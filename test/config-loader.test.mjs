@@ -24,6 +24,7 @@ import {
   loadConfigCached,
   resetConfigCache,
   resetRuntimeUnknownWarningCacheForTests,
+  ENV_ALIASES,
 } from '../src/config-loader.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -2520,6 +2521,197 @@ test('OSS local-route gate mirror loads through strict Node schema and defaults 
           local_routes_enabled: true
     `);
     assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.oss_dispatch.local_routes_enabled'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('OSS local tool-call passthrough mirror loads through strict Node schema and defaults to false', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        oss_dispatch:
+          enabled: true
+    `);
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.oss_dispatch.local_tool_call_passthrough'), false);
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        oss_dispatch:
+          enabled: true
+          local_tool_call_passthrough: true
+    `);
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.oss_dispatch.local_tool_call_passthrough'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('mcp_metering mirror keeps inherited settings under a partial local override', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        enabled: true
+        surfaces:
+          dispatched: true
+        policy:
+          mode: enforce
+          rules: []
+    `);
+    writeFile(local, `
+      version: 1
+      mcp_metering:
+        surfaces:
+          host: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('mcp_metering.policy.mode'), 'enforce');
+    assert.equal(cfg.get('mcp_metering.surfaces.dispatched'), true);
+    assert.equal(cfg.get('mcp_metering.surfaces.host'), true);
+    assert.equal(cfg.get('mcp_metering.enabled'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('main_catchup.pull_retry_delays_seconds mirror defaults, accepts, and bounds items', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).get('main_catchup.pull_retry_delays_seconds'), [5, 15]);
+    writeFile(top, `
+      version: 1
+      main_catchup:
+        pull_retry_delays_seconds: [2, 30]
+    `);
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).get('main_catchup.pull_retry_delays_seconds'), [2, 30]);
+    writeFile(top, `
+      version: 1
+      main_catchup:
+        pull_retry_delays_seconds: [5, 45]
+    `);
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), /pull_retry_delays_seconds/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('mcp_metering mirror passes extension keys through and rejects invalid scalars', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        enabled: true
+        policy:
+          mode: observe
+          rules:
+            - id: r1
+              server: linear
+          rule_modes:
+            r1: enforce
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('mcp_metering.policy.rules'), [{ id: 'r1', server: 'linear' }]);
+    assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), { r1: 'enforce' });
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        policy:
+          mode: bogus
+    `);
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), /mcp_metering\.policy\.mode/);
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        enabled: "yes"
+    `);
+    assert.throws(() => loadConfig({ topPath: top, env: {} }), /mcp_metering\.enabled/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('env-sourced int lists coerce each item to a number', () => {
+  // No alias is registered for this key today; register one for the test so
+  // the env path a future alias would take is exercised.
+  const key = 'main_catchup.pull_retry_delays_seconds';
+  ENV_ALIASES[key] = { canonical: 'AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS', aliases: [] };
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    const env = { AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS: '3, 7' };
+    assert.deepEqual(loadConfig({ topPath: top, env }).get(key), [3, 7]);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: { AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS: '3,x' } }),
+      /pull_retry_delays_seconds\[1\].*not an integer/,
+    );
+  } finally {
+    delete ENV_ALIASES[key];
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('mcp_metering extension subtrees are replaced whole by a higher layer', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        policy:
+          mode: enforce
+          rule_modes:
+            r1: enforce
+            r2: enforce
+    `);
+    writeFile(local, `
+      version: 1
+      mcp_metering:
+        policy:
+          rule_modes:
+            r1: observe
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), { r1: 'observe' });
+    assert.equal(cfg.get('mcp_metering.policy.mode'), 'enforce');
+    writeFile(local, `
+      version: 1
+      mcp_metering:
+        policy:
+          rule_modes: {}
+    `);
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).get('mcp_metering.policy.rule_modes'), {});
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('mcp_metering mirror defaults apply when the section is absent', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('mcp_metering.policy.mode'), 'observe');
+    assert.equal(cfg.get('mcp_metering.surfaces.host'), false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

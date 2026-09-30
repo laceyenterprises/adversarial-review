@@ -404,6 +404,14 @@ function schemaV1() {
             __default: 120,
             __min: 1,
           },
+          // Python-owned (main-catchup parent pull retries); the checked-in
+          // config.yaml carries it, so the strict checked-in-config tests
+          // failed on `main_catchup.pull_retry_delays_seconds: unknown key`.
+          pull_retry_delays_seconds: {
+            __type: TYPE_LIST,
+            __item: { __type: TYPE_INT, __min: 0, __max: 30, __enforceMax: true },
+            __default: [5, 15],
+          },
           recovery_max_attempts: {
             __type: TYPE_INT,
             __default: 5,
@@ -587,6 +595,35 @@ function schemaV1() {
               enabled: { __type: TYPE_BOOL, __default: false },
               port: { __type: TYPE_INT, __default: 18794, __min: 1024, __max: 65535 },
               kill_switch_path: { __type: TYPE_STRING, __default: null, __nullable: true },
+            },
+          },
+        },
+      },
+      // MCM-07 (agent-os #7227) MCP call metering. Python owns it; this reader
+      // does not consume it, but the checked-in config.yaml carries it, so the
+      // strict checked-in-config tests failed on `mcp_metering: unknown key`
+      // (the runtime reader only logged and dropped it). Tolerant, like
+      // validate the scalar keys, allow policy rules to grow. Leaf defaults
+      // only: per-layer default injection (__default_when_present) would let a
+      // partial config.local.yaml override reset inherited siblings.
+      mcp_metering: {
+        __type: TYPE_DICT,
+        __strict: false,
+        __keys: {
+          enabled: { __type: TYPE_BOOL, __default: true },
+          surfaces: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __keys: {
+              dispatched: { __type: TYPE_BOOL, __default: false },
+              host: { __type: TYPE_BOOL, __default: false },
+            },
+          },
+          policy: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __keys: {
+              mode: { __type: TYPE_STRING, __default: 'observe', __enum: ['observe', 'enforce'] },
             },
           },
         },
@@ -2209,6 +2246,12 @@ function schemaV1() {
               // it in OMT-07. Python owns it; mirrored so the key in config.yaml
               // or a host config.local.yaml does not fail this strict reader.
               local_routes_enabled: { __type: TYPE_BOOL, __default: false },
+              // OMBPASS-01 (agent-os): the local OSS model backend returns a
+              // model's call to a tool the request did not offer as a
+              // tool_call, as hosted providers do, instead of as text.
+              // Python owns it; mirrored so a host config.local.yaml opt-in
+              // does not fail this strict reader.
+              local_tool_call_passthrough: { __type: TYPE_BOOL, __default: false },
               team_monthly_cap_usd: {
                 __type: TYPE_FLOAT,
                 __default: 25,
@@ -5021,7 +5064,14 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
     return n;
   }
   if (expected === TYPE_LIST) {
-    return value.split(',').map((part) => part.trim()).filter(Boolean);
+    const parts = value.split(',').map((part) => part.trim()).filter(Boolean);
+    // Coerce items the way a scalar leaf of the item type is coerced, so an
+    // int list (main_catchup.pull_retry_delays_seconds) validates as numbers.
+    const item = schemaLeaf.__item;
+    if (item && [TYPE_BOOL, TYPE_INT, TYPE_FLOAT].includes(item.__type)) {
+      return parts.map((part, index) => coerceEnvValue(`${key}[${index}]`, part, item, source));
+    }
+    return parts;
   }
   return value;
 }

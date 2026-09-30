@@ -7190,3 +7190,18 @@ test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future 
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('QUOTAROUTE horizon accepts checked-in config and rejects invalid values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    for (const value of [0, 21600, 7200]) {
+      writeFile(top, `version: 1\nworker_pool:\n  quota:\n    fallback_reroute_horizon_seconds: ${value}\n`);
+      assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.quota.fallback_reroute_horizon_seconds'), value);
+    }
+    for (const value of [-1, 'not-an-integer']) {
+      writeFile(top, `version: 1\nworker_pool:\n  quota:\n    fallback_reroute_horizon_seconds: ${value}\n`);
+      assert.throws(() => loadConfig({ topPath: top, env: {} }));
+    }
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

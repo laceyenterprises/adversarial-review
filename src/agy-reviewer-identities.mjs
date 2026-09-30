@@ -91,6 +91,8 @@ const KILL_GRACE_MS = 2_000;
 // `agy models` under launchd takes ~30s; the keychain helper bounds it at 60s.
 const PROBE_TIMEOUT_MS = 90_000;
 const EXTRACT_TIMEOUT_MS = 5 * 60_000;
+// Backoff before each re-attempt of a transiently failed snapshot extract.
+const EXTRACT_RETRY_DELAYS_MS = Object.freeze([2_000, 10_000]);
 const LEASE_WAIT_MS = 5 * 60_000;
 const LEASE_POLL_MS = 2_000;
 // acquire() runs its own readiness pass when the last one is older than this,
@@ -117,11 +119,12 @@ const IDENTITY_ALERT_AFTER_MS = 15 * 60_000;
 const AGY_REVIEW_PROCESS_RE = /^(?:agy|agy-reviewer-agy|antigravity.*|language[_-]server.*)$/i;
 
 class AgyReviewerIdentityError extends Error {
-  constructor(message, { reason = 'agy-identity-failed', detail = '' } = {}) {
+  constructor(message, { reason = 'agy-identity-failed', detail = '', transient = false } = {}) {
     super(message);
     this.name = 'AgyReviewerIdentityError';
     this.reason = reason;
     this.detail = detail;
+    this.transient = transient;
   }
 }
 
@@ -403,6 +406,22 @@ function settleWithin(promise, ms, onTimeout) {
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
+// A failed pinned helper call worth another attempt: sudo or the helper timed
+// out, died on a signal, could not be spawned for lack of a system resource,
+// or exited EX_TEMPFAIL (75). Everything else (sudo refusing without a
+// password, a missing or non-executable helper, a full disk, a review id that
+// already exists) is permanent and fails at once.
+const TRANSIENT_SPAWN_ERROR_CODES = new Set(['EAGAIN', 'EBUSY', 'EINTR', 'EMFILE', 'ENFILE', 'ENOMEM']);
+const EX_TEMPFAIL = 75;
+function helperFailureIsTransient(result) {
+  if (!result) return false;
+  if (result.timedOut) return true;
+  if (result.error) return TRANSIENT_SPAWN_ERROR_CODES.has(String(result.error.code || ''));
+  if (result.code === EX_TEMPFAIL) return true;
+  if (result.code === null && result.signal) return true;
+  return /resource temporarily unavailable/i.test(String(result.stderr || ''));
+}
+
 // Stream `sourceDir` as an uncompressed tar into the workspace helper's
 // `extract`, running as `user`. It unpacks into a fresh 0700 directory under
 // that user's scratch root; no HQ-owned path gains any access for it.
@@ -448,7 +467,10 @@ async function extractAgyReviewWorkspace({
       if (!dir) stopArchive();
     }
     if (!dir) {
-      throw new AgyReviewerIdentityError(describeFailure(`workspace extract as ${user}`, result), { reason: 'agy-identity-extract-failed' });
+      throw new AgyReviewerIdentityError(describeFailure(`workspace extract as ${user}`, result), {
+        reason: 'agy-identity-extract-failed',
+        transient: helperFailureIsTransient(result),
+      });
     }
     tarResult = await settleWithin(tarExit, tarGraceMs, () => {
       stopArchive();
@@ -508,12 +530,43 @@ function resolveAgyReviewIdentityFromEnv(env = process.env, { hqOwner = resolveH
 // Reviewer child: stage one added-identity review. `run` is `{ user, reviewId }`
 // and is filled in place (`cwd`, `workspaceDir`) so the caller's `finally` can
 // always hand it to finishAgyIdentityReview, whatever step threw.
-async function prepareAgyIdentityReview(run, { sourceDir, cwdParent = AGY_IDENTITY_CWD_PARENT, extractImpl = extractAgyReviewWorkspace } = {}) {
+//
+// The extract runs before any reviewer does, so a transient sudo/helper failure
+// is retried here with bounded backoff rather than failing the review. Before
+// each re-attempt the review id's scratch copy is cleaned, since a helper that
+// timed out may have created it. A permanent failure throws at once. A
+// transient one that outlasts the retries throws tagged
+// `[agy-identity-unavailable]`: no reviewer ran, so the watcher parks the PR on
+// the infra auto-recovery budget instead of charging a review attempt.
+async function prepareAgyIdentityReview(run, {
+  sourceDir,
+  cwdParent = AGY_IDENTITY_CWD_PARENT,
+  extractImpl = extractAgyReviewWorkspace,
+  cleanupImpl = cleanupAgyReviewWorkspace,
+  retryDelaysMs = EXTRACT_RETRY_DELAYS_MS,
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  log = console,
+} = {}) {
   run.cwd = mkdtempSync(join(cwdParent, 'agy-review-cwd-'));
   chmodSync(run.cwd, 0o755);
-  const workspace = await extractImpl({ user: run.user, reviewId: run.reviewId, sourceDir });
-  run.workspaceDir = workspace.dir;
-  return run;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const workspace = await extractImpl({ user: run.user, reviewId: run.reviewId, sourceDir });
+      run.workspaceDir = workspace.dir;
+      return run;
+    } catch (err) {
+      if (err?.transient !== true) throw err;
+      if (attempt >= retryDelaysMs.length) {
+        throw new AgyReviewerIdentityError(
+          `[${AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS}] ${err.message} (after ${attempt + 1} attempts)`,
+          { reason: 'agy-identity-extract-failed', transient: true },
+        );
+      }
+      log.warn?.(`[agy-identities] identity=${run.user} review=${run.reviewId} ${err.message}; retrying the extract in ${retryDelaysMs[attempt]}ms`);
+      await cleanupImpl({ user: run.user, reviewId: run.reviewId, log });
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
 }
 
 // Runs on every exit path of the review (success, failure, timeout). The

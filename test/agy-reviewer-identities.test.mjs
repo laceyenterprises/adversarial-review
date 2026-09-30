@@ -56,6 +56,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { scanActiveReviewerRunRecords, writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { probeReviewerCliOAuth } from '../src/adapters/reviewer-runtime/cli-direct/discovery.mjs';
+import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { createAgentRuntimeReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
 import { createHealthRouter } from '../src/adapters/agent-runtime/router/index.mjs';
 import { reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
@@ -483,6 +485,109 @@ test('CCX-08: an extract helper that exits without reading stdin does not hang o
     assert.equal(statSync(join(ok.dir, 'blob.bin')).size, 4 * 1024 * 1024);
   } finally {
     fake.cleanup();
+  }
+});
+
+test('CCX-08: a transient extract failure is retried with backoff; a permanent one fails at once', async () => {
+  const quiet = quietLog();
+  // Classification at the extract: a helper timeout or signal is transient, an
+  // existing review id (exit 73) or a refused sudo is not.
+  const failWith = (result) => extractAgyReviewWorkspace({
+    user: REVIEWER_A, reviewId: 'agy-classify', sourceDir: '/tmp', runPinnedImpl: async () => result, timeoutMs: 60_000,
+  }).then(() => assert.fail('extract must fail'), (err) => err);
+  assert.equal((await failWith({ code: null, signal: null, stdout: '', stderr: '', timedOut: true })).transient, true);
+  assert.equal((await failWith({ code: null, signal: 'SIGKILL', stdout: '', stderr: '', timedOut: false })).transient, true);
+  assert.equal((await failWith({ code: 75, stdout: '', stderr: 'helper busy', timedOut: false })).transient, true);
+  assert.equal((await failWith({ code: null, stdout: '', stderr: '', timedOut: false, error: Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }) })).transient, true);
+  assert.equal((await failWith({ code: 73, stdout: '', stderr: 'review id exists', timedOut: false })).transient, false);
+  assert.equal((await failWith({ code: 1, stdout: '', stderr: 'sudo: a password is required', timedOut: false })).transient, false);
+  assert.equal((await failWith({ code: null, stdout: '', stderr: '', timedOut: false, error: Object.assign(new Error('spawn EACCES'), { code: 'EACCES' }) })).transient, false);
+
+  const transient = () => Object.assign(new Error('workspace extract as agentos-reviewer timed out'), { reason: 'agy-identity-extract-failed', transient: true });
+  const runOnce = async (outcomes) => {
+    const calls = { extract: 0, cleanup: [], sleeps: [] };
+    const run = { user: REVIEWER_A, reviewId: 'agy-retry', cwd: null, workspaceDir: null };
+    const outcome = await prepareAgyIdentityReview(run, {
+      sourceDir: '/tmp',
+      cwdParent: '/tmp',
+      extractImpl: async () => {
+        const next = outcomes[calls.extract++];
+        if (next instanceof Error) throw next;
+        return { dir: next };
+      },
+      cleanupImpl: async ({ reviewId }) => { calls.cleanup.push(reviewId); return { ok: true, removed: true }; },
+      sleepImpl: async (ms) => { calls.sleeps.push(ms); },
+      log: quiet,
+    }).then(() => 'ok', (err) => err);
+    rmSync(run.cwd, { recursive: true, force: true });
+    return { outcome, run, calls };
+  };
+
+  // One transient failure, then success: the review goes on, nothing is charged.
+  const recovered = await runOnce([transient(), '/scratch/agy-retry']);
+  assert.equal(recovered.outcome, 'ok');
+  assert.equal(recovered.run.workspaceDir, '/scratch/agy-retry');
+  assert.equal(recovered.calls.extract, 2);
+  assert.deepEqual(recovered.calls.cleanup, ['agy-retry'], 'a timed-out helper\'s partial scratch copy is cleaned before the retry');
+  assert.deepEqual(recovered.calls.sleeps, [2_000]);
+
+  // A permanent failure is not retried.
+  const permanent = Object.assign(new Error('workspace extract as agentos-reviewer exited 73'), { reason: 'agy-identity-extract-failed', transient: false });
+  const failed = await runOnce([permanent, '/never']);
+  assert.equal(failed.outcome, permanent);
+  assert.equal(failed.calls.extract, 1);
+  assert.deepEqual(failed.calls.sleeps, []);
+
+  // A transient failure that outlasts the bounded retries is tagged so the
+  // watcher parks the PR instead of charging a review attempt.
+  const exhausted = await runOnce([transient(), transient(), transient(), '/never']);
+  assert.equal(exhausted.calls.extract, 3);
+  assert.deepEqual(exhausted.calls.sleeps, [2_000, 10_000]);
+  assert.match(exhausted.outcome.message, /^\[agy-identity-unavailable\] workspace extract as agentos-reviewer timed out \(after 3 attempts\)$/);
+  assert.equal(classifyReviewerFailure(`[reviewer] AI review failed for o/r#1: ${exhausted.outcome.message}`, 1), AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS);
+  assert.equal(classifyReviewerFailure(`[reviewer] AI review failed for o/r#1: ${permanent.message}`, 1), 'unknown', 'a permanent extract failure is still charged');
+});
+
+test('CCX-08: cli-direct skips the HQ owner\'s Gemini CLI OAuth probe for a review leased to an added identity', async () => {
+  const rootDir = mkdtempSync(join('/tmp', 'ccx08-preflight-'));
+  const emptyHome = mkdtempSync(join('/tmp', 'ccx08-no-gemini-home-'));
+  const spawned = [];
+  const probed = [];
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      // The real probe, on a host with no HQ-owner Gemini CLI and no
+      // oauth_creds.json.
+      preflightImpl: (opts) => {
+        probed.push(opts.env[AGY_IDENTITY_USER_ENV] || null);
+        return probeReviewerCliOAuth({
+          ...opts,
+          env: { ...opts.env, PATH: join(emptyHome, 'bin'), HOME: emptyHome, GEMINI_CLI: '', GEMINI_CLI_PATH: '', GEMINI_HOME: '', GEMINI_OAUTH_CREDS_PATH: '' },
+        });
+      },
+      spawnCapturedImpl: async (command, argv, opts) => {
+        spawned.push(opts.env[AGY_IDENTITY_USER_ENV] || null);
+        const err = new Error('stop here');
+        err.exitCode = 1;
+        throw err;
+      },
+      logger: quietLog(),
+      now: () => '2026-09-29T10:00:00.000Z',
+    });
+    const base = { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 1 };
+    const hqOwner = await adapter.spawnReviewer({ model: 'gemini', prompt: '', subjectContext: base, timeoutMs: 100, sessionUuid: 'ccx08-preflight-owner', forbiddenFallbacks: ['api-key'] });
+    assert.equal(hqOwner.ok, false);
+    assert.equal(hqOwner.failureClass, 'oauth-broken', 'the HQ-owner path still requires its Gemini CLI OAuth');
+    const leased = await adapter.spawnReviewer({
+      model: 'gemini', prompt: '', subjectContext: { ...base, agyIdentity: { user: REVIEWER_A, reviewId: 'agy-preflight-1' } },
+      timeoutMs: 100, sessionUuid: 'ccx08-preflight-lease', forbiddenFallbacks: ['api-key'],
+    });
+    assert.notEqual(leased.failureClass, 'oauth-broken');
+    assert.deepEqual(probed, [null], 'the added identity\'s review never runs the HQ-owner probe');
+    assert.deepEqual(spawned, [REVIEWER_A], 'the added identity\'s reviewer child is spawned');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(emptyHome, { recursive: true, force: true });
   }
 });
 

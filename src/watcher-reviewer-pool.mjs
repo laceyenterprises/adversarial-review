@@ -858,6 +858,7 @@ function createDetachedReviewerDispatchTracker({
   // carry pipeline Gemini reservations across a watcher restart.
   loadPersistedSpawnRecords = null,
   isPersistedSpawnLive = null,
+  persistedSpawnHoldsAgyIdentityLease = null,
   logger = console,
 } = {}) {
   const detachedReviewerDispatches = new Map();
@@ -902,6 +903,15 @@ function createDetachedReviewerDispatchTracker({
   // panel stays reserved, whatever model the stage itself runs. Records past
   // the reviewer timeout, or whose process is gone, reserve nothing. A PR this
   // watcher already tracks is reserved by that entry. Returns seats by PR key.
+  function holdsAgyIdentityLease(record) {
+    if (typeof persistedSpawnHoldsAgyIdentityLease !== 'function') return false;
+    try {
+      return persistedSpawnHoldsAgyIdentityLease(record) === true;
+    } catch {
+      return false;
+    }
+  }
+
   function persistedReservations(skipPrKeys) {
     if (typeof loadPersistedSpawnRecords !== 'function') return new Map();
     let loaded;
@@ -929,10 +939,14 @@ function createDetachedReviewerDispatchTracker({
       }
       if (!live) continue;
       reservations.set(key, Math.max(reservations.get(key) || 0, seats));
-      // A Gemini stage that survived holds its agy identity through the
-      // identity pool's adoption (it is not counted ready), so only the rest
-      // of the panel is reserved here.
-      if (String(record?.reviewerModel).toLowerCase() === 'gemini') actualSeats.set(key, (actualSeats.get(key) || 0) + 1);
+      // A Gemini stage that survived while holding an agy identity lease keeps
+      // that identity out of the ready count through the identity pool's
+      // adoption, so only the rest of its panel is reserved here. A Gemini
+      // stage without a lease (a nonleasing runtime, a single-identity pool,
+      // or a lease that cannot be confirmed) keeps its seat here.
+      if (String(record?.reviewerModel).toLowerCase() === 'gemini' && holdsAgyIdentityLease(record)) {
+        actualSeats.set(key, (actualSeats.get(key) || 0) + 1);
+      }
     }
     for (const [key, seats] of reservations) reservations.set(key, Math.max(0, seats - (actualSeats.get(key) || 0)));
     return reservations;
@@ -1011,7 +1025,10 @@ function createDetachedReviewerDispatchTracker({
 // writes a run record at launch, so a spawn record without one never
 // launched; a terminal record or a gone process group has ended; anything
 // else (launching, or a record that cannot be read) counts as running until
-// the tracker's reviewer-timeout expiry.
+// the tracker's reviewer-timeout expiry. `persistedSpawnHoldsAgyIdentityLease`
+// is true only when the run record carries the `subjectContext.agyIdentityLease`
+// the identity pool adopts after a restart; a missing or unreadable record
+// holds no lease, so the stage keeps its own reservation seat.
 function persistedSpawnReservationSource({
   stateDir,
   runStateRootDir,
@@ -1037,6 +1054,18 @@ function persistedSpawnReservationSource({
       } catch {
         return true;
       }
+    },
+    persistedSpawnHoldsAgyIdentityLease(record) {
+      const sessionUuid = String(record?.reviewerSessionUuid || '').trim();
+      if (!sessionUuid) return false;
+      let run;
+      try {
+        run = readRunRecordImpl(runStateRootDir, sessionUuid);
+      } catch {
+        return false;
+      }
+      const lease = run?.subjectContext?.agyIdentityLease;
+      return Boolean(lease?.user && lease?.reviewId);
     },
   };
 }

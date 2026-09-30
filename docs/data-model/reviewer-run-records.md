@@ -35,6 +35,12 @@ also scans the active run records, and an identity named by
 `agyIdentityLease` in a record whose process group is alive (or which is
 `launching` without one) stays unleased until that review ends.
 
+The Gemini reservation reader for persisted spawn records reads the same field.
+A surviving Gemini stage stops reserving its own seat only when its run record
+carries `agyIdentityLease`, because the pool's adoption holds that seat. A
+stage without the field, or one whose run record cannot be read, keeps its
+seat reserved.
+
 That scan is strict (`scanActiveReviewerRunRecords`): a record that exists but
 cannot be read or parsed is reported, not skipped. While any active-state file
 is unreadable, every identity this watcher does not already hold a lease on

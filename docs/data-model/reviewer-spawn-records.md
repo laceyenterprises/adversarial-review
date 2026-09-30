@@ -52,8 +52,11 @@ places:
   shows it may still be running: no run record, a terminal run state or a gone
   process group ends it; a `launching` record with no process group yet, or
   a run record that cannot be read, keeps it until the expiry. A surviving
-  Gemini stage's own seat is not counted again, because the agy identity pool
-  already holds that identity out of the ready count while the review runs
-  (see `reviewer-run-records.md`).
+  Gemini stage whose run record carries `subjectContext.agyIdentityLease` does
+  not count its own seat again, because the agy identity pool adopts that lease
+  and holds the identity out of the ready count while the review runs (see
+  `reviewer-run-records.md`). A surviving Gemini stage without a lease (a
+  runtime that cannot carry an identity, a single-identity pool, or a run
+  record that cannot be read) keeps its own seat in the reservation.
 
 There is no SQL schema change; this store is JSON only.

@@ -337,6 +337,26 @@ because the review id already exists or the scratch disk is full), `tar` is
 killed immediately. The review then fails with `agy-identity-extract-failed`
 instead of holding the slot until the reviewer timeout.
 
+**Extract retry.** The extract runs before any reviewer does, so the reviewer
+child retries a transient failure itself: sudo or the workspace helper timed
+out, died on a signal, could not be spawned for lack of a system resource
+(`EAGAIN`, `EMFILE`, `ENFILE`, `ENOMEM`, `EBUSY`, `EINTR`), or exited
+`EX_TEMPFAIL` (75). It re-attempts twice, after 2s and then 10s, and cleans
+the review id's scratch copy before each re-attempt. Permanent failures fail
+at once: sudo asking for a password, a missing or non-executable helper, a
+full disk, or a review id that already exists. A transient failure that
+outlasts the retries is tagged `[agy-identity-unavailable]`. Like a lease that
+never became free, it parks the PR in `pending-upstream` without charging a
+review attempt.
+
+**Preflight.** The cli-direct adapter normally probes the HQ owner's Gemini
+CLI and `oauth_creds.json` before it spawns a Gemini reviewer. It skips that
+probe for a review leased to an added identity. That review runs agy as the
+added user and never touches the HQ owner's Gemini CLI. The pool leased the
+identity only after its own readiness check passed (keychain plus
+`agy models`), and that check is at most 60s old. A missing or expired
+HQ-owner Gemini CLI login therefore blocks only HQ-owner reviews.
+
 ## Output Guard And Timeout Behavior
 
 `agy --print` does not expose a quiet, JSON, or final-message-only flag. In

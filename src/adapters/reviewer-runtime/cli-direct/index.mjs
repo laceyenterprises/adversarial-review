@@ -420,7 +420,14 @@ function createCliDirectReviewerRuntimeAdapter({
       }
       stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
       assertForbiddenFallbackEnvStripped(reviewerEnv);
-      if (typeof preflightImpl === 'function') {
+      // CCX-08: a review leased to an added agy identity runs agy as that user
+      // through sudo, never the HQ owner's Gemini CLI or its oauth_creds.json.
+      // The identity pool leased it only after that identity's own readiness
+      // check (keychain + `agy models` probe) passed, so the HQ-owner CLI OAuth
+      // probe would only reject a review it has no bearing on.
+      const addedAgyIdentity = Boolean(reviewerEnv[AGY_IDENTITY_USER_ENV])
+        && String(req.model || '').toLowerCase().includes('gemini');
+      if (typeof preflightImpl === 'function' && !addedAgyIdentity) {
         preflightResult = await preflightImpl({
           model: req.model,
           env: reviewerEnv,

@@ -1948,7 +1948,7 @@ test('CCX-08: a fresh tracker rebuilds a pipeline reservation from a persisted, 
   }
 });
 
-test('CCX-08: a surviving Gemini stage reserves only the rest of its panel', () => {
+test('CCX-08: a surviving Gemini stage with an adopted identity lease reserves only the rest of its panel', () => {
   const nowMs = Date.parse('2026-09-29T12:00:00.000Z');
   const tracker = createDetachedReviewerDispatchTracker({
     activeReviewerSpawns: new Map(),
@@ -1958,7 +1958,42 @@ test('CCX-08: a surviving Gemini stage reserves only the rest of its panel', () 
       g: { spawnToken: 'g', repo: 'o/r', pr: 7, reviewerModel: 'gemini', pipelineGeminiSeats: 2, reviewerSessionUuid: 's', spawnedAt: new Date(nowMs).toISOString() },
     }),
     isPersistedSpawnLive: () => true,
+    persistedSpawnHoldsAgyIdentityLease: () => true,
   });
   // Its own seat is held by the agy identity pool's adoption, not here.
   assert.equal(tracker.activeCounts().get('gemini'), 1);
+});
+
+test('CCX-08: a surviving Gemini stage without an identity lease keeps its own seat after a restart', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ccx08-nonleasing-'));
+  try {
+    const stateDir = join(root, 'data');
+    const nowMs = Date.parse('2026-09-29T12:00:00.000Z');
+    // A Gemini stage on a runtime that cannot lease an identity (agent-runtime,
+    // or a single-identity pool): its run record carries no agyIdentityLease.
+    upsertSpawnRecord(stateDir, {
+      spawnToken: 'nonleasing-gemini', repo: 'o/r', pr: 7, reviewerModel: 'gemini', pipelineGeminiSeats: 2,
+      reviewerSessionUuid: 'session-nonleasing', spawnedAt: new Date(nowMs - 60_000).toISOString(),
+    });
+    writeReviewerRunRecord(root, { sessionUuid: 'session-nonleasing', state: 'heartbeating', pgid: 4242, subjectContext: { domainId: 'code-pr' } });
+    const source = persistedSpawnReservationSource({ stateDir, runStateRootDir: root, isPgidAliveImpl: (pgid) => pgid === 4242 });
+    const tracker = () => createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(), timeoutMs: 10 * 60_000, now: () => nowMs, ...source });
+    assert.equal(tracker().activeCounts().get('gemini'), 2, 'nothing else holds the running stage\'s seat, so the whole panel stays reserved');
+
+    // The same stage with an adopted lease hands its own seat to the identity pool.
+    writeReviewerRunRecord(root, {
+      sessionUuid: 'session-nonleasing', state: 'heartbeating', pgid: 4242,
+      subjectContext: { domainId: 'code-pr', agyIdentityLease: { user: 'agentos-reviewer', reviewId: 'agy-lease-1' } },
+    });
+    assert.equal(tracker().activeCounts().get('gemini'), 1);
+
+    // An unreadable run record cannot confirm a lease: the seat stays reserved.
+    const unreadable = persistedSpawnReservationSource({
+      stateDir, runStateRootDir: root, readRunRecordImpl: () => { throw new Error('EACCES'); },
+    });
+    const conservative = createDetachedReviewerDispatchTracker({ activeReviewerSpawns: new Map(), timeoutMs: 10 * 60_000, now: () => nowMs, ...unreadable });
+    assert.equal(conservative.activeCounts().get('gemini'), 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

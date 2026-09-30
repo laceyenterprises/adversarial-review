@@ -165,10 +165,17 @@ unvalidated, because the Python loader is canonical for them. The mirrored
 scalars are validated normally: a non-boolean `enabled` or an unknown
 `policy.mode` fails loud.
 
-Defaults are leaf defaults only. Layers deep-merge, so a partial
-`config.local.yaml` override (for example only `surfaces.host`) keeps the values
-inherited from `config.yaml` for every key it does not set. Defaults fill only
-keys that no layer sets, including when the section is absent.
+Defaults are leaf defaults only. The mirrored scalars merge per key, so a
+partial `config.local.yaml` override (for example only `surfaces.host`) keeps
+the mirrored values inherited from `config.yaml` for every key it does not set.
+Defaults fill only mirrored keys that no layer sets, including when the section
+is absent.
+
+Extension subtrees are not merged by this reader. A higher layer that sets
+`policy.rules` or `policy.rule_modes` replaces the inherited value as a whole:
+a base `rule_modes: {r1: enforce, r2: enforce}` under a local
+`rule_modes: {r1: observe}` resolves here to `{r1: observe}`. This reader does
+not consume those keys; the Python loader is canonical for how they merge.
 
 ## `post_deploy_verify` Node mirror
 
@@ -264,7 +271,7 @@ Python, Node, and shell CFG loaders must agree on this surface:
   checked-in `post_deploy_verify.*` keys fail as nested unknown keys
 - checked-in `mcp_metering` validates the mirrored scalar controls and passes
   other keys under it through unvalidated; a partial override keeps inherited
-  values
+  mirrored scalars, and a higher layer replaces an extension subtree whole
 - direct validator calls remain strict even when `source` names a `.local.yaml`
   file
 - Layer-4 local siblings may drop nested unknown keys under owned roots

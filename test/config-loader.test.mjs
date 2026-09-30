@@ -2666,6 +2666,35 @@ test('env-sourced int lists coerce each item to a number', () => {
   }
 });
 
+test('mcp_metering extension subtrees are replaced whole by a higher layer', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      mcp_metering:
+        policy:
+          mode: enforce
+          rule_modes:
+            r1: enforce
+            r2: enforce
+    `);
+    writeFile(local, `
+      version: 1
+      mcp_metering:
+        policy:
+          rule_modes:
+            r1: observe
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), { r1: 'observe' });
+    assert.equal(cfg.get('mcp_metering.policy.mode'), 'enforce');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('mcp_metering mirror defaults apply when the section is absent', () => {
   const tmp = freshTmp();
   try {

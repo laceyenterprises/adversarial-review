@@ -46,7 +46,7 @@ test('non-blocking Codex model and effort require the remediator allowlists', ()
     });
     const invalid = resolveNonBlockingCodexModel({ model: 'unknown', reasoningEffort: 'max', env, hqRoot: root });
     assert.equal(invalid.resolvedModel, 'gpt-6-sol');
-    assert.equal(invalid.resolvedReasoningLevel, 'low');
+    assert.equal(invalid.resolvedReasoningLevel, 'high');
     assert.equal(invalid.modelSource, 'non-blocking-default');
     const missingSol61 = resolveNonBlockingCodexModel({ model: 'gpt-6.1-sol', env, hqRoot: root });
     assert.equal(missingSol61.resolvedModel, 'gpt-6-sol');
@@ -98,7 +98,7 @@ for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
       });
       assert.equal(record.resolvedModel, model);
       assert.equal(record.modelSource, 'non-blocking-config');
-      assert.deepEqual(record.command.slice(1, 6), ['exec', '--model', model, '-c', 'model_reasoning_effort=low']);
+      assert.deepEqual(record.command.slice(1, 6), ['exec', '--model', model, '-c', 'model_reasoning_effort=high']);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

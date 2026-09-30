@@ -1839,8 +1839,8 @@ function schemaV1() {
                     __type: TYPE_DICT,
                     __strict: true,
                     __keys: {
-                      model: { __type: TYPE_STRING, __default: 'gpt-6-sol' },
-                      reasoning_effort: { __type: TYPE_STRING, __default: 'low' },
+                      model: { __type: TYPE_STRING, __default: 'gpt-6.1-sol' },
+                      reasoning_effort: { __type: TYPE_STRING, __default: 'high' },
                       max_rounds: { __type: TYPE_INT, __default: 1, __min: 1 },
                     },
                   },

@@ -4512,8 +4512,8 @@ test('non-blocking remediation config resolves host-local overrides and validate
     const top = join(tmp, 'config.yaml');
     writeFile(top, 'version: 1\n');
     const defaults = loadConfig({ topPath: top, env: {} });
-    assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.model'), 'gpt-6-sol');
-    assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.reasoning_effort'), 'low');
+    assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.model'), 'gpt-6.1-sol');
+    assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.reasoning_effort'), 'high');
     assert.equal(defaults.get('roles.adversarial.remediation.non_blocking.max_rounds'), 1);
     writeFile(join(tmp, 'config.local.yaml'), `version: 1\nroles:\n  adversarial:\n    remediation:\n      non_blocking:\n        model: gpt-6-luna\n        reasoning_effort: medium\n        max_rounds: 2\n`);
     const local = loadConfig({ topPath: top, env: {} });

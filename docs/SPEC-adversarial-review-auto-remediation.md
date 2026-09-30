@@ -2649,15 +2649,19 @@ finding before merging. An explicit operator retrigger can consume a further
 round within the normal PR-wide budget.
 
 `roles.adversarial.remediation.non_blocking.{model,reasoning_effort,max_rounds}`
-controls this path. The default is `gpt-6-sol`, `low`, and `1`. The model is
-checked against `remediator-codex.allowedModels`; the effort is checked against
-the Codex reasoning levels. Invalid model or effort values fall back to the
-defaults; invalid round caps fail config validation. The
+controls this path. The configured defaults are `gpt-6.1-sol`, `high`, and `1`.
+The model is checked against `remediator-codex.allowedModels`; the effort is
+checked against the Codex reasoning levels. If the configured model is not
+allowlisted, the runtime falls back to the universally allowlisted `gpt-6-sol`,
+while preserving a valid configured effort. Invalid effort values fall back to
+`high`. If no registry provides the allowlist, the runtime falls back to
+`gpt-6-sol` at `high` effort. Invalid round caps fail config validation. The
 follow-up job and remediation pass metadata record the trigger, resolved model,
 effort, and PR-wide round number for TOKCAP-02. In HQ mode, pinned Codex
 rounds use the existing direct `hq dispatch --model --reasoning-level` path;
-the App Contract endpoint currently omits those overrides. TOKCAP-01 will
-select the model after quota measurements.
+the App Contract endpoint currently omits those overrides. TOKCAP-01 may
+revise the configured model after quota measurements; until then the configured
+default and compatibility fallback above apply.
 
 Reviewer harnesses resolve their model and supported effort from the
 explicit `GEMINI_REVIEWER_MODEL` process override for Gemini, then the

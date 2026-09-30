@@ -520,7 +520,10 @@ function resolveRemediationModel(className, {
 }
 
 function resolveNonBlockingCodexModel({ model, reasoningEffort, env = process.env, hqRoot = env.HQ_ROOT } = {}) {
-  const fallback = { resolvedModel: 'gpt-6-sol', resolvedReasoningLevel: 'low', modelSource: 'non-blocking-default', reasoningSource: 'non-blocking-default' };
+  // The fallback model stays the universally allowlisted gpt-6-sol: it is only used when
+  // the configured model is not in the remediator-codex allowlist. Effort follows the
+  // fleet default (operator 2026-09-29: HIGH everywhere).
+  const fallback = { resolvedModel: 'gpt-6-sol', resolvedReasoningLevel: 'high', modelSource: 'non-blocking-default', reasoningSource: 'non-blocking-default' };
   const requestedModel = nonEmptyModelString(model);
   const candidates = [
     hqRoot && [join(resolve(hqRoot), 'registry', 'worker-classes.json'), 'registry-mirror'],

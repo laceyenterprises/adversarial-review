@@ -108,12 +108,14 @@ roles:
   #       taskKind: review
   #       completionShape: decision-only
   adversarial:
-    # REMWASTE-01: one low-effort Codex round for reviews containing only
-    # non-blocking findings. Change model after TOKCAP-01 measures quota cost.
+    # REMWASTE-01: one Codex round for reviews containing only non-blocking
+    # findings. Effort follows the fleet default (operator 2026-09-29: HIGH is the
+    # default reasoning level everywhere; 2026-09-30: GPT-6.1 Sol is the default
+    # codex model). The one-round cap is what bounds the cost.
     remediation:
       non_blocking:
-        model: gpt-6-sol
-        reasoning_effort: low
+        model: gpt-6.1-sol
+        reasoning_effort: high
         max_rounds: 1
     handoff:
       # HOM-01 wake-the-loop primitive. Default off preserves the timer-only

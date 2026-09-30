@@ -19,6 +19,9 @@
 // ama/harness-fallback.mjs.
 export const QUOTA_HARNESS_PROVIDER = Object.freeze({
   codex: 'openai',
+  hammer: 'openai',
+  'hammer-corp': 'openai',
+  'hammer-claude': 'anthropic',
   'codex-corp': 'openai',
   'remediator-codex': 'openai',
   'remediator-codex-corp': 'openai',

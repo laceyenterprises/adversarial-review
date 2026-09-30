@@ -1,3 +1,4 @@
+import { prepareCorporateCodexReviewerAuth } from '../../../codex-per-worker-auth.mjs';
 import { execFile } from 'node:child_process';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -386,6 +387,7 @@ function createCliDirectReviewerRuntimeAdapter({
   cancelPollIntervalMs = DEFAULT_CANCEL_POLL_MS,
   reattachPollIntervalMs = DEFAULT_REATTACH_POLL_MS,
   logger = console,
+  prepareCorporateCodexReviewerAuthImpl = prepareCorporateCodexReviewerAuth,
   now = () => new Date().toISOString(),
 } = {}) {
   const activeRuns = new Map();
@@ -412,10 +414,12 @@ function createCliDirectReviewerRuntimeAdapter({
       reviewerEnv[AGY_IDENTITY_REVIEW_ID_ENV] = String(agyIdentity.reviewId || '');
     }
     reviewerEnv.CODEX_BROKER_PROVIDER = req?.subjectContext?.codexBrokerProvider || 'codex';
+    let corporateAuth = null;
     let stripped = [];
     let preflightResult = null;
     try {
       if (isCodexModel(req.model)) {
+        corporateAuth = prepareCorporateCodexReviewerAuthImpl(reviewerEnv, sessionUuid);
         const { authPath, home } = resolveCodexReviewerEnv(reviewerEnv);
         logger.log?.(`[watcher] Using Codex auth for reviewer at ${authPath} with HOME=${home || '<unset>'}`);
       }
@@ -441,6 +445,7 @@ function createCliDirectReviewerRuntimeAdapter({
         if (preflightResult?.geminiCli) reviewerEnv.GEMINI_CLI = preflightResult.geminiCli;
       }
     } catch (err) {
+      corporateAuth?.cleanup();
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
       const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim();
       const failureClass = err?.failureClass || reviewerSignalAwareFailureClass(err, classificationText, null);
@@ -473,6 +478,7 @@ function createCliDirectReviewerRuntimeAdapter({
     };
     const claim = claimReviewerRunRecord(rootDir, initialRecord);
     if (!claim.claimed && ACTIVE_RUN_STATES.has(claim.record?.state)) {
+      corporateAuth?.cleanup();
       return emptyResult({
         ok: false,
         spawnedAt: claim.record.spawnedAt || spawnedAt,
@@ -483,6 +489,7 @@ function createCliDirectReviewerRuntimeAdapter({
       });
     }
     if (!claim.claimed) {
+      corporateAuth?.cleanup();
       return emptyResult({
         ok: false,
         spawnedAt: claim.record?.spawnedAt || spawnedAt,
@@ -684,6 +691,7 @@ function createCliDirectReviewerRuntimeAdapter({
         error: detail || effectiveErr.message,
       });
     } finally {
+      corporateAuth?.cleanup();
       activeRuns.delete(sessionUuid);
     }
   }

@@ -856,7 +856,7 @@ test('resolveReviewerIdentity maps the Gemini bot token env to the Gemini review
   );
 });
 
-test('reviewer-timeout fallback switches reviewer model after threshold only with explicit opt-in', () => {
+test('reviewer-timeout fallback refuses codex-family self-review even with explicit opt-in', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-timeout-fallback-'));
   const repo = 'laceyenterprises/agent-os';
   const prNumber = 1007;
@@ -890,13 +890,9 @@ test('reviewer-timeout fallback switches reviewer model after threshold only wit
       },
     });
 
-    assert.equal(selected.reviewerModel, 'codex');
-    assert.equal(selected.botTokenEnv, 'GH_CODEX_REVIEWER_TOKEN');
-    assert.equal(selected.timeoutFallback.fromReviewerModel, 'claude');
-    assert.equal(selected.timeoutFallback.toReviewerModel, 'codex');
-    assert.equal(selected.timeoutFallback.builderClass, 'codex');
-    assert.equal(selected.timeoutFallback.sameModelAsBuilder, true);
-    assert.equal(selected.timeoutFallback.timeoutFailures, 2);
+    assert.equal(selected.reviewerModel, 'claude');
+    assert.equal(selected.botTokenEnv, 'GH_CLAUDE_REVIEWER_TOKEN');
+    assert.equal(selected.timeoutFallback, undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

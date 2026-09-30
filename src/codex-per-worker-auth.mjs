@@ -46,6 +46,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 export const PER_WORKER_PLACEHOLDER_REFRESH_TOKEN =
@@ -209,4 +211,18 @@ export function materializePerWorkerCodexAuth({
     if (corporate) throw new Error(`corporate Codex broker credential unavailable: ${err.message}`, { cause: err });
     return null; // fail-safe: caller uses the shared credential
   }
+}
+
+// Direct reviewer adapters prepare corporate auth before CLI OAuth preflight.
+// No inherited marker may claim that a primary/shared credential is corporate.
+export function prepareCorporateCodexReviewerAuth(env, sessionUuid, { materializeImpl = materializePerWorkerCodexAuth } = {}) {
+  delete env.CODEX_REVIEWER_AUTH_PROVIDER;
+  if (env.CODEX_BROKER_PROVIDER !== 'codex-corp') return null;
+  const sharedAuthPath = env.CODEX_AUTH_PATH || join(env.CODEX_SOURCE_HOME || env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), 'auth.json');
+  const auth = materializeImpl({ sharedAuthPath, key: `reviewer-${sessionUuid}-${randomUUID()}`, env, provider: 'codex-corp' });
+  if (!auth) throw new Error('corporate Codex broker credential unavailable');
+  env.CODEX_AUTH_PATH = auth.authPath;
+  env.CODEX_HOME = auth.codexHome;
+  env.CODEX_REVIEWER_AUTH_PROVIDER = 'codex-corp';
+  return auth;
 }

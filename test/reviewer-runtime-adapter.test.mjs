@@ -3811,6 +3811,10 @@ for (const provider of ['codex', 'codex-corp']) {
       let childEnv;
       const adapter = createCliDirectReviewerRuntimeAdapter({
         rootDir,
+        prepareCorporateCodexReviewerAuthImpl: (env) => {
+          assert.equal(env.CODEX_BROKER_PROVIDER, provider);
+          return null;
+        },
         preflightImpl: async ({ env }) => {
           assert.equal(env.CODEX_BROKER_PROVIDER, provider);
           return {};

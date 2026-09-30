@@ -137,10 +137,9 @@ export async function resolveCloserDispatchHarness({
   // fallback configured, because it defers rather than dispatch a grounded
   // class (src/merge-agent-harness.mjs). With no fallbacks, a grounded primary
   // reports `all-fallbacks-grounded` and its grounding fields.
-  probeWithoutFallbacks = false,
-  // CLOSERREUSE-01: also skip a SOFT-grounded fallback candidate. Off for the
-  // closer (see the candidate screening below); the merge-agent turns it on,
-  // since it defers rather than dispatch any grounded class.
+  probeWithoutFallbacks = true,
+  // Retained for callers screening custom provider mappings. Shared cap
+  // classification already screens soft grounding for tracked harnesses.
   screenSoftGroundedFallbacks = false,
 } = {}) {
   const primary = String(workerClass || '').trim();
@@ -220,13 +219,8 @@ export async function resolveCloserDispatchHarness({
   // Primary is authoritatively grounded (hard, soft, or both). Pick the first
   // fallback whose provider is not ALSO grounded.
   //
-  // Candidate screening stays HARD-only, deliberately: AFH-05's scope is one
-  // additional way the PRIMARY is grounded. Skipping merely soft-grounded
-  // candidates too would be a second behavior change, and it can only ever
-  // subtract a fallback — leaving the closer on an already-grounded primary,
-  // which is the outcome this pack exists to prevent. The merge-agent is the
-  // exception (`screenSoftGroundedFallbacks`): with no usable fallback it
-  // defers, so skipping a soft-grounded candidate never pins it to the primary.
+  // CCX-04: screen model caps and soft grounding on every candidate too.
+  // With no admitting candidate the caller holds instead of spawning capped.
   for (const candidate of fallbacks) {
     if (candidate === primary) continue;
     const candidateProvider = providerForCloserWorkerClass(candidate);

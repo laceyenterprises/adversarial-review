@@ -142,14 +142,14 @@ test('github-pr routePR reuses its resolved route table', () => {
   });
 });
 
-test('github-pr routing can force the default reviewer from env', () => {
+test('github-pr routing honors reviewer pins while refusing codex-family self-review', () => {
   const env = { ...HERMETIC_CONFIG_ENV, ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
 
   assert.deepEqual(routeSubject({ builderClass: 'codex' }, { env }), {
     builderClass: 'codex',
     tag: 'codex',
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   });
 
   assert.deepEqual(routeSubject({ builderClass: 'claude-code' }, { env }), {

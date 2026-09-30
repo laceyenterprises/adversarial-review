@@ -5,12 +5,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 
 import {
@@ -3370,7 +3372,11 @@ test('prepareOriginalWorkerForMergeAgent matches canonical terminal semantics fo
 });
 
 test('merge-agent terminal status set matches parent session-ledger model when available', (t) => {
+  // Resolve from the real checkout, not the runner's temporary cwd/symlinks:
+  // an unrelated temp/platform fixture must not masquerade as agent-os.
   const modelsPath = path.resolve(
+    path.dirname(realpathSync(fileURLToPath(import.meta.url))),
+    '..',
     '..',
     '..',
     'platform',

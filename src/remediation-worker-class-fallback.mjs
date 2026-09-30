@@ -107,7 +107,8 @@ function classCapState(workerClass, { evidence, statuses, model }) {
   if (fleet?.capped) {
     return { capped: true, capSource: fleet.capSource, state: fleet.state, model: fleet.model, resetAt: fleet.resetAt, available: false };
   }
-  const local = evidence.get(workerClass) || null;
+  const evidenceClass = workerClass === 'remediator-claude' ? 'claude-code' : workerClass;
+  const local = evidence.get(evidenceClass) || null;
   const clearedByFleet = Boolean(local && fleet?.available)
     && Date.parse(String(fleet.lastGoodAt || '')) > Date.parse(String(local.requeuedAt || ''));
   const state = fleet ? fleet.state : 'unverified';

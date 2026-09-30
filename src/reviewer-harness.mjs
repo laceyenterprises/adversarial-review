@@ -1226,7 +1226,9 @@ async function reviewWithCodex(diff, extraContext = '', {
   // shared ChatGPT credential. Fail-safe: null -> use the shared path.
   let perWorkerAuth;
   try {
-    perWorkerAuth = materializePerWorkerCodexAuth({
+    perWorkerAuth = process.env.CODEX_REVIEWER_AUTH_PROVIDER === 'codex-corp'
+      && process.env.CODEX_BROKER_PROVIDER === 'codex-corp'
+      ? null : materializePerWorkerCodexAuth({
       sharedAuthPath: authPath,
       provider: process.env.CODEX_BROKER_PROVIDER || 'codex',
       key: `reviewer-${process.pid}-${Date.now()}`,

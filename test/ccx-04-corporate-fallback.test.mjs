@@ -10,7 +10,7 @@ import { afhGroundingSnapshotFromStdout, applyAfhReviewerFallback, reviewerModel
 import { routeSubject, isCrossModelReviewWaived, normalizeReviewerModel } from '../src/adapters/subject/github-pr/routing.mjs';
 import { TAG_PREFIXES } from '../src/adapters/subject/github-pr/title-tagging.mjs';
 import { loadConfig } from '../src/config-loader.mjs';
-import { materializePerWorkerCodexAuth, PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from '../src/codex-per-worker-auth.mjs';
+import { materializePerWorkerCodexAuth, prepareCorporateCodexReviewerAuth, PER_WORKER_PLACEHOLDER_REFRESH_TOKEN } from '../src/codex-per-worker-auth.mjs';
 import { remediationWorkerGitIdentity, remediationWorkerPushProvider, remediationWorkerTrailerClass } from '../src/remediation-worker-provenance.mjs';
 
 function rows(primary = 'exhausted', corp = 'ok', extra = {}) {
@@ -155,4 +155,32 @@ test('CCX-04 remediator twins retain their harness commit and push identity', ()
     assert.equal(remediationWorkerPushProvider(twin, {}).provider, remediationWorkerPushProvider(original, {}).provider);
     assert.equal(remediationWorkerTrailerClass(twin), remediationWorkerTrailerClass(original));
   }
+});
+
+
+test('CCX-04 corporate preflight prepares independent auth without a primary credential', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ccx-independent-auth-'));
+  try {
+    const syncBin = join(dir, 'fake-sync');
+    writeFileSync(syncBin, 'fixture');
+    const env = { HOME: dir, CODEX_BROKER_PROVIDER: 'codex-corp', AGENT_OS_CODEX_WORKER_AUTH_SYNC_BIN: syncBin };
+    const materializeImpl = (args) => materializePerWorkerCodexAuth({ ...args,
+      execFileSyncImpl: (_bin, _args, options) => {
+        assert.equal(options.env.CODEX_BROKER_PROVIDER, 'codex-corp');
+        writeFileSync(options.env.CODEX_WORKER_AUTH_PATH, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'corp-only' } }));
+      } });
+    const first = prepareCorporateCodexReviewerAuth(env, 'same-session', { materializeImpl });
+    const secondEnv = { ...env };
+    const second = prepareCorporateCodexReviewerAuth(secondEnv, 'same-session', { materializeImpl });
+    assert.notEqual(first.authPath, second.authPath);
+    assert.equal(env.CODEX_REVIEWER_AUTH_PROVIDER, 'codex-corp');
+    assert.equal(JSON.parse(readFileSync(env.CODEX_AUTH_PATH, 'utf8')).tokens.access_token, 'corp-only');
+    second.cleanup();
+    assert.equal(existsSync(first.authPath), true, 'duplicate-session preparation cannot delete active auth');
+    first.cleanup();
+    assert.equal(existsSync(join(dir, '.codex', 'auth.json')), false);
+    const primaryEnv = { CODEX_BROKER_PROVIDER: 'codex', CODEX_REVIEWER_AUTH_PROVIDER: 'codex-corp' };
+    assert.equal(prepareCorporateCodexReviewerAuth(primaryEnv, 'primary'), null);
+    assert.equal(primaryEnv.CODEX_REVIEWER_AUTH_PROVIDER, undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

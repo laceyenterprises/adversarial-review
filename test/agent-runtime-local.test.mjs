@@ -48,6 +48,9 @@ test('non-blocking Codex model and effort require the remediator allowlists', ()
     assert.equal(invalid.resolvedModel, 'gpt-6-sol');
     assert.equal(invalid.resolvedReasoningLevel, 'low');
     assert.equal(invalid.modelSource, 'non-blocking-default');
+    const missingSol61 = resolveNonBlockingCodexModel({ model: 'gpt-6.1-sol', env, hqRoot: root });
+    assert.equal(missingSol61.resolvedModel, 'gpt-6-sol');
+    assert.equal(missingSol61.modelSource, 'non-blocking-default');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

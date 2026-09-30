@@ -2295,7 +2295,11 @@ async function main() {
   }
   const reviewTextForPost = await applyLivePackCrossEditReview(scopeViolationFinding
     ? appendScopeViolationFinding(reviewText, scopeViolationFinding)
-    : reviewText, { repo, prNumber, diff, prContext, labels, reviewerHeadSha, log: console });
+    : reviewText, {
+      repo, prNumber, diff, prContext,
+      labels: verdictModeResolution.labels,
+      reviewerHeadSha, log: console,
+    });
   const fullComment = buildReviewCommentBody({
     reviewerMetadata,
     verdictMode,

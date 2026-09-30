@@ -493,7 +493,9 @@ async function applyLivePackCrossEditReview(reviewText, {
   log = console,
   evaluateImpl = evaluateLivePackCrossEdits,
 } = {}) {
-  const allLabels = [...(Array.isArray(labels) ? labels : []), ...(prContext?.labels || [])];
+  // Only the posting-time read can authorize a waiver. PR context and
+  // dispatch labels may predate an operator's removal during model review.
+  const currentLabels = Array.isArray(labels) ? labels : [];
   let findings;
   try {
     const review = await evaluateImpl({
@@ -503,7 +505,7 @@ async function applyLivePackCrossEditReview(reviewText, {
       title: prContext?.title || '',
       baseRef: prContext?.baseRefName || '',
       headRef: reviewerHeadSha || prContext?.headRefOid || '',
-      labels: allLabels,
+      labels: currentLabels,
     });
     findings = review.findings;
     if (review.waived) {
@@ -513,7 +515,7 @@ async function applyLivePackCrossEditReview(reviewText, {
       );
     }
   } catch (err) {
-    findings = inconclusiveFindingsForDiff({ diffText: diff, labels: allLabels, error: err });
+    findings = inconclusiveFindingsForDiff({ diffText: diff, labels: currentLabels, error: err });
     log?.error?.(
       `[reviewer] WARN: live-pack cross-edit check failed for ${repo}#${prNumber}; failing closed: ${err?.message || err}`,
     );

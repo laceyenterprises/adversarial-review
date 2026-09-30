@@ -647,8 +647,7 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
     // without psql-side preprocessing. That means `:'lrq'` style
     // placeholders are forwarded literally, causing the server to raise
     // `syntax error at or near ":"`. To make `:'name'` substitution work,
-    // either `-f /dev/stdin` (script mode) with `\set` prepended, or stdin
-    // piping.
+    // use stdin script mode with variables assigned by separate `-v` args.
     //
     // Surfaced 2026-06-08T18:24Z when the adversarial-watcher's
     // merge-agent dispatcher began failing to look up worker-runs for
@@ -657,10 +656,10 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
     // The merge-agent dispatch was getting skipped, leaving Comment-only
     // verdicts stuck and operator-blocking the cutover-replay pack.
     //
-    // Fix: when psqlVars are supplied, switch to stdin (`-f /dev/stdin`
-    // shape via the spawnSyncImpl `input` option) and prepend a
-    // `\set name 'value'` line per variable. Empty psqlVars keeps the
-    // `-c` fast path unless a read-only transaction is requested.
+    // When psqlVars are supplied, switch to stdin via the spawnSyncImpl
+    // `input` option. Never embed variable values in script text: psql
+    // meta-command quoting can turn repository content into shell commands.
+    // Empty psqlVars keeps the `-c` fast path unless readOnly is requested.
     //
     // `readOnly` wraps the statement in `BEGIN READ ONLY; ... COMMIT;` so
     // the server rejects any write, and adds `-q` so psql does not echo the
@@ -675,20 +674,10 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
     }
     let result;
     if (readOnly || psqlVars.length > 0) {
-      const setStanzas = psqlVars
-        .map(([name, value]) =>
-          // Escape any single-quote in the value to keep the psql
-          // string literal balanced. Values originate from validated
-          // ledger identifiers so the surface area is small, but
-          // doubling single quotes is the canonical SQL escape and
-          // costs nothing.
-          `\\set ${name} '${String(value).replace(/'/g, "''")}'`,
-        )
-        .join('\n');
       const statement = readOnly
         ? `BEGIN READ ONLY;\n${String(jsonSql).trim().replace(/;$/, '')};\nCOMMIT;`
         : jsonSql;
-      const script = `${setStanzas}\n${statement}\n`;
+      const script = `${statement}\n`;
       args.push(...spawnConfig.args, '-t', '-A');
       result = spawnSyncImpl('psql', args, {
         encoding: 'utf8',

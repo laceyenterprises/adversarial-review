@@ -344,7 +344,7 @@ test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader pat
       assert.ok(args.includes('-v'));
       assert.ok(args.includes('lrq=lrq_pg'));
       const sql = String(options.input);
-      assert.match(sql, /\\set lrq 'lrq_pg'/);
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /FROM worker_runs/);
       assert.match(sql, /WHERE wr\.launch_request_id = :'lrq'/);
       assert.match(sql, /LEFT JOIN LATERAL/);
@@ -635,10 +635,11 @@ test('readBuildCompletionSignalForPr uses the canonical postgres reader path', (
       assert.equal(command, 'psql');
       assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
       const sql = String(options.input);
-      assert.match(sql, /\\set repo 'acme\/myrepo'/);
-      assert.match(sql, /\\set pr_number '1234'/);
-      assert.match(sql, /\\set head_sha ''/);
-      assert.match(sql, /\\set signal_kind 'merged'/);
+      assert.ok(args.includes('repo=acme/myrepo'));
+      assert.doesNotMatch(sql, /\\set/);
+      assert.ok(args.includes('pr_number=1234'));
+      assert.ok(args.includes('head_sha='));
+      assert.ok(args.includes('signal_kind=merged'));
       assert.match(sql, /FROM build_completions/);
       assert.match(sql, /WHERE repo = :'repo'/);
       assert.match(sql, /AND pr_number = :'pr_number'::integer/);
@@ -697,7 +698,7 @@ test('readWorkerRunUsageFromLedger reads worker-run token rollups from the postg
       assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
       assert.ok(args.includes('worker_run_id=wr_pg'));
       const sql = String(options.input);
-      assert.match(sql, /\\set worker_run_id 'wr_pg'/);
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /FROM worker_runs wr/);
       assert.match(sql, /LEFT JOIN runtime_sessions rs ON rs\.session_id = wr\.session_id/);
       assert.match(sql, /WHERE wr\.run_id = :'worker_run_id'/);
@@ -731,10 +732,11 @@ test('readWorkerRunUsageFromLedger falls back to the postgres launch-request sel
   const result = readWorkerRunUsageFromLedger({
     launchRequestId: 'lrq_pg',
     ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (_command, _args, options) => {
+    spawnSyncImpl: (_command, args, options) => {
       const sql = String(options.input);
       selectors.push(sql);
-      assert.match(sql, /\\set launch_request_id 'lrq_pg'/);
+      assert.ok(args.includes('launch_request_id=lrq_pg'));
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /WHERE wr\.launch_request_id = :'launch_request_id'/);
       return {
         status: 0,
@@ -763,10 +765,11 @@ test('readReviewerSessionUsageFromLedger reads runtime-session token rollups fro
     startedAt: '2026-06-04T00:00:00.000Z',
     endedAt: '2026-06-04T00:02:00.000Z',
     ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (command, _args, options) => {
+    spawnSyncImpl: (command, args, options) => {
       assert.equal(command, 'psql');
       const sql = String(options.input);
-      assert.match(sql, /\\set key0 'session-1'/);
+      assert.ok(args.includes('key0=session-1'));
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /FROM runtime_sessions/);
       assert.match(sql, /adapter_session_key IN \(:'key0'\)/);
       // TIMESTAMPTZ-safe window bounds, never COALESCE(<timestamptz>, '').
@@ -948,7 +951,8 @@ test('readActiveDagRunsForPlan runs one bounded SELECT inside a read-only transa
       assert.equal(command, 'psql');
       assert.ok(args.includes('-q'), 'quiet mode keeps BEGIN/COMMIT tags out of the JSON rows');
       const sql = String(options.input);
-      assert.match(sql, /\\set plan_id 'model-efficiency-gym-v1'/);
+      assert.ok(args.includes('plan_id=model-efficiency-gym-v1'));
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /^BEGIN READ ONLY;$/m);
       assert.match(sql, /^COMMIT;$/m);
       assert.doesNotMatch(sql, /\bSET\s+(SESSION|default_transaction)/i);
@@ -967,6 +971,48 @@ test('readActiveDagRunsForPlan runs one bounded SELECT inside a read-only transa
   assert.equal(result.ok, true);
   assert.deepEqual(result.runs.map((run) => [run.run_id, run.state]), [['dagrun_01M3QXE49Z7RNR5K11ABGVD6ZG', 'running']]);
   assert.deepEqual([...LIVE_DAG_RUN_STATES], ['pending', 'running', 'parked', 'awaiting-merge']);
+});
+
+test('postgres query values stay in argv for quotes, backslashes and control characters', () => {
+  const values = [
+    'safe-plan',
+    "p\\' \\! id #",
+    "p'quoted",
+    'p\\backslash',
+    'p\n\\! id\r\n\t\x01end',
+  ];
+  for (const [readImpl, variable] of [
+    [(value, spawnSyncImpl) => readActiveDagRunsForPlan({
+      planId: value,
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+      spawnSyncImpl,
+    }), 'plan_id'],
+    [(value, spawnSyncImpl) => readLatestWorkerRunStatusFromLedger({
+      launchRequestId: value,
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+      spawnSyncImpl,
+    }), 'lrq'],
+  ]) {
+    let baselineScript;
+    for (const value of values) {
+      let calls = 0;
+      const result = readImpl(value, (command, args, options) => {
+        calls += 1;
+        assert.equal(command, 'psql');
+        const valueIndex = args.indexOf(`${variable}=${value}`);
+        assert.ok(valueIndex > 0);
+        assert.equal(args[valueIndex - 1], '-v');
+        assert.ok(!args.includes('-c'));
+        assert.ok(options.input.includes(`:'${variable}'`));
+        assert.doesNotMatch(options.input, /^\s*\\/m, 'no executable meta-command lines');
+        baselineScript ??= options.input;
+        assert.equal(options.input, baselineScript, 'script is independent of repository values');
+        return { status: 0, stdout: '{}\n', stderr: '' };
+      });
+      assert.equal(calls, 1);
+      assert.equal(result.ok, true);
+    }
+  }
 });
 
 test('readActiveDagRunsForPlan surfaces psql failure as not-ok and rejects unsafe states', () => {

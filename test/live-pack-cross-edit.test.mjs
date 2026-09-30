@@ -17,7 +17,10 @@ import {
 import { classifyFollowUpCriticality } from '../src/follow-up-jobs.mjs';
 import { normalizeEffectiveReviewVerdict } from '../src/kernel/verdict.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
+import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import { exactHeadReviewEventForBody } from '../src/reviewer-exact-head-post.mjs';
+
+const { fetchCurrentHeadVerdictMode } = reviewerTest;
 
 const REPO = 'laceyenterprises/agent-os';
 const MEG_RUN = 'dagrun_01M3QXE49Z7RNR5K11ABGVD6ZG';
@@ -388,7 +391,7 @@ test('remediation context is empty when no pack dir is touched and fails closed 
   assert.match(unreadable, /"live": true/);
 });
 
-test('applyLivePackCrossEditReview reads PR context, merges label sets, and fails closed when evaluation throws', async () => {
+test('applyLivePackCrossEditReview reads PR context, uses only current labels, and fails closed when evaluation throws', async () => {
   const logs = [];
   const log = { error: (line) => logs.push(line) };
   const prContext = {
@@ -404,7 +407,7 @@ test('applyLivePackCrossEditReview reads PR context, merges label sets, and fail
     prNumber: 7392,
     diff: diffFor(CROSS_EDIT_PATHS),
     prContext,
-    labels: ['from-watcher'],
+    labels: ['current-label'],
     reviewerHeadSha: 'abc123',
     log,
     evaluateImpl: async (args) => {
@@ -416,7 +419,7 @@ test('applyLivePackCrossEditReview reads PR context, merges label sets, and fail
   assert.equal(seen.branch, 'codex-toc-06/TOC-06');
   assert.equal(seen.baseRef, 'main');
   assert.equal(seen.headRef, 'abc123');
-  assert.deepEqual(seen.labels.map((label) => label.name || label), ['from-watcher', 'from-pr-context']);
+  assert.deepEqual(seen.labels.map((label) => label.name || label), ['current-label']);
 
   const failedClosed = await applyLivePackCrossEditReview(REVIEW_TEXT, {
     repo: REPO,
@@ -429,6 +432,58 @@ test('applyLivePackCrossEditReview reads PR context, merges label sets, and fail
   assert.equal(normalizeEffectiveReviewVerdict(failedClosed, { log: null }), 'request-changes');
   assert.match(failedClosed, /live-pack evaluation failed: gh exploded/);
   assert.ok(logs.some((line) => /failing closed/.test(line)));
+});
+
+test('posting-time labels revoke in-flight waivers and failed reads grant no waiver', async () => {
+  // Both dispatch and pre-review context saw approval before the model ran.
+  const dispatchLabels = [{ name: LIVE_PACK_EDIT_WAIVER_LABEL }];
+  const prContext = {
+    title: '[codex] TOC-06: compression evals',
+    headRefName: 'codex-toc-06/TOC-06',
+    baseRefName: 'main',
+    headRefOid: 'head-a',
+    labels: dispatchLabels,
+  };
+  const log = { error() {}, warn() {} };
+  for (const scenario of ['removed', 'read-failed', 'still-present']) {
+    const current = await fetchCurrentHeadVerdictMode({
+      repo: REPO,
+      prNumber: 7392,
+      reviewerHeadSha: 'head-a',
+      log,
+      fetchPullRequestHeadAndStateImpl: async (_repo, _prNumber, options) => {
+        assert.equal(options.withLabels, true);
+        if (scenario === 'read-failed') throw new Error('current labels unavailable');
+        return { headRefOid: 'head-a', labels: scenario === 'still-present' ? dispatchLabels : [] };
+      },
+    });
+    for (const evaluationFails of [false, true]) {
+      const body = await applyLivePackCrossEditReview(REVIEW_TEXT, {
+        repo: REPO,
+        prNumber: 7392,
+        diff: diffFor(CROSS_EDIT_PATHS),
+        prContext,
+        labels: current.labels,
+        reviewerHeadSha: 'head-a',
+        log,
+        evaluateImpl: (args) => {
+          if (evaluationFails) throw new Error('evaluation unavailable');
+          return evaluateLivePackCrossEdits({
+            ...args,
+            fetchFileAtRefImpl: fetchPlan,
+            readActiveDagRunsImpl: makeLedger().impl,
+          });
+        },
+      });
+      if (scenario === 'still-present') {
+        assert.equal(body, REVIEW_TEXT);
+      } else {
+        assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'request-changes');
+        assert.ok(reviewBodyHasLivePackCrossEditFinding(body));
+        assert.match(body, /model-efficiency-gym/);
+      }
+    }
+  }
 });
 
 test('resolveLivePackContextForJob routes every gh read through the injected execFileImpl', async () => {

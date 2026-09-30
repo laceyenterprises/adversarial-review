@@ -114,11 +114,10 @@ import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
-  appendScopeViolationFinding,
   resolveAdditiveOnlyScopeReview,
   reviewBodyHasScopeViolationFinding,
 } from './additive-only-scope.mjs';
-import { applyLivePackCrossEditReview } from './live-pack-cross-edit.mjs';
+import { applyReviewScopeGates } from './reviewer-scope-gates.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
 import {
   alertClioOAuthFailure,
@@ -2293,13 +2292,10 @@ async function main() {
       `[reviewer] WARN: additive-only scope check failed for ${repo}#${prNumber}; continuing normal review: ${err?.message || err}`
     );
   }
-  const reviewTextForPost = await applyLivePackCrossEditReview(scopeViolationFinding
-    ? appendScopeViolationFinding(reviewText, scopeViolationFinding)
-    : reviewText, {
-      repo, prNumber, diff, prContext,
-      labels: verdictModeResolution.labels,
-      reviewerHeadSha, log: console,
-    });
+  const reviewTextForPost = await applyReviewScopeGates(reviewText, {
+    scopeViolationFinding, repo, prNumber, diff, prContext,
+    labels: verdictModeResolution.labels, reviewerHeadSha, log: console,
+  });
   const fullComment = buildReviewCommentBody({
     reviewerMetadata,
     verdictMode,

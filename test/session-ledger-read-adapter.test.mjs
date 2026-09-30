@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { createEmptySqliteDb, createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 import {
+  LIVE_DAG_RUN_STATES,
+  readActiveDagRunsForPlan,
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
   readLatestWorkerRunStatusFromLedger,
@@ -341,7 +344,7 @@ test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader pat
       assert.ok(args.includes('-v'));
       assert.ok(args.includes('lrq=lrq_pg'));
       const sql = String(options.input);
-      assert.match(sql, /\\set lrq 'lrq_pg'/);
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /FROM worker_runs/);
       assert.match(sql, /WHERE wr\.launch_request_id = :'lrq'/);
       assert.match(sql, /LEFT JOIN LATERAL/);
@@ -632,10 +635,11 @@ test('readBuildCompletionSignalForPr uses the canonical postgres reader path', (
       assert.equal(command, 'psql');
       assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
       const sql = String(options.input);
-      assert.match(sql, /\\set repo 'acme\/myrepo'/);
-      assert.match(sql, /\\set pr_number '1234'/);
-      assert.match(sql, /\\set head_sha ''/);
-      assert.match(sql, /\\set signal_kind 'merged'/);
+      assert.ok(args.includes('repo=acme/myrepo'));
+      assert.doesNotMatch(sql, /\\set/);
+      assert.ok(args.includes('pr_number=1234'));
+      assert.ok(args.includes('head_sha='));
+      assert.ok(args.includes('signal_kind=merged'));
       assert.match(sql, /FROM build_completions/);
       assert.match(sql, /WHERE repo = :'repo'/);
       assert.match(sql, /AND pr_number = :'pr_number'::integer/);
@@ -694,7 +698,7 @@ test('readWorkerRunUsageFromLedger reads worker-run token rollups from the postg
       assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
       assert.ok(args.includes('worker_run_id=wr_pg'));
       const sql = String(options.input);
-      assert.match(sql, /\\set worker_run_id 'wr_pg'/);
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /FROM worker_runs wr/);
       assert.match(sql, /LEFT JOIN runtime_sessions rs ON rs\.session_id = wr\.session_id/);
       assert.match(sql, /WHERE wr\.run_id = :'worker_run_id'/);
@@ -728,10 +732,11 @@ test('readWorkerRunUsageFromLedger falls back to the postgres launch-request sel
   const result = readWorkerRunUsageFromLedger({
     launchRequestId: 'lrq_pg',
     ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (_command, _args, options) => {
+    spawnSyncImpl: (_command, args, options) => {
       const sql = String(options.input);
       selectors.push(sql);
-      assert.match(sql, /\\set launch_request_id 'lrq_pg'/);
+      assert.ok(args.includes('launch_request_id=lrq_pg'));
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /WHERE wr\.launch_request_id = :'launch_request_id'/);
       return {
         status: 0,
@@ -760,10 +765,11 @@ test('readReviewerSessionUsageFromLedger reads runtime-session token rollups fro
     startedAt: '2026-06-04T00:00:00.000Z',
     endedAt: '2026-06-04T00:02:00.000Z',
     ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
-    spawnSyncImpl: (command, _args, options) => {
+    spawnSyncImpl: (command, args, options) => {
       assert.equal(command, 'psql');
       const sql = String(options.input);
-      assert.match(sql, /\\set key0 'session-1'/);
+      assert.ok(args.includes('key0=session-1'));
+      assert.doesNotMatch(sql, /\\set/);
       assert.match(sql, /FROM runtime_sessions/);
       assert.match(sql, /adapter_session_key IN \(:'key0'\)/);
       // TIMESTAMPTZ-safe window bounds, never COALESCE(<timestamptz>, '').
@@ -884,4 +890,199 @@ test('readWorkerRunUsageFromLedger treats historical sqlite ledgers without guar
   assert.equal(result.row.token_usage_guardrail, null);
   assert.equal(result.row.total_cache_read_tokens, 3);
   assert.equal(result.row.total_cache_write_tokens, 2);
+});
+
+test('queryPostgresRows enforces readOnly without variables and preserves the unguarded fast path', async () => {
+  // Expose the private helper in a temporary module, without expanding the
+  // production adapter's public interface just for this regression test.
+  const root = tempRoot();
+  try {
+    const sourceUrl = new URL('../src/session-ledger-read-adapter.mjs', import.meta.url);
+    const source = readFileSync(sourceUrl, 'utf8').replace(
+      "'./config-loader.mjs'",
+      JSON.stringify(new URL('./config-loader.mjs', sourceUrl).href),
+    );
+    const modulePath = path.join(root, 'adapter.mjs');
+    writeFileSync(modulePath, `${source}\nexport { queryPostgresRows };\n`);
+    const { queryPostgresRows } = await import(pathToFileURL(modulePath).href);
+    for (const readOnly of [true, false]) {
+      let calls = 0;
+      const result = queryPostgresRows(
+        { backend: 'postgres', databaseName: 'agent_os_ledger' },
+        'SELECT row_to_json(t) FROM dag_runs t;',
+        {
+          readOnly,
+          spawnSyncImpl: (command, args, options) => {
+            calls += 1;
+            assert.equal(command, 'psql');
+            assert.ok(args.includes('ON_ERROR_STOP=1'));
+            if (readOnly) {
+              assert.ok(args.includes('-q'));
+              assert.ok(!args.includes('-c'));
+              assert.match(options.input, /^BEGIN READ ONLY;$/m);
+              assert.match(options.input, /^COMMIT;$/m);
+              assert.match(options.input, /^SELECT row_to_json\(t\) FROM dag_runs t;$/m);
+              assert.doesNotMatch(options.input, /\\set/);
+            } else {
+              assert.ok(!args.includes('-q'));
+              assert.equal(args[args.indexOf('-c') + 1], 'SELECT row_to_json(t) FROM dag_runs t;');
+              assert.equal(options.input, undefined);
+            }
+            return { status: 0, stdout: '{"state":"running"}\n', stderr: '' };
+          },
+        },
+      );
+      assert.equal(calls, 1);
+      assert.equal(result.ok, true);
+      assert.deepEqual(result.rows, [{ state: 'running' }]);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('readActiveDagRunsForPlan runs one bounded SELECT inside a read-only transaction on postgres', () => {
+  let calls = 0;
+  const result = readActiveDagRunsForPlan({
+    planId: 'model-efficiency-gym-v1',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: (command, args, options) => {
+      calls += 1;
+      assert.equal(command, 'psql');
+      assert.ok(args.includes('-q'), 'quiet mode keeps BEGIN/COMMIT tags out of the JSON rows');
+      const sql = String(options.input);
+      assert.ok(args.includes('plan_id=model-efficiency-gym-v1'));
+      assert.doesNotMatch(sql, /\\set/);
+      assert.match(sql, /^BEGIN READ ONLY;$/m);
+      assert.match(sql, /^COMMIT;$/m);
+      assert.doesNotMatch(sql, /\bSET\s+(SESSION|default_transaction)/i);
+      assert.match(sql, /FROM dag_runs/);
+      assert.match(sql, /WHERE plan_id = :'plan_id'/);
+      assert.match(sql, /state IN \('pending', 'running', 'parked', 'awaiting-merge'\)/);
+      assert.match(sql, /LIMIT 20/);
+      return {
+        status: 0,
+        stdout: '{"run_id":"dagrun_01M3QXE49Z7RNR5K11ABGVD6ZG","plan_id":"model-efficiency-gym-v1","state":"running","started_at":"2026-09-29T18:04:04-07:00"}\n',
+        stderr: '',
+      };
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.runs.map((run) => [run.run_id, run.state]), [['dagrun_01M3QXE49Z7RNR5K11ABGVD6ZG', 'running']]);
+  assert.deepEqual([...LIVE_DAG_RUN_STATES], ['pending', 'running', 'parked', 'awaiting-merge']);
+});
+
+test('postgres query values stay in argv for quotes, backslashes and control characters', () => {
+  const values = [
+    'safe-plan',
+    "p\\' \\! id #",
+    "p'quoted",
+    'p\\backslash',
+    'p\n\\! id\r\n\t\x01end',
+  ];
+  for (const [readImpl, variable] of [
+    [(value, spawnSyncImpl) => readActiveDagRunsForPlan({
+      planId: value,
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+      spawnSyncImpl,
+    }), 'plan_id'],
+    [(value, spawnSyncImpl) => readLatestWorkerRunStatusFromLedger({
+      launchRequestId: value,
+      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+      spawnSyncImpl,
+    }), 'lrq'],
+  ]) {
+    let baselineScript;
+    for (const value of values) {
+      let calls = 0;
+      const result = readImpl(value, (command, args, options) => {
+        calls += 1;
+        assert.equal(command, 'psql');
+        const valueIndex = args.indexOf(`${variable}=${value}`);
+        assert.ok(valueIndex > 0);
+        assert.equal(args[valueIndex - 1], '-v');
+        assert.ok(!args.includes('-c'));
+        assert.ok(options.input.includes(`:'${variable}'`));
+        assert.doesNotMatch(options.input, /^\s*\\/m, 'no executable meta-command lines');
+        baselineScript ??= options.input;
+        assert.equal(options.input, baselineScript, 'script is independent of repository values');
+        return { status: 0, stdout: '{}\n', stderr: '' };
+      });
+      assert.equal(calls, 1);
+      assert.equal(result.ok, true);
+    }
+  }
+});
+
+test('readActiveDagRunsForPlan surfaces psql failure as not-ok and rejects unsafe states', () => {
+  const failed = readActiveDagRunsForPlan({
+    planId: 'p',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: () => ({ status: 2, stdout: '', stderr: 'connection refused' }),
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.reason, 'ledger-read-failed');
+  assert.equal(readActiveDagRunsForPlan({ planId: '' }).reason, 'missing-plan-id');
+  const unsafe = readActiveDagRunsForPlan({
+    planId: 'p',
+    states: ["running') OR ('1'='1"],
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: () => { throw new Error('must not query'); },
+  });
+  assert.equal(unsafe.ok, false);
+  assert.equal(unsafe.reason, 'invalid-dag-run-states');
+});
+
+test('readActiveDagRunsForPlan filters sqlite rows to the plan and live states', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  const db = new Database(ledgerDb);
+  db.exec('CREATE TABLE dag_runs (run_id TEXT PRIMARY KEY, plan_id TEXT, state TEXT, started_at TEXT)');
+  const insert = db.prepare('INSERT INTO dag_runs (run_id, plan_id, state, started_at) VALUES (?, ?, ?, ?)');
+  insert.run('dagrun_live', 'plan-a', 'running', '2026-09-29T02:00:00Z');
+  insert.run('dagrun_parked', 'plan-a', 'parked', '2026-09-29T01:00:00Z');
+  insert.run('dagrun_done', 'plan-a', 'succeeded', '2026-09-29T03:00:00Z');
+  insert.run('dagrun_other', 'plan-b', 'running', '2026-09-29T04:00:00Z');
+  db.close();
+
+  const result = readActiveDagRunsForPlan({
+    planId: 'plan-a',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.runs.map((run) => run.run_id), ['dagrun_live', 'dagrun_parked']);
+});
+
+
+test('active DAG reads retry transient failures, stop on permanent errors, and fail closed at cap', () => {
+  for (const failure of [
+    { status: null, error: { code: 'ETIMEDOUT' } },
+    { status: 2, stderr: 'connection refused' },
+  ]) {
+    for (const recover of [true, false]) {
+      let calls = 0;
+      const result = readActiveDagRunsForPlan({ planId: 'p',
+        ledgerTarget: { backend: 'postgres', databaseName: 'ledger' },
+        spawnSyncImpl: () => ++calls === 3 && recover
+          ? { status: 0, stdout: '', stderr: '' } : failure,
+      });
+      assert.equal(calls, 3);
+      assert.equal(result.ok, recover);
+    }
+  }
+  for (const failure of [
+    { status: 1, stderr: 'permission denied for table dag_runs' },
+    { status: null, error: { code: 'ENOENT' } },
+    { status: 0, stdout: 'invalid JSON' },
+  ]) {
+    let calls = 0;
+    const result = readActiveDagRunsForPlan({ planId: 'p',
+      ledgerTarget: { backend: 'postgres', databaseName: 'ledger' },
+      spawnSyncImpl: () => { calls++; return failure; },
+    });
+    assert.equal(calls, 1);
+    assert.equal(result.ok, false);
+  }
 });

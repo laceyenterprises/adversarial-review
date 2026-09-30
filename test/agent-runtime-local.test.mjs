@@ -18,6 +18,7 @@ import {
 import {
   cancelLocalRemediationWorker,
   prepareCodexRemediationStartupEnv,
+  resolveCodexRemediationModel,
   resolveRemediationModel,
   resolveNonBlockingCodexModel,
   spawnClaudeCodeRemediationWorker,
@@ -25,6 +26,7 @@ import {
   spawnGeminiRemediationWorker,
   waitForLocalRemediationExit,
 } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import { resolveConfiguredNonBlockingCodexModel } from '../src/adapters/agent-runtime/local/non-blocking-codex-model.mjs';
 import {
   readReviewerRunRecord,
   writeReviewerRunRecord,
@@ -49,6 +51,42 @@ test('non-blocking Codex model and effort require the remediator allowlists', ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// SOL61-02: the registry governs acceptance; changing a default is a separate rollout.
+for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
+  test(`${model} passes Codex registry, config, env-pin and spawn paths`, () => {
+    const root = mkdtempSync(join(tmpdir(), 'sol61-model-'));
+    try {
+      mkdirSync(join(root, 'registry'));
+      writeFileSync(join(root, 'registry', 'worker-classes.json'), JSON.stringify({
+        'remediator-codex': {
+          allowedModels: ['gpt-6-sol', 'gpt-6.1-sol'], defaultModel: model,
+        },
+      }));
+      const configPath = join(root, 'config.yaml');
+      writeFileSync(configPath, `version: 1\nroles:\n  adversarial:\n    remediation:\n      non_blocking:\n        model: ${model}\n`);
+      const env = { HQ_ROOT: root, HOME: root, AGENT_OS_CONFIG_PATH: configPath };
+      assert.equal(resolveConfiguredNonBlockingCodexModel(env).resolvedModel, model);
+      assert.equal(resolveNonBlockingCodexModel({ model, env }).modelSource, 'non-blocking-config');
+      assert.equal(resolveCodexRemediationModel(env), model);
+      for (const key of ['ADVERSARIAL_REMEDIATION_CODEX_MODEL', 'CODEX_REMEDIATION_MODEL', 'CODEX_MODEL_ID']) {
+        assert.equal(resolveCodexRemediationModel({ ...env, [key]: model }), model);
+      }
+      const promptPath = join(root, 'prompt.md');
+      writeFileSync(promptPath, 'fix the PR');
+      const record = spawnCodexRemediationWorker({
+        workspaceDir: root, promptPath, outputPath: join(root, 'out.txt'),
+        logPath: join(root, 'worker.log'), replyPath: join(root, 'reply.json'),
+        hqRoot: root, sourceEnv: env, enforceHarnessIdentity: false,
+        spawnImpl: () => ({ pid: 4141, unref() {} }),
+      });
+      assert.equal(record.resolvedModel, model);
+      assert.deepEqual(record.command.slice(1, 4), ['exec', '--model', model]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 const noopPreflight = async ({ model }) => (
   String(model || '').toLowerCase().includes('codex')

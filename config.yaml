@@ -86,7 +86,7 @@ roles:
   # round, is skipped. [] disables it (a capped remediator holds, no respawn).
   # Env: AGENT_OS_ROLES_REMEDIATOR_FALLBACK /
   #      ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK (comma-separated)
-  remediator_fallback: [claude-code, codex]   # enum items: claude-code / codex / gemini
+  remediator_fallback: [remediator-codex-corp, remediator-claude, codex]   # corporate twin before Claude; auto-revert to the routed primary
   # ARC-12/13 role registry (v2 app architecture §5). Left EMPTY by default so
   # boot never has to resolve the hq-published worker-class roster and the
   # code-pr pipeline gate (domains/code-pr.json → pipeline.enabled) stays inert

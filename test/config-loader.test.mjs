@@ -6131,12 +6131,12 @@ test('roles.remediator_fallback is declared config: schema default, file overrid
     // Both the strict and the runtime (daemon) loader resolve the schema default.
     for (const load of [loadConfig, loadConfigRuntime]) {
       const cfg = load({ topPath: bare, env: {} });
-      assert.deepEqual(cfg.get('roles.remediator_fallback'), ['claude-code', 'codex']);
+      assert.deepEqual(cfg.get('roles.remediator_fallback'), ['remediator-codex-corp', 'remediator-claude', 'codex']);
       assert.equal(cfg.resolutionTrace('roles.remediator_fallback').at(-1).source, 'code-default');
     }
     // The checked-in module config declares the same order explicitly.
     const moduleCfg = loadConfig({ topPath: bare, modulePaths: [MODULE_CONFIG_PATH], env: {} });
-    assert.deepEqual(moduleCfg.get('roles.remediator_fallback'), ['claude-code', 'codex']);
+    assert.deepEqual(moduleCfg.get('roles.remediator_fallback'), ['remediator-codex-corp', 'remediator-claude', 'codex']);
 
     const top = join(tmp, 'config.yaml');
     writeFile(top, `

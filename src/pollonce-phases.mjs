@@ -1635,6 +1635,7 @@ export async function processReviewSubject(entry, ctx) {
         afhGrounding,
         emitCacheEvent,
       });
+      if (route.quotaBlocked) return;
       let depthSpillReserved = false;
       const depthPassKind = reviewerDispatchPassKind({
         current: existing,
@@ -3273,6 +3274,7 @@ export async function processReviewSubject(entry, ctx) {
                 repo: repoPath,
                 prNumber,
                 reviewerModel: route.reviewerModel,
+                codexBrokerProvider: route.codexBrokerProvider || 'codex',
                 botTokenEnv: route.botTokenEnv,
                 linearTicketId,
                 labels: Array.isArray(subject.labels) ? subject.labels : [],

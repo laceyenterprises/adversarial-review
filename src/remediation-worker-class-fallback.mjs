@@ -56,6 +56,28 @@ import {
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
 
+export function normalizeRemediationWorkerClass(workerClassInput) {
+  const workerClass = String(workerClassInput || '').trim().toLowerCase();
+  if (!workerClass) return null;
+  switch (workerClass) {
+    case 'remediator-codex-corp':
+    case 'remediator-claude':
+      return workerClass;
+    case 'codex':
+    case 'codex-remediation':
+      return 'codex';
+    case 'claude':
+    case 'claude-code':
+    case 'claude-code-remediation':
+      return 'claude-code';
+    case 'gemini':
+    case 'gemini-remediation':
+      return 'gemini';
+    default:
+      return null;
+  }
+}
+
 const execFileAsync = promisify(execFileCb);
 const FLEET_QUOTA_STATUS_TIMEOUT_MS = 20_000;
 
@@ -218,11 +240,19 @@ export async function resolveRemediationWorkerClassWithFallback({
     }
     const ownReviewer = (Array.isArray(reviewerModels) ? reviewerModels : [])
       .find((reviewerModel) => isCrossModelReviewWaived(candidate, reviewerModel));
-    if (ownReviewer) {
+    // The corporate twin continues the routed Codex writer; it inherits the
+    // primary's diversity decision rather than introducing a new writer family.
+    const corporateContinuation = candidate === 'remediator-codex-corp'
+      && ['codex', 'remediator-codex'].includes(primaryClass);
+    if (ownReviewer && !corporateContinuation) {
       skipped.push({ workerClass: candidate, reason: `reviews-next-round:${ownReviewer}` });
       continue;
     }
     const cap = capOf(candidate);
+    if (candidate === 'remediator-codex-corp' && cap.available !== true) {
+      skipped.push({ workerClass: candidate, reason: `unavailable:${cap.state}` });
+      continue;
+    }
     const refusal = cap.capped
       ? `capped:${cap.capSource}`
       : cap.resetsWithinHoldWindow
@@ -292,12 +322,12 @@ export function nextRoundReviewerModels(job, { env = process.env, topPath, loade
 
 // The model each remediator class would spawn with, for model-level caps.
 function remediatorModelForClass(workerClass, { job, env }) {
-  if (workerClass === 'codex') {
+  if (['codex', 'remediator-codex-corp'].includes(workerClass)) {
     return job?.nonBlockingOnly === true
       ? resolveConfiguredNonBlockingCodexModel(env).resolvedModel
       : resolveCodexRemediationModel(env);
   }
-  if (workerClass === 'claude-code') return resolveClaudeRemediationModel(env).resolvedModel;
+  if (['claude-code', 'remediator-claude'].includes(workerClass)) return resolveClaudeRemediationModel(env).resolvedModel;
   if (workerClass === 'gemini') return resolveGeminiRemediationModel(env);
   return null;
 }

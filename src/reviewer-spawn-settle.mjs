@@ -161,6 +161,7 @@ function resolveReviewerQuotaStatusDir(env = process.env) {
 
 async function readReviewerQuotaDecision({
   reviewerModel,
+  codexBrokerProvider = 'codex',
   env = process.env,
   readdirImpl = readdir,
   readFileImpl = readFile,
@@ -191,7 +192,10 @@ async function readReviewerQuotaDecision({
         // looking for a valid record; if none exists, the decision fails open.
       }
     }
-    const status = statuses.find((entry) => entry.authPath === 'oauth') || statuses[0];
+    const accountAuthPath = codexBrokerProvider === 'codex-corp' ? 'oauth-corp' : 'oauth';
+    const accountStatuses = statuses.filter((entry) => codexBrokerProvider === 'codex-corp'
+      ? entry.authPath === accountAuthPath : entry.authPath !== 'oauth-corp');
+    const status = accountStatuses.find((entry) => entry.authPath === accountAuthPath) || accountStatuses[0];
     if (!status) {
       return { available: true, state: 'missing-provider-status', provider };
     }
@@ -517,6 +521,7 @@ async function spawnReviewer({
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
   afhReviewerFallback = null,
+  codexBrokerProvider = 'codex',
   onReviewerPgid = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
@@ -548,6 +553,7 @@ async function spawnReviewer({
   try {
     quotaDecision = await readReviewerQuotaDecisionImpl({
       reviewerModel,
+      codexBrokerProvider,
       env: quotaCheckEnv,
     });
   } catch {
@@ -691,6 +697,7 @@ async function spawnReviewer({
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
         afhReviewerFallback,
+        codexBrokerProvider,
         ...(agyIdentity ? { agyIdentity } : {}),
         // Persisted in the run record so a restarted watcher keeps this
         // identity out while this review still runs.

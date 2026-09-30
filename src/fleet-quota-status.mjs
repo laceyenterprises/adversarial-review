@@ -19,6 +19,10 @@
 // ama/harness-fallback.mjs.
 export const QUOTA_HARNESS_PROVIDER = Object.freeze({
   codex: 'openai',
+  'codex-corp': 'openai',
+  'remediator-codex': 'openai',
+  'remediator-codex-corp': 'openai',
+  'remediator-claude': 'anthropic',
   claude: 'anthropic',
   'claude-code': 'anthropic',
   gemini: 'google',
@@ -157,8 +161,9 @@ export function parseHqFleetQuotaStatus(stdout) {
 
 // Rows for one provider, OAuth-first (the auth path a native-harness spawn
 // actually uses), then any other auth path for the same provider.
-function providerStatusRows(statuses, normalizedProvider) {
-  const rows = statuses.filter((entry) => entry.provider === normalizedProvider);
+function providerStatusRows(statuses, normalizedProvider, authPath = null) {
+  const rows = statuses.filter((entry) => entry.provider === normalizedProvider
+    && (authPath ? entry.authPath === authPath : entry.authPath !== 'oauth-corp'));
   return [...rows.filter((entry) => entry.authPath === 'oauth'), ...rows.filter((entry) => entry.authPath !== 'oauth')];
 }
 
@@ -170,12 +175,12 @@ function providerStatusRows(statuses, normalizedProvider) {
 // uses) and falls back to any status for that provider. Returns { available,
 // state, source, checkedAt, afhGrounding } where `available` is strictly
 // `state === 'ok'` — the soft verdict rides alongside without touching it.
-export function providerAvailabilityFromStatuses(statuses, { provider } = {}) {
+export function providerAvailabilityFromStatuses(statuses, { provider, authPath = null } = {}) {
   const normalizedProvider = normalizeProviderKey(provider);
   if (!normalizedProvider) {
     return { available: false, state: 'unknown-provider', source: 'hq-fleet-quota-status', afhGrounding: null };
   }
-  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], normalizedProvider);
+  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], normalizedProvider, authPath);
   const status = rows[0];
   if (!status) {
     return { available: false, state: 'missing-provider-status', source: 'hq-fleet-quota-status', afhGrounding: null };
@@ -211,13 +216,13 @@ export function providerAvailabilityFromFleetStatus(stdout, options = {}) {
 // side's own fail-open when the kill ledger is unreadable), a non-object, or a
 // non-boolean `grounded` — returns false with a reason naming which, so the
 // caller keeps its primary instead of guessing.
-export function providerSoftGroundingFromStatuses(statuses, { provider } = {}) {
+export function providerSoftGroundingFromStatuses(statuses, { provider, authPath = null } = {}) {
   const normalizedProvider = normalizeProviderKey(provider);
   const source = 'hq-fleet-quota-status';
   if (!normalizedProvider) {
     return { grounded: false, verdict: null, reason: 'unknown-provider', source };
   }
-  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], normalizedProvider);
+  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], normalizedProvider, authPath);
   if (rows.length === 0) {
     return { grounded: false, verdict: null, reason: 'missing-provider-status', source };
   }
@@ -252,7 +257,7 @@ export function quotaAvailableFromFleetStatus(stdout, { harness } = {}) {
   if (!provider) {
     return { available: false, state: 'unknown-harness', source: 'hq-fleet-quota-status' };
   }
-  return providerAvailabilityFromFleetStatus(stdout, { provider });
+  return providerAvailabilityFromFleetStatus(stdout, { provider, authPath: String(harness || '').endsWith('-corp') ? 'oauth-corp' : null });
 }
 
 // REMFALLBACK-01 cap verdict for one harness and, optionally, the model it would
@@ -262,11 +267,11 @@ export function quotaAvailableFromFleetStatus(stdout, { harness } = {}) {
 // when AFH-02 soft-grounds the provider. `available` keeps the strict
 // "confirmed quota" meaning: not capped, provider `ok`, and the model row `ok`
 // when one exists. Anything unreadable is neither capped nor available.
-export function harnessCapFromStatuses(statuses, { harness, model = null } = {}) {
+export function harnessCapFromStatuses(statuses, { harness, model = null, authPath = String(harness || '').endsWith('-corp') ? 'oauth-corp' : null } = {}) {
   const source = 'hq-fleet-quota-status';
   const provider = providerForQuotaHarness(harness);
   if (!provider) return { capped: false, capSource: null, available: false, state: 'unknown-harness', source };
-  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], provider);
+  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], provider, authPath);
   const row = rows[0];
   if (!row) return { capped: false, capSource: null, available: false, state: 'missing-provider-status', source };
   const modelName = String(model || '').trim() || null;
@@ -276,7 +281,7 @@ export function harnessCapFromStatuses(statuses, { harness, model = null } = {})
   const modelExhausted = modelRow
     ? isGroundedProviderState(modelRow.state)
     : row.lastErrorSignature === MODEL_ONLY_EXHAUSTION_SIGNATURE;
-  const soft = providerSoftGroundingFromStatuses(statuses, { provider });
+  const soft = providerSoftGroundingFromStatuses(statuses, { provider, authPath });
   const capSource = isGroundedProviderState(row.state)
     ? 'provider-grounded'
     : modelExhausted

@@ -754,10 +754,12 @@ function prepareCodexRemediationStartupEnv({
   sourceEnv = process.env,
 } = {}) {
   const sharedAuthPath = resolveCodexAuthPath(sourceEnv);
-  const perWorkerAuth = sourceEnv.CODEX_AUTH_PATH
+  const perWorkerAuth = sourceEnv.CODEX_AUTH_PATH && workerClass !== 'remediator-codex-corp'
     ? null
     : materializePerWorkerCodexAuth({
         sharedAuthPath,
+        env: sourceEnv,
+        provider: workerClass === 'remediator-codex-corp' ? 'codex-corp' : 'codex',
         key: perWorkerKey ? `remediation-${perWorkerKey}` : `remediation-${process.pid}-${Date.now()}`,
       });
   const authPath = perWorkerAuth?.authPath || sharedAuthPath;
@@ -1200,7 +1202,9 @@ function spawnCodexRemediationWorker({
 
 function spawnLocalRemediationWorker(workerClass, opts) {
   switch (workerClass) {
+    case 'remediator-codex-corp': return spawnCodexRemediationWorker({ ...opts, workerClass });
     case 'codex': return spawnCodexRemediationWorker(opts);
+    case 'remediator-claude':
     case 'claude-code': return spawnClaudeCodeRemediationWorker(opts);
     case 'gemini': return spawnGeminiRemediationWorker(opts);
     default: throw new Error(`unknown remediation worker class: ${workerClass}`);

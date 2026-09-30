@@ -120,21 +120,27 @@ export function materializePerWorkerCodexAuth({
   key,
   env = process.env,
   brokerRefresh = true,
+  provider = env.CODEX_BROKER_PROVIDER || 'codex',
+  execFileSyncImpl = execFileSync,
   pythonBin = null,
   now = Date.now(),
 } = {}) {
+  const corporate = provider === 'codex-corp';
+  if (!['codex', 'codex-corp'].includes(provider)) throw new Error('unsupported Codex broker provider');
+  let createdHome = null;
   try {
-    if (!perWorkerAuthEnabled(env)) return null;
-    if (!sharedAuthPath || !existsSync(sharedAuthPath)) return null;
+    if (!perWorkerAuthEnabled(env) && !corporate) return null;
+    if (!sharedAuthPath && corporate) throw new Error('corporate Codex auth destination unavailable');
+    if (!sharedAuthPath || (!corporate && !existsSync(sharedAuthPath))) return null;
 
     let parsed;
     try {
-      parsed = JSON.parse(readFileSync(sharedAuthPath, 'utf8'));
+      parsed = corporate ? { auth_mode: 'chatgpt', tokens: {} } : JSON.parse(readFileSync(sharedAuthPath, 'utf8'));
     } catch {
       return null;
     }
     if ((parsed?.auth_mode || '').toLowerCase() !== 'chatgpt') return null;
-    if (!parsed?.tokens?.access_token) return null;
+    if (!corporate && !parsed?.tokens?.access_token) return null;
 
     const operatorHome = resolveOperatorHome(sharedAuthPath);
     const baseDir = join(operatorHome, '.codex', PER_WORKER_DIRNAME);
@@ -143,6 +149,7 @@ export function materializePerWorkerCodexAuth({
     const safeKey = String(key || `${process.pid}-${now}`).replace(/[^A-Za-z0-9._-]/g, '_');
     const codexHome = join(baseDir, safeKey);
     rmSync(codexHome, { recursive: true, force: true });
+    createdHome = codexHome;
     mkdirSync(codexHome, { recursive: true, mode: 0o700 });
 
     const authPath = join(codexHome, 'auth.json');
@@ -161,12 +168,13 @@ export function materializePerWorkerCodexAuth({
     // token expires. The copied token is already broker-fresh on a host where
     // the acpx-codex-worker-auth-sync LaunchAgent runs, so this only widens the
     // safety margin and never blocks the spawn.
-    if (brokerRefresh) {
+    if (brokerRefresh || corporate) {
       const syncBin = resolveAuthSyncBin(env);
+      if (!syncBin && corporate) throw new Error('corporate Codex broker auth sync unavailable');
       if (syncBin) {
         try {
-          execFileSync(pythonBin || env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3', [syncBin], {
-            env: { ...env, CODEX_WORKER_AUTH_PATH: authPath },
+          execFileSyncImpl(pythonBin || env.HQ_PYTHON3 || env.AGENT_OS_PY || 'python3', [syncBin], {
+            env: { ...env, CODEX_WORKER_AUTH_PATH: authPath, CODEX_BROKER_PROVIDER: provider },
             stdio: 'ignore',
             timeout: 15000,
           });
@@ -174,12 +182,14 @@ export function materializePerWorkerCodexAuth({
           // placeholder defensively so no real refresh_token can ever land in
           // the per-worker file.
           const afterSync = JSON.parse(readFileSync(authPath, 'utf8'));
+          if (corporate && !afterSync.tokens?.access_token) throw new Error('corporate Codex token missing');
           afterSync.tokens = {
             ...afterSync.tokens,
             refresh_token: PER_WORKER_PLACEHOLDER_REFRESH_TOKEN,
           };
           writeFileSync(authPath, JSON.stringify(afterSync), { mode: 0o600 });
-        } catch {
+        } catch (err) {
+          if (corporate) throw err;
           /* best-effort; copied token remains valid for the run */
         }
       }
@@ -194,7 +204,9 @@ export function materializePerWorkerCodexAuth({
     };
 
     return { authPath, codexHome, home: operatorHome, cleanup };
-  } catch {
+  } catch (err) {
+    if (createdHome) rmSync(createdHome, { recursive: true, force: true });
+    if (corporate) throw new Error(`corporate Codex broker credential unavailable: ${err.message}`, { cause: err });
     return null; // fail-safe: caller uses the shared credential
   }
 }

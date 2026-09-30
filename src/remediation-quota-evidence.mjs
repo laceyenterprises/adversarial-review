@@ -21,6 +21,8 @@ export function detectRemediationQuotaEvidence({ model, stderrText, finalMessage
 // Log-derived harness labels say `claude`; worker records say `claude-code`.
 const REMEDIATOR_CLASS_BY_QUOTA_LABEL = Object.freeze({
   codex: 'codex',
+  'remediator-codex-corp': 'remediator-codex-corp',
+  'remediator-claude': 'remediator-claude',
   claude: 'claude-code',
   'claude-code': 'claude-code',
   gemini: 'gemini',

@@ -103,7 +103,7 @@ test('falls back claude-code -> codex when Claude is grounded and Codex is avail
 });
 
 test('remediationWorkerClassFallback reads the declared roles.remediator_fallback and honors the env aliases', () => {
-  assert.deepEqual(remediationWorkerClassFallback({}, HERMETIC_CONFIG), ['claude-code', 'codex']);
+  assert.deepEqual(remediationWorkerClassFallback({}, HERMETIC_CONFIG), ['remediator-codex-corp', 'remediator-claude', 'codex']);
   assert.deepEqual(
     remediationWorkerClassFallback(
       { ADVERSARIAL_REVIEW_REMEDIATOR_WORKER_CLASS_FALLBACK: 'claude-code, gemini' },
@@ -421,10 +421,10 @@ test('resolveClaimedRemediatorRouting reads the declared list and, unwired, uses
     topPath: '/dev/null',
     log: { warn: (line) => warnings.push(line) },
   });
-  assert.equal(routing.workerClass, 'claude-code');
+  assert.equal(routing.workerClass, 'remediator-claude');
   assert.equal(routing.fellBack, true);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /routed=codex -> claude-code .*provider-reset-past-hold-window, resets 2026-10-04T12:52:00.000Z/);
+  assert.match(warnings[0], /routed=codex -> remediator-claude .*provider-reset-past-hold-window, resets 2026-10-04T12:52:00.000Z/);
 
   // `[]` declared: no class can take it, so the capped primary holds.
   const disabled = await resolveClaimedRemediatorRouting({

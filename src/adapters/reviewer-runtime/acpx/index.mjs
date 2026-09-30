@@ -401,6 +401,7 @@ function createAcpxReviewerRuntimeAdapter({
         ...process.env,
         REVIEWER_SESSION_UUID: sessionUuid,
       };
+      reviewerEnv.CODEX_BROKER_PROVIDER = req?.subjectContext?.codexBrokerProvider || 'codex';
       const stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
       const acpxCli = await resolveAcpxCliImpl({ env: reviewerEnv, execFileImpl });
       await assertCodexOAuthLayers({ env: reviewerEnv, domainConfig, execFileImpl, acpxCli });

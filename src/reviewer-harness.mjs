@@ -575,7 +575,7 @@ async function assertCodexOAuth() {
 
   // Verify auth.json is readable and contains valid OAuth tokens.
   // This is more reliable than CLI probes, which may not support `login status`.
-  assertCodexAuthReadable();
+  if (process.env.CODEX_BROKER_PROVIDER !== 'codex-corp') assertCodexAuthReadable();
 }
 
 // ── Gemini OAuth checks ──────────────────────────────────────────────────────
@@ -1226,6 +1226,7 @@ async function reviewWithCodex(diff, extraContext = '', {
   // shared ChatGPT credential. Fail-safe: null -> use the shared path.
   const perWorkerAuth = materializePerWorkerCodexAuth({
     sharedAuthPath: authPath,
+    provider: process.env.CODEX_BROKER_PROVIDER || 'codex',
     key: `reviewer-${process.pid}-${Date.now()}`,
   });
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;

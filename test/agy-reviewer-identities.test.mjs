@@ -53,6 +53,7 @@ import {
   runWithAgyReviewerIdentity,
 } from '../src/agy-reviewer-identities.mjs';
 import { EventEmitter } from 'node:events';
+import { tmpdir } from 'node:os';
 import { PassThrough } from 'node:stream';
 import { scanActiveReviewerRunRecords, writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';

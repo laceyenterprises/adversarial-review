@@ -24,6 +24,7 @@ import {
   loadConfigCached,
   resetConfigCache,
   resetRuntimeUnknownWarningCacheForTests,
+  ENV_ALIASES,
 } from '../src/config-loader.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -2638,6 +2639,29 @@ test('mcp_metering mirror passes extension keys through and rejects invalid scal
     `);
     assert.throws(() => loadConfig({ topPath: top, env: {} }), /mcp_metering\.enabled/);
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('env-sourced int lists coerce each item to a number', () => {
+  // No alias is registered for this key today; register one for the test so
+  // the env path a future alias would take is exercised.
+  const key = 'main_catchup.pull_retry_delays_seconds';
+  ENV_ALIASES[key] = { canonical: 'AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS', aliases: [] };
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    const env = { AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS: '3, 7' };
+    assert.deepEqual(loadConfig({ topPath: top, env }).get(key), [3, 7]);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: { AGENT_OS_MAIN_CATCHUP_PULL_RETRY_DELAYS_SECONDS: '3,x' } }),
+      /pull_retry_delays_seconds\[1\].*not an integer/,
+    );
+  } finally {
+    delete ENV_ALIASES[key];
     rmSync(tmp, { recursive: true, force: true });
   }
 });

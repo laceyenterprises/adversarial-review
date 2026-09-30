@@ -5064,7 +5064,14 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
     return n;
   }
   if (expected === TYPE_LIST) {
-    return value.split(',').map((part) => part.trim()).filter(Boolean);
+    const parts = value.split(',').map((part) => part.trim()).filter(Boolean);
+    // Coerce items the way a scalar leaf of the item type is coerced, so an
+    // int list (main_catchup.pull_retry_delays_seconds) validates as numbers.
+    const item = schemaLeaf.__item;
+    if (item && [TYPE_BOOL, TYPE_INT, TYPE_FLOAT].includes(item.__type)) {
+      return parts.map((part, index) => coerceEnvValue(`${key}[${index}]`, part, item, source));
+    }
+    return parts;
   }
   return value;
 }

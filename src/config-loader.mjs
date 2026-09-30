@@ -603,19 +603,17 @@ function schemaV1() {
       // does not consume it, but the checked-in config.yaml carries it, so the
       // strict checked-in-config tests failed on `mcp_metering: unknown key`
       // (the runtime reader only logged and dropped it). Tolerant, like
-      // alert_delivery: validate the scalar keys, allow policy rules to grow.
+      // validate the scalar keys, allow policy rules to grow. Leaf defaults
+      // only: per-layer default injection (__default_when_present) would let a
+      // partial config.local.yaml override reset inherited siblings.
       mcp_metering: {
         __type: TYPE_DICT,
         __strict: false,
-        __default_when_present: true,
-        __skip_global_default_tree: true,
         __keys: {
           enabled: { __type: TYPE_BOOL, __default: true },
           surfaces: {
             __type: TYPE_DICT,
             __strict: false,
-            __default_when_present: true,
-            __default: {},
             __keys: {
               dispatched: { __type: TYPE_BOOL, __default: false },
               host: { __type: TYPE_BOOL, __default: false },
@@ -624,8 +622,6 @@ function schemaV1() {
           policy: {
             __type: TYPE_DICT,
             __strict: false,
-            __default_when_present: true,
-            __default: {},
             __keys: {
               mode: { __type: TYPE_STRING, __default: 'observe', __enum: ['observe', 'enforce'] },
             },

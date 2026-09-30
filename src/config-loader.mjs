@@ -2204,6 +2204,11 @@ function schemaV1() {
             __strict: true,
             __keys: {
               enabled: { __type: TYPE_BOOL, __default: false },
+              // OMT-06 (agent-os #7424): refuses the four OSS classes on a
+              // litellm-local-openai/local/* route until the operator opens
+              // it in OMT-07. Python owns it; mirrored so the key in config.yaml
+              // or a host config.local.yaml does not fail this strict reader.
+              local_routes_enabled: { __type: TYPE_BOOL, __default: false },
               team_monthly_cap_usd: {
                 __type: TYPE_FLOAT,
                 __default: 25,

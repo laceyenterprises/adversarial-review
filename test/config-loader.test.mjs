@@ -2525,6 +2525,30 @@ test('OSS local-route gate mirror loads through strict Node schema and defaults 
   }
 });
 
+test('OSS local tool-call passthrough mirror loads through strict Node schema and defaults to false', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        oss_dispatch:
+          enabled: true
+    `);
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.oss_dispatch.local_tool_call_passthrough'), false);
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        oss_dispatch:
+          enabled: true
+          local_tool_call_passthrough: true
+    `);
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.oss_dispatch.local_tool_call_passthrough'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('post-merge activation rollout controls load through strict Node schema and env aliases', () => {
   const tmp = freshTmp();
   try {

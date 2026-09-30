@@ -1910,7 +1910,7 @@ function schemaV1() {
                     __type: TYPE_LIST,
                     __item: {
                       __type: TYPE_STRING,
-                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-claude', 'gemini'],
+                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-corp', 'hammer-claude', 'gemini'],
                     },
                     __default: ['hammer-claude'],
                   },

@@ -7297,3 +7297,19 @@ test('QUOTAROUTE horizon accepts checked-in config and rejects invalid values', 
     }
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+
+test('CCX-11 accepts hammer-corp fallback while preserving default and rejecting unknown', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).getMergeAuthorityConfig().workerClassFallback, ['hammer-claude']);
+    writeFile(top, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      worker_class_fallback: [hammer-corp]\n');
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).getMergeAuthorityConfig().workerClassFallback, ['hammer-corp']);
+    writeFile(top, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      worker_class_fallback: [unknown-closer]\n');
+    assert.throws(() => loadConfig({ topPath: top, env: {} }));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

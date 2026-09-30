@@ -485,6 +485,57 @@ test('gemini runtime and mode remain valid while antigravity accounts is rejecte
   }
 });
 
+test('CCX-08: the strict and runtime loaders accept reviewer.gemini.identities (Python schema parity)', () => {
+  const tmp = freshTmp();
+  try {
+    const unset = join(tmp, 'unset.yaml');
+    writeFile(unset, `
+      version: 1
+      reviewer:
+        gemini:
+          runtime: antigravity
+    `);
+    assert.equal(loadConfig({ topPath: unset, env: {} }).get('reviewer.gemini.identities'), null);
+
+    const top = join(tmp, 'identities.yaml');
+    writeFile(top, `
+      version: 1
+      reviewer:
+        gemini:
+          runtime: antigravity
+          identities: [airlock, agentos-reviewer]
+    `);
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).get('reviewer.gemini.identities'), ['airlock', 'agentos-reviewer']);
+    assert.deepEqual(loadConfigRuntime({ topPath: top, env: {} }).get('reviewer.gemini.identities'), ['airlock', 'agentos-reviewer']);
+
+    const badName = join(tmp, 'bad-name.yaml');
+    writeFile(badName, `
+      version: 1
+      reviewer:
+        gemini:
+          identities: ['../root']
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badName, env: {} }),
+      (err) => err instanceof AgentOSConfigError && /local username/.test(err.message),
+    );
+
+    const notList = join(tmp, 'not-list.yaml');
+    writeFile(notList, `
+      version: 1
+      reviewer:
+        gemini:
+          identities: agentos-reviewer
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: notList, env: {} }),
+      (err) => err instanceof AgentOSConfigError && /expected list/.test(err.message),
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('codex runaway guardrail vocabulary fatigue config resolves through strict schema', () => {
   const tmp = freshTmp();
   try {

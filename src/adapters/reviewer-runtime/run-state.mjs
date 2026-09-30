@@ -129,6 +129,34 @@ function readActiveReviewerRunRecords(rootDir) {
   return records;
 }
 
+// Strict variant of readActiveReviewerRunRecords for callers that must not
+// mistake a damaged record for an absent one (CCX-08 agy identity lease
+// recovery). Returns every active record plus the file names it could not
+// read or parse; a record removed between listing and reading is simply gone.
+function scanActiveReviewerRunRecords(rootDir) {
+  const dir = reviewerRunStateDir(rootDir);
+  if (!existsSync(dir)) return { records: [], unreadable: [] };
+  const records = [];
+  const unreadable = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.json')) continue;
+    let raw;
+    try {
+      raw = readFileSync(join(dir, name), 'utf8');
+    } catch (err) {
+      if (err?.code !== 'ENOENT') unreadable.push({ name, error: err?.code || err?.message || String(err) });
+      continue;
+    }
+    try {
+      const parsed = normalizeReviewerRunRecord(JSON.parse(raw));
+      if (ACTIVE_RUN_STATES.has(parsed.state)) records.push(parsed);
+    } catch (err) {
+      unreadable.push({ name, error: err?.message || String(err) });
+    }
+  }
+  return { records, unreadable };
+}
+
 function readRecoverableReviewerRunRecords(rootDir) {
   const dir = reviewerRunStateDir(rootDir);
   if (!existsSync(dir)) return [];
@@ -213,6 +241,7 @@ export {
   removeReviewerRunArtifacts,
   removeReviewerRunRecord,
   reviewerRunSideChannelPaths,
+  scanActiveReviewerRunRecords,
   reviewerRunStatePath,
   settleReviewerRunRecord,
   TERMINAL_RUN_STATES,

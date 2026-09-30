@@ -85,7 +85,7 @@ import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { isPipelineEnabled } from './domain-pipeline.mjs';
 import { reconcileDuplicateFamilyLabels, runDuplicateFamilyCensusForWatcher } from './duplicate-family-state.mjs';
-import { warnIfAntigravityReviewerAuthUnavailable } from './watcher-agy-startup-preflight.mjs';
+import { runAgyReviewerStartupChecks, warnIfAntigravityReviewerAuthUnavailable } from './watcher-agy-startup-preflight.mjs';
 import { startArgusSecurityDrainForWatcherTick } from './argus-security-drain.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
@@ -399,7 +399,7 @@ import {
 } from './reviewer-fence.mjs';
 import {
   compareReviewerDispatchCandidates,
-  createDetachedReviewerDispatchTracker,
+  createDetachedReviewerDispatchTracker, persistedSpawnReservationSource,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission, reviewerDispatchIsFirstPass,
   resolveFirstPassReviewerPoolConfig,
@@ -1030,7 +1030,7 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 // pool race that the CAS alone cannot (both workers read `pending`, both fetch,
 // both claim in sequence).
 const reviewerHeadDispatchLease = createHeadDispatchLease();
-const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: () => Math.max(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000, resolveAgyReviewerSubprocessTimeoutMs()), isProcessAlive, logger: console });
+const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: () => Math.max(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000, resolveAgyReviewerSubprocessTimeoutMs()), isProcessAlive, ...persistedSpawnReservationSource({ stateDir: ADVERSARIAL_REVIEW_STATE_DIR, runStateRootDir: ROOT }), logger: console });
 // ── Operator surface ─────────────────────────────────────────────────────────
 function createWatcherOperatorSurface() {
   return createCompositeOperatorSurface({
@@ -1633,7 +1633,7 @@ async function main() {
     resolvePendingDraftRespawnAgeSeconds(process.env);
     resolveStuckDispatchAlertDebounceMs(process.env);
     validateFenceConfig(process.env);
-    await warnIfAntigravityReviewerAuthUnavailable({ env: process.env });
+    await runAgyReviewerStartupChecks({ env: process.env });
     if (resolveSigtermFenceMode(process.env) !== 'off') {
       const exitTimeoutCheck = inspectWatcherExitTimeout(process.env);
       if (!exitTimeoutCheck.ok) {

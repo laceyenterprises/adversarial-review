@@ -488,6 +488,26 @@ export function resolveGeminiAntigravityModel({
   return value || DEFAULT_GEMINI_ANTIGRAVITY_MODEL;
 }
 
+// resolveGeminiReviewerIdentities — CCX-08: the ordered agy reviewer OS users
+// (`reviewer.gemini.identities`). Returns [] when unset, which means one
+// identity: the HQ owner, running agy directly as today.
+export function resolveGeminiReviewerIdentities({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.gemini.identities',
+  });
+  const value = cfg.get('reviewer.gemini.identities', null);
+  return Array.isArray(value) ? value.map((user) => String(user)) : [];
+}
+
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker
 // class (always a real value — default `merge-agent`). The loader enforces
 // the §10.3 allowlist and applies the §10.2 module-to-top alias.

@@ -171,6 +171,14 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return TOKEN_REFRESH_PENDING_FAILURE_CLASS;
   }
 
+  // CCX-08: the reviewer child could not stage an added agy identity's
+  // workspace after bounded retries of a transient sudo/helper failure. No
+  // reviewer ran, so this rides the same no-attempt-charge path as a lease
+  // that never became free.
+  if (/\[agy-identity-unavailable\]/.test(lower)) {
+    return 'agy-identity-unavailable';
+  }
+
   if (mentionsHcpUnavailable) {
     return HCP_UNAVAILABLE_FAILURE_CLASS;
   }

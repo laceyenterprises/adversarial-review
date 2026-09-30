@@ -7,6 +7,9 @@
 //     broker shared secret; returns '' on any miss so callers fail open.
 //   - resolveGeminiCredentialConcurrencyForDispatchCandidates: fetch the gemini
 //     credential-concurrency cap only when the candidate set includes gemini.
+//     CCX-08: with added agy reviewer identities configured and a reviewer
+//     runtime that can carry them, the cap is the number of ready identities
+//     instead of the broker credential count.
 //
 // The broker-secret cache was a watcher module-level singleton used solely by
 // readReviewerBrokerSharedSecretBestEffort, so it moves here intact and stays
@@ -15,8 +18,10 @@
 // which import these functions re-exported from watcher.mjs.
 
 import { readFile as readFileAsync } from 'node:fs/promises';
+import { adapterCarriesAgyReviewerIdentity, getAgyReviewerIdentityPool } from './agy-reviewer-identities.mjs';
+import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { writeReviewerTokenUsageArtifact } from './reviewer-pass-tokens.mjs';
-import { fetchGeminiCredentialConcurrency } from './watcher-reviewer-pool.mjs';
+import { fetchGeminiCredentialConcurrency, reviewerDispatchCandidateUsesGemini, reviewerDispatchCandidateGeminiSeats } from './watcher-reviewer-pool.mjs';
 
 const DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_CQP_BROKER_URL = 'http://127.0.0.1:4099';
@@ -100,16 +105,47 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
     env = process.env,
     fetchCredentialConcurrency = fetchGeminiCredentialConcurrency,
     readSharedSecret = readReviewerBrokerSharedSecretBestEffort,
+    identityPool = getAgyReviewerIdentityPool(),
+    resolveCandidateAdapter = (candidate) => candidate?.reviewerRuntimeAdapter || reviewerRuntimeState.adapter,
   } = {}
 ) {
-  const hasGeminiCandidates = candidates.some(
-    (candidate) => String(candidate?.reviewerModel || '').toLowerCase() === 'gemini'
-  );
-  if (!hasGeminiCandidates) return null;
+  const geminiCandidates = candidates.filter(reviewerDispatchCandidateUsesGemini);
+  if (geminiCandidates.length === 0) {
+    identityPool.noteGeminiDemand?.({ readyIdentities: 0, candidates: 0 });
+    return null;
+  }
+
+  // CCX-08: added identities only count toward the cap for reviews whose
+  // runtime can actually lease one (see adapterCarriesAgyReviewerIdentity).
+  // For those, one readiness pass per watcher pass (settings drift isolates,
+  // a passing check re-admits). Null means the pre-CCX-08 path: the broker
+  // count below stays the cap exactly as before.
+  const leasingCandidates = identityPool.plan().multi
+    ? geminiCandidates.filter((candidate) => adapterCarriesAgyReviewerIdentity(resolveCandidateAdapter(candidate)))
+    : [];
+  // The ready count is total capacity: it already includes identities this
+  // watcher holds a lease on (leasing does not unready an identity), and the
+  // queue subtracts those in-flight reviews itself, so they count once.
+  const readyIdentities = leasingCandidates.length > 0 ? await identityPool.refreshReadiness() : null;
+  // Alert when no waiting candidate can fit, including a panel larger than
+  // the nonzero ready capacity. A smaller candidate keeps the lane actionable.
+  identityPool.noteGeminiDemand?.({
+    readyIdentities: readyIdentities ?? 0,
+    candidates: leasingCandidates.length,
+    requiredSeats: leasingCandidates.length > 0
+      ? Math.min(...leasingCandidates.map(reviewerDispatchCandidateGeminiSeats)) : 1,
+  });
+  if (readyIdentities !== null && leasingCandidates.length === geminiCandidates.length) return readyIdentities;
 
   const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || DEFAULT_CQP_BROKER_URL;
-  return await fetchCredentialConcurrency({
+  const brokerCount = await fetchCredentialConcurrency({
     brokerUrl,
     secret: brokerUrl ? await readSharedSecret(env) : '',
   });
+  if (readyIdentities === null) return brokerCount;
+  // Mixed runtimes in one drain: leasing reviews must stay within the ready
+  // identities and HQ-owner reviews within the broker count, so bound the
+  // shared Gemini cap by both.
+  const broker = Number.parseInt(String(brokerCount ?? ''), 10);
+  return Number.isFinite(broker) ? Math.min(readyIdentities, broker) : readyIdentities;
 }

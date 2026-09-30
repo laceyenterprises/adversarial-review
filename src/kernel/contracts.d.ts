@@ -357,6 +357,8 @@ export interface SubjectContext {
   ticketPipelinePaused?: boolean;
   crossModelReviewWaived?: boolean;
   crossModelReviewWaiverReason?: string | null;
+  /** CCX-08: the added agy reviewer identity leased for this Gemini review. */
+  agyIdentity?: { user: string; reviewId: string };
 }
 
 export interface RemediationWorkspace {
@@ -501,6 +503,7 @@ export type ReviewerFailureClass =
   | 'attestation-sign-failed'
   | 'hcp-unavailable'
   | 'infra-runtime-missing-library'
+  | 'agy-identity-unavailable'
   | 'local-admission-refused'
   | 'bug'
   | 'unknown';
@@ -515,6 +518,8 @@ export interface AdapterCapabilities {
   heartbeatPersisted: boolean;
   leaseManaged: boolean;
   oauthStripEnforced: boolean;
+  /** CCX-08: passes a leased agy reviewer identity to the reviewer child. */
+  agyReviewerIdentity?: boolean;
 }
 
 export interface ReviewerRunRequest {

@@ -3,6 +3,9 @@ import {
   peakReviewerMemoryMbFor,
   readMemoryPressureSample,
 } from './watcher-memory-pressure.mjs';
+import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
+import { isPgidAlive } from './process-group-identity.mjs';
+import { loadSpawnRecords } from './reviewer-fence.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
@@ -760,6 +763,18 @@ function resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency = n
   return Math.min(cap, Math.max(0, parsed));
 }
 
+// A dispatch candidate that runs a Gemini review: its own reviewer model, or,
+// on a pipeline domain, a stage seat that runs Gemini (CCX-08: those stages
+// lease an agy reviewer identity too, so they count against the Gemini cap).
+function reviewerDispatchCandidateGeminiSeats(candidate) {
+  const pipelineSeats = Math.max(0, Number.parseInt(candidate?.pipelineGeminiSeats, 10) || 0);
+  return Math.max(pipelineSeats, String(candidate?.reviewerModel || '').toLowerCase() === 'gemini' ? 1 : 0);
+}
+
+function reviewerDispatchCandidateUsesGemini(candidate) {
+  return reviewerDispatchCandidateGeminiSeats(candidate) > 0;
+}
+
 function activeReviewerCountForModel(activeReviewerCounts, model) {
   const normalizedModel = String(model || '').trim().toLowerCase();
   if (!normalizedModel || !activeReviewerCounts) return 0;
@@ -790,6 +805,17 @@ function countActiveReviewerSpawnsByModel(activeReviewerSpawns) {
     const laneKey = `__lane:${passKind}`;
     counts.set(laneKey, (counts.get(laneKey) || 0) + 1);
   }
+  // Each stage persists the enclosing panel reservation. Group by PR so
+  // concurrent seats reserve once, and actual Gemini spawns are not doubled.
+  const reservations = new Map();
+  const actualSeats = new Map();
+  for (const record of activeReviewerSpawns?.values?.() || []) {
+    const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr });
+    if (!key) continue;
+    reservations.set(key, Math.max(reservations.get(key) || 0, Number(record?.pipelineGeminiSeats) || 0));
+    if (String(record?.reviewerModel).toLowerCase() === 'gemini') actualSeats.set(key, (actualSeats.get(key) || 0) + 1);
+  }
+  for (const [key, seats] of reservations) counts.set('gemini', (counts.get('gemini') || 0) + Math.max(0, seats - (actualSeats.get(key) || 0)));
   return counts;
 }
 
@@ -827,6 +853,12 @@ function createDetachedReviewerDispatchTracker({
   graceMs = DEFAULT_DETACHED_REVIEWER_DISPATCH_GRACE_MS,
   now = () => Date.now(),
   isProcessAlive = null,
+  // CCX-08: spawn records persisted by any watcher (object keyed by spawn
+  // token, or an array) and a liveness check for one of them. Together they
+  // carry pipeline Gemini reservations across a watcher restart.
+  loadPersistedSpawnRecords = null,
+  isPersistedSpawnLive = null,
+  persistedSpawnHoldsAgyIdentityLease = null,
   logger = console,
 } = {}) {
   const detachedReviewerDispatches = new Map();
@@ -865,6 +897,61 @@ function createDetachedReviewerDispatchTracker({
     return live;
   }
 
+  // Pipeline Gemini reservations this watcher does not hold in memory: spawn
+  // records a previous watcher persisted for a stage that still runs. The
+  // reviewer child outlives the watcher, and while it runs its PR's Gemini
+  // panel stays reserved, whatever model the stage itself runs. Records past
+  // the reviewer timeout, or whose process is gone, reserve nothing. A PR this
+  // watcher already tracks is reserved by that entry. Returns seats by PR key.
+  function holdsAgyIdentityLease(record) {
+    if (typeof persistedSpawnHoldsAgyIdentityLease !== 'function') return false;
+    try {
+      return persistedSpawnHoldsAgyIdentityLease(record) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function persistedReservations(skipPrKeys) {
+    if (typeof loadPersistedSpawnRecords !== 'function') return new Map();
+    let loaded;
+    try {
+      loaded = loadPersistedSpawnRecords() || [];
+    } catch (err) {
+      logger?.warn?.(`[watcher] cannot read persisted reviewer spawn records for Gemini reservations: ${err?.message || err}`);
+      return new Map();
+    }
+    const nowMs = now();
+    const reservations = new Map();
+    const actualSeats = new Map();
+    for (const record of Array.isArray(loaded) ? loaded : Object.values(loaded)) {
+      const seats = Math.max(0, Number.parseInt(record?.pipelineGeminiSeats, 10) || 0);
+      if (seats === 0 || activeReviewerSpawns?.has?.(record?.spawnToken)) continue;
+      const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr });
+      if (!key || skipPrKeys.has(key)) continue;
+      const spawnedAtMs = Date.parse(record?.spawnedAt);
+      if (!Number.isFinite(spawnedAtMs) || nowMs - spawnedAtMs > expiryMs()) continue;
+      let live = true;
+      try {
+        live = typeof isPersistedSpawnLive === 'function' ? isPersistedSpawnLive(record) !== false : true;
+      } catch {
+        live = true;
+      }
+      if (!live) continue;
+      reservations.set(key, Math.max(reservations.get(key) || 0, seats));
+      // A Gemini stage that survived while holding an agy identity lease keeps
+      // that identity out of the ready count through the identity pool's
+      // adoption, so only the rest of its panel is reserved here. A Gemini
+      // stage without a lease (a nonleasing runtime, a single-identity pool,
+      // or a lease that cannot be confirmed) keeps its seat here.
+      if (String(record?.reviewerModel).toLowerCase() === 'gemini' && holdsAgyIdentityLease(record)) {
+        actualSeats.set(key, (actualSeats.get(key) || 0) + 1);
+      }
+    }
+    for (const [key, seats] of reservations) reservations.set(key, Math.max(0, seats - (actualSeats.get(key) || 0)));
+    return reservations;
+  }
+
   return {
     activeCounts() {
       const liveDetached = pruneAndList();
@@ -876,9 +963,29 @@ function createDetachedReviewerDispatchTracker({
       }
       for (const record of liveDetached) {
         const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.prNumber });
-        if (!key || registeredPrKeys.has(key)) continue;
+        if (!key) continue;
+        const seats = reviewerDispatchCandidateGeminiSeats(record?.candidate);
+        if (registeredPrKeys.has(key)) {
+          const registered = [...(activeReviewerSpawns?.values?.() || [])].filter((spawn) => (
+            reviewerDispatchPrKey({ repo: spawn?.repo, prNumber: spawn?.pr }) === key
+          ));
+          const registeredGemini = registered.filter((spawn) => String(spawn?.reviewerModel).toLowerCase() === 'gemini').length;
+          const registeredReservation = Math.max(registeredGemini, ...registered.map((spawn) => Number(spawn?.pipelineGeminiSeats) || 0));
+          counts.set('gemini', (counts.get('gemini') || 0) + Math.max(0, seats - registeredReservation));
+          continue;
+        }
         incrementReviewerModelCount(counts, record?.reviewerModel);
+        const directSeat = record?.reviewerModel === 'gemini' ? 1 : 0;
+        counts.set('gemini', (counts.get('gemini') || 0) + Math.max(0, seats - directSeat));
         incrementReviewerLaneCounts(counts, record?.candidate);
+      }
+      const trackedPrKeys = new Set(registeredPrKeys);
+      for (const record of liveDetached) {
+        const key = reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.prNumber });
+        if (key) trackedPrKeys.add(key);
+      }
+      for (const seats of persistedReservations(trackedPrKeys).values()) {
+        if (seats > 0) counts.set('gemini', (counts.get('gemini') || 0) + seats);
       }
       return counts;
     },
@@ -908,6 +1015,57 @@ function createDetachedReviewerDispatchTracker({
           detachedReviewerDispatches.delete(token);
         })
         .catch(() => {});
+    },
+  };
+}
+
+// The persisted spawn records (reviewer-fence `spawn-records/`) and the
+// reviewer run record each one names, as the detached tracker's
+// `loadPersistedSpawnRecords` / `isPersistedSpawnLive`. Every reviewer runtime
+// writes a run record at launch, so a spawn record without one never
+// launched; a terminal record or a gone process group has ended; anything
+// else (launching, or a record that cannot be read) counts as running until
+// the tracker's reviewer-timeout expiry. `persistedSpawnHoldsAgyIdentityLease`
+// is true only when the run record carries the `subjectContext.agyIdentityLease`
+// the identity pool adopts after a restart; a missing or unreadable record
+// holds no lease, so the stage keeps its own reservation seat.
+function persistedSpawnReservationSource({
+  stateDir,
+  runStateRootDir,
+  loadSpawnRecordsImpl = loadSpawnRecords,
+  readRunRecordImpl = readReviewerRunRecord,
+  isPgidAliveImpl = isPgidAlive,
+} = {}) {
+  return {
+    loadPersistedSpawnRecords: () => loadSpawnRecordsImpl(stateDir),
+    isPersistedSpawnLive(record) {
+      const sessionUuid = String(record?.reviewerSessionUuid || '').trim();
+      if (!sessionUuid) return true;
+      let run;
+      try {
+        run = readRunRecordImpl(runStateRootDir, sessionUuid);
+      } catch {
+        return true;
+      }
+      if (!run || TERMINAL_RUN_STATES.has(run.state)) return false;
+      if (!Number.isInteger(run.pgid)) return true;
+      try {
+        return isPgidAliveImpl(run.pgid);
+      } catch {
+        return true;
+      }
+    },
+    persistedSpawnHoldsAgyIdentityLease(record) {
+      const sessionUuid = String(record?.reviewerSessionUuid || '').trim();
+      if (!sessionUuid) return false;
+      let run;
+      try {
+        run = readRunRecordImpl(runStateRootDir, sessionUuid);
+      } catch {
+        return false;
+      }
+      const lease = run?.subjectContext?.agyIdentityLease;
+      return Boolean(lease?.user && lease?.reviewId);
     },
   };
 }
@@ -961,7 +1119,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   }
   const geminiConcurrencyLimit = resolveGeminiDispatchConcurrencyLimit({
     geminiCredentialConcurrency,
-    ceiling: concurrencyLimit,
+    ceiling: Math.max(concurrencyLimit, ...candidates.map(reviewerDispatchCandidateGeminiSeats)),
   });
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
@@ -982,8 +1140,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let initialWaveClosed = false;
   let singleWaveDeadlineMs = null;
 
-  const isGeminiCandidate = (candidate) =>
-    String(candidate?.reviewerModel || '').toLowerCase() === 'gemini';
+  const isGeminiCandidate = reviewerDispatchCandidateUsesGemini;
 
   const dispatchWasSkipped = (result) =>
     result && typeof result === 'object' && result.dispatched === false;
@@ -1009,9 +1166,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   };
 
   async function start(candidate) {
-    const gemini = isGeminiCandidate(candidate);
+    const geminiSeats = reviewerDispatchCandidateGeminiSeats(candidate);
     try {
-      if (gemini) activeGemini += 1;
+      activeGemini += geminiSeats;
       const currentNowMs = Number(now());
       const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
       logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
@@ -1067,7 +1224,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         err?.message || err
       );
     } finally {
-      if (gemini) activeGemini -= 1;
+      activeGemini -= geminiSeats;
     }
   }
 
@@ -1117,7 +1274,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
         continue;
       }
-      if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) {
+      if (isGeminiCandidate(entry.candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiConcurrencyLimit) {
         recordDeferredReason(
           entry,
           geminiConcurrencyLimit < 1
@@ -1136,7 +1293,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     if (isGeminiCandidate(candidate) && geminiConcurrencyLimit < 1) {
       return 'gemini-credential-concurrency-zero';
     }
-    if (isGeminiCandidate(candidate) && activeGemini >= geminiConcurrencyLimit) {
+    if (isGeminiCandidate(candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(candidate) > geminiConcurrencyLimit) {
       return 'gemini-credential-concurrency-saturated';
     }
     if (initialWaveClosed) return 'single-wave-deferred';
@@ -1337,6 +1494,9 @@ export {
   reviewerLaneFloor,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
+  reviewerDispatchCandidateUsesGemini,
+  reviewerDispatchCandidateGeminiSeats,
+  persistedSpawnReservationSource,
   reviewerDispatchIsFirstPass,
   reviewerDispatchPassKind,
   reviewerSafetyPassKind,

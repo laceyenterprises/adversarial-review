@@ -389,6 +389,32 @@
       "schemaSurface": "src/follow-up-stuck-claim-sweep.mjs",
       "relatedSchemaSurfaces": ["src/ama/closer-worktree-reaper.mjs"],
       "owner": "follow-up finished PR and closer worktree reapers"
+    },
+    {
+      "id": "reviewer-spawn-records",
+      "title": "Reviewer Spawn Records",
+      "path": "docs/data-model/reviewer-spawn-records.md",
+      "store": "data/reviewer-fences/spawn-records/<spawnToken>.json",
+      "schemaSurface": "src/reviewer-fence.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-spawn-settle.mjs",
+        "src/reviewer-fence-sigterm.mjs",
+        "src/watcher-reviewer-pool.mjs"
+      ],
+      "owner": "watcher reviewer spawn fences and Gemini dispatch reservations"
+    },
+    {
+      "id": "reviewer-run-records",
+      "title": "Reviewer Run Records",
+      "path": "docs/data-model/reviewer-run-records.md",
+      "store": "data/reviewer-runs/<sessionUuid>.json",
+      "schemaSurface": "src/adapters/reviewer-runtime/run-state.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-spawn-settle.mjs",
+        "src/agy-reviewer-identities.mjs",
+        "src/watcher-reviewer-pool.mjs"
+      ],
+      "owner": "reviewer runtime adapters and agy identity lease recovery"
     }
   ]
 }

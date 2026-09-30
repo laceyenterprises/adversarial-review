@@ -167,7 +167,10 @@ new PR
   `reviewing`.
 - Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,
   `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`,
-  `daemon-bounce`, and `infra-runtime-missing-library`, a reviewer process that
+  `daemon-bounce`, `agy-identity-unavailable`, where no agy reviewer identity
+  could be leased, or a leased identity's workspace extract kept failing
+  transiently through its bounded retries, and no reviewer ran (CCX-08), and
+  `infra-runtime-missing-library`, a reviewer process that
   died in dyld with `Library not loaded` because a Homebrew upgrade moved the
   host node's dylibs) settle
   directly to `pending-upstream`, increment `infra_auto_recover_attempts`, and

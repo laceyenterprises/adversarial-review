@@ -9,6 +9,7 @@ import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
+import { AGY_IDENTITY_REVIEW_ID_ENV, AGY_IDENTITY_USER_ENV } from '../../../agy-reviewer-identities.mjs';
 import {
   parseCodexJsonTokenUsage,
   parseCodexJsonTokenUsageFromFailureStdout,
@@ -401,6 +402,15 @@ function createCliDirectReviewerRuntimeAdapter({
       REVIEWER_SESSION_UUID: sessionUuid,
       REVIEWER_RUN_STATE_ROOT_DIR: rootDir,
     };
+    // CCX-08: the leased agy reviewer identity reaches the reviewer child only
+    // through its own env; an inherited value never selects one.
+    delete reviewerEnv[AGY_IDENTITY_USER_ENV];
+    delete reviewerEnv[AGY_IDENTITY_REVIEW_ID_ENV];
+    const agyIdentity = req?.subjectContext?.agyIdentity;
+    if (agyIdentity?.user) {
+      reviewerEnv[AGY_IDENTITY_USER_ENV] = String(agyIdentity.user);
+      reviewerEnv[AGY_IDENTITY_REVIEW_ID_ENV] = String(agyIdentity.reviewId || '');
+    }
     let stripped = [];
     let preflightResult = null;
     try {
@@ -410,7 +420,14 @@ function createCliDirectReviewerRuntimeAdapter({
       }
       stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
       assertForbiddenFallbackEnvStripped(reviewerEnv);
-      if (typeof preflightImpl === 'function') {
+      // CCX-08: a review leased to an added agy identity runs agy as that user
+      // through sudo, never the HQ owner's Gemini CLI or its oauth_creds.json.
+      // The identity pool leased it only after that identity's own readiness
+      // check (keychain + `agy models` probe) passed, so the HQ-owner CLI OAuth
+      // probe would only reject a review it has no bearing on.
+      const addedAgyIdentity = Boolean(reviewerEnv[AGY_IDENTITY_USER_ENV])
+        && String(req.model || '').toLowerCase().includes('gemini');
+      if (typeof preflightImpl === 'function' && !addedAgyIdentity) {
         preflightResult = await preflightImpl({
           model: req.model,
           env: reviewerEnv,
@@ -803,6 +820,7 @@ function createCliDirectReviewerRuntimeAdapter({
         heartbeatPersisted: false,
         leaseManaged: false,
         oauthStripEnforced: true,
+        agyReviewerIdentity: true,
       },
     };
   }

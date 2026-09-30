@@ -14,6 +14,7 @@
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
 import { randomUUID } from 'node:crypto';
+import { resolveBuilderProvenanceRouting } from './builder-provenance-routing.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
   OPERATOR_APPROVED_LABEL,
@@ -642,7 +643,8 @@ export async function resolveClaudeRuntimeProbeUidForWatcher({
 }
 
 export async function processReviewSubject(entry, ctx) {
-  const { subject, prNumber, current: cachedCurrent } = entry;
+  let { subject } = entry;
+  const { prNumber, current: cachedCurrent } = entry;
   const {
     octokit,
     operatorSurface,
@@ -1404,6 +1406,17 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      if (domainId === 'code-pr') {
+        const reconciled = resolveBuilderProvenanceRouting(subject, {
+          repo: repoPath, prNumber, rootDir: ROOT,
+          ...(ctx.readBuilderProvenance ? { readProvenance: ctx.readBuilderProvenance } : {}),
+        });
+        if (reconciled.deferClaim) {
+          console.warn(`[watcher] builder provenance read failed for ${repoPath}#${prNumber}; deferring claim until next tick`);
+          return;
+        }
+        subject = reconciled.subject;
+      }
       let crossModelWaiverReason = null;
       const baseRoute = routeSubject(subject, {
         domainId,

@@ -628,3 +628,33 @@ Apache-2.0 was chosen over MIT because adversarial review is the kind of
 work where an explicit patent grant matters: someone, somewhere, will
 have a patent on "automated cross-model code review" before long, and a
 permissive-but-grant-bearing license is the cleanest answer.
+
+### Recover a ledger/title builder mismatch (ROUTEPROV-01)
+
+The watcher cross-checks the latest build completion for the PR and its LRQ before
+selecting a reviewer. Builder identity survives head moves, including human
+follow-up commits. Confirmed ledger provenance wins over the creation-time
+title. It records `builder_class_mismatch` in `data/builder-routing/`; absent or
+unconfigured provenance records `builder_class_inconclusive` and keeps title routing.
+Failed ledger queries also record `builder_class_inconclusive`, but defer the PR's
+claim before reviewer assignment or spawn so the next poll tick can retry.
+Lookups use the configured session-ledger backend: SQLite is read through the
+shared read-only adapter; Postgres URL DSNs use direct loopback port 5432. If that
+rewrite is unavailable (including database-name-only and libpq keyword/value
+targets), the adapter warns and uses the configured target. Each Postgres query
+uses a read-only transaction and retries transient connection failures up to three
+total attempts with 100/200ms backoff; permanent failures defer without retries.
+The operator CLI retries transient `gh pr view` failures up to
+three total attempts with bounded backoff before failing.
+
+For an already-open mislabeled PR, preview from the deployed review-tool root:
+
+```sh
+node bin/reroute-builder-review.mjs --repo laceyenterprises/agent-os --pr 7418
+```
+
+After reviewing the confirmed mismatch, add `--apply --reason 'ROUTEPROV-01 recovery'`
+to request an audited exact-head rereview. This preserves the title and all holds,
+refuses terminal PRs and active reviewers, and does not increase remediation budget.
+The normal watcher claim guards remain authoritative. Deploy and restart the
+watcher before using recovery so it selects the reviewer from ledger provenance.

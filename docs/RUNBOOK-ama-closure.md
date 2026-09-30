@@ -213,6 +213,17 @@ provenance still key off the configured logical class). It emits a loud
   follow-up; until it lands, the shared Python loader would reject an explicit
   `worker_class_fallback` key (fail-loud, never silent). The default protection
   needs neither.
+- **Domain declaration:** every `domains/*.json` `mergeAuthority` block
+  declares `workerClassFallback: ["hammer-claude"]` (`code-pr`,
+  `code-pr-security`, `research-finding`). `resolveMergeAuthorityConfigFromDomain`
+  (`src/domain-policy.mjs`) lets the domain value replace the loader default
+  unless the operator set `roles.adversarial.merge_authority.worker_class_fallback`
+  through `local:`, `env:`, or `cli`, so a domain value is effectively the
+  fleet default. A coding-only class such as `claude-code` cannot accept the
+  `merge` task kind and must never appear there; `test/domain-policy.test.mjs`
+  asserts every domain fallback is a hammer class. Explicit operator overrides
+  still take precedence. This is a role declaration, not a temporary
+  provider-outage pin.
 - **Fail-open:** if `hq fleet quota status` is unreadable, or the alert
   transport is down, the closer dispatches on the configured primary exactly as
   before — a resolver/alert fault never blocks the merge.
@@ -750,6 +761,16 @@ jq '{status, attempts: (.attempts | map({attemptNumber, outcome, cliExitCode}))}
 
 ## 7. Common refusal classes
 
+### `worker class claude-code does not support task kind merge`
+
+A closer or merge-agent dispatch fell back to a coding-only class. The closer
+fallback list is `roles.adversarial.merge_authority.worker_class_fallback`,
+resolved through the domain policy; a domain or operator override that names
+`claude-code` replaces the merge-capable `[hammer-claude]` default. Check the
+active domain's `mergeAuthority.workerClassFallback` and any `local:`/`env:`
+override of that key, and restore a hammer class. See §2a (**Domain
+declaration**) for the precedence rules.
+
 ### Terminal branch-holder takeover
 
 On a hammer provision collision, the closer first requires terminal worker-run
@@ -1265,9 +1286,3 @@ diagnostic list.
    AMA-06A's admit gate lets it through.
 
 The full SPEC reference: §4.8 coexistence table + §6 AC#9 rollback.
-
-The code-pr domain declares `hammer-claude` as its merge-authority fallback.
-A coding-only `claude-code` class cannot accept the `merge` task kind; hosts and
-forks inherit the merge-capable fallback without a host-local override. Explicit
-operator overrides still take precedence under the domain-policy resolver.
-This is a role declaration, not a temporary provider-outage pin.

@@ -1224,11 +1224,16 @@ async function reviewWithCodex(diff, extraContext = '', {
   // gets its own auth.json with a placeholder refresh_token so a review storm
   // (or a reviewer racing the hq-dispatch fleet) cannot rotate-and-revoke the
   // shared ChatGPT credential. Fail-safe: null -> use the shared path.
-  const perWorkerAuth = materializePerWorkerCodexAuth({
-    sharedAuthPath: authPath,
-    provider: process.env.CODEX_BROKER_PROVIDER || 'codex',
-    key: `reviewer-${process.pid}-${Date.now()}`,
-  });
+  let perWorkerAuth;
+  try {
+    perWorkerAuth = materializePerWorkerCodexAuth({
+      sharedAuthPath: authPath,
+      provider: process.env.CODEX_BROKER_PROVIDER || 'codex',
+      key: `reviewer-${process.pid}-${Date.now()}`,
+    });
+  } catch (err) {
+    throw new OAuthError('codex', err.message);
+  }
   const effectiveAuthPath = perWorkerAuth?.authPath || authPath;
   const codexSessionHome = perWorkerAuth?.codexHome || process.env.CODEX_HOME || null;
   const outputPath = join(tmpdir(), `codex-review-${process.pid}-${Date.now()}.md`);

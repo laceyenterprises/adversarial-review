@@ -65,7 +65,7 @@ export async function settleQuotaExhaustedRemediation({
         code: 'quota-exhausted',
         harness: quotaSignal.harness,
         // The class and model that ran: job-local cap evidence for the next claim.
-        workerClass: worker?.model || null,
+        workerClass: worker?.workerClass || worker?.model || null,
         model: worker?.resolvedModel || null,
         resetAt: resetIso || null,
         providerResetAt: resetIso || null,

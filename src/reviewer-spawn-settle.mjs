@@ -33,6 +33,8 @@ import {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
+import { isCrossModelReviewWaived, normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
+import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
 import {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
@@ -41,6 +43,8 @@ import {
 } from './agy-reviewer-identities.mjs';
 import {
   isGroundedProviderState,
+  harnessCapFromStatuses,
+  parseHqFleetQuotaStatus,
   providerForQuotaHarness,
 } from './fleet-quota-status.mjs';
 import {
@@ -184,6 +188,8 @@ async function readReviewerQuotaDecision({
       try {
         const payload = JSON.parse(await readFileImpl(join(statusDir, file), 'utf8'));
         statuses.push({
+          ...payload,
+          provider,
           authPath: String(payload?.authPath || payload?.auth_path || authPath).trim().toLowerCase(),
           state: String(payload?.state || '').trim().toLowerCase(),
         });
@@ -199,11 +205,13 @@ async function readReviewerQuotaDecision({
     if (!status) {
       return { available: true, state: 'missing-provider-status', provider };
     }
-    return {
-      available: status.state === 'ok' || !isGroundedProviderState(status.state),
-      state: status.state || 'unknown',
-      provider,
-    };
+    const cap = harnessCapFromStatuses(parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: accountStatuses })), {
+      harness: reviewerModel === 'codex' && codexBrokerProvider === 'codex-corp' ? 'codex-corp' : reviewerModel,
+      model: reviewerModel === 'codex'
+        ? resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel
+        : null,
+    });
+    return { available: !cap.capped, capped: cap.capped, state: cap.state, provider };
   } catch {
     return {
       available: true,
@@ -537,6 +545,9 @@ async function spawnReviewer({
   onPostOperationSettled = null,
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
+  if (normalizeReviewerModel(reviewerModel) === 'codex' && isCrossModelReviewWaived(builderTag, reviewerModel)) {
+    return { ok: false, failureClass: 'bug', error: 'Codex-family reviewer cannot review a Codex-family builder' };
+  }
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
   const finalRound = (
@@ -563,7 +574,7 @@ async function spawnReviewer({
       provider: providerForQuotaHarness(reviewerModel),
     };
   }
-  if (!quotaDecision.available && isGroundedProviderState(quotaDecision.state)) {
+  if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
     const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
     const startedAt = new Date().toISOString();
     const metadata = {

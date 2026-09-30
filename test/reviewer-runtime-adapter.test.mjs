@@ -3803,3 +3803,31 @@ test('bounce recovery prunes old terminal run-state files on startup', async () 
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+for (const provider of ['codex', 'codex-corp']) {
+  test(`CCX-04 cli-direct forwards the selected ${provider} broker provider to preflight and child`, async () => {
+    const rootDir = makeRoot();
+    try {
+      let childEnv;
+      const adapter = createCliDirectReviewerRuntimeAdapter({
+        rootDir,
+        preflightImpl: async ({ env }) => {
+          assert.equal(env.CODEX_BROKER_PROVIDER, provider);
+          return {};
+        },
+        spawnCapturedImpl: async (_command, _args, options) => {
+          childEnv = options.env;
+          options.onSpawn({ pgid: 5150 });
+          return { stdout: 'ok', stderr: '' };
+        },
+      });
+      const result = await adapter.spawnReviewer({
+        model: 'codex', prompt: '',
+        subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3, codexBrokerProvider: provider },
+        timeoutMs: 100, sessionUuid: `ccx-${provider}-fixture`,
+      });
+      assert.equal(result.ok, true);
+      assert.equal(childEnv.CODEX_BROKER_PROVIDER, provider);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  });
+}

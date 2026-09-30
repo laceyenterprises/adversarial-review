@@ -634,11 +634,17 @@ permissive-but-grant-bearing license is the cleanest answer.
 The watcher cross-checks the latest build completion for the PR and its LRQ before
 selecting a reviewer. Builder identity survives head moves, including human
 follow-up commits. Confirmed ledger provenance wins over the creation-time
-title. It records `builder_class_mismatch` in `data/builder-routing/`; missing or
-unreadable provenance records `builder_class_inconclusive` and keeps title routing.
+title. It records `builder_class_mismatch` in `data/builder-routing/`; absent or
+unconfigured provenance records `builder_class_inconclusive` and keeps title routing.
+Failed ledger queries also record `builder_class_inconclusive`, but defer the PR's
+claim before reviewer assignment or spawn so the next poll tick can retry.
 Lookups use the configured session-ledger backend: SQLite is read through the
-shared read-only adapter; Postgres uses direct loopback port 5432 in a read-only
-transaction. The operator CLI retries transient `gh pr view` failures up to
+shared read-only adapter; Postgres URL DSNs use direct loopback port 5432. If that
+rewrite is unavailable (including database-name-only and libpq keyword/value
+targets), the adapter warns and uses the configured target. Each Postgres query
+uses a read-only transaction and retries transient connection failures up to three
+total attempts with 100/200ms backoff; permanent failures defer without retries.
+The operator CLI retries transient `gh pr view` failures up to
 three total attempts with bounded backoff before failing.
 
 For an already-open mislabeled PR, preview from the deployed review-tool root:

@@ -597,6 +597,11 @@ function buildPostgresSpawnConfig(target) {
   };
 }
 
+function isTransientPostgresError(error) {
+  return /^(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|EIO)$/.test(String(error?.code || ''))
+    || /connection (?:refused|reset|timed out)|timeout expired|TLS handshake timeout|SSL (?:SYSCALL error|connection has been closed unexpectedly)|server closed the connection unexpectedly|could not (?:connect|translate host name)|too many clients|database system is (?:starting up|shutting down|in recovery)/i.test(String(error?.message || ''));
+}
+
 function describePostgresSpawnFailure(result) {
   if (result.error?.code === 'ENOENT') {
     return {
@@ -613,6 +618,14 @@ function describePostgresSpawnFailure(result) {
       transient: true,
     };
   }
+  if (result.error) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: result.error.message || String(result.error),
+      transient: isTransientPostgresError(result.error),
+    };
+  }
   if (result.signal || result.status === null) {
     return {
       ok: false,
@@ -625,7 +638,7 @@ function describePostgresSpawnFailure(result) {
       ok: false,
       reason: 'ledger-read-failed',
       detail: String(result.stderr || result.stdout || `psql exited with status ${result.status}`),
-      transient: /connection (?:refused|reset|timed out)|timeout expired|server closed the connection unexpectedly|could not (?:connect|translate host name)|too many clients|database system is (?:starting up|shutting down|in recovery)/i.test(String(result.stderr || '')),
+      transient: isTransientPostgresError({ message: result.stderr }),
     };
   }
   return null;
@@ -709,6 +722,7 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
       ok: false,
       reason: 'ledger-read-failed',
       detail: err?.message || String(err),
+      transient: isTransientPostgresError(err),
       target,
     };
   }
@@ -905,11 +919,11 @@ export const LIVE_DAG_RUN_STATES = Object.freeze(['pending', 'running', 'parked'
 const DAG_RUN_STATE_RE = /^[a-z][a-z0-9_-]*$/;
 const MAX_ACTIVE_DAG_RUNS = 20;
 
-function queryActiveDagRunsWithRetry(...args) {
+function queryPostgresRowsWithRetry(target, sql, { sleepSyncImpl = sleepSync, ...options } = {}) {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const result = queryPostgresRows(...args);
+    const result = queryPostgresRows(target, sql, options);
     if (result.ok || !result.transient || attempt === 3) return result;
-    sleepSync(100 * attempt);
+    sleepSyncImpl(100 * attempt);
   }
 }
 
@@ -969,7 +983,7 @@ export function readActiveDagRunsForPlan({
     // States are validated against DAG_RUN_STATE_RE above, so inlining them
     // as literals cannot inject; plan_id rides as a psql variable.
     const stateLiterals = stateList.map((state) => `'${state}'`).join(', ');
-    queried = queryActiveDagRunsWithRetry(
+    queried = queryPostgresRowsWithRetry(
       resolution.target,
       `SELECT json_build_object(
           'run_id', run_id,
@@ -1500,7 +1514,7 @@ export function readReviewerSessionUsageFromLedger({
 // These reads never touch PgBouncer session settings or mutate the ledger.
 export function readPrBuilderProvenance({
   repo, prNumber, env = process.env, rootDir = null,
-  ledgerTarget = null, spawnSyncImpl = spawnSync,
+  ledgerTarget = null, spawnSyncImpl = spawnSync, sleepSyncImpl = sleepSync,
 } = {}) {
   const normalizedRepo = normalizeText(repo);
   const numericPrNumber = Number(prNumber);
@@ -1544,9 +1558,11 @@ export function readPrBuilderProvenance({
     url.port = '5432';
     target.dsn = url.toString();
   } catch {
-    return { ok: false, reason: 'direct-ledger-dsn-unavailable' };
+    // databaseName-only and libpq keyword/value targets are valid too. The
+    // transaction-scoped READ ONLY guard is safe through PgBouncer.
+    console.warn('[builder-routing] direct ledger DSN unavailable; using configured Postgres target');
   }
-  const queried = queryPostgresRows(target, `
+  const queried = queryPostgresRowsWithRetry(target, `
     SELECT json_build_object(
       'launchRequestId', lr.launch_request_id,
       'workerClass', lr.worker_class,
@@ -1567,10 +1583,13 @@ export function readPrBuilderProvenance({
     WHERE bc.repo = :'repo' AND bc.pr_number = :'pr_number'::integer
     ORDER BY bc.recorded_at DESC, bc.completion_id DESC LIMIT 1`, {
     spawnSyncImpl,
+    sleepSyncImpl,
     readOnly: true,
     psqlVars: [['repo', normalizedRepo], ['pr_number', String(numericPrNumber)]],
   });
-  if (!queried.ok) return queried;
+  // A failed query cannot establish that provenance is absent. Defer claims
+  // until a later tick rather than permanently assigning the title route.
+  if (!queried.ok) return { ...queried, deferClaim: true };
   return queried.rows.length
     ? { ok: true, ...queried.rows[0] }
     : { ok: false, reason: 'missing-builder-provenance' };

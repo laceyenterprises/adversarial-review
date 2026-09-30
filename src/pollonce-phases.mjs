@@ -1411,6 +1411,10 @@ export async function processReviewSubject(entry, ctx) {
           repo: repoPath, prNumber, rootDir: ROOT,
           ...(ctx.readBuilderProvenance ? { readProvenance: ctx.readBuilderProvenance } : {}),
         });
+        if (reconciled.deferClaim) {
+          console.warn(`[watcher] builder provenance read failed for ${repoPath}#${prNumber}; deferring claim until next tick`);
+          return;
+        }
         subject = reconciled.subject;
       }
       let crossModelWaiverReason = null;

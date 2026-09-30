@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { reconcileBuilderClass } from '../src/builder-provenance-routing.mjs';
+import { reconcileBuilderClass, resolveBuilderProvenanceRouting } from '../src/builder-provenance-routing.mjs';
 import { routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
 import { readPrBuilderProvenance } from '../src/session-ledger-read-adapter.mjs';
 import { fetchPrState, main as reroute } from '../bin/reroute-builder-review.mjs';
@@ -62,11 +62,113 @@ for (const [title, actual, reviewer] of [
     assert.equal(route.reviewerModel, reviewer);
   });
 }
-test('unreadable ledger preserves title routing and records inconclusive', () => {
+test('absent provenance preserves title routing and records inconclusive', () => {
   const subject = { builderClass: 'codex' };
-  const result = reconcileBuilderClass(subject, { ok: false, reason: 'unreadable' });
+  const result = reconcileBuilderClass(subject, { ok: false, reason: 'missing-builder-provenance' });
   assert.equal(result.subject, subject);
+  assert.equal(result.deferClaim, false);
   assert.equal(result.finding.name, 'builder_class_inconclusive');
+});
+for (const [name, ledgerTarget, expectedLocator] of [
+  ['databaseName-only', { backend: 'postgres', databaseName: 'fixture_ledger' }, 'fixture_ledger'],
+  ['libpq keyword/value', { backend: 'postgres', dsn: 'host=127.0.0.1 port=6432 dbname=fixture_ledger' },
+    'host=127.0.0.1 port=6432 dbname=fixture_ledger'],
+]) {
+  test(`postgres provenance reads ${name} target without a URL rewrite`, t => {
+    const warnings = [];
+    t.mock.method(console, 'warn', message => warnings.push(message));
+    let attempts = 0;
+    const result = readPrBuilderProvenance({ repo: 'org/repo', prNumber: 12,
+      env: hermeticEnv, ledgerTarget,
+      spawnSyncImpl: (cmd, args, options) => {
+        attempts += 1;
+        assert.equal(cmd, 'psql');
+        assert.ok(args.includes(expectedLocator));
+        if (ledgerTarget.databaseName) assert.ok(args.includes('-d'));
+        assert.match(options.input, /^BEGIN READ ONLY;/);
+        assert.match(options.input, /COMMIT;\n$/);
+        assert.doesNotMatch(options.input, /^\s*SET\s/im);
+        return { status: 0, stdout: '{"actualHarness":"codex"}\n' };
+      },
+    });
+    assert.equal(result.actualHarness, 'codex');
+    assert.equal(attempts, 1);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /using configured Postgres target/);
+  });
+}
+for (const [name, failure] of [
+  ['connection reset', { status: 2, stderr: 'connection reset by peer' }],
+  ['TLS handshake timeout', { status: 2, stderr: 'TLS handshake timeout' }],
+  ['SSL disconnect', { status: 2, stderr: 'SSL SYSCALL error: EOF detected' }],
+  ['subprocess timeout', { status: null, error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }) }],
+  ['subprocess EIO', { status: null, error: Object.assign(new Error('input/output error'), { code: 'EIO' }) }],
+  ['thrown EIO', Object.assign(new Error('input/output error'), { code: 'EIO' })],
+]) {
+  test(`postgres provenance recovers from transient ${name} before choosing a reviewer`, () => {
+    let attempts = 0;
+    const delays = [];
+    const provenance = readPrBuilderProvenance({ repo: 'org/repo', prNumber: 12,
+      ledgerTarget: 'postgresql://test@127.0.0.1:6432/fixture', env: hermeticEnv,
+      sleepSyncImpl: ms => delays.push(ms),
+      spawnSyncImpl: () => {
+        attempts += 1;
+        if (attempts < 3) {
+          if (failure instanceof Error) throw failure;
+          return failure;
+        }
+        return { status: 0, stdout: '{"actualHarness":"claude-code"}\n' };
+      },
+    });
+    assert.equal(attempts, 3);
+    assert.deepEqual(delays, [100, 200]);
+    const reconciled = reconcileBuilderClass({ builderClass: 'codex' }, provenance);
+    assert.equal(reconciled.subject.builderClass, 'claude-code');
+    assert.equal(reconciled.finding.name, 'builder_class_mismatch');
+    assert.ok(!reconciled.deferClaim);
+  });
+}
+for (const [name, failure, expectedAttempts] of [
+  ['transient exhaustion', { status: 2, stderr: 'connection refused' }, 3],
+  ['authentication failure', { status: 2, stderr: 'password authentication failed' }, 1],
+  ['SQL failure', { status: 1, stderr: 'relation worker_runs does not exist' }, 1],
+  ['missing psql', { status: null, error: { code: 'ENOENT' } }, 1],
+  ['invalid JSON', { status: 0, stdout: '{invalid' }, 1],
+]) {
+  test(`postgres ${name} defers claims without falling back to the title route`, () => {
+    let attempts = 0;
+    const delays = [];
+    const provenance = readPrBuilderProvenance({ repo: 'org/repo', prNumber: 12,
+      ledgerTarget: 'postgresql://test@127.0.0.1:6432/fixture', env: hermeticEnv,
+      sleepSyncImpl: ms => delays.push(ms),
+      spawnSyncImpl: () => { attempts += 1; return failure; },
+    });
+    assert.equal(attempts, expectedAttempts);
+    assert.equal(delays.length, expectedAttempts - 1);
+    assert.equal(provenance.ok, false);
+    assert.equal(provenance.deferClaim, true);
+    const reconciled = resolveBuilderProvenanceRouting({ builderClass: 'codex' }, {
+      readProvenance: () => provenance,
+    });
+    assert.equal(reconciled.deferClaim, true);
+    assert.equal(reconciled.finding.name, 'builder_class_inconclusive');
+  });
+}
+test('a successful empty Postgres query keeps title fallback', () => {
+  const provenance = readPrBuilderProvenance({ repo: 'org/repo', prNumber: 12,
+    ledgerTarget: 'postgresql://test@127.0.0.1:6432/fixture', env: hermeticEnv,
+    spawnSyncImpl: () => ({ status: 0, stdout: '' }),
+    sleepSyncImpl: () => assert.fail('empty query must not retry'),
+  });
+  assert.equal(provenance.reason, 'missing-builder-provenance');
+  assert.equal(reconcileBuilderClass({ builderClass: 'codex' }, provenance).deferClaim, false);
+});
+test('an unexpected provenance read exception defers the claim', () => {
+  const reconciled = resolveBuilderProvenanceRouting({ builderClass: 'codex' }, {
+    readProvenance: () => { throw new Error('fixture read failure'); },
+  });
+  assert.equal(reconciled.deferClaim, true);
+  assert.equal(reconciled.finding.reason, 'ledger-read-failed');
 });
 test('postgres builder lookup selects latest PR provenance across head moves in a read-only transaction', () => {
   let captured;
@@ -128,13 +230,14 @@ for (const [name, options, expected] of [
     assert.equal(result.actualHarness, expected);
   });
 }
-test('missing and malformed SQLite provenance remains inconclusive without creating a database', t => {
+test('malformed SQLite provenance defers while missing provenance keeps fallback without creating a database', t => {
   const { ledgerTarget } = sqliteProvenanceFixture(t, { payload: '{malformed' });
   const subject = { builderClass: 'codex' };
   const malformed = readPrBuilderProvenance({ repo: 'org/repo', prNumber: 12, ledgerTarget, env: hermeticEnv });
   assert.equal(malformed.ok, false);
   assert.equal(malformed.reason, 'ledger-read-failed');
   assert.equal(reconcileBuilderClass(subject, malformed).subject, subject);
+  assert.equal(reconcileBuilderClass(subject, malformed).deferClaim, true);
   const missing = readPrBuilderProvenance({ repo: 'org/repo', prNumber: 99, ledgerTarget, env: hermeticEnv });
   assert.deepEqual(missing, { ok: false, reason: 'missing-builder-provenance' });
   const missingPath = `${ledgerTarget.path}.missing`;

@@ -9,6 +9,9 @@ export function reconcileBuilderClass(subject, provenance) {
   if (!actual) {
     return {
       subject,
+      // Missing provenance may use title routing; an unsuccessful query may
+      // not turn an infrastructure failure into a durable reviewer choice.
+      deferClaim: provenance?.deferClaim === true || provenance?.reason === 'ledger-read-failed',
       finding: { name: 'builder_class_inconclusive', reason: provenance?.reason || 'unknown-builder-harness' },
     };
   }
@@ -31,12 +34,12 @@ export function resolveBuilderProvenanceRouting(subject, {
   try {
     provenance = readProvenance({ repo, prNumber, headSha: subject.headSha, rootDir });
   } catch {
-    provenance = { ok: false, reason: 'ledger-read-failed' };
+    provenance = { ok: false, reason: 'ledger-read-failed', deferClaim: true };
   }
   const result = reconcileBuilderClass(subject, provenance);
   if (result.finding && rootDir) {
     const audit = { repo, prNumber, headSha: subject.headSha, ...result.finding };
-    // Audit failure does not prevent cross-model routing or title fallback.
+    // Audit failure does not alter the routing or claim-deferral decision.
     try {
       const dir = join(rootDir, 'data', 'builder-routing');
       mkdirSync(dir, { recursive: true });

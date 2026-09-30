@@ -157,6 +157,12 @@ new PR
 
 ### Notes
 
+- Before route selection and the atomic claim, the GitHub-PR watcher reads builder
+  provenance. Absent provenance keeps title routing. A failed ledger query records
+  `builder_class_inconclusive` and defers the PR until the next poll tick without
+  changing its reviewer, claiming a pass, or spending an attempt. Postgres reads
+  retry transient connection failures for at most three total attempts with 100/200ms backoff;
+  permanent query failures defer immediately.
 - `malformed` is intentionally sticky.
 - A `failed` row is not reset by a standalone sweep. Its `failed_at` and
   `failure_message` remain visible until the watcher rediscovers that PR in an

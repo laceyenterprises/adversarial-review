@@ -92,6 +92,7 @@ function buildLoaderSource({
     [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
     [fileUrl('src', 'head-closer-commit-suppression.mjs')]: 'fixture:head-closer-commit-suppression',
     [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
+    [fileUrl('src', 'session-ledger-read-adapter.mjs')]: 'fixture:session-ledger-read-adapter',
   };
 
   return `
@@ -254,6 +255,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenance({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
     'fixture:adversarial-gate-status': "export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
@@ -298,6 +300,7 @@ function buildRunnerSource({
   expectPollError = false,
   freshHeads = {},
   prePollSetup = '',
+  afterFirstPoll = '',
 } = {}) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
@@ -400,7 +403,7 @@ try {
 
   let pollError = null;
   try {
-    await pollOnce(octokit, {
+    const pollOptions = {
       healthProbe: {
         beginTick() { return {}; },
         recordOpenPending() {},
@@ -410,7 +413,9 @@ try {
       afterClaim(payload) {
         claims.push(payload);
       },
-    });
+    };
+    await pollOnce(octokit, pollOptions);
+    ${afterFirstPoll}
   } catch (err) {
     pollError = err;
   }
@@ -932,6 +937,63 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+for (const [name, failureSource] of [
+  ['exhausted transient query', "return { ok: false, reason: 'ledger-read-failed', transient: true, deferClaim: true };"],
+  ['permanent missing psql', "return { ok: false, reason: 'psql-not-installed', deferClaim: true };"],
+  ['unexpected read exception', "throw new Error('fixture ledger unavailable');"],
+]) {
+  test(`watcher defers ${name} without claiming and retries provenance on the next tick`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-provenance-defer-'));
+    const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+    const registerPath = path.join(tmp, 'fixture-register.mjs');
+    const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+    try {
+      writeFileSync(loaderPath, buildLoaderSource());
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({
+        prePollSetup: `
+          globalThis.__watcherClaimLoopProvenance = prNumber => {
+            if (prNumber === 101) { ${failureSource} }
+            return { ok: false, reason: 'missing-builder-provenance' };
+          };
+          db.prepare(\`INSERT INTO reviewed_prs
+            (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)\`).run(
+              'laceyenterprises/adversarial-review', 101, '2026-05-15T12:00:00.000Z', 'claude', 'open', 'pending', 0);
+        `,
+        afterFirstPoll: `
+          const parked = db.prepare('SELECT review_status, review_attempts, reviewer FROM reviewed_prs WHERE pr_number = 101').get();
+          assert.equal(parked.review_status, 'pending');
+          assert.equal(parked.review_attempts, 0);
+          assert.equal(parked.reviewer, 'claude');
+          assert.ok(!claims.some(claim => claim.prNumber === 101));
+          assert.ok(!readPassRows(db).some(row => row.pr_number === 101));
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 1,
+            'unrelated PR should still spawn during the provenance outage');
+          globalThis.__watcherClaimLoopProvenance = () => ({ ok: true, actualHarness: 'claude-code' });
+          await pollOnce(octokit, pollOptions);
+        `,
+      }));
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)) });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      const summaryLine = result.stdout.split(/\r?\n/).find(line => line.startsWith(SUMMARY_MARKER));
+      assert.ok(summaryLine, output);
+      const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+      assert.equal(summary.rows['101'].review_status, 'posted');
+      assert.equal(summary.claims.filter(claim => claim.prNumber === 101).length, 1);
+      assert.equal(summary.reviewerPassRows.find(row => row.pr_number === 101).attempt_number, 1);
+      assert.equal(summary.reviewerSpawns.length, 2);
+      assert.equal(summary.reviewerSpawns[1].subjectContext.prNumber, 101);
+      assert.equal(summary.reviewerSpawns[1].subjectContext.builderTag, 'claude-code');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
 
 test('watcher pollOnce refreshes a stale pending revision_ref before reviewer claim', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-stale-pending-head-'));

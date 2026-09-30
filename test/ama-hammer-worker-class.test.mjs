@@ -13,12 +13,13 @@ import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../src/duplicate-family-gate
 // keyed on the literal string 'hammer', so a `worker_class = hammer-claude`
 // deploy parked every PR. Both classes must engage every hammer route gate.
 
-test('isHammerWorkerClass accepts both hammer classes and rejects everything else', () => {
+test('isHammerWorkerClass accepts all hammer classes and rejects everything else', () => {
   assert.equal(isHammerWorkerClass('hammer'), true);
   assert.equal(isHammerWorkerClass('hammer-corp'), true);
   assert.equal(isHammerWorkerClass('hammer-claude'), true);
   // Whitespace tolerance (the config value is trimmed at every gate).
   assert.equal(isHammerWorkerClass('  hammer-claude  '), true);
+  assert.equal(isHammerWorkerClass('  hammer-corp  '), true);
 
   assert.equal(isHammerWorkerClass('codex'), false);
   assert.equal(isHammerWorkerClass('claude-code'), false);

@@ -68,9 +68,15 @@ adversarial-review watcher:
 - `worker_pool.dispatch.fleet_launch_health.*`
 - `worker_pool.dispatch.goal_lineage.*`
 - `worker_pool.dispatch.substrate.*`
+- `worker_pool.quota.fallback_reroute_horizon_seconds`
 - `worker_pool.memory.dynamic.*`
 - `worker_pool.secrets.prewarm.*`
 - `worker_pool.secrets_bus.*`
+
+`worker_pool.quota.fallback_reroute_horizon_seconds` is an integer with default
+`21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
+reroute behavior; Node validates this shared field so checked-in configuration
+can carry the same policy. Unknown keys under `worker_pool.quota` still fail.
 
 Checked-in `config.yaml` accepts only those mirrored `worker_pool` subtrees. Any
 other checked-in `worker_pool.*` key is an unknown nested key under a known
@@ -105,6 +111,11 @@ control surface that appears in the shared `config.yaml`:
 - `main_catchup.adversarial_watcher_drain_bounce_slack_seconds` (default `120`,
   matching Python's 2-minute watcher bounce slack)
 
+`worker_pool.quota.fallback_reroute_horizon_seconds` is an integer with default
+`21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
+reroute behavior; Node validates this shared field so checked-in configuration
+can carry the same policy. Unknown keys under `worker_pool.quota` still fail.
+
 Checked-in `config.yaml` accepts only those mirrored `main_catchup` keys. Any
 other checked-in `main_catchup.*` key is an unknown nested key under a known
 strict root and must fail loud.
@@ -130,6 +141,11 @@ these values, but the Node loader mirrors:
 - `post_deploy_verify.enabled`
 - `post_deploy_verify.spawn_timeout_seconds`
 - `post_deploy_verify.boot_window_seconds`
+
+`worker_pool.quota.fallback_reroute_horizon_seconds` is an integer with default
+`21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
+reroute behavior; Node validates this shared field so checked-in configuration
+can carry the same policy. Unknown keys under `worker_pool.quota` still fail.
 
 Checked-in `config.yaml` accepts only those mirrored `post_deploy_verify` keys.
 Any other checked-in `post_deploy_verify.*` key is an unknown nested key under a

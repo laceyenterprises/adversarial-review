@@ -1303,3 +1303,8 @@ not restore remediation rounds to a single review. Required recovery writes
 retry transient SQLite locks and fail closed before a GitHub post if storage
 remains unavailable. A nonbinary diff entry without a hunk refuses single
 review; the oversized Files API fallback cannot count omitted patches as zero.
+
+The Node config mirror accepts `worker_pool.quota.fallback_reroute_horizon_seconds`
+(default 21600, nonnegative integer), owned by the Agent OS admission quota gate.
+This allows the shared checked-in configuration to declare the horizon without
+a strict-schema watcher startup failure. See Agent OS PR #7346.

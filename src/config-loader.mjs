@@ -2192,6 +2192,13 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          quota: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              fallback_reroute_horizon_seconds: { __type: TYPE_INT, __default: 21600, __min: 0 },
+            },
+          },
           oss_dispatch: {
             __type: TYPE_DICT,
             __strict: true,

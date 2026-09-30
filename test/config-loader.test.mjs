@@ -2702,6 +2702,39 @@ test('mcp_metering extension subtrees are replaced whole by a higher layer', () 
   }
 });
 
+for (const version of ['', 'version: 1']) {
+  test(`local empty maps replace inherited maps (${version || 'versionless'})`, () => {
+    const tmp = freshTmp();
+    try {
+      const top = join(tmp, 'config.yaml');
+      writeFile(top, `
+        version: 1
+        mcp_metering:
+          policy:
+            mode: enforce
+            rule_modes: {r1: enforce}
+            rules: {r1: {mode: enforce}}
+      `);
+      writeFile(join(tmp, 'config.local.yaml'), `
+        ${version}
+        mcp_metering:
+          policy:
+            rule_modes: {}
+            rules: {}
+        worker_pool:
+          unknown_empty_map: {}
+      `);
+      const cfg = loadConfig({ topPath: top, env: {} });
+      assert.deepEqual(cfg.get('mcp_metering.policy.rule_modes'), {});
+      assert.deepEqual(cfg.get('mcp_metering.policy.rules'), {});
+      assert.equal(cfg.get('mcp_metering.policy.mode'), 'enforce');
+      assert.deepEqual(cfg.resolutionTrace('worker_pool.unknown_empty_map'), []);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
 test('mcp_metering mirror defaults apply when the section is absent', () => {
   const tmp = freshTmp();
   try {

@@ -189,6 +189,26 @@ test('model_only_exhaustion of the routed codex model counts as capped (provider
   assert.equal(result.resetAt, '2026-10-04T12:52:00.000Z');
 });
 
+for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
+  test(`${model} quota fallback matches only the routed model`, async () => {
+    for (const state of ['ok', 'exhausted']) {
+      const result = await resolveRemediationWorkerClassWithFallback({
+        primary: 'codex', fallbackWorkerClasses: ['claude-code'], nowMs: NOW,
+        modelForClass: (workerClass) => workerClass === 'codex' ? model : null,
+        execFileImpl: fleetStatusStub([
+          { provider: 'openai', authPath: 'oauth', state: 'ok', models: [
+            { model, state, resetAtUtc: '2026-10-04T12:52:00.000Z' },
+            { model: model === 'gpt-6-sol' ? 'gpt-6.1-sol' : 'gpt-6-sol', state: 'exhausted' },
+          ] },
+          ANTHROPIC_OK,
+        ]),
+      });
+      assert.equal(result.fellBack, state === 'exhausted');
+      assert.equal(result.workerClass, state === 'exhausted' ? 'claude-code' : 'codex');
+    }
+  });
+}
+
 test('the model_only_exhaustion signature caps codex even when the payload carries no models[] rows', async () => {
   const signatureOnly = { ...OPENAI_MODEL_ONLY_EXHAUSTION };
   delete signatureOnly.models;

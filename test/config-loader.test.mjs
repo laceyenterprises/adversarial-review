@@ -4503,6 +4503,23 @@ test('non-blocking remediation config resolves host-local overrides and validate
   }
 });
 
+for (const model of ['gpt-6-sol', 'gpt-6.1-sol']) {
+  test(`non-blocking config accepts ${model} in YAML and local overrides`, () => {
+    const tmp = freshTmp();
+    try {
+      const top = join(tmp, 'config.yaml');
+      const key = 'roles.adversarial.remediation.non_blocking.model';
+      writeFile(top, `version: 1\nroles:\n  adversarial:\n    remediation:\n      non_blocking:\n        model: ${model}\n`);
+      assert.equal(loadConfig({ topPath: top, env: {} }).get(key), model);
+      writeFile(top, 'version: 1\n');
+      writeFile(join(tmp, 'config.local.yaml'), `version: 1\nroles:\n  adversarial:\n    remediation:\n      non_blocking:\n        model: ${model}\n`);
+      assert.equal(loadConfig({ topPath: top, env: {} }).get(key), model);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
 test('SINGLEREVIEW-01: single_review knobs default, override locally, and validate', () => {
   const tmp = freshTmp();
   try {

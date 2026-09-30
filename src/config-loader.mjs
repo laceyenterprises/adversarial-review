@@ -4769,14 +4769,16 @@ function filterForeignTopLevelSections(
 
 // -------- Module file validation -------------------------------------------
 
-function flatten(doc, prefix = '') {
+function flatten(doc, prefix = '', preserveEmptyMap = () => false) {
   const out = {};
   for (const [key, value] of Object.entries(doc)) {
     if (key.startsWith('__')) continue;
     const full = prefix ? `${prefix}.${key}` : key;
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       if (Object.keys(value).length > 0) {
-        Object.assign(out, flatten(value, full));
+        Object.assign(out, flatten(value, full, preserveEmptyMap));
+      } else if (preserveEmptyMap(full)) {
+        out[full] = value;
       }
     } else {
       out[full] = value;
@@ -4861,6 +4863,7 @@ function validateModuleDoc(
   {
     tolerateForeignTopLevelSections = false,
     tolerateNestedUnknownLocalKeys = false,
+    preserveEmptyMaps = false,
     tolerateUnknownTopLevelKeys = false,
     warnUnknownOnce = false,
     droppedUnknownKeys = null,
@@ -4923,7 +4926,11 @@ function validateModuleDoc(
     if (k !== '__aliases') body[k] = v;
   }
 
-  const rawFlat = flatten(body);
+  // Local overrides preserve accepted empty maps; unknown empty maps retain
+  // their historical drop behavior, and module normalization stays unchanged.
+  const rawFlat = flatten(body, '', (key) =>
+    preserveEmptyMaps && isValidSchemaPath(schema, aliases[key] || key),
+  );
   for (const [moduleKey, canonicalKey] of Object.entries(aliases)) {
     if (moduleKey in rawFlat && canonicalKey in rawFlat) {
       const mv = rawFlat[moduleKey];
@@ -5676,6 +5683,7 @@ function loadConfigImpl({
       const { validated, aliases } = validateModuleDoc(localDoc, local, localRaw, {
         tolerateForeignTopLevelSections: kind === 'top',
         tolerateNestedUnknownLocalKeys: true,
+        preserveEmptyMaps: true,
       });
       validatedLocal = validated;
       for (const [moduleKey, canonicalKey] of Object.entries(aliases)) {

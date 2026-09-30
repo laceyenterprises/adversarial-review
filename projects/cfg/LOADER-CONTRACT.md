@@ -175,11 +175,9 @@ Extension subtrees are not merged by this reader. A higher layer that sets
 `policy.rules` or `policy.rule_modes` replaces the inherited value as a whole:
 a base `rule_modes: {r1: enforce, r2: enforce}` under a local
 `rule_modes: {r1: observe}` resolves here to `{r1: observe}`, and a local
-`rule_modes: {}` clears it. One exception comes from this reader's generic
-handling of a local file without `version:`: its normalization drops empty maps
-in every section, so a versionless local `rule_modes: {}` leaves the inherited
-map in place. Declare `version: 1` to clear a map. This reader does not consume
-those keys; the Python loader is canonical for how they merge.
+`rule_modes: {}` clears it. Local empty maps have the same replacement
+behavior with or without `version: 1`. This reader does not consume those keys;
+the Python loader is canonical for how they merge.
 
 ## `post_deploy_verify` Node mirror
 

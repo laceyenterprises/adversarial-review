@@ -3003,3 +3003,52 @@ test('a never-spawned dispatch (admit refusal, no lrq) does NOT count toward the
   assert.equal(ledger, null, 'never-spawned dispatches leave the firing ledger untouched');
   assert.equal(alertCalls.length, 0, 'no operator page for a PR that never got a hammer');
 });
+
+
+test('lease-held refusal leaves no orphaned dispatch reservation or HQ admission', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-held-reservation-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+  acquireAmaCloserLease({ rootDir, ...identity, now: '2026-07-06T11:59:00Z' });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'deferred', now: '2026-07-06T11:59:30Z' });
+  const priorLease = readAmaCloserLease(rootDir, identity);
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'lease-held');
+  assert.equal(deps.execCalls.length, 0, 'the lease refusal happens before HQ admission');
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), priorLease, 'keep the real lease evidence unchanged');
+  const record = readAmaCloserDispatchRecord(rootDir, identity);
+  assert.equal(record.state, 'no-dispatch');
+  assert.equal(record.reason, 'lease-held');
+  assert.equal(record.launchRequestId, null);
+  assert.equal(record.dispatchId, null);
+  assert.equal(record.retryCount, 0, 'no launch consumed a retry');
+  assert.deepEqual(listActiveAmaCloserDispatches(rootDir, { now: '2026-07-06T12:00:30Z' }), []);
+});
+
+
+test('lease-held rollback does not recreate a concurrently deleted dispatch record', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-held-deleted-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+  acquireAmaCloserLease({ rootDir, ...identity, watcherPid: 12345, now: '2026-07-06T11:59:59Z' });
+  const priorLease = readAmaCloserLease(rootDir, identity);
+  const deps = hammerDispatchDeps();
+  let deleted = false;
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir), ...deps,
+    processKillImpl: () => {
+      const record = readAmaCloserDispatchRecord(rootDir, identity);
+      if (record?.state === 'dispatching') {
+        rmSync(amaCloserDispatchFilePath(rootDir, identity));
+        deleted = true;
+      }
+    },
+  });
+  assert.equal(deleted, true, 'delete the intent during lease refusal');
+  assert.equal(result.reason, 'lease-held');
+  assert.equal(deps.execCalls.length, 0);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity), null);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), priorLease);
+});

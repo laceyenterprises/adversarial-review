@@ -1315,4 +1315,3 @@ The Node config mirror accepts `worker_pool.quota.fallback_reroute_horizon_secon
 (default 21600, nonnegative integer), owned by the Agent OS admission quota gate.
 This allows the shared checked-in configuration to declare the horizon without
 a strict-schema watcher startup failure. See Agent OS PR #7346.
-

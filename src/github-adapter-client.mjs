@@ -621,6 +621,7 @@ const __test__ = {
 };
 
 export {
+  buildAdapterEnv,
   adapterUnsupportedError,
   __test__,
   readAdapterHeadAndState,

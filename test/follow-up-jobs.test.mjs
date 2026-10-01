@@ -776,6 +776,7 @@ test('reapTerminalFollowUpWorkspaces removes eligible completed, failed, and arc
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: ({ trashDir }) => launchedTrashDirs.push(trashDir),
   });
 
@@ -892,6 +893,7 @@ test('reapTerminalFollowUpWorkspaces logs unreadable job records, skips missing 
       rootDir,
       workspaceRootDir,
       nowMs,
+      ttlMs: 24 * 60 * 60 * 1000,
     });
   } finally {
     console.error = originalError;
@@ -953,6 +955,7 @@ test('reapTerminalFollowUpWorkspaces lets a parseable duplicate timestamp beat a
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: () => {},
     logErrorImpl: (...args) => {
       errors.push(args.map((entry) => String(entry)).join(' '));
@@ -996,6 +999,7 @@ test('reapTerminalFollowUpWorkspaces uses the newest terminal timestamp on a job
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
   });
 
   assert.equal(result.scanned, 1);
@@ -1039,6 +1043,7 @@ test('reapTerminalFollowUpWorkspaces falls back to archived jobs when an active 
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: () => {},
     logErrorImpl: (...args) => {
       errors.push(args.map((entry) => String(entry)).join(' '));
@@ -1098,6 +1103,7 @@ test('reapTerminalFollowUpWorkspaces continues after a per-workspace delete fail
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: () => {},
     renameSyncImpl: (targetPath, destination) => {
       if (targetPath === blockedWorkspaceDir) {
@@ -1162,6 +1168,7 @@ test('reapTerminalFollowUpWorkspaces logs permission context when a delete failu
       rootDir,
       workspaceRootDir,
       nowMs,
+      ttlMs: 24 * 60 * 60 * 1000,
       launchTrashDeleterImpl: () => {},
       renameSyncImpl: (targetPath, destination) => {
         renameSync(targetPath, destination);
@@ -1223,6 +1230,7 @@ test('reapTerminalFollowUpWorkspaces records a structured anomaly for permission
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: () => {},
     renameSyncImpl: () => {
       const err = new Error('permission denied');
@@ -5076,6 +5084,7 @@ test('reapTerminalFollowUpWorkspaces moves eligible workspaces to trash and remo
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: ({ trashDir }) => launchedTrashDirs.push(trashDir),
   });
 
@@ -5089,6 +5098,7 @@ test('reapTerminalFollowUpWorkspaces moves eligible workspaces to trash and remo
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: () => {},
   });
   assert.equal(nextPass.scanned, 0);
@@ -5113,6 +5123,7 @@ test('mount-root rename fallback moves the workspace to in-root trash without re
   const errors = [];
   const result = reapTerminalFollowUpWorkspaces({
     rootDir, workspaceRootDir, nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
+    ttlMs: 24 * 60 * 60 * 1000,
     renameSyncImpl: (source, destination) => {
       if (path.basename(path.dirname(destination)) === 'workspaces.trash') {
         const err = new Error('mount boundary'); err.code = 'EXDEV'; throw err;
@@ -5147,6 +5158,7 @@ test('sibling trash creation failure falls back to in-root trash', (t) => {
   const errors = [];
   const result = reapTerminalFollowUpWorkspaces({
     rootDir, workspaceRootDir, nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
+    ttlMs: 24 * 60 * 60 * 1000,
     launchTrashDeleterImpl: ({ trashDir }) => launched.push(trashDir),
     logErrorImpl: (message) => errors.push(message),
   });
@@ -5183,6 +5195,7 @@ test('reapTerminalFollowUpWorkspaces reports permission errors and preserves a w
       rootDir,
       workspaceRootDir,
       nowMs: Date.parse('2026-06-03T12:00:00.000Z'),
+      ttlMs: 24 * 60 * 60 * 1000,
       renameSyncImpl: () => { throw Object.assign(new Error('permission denied'), { code }); },
       launchTrashDeleterImpl: () => {},
       logErrorImpl: (message) => errors.push(message),
@@ -5230,6 +5243,7 @@ test('reapTerminalFollowUpWorkspaces defers removals once its wall-clock budget 
     rootDir,
     workspaceRootDir,
     nowMs,
+    ttlMs: 24 * 60 * 60 * 1000,
     budgetMs: 1000,
     // Each removal advances the clock past the budget.
     clockImpl: () => clock,
@@ -5261,4 +5275,33 @@ test('reapTerminalFollowUpWorkspaces relaunches the deleter for pending trash', 
   });
 
   assert.deepEqual(backgroundCalls.map((target) => realpathSync(target)), [realpathSync(trashDir)]);
+});
+
+test('workspace retention removes terminal jobs after 72 hours and preserves active duplicates', (t) => {
+  const rootDir = makeTempRoot(t);
+  const workspaceRootDir = path.join(rootDir, 'workspaces');
+  const nowMs = Date.now();
+  for (const jobId of ['expired', 'active', 'recent']) {
+    mkdirSync(path.join(workspaceRootDir, jobId), { recursive: true });
+    const dir = getFollowUpJobDir(rootDir, 'completed');
+    mkdirSync(dir, { recursive: true });
+    writeFollowUpJob(path.join(dir, `${jobId}.json`), {
+      jobId, status: 'completed', completedAt: new Date(nowMs - (jobId === 'recent' ? 48 : 96) * 3600000).toISOString(),
+    });
+  }
+  const activeDir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(activeDir, { recursive: true });
+  writeFollowUpJob(path.join(activeDir, 'active.json'), { jobId: 'active', status: 'in-progress' });
+  mkdirSync(path.join(workspaceRootDir, 'expired.resume-backup-123-456'));
+  mkdirSync(path.join(workspaceRootDir, 'active.resume-backup-123-456'));
+  const result = reapTerminalFollowUpWorkspaces({
+    rootDir, workspaceRootDir, nowMs, ttlMs: 72 * 3600000,
+    rmSyncImpl: (target, options) => rmSync(target, options),
+  });
+  assert.equal(result.reaped, 2);
+  assert.equal(existsSync(path.join(workspaceRootDir, 'expired.resume-backup-123-456')), false);
+  assert.equal(existsSync(path.join(workspaceRootDir, 'active.resume-backup-123-456')), true);
+  assert.equal(existsSync(path.join(workspaceRootDir, 'expired')), false);
+  assert.equal(existsSync(path.join(workspaceRootDir, 'active')), true);
+  assert.equal(existsSync(path.join(workspaceRootDir, 'recent')), true);
 });

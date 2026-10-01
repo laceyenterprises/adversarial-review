@@ -589,3 +589,56 @@ test('changedStatusPaths only splits arrow notation for rename or copy status li
   assert.deepEqual(changedStatusPaths([], ['?? added -> file.txt']), ['added -> file.txt']);
   assert.deepEqual(changedStatusPaths([], ['R  old.txt -> new.txt']), ['new.txt', 'old.txt']);
 });
+
+test('snapshot cache evicts least recently used entries for count and byte limits', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-cache-limits-'));
+  try {
+    for (const [index, name] of ['old', 'middle', 'current'].entries()) {
+      mkdirSync(join(root, name));
+      writeFileSync(join(root, name, 'content'), '1234567890');
+      utimesSync(join(root, name), new Date(1000 + index), new Date(1000 + index));
+    }
+    assert.deepEqual(garbageCollectSnapshots(root, 'current', {
+      nowMs: 2000, maxAgeMs: Infinity, maxCount: 2, maxBytes: Infinity,
+    }), [join(root, 'old')]);
+    assert.deepEqual(garbageCollectSnapshots(root, 'current', {
+      nowMs: 2000, maxAgeMs: Infinity, maxCount: 2, maxBytes: 10,
+    }), [join(root, 'middle')]);
+    assert.equal(existsSync(join(root, 'current')), true);
+  } finally { removeFixture(root); }
+});
+
+test('snapshot cache preserves snapshots pinned by a live reviewer', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-cache-pin-'));
+  try {
+    mkdirSync(join(root, 'active'));
+    mkdirSync(join(root, '.leases', 'active'), { recursive: true });
+    writeFileSync(join(root, '.leases', 'active', String(process.pid)), '');
+    assert.deepEqual(garbageCollectSnapshots(root, 'current', {
+      maxAgeMs: 0, maxCount: 0, maxBytes: 0,
+    }), []);
+    assert.equal(existsSync(join(root, 'active')), true);
+  } finally { removeFixture(root); }
+});
+
+test('snapshot cache environment knobs have bounded defaults and reject invalid values', async () => {
+  const { resolveSnapshotCacheLimits } = await import('../src/reviewer-workspace.mjs');
+  assert.deepEqual(resolveSnapshotCacheLimits({}), { maxCount: 8, maxBytes: 4 * 1024 ** 3 });
+  assert.deepEqual(resolveSnapshotCacheLimits({
+    ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_COUNT: '2', ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_GB: '1',
+  }), { maxCount: 2, maxBytes: 1024 ** 3 });
+  assert.deepEqual(resolveSnapshotCacheLimits({
+    ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_COUNT: '-1', ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_GB: 'invalid',
+  }), { maxCount: 8, maxBytes: 4 * 1024 ** 3 });
+});
+
+test('snapshot cache recovers garbage left by a dead collector', () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewer-cache-garbage-'));
+  try {
+    const garbage = join(root, '.gc-2147483647-old-00000000-0000-0000-0000-000000000000');
+    mkdirSync(garbage);
+    writeFileSync(join(garbage, 'content'), 'left behind');
+    assert.deepEqual(garbageCollectSnapshots(root, 'current', { maxAgeMs: Infinity }), [garbage]);
+    assert.equal(existsSync(garbage), false);
+  } finally { removeFixture(root); }
+});

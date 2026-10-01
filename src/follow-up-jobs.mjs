@@ -14,6 +14,7 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease.mjs';
 import { isActiveAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
 import { ensureWorkspaceTrashDir, launchWorkspaceTrashDeleter, workspaceTrashDir } from './follow-up-workspace-trash.mjs';
+import { getConfig } from './config-loader.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS, quotaHoldTarget } from './remediation-quota-evidence.mjs';
 import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
@@ -1286,6 +1287,12 @@ function readTerminalWorkspaceJobForId(
     logErrorImpl = console.error,
   } = {},
 ) {
+  // Active ledger ownership wins over stale terminal duplicates.
+  for (const key of ['pending', 'inProgress']) {
+    if (existsSync(join(getFollowUpJobDir(rootDir, key), `${jobId}.json`))) {
+      return { terminalJob: null, unreadableJobRecords: 0 };
+    }
+  }
   const candidatePaths = [];
   for (const key of ['completed', 'failed', 'stopped']) {
     const candidatePath = join(getFollowUpJobDir(rootDir, key), `${jobId}.json`);
@@ -1455,7 +1462,7 @@ function reapTerminalFollowUpWorkspaces({
   rootDir,
   workspaceRootDir,
   nowMs = Date.now(),
-  ttlMs = 24 * 60 * 60 * 1000,
+  ttlMs = getConfig('retention.ephemeral.follow_up_workspaces_keep_hours', 72) * 60 * 60 * 1000,
   readFollowUpJobImpl = readFollowUpJob,
   rmSyncImpl = rmSync,
   renameSyncImpl = renameSync,
@@ -1510,7 +1517,7 @@ function reapTerminalFollowUpWorkspaces({
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
     try {
-      const lookup = readTerminalWorkspaceJobForId(rootDir, entry.name, {
+      const lookup = readTerminalWorkspaceJobForId(rootDir, entry.name.replace(/\.resume-backup-\d+-\d+$/, ''), {
         readFollowUpJobImpl,
         logErrorImpl,
       });

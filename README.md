@@ -658,3 +658,18 @@ to request an audited exact-head rereview. This preserves the title and all hold
 refuses terminal PRs and active reviewers, and does not increase remediation budget.
 The normal watcher claim guards remain authoritative. Deploy and restart the
 watcher before using recovery so it selects the reviewer from ledger provenance.
+
+Follow-up workspace cleanup uses `retention.ephemeral.follow_up_workspaces_keep_hours`
+(default 72), measured from the latest terminal timestamp. Pending and in-progress
+ledger records protect a workspace even if an older terminal record remains.
+Preserved `.resume-backup-<time>-<pid>` workspaces follow their owning job's retention.
+The existing maintenance sweep moves eligible workspaces to trash for deletion.
+
+Reviewer snapshot caches expire unused snapshots after seven days and evict least
+recently used snapshots to keep each repo within 8 snapshots and 4 GiB of logical
+file bytes. Registered environment knobs `ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_COUNT`
+and `ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_GB` override these defaults (positive integers).
+These settings do not extend the shared YAML schema. Current and live-PID-pinned
+snapshots are protected; limits can temporarily be exceeded by active reviews or
+one oversized current snapshot. Dead reviewer pins are ignored on the next cache
+sweep. Cleanup runs when a reviewer prepares a snapshot for that repo.

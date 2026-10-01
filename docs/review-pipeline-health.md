@@ -563,7 +563,7 @@ connections are excluded: the 100-PR listing otherwise expands nested commit
 authors beyond GitHub's 500,000-node GraphQL limit, even for an empty repository.
 The 100-row truncation and unknown-mergeability checks still fail closed.
 For unowned-conflict age, the collector uses the last supplied commit date when
-available and otherwise falls back to the PR's `updatedAt` in `headCommittedAt`.
+available and otherwise falls back to the PR's `updatedAt` in `ageAnchorTimestamp` (with `ageAnchorSource` recording `committedDate` or `updatedAt` in alert evidence).
 Production listings use that fallback, so comments, labels, and other PR activity
 can delay the unowned-age alert. Missing or invalid timestamps suppress only
 that PR's age-based finding; they do not mark a successful listing unreadable

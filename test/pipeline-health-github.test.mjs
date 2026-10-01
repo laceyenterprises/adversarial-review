@@ -77,7 +77,7 @@ test('bridge listings without commits preserve conflict diagnostics and use upda
         assert.equal(snapshot.conflictingOpenPrs.collected, true);
         assert.equal(snapshot.conflictingOpenPrs.count, 1);
         assert.deepEqual(snapshot.conflictingOpenPrs.errors, []);
-        assert.equal(snapshot.conflictingOpenPrs.prs[0].headCommittedAt, updatedAt);
+        assert.equal(snapshot.conflictingOpenPrs.prs[0].ageAnchorTimestamp, updatedAt);
         const codes = snapshot.findings.map(({ code }) => code);
         assert.ok(!codes.includes('review:conflicting_open_prs_unreadable'));
         assert.equal(codes.includes('review:conflicting_open_prs'), detailedProbesEnabled);

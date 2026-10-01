@@ -3441,14 +3441,15 @@ function normalizeConflictingPrRow(row) {
     : [];
   // Bounded GitHub listings omit commit connections; updatedAt is the
   // conservative age anchor when a caller does not supply commit dates.
-  const headCommittedAt = commitDates.length > 0 ? commitDates[commitDates.length - 1] : (row.updatedAt || null);
+  const ageAnchorTimestamp = commitDates.length > 0 ? commitDates[commitDates.length - 1] : (row.updatedAt || null);
   return {
     number: prNumber,
     url: row.url || null,
     title: row.title || null,
     headRefName: row.headRefName || null,
     headRefOid: row.headRefOid || null,
-    headCommittedAt,
+    ageAnchorTimestamp,
+    ageAnchorSource: commitDates.length > 0 ? 'committedDate' : 'updatedAt',
     baseRefName: row.baseRefName || 'main',
     mergeable,
     updatedAt: row.updatedAt || null,
@@ -5500,10 +5501,10 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
   }
 
   const unownedConflicts = (snapshot.conflictingOpenPrs?.prs || []).filter((pr) => {
-    const headCommittedMs = Date.parse(pr.headCommittedAt || '');
+    const ageAnchorMs = Date.parse(pr.ageAnchorTimestamp || '');
     return pr.owned !== true
-      && Number.isFinite(headCommittedMs)
-      && Date.parse(observedAt) - headCommittedMs >= config.conflictingPrUnownedMaxAgeMs;
+      && Number.isFinite(ageAnchorMs)
+      && Date.parse(observedAt) - ageAnchorMs >= config.conflictingPrUnownedMaxAgeMs;
   });
   if (unownedConflicts.length > 0) {
     findings.push(buildFinding({
@@ -5511,7 +5512,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       tier: 'ticket',
       subject: `${unownedConflicts.length} conflicting PR(s) have no observed owner past the threshold`,
       message: `The monitored repositories have conflicting PRs older than ${Math.round(config.conflictingPrUnownedMaxAgeMs / 60000)}m without a current-head ownership signal.`,
-      evidence: unownedConflicts.slice(0, 12).map((pr) => `${pr.repo || snapshot.conflictingOpenPrs.repo}#${pr.number}@${pr.headRefOid || 'unknown'} headCommittedAt=${pr.headCommittedAt || 'unknown'}`),
+      evidence: unownedConflicts.slice(0, 12).map((pr) => `${pr.repo || snapshot.conflictingOpenPrs.repo}#${pr.number}@${pr.headRefOid || 'unknown'} ageAnchorTimestamp=${pr.ageAnchorTimestamp || 'unknown'} source=${pr.ageAnchorSource || 'unknown'}`),
       recommendedAction: 'Inspect the auto-merge dirty-PR ledger and dispatch a single lease-protected hammer owner for each current head.',
       observedAt,
       details: { thresholdMs: config.conflictingPrUnownedMaxAgeMs, prs: unownedConflicts },

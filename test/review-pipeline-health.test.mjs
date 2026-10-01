@@ -40,7 +40,7 @@ function collectReviewPipelineHealth(options = {}) {
     ...options,
     listOpenPrsSyncImpl: (repo, { execFileSyncImpl }) => JSON.parse(execFileSyncImpl('gh', [
       'pr', 'list', '--repo', repo, '--state', 'open', '--limit', '100', '--json',
-      'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
+      'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
     ], { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] })),
   });
 }
@@ -111,7 +111,7 @@ function conflictPrFixture(overrides = {}) {
     baseRefName: 'main',
     mergeable: 'CONFLICTING',
     isDraft: false,
-    commits: [{ committedDate: OLD_HEAD_COMMIT }],
+    updatedAt: OLD_HEAD_COMMIT,
     ...overrides,
   };
 }
@@ -1775,7 +1775,7 @@ test('CONFLICTOWN-01: host checks always collect the cheap conflicting PR invent
     if (command === 'gh') {
       assert.deepEqual(args.slice(-2), [
         '--json',
-        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
+        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
       ]);
       return JSON.stringify(incidentPrNumbers.map((number) => conflictPrFixture({
         number,
@@ -1872,6 +1872,9 @@ test('CONFLICTOWN-01: stale lifecycle labels do not satisfy current-head ownersh
 
   assert.equal(snapshot.conflictingOpenPrs.prs[0].owned, false);
   assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
+  const finding = snapshot.findings.find((entry) => entry.code === 'review:conflicting_pr_unowned');
+  assert.match(finding.evidence[0], /ageAnchorTimestamp=.* source=updatedAt/);
+  assert.ok(!finding.evidence[0].includes('headCommittedAt='));
 });
 
 test('CONFLICTOWN-01: phantom handoff dispatch records do not satisfy current-head ownership', () => {
@@ -1911,7 +1914,7 @@ test('CONFLICTOWN-01: phantom handoff dispatch records do not satisfy current-he
   assert.ok(findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
 });
 
-test('CONFLICTOWN-01: unowned age uses head commit time instead of GitHub updatedAt', () => {
+test('CONFLICTOWN-01: recent updatedAt delays unowned age alerts when listings omit commits', () => {
   const rootDir = tempRoot();
   const execFileSyncImpl = (command) => {
     if (command === 'gh') {
@@ -1938,8 +1941,10 @@ test('CONFLICTOWN-01: unowned age uses head commit time instead of GitHub update
     execFileSyncImpl,
   });
 
-  const finding = snapshot.findings.find(({ code }) => code === 'review:conflicting_pr_unowned');
-  assert.match(finding?.evidence?.[0] || '', /headCommittedAt=2026-05-25T15:00:00.000Z/);
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].owned, false);
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].ageAnchorTimestamp, '2026-05-25T17:59:00.000Z');
+  assert.equal(snapshot.conflictingOpenPrs.prs[0].ageAnchorSource, 'updatedAt');
+  assert.ok(!findingCodes(snapshot).includes('review:conflicting_pr_unowned'));
 });
 
 test('CONFLICTOWN-01: stale dispatch records do not satisfy current-head ownership', () => {

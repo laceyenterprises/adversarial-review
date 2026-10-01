@@ -78,7 +78,7 @@ def read(args, *, resolver_factory=None, run=subprocess.run, sleep=time.sleep):
     command = ["gh", "pr"]
     if args.kind == "list":
         command += ["list", "--state", "open", "--limit", "100", "--json",
-                    "number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits"]
+                    "number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels"]
     elif args.kind == "state":
         command += ["view", args.number, "--json", "state,mergedAt,closedAt,headRefName,headRefOid"]
     else:

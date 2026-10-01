@@ -3439,7 +3439,9 @@ function normalizeConflictingPrRow(row) {
   const commitDates = Array.isArray(row.commits)
     ? row.commits.map((commit) => commit?.committedDate).filter(Boolean)
     : [];
-  const headCommittedAt = commitDates.length > 0 ? commitDates[commitDates.length - 1] : null;
+  // Bounded GitHub listings omit commit connections; updatedAt is the
+  // conservative age anchor when a caller does not supply commit dates.
+  const headCommittedAt = commitDates.length > 0 ? commitDates[commitDates.length - 1] : (row.updatedAt || null);
   return {
     number: prNumber,
     url: row.url || null,
@@ -3653,14 +3655,6 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
     return normalized ? { ...normalized, repo: row.repo } : null;
   }).filter(Boolean);
   const errors = [...listingErrors];
-  const missingHeadCommittedAt = prs.filter((pr) => !Number.isFinite(Date.parse(pr.headCommittedAt || '')));
-  if (missingHeadCommittedAt.length > 0) {
-    errors.push(
-      ...missingHeadCommittedAt.slice(0, 12).map((pr) => (
-        `${pr.repo || repo}#${pr.number}: missing head commit timestamp`
-      ))
-    );
-  }
   let probedPrs = 0;
   if (!config.conflictingPrChecksEnabled || !repoRoot) {
     return {
@@ -3669,7 +3663,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
       repoRoot,
       enabled: true,
       detailedProbesEnabled: false,
-      collected: listingErrors.length === 0 && missingHeadCommittedAt.length === 0,
+      collected: listingErrors.length === 0,
       count: prs.length,
       probedPrs: 0,
       unprobedPrs: prs.length,
@@ -3699,7 +3693,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
       )).trim();
     } catch (error) {
       return {
-        repo, repos, repoRoot, enabled: true, detailedProbesEnabled: true, collected: listingErrors.length === 0 && missingHeadCommittedAt.length === 0,
+        repo, repos, repoRoot, enabled: true, detailedProbesEnabled: true, collected: listingErrors.length === 0,
         count: prs.length, probedPrs: 0, unprobedPrs: prs.length,
         probeCoverage: prs.length > 0 ? 0 : 1,
         prs: prs.map((pr) => ({ ...pr, conflictingPaths: [], probeOk: false })),
@@ -3761,7 +3755,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
     repoRoot,
     enabled: true,
     detailedProbesEnabled: true,
-    collected: listingErrors.length === 0 && missingHeadCommittedAt.length === 0,
+    collected: listingErrors.length === 0,
     count: prs.length,
     probedPrs,
     unprobedPrs: prs.length - probedPrs,

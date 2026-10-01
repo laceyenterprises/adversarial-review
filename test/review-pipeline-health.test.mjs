@@ -40,7 +40,7 @@ function collectReviewPipelineHealth(options = {}) {
     ...options,
     listOpenPrsSyncImpl: (repo, { execFileSyncImpl }) => JSON.parse(execFileSyncImpl('gh', [
       'pr', 'list', '--repo', repo, '--state', 'open', '--limit', '100', '--json',
-      'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
+      'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
     ], { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] })),
   });
 }
@@ -111,7 +111,7 @@ function conflictPrFixture(overrides = {}) {
     baseRefName: 'main',
     mergeable: 'CONFLICTING',
     isDraft: false,
-    commits: [{ committedDate: OLD_HEAD_COMMIT }],
+    updatedAt: OLD_HEAD_COMMIT,
     ...overrides,
   };
 }
@@ -1775,7 +1775,7 @@ test('CONFLICTOWN-01: host checks always collect the cheap conflicting PR invent
     if (command === 'gh') {
       assert.deepEqual(args.slice(-2), [
         '--json',
-        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
+        'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels',
       ]);
       return JSON.stringify(incidentPrNumbers.map((number) => conflictPrFixture({
         number,
@@ -1918,6 +1918,7 @@ test('CONFLICTOWN-01: unowned age uses head commit time instead of GitHub update
       return JSON.stringify([conflictPrFixture({
         number: 6914,
         headRefOid: 'chatty-head',
+        commits: [{ committedDate: OLD_HEAD_COMMIT }],
         updatedAt: '2026-05-25T17:59:00.000Z',
         labels: [],
       })]);

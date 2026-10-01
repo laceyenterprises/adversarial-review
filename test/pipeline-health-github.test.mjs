@@ -48,6 +48,45 @@ test('missing identity, adapter failures and truncated/malformed listings cannot
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
+test('bridge listings without commits preserve conflict diagnostics and use updatedAt for age', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'alr07-gh-conflicts-'));
+  const now = '2026-05-25T18:00:00.000Z';
+  try {
+    for (const detailedProbesEnabled of [false, true]) {
+      for (const updatedAt of ['2026-05-25T15:00:00.000Z', '2026-05-25T17:59:00.000Z', null, 'invalid']) {
+        const snapshot = collectReviewPipelineHealth({
+          rootDir, env, now: () => new Date(now),
+          config: {
+            hostChecksEnabled: true,
+            conflictingPrChecksEnabled: detailedProbesEnabled,
+            conflictingPrRepos: ['org/repo'],
+            conflictingPrRepo: 'org/repo',
+            conflictingPrRepoRoot: '/fixture/repo',
+            conflictingPrMinSharedPathCount: 1,
+            conflictingPrUnownedMaxAgeMs: 30 * 60 * 1000,
+          },
+          execFileSyncImpl: (bin, args) => {
+            if (args.includes('--kind')) {
+              assert.equal(args[args.indexOf('--kind') + 1], 'list');
+              return JSON.stringify([{ number: 1, headRefOid: 'fixture-head', mergeable: 'CONFLICTING', isDraft: false, updatedAt }]);
+            }
+            if (bin === 'git' && args[0] === 'merge-tree') return 'fixture-tree\nsrc/shared.mjs\n\n';
+            return '';
+          },
+        });
+        assert.equal(snapshot.conflictingOpenPrs.collected, true);
+        assert.equal(snapshot.conflictingOpenPrs.count, 1);
+        assert.deepEqual(snapshot.conflictingOpenPrs.errors, []);
+        assert.equal(snapshot.conflictingOpenPrs.prs[0].headCommittedAt, updatedAt);
+        const codes = snapshot.findings.map(({ code }) => code);
+        assert.ok(!codes.includes('review:conflicting_open_prs_unreadable'));
+        assert.equal(codes.includes('review:conflicting_open_prs'), detailedProbesEnabled);
+        assert.equal(codes.includes('review:conflicting_pr_unowned'), updatedAt === '2026-05-25T15:00:00.000Z');
+      }
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
 test('registered auth bridge runs offline against fake adapter and gh without credential output', async () => {
   const { mkdirSync, writeFileSync } = await import('node:fs');
   const { execFileSync } = await import('node:child_process');

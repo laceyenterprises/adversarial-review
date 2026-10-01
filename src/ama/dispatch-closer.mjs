@@ -5635,9 +5635,12 @@ export async function maybeDispatchAmaCloser({
     // The intent record precedes lease acquisition. A refusal never reaches HQ,
     // so it must not reserve the PR as an in-flight dispatch for the next hour.
     // Preserve the competing lease and any prior receipt; no retry was admitted.
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
-      ...current, state: 'no-dispatch', reason: 'lease-held', retryCount: priorRetryCount,
-    }));
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+      if (!current) return null;
+      return {
+        ...current, state: 'no-dispatch', reason: 'lease-held', retryCount: priorRetryCount,
+      };
+    });
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,

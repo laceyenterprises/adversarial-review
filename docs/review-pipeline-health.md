@@ -557,3 +557,8 @@ states use the same owner/job key. Queue starvation is still emitted; the
 review-freshness detector retains the sole page criterion (actual posted reviews
 stop while first-pass work waits). ALR-04 owns downstream episode latching and
 page policy; consumers must not derive a new episode from finding-set changes.
+
+Conflict listing requests only the PR fields consumed by the collector. Commit
+connections are excluded: the 100-PR listing otherwise expands nested commit
+authors beyond GitHub's 500,000-node GraphQL limit, even for an empty repository.
+The 100-row truncation and unknown-mergeability checks still fail closed.

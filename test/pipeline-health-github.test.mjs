@@ -74,6 +74,9 @@ class AuthResolver:
 import os, sys
 assert os.environ['GH_TOKEN'] == 'fixture-resolved-token'
 assert 'GITHUB_TOKEN' not in os.environ
+if sys.argv[2] == 'list' and 'commits' in sys.argv[sys.argv.index('--json') + 1].split(','):
+    print('GraphQL: nested commit authors exceed the 500000-node limit', file=sys.stderr)
+    sys.exit(1)
 if os.environ.get('FIXTURE_GH_TRANSIENT'):
     import pathlib
     counter = pathlib.Path(__file__).with_name('attempts')

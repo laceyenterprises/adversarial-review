@@ -65,8 +65,8 @@ successful owner-scoped OJO job. No network or live ledger was used.
 | GitHub authenticated empty listing | zero conflicts | collected=true, zero conflicts |
 | GitHub failure, invalid list or 100-row cap | ambient failure/raw diagnostics or truncated result | collected=false; bounded blind reason |
 
-Autowalk now reads `hq ojo --owners <owner> job dag-autowalk` with a 10-second
-outer timeout and 1 MiB cap. JSON status is healthy/unhealthy/inconclusive;
+Autowalk now reads `hq ojo --owners <owner> job dag-autowalk` with three bounded
+3-second attempts, 100/250ms transient backoff and a 1 MiB cap. JSON status is healthy/unhealthy/inconclusive;
 healthy is true/false/null, and Prometheus uses NaN for inconclusive. Existing
 max-log-age configuration is retained as the progress-age threshold for
 compatibility; no shared YAML schema changes were introduced. Latest failure,
@@ -82,7 +82,11 @@ without duplicating broker credential resolution. It strips ambient tokens,
 requires explicit service selector/App/installation bindings, resolves broker
 auth in the child, and never returns credentials to Node. Reads have bounded
 execution/output and sanitized errors. SIGTERM unwinds subprocess execution and
-kills/waits for its child. No ambient fallback is permitted.
+kills/waits for its child. Transient `gh` failures retry up to three 5-second
+attempts with 100/250ms backoff within the existing 20-second outer deadline;
+failed/pending check data remains readable. OJO retries only SQLite contention,
+temporary spawn/resource failures and subprocess timeouts. Permanent failures
+and invalid evidence remain inconclusive without retry. No ambient fallback is permitted.
 
 The collector still emits actionable queue-starvation tickets, slow/moving
 budget trends and actual progress-stall diagnoses. Findings have stable
@@ -110,7 +114,7 @@ covered by the full suite. A PPH_FULL mirror also follows the shared host heavy
 check semaphore. Final mirror/PR-head results are recorded in acceptance evidence.
 
 Initial verification caught stale retry-count and finding-definition assertions,
-which were updated for bounded single reads and both explicit OJO finding codes.
+which were updated for the registered collector bridge and both explicit OJO finding codes.
 Running a direct targeted test alongside the first full suite also changed a
 checkout-local fixture status file and tripped the runner's isolation check;
 final full validation used the isolated suite alone and passed. No live review

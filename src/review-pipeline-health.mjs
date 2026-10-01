@@ -6038,7 +6038,11 @@ function collectReviewPipelineHealth({
   // Fixture executors remain injectable; production never runs ambient gh.
   execFileSyncImpl ||= (bin, args, options) => {
     if (bin !== 'gh') return execFileSync(bin, args, options);
-    const repo = args[args.indexOf('--repo') + 1];
+    const repoIndex = args.indexOf('--repo');
+    if (repoIndex < 0 || !args[repoIndex + 1] || args[repoIndex + 1].startsWith('-')) {
+      throw new Error('github-adapter-repo-required');
+    }
+    const repo = args[repoIndex + 1];
     const kind = args[1] === 'checks' ? 'checks' : 'state';
     return JSON.stringify(readPipelineGithub(kind, repo, args[2], { env, rootDir }));
   };

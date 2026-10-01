@@ -512,8 +512,12 @@ is visible before those later signals arrive.
 
 ## ALR-07 canonical scheduler and collector evidence
 
-Host checks read `hq ojo --owners <owner> job dag-autowalk` with a 10-second
-outer timeout and a 1 MiB output cap. The owner is selected by
+Host checks read `hq ojo --owners <owner> job dag-autowalk` with at most three
+3-second attempts and 100/250ms backoff (9.35 seconds of subprocess/backoff
+budget), retaining the 1 MiB output cap. SQLite busy/locked errors, temporary
+spawn/resource failures and subprocess timeouts retry before reporting
+`ojo-unavailable`. Permanent failures, malformed JSON and invalid owner/job
+evidence do not retry. The owner is selected by
 ADVERSARIAL_REVIEW_PIPELINE_HEALTH_OWNER_USER, then the runtime user.
 The retired dag-autowalk LaunchAgent and its log mtimes are never probed.
 `dagAutowalk.status` is `healthy`, `unhealthy`, or `inconclusive`;
@@ -535,6 +539,15 @@ are stripped. `HQ_PYTHON3` can select Python >=3.11 (default python3.13 on macOS
 python3 elsewhere). Missing adapter, identity, broker or interpreter reports a
 blind collector rather than an empty conflict set. Listings at the 100-row cap
 are inconclusive; errors expose bounded reason codes rather than raw stderr.
+Each `gh` list/state/checks read retries transient TLS/network/HTTP 5xx failures,
+subprocess timeouts and temporary spawn/resource failures for at most three
+5-second attempts with 100/250ms backoff. The existing 20-second outer bridge
+deadline also covers auth resolution and cancels the active child without
+retrying cancellation. Auth, permission and malformed-data failures remain
+immediately inconclusive. Checks exit codes 1 and 8 are accepted only with JSON
+list data; they represent failed/pending checks, not failed collection. The
+Node fallback requires an explicit `--repo` value and never guesses a repository
+from an omitted argument or uses ambient auth.
 The bridge supplies the listing operation absent from older native adapter CLIs
 without duplicating credential resolution rules or requiring a superproject edit.
 

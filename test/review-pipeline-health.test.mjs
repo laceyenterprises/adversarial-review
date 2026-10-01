@@ -3482,6 +3482,25 @@ test('terminal reconciliation retries transient gh failures before reconciling',
   assert.equal(snapshot.terminalReconciliation.reconciled, 1);
 });
 
+test('registered GitHub fallback rejects missing repo arguments before invoking the adapter', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 6395, reviewStatus: 'pending' });
+  for (const args of [
+    ['pr', 'view', 'https://github.com/org/repo/pull/6395'],
+    ['pr', 'view', '6395', '--repo'],
+    ['pr', 'view', '6395', '--repo', '--json', 'state'],
+  ]) {
+    const snapshot = collectHealth({ rootDir, env: {}, reconcileTerminalState: true,
+      fetchPRTerminalStateSyncImpl: (_repo, _number, { execFileSyncImpl }) => (
+        JSON.parse(execFileSyncImpl('gh', args, {}))
+      ),
+    });
+    assert.equal(snapshot.terminalReconciliation.checked, 1);
+    assert.equal(snapshot.terminalReconciliation.reconciled, 0);
+    assert.equal(snapshot.terminalReconciliation.errors[0].error, 'github-adapter-repo-required');
+  }
+});
+
 test('terminal reconciliation refuses writable reviews.db when caller uid differs from owner', () => {
   if (typeof process.getuid !== 'function') return;
 

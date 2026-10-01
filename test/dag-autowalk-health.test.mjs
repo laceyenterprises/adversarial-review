@@ -52,7 +52,7 @@ test('collector never probes the retired timer; OJO blindness stays distinct in 
         execFileSyncImpl: (bin, args, opts) => {
           if (bin === 'hq') {
             assert.deepEqual(args, ['ojo', '--owners', 'airlock', 'job', 'dag-autowalk']);
-            assert.equal(opts.timeout, 10000);
+            assert.equal(opts.timeout, 3000);
             if (!accessible) throw new Error('unreachable');
             return JSON.stringify({ job: healthy, owners: [{ owner: 'airlock', ok: true }] });
           }
@@ -66,6 +66,55 @@ test('collector never probes the retired timer; OJO blindness stays distinct in 
       if (!accessible) assert.match(renderReviewPipelinePrometheus(snapshot), /review_pipeline_dag_autowalk_healthy NaN/);
     }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('OJO retries SQLite contention, temporary spawn failures and timeouts before recovering', () => {
+  for (const error of [
+    Object.assign(new Error('command failed'), { stderr: Buffer.from('SQLITE_BUSY: secret-marker') }),
+    Object.assign(new Error('command failed'), { stderr: 'database is locked' }),
+    Object.assign(new Error('spawn hq EAGAIN'), { code: 'EAGAIN' }),
+    Object.assign(new Error('spawn hq ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+  ]) {
+    let calls = 0;
+    const delays = [];
+    const result = collectDagAutowalkHealth({ ...options,
+      sleepSyncImpl: (ms) => delays.push(ms),
+      execFileSyncImpl: (bin, args, opts) => {
+        assert.equal(bin, 'hq');
+        assert.deepEqual(args, ['ojo', '--owners', 'airlock', 'job', 'dag-autowalk']);
+        assert.equal(opts.timeout, 3000);
+        assert.equal(opts.maxBuffer, 1024 * 1024);
+        if (++calls < 3) throw error;
+        return JSON.stringify({ job: healthy, owners: [{ owner: 'airlock', ok: true }] });
+      },
+    });
+    assert.equal(result.healthy, true);
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [100, 250]);
+    assert.ok(!JSON.stringify(result).includes('secret-marker'));
+  }
+});
+
+test('OJO exhausts bounded retries and does not retry permanent failures or invalid evidence', () => {
+  for (const [output, error, expectedCalls] of [
+    [null, Object.assign(new Error('secret-marker'), { stderr: 'SQLITE_LOCKED' }), 3],
+    [null, Object.assign(new Error('secret-marker'), { code: 'ENOENT' }), 1],
+    [null, new Error('permission denied: secret-marker'), 1],
+    ['invalid JSON', null, 1],
+    [JSON.stringify({ owners: [{ owner: 'airlock', ok: false }], job: healthy }), null, 1],
+  ]) {
+    let calls = 0;
+    const delays = [];
+    const result = collectDagAutowalkHealth({ ...options,
+      sleepSyncImpl: (ms) => delays.push(ms),
+      execFileSyncImpl: () => { calls += 1; if (error) throw error; return output; },
+    });
+    assert.equal(result.reason, 'ojo-unavailable');
+    assert.equal(result.healthy, null);
+    assert.equal(calls, expectedCalls);
+    assert.deepEqual(delays, expectedCalls === 3 ? [100, 250] : []);
+    assert.ok(!JSON.stringify(result).includes('secret-marker'));
+  }
 });
 
 test('changing diagnostics and timestamps keeps the autowalk root identity and never adds a page', () => {

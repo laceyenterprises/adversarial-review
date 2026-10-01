@@ -1,4 +1,13 @@
 import { execFileSync } from 'node:child_process';
+import { isSqliteBusyError, sleepSync } from './sqlite-busy-retry.mjs';
+
+const OJO_RETRY_DELAYS_MS = Object.freeze([100, 250]);
+
+function isTransientOjoError(error) {
+  const diagnostic = [error?.code, error?.message, error?.stderr].map((value) => String(value || '')).join('\n');
+  return isSqliteBusyError(error) || isSqliteBusyError({ message: diagnostic })
+    || /\b(?:EAGAIN|EIO|EMFILE|ENFILE|ETIMEDOUT)\b|resource temporarily unavailable/i.test(diagnostic);
+}
 
 // OJO owns this job. A retired launchd timer and log mtimes are not evidence.
 export function classifyDagAutowalk(job, { owner, nowMs, thresholdMs }) {
@@ -49,11 +58,23 @@ export function classifyDagAutowalk(job, { owner, nowMs, thresholdMs }) {
   return { ...result, healthy: true, status: 'healthy', reason: 'completed-fresh' };
 }
 
-export function collectDagAutowalkHealth({ owner, nowMs, thresholdMs, execFileSyncImpl = execFileSync }) {
+export function collectDagAutowalkHealth({
+  owner, nowMs, thresholdMs, execFileSyncImpl = execFileSync, sleepSyncImpl = sleepSync,
+}) {
   try {
-    const raw = execFileSyncImpl('hq', ['ojo', '--owners', owner, 'job', 'dag-autowalk'], {
-      encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let raw;
+    for (let attempt = 0; attempt <= OJO_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        // Three attempts plus backoff stay inside the original 10s budget.
+        raw = execFileSyncImpl('hq', ['ojo', '--owners', owner, 'job', 'dag-autowalk'], {
+          encoding: 'utf8', timeout: 3_000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        break;
+      } catch (error) {
+        if (!isTransientOjoError(error) || attempt >= OJO_RETRY_DELAYS_MS.length) throw error;
+        sleepSyncImpl(OJO_RETRY_DELAYS_MS[attempt]);
+      }
+    }
     const payload = JSON.parse(raw);
     if (!Array.isArray(payload.owners)
       || !payload.owners.some((entry) => entry.owner === owner && entry.ok === true)) {

@@ -1,4 +1,6 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -3052,3 +3054,80 @@ test('lease-held rollback does not recreate a concurrently deleted dispatch reco
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity), null);
   assert.deepEqual(readAmaCloserLease(rootDir, identity), priorLease);
 });
+
+
+test('active remediation rollback does not recreate a deleted dispatch record', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-remediation-missing-record-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+  const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+  const pendingDir = join(rootDir, 'data', 'follow-up-jobs', 'pending');
+  mkdirSync(pendingDir, { recursive: true });
+  const originalList = fs.readdirSync;
+  const originalRead = fs.readFileSync;
+  let appeared = false;
+  let removed = false;
+  // Inject the actual race boundaries deterministically: a job arrives after
+  // the intent write, then its record disappears immediately before rollback.
+  t.mock.method(fs, 'readdirSync', (path, ...args) => {
+    if (String(path) === pendingDir && fs.existsSync(recordPath) && !appeared) {
+      appeared = true;
+      writeFileSync(join(pendingDir, 'active.json'), JSON.stringify({
+        repo: REPO, prNumber: PR_NUMBER, status: 'pending',
+      }));
+    }
+    return originalList(path, ...args);
+  });
+  t.mock.method(fs, 'readFileSync', (path, ...args) => {
+    if (String(path) === recordPath && appeared && !removed) {
+      removed = true;
+      rmSync(recordPath);
+    }
+    return originalRead(path, ...args);
+  });
+  syncBuiltinESMExports();
+  const deps = hammerDispatchDeps();
+  let result;
+  try {
+    result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.equal(appeared, true);
+  assert.equal(removed, true);
+  assert.equal(result.reason, 'active-remediation-job');
+  assert.equal(deps.execCalls.length, 0, 'no HQ admission');
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity), null);
+  assert.equal(fs.existsSync(recordPath), false, 'do not recreate a partial record');
+  assert.equal(readAmaCloserLease(rootDir, identity), null);
+});
+
+
+for (const [state, headBranchExists, reason] of [
+  ['MERGED', true, 'target-already-merged'],
+  ['CLOSED', true, 'live-pr-closed'],
+  ['OPEN', false, 'live-head-branch-missing'],
+]) {
+  test(`pre-admission ${reason} does not recreate a deleted dispatch record`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hammer-pr-probe-missing-record-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+    const deps = hammerDispatchDeps();
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, { dispatchContext: {
+        livePrProbeImpl: async () => {
+          assert.equal(fs.existsSync(recordPath), true, 'intent was staged before the probe');
+          rmSync(recordPath);
+          return { state, headBranchExists, headRefName: 'removed/branch' };
+        },
+      } }),
+      ...deps,
+    });
+    assert.equal(result.reason, reason);
+    assert.equal(deps.execCalls.length, 0, 'no HQ admission');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity), null);
+    assert.equal(fs.existsSync(recordPath), false);
+  });
+}

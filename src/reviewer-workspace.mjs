@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   chmodSync,
@@ -23,6 +23,41 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const SNAPSHOT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Environment-only knobs deliberately avoid extending the shared YAML schema.
+export const SNAPSHOT_CACHE_CONFIG = Object.freeze({
+  maxCount: { env: 'ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_COUNT', default: 8 },
+  maxGb: { env: 'ADVERSARIAL_REVIEWER_SNAPSHOT_MAX_GB', default: 4 },
+});
+export function resolveSnapshotCacheLimits(env = process.env) {
+  const value = (key) => {
+    const knob = SNAPSHOT_CACHE_CONFIG[key];
+    const parsed = Number(env[knob.env]);
+    return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : knob.default;
+  };
+  return { maxCount: value('maxCount'), maxBytes: value('maxGb') * 1024 ** 3 };
+}
+function snapshotBytes(path) {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory()) return stat.size;
+  return readdirSync(path).reduce((total, name) => total + snapshotBytes(join(path, name)), 0);
+}
+function pidInUse(pid) {
+  try { process.kill(Number(pid), 0); return true; }
+  catch (err) { return err.code !== 'ESRCH'; }
+}
+function snapshotInUse(repoCacheDir, sha) {
+  const leaseDir = join(repoCacheDir, '.leases', sha);
+  if (!existsSync(leaseDir)) return false;
+  for (const pid of readdirSync(leaseDir)) {
+    if (!/^[1-9][0-9]*$/.test(pid)) return true;
+    try { process.kill(Number(pid), 0); return true; }
+    catch (err) {
+      if (err.code !== 'ESRCH') return true;
+      unlinkSync(join(leaseDir, pid));
+    }
+  }
+  return false;
+}
 const AUDIT_DIRNAME = 'reviewer-workspace-audit';
 const GIT_AUDIT_MAX_BUFFER = 64 * 1024 * 1024;
 const AUDIT_HASH_MAX_BYTES = 8 * 1024 * 1024;
@@ -298,6 +333,8 @@ function makeTreeWritable(path) {
 function garbageCollectSnapshots(repoCacheDir, currentSha, {
   nowMs = Date.now(),
   maxAgeMs = SNAPSHOT_MAX_AGE_MS,
+  maxCount = resolveSnapshotCacheLimits().maxCount,
+  maxBytes = resolveSnapshotCacheLimits().maxBytes,
   statSyncImpl = statSync,
   log = console,
 } = {}) {
@@ -310,19 +347,52 @@ function garbageCollectSnapshots(repoCacheDir, currentSha, {
     if (err?.code !== 'ENOENT') log.warn(`[reviewer] snapshot cache listing failed: ${err.message}`);
     return removed;
   }
+  const candidates = [];
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === currentSha) continue;
+    // Recover tombstones left by a collector crash, but never touch one
+    // owned by a running collector. Build and lease metadata stay protected.
+    const tombstone = /^\.gc-([1-9][0-9]*)-(.+)-[0-9a-f-]{36}$/.exec(entry.name);
+    if (!entry.isDirectory()) continue;
+    if (tombstone && pidInUse(tombstone[1])) continue;
+    if (entry.name.startsWith('.') && !tombstone) continue;
     const entryPath = join(repoCacheDir, entry.name);
     try {
       const entryStat = statSyncImpl(entryPath);
       if (!entryStat.isDirectory()) continue;
-      if (nowMs - entryStat.mtimeMs <= maxAgeMs) continue;
-      makeTreeWritable(entryPath);
-      rmSync(entryPath, { recursive: true, force: true });
-      removed.push(entryPath);
+      candidates.push({ name: tombstone ? tombstone[2] : entry.name, orphan: Boolean(tombstone), path: entryPath, mtimeMs: entryStat.mtimeMs, bytes: snapshotBytes(entryPath) });
     } catch (err) {
-      if (err?.code === 'ENOENT') continue;
-      log.warn(`[reviewer] snapshot cache cleanup failed path=${entryPath}: ${err.message}`);
+      if (err?.code !== 'ENOENT') log.warn(`[reviewer] snapshot cache cleanup failed path=${entryPath}: ${err.message}`);
+    }
+  }
+  let count = candidates.length;
+  let bytes = candidates.reduce((sum, entry) => sum + entry.bytes, 0);
+  candidates.sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
+  for (const entry of candidates) {
+    if (entry.name === currentSha) continue;
+    if (!entry.orphan && nowMs - entry.mtimeMs <= maxAgeMs && count <= maxCount && bytes <= maxBytes) continue;
+    const victim = join(repoCacheDir, `.gc-${process.pid}-${entry.name}-${randomUUID()}`);
+    try {
+      if (snapshotInUse(repoCacheDir, entry.name)) continue;
+      // Rename before the final pin check: a new reader either pins the old
+      // tree (which we restore) or observes the missing tree and rebuilds.
+      renameSync(entry.path, victim);
+      if (snapshotInUse(repoCacheDir, entry.name)) {
+        renameSync(victim, entry.path);
+        continue;
+      }
+      makeTreeWritable(victim);
+      rmSync(victim, { recursive: true, force: true });
+      count -= 1;
+      bytes -= entry.bytes;
+      removed.push(entry.path);
+    } catch (err) {
+      if (err?.code !== 'ENOENT') log.warn(`[reviewer] snapshot cache cleanup failed path=${entry.path}: ${err.message}`);
+      // Keep failed deletions visible to the next sweep rather than leaking
+      // hidden garbage. A concurrent replacement keeps its own path.
+      if (existsSync(victim) && !existsSync(entry.path)) {
+        try { renameSync(victim, entry.path); }
+        catch (restoreErr) { log.warn(`[reviewer] snapshot cache restore failed: ${restoreErr.message}`); }
+      }
     }
   }
   return removed;
@@ -361,6 +431,8 @@ async function prepareReviewerSnapshot({
   extractArchiveImpl = extractArchive,
   nowMs = Date.now(),
   maxAgeMs = SNAPSHOT_MAX_AGE_MS,
+  pinSnapshot = false,
+  ...cacheLimits
 } = {}) {
   if (!checkoutDir || !stateDir) throw new Error('reviewer snapshot requires checkoutDir and stateDir');
   const headSha = await resolveCheckoutHead(checkoutDir, execFileImpl);
@@ -372,6 +444,13 @@ async function prepareReviewerSnapshot({
   const repoCacheDir = join(cacheRoot, safeRepoName(repo));
   const snapshotDir = join(repoCacheDir, headSha);
   mkdirSync(repoCacheDir, { recursive: true, mode: 0o700 });
+  // Pin before inspecting/building so concurrent collectors cannot remove a
+  // snapshot between validation and subprocess startup. Dead PID pins expire.
+  const leaseDir = join(repoCacheDir, '.leases', headSha);
+  if (pinSnapshot) {
+    mkdirSync(leaseDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(leaseDir, String(process.pid)), '', { mode: 0o600 });
+  }
   const reused = validateSnapshot(snapshotDir, headSha);
   if (!reused) {
     const buildDir = mkdtempSync(join(repoCacheDir, '.build-'));
@@ -400,8 +479,8 @@ async function prepareReviewerSnapshot({
     }
   }
   if (!validateSnapshot(snapshotDir, headSha)) throw new Error(`reviewer snapshot validation failed for ${repo}@${headSha}`);
-  if (reused) touchSnapshot(snapshotDir, nowMs);
-  garbageCollectSnapshots(repoCacheDir, headSha, { nowMs, maxAgeMs });
+  touchSnapshot(snapshotDir, nowMs);
+  garbageCollectSnapshots(repoCacheDir, headSha, { nowMs, maxAgeMs, ...cacheLimits });
   return { checkoutDir: resolve(checkoutDir), headSha, snapshotDir, reused };
 }
 

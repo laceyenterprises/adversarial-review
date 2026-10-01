@@ -2071,8 +2071,7 @@ async function main() {
   });
   const reviewerCheckoutDir = resolveReviewerSubprocessCwd({ repo, rootDir: ROOT });
   const reviewerStateDir = resolveAdversarialReviewStateDir(ROOT, process.env);
-  let reviewerWorkspaceStateDir;
-  let reviewerSubprocessCwd;
+  let reviewerWorkspaceStateDir, reviewerSubprocessCwd;
   let reviewerWorkspaceHeadSha;
   try {
     reviewerWorkspaceStateDir = resolveReviewerWorkspaceStateDir({
@@ -2083,6 +2082,7 @@ async function main() {
       repo,
       checkoutDir: reviewerCheckoutDir,
       stateDir: reviewerWorkspaceStateDir,
+      pinSnapshot: true,
     });
     reviewerSubprocessCwd = snapshot.snapshotDir;
     reviewerWorkspaceHeadSha = reviewerHeadSha || snapshot.headSha;

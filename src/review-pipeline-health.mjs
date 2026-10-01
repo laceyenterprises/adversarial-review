@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3';
+import { listPipelineOpenPrs, readPipelineGithub } from './pipeline-health-github.mjs';
+import { collectDagAutowalkHealth } from './dag-autowalk-health.mjs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
@@ -368,7 +370,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_hammer_runs_total: 'Recorded terminal hammer runs.',
   review_pipeline_hammer_merges_total: 'Recorded hammer runs that merged their PR.',
   review_pipeline_hammer_input_tokens_per_merge: 'Recorded hammer input tokens divided by hammer merges; NaN when there is no merge.',
-  review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
+  review_pipeline_dag_autowalk_healthy: 'OJO completed-progress health: 1 healthy, 0 unhealthy, NaN inconclusive.',
   review_pipeline_ttm_minutes: 'Time-to-merge rollup in minutes over the configured window.',
   review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the measured rounds-aware time-to-merge budget (SLOW; trend only).',
   review_pipeline_ttm_stuck_open_prs: 'Current open PRs that are not progressing (STUCK; the page-worthy counter).',
@@ -772,11 +774,15 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'the required dispatch log is missing, so hammer dispatch activity cannot be classified as healthy or stalled',
   },
   {
-    code: 'review:dag_autowalk_launchd_unhealthy',
+    code: 'review:dag_autowalk_unhealthy',
     tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'dagAutowalkMaxLogAgeMs',
     defaultThreshold: DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS,
+  },
+  {
+    code: 'review:dag_autowalk_inconclusive', tier: 'ticket', category: 'review-pipeline',
+    thresholdKey: null, defaultThreshold: null,
   },
   {
     code: 'review:argus_security_job_stale',
@@ -3598,41 +3604,7 @@ function mergeTreeConflictPaths(pr, { repoRoot, execFileSyncImpl, gitEnv }) {
   }
 }
 
-function ghPrListOpenSync(repo, { execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
-  const args = [
-    'pr',
-    'list',
-    '--repo',
-    repo,
-    '--state',
-    'open',
-    '--limit',
-    '100',
-    '--json',
-    'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
-  ];
-  const options = {
-    encoding: 'utf8',
-    timeout: 20_000,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  };
-  let lastError;
-  for (let attempt = 0; attempt <= DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS.length; attempt += 1) {
-    try {
-      return execFileSyncImpl('gh', args, options);
-    } catch (error) {
-      lastError = error;
-      if (!isTransientGhTerminalStateError(error)
-        || attempt >= DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS.length) {
-        throw error;
-      }
-      sleepSyncImpl(DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS[attempt]);
-    }
-  }
-  throw lastError;
-}
-
-function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl = sleepSyncMs }) {
+function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, listOpenPrsSyncImpl }) {
   if (!config.hostChecksEnabled && !config.conflictingPrChecksEnabled) {
     return { enabled: false, collected: false, count: 0, probedPrs: 0, unprobedPrs: 0, probeCoverage: 0, prs: [], paths: [], groupedPaths: [], sharedPathGroups: [], errors: [] };
   }
@@ -3652,12 +3624,11 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, sleepSyncImpl =
   const listingErrors = [];
   for (const listedRepo of repos) {
     try {
-      const output = ghPrListOpenSync(listedRepo, { execFileSyncImpl, sleepSyncImpl });
-      const parsed = JSON.parse(output || '[]');
+      const parsed = listOpenPrsSyncImpl(listedRepo, { execFileSyncImpl, env, rootDir });
       if (!Array.isArray(parsed)) throw new Error('gh pr list returned non-list JSON');
       rows.push(...parsed.map((row) => ({ ...row, repo: listedRepo })));
     } catch (error) {
-      listingErrors.push(`${listedRepo}: ${String(error?.stderr || error?.message || 'gh pr list failed').slice(0, 500)}`);
+      listingErrors.push(`${listedRepo}: github-list-inconclusive`);
     }
   }
   if (listingErrors.length > 0) {
@@ -4392,12 +4363,6 @@ function launchdPrint(label, {
   }
 }
 
-function parseLaunchdLastExit(raw) {
-  const text = String(raw || '');
-  const match = text.match(/(?:last exit code|LastExitStatus|last exit status)\s*[:=]\s*(-?\d+)/i);
-  return match ? Number(match[1]) : null;
-}
-
 function currentUserName(env = process.env) {
   return env.USER || env.LOGNAME || userInfo().username;
 }
@@ -4430,20 +4395,7 @@ function summarizeLaunchdServices({ env, config, execFileSyncImpl, sleepSyncImpl
       sleepSyncImpl,
     }),
   }));
-  const dag = launchdPrint(labels.dagAutowalk, {
-    timeoutMs: config.launchdTimeoutMs,
-    transientRetryDelaysMs: config.launchdTransientRetryDelaysMs,
-    execFileSyncImpl,
-    sleepSyncImpl,
-  });
-  return {
-    owner: labels.owner,
-    services,
-    dagAutowalk: {
-      ...dag,
-      lastExitCode: parseLaunchdLastExit(dag.raw),
-    },
-  };
+  return { owner: labels.owner, services };
 }
 
 function tailRecentLines(path, maxBytes = 64 * 1024) {
@@ -4590,33 +4542,6 @@ function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config
   };
 }
 
-function summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd }) {
-  const owner = launchd.owner;
-  const defaultErrLog = join(homedir(), 'Library', 'Logs', `${DEFAULT_LABEL_PREFIX}.dag-autowalk.${owner}.tick.err.log`);
-  const defaultOutLog = join(homedir(), 'Library', 'Logs', `${DEFAULT_LABEL_PREFIX}.dag-autowalk.${owner}.tick.out.log`);
-  const errLogPath = env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_ERR_LOG || defaultErrLog;
-  const outLogPath = env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_OUT_LOG || defaultOutLog;
-  const err = tailRecentLines(errLogPath, 16 * 1024);
-  const out = tailRecentLines(outLogPath, 16 * 1024);
-  const freshestMtime = Math.max(err.mtimeMs || 0, out.mtimeMs || 0);
-  const logAgeMs = freshestMtime > 0 ? Math.max(0, nowMs - freshestMtime) : null;
-  const healthy = launchd.dagAutowalk.loaded
-    && (launchd.dagAutowalk.lastExitCode === null || launchd.dagAutowalk.lastExitCode === 0)
-    && logAgeMs !== null
-    && logAgeMs <= config.dagAutowalkMaxLogAgeMs;
-  return {
-    hqRoot,
-    label: launchd.dagAutowalk.label,
-    loaded: launchd.dagAutowalk.loaded,
-    lastExitCode: launchd.dagAutowalk.lastExitCode,
-    probeFailure: launchd.dagAutowalk.probeFailure,
-    errLogPath,
-    outLogPath,
-    logAgeMs,
-    thresholdMs: config.dagAutowalkMaxLogAgeMs,
-    healthy,
-  };
-}
 
 function summarizeDuplicateFamilies(db, { nowMs, config }) {
   const empty = {
@@ -4726,6 +4651,9 @@ function summarizeDuplicateFamilies(db, { nowMs, config }) {
 function buildFinding({ code, tier, subject, message, evidence, recommendedAction, observedAt, details = {} }) {
   return {
     agent_id: 'sentinel',
+    incident_key: code.startsWith('review:dag_autowalk_')
+      ? `review-pipeline:dag-autowalk:${details.owner || 'unknown'}`
+      : `review-pipeline:${code}`,
     // Do not let a new source-level finding quietly become a pager route. The
     // review-freshness detector owns the sole page criterion for this domain.
     tier: tier === 'page' ? 'ticket' : tier,
@@ -5552,7 +5480,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       subject: 'open conflicting PR diagnostics could not be collected',
       message: `GitHub open-PR listing or local merge-tree probes for ${configuredRepos} failed; this is a blind collector state, not proof that no PRs are conflicting.`,
       evidence: (snapshot.conflictingOpenPrs.errors || []).slice(0, 3),
-      recommendedAction: 'Check gh authentication/network health and local git fetch/merge-tree access for the pipeline-health host, then re-run the collector.',
+      recommendedAction: 'Check registered GitHub adapter/broker identity and local git fetch/merge-tree access for the pipeline-health host, then re-run the collector.',
       observedAt,
       details: snapshot.conflictingOpenPrs,
     }));
@@ -5962,7 +5890,6 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
   const unprobedServices = [
     ...snapshot.launchd.services,
-    { name: 'dag-autowalk', ...snapshot.dagAutowalk },
   ].filter((service) => service.loaded === null && service.probeFailure);
   if (unprobedServices.length > 0) {
     const sample = unprobedServices[0];
@@ -6028,17 +5955,20 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
-  if (!snapshot.dagAutowalk.healthy && !snapshot.dagAutowalk.probeFailure) {
-    findings.push(buildFinding({
-      code: 'review:dag_autowalk_launchd_unhealthy',
-      tier: 'page',
-      subject: 'dag-autowalk LaunchAgent is not healthy',
-      message: `dag-autowalk loaded=${snapshot.dagAutowalk.loaded} lastExit=${snapshot.dagAutowalk.lastExitCode ?? 'unknown'} logAgeMs=${snapshot.dagAutowalk.logAgeMs ?? 'unknown'}.`,
-      evidence: [snapshot.dagAutowalk.label, snapshot.dagAutowalk.errLogPath, snapshot.dagAutowalk.outLogPath],
-      recommendedAction: 'Check dag-autowalk launchd state and recent logs; this is the post-merge DAG advancement backstop.',
+  if (snapshot.dagAutowalk.healthy !== true) {
+    const blind = snapshot.dagAutowalk.healthy === null;
+    const finding = {
+      tier: 'ticket',
+      subject: `dag-autowalk OJO health is ${snapshot.dagAutowalk.status}`,
+      message: `Owner ${snapshot.dagAutowalk.owner}: ${snapshot.dagAutowalk.reason}. Scheduler freshness is separate from completed progress.`,
+      evidence: [`ojo owner=${snapshot.dagAutowalk.owner} job=dag-autowalk`],
+      recommendedAction: 'Inspect owner-scoped OJO job and history; confirm completed DAG progress before declaring recovery. Coordinate scheduler repair with ALR-02.',
       observedAt,
       details: snapshot.dagAutowalk,
-    }));
+    };
+    findings.push(blind
+      ? buildFinding({ code: 'review:dag_autowalk_inconclusive', ...finding })
+      : buildFinding({ code: 'review:dag_autowalk_unhealthy', ...finding }));
   }
 
   // ARGUSDRAIN-01: the security lane's silence is what the SEV was about.
@@ -6100,9 +6030,22 @@ function collectReviewPipelineHealth({
   config: configOverrides = {},
   reconcileTerminalState = false,
   fetchPRTerminalStateSyncImpl = fetchPRTerminalStateSync,
-  execFileSyncImpl = execFileSync,
+  listOpenPrsSyncImpl = listPipelineOpenPrs,
+  execFileSyncImpl = null,
   sleepSyncImpl = sleepSyncMs,
 } = {}) {
+  // All collector GitHub reads share the explicit registered auth path.
+  // Fixture executors remain injectable; production never runs ambient gh.
+  execFileSyncImpl ||= (bin, args, options) => {
+    if (bin !== 'gh') return execFileSync(bin, args, options);
+    const repoIndex = args.indexOf('--repo');
+    if (repoIndex < 0 || !args[repoIndex + 1] || args[repoIndex + 1].startsWith('-')) {
+      throw new Error('github-adapter-repo-required');
+    }
+    const repo = args[repoIndex + 1];
+    const kind = args[1] === 'checks' ? 'checks' : 'state';
+    return JSON.stringify(readPipelineGithub(kind, repo, args[2], { env, rootDir }));
+  };
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
   const config = resolveReviewPipelineHealthConfig(env, configOverrides);
@@ -6228,7 +6171,7 @@ function collectReviewPipelineHealth({
     const conflictingOpenPrsBase = summarizeConflictingOpenPrs({
       config,
       execFileSyncImpl,
-      sleepSyncImpl,
+      env, rootDir, listOpenPrsSyncImpl,
     });
     const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
     const hammerEfficiency = summarizeHammerEfficiency(db);
@@ -6359,7 +6302,7 @@ function collectReviewPipelineHealth({
       { nowMs, staleAfterMs: config.lifecycleReconcileStaleAfterMs }
     );
     const dagAutowalk = config.hostChecksEnabled
-      ? summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd })
+      ? collectDagAutowalkHealth({ owner: launchd.owner, nowMs, thresholdMs: config.dagAutowalkMaxLogAgeMs, execFileSyncImpl })
       : { hqRoot, label: null, loaded: true, lastExitCode: 0, errLogPath: null, outLogPath: null, logAgeMs: null, thresholdMs: config.dagAutowalkMaxLogAgeMs, healthy: true };
     const configSignatureDrift = config.hostChecksEnabled
       ? summarizeConfigSignatureDrift(hqRoot, {
@@ -6658,7 +6601,7 @@ function renderReviewPipelinePrometheus(snapshot) {
   pushMetric('review_pipeline_hammer_merges_total', {}, snapshot.hammerEfficiency?.merges || 0);
   pushMetric('review_pipeline_hammer_input_tokens_per_merge', {},
     snapshot.hammerEfficiency?.inputTokensPerMerge ?? Number.NaN);
-  pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
+  pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy === null ? Number.NaN : snapshot.dagAutowalk?.healthy ? 1 : 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);
   pushMetric('review_pipeline_ttm_open_budget_breaches', {}, withDefault(snapshot.ttm?.rollup?.openPrsBreachingBudget));

@@ -23,7 +23,7 @@ import {
 import {
   REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS,
   REVIEW_PIPELINE_HEALTH_METRICS,
-  collectReviewPipelineHealth,
+  collectReviewPipelineHealth as collectHealth,
   evaluateReviewPipelineFindings,
   renderReviewPipelinePrometheus,
   summarizeFirstPassCiOrphans,
@@ -34,6 +34,16 @@ import {
   stoppedJobIsCiRegressionStopped,
   summarizeHammerEfficiency,
 } from '../src/review-pipeline-health.mjs';
+
+function collectReviewPipelineHealth(options = {}) {
+  return collectHealth({
+    ...options,
+    listOpenPrsSyncImpl: (repo, { execFileSyncImpl }) => JSON.parse(execFileSyncImpl('gh', [
+      'pr', 'list', '--repo', repo, '--state', 'open', '--limit', '100', '--json',
+      'number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels,commits',
+    ], { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] })),
+  });
+}
 
 test('hammer efficiency counts only merged closer passes and divides recorded input tokens by merges', () => {
   const db = new Database(':memory:');
@@ -2115,12 +2125,12 @@ test('conflicting open PR diagnostic failure creates a blind finding, not a zero
 
   assert.equal(snapshot.conflictingOpenPrs.count, 0);
   assert.equal(snapshot.conflictingOpenPrs.collected, false);
-  assert.match(snapshot.conflictingOpenPrs.errors[0], /HTTP 502/);
+  assert.match(snapshot.conflictingOpenPrs.errors[0], /github-list-inconclusive/);
   assert.ok(!findingCodes(snapshot).includes('review:conflicting_open_prs'));
   assert.ok(findingCodes(snapshot).includes('review:conflicting_open_prs_unreadable'));
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs 0$/m);
   assert.match(renderReviewPipelinePrometheus(snapshot), /^review_pipeline_conflicting_open_prs_collected 0$/m);
-  assert.equal(calls, 3);
+  assert.equal(calls, 1);
 });
 
 test('stopped remediation operational blockers surface in pipeline health findings', () => {
@@ -3472,6 +3482,25 @@ test('terminal reconciliation retries transient gh failures before reconciling',
   assert.equal(snapshot.terminalReconciliation.reconciled, 1);
 });
 
+test('registered GitHub fallback rejects missing repo arguments before invoking the adapter', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 6395, reviewStatus: 'pending' });
+  for (const args of [
+    ['pr', 'view', 'https://github.com/org/repo/pull/6395'],
+    ['pr', 'view', '6395', '--repo'],
+    ['pr', 'view', '6395', '--repo', '--json', 'state'],
+  ]) {
+    const snapshot = collectHealth({ rootDir, env: {}, reconcileTerminalState: true,
+      fetchPRTerminalStateSyncImpl: (_repo, _number, { execFileSyncImpl }) => (
+        JSON.parse(execFileSyncImpl('gh', args, {}))
+      ),
+    });
+    assert.equal(snapshot.terminalReconciliation.checked, 1);
+    assert.equal(snapshot.terminalReconciliation.reconciled, 0);
+    assert.equal(snapshot.terminalReconciliation.errors[0].error, 'github-adapter-repo-required');
+  }
+});
+
 test('terminal reconciliation refuses writable reviews.db when caller uid differs from owner', () => {
   if (typeof process.getuid !== 'function') return;
 
@@ -4576,7 +4605,7 @@ test('host checks are opt-in and report launchd, dispatch-log, and dag-autowalk 
       error.stderr = 'Could not find service';
       throw error;
     }
-    if (target.includes('dag-autowalk')) return 'last exit code = 65\n';
+    if (_bin === 'hq') return JSON.stringify({ owners: [{ owner: 'fixture', ok: true }], job: { id: 'dag-autowalk', owner: 'fixture', owned: true, enabled: true, state: 'failing', lastExitCode: 65 } });
     return 'state = running\nlast exit code = 0\n';
   };
 
@@ -4598,7 +4627,7 @@ test('host checks are opt-in and report launchd, dispatch-log, and dag-autowalk 
 
   assert.ok(findingCodes(enabled).includes('review:daemon_liveness'));
   assert.ok(findingCodes(enabled).includes('review:dispatch_spawn_failures'));
-  assert.ok(findingCodes(enabled).includes('review:dag_autowalk_launchd_unhealthy'));
+  assert.ok(findingCodes(enabled).includes('review:dag_autowalk_unhealthy'));
   assert.equal(enabled.dispatchSpawnFailures.matches.length, 1);
   assert.equal(enabled.dagAutowalk.lastExitCode, 65);
 });
@@ -4745,7 +4774,7 @@ test('system fallback uses sudo non-interactively and reports sudo privilege fai
   assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
 });
 
-test('dag-autowalk probe failure reports probe failure instead of unhealthy', () => {
+test('inaccessible OJO reports inconclusive instead of unhealthy', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();
   const dagErr = path.join(hqRoot, 'dag.err.log');
@@ -4780,10 +4809,10 @@ test('dag-autowalk probe failure reports probe failure instead of unhealthy', ()
     execFileSyncImpl,
   });
 
-  assert.equal(snapshot.dagAutowalk.loaded, null);
-  assert.equal(snapshot.dagAutowalk.probeFailure.kind, 'sudo-privilege');
-  assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
-  assert.ok(!findingCodes(snapshot).includes('review:dag_autowalk_launchd_unhealthy'));
+  assert.equal(snapshot.dagAutowalk.healthy, null);
+  assert.equal(snapshot.dagAutowalk.reason, 'ojo-unavailable');
+  assert.ok(findingCodes(snapshot).includes('review:dag_autowalk_inconclusive'));
+  assert.ok(!findingCodes(snapshot).includes('review:dag_autowalk_unhealthy'));
 });
 
 test('transient system-domain launchctl print failure is retried before reporting liveness', () => {

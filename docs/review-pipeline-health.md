@@ -227,8 +227,8 @@ The Grafana dashboard lives at
 - `review_pipeline_hammer_runs_total`: terminal hammer passes recorded in the review ledger.
 - `review_pipeline_hammer_merges_total`: those passes that merged the PR.
 - `review_pipeline_hammer_input_tokens_per_merge`: recorded input tokens from terminal logical hammer closer passes started in the last 30 days, divided by their confirmed merges; NaN when no merge is recorded. A fallback harness retains its logical `metadata_json.workerClass` attribution.
-- `review_pipeline_dag_autowalk_healthy`: dag-autowalk LaunchAgent last-exit
-  and recent-log health.
+- `review_pipeline_dag_autowalk_healthy`: owner-scoped OJO completed-progress
+  health (1 healthy, 0 unhealthy, NaN inconclusive).
 - `review_pipeline_argus_jobs`: Argus security review jobs by `bucket`
   (`pending`, `in_progress`, `completed`, `failed`); an uncapped directory count.
 - `review_pipeline_argus_oldest_unanswered_job_age_seconds`: age, from enqueue,
@@ -358,11 +358,12 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:config_signature_drift` | a long-lived daemon's last successfully loaded config signature differs from disk beyond the configured drift threshold, including failed reloads after the shared config cache has been reset; also fires when a loaded daemon's config-status file is missing, any status read is malformed or denied, or the status stops updating for longer than the greater of six minutes and three expected daemon ticks | ticket | the daemon reloads the changed config successfully, the disk config is restored to the loaded signature, or the status file is readable, fresh, and reports the daemon back in sync |
 | `review:follow_up_consume_interval_slow` | more than five minutes have elapsed since the last consume pass (or daemon start before its first pass), including repeated skipped ticks, or two consume passes in one process are more than five minutes apart; `config-status.json` records `tickDurationMs`, `consumeIntervalMs`, `consumeSkippedReason`, `daemonStartedAt`, and `lastConsumeAt`. Restart gaps do not produce this finding | ticket | a consume pass runs and the daemon remains current |
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | ticket | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
-| `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
+| `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, and dispatch daemon labels |
 | `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | ticket | no matching recent dispatch daemon stderr lines remain |
 | `review:hammer_dispatch_stall_blind` | SEN-02 `blind`: the dispatch daemon log required by the hammer-dispatch stall detector is missing, so the snapshot cannot classify the conflicted backlog as healthy or stalled. Never a health verdict. | ticket | the dispatch daemon log surface is restored or the configured HQ root is corrected |
 | `review:hammer_dispatch_stalled_with_conflicts` | conflicted/dirty PRs are present in auto-merge state and no hammer dispatch has been observed in the dispatch daemon log within 2h | ticket | a hammer dispatch is observed in the dispatch daemon log, the conflicted backlog clears, or the log is outside host-check collection |
-| `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
+| `review:dag_autowalk_unhealthy` | OJO latest run failed (including exit 124), scheduler is stale/suppressed, or completed progress is stale | ticket | fresh successful completed progress under the canonical owner |
+| `review:dag_autowalk_inconclusive` | OJO is inaccessible, evidence is invalid, or queued/running/warning state does not prove a completed sweep | ticket | canonical evidence establishes healthy or unhealthy progress |
 | `review:argus_security_job_stale` | the oldest pending or in-progress Argus security job has waited more than 2h without a verdict (a live head once the drain's backlog retirement is fresh) | ticket | that job reaches a verdict or is retired, and no other job is older than the bound |
 | `review:argus_security_drain_not_running` | Argus jobs are waiting and the watcher drain is disabled, erroring, or has not written `data/argus-security-drain-status.json` for three pipeline ticks | ticket | the drain is enabled and writing fresh status, or the queue is empty |
 
@@ -508,3 +509,51 @@ Later ARP tracks can extend this collector by adding hq remediation and merge
 dispatch ledgers to the same snapshot. The current version intentionally ships
 against `reviews.db` and the existing follow-up queues so the next silent stall
 is visible before those later signals arrive.
+
+## ALR-07 canonical scheduler and collector evidence
+
+Host checks read `hq ojo --owners <owner> job dag-autowalk` with at most three
+3-second attempts and 100/250ms backoff (9.35 seconds of subprocess/backoff
+budget), retaining the 1 MiB output cap. SQLite busy/locked errors, temporary
+spawn/resource failures and subprocess timeouts retry before reporting
+`ojo-unavailable`. Permanent failures, malformed JSON and invalid owner/job
+evidence do not retry. The owner is selected by
+ADVERSARIAL_REVIEW_PIPELINE_HEALTH_OWNER_USER, then the runtime user.
+The retired dag-autowalk LaunchAgent and its log mtimes are never probed.
+`dagAutowalk.status` is `healthy`, `unhealthy`, or `inconclusive`;
+`healthy` is respectively true, false, or null. The Prometheus health metric
+uses NaN for inconclusive. Scheduler `staleness.state=fresh` does not erase a
+failed latest run or establish DAG advancement. Queued/active singleton work
+remains inconclusive until completed progress is established; stale progress
+still reports nonprogress. This vocabulary follows ALR-02's locked acceptance:
+running, singleflight skip and reset last-green alone are not recovery proof.
+
+GitHub reads (conflict listing, terminal reconciliation and CI-orphan checks)
+use the registered GitHub adapter's Python auth resolver through the bounded
+collector bridge. The adapter installation is resolved with the existing
+`GHA_ADAPTER_BIN`/`AGENT_OS_GITHUB_ADAPTER_BIN` or trusted auto-discovery contract.
+`WATCHER_GH_BROKER_ROLE` defaults to `merge-agent`; its
+`OAUTH_BROKER_<ROLE>_EXPECTED_APP_ID` and `..._EXPECTED_INSTALLATION_ID` must be
+configured, together with the broker secret **file** path. Ambient GitHub tokens
+are stripped. `HQ_PYTHON3` can select Python >=3.11 (default python3.13 on macOS,
+python3 elsewhere). Missing adapter, identity, broker or interpreter reports a
+blind collector rather than an empty conflict set. Listings at the 100-row cap
+are inconclusive; errors expose bounded reason codes rather than raw stderr.
+Each `gh` list/state/checks read retries transient TLS/network/HTTP 5xx failures,
+subprocess timeouts and temporary spawn/resource failures for at most three
+5-second attempts with 100/250ms backoff. The existing 20-second outer bridge
+deadline also covers auth resolution and cancels the active child without
+retrying cancellation. Auth, permission and malformed-data failures remain
+immediately inconclusive. Checks exit codes 1 and 8 are accepted only with JSON
+list data; they represent failed/pending checks, not failed collection. The
+Node fallback requires an explicit `--repo` value and never guesses a repository
+from an omitted argument or uses ambient auth.
+The bridge supplies the listing operation absent from older native adapter CLIs
+without duplicating credential resolution rules or requiring a superproject edit.
+
+Findings retain ticket-tier disposition and a stable `incident_key` independent
+of timestamps, subjects and the aggregate finding set. Both autowalk health
+states use the same owner/job key. Queue starvation is still emitted; the
+review-freshness detector retains the sole page criterion (actual posted reviews
+stop while first-pass work waits). ALR-04 owns downstream episode latching and
+page policy; consumers must not derive a new episode from finding-set changes.

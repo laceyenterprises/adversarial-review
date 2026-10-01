@@ -5652,9 +5652,12 @@ export async function maybeDispatchAmaCloser({
   // A follow-up can claim between the first queue check and lease acquisition.
   if (findActiveRemediationJob(rootDir, { repo, prNumber })) {
     deleteAmaCloserLease(rootDir, leaseIdentity);
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
-      ...current, state: 'no-dispatch', reason: 'active-remediation-job', retryCount: priorRetryCount,
-    }));
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+      if (!current) return null;
+      return {
+        ...current, state: 'no-dispatch', reason: 'active-remediation-job', retryCount: priorRetryCount,
+      };
+    });
     logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job appeared during lease acquisition`);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
   }
@@ -5669,22 +5672,25 @@ export async function maybeDispatchAmaCloser({
   });
   throwIfAborted(signal);
   if (livePrProbe?.state === 'MERGED') {
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
-      ...(current || {}),
-      state: 'completed',
-      status: 'target-already-merged',
-      reason: 'target-already-merged',
-      prState: livePrProbe.state,
-      headBranchExists: livePrProbe.headBranchExists,
-      observedAt: dispatchContext.dispatchedAt,
-      lastObservedStatus: 'succeeded',
-      lastObservedAt: dispatchContext.dispatchedAt,
-      lastError: null,
-      terminalOutcome: 'succeeded',
-      workerClass,
-      dispatchWorkerClass,
-      workerId,
-    }));
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+      if (!current) return null;
+      return {
+        ...current,
+        state: 'completed',
+        status: 'target-already-merged',
+        reason: 'target-already-merged',
+        prState: livePrProbe.state,
+        headBranchExists: livePrProbe.headBranchExists,
+        observedAt: dispatchContext.dispatchedAt,
+        lastObservedStatus: 'succeeded',
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: null,
+        terminalOutcome: 'succeeded',
+        workerClass,
+        dispatchWorkerClass,
+        workerId,
+      };
+    });
     finalizeAmaCloserLeaseBestEffort({
       rootDir,
       leaseIdentity,
@@ -5705,18 +5711,21 @@ export async function maybeDispatchAmaCloser({
     });
   }
   if (livePrProbe?.state === 'CLOSED') {
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
-      ...(current || {}),
-      state: 'no-dispatch',
-      status: 'abandoned-pr-closed',
-      reason: 'live-pr-closed',
-      prState: livePrProbe.state,
-      headBranchExists: livePrProbe.headBranchExists,
-      observedAt: dispatchContext.dispatchedAt,
-      workerClass,
-      dispatchWorkerClass,
-      workerId,
-    }));
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+      if (!current) return null;
+      return {
+        ...current,
+        state: 'no-dispatch',
+        status: 'abandoned-pr-closed',
+        reason: 'live-pr-closed',
+        prState: livePrProbe.state,
+        headBranchExists: livePrProbe.headBranchExists,
+        observedAt: dispatchContext.dispatchedAt,
+        workerClass,
+        dispatchWorkerClass,
+        workerId,
+      };
+    });
     deleteAmaCloserLease(rootDir, leaseIdentity);
     logger.log?.(
       `[ama-closer] no dispatch: PR ${repo}#${prNumber} is ${livePrProbe.state}; treating as already closed`
@@ -5729,19 +5738,22 @@ export async function maybeDispatchAmaCloser({
     });
   }
   if (livePrProbe?.state === 'OPEN' && livePrProbe?.headBranchExists === false) {
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
-      ...(current || {}),
-      state: 'no-dispatch',
-      status: 'abandoned-pr-closed',
-      reason: 'live-head-branch-missing',
-      prState: livePrProbe.state,
-      headBranchExists: false,
-      headRefName: livePrProbe.headRefName || null,
-      observedAt: dispatchContext.dispatchedAt,
-      workerClass,
-      dispatchWorkerClass,
-      workerId,
-    }));
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+      if (!current) return null;
+      return {
+        ...current,
+        state: 'no-dispatch',
+        status: 'abandoned-pr-closed',
+        reason: 'live-head-branch-missing',
+        prState: livePrProbe.state,
+        headBranchExists: false,
+        headRefName: livePrProbe.headRefName || null,
+        observedAt: dispatchContext.dispatchedAt,
+        workerClass,
+        dispatchWorkerClass,
+        workerId,
+      };
+    });
     deleteAmaCloserLease(rootDir, leaseIdentity);
     logger.log?.(
       `[ama-closer] no dispatch: PR ${repo}#${prNumber} head branch is missing; treating as already closed`

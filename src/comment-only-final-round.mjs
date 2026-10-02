@@ -5,6 +5,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
+import { withCommentOnlyRecovery, RECOVERY_SOURCE_PATH } from './comment-only-recovery-record.mjs';
+import { proveGeneratedIndexReplay } from './generated-index-replay.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 
 const SHA = /^[0-9a-f]{40}$/iu;
@@ -33,7 +35,12 @@ function cherryEntries(stdout) {
 }
 
 function hasWorkerJobTrailer(message, jobId) {
-  return String(message || '').split(/\r?\n/u).some((line) => line === `Worker-Job-Id: ${jobId}`);
+  if (!jobId || /[\r\n]/u.test(jobId)) return false;
+  const paragraph = String(message || '').trimEnd().split(/\r?\n\s*\r?\n/u).at(-1);
+  const lines = paragraph.split(/\r?\n/u);
+  return lines.every((line) => /^[A-Za-z][A-Za-z0-9-]*: .+$/u.test(line)) &&
+    lines.filter((line) => line.startsWith('Worker-Job-Id:')).length === 1 &&
+    lines.includes(`Worker-Job-Id: ${jobId}`);
 }
 
 /**
@@ -54,6 +61,11 @@ function hasWorkerJobTrailer(message, jobId) {
  *   3. every commit HEAD adds beyond the reviewed head and the base that is not
  *      such a replay carries this job's trailer
  *      (`git cherry <reviewed> HEAD origin/<base>`).
+ * PMSC-14: known agent-os/main generated-index policy may instead prove an
+ * ordered series of exact non-index binary patches, with the index unchanged
+ * from the live authoritative base. This is not a cumulative endpoint diff.
+ * Every success rechecks local HEAD/base and live head after immutable-SHA
+ * inspection. Downstream merge still checks exact live head under its lease.
  * A human commit replayed under the worker's, a conflict-rewritten reviewed
  * commit, or a merge fails closed. Every withheld proof logs its reason; a
  * `gh` failure throws so the job stays in progress and the next reconcile
@@ -88,36 +100,63 @@ export async function proveFinalRoundWorkerPush({
   };
   if (withheldBecause) return withheld(withheldBecause);
   if (!SHA.test(String(reviewedHead || ''))) return withheld('reviewed-head-invalid');
-  const git = async (args) => String((await execFileImpl('git', ['-C', workspaceDir, ...args], {
-    maxBuffer: 10 * 1024 * 1024,
-  })).stdout || '');
+  const deadline = Date.now() + 60000;
+  const git = async (args) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error('git-proof-deadline-exceeded');
+    return String((await execFileImpl('git', ['--no-replace-objects', '-C', workspaceDir, ...args], {
+      maxBuffer: 10 * 1024 * 1024, timeout: Math.min(15000, remaining),
+    })).stdout || '');
+  };
+  const lookup = async (args) => {
+    try {
+      return await execGhWithRetry({ execFileImpl, args, log, ...(sleep ? { sleep } : {}) });
+    } catch (err) { err.finalRoundLiveLookupFailure = true; throw err; }
+  };
   try {
     const localSha = (await git(['rev-parse', 'HEAD'])).trim();
     if (!SHA.test(localSha) || localSha !== liveHeadSha) return withheld(`live-head-mismatch local=${localSha.slice(0, 12) || 'none'}`);
     if (localSha === reviewedHead) return { workerPushedHeadSha: null, liveHeadSha, reason: 'no-push' };
-    if (!hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', 'HEAD']), jobId)) return withheld('head-not-worker-commit');
-    const base = `origin/${baseBranch}`;
+    const workerOwns = async (sha) => hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId);
+    if (!await workerOwns(localSha)) return withheld('head-not-worker-commit');
+    const baseRef = `origin/${baseBranch}`;
+    const base = (await git(['rev-parse', '--verify', `${baseRef}^{commit}`])).trim();
+    let governedProof = null;
     const dropped = cherryEntries(await git(['cherry', localSha, reviewedHead])).filter(({ sign }) => sign !== '-');
-    if (dropped.length > 0) return withheld(`reviewed-commit-not-replayed ${dropped[0].sha.slice(0, 12)}`);
+    if (dropped.length > 0) {
+      governedProof = await proveGeneratedIndexReplay({ repo, baseBranch, base, head: localSha, reviewedHead, git, workerOwns });
+      if (!governedProof) return withheld(`reviewed-commit-not-replayed ${dropped[0].sha.slice(0, 12)}`);
+      const authoritative = await lookup(['api', `repos/${repo}/git/ref/heads/${encodeURIComponent(baseBranch)}`, '--jq', '.object.sha']);
+      if (String(authoritative.stdout || '').trim() !== base) return withheld('generated-index-base-not-current');
+    }
     if ((await git(['rev-list', '--merges', localSha, `^${reviewedHead}`, `^${base}`])).trim()) {
       return withheld('merge-commit-in-push');
     }
     const pushed = cherryEntries(await git(['cherry', reviewedHead, localSha, base]));
     const added = pushed.filter(({ sign }) => sign !== '-');
-    for (const { sha } of added) {
-      if (!hasWorkerJobTrailer(await git(['show', '-s', '--format=%B', sha]), jobId)) {
+    for (const { sha } of governedProof ? [] : added) {
+      if (!await workerOwns(sha)) {
         return withheld(`foreign-commit-in-push ${sha.slice(0, 12)}`);
       }
     }
-    const reviewedCommitsReplayed = pushed.length - added.length;
+    const reviewedCommitsReplayed = governedProof?.reviewedCommitsReplayed ?? pushed.length - added.length;
+    const refreshed = await lookup(['pr', 'view', String(prNumber), '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid']);
+    if (governedProof) {
+      const currentBase = await lookup(['api', `repos/${repo}/git/ref/heads/${encodeURIComponent(baseBranch)}`, '--jq', '.object.sha']);
+      if (String(currentBase.stdout || '').trim() !== base) return withheld('base-changed-during-proof');
+    }
+    if (String(refreshed.stdout || '').trim() !== localSha ||
+        (await git(['rev-parse', 'HEAD'])).trim() !== localSha ||
+        (await git(['rev-parse', baseRef])).trim() !== base) return withheld('head-or-base-changed-during-proof');
     return {
       workerPushedHeadSha: localSha,
       liveHeadSha,
       reason: reviewedCommitsReplayed > 0 ? 'replayed-onto-base' : 'descendant',
-      proof: { method: FINAL_ROUND_REPLAY_PROOF, reviewedCommitsReplayed, workerCommits: added.length },
+      proof: { method: FINAL_ROUND_REPLAY_PROOF, reviewedCommitsReplayed, workerCommits: added.length, ...governedProof },
     };
   } catch (err) {
-    const diagnostic = String(err?.message || err).split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).join(' ');
+    if (err.finalRoundLiveLookupFailure) throw err;
+    const diagnostic = String(err?.message || err).split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).join(' ').slice(0, 2048);
     return { ...withheld(`git-proof-failed: ${diagnostic}`), transient: isTransientGitFailure(diagnostic) };
   }
 }
@@ -165,7 +204,10 @@ function scanCommentOnlyJobs(rootDir, status, repo, prNumber, log) {
     }
     try {
       const job = JSON.parse(contents);
-      if (job?.repo === repo && Number(job?.prNumber) === Number(prNumber)) jobs.push(job);
+      if (job?.repo === repo && Number(job?.prNumber) === Number(prNumber)) {
+        Object.defineProperty(job, RECOVERY_SOURCE_PATH, { value: join(dir, name) });
+        jobs.push(job);
+      }
     } catch (err) {
       log.warn?.(`[comment-only-final-round] Skipping malformed job ${join(dir, name)}: ${err?.message || err}`);
     }
@@ -201,7 +243,7 @@ function terminalFollowUpJobs(rootDir, repo, prNumber, log) {
     ...['completed', 'stopped', 'failed'].flatMap((status) =>
       scanCommentOnlyJobs(rootDir, status, repo, prNumber, log).map((job) => ({ status, job }))),
     ...scanArchivedStoppedFollowUpJobs(rootDir, repo, prNumber, log).map((job) => ({ status: 'stopped', job })),
-  ];
+  ].map((entry) => ({ ...entry, job: withCommentOnlyRecovery(rootDir, entry.job) }));
 }
 
 function isTerminalFinalRound(status, job) {
@@ -230,7 +272,8 @@ export function hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha 
 export function hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha }, log = console) {
   if (!SHA.test(String(headSha || ''))) return false;
   return terminalFollowUpJobs(rootDir, repo, prNumber, log).some(({ status, job }) =>
-    isTerminalFinalRound(status, job) && job.completion?.withheldPushHeadSha === headSha);
+    isTerminalFinalRound(status, job) && job.completion?.withheldPushHeadSha === headSha &&
+      job.completion?.workerPushedHeadSha !== headSha);
 }
 
 // COMMENTCLOSE-01: the terminal final-round job that pushed `workerPushedHeadSha`

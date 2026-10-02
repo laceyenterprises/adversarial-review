@@ -52,6 +52,55 @@ retries transient GitHub failures. A transient git failure during the proof
 persists, reconcile leaves the job in progress and retries on later ticks for up
 to one hour before treating the proof as withheld.
 
+PMSC-14 adds one versioned generated-index policy, `agent-os-main-index-v1`,
+only for `laceyenterprises/agent-os` targeting `main`. Its authority is the pinned
+blob of `scripts/check-generated-index-pr-diff.py` plus the authoritative
+`.gitattributes` declaration; both governance files must remain unchanged at the
+pushed head. Unknown repositories, branches, or policy versions fail closed.
+Only literal `docs/INDEX.md` may be omitted from reviewed patches. Every other
+reviewed binary patch, including modes, paths, full blob IDs and cancellations,
+must replay exactly once in order before any job-owned remediation commits.
+INDEX-only reviewed commits may be omitted. Every pushed commit must retain the
+fresh base's regular-file index blob, and live GitHub main must equal the pinned
+base at both fences. A delayed recovery may use the actual earlier rebase
+anchor only when newer authoritative main retains identical index/governance
+bytes and its changed paths do not overlap any reviewed or pushed commit;
+file/directory prefix collisions also fail closed. This still needs a normal
+hammer rebase/validation before merge when the existing closure policy requires
+it. Root may hydrate an isolated proof workspace with these immutable objects
+and live origin/main, leaving the historical worker tree untouched.
+No generated-file glob, whitespace-only patch ID, or
+cumulative endpoint diff grants this exception. The history is limited to 256
+commits per side, Git calls to 15 seconds each within a 60-second inspection
+budget, and Git diagnostics to 2048 characters. Replace objects, external diffs
+and text conversions cannot alter the proof. All proofs recheck local HEAD/base
+and live PR head after inspection; merge still requires its own live exact-head
+validation under the existing lease.
+
+A native owner may explicitly preview a historical stopped final round:
+
+```bash
+npm run follow-up:reconcile -- --recover-comment-only <job-id> --workspace <historical-worker-workspace>
+```
+
+After reviewed deployment and resident reload proof, adding `--apply` appends an
+immutable recovery record under `data/follow-up-jobs/final-round-recoveries/`.
+This is limited to three published evaluations per job, including withheld
+attempts. Eligible jobs retain Comment only suppression, a completed recorded
+worker, a `no-progress`/`max-rounds-reached` stop, and the original
+`reviewed-commit-not-replayed` withheld head. Recovery verifies native file
+ownership, supported worker liveness, no active follow-up/AMA owner, an open live
+PR at that exact withheld head, the original validated reply, a clean read-only
+workspace and the governed replay proof. It repeats ownership/artifact/proof
+checks before publication. It never fetches, edits the historical worktree,
+rewrites the job/review/withheld reason, manufactures LRQ completion, dispatches
+or merges. Preview cannot grant authority. Readers bind successful recovery to
+the original job digest and head, including after stopped-job archival; original
+terminal status, failure and round accounting remain intact. Normal watcher
+reconciliation can subsequently use that proof without a new cross-model review
+solely because the eligible final-round head changed. The fix itself still
+requires exact-head cross-model convergence and normal governed deployment.
+
 When the proof is withheld while the PR head moved, the job records that head as
 `completion.withheldPushHeadSha`. HELDHEAD-01 queues one automatic exact-head
 review when that SHA remains current and no reviewer or closer owns it. The

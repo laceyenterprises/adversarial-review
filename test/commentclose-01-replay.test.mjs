@@ -193,7 +193,7 @@ function pr7311WorkspaceExec(jobId) {
   const trailer = `Retry transient RTK downloads\n\nWorker-Job-Id: ${jobId}\n`;
   return async (command, args) => {
     if (command === 'gh') return { stdout: `${PR_7311_PUSHED}\n` };
-    const argv = args.slice(2);
+    const argv = args.slice(args.indexOf('-C') + 2);
     if (argv[0] === 'rev-parse') return { stdout: `${PR_7311_PUSHED}\n` };
     if (argv[0] === 'show') return { stdout: trailer };
     if (argv[0] === 'rev-list') return { stdout: '' };

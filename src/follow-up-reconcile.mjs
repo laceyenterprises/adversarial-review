@@ -111,6 +111,18 @@ async function reconcileInProgressFollowUpJobs({
 
 async function main() {
   try {
+    if (process.argv.includes('--recover-comment-only')) {
+      const value = (flag) => process.argv[process.argv.indexOf(flag) + 1];
+      const jobId = value('--recover-comment-only');
+      const workspaceDir = process.argv.includes('--workspace') ? value('--workspace') : null;
+      if (!jobId || jobId.startsWith('--') || !workspaceDir || workspaceDir.startsWith('--')) {
+        throw new Error('Recovery requires --recover-comment-only <job-id> --workspace <historical-worker-workspace> [--apply]');
+      }
+      const { recoverTerminalCommentOnlyRound } = await import('./comment-only-final-round-recovery.mjs');
+      console.log(JSON.stringify(await recoverTerminalCommentOnlyRound({ rootDir: ROOT, jobId, workspaceDir,
+        apply: process.argv.includes('--apply') }), null, 2));
+      return;
+    }
     const results = await reconcileInProgressFollowUpJobs();
     if (results.length === 0) {
       console.log('[follow-up-reconcile] No in-progress follow-up jobs found.');

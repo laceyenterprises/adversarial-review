@@ -1,0 +1,86 @@
+[
+  {
+    "old": "15eef1441403",
+    "new": "1d488b375",
+    "oldImplementationPatchId": "6b1fdfaf5d790dd574f61054ed26d1ed3ad911d8",
+    "newImplementationPatchId": "6b1fdfaf5d790dd574f61054ed26d1ed3ad911d8",
+    "equal": true,
+    "oldPaths": [
+      "docs/INDEX.md",
+      "docs/postmortems/SEV3-PMSC-11-external-operator-plan-pr-open-2026-10-02.md",
+      "modules/worker-pool/docs/registered-external-plans.md",
+      "modules/worker-pool/lib/hq-plan-validate.sh",
+      "modules/worker-pool/lib/hq-pr-open.sh",
+      "modules/worker-pool/lib/python/cwp_dispatch/dispatch.py",
+      "modules/worker-pool/lib/python/cwp_dispatch/external_plan_provenance.py",
+      "modules/worker-pool/lib/python/cwp_dispatch/pr_open_plan_lookup.py",
+      "modules/worker-pool/test/test-hq-pr-open-cross-repo.sh",
+      "modules/worker-pool/test/test-hq-pr-open.sh",
+      "modules/worker-pool/test/test_external_plan_dispatch_pr.py",
+      "modules/worker-pool/test/test_external_plan_provenance.py",
+      "platform/session-ledger/src/session_ledger/dag_plans.py",
+      "projects/worker-pool/SPEC.md",
+      "scripts/ci-mirror/checks.agent-os.json"
+    ],
+    "newPaths": [
+      "docs/postmortems/SEV3-PMSC-11-external-operator-plan-pr-open-2026-10-02.md",
+      "modules/worker-pool/docs/registered-external-plans.md",
+      "modules/worker-pool/lib/hq-plan-validate.sh",
+      "modules/worker-pool/lib/hq-pr-open.sh",
+      "modules/worker-pool/lib/python/cwp_dispatch/dispatch.py",
+      "modules/worker-pool/lib/python/cwp_dispatch/external_plan_provenance.py",
+      "modules/worker-pool/lib/python/cwp_dispatch/pr_open_plan_lookup.py",
+      "modules/worker-pool/test/test-hq-pr-open-cross-repo.sh",
+      "modules/worker-pool/test/test-hq-pr-open.sh",
+      "modules/worker-pool/test/test_external_plan_dispatch_pr.py",
+      "modules/worker-pool/test/test_external_plan_provenance.py",
+      "platform/session-ledger/src/session_ledger/dag_plans.py",
+      "projects/worker-pool/SPEC.md",
+      "scripts/ci-mirror/checks.agent-os.json"
+    ]
+  },
+  {
+    "old": "5b83e6ce8",
+    "new": "2afcf54d3",
+    "oldImplementationPatchId": "26b424c606752dc580ca32647a34754f255ee27b",
+    "newImplementationPatchId": "26b424c606752dc580ca32647a34754f255ee27b",
+    "equal": true,
+    "oldPaths": [
+      "docs/postmortems/SEV3-PMSC-11-external-operator-plan-pr-open-2026-10-02.md"
+    ],
+    "newPaths": [
+      "docs/postmortems/SEV3-PMSC-11-external-operator-plan-pr-open-2026-10-02.md"
+    ]
+  },
+  {
+    "old": "937185a30",
+    "new": "799bf8b0c",
+    "oldImplementationPatchId": "26cfbbb757f2a694a8de2c9d44d7c03258be9ade",
+    "newImplementationPatchId": "26cfbbb757f2a694a8de2c9d44d7c03258be9ade",
+    "equal": true,
+    "oldPaths": [
+      "docs/INDEX.md",
+      "modules/worker-pool/lib/hq-plan-validate.sh",
+      "modules/worker-pool/lib/hq-pr-open.sh",
+      "modules/worker-pool/lib/python/cwp_dispatch/pr_open_plan_resolution.py",
+      "platform/session-ledger/src/session_ledger/hardening_contracts.py",
+      "scripts/ci-mirror/checks.agent-os.json"
+    ],
+    "newPaths": [
+      "modules/worker-pool/lib/hq-plan-validate.sh",
+      "modules/worker-pool/lib/hq-pr-open.sh",
+      "modules/worker-pool/lib/python/cwp_dispatch/pr_open_plan_resolution.py",
+      "platform/session-ledger/src/session_ledger/hardening_contracts.py",
+      "scripts/ci-mirror/checks.agent-os.json"
+    ]
+  },
+  {
+    "omittedResetCommit": "adc88d1635",
+    "paths": [
+      "docs/INDEX.md"
+    ],
+    "finalIndexMatchesTrunk": true,
+    "head": "6028e2a63ec132b02ed857ec2a9e44c81da9a0ef",
+    "trunk": "0c84b192601a03ff44f5fdc87ddec5b28f9d3e46"
+  }
+]

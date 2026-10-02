@@ -146,7 +146,7 @@ test('worker proof retries a transient live lookup and remains re-entrant after 
     },
   };
   assert.equal((await proveFinalRoundWorkerPush(args)).workerPushedHeadSha, pushed);
-  assert.equal(attempts, 3);
+  assert.equal(attempts, 4, 'three initial attempts plus the final live-head fence');
   await assert.rejects(proveFinalRoundWorkerPush({
     ...args, execFileImpl: async (command, argv) => {
       if (command === 'gh') throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });

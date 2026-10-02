@@ -93,7 +93,7 @@ function pushedWorkspaceExec({ jobId = 'example__repo-pr-42-final', head = pushe
   return async (command, args) => {
     if (command === 'gh') return { stdout: args[0] === 'api' ? 'ahead\n' : `${head}\n` };
     if (args.includes('show')) return { stdout: `fix\n\nWorker-Job-Id: ${jobId}\n` };
-    if (args.includes('cherry')) return { stdout: args.at(-1) === `origin/main` ? `+ ${head}\n` : '' };
+    if (args.includes('cherry')) return { stdout: args.includes('cherry') && args.slice(args.indexOf('cherry') + 1).length === 3 ? `+ ${head}\n` : '' };
     if (args.includes('rev-list')) return { stdout: '' };
     return { stdout: `${head}\n` };
   };

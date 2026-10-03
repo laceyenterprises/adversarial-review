@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -6,7 +7,7 @@ import { join } from 'node:path';
 
 import {
   headHasValidatedHamTerminalRemediation,
-  runDaemonCleanMergeAttempt,
+  runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal,
 } from '../src/daemon-clean-merge.mjs';
 import { DAEMON_MERGE_DISPOSITION } from '../src/ama/daemon-merge.mjs';
 
@@ -418,3 +419,11 @@ test('the HAM re-merge declines when the audit marker resolves without a concret
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+// Inject history evidence so these wiring fixtures remain offline.
+function runDaemonCleanMergeAttempt(args) {
+  return runDaemonCleanMergeAttemptReal({
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    ...args,
+  });
+}

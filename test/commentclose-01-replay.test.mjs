@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 // COMMENTCLOSE-01 replay (SEV2 2026-09-28, "the comment-only fix rarely engages,
 // and when it does the PR strands").
 //
@@ -25,7 +26,7 @@ import {
 } from '../src/ama-closure-orchestration.mjs';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
-import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
+import { runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal } from '../src/daemon-clean-merge.mjs';
 import { isTerminalCloserCommitIdentity } from '../src/head-closer-commit-suppression.mjs';
 import { proveCommentOnlyFinalRoundHead } from '../src/comment-only-final-round.mjs';
 import {
@@ -413,3 +414,11 @@ test('replay #7311: the worker-opened draft is named as a draft, not a state cha
   assert.equal(settled.needsOperator, true);
   assert.equal(settled.operatorReason, 'pr-is-draft');
 });
+
+// Inject history evidence so these wiring fixtures remain offline.
+function runDaemonCleanMergeAttempt(args) {
+  return runDaemonCleanMergeAttemptReal({
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    ...args,
+  });
+}

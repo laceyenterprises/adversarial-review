@@ -1,3 +1,4 @@
+import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -422,6 +423,14 @@ export async function fetchHeadCloserVerifiedCommit({
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
+  const withPrimaryChange = async (commit) => ({ ...normalizeVerifiedCloserCommit(commit),
+    primaryChange: await fetchPrimaryChange({ repo: repoPath, prNumber, headSha: sha,
+      get: async (path) => {
+        const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, retries: 0 });
+        return JSON.parse(stdout);
+      },
+    }),
+  });
   // Daemon-robust: read the closer commit from the local checkout first. The remote
   // `gh api commits` fetch fails-closed in the watcher daemon context (no interactive
   // gh auth), which silently starved the hammer stale-review-head resume for every
@@ -440,7 +449,7 @@ export async function fetchHeadCloserVerifiedCommit({
   });
   if (localCommit) {
     const localIdentity = isTerminalCloserCommitIdentity(localCommit);
-    if (localIdentity?.suppressed === true) return normalizeVerifiedCloserCommit(localCommit);
+    if (localIdentity?.suppressed === true) return withPrimaryChange(localCommit);
   }
   const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
   try {
@@ -455,7 +464,7 @@ export async function fetchHeadCloserVerifiedCommit({
       sleep: sleepImpl,
     });
     const parsed = JSON.parse(String(stdout || '{}'));
-    return normalizeVerifiedCloserCommit(parsed);
+    return withPrimaryChange(parsed);
   } catch (err) {
     logger?.warn?.(
       `[watcher] closer commit verification fetch failed for ${repoPath}#${prNumber} ` +

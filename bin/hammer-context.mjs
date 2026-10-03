@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // One bounded GitHub snapshot; no Agent OS installation or local daemon required.
+import { fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -58,7 +59,18 @@ try {
       } catch { /* Unreadable local lease is reported as unavailable below. */ }
     }
   }
+  const primaryChange = await fetchPrimaryChange({ repo, prNumber: number, headSha: head,
+    get: (path) => get(['api', path]) });
+  // Before the first hammer commit the current author head defines the primary diff.
+  if (primaryChange.hasHammerCommits === false) {
+    const authorDiff = get(['api', `repos/${repo}/compare/${pr.base.sha}...${head}`]);
+    primaryChange.primaryHead = head;
+    primaryChange.mergeBase = authorDiff.merge_base_commit?.sha;
+    primaryChange.primaryFiles = authorDiff.files;
+  }
   const output = {
+    primaryChange,
+    statedIntent: pr.body || '',
     pr: { repo, number: Number(number), state: pr.state, merged: Boolean(pr.merged_at), draft: Boolean(pr.draft), mergeable: pr.mergeable, mergeableState: pr.mergeable_state, base: pr.base?.ref },
     head,
     review: verdict ? { state: verdict.state, author: verdict.user?.login, submittedAt: verdict.submitted_at, findings: compact(verdict.body, 1800), findingsBytes, findingsTruncated: findingsBytes > Buffer.byteLength(compact(verdict.body, 1800)) } : null,
@@ -71,7 +83,7 @@ try {
     localStateAvailable: Boolean(statePath || existsSync(join(localRoot, 'data'))),
   };
   const serialized = JSON.stringify(output);
-  if (Buffer.byteLength(serialized) > 8192) throw new Error('snapshot exceeds 8192 bytes');
+  if (Buffer.byteLength(serialized) > 1024 * 1024) throw new Error('snapshot exceeds 1 MiB');
   process.stdout.write(`${serialized}\n`);
 } catch (error) {
   process.stderr.write(`${compact(error.message, 800)}\n`);

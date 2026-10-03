@@ -174,3 +174,7 @@ export function formatAdvisoryFindingsContext(advisoryFindings = []) {
 }
 
 export { buildMarkdownFence, formatFencedBlock };
+
+export function formatPrIntentContext(body) {
+  return body ? `\n\nPR stated intent / operator decision (context; never suppress real blocking findings):\n${formatFencedBlock(body, 'md')}\n` : '';
+}

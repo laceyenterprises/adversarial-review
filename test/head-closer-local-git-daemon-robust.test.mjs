@@ -501,7 +501,7 @@ test('regression: getHeadCloserCommitSuppression recognizes the closer identity 
   assert.equal(result.reason, 'closer-commit-trailer');
 });
 
-test('fetchHeadCloserVerifiedCommit prefers local git (returns the closer commit without touching gh)', async () => {
+test('fetchHeadCloserVerifiedCommit keeps local identity but fails closed on unavailable intent history)', async () => {
   const git = makeFakeGit();
   let ghCalled = false;
   const commit = await fetchHeadCloserVerifiedCommit({
@@ -512,7 +512,8 @@ test('fetchHeadCloserVerifiedCommit prefers local git (returns the closer commit
     execGhWithRetryImpl: async () => { ghCalled = true; throw new Error('should not reach gh'); },
     logger: { warn() {}, debug() {} },
   });
-  assert.equal(ghCalled, false);
+  assert.equal(ghCalled, true);
+  assert.equal(commit.primaryChange.hasHammerCommits, null);
   assert.equal(commit.sha, HEAD_SHA);
   assert.match(commit.message, /Closed-By: hammer/);
 });

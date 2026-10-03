@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 // COMMENTCLOSE-02 replay (SEV3 2026-09-29, "a stale auto-refresh rereview reason
 // bypasses the comment-only final-round close", agent-os#7340).
 //
@@ -34,7 +35,7 @@ import {
 } from '../src/ama-closure-orchestration.mjs';
 import { isHammerRemediableEligibilityMiss, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
-import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
+import { runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal } from '../src/daemon-clean-merge.mjs';
 import { isTerminalCloserCommitIdentity } from '../src/head-closer-commit-suppression.mjs';
 import { proveCommentOnlyFinalRoundHead } from '../src/comment-only-final-round.mjs';
 import { getFollowUpJobDir, summarizePRRemediationLedger, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
@@ -424,3 +425,11 @@ test('a genuine pending head-change re-review of the pushed head keeps failing c
   assert.equal(payload.reviewState.blockingFindingState, 'unknown');
   assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, false);
 });
+
+// Inject history evidence so these wiring fixtures remain offline.
+function runDaemonCleanMergeAttempt(args) {
+  return runDaemonCleanMergeAttemptReal({
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    ...args,
+  });
+}

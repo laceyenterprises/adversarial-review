@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -9,7 +10,7 @@ import {
   maybeDispatchAmaClosureFor,
   readHeadAttestationChainForPr,
   resolveOperatorMergeAccountability,
-  runDaemonCleanMergeAttempt,
+  runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal,
   resolveDaemonWorkerIdentityForPr,
   resolveDaemonWorkerIdentityFromHeadAttestation,
 } from '../src/watcher.mjs';
@@ -3646,3 +3647,11 @@ test('resolveOperatorMergeAccountability requires a head-scoped, attributable, p
   assert.equal(resolveOperatorMergeAccountability({ mergeHeadSha: head }), null);
   assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeHeadSha: '' }), null);
 });
+
+// Inject history evidence so these wiring fixtures remain offline.
+function runDaemonCleanMergeAttempt(args) {
+  return runDaemonCleanMergeAttemptReal({
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    ...args,
+  });
+}

@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ import {
   enqueueArgusSecurityReview,
   findArgusJob,
 } from '../src/argus-security-queue.mjs';
-import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
+import { runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal } from '../src/daemon-clean-merge.mjs';
 import { attemptDaemonCleanMerge } from '../src/ama/daemon-merge.mjs';
 
 const HEAD = 'a'.repeat(40);
@@ -346,3 +347,11 @@ test('daemon clean merge returns the live gate when pre-lease CI is pending', as
   assert.deepEqual(result.reasons, ['ci-not-green', 'labels-unavailable']);
   assert.deepEqual(result.liveGate.requiredChecks, [pendingCheck]);
 }));
+
+// Inject history evidence so these wiring fixtures remain offline.
+function runDaemonCleanMergeAttempt(args) {
+  return runDaemonCleanMergeAttemptReal({
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    ...args,
+  });
+}

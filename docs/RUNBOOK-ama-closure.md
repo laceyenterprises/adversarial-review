@@ -1185,6 +1185,15 @@ counts must survive (whitespace is normalized). In-place fixes to added author
 lines are allowed. This syntactic check does not prove semantic intent;
 reviewers and the hammer still inspect inversions and neutralizations.
 
+The hammer's `bin/primary-change-context.mjs` reads each GitHub endpoint through
+`execGhWithRetry`: transient transport, timeout, rate-limit and HTTP 5xx failures
+get at most three attempts with 500/1000ms backoff and a 15-second timeout per
+attempt. Permanent permission errors are not retried; rejected credentials use
+the helper's single forced token-refresh attempt. Exhausted reads and malformed
+JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
+`primary-change-read-failed` rather than a proven reversal. The hammer prompt's
+90-second process limit still bounds the complete collection.
+
 For `primary-change-unknown` or `primary-change-reverted`, inspect the head-scoped
 primary-change evidence (`node bin/primary-change-context.mjs <repo> <pr> <head>`)
 and the PR diff. Resolve missing evidence or restore the primary effect if that

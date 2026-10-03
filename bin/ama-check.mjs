@@ -555,7 +555,12 @@ function main(argv = process.argv.slice(2)) {
   }
   const primaryChange = args['primary-change'] ? loadJson(args['primary-change'])
     : { headSha: prMetadata.headSha, hasHammerCommits: null };
-  if (hamTerminalRemediationGroundTruth?.commit) hamTerminalRemediationGroundTruth.commit.primaryChange = primaryChange;
+  if (hamTerminalRemediationGroundTruth?.commit) {
+    hamTerminalRemediationGroundTruth = {
+      ...hamTerminalRemediationGroundTruth,
+      commit: { ...hamTerminalRemediationGroundTruth.commit, primaryChange },
+    };
+  }
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     primaryChange,
     hamTerminalRemediation,

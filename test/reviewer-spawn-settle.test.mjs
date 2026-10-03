@@ -246,11 +246,7 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
 
   assert.deepEqual(markedPosted, []);
   assert.deepEqual(released, [['stale-session', 'laceyenterprises/demo', 140]]);
-  assert.equal(leaseReleased.length, 1);
-  assert.match(leaseReleased[0][0], /^\d{4}-\d{2}-\d{2}T/);
-  assert.equal(leaseReleased[0][1], 'reviewer output targeted stale head');
-  assert.equal(leaseReleased[0][2], 'laceyenterprises/demo');
-  assert.equal(leaseReleased[0][3], 140);
+  assert.equal(leaseReleased.length, 0);
 });
 
 test('spawnReviewer does not post unmarked adapter review bodies', async () => {

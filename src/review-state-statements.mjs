@@ -504,3 +504,35 @@ export function sqlSumReviewerPassSpendSince(repoCount) {
     + 'WHERE (started_at >= ? OR (started_at >= ? AND started_at < ?)) '
     + `AND repo COLLATE NOCASE IN (${placeholders})`;
 }
+
+// Session-bound, uncharged release for a reviewer that did not post.
+export function prepareReleaseLegacyStaleReviewerClaim(db) {
+  // A legacy claim can lack a session. Never release a replacement session,
+  // even if that replacement is reviewing the same head.
+  return db.prepare(`UPDATE reviewed_prs
+      SET review_status = 'pending',
+          reviewer_started_at = NULL,
+          reviewer_head_sha = NULL,
+          reviewer_timeout_ms = NULL,
+          reviewer_lease_expires_at = NULL,
+          reviewer_pgid = NULL
+    WHERE repo = ? AND pr_number = ?
+      AND review_status = 'reviewing'
+      AND reviewer_head_sha = ?
+      AND reviewer_session_uuid IS NULL`);
+}
+
+export function prepareReleaseReviewerClaim(db) {
+  return db.prepare(`UPDATE reviewed_prs
+      SET review_status = 'pending',
+          reviewer_session_uuid = NULL,
+          reviewer_started_at = NULL,
+          reviewer_head_sha = NULL,
+          reviewer_timeout_ms = NULL,
+          reviewer_lease_expires_at = NULL,
+          reviewer_pgid = NULL
+    WHERE reviewer_session_uuid = ?
+      AND repo = ?
+      AND pr_number = ?
+      AND review_status = 'reviewing'`);
+}

@@ -13,6 +13,7 @@
 // helpers/constants). Leaf helpers and prepared statements are imported directly
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
+import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { randomUUID } from 'node:crypto';
 import { resolveBuilderProvenanceRouting } from './builder-provenance-routing.mjs';
 import {
@@ -595,7 +596,9 @@ const previousAfhGroundingByProbeKey = new Map();
 // crash loop.
 export function reviewRowInTerminalFailureState(row, currentHeadSha) {
   if (!row) return false;
-  if (row.review_status === 'failed') return true;
+  if (row.review_status === 'failed') {
+    return !row.reviewer_head_sha || !currentHeadSha || String(row.reviewer_head_sha) === String(currentHeadSha);
+  }
   if (row.review_status !== 'pending') return false;
   if (!row.failed_at) return false;
   if (!(Number(row.review_attempts || 0) > 0)) return false;
@@ -1971,6 +1974,27 @@ export async function processReviewSubject(entry, ctx) {
 
       let current = stmtGetReviewRow.get(repoPath, prNumber);
       const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
+      if (current?.review_status === 'failed' && current.reviewer_head_sha &&
+          subject.headSha && current.reviewer_head_sha !== subject.headSha && !subject.terminal) {
+        try {
+          const rearmed = requestReviewRereview({
+            rootDir: ROOT, db, repo: repoPath, prNumber,
+            targetRevisionRef: pendingRevisionRef,
+            expectedFailedHead: current.reviewer_head_sha,
+            reason: 'Failed review superseded by a new PR head.',
+          });
+          if (!rearmed.triggered) {
+            console.warn(`[watcher] Failed review re-arm blocked for ${repoPath}#${prNumber}: ${rearmed.reason}`);
+            return;
+          }
+          current = rearmed.reviewRow;
+          existing = current;
+        } catch (error) {
+          console.warn(`[watcher] Failed review re-arm failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
+          return;
+        }
+      }
+
       // RPL-04: drain this PR's durable rereview wake requests here, in the
       // admission lane, because this is the first point in the tick where the
       // review row and the live head are both known. The drain records what
@@ -2267,27 +2291,28 @@ export async function processReviewSubject(entry, ctx) {
       if (inTerminalFailure && !infraRecoveryClass && !unknownFailureRetryable && !reviewPopulationRetryable) {
         if (unknownFailureClass) {
           finalizePendingTerminalFailureState(current);
-          console.log(
-            `[watcher] Unknown reviewer failure retry cap exhausted for ${repoPath}#${prNumber}: ` +
-              `attempts=${unknownFailureAttempts}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES}; ` +
-              `leaving evidence intact`
-          );
+          await parkExhaustedReview({
+            rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+            reason: `unknown reviewer failure attempts=${unknownFailureAttempts}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES}`,
+            deliverAlertFn,
+          });
           return;
         }
         if (populationRetry.matched && populationRetry.action === 'exhausted') {
           finalizePendingTerminalFailureState(current);
-          console.log(
-            `[watcher] Review-population retry cap exhausted for ${repoPath}#${prNumber}: ` +
-              `class=${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}; ` +
-              `leaving evidence intact`
-          );
+          await parkExhaustedReview({
+            rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+            reason: `${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}`,
+            deliverAlertFn,
+          });
           return;
         }
         finalizePendingTerminalFailureState(current);
-        console.log(
-          `[watcher] Skipping failed review ${repoPath}#${prNumber}: ` +
-            `failure is not infrastructure-recoverable; leaving evidence intact`
-        );
+        await parkExhaustedReview({
+          rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+          reason: 'failure is not infrastructure-recoverable; leaving evidence intact',
+          deliverAlertFn,
+        });
         return;
       }
       if (infraRecoveryClass === 'reviewer-command-failed') {
@@ -3325,6 +3350,8 @@ export async function processReviewSubject(entry, ctx) {
                   repoPath,
                   prNumber,
                   result: postedResult,
+                  reviewerSessionUuid,
+                  reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
                   reviewerModel: route.reviewerModel,
@@ -3383,6 +3410,8 @@ export async function processReviewSubject(entry, ctx) {
                   repoPath,
                   prNumber,
                   result,
+                  reviewerSessionUuid,
+                  reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
                   reviewerModel: route.reviewerModel,

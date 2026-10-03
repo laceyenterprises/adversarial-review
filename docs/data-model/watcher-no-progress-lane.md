@@ -3,7 +3,7 @@
 **Owner:** watcher posted-review dispatch fairness
 **Store:** `data/watcher-no-progress-lane/`
 **Source of truth:** `src/watcher-no-progress-lane.mjs`
-**Runtime surface:** `src/posted-review-row.mjs`, `src/watcher-no-progress-lane.mjs`
+**Runtime surface:** `src/posted-review-row.mjs`, `src/watcher-no-progress-lane.mjs`, `src/review-retry-exhaustion.mjs`, `src/pollonce-phases.mjs`
 
 ## Purpose
 
@@ -11,6 +11,13 @@
 posted-review subjects that keep being walked without any durable review-state
 progress. The watcher uses the ledger to demote unchanged subjects onto a
 bounded slow lane while still rechecking them on a capped cadence.
+
+Same-head failed reviews also enter `operator-blocked` with fingerprint and
+operator reason `review-retry-cap-exhausted` when unknown or review-population
+retry budgets are spent, or the failure is not infrastructure-recoverable.
+`parkExhaustedReview` retains SQLite failure evidence, sends one alert per head
+and fingerprint, and logs persistence or delivery errors without aborting the
+review loop.
 
 The ledger is keyed by PR, with the current head stored inside the document. A
 new head is treated as fresh evidence and is walked immediately.

@@ -1875,3 +1875,126 @@ test('watcher declines an FSR-06B request it cannot verify instead of leaving th
     `FSR-06B declined: remediation-round-budget-exhausted; reviewed=${clone.reviewed} live=${clone.live}`
   );
 });
+
+for (const suppressionReason of ['same-head-review-in-flight', 'other-suppression']) {
+  test(`REVIEWSTALL-01: ${suppressionReason} does not consume attempts after new-head re-arm`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-reviewstall-suppression-'));
+    const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+    const registerPath = path.join(tmp, 'fixture-register.mjs');
+    const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+    try {
+      const loader = buildLoaderSource().replace(
+        "return async () => ({ suppressed: false, reason: 'fixture' });",
+        `return async () => ({ suppressed: true, reason: '${suppressionReason}' });`,
+      );
+      writeFileSync(loaderPath, loader);
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({
+        prePollSetup: `
+          db.prepare(\`INSERT INTO reviewed_prs
+            (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+             reviewer_head_sha, revision_ref, failed_at, failure_message)
+            VALUES (?, 101, '2026-10-03', 'claude', 'open', 'failed', 3,
+                    'old-head', 'old-head', '2026-10-03', 'Command failed with code 1')\`)
+            .run('laceyenterprises/adversarial-review');
+        `,
+        afterFirstPoll: `
+          const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+          assert.equal(row.review_status, 'pending');
+          assert.equal(row.review_attempts, 0);
+          assert.ok(!claims.some(claim => claim.prNumber === 101));
+          const archived = db.prepare('SELECT row_json FROM review_failure_archive WHERE pr_number = 101').get();
+          assert.equal(JSON.parse(archived.row_json).review_attempts, 3);
+          assert.equal(JSON.parse(archived.row_json).failure_message, 'Command failed with code 1');
+          await pollOnce(octokit, pollOptions);
+          assert.equal(db.prepare('SELECT review_attempts FROM reviewed_prs WHERE pr_number = 101').get().review_attempts, 0);
+        `,
+      }));
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const scenario of ['stale-subprocess', 'rearm-exception', 'rearm-refused', 'nonrecoverable-failure']) {
+  test(`REVIEWSTALL-01 watcher settles ${scenario} without losing the claim loop`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-reviewstall-settle-'));
+    const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+    const registerPath = path.join(tmp, 'fixture-register.mjs');
+    const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+    try {
+      let loader = buildLoaderSource(scenario === 'stale-subprocess' ? {
+        reviewerRuntimeSource: `
+          globalThis.__watcherClaimLoopReviewerSpawns = [];
+          export function createReviewerRuntimeAdapterForDomain() {
+            return { spawnReviewer: async (payload) => {
+              globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+              return { ok: false, exitCode: 75, failureClass: 'stale-review-head',
+                stderrTail: '[stale-review-head] refusing obsolete post' };
+            }, cancel: async () => {}, reattach: async () => ({}) };
+          }
+          export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+          export function loadDomainConfig() { return {}; }
+          export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+        `,
+      } : {});
+      if (scenario === 'nonrecoverable-failure') {
+        loader = loader.replace('  return nextLoad(url, context);', `
+          if (url === ${JSON.stringify(fileUrl('src', 'review-retry-exhaustion.mjs'))}) {
+            return { format: 'module', shortCircuit: true, source:
+              'export async function parkExhaustedReview(args) { globalThis.__reviewstallParks = [args]; }' };
+          }
+          return nextLoad(url, context);
+        `);
+      }
+      writeFileSync(loaderPath, loader);
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      const rearmScenario = scenario.startsWith('rearm-');
+      writeFileSync(runnerPath, buildRunnerSource({
+        prePollSetup: scenario === 'stale-subprocess' ? '' : `
+          db.prepare(\`INSERT INTO reviewed_prs
+            (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+             reviewer_head_sha, revision_ref, failed_at, failure_message)
+            VALUES (?, 101, '2026-10-03', 'claude', 'open', 'failed', 3,
+              ?, ?, '2026-10-03', ?)\`)
+            .run('laceyenterprises/adversarial-review',
+              ${JSON.stringify(rearmScenario ? 'old-head' : 'sha-happy-101')},
+              ${JSON.stringify(rearmScenario ? 'old-head' : 'sha-happy-101')},
+              ${JSON.stringify(rearmScenario ? 'Command failed with code 1' : '[bug] SyntaxError')});
+          ${scenario === 'rearm-exception' ? `db.exec(\`CREATE TRIGGER reject_archive BEFORE INSERT ON review_failure_archive
+            BEGIN SELECT RAISE(ABORT, 'fixture archive unavailable'); END\`);` : ''}
+          ${scenario === 'rearm-refused' ? `db.exec(\`CREATE TRIGGER refuse_reset BEFORE UPDATE ON reviewed_prs
+            WHEN OLD.pr_number = 101 AND OLD.review_status = 'failed'
+            BEGIN SELECT RAISE(IGNORE); END\`);` : ''}
+        `,
+        afterFirstPoll: `
+          const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+          assert.equal(row.review_status, ${JSON.stringify(scenario === 'stale-subprocess' ? 'pending' : 'failed')});
+          assert.equal(row.review_attempts, ${scenario === 'stale-subprocess' ? 0 : 3});
+          ${scenario === 'stale-subprocess' ? `
+            assert.equal(row.reviewer_session_uuid, null);
+            assert.equal(row.reviewer_lease_expires_at, null);
+          ` : 'assert.ok(!claims.some(claim => claim.prNumber === 101));'}
+          ${scenario === 'nonrecoverable-failure' ? `
+            assert.equal(globalThis.__reviewstallParks.length, 1);
+            assert.equal(globalThis.__reviewstallParks[0].headSha, 'sha-happy-101');
+            assert.match(globalThis.__reviewstallParks[0].reason, /not infrastructure-recoverable/);
+          ` : ''}
+        `,
+      }));
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      if (scenario === 'rearm-exception') assert.match(output, /Failed review re-arm failed.*fixture archive unavailable/);
+      if (scenario === 'rearm-refused') assert.match(output, /Failed review re-arm blocked.*: \S+/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}

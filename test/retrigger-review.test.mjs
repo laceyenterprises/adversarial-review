@@ -680,7 +680,7 @@ test('retrigger-review preserves failed-review evidence unless allow-failed-rese
   ], { stdout: makeCaptureStream(), stderr: err });
 
   assert.equal(rc, 1);
-  assert.match(err.text(), /watcher already retries failed review rows automatically/i);
+  assert.match(err.text(), /watcher re-arms failed reviews when the PR head changes/i);
   assert.match(err.text(), /--allow-failed-reset/);
 });
 

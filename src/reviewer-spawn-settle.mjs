@@ -81,6 +81,7 @@ import {
   stmtMarkTokenRefreshHold,
   stmtGetReviewRow,
   stmtReleaseReviewerClaim,
+  stmtReleaseLegacyStaleReviewerClaim,
 } from './review-state-db.mjs';
 import { fetchPullRequestHeadAndState } from './github-api.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
@@ -1106,6 +1107,8 @@ function settleReviewerAttempt({
   repoPath,
   prNumber,
   result,
+  reviewerSessionUuid = result?.reviewerSessionUuid ?? null,
+  reviewerHeadSha = null,
   env = null,
   failureAt = new Date().toISOString(),
   maxRemediationRounds,
@@ -1115,6 +1118,7 @@ function settleReviewerAttempt({
     markPosted: stmtMarkPosted,
     markFailed: stmtMarkFailed,
     releaseReviewerClaim: stmtReleaseReviewerClaim,
+    releaseLegacyStaleReviewerClaim: stmtReleaseLegacyStaleReviewerClaim,
     releaseReviewLease: stmtReleaseReviewLease,
     markFailedQuota: stmtMarkFailedQuota,
     releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
@@ -1192,31 +1196,25 @@ function settleReviewerAttempt({
   const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
   if (failureClass === 'stale-review-head') {
-    // Clear the session-bound claim first. The default releaseReviewLease
-    // statement is status-gated to review_status='reviewing', so after this
-    // no-budget release it records a 0-change cleanup check instead of charging
-    // review_attempts for ordinary head churn.
-    const releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
+    // Claim identity comes from dispatch, not the runtime adapter's result.
+    // Failure/lease statements charge attempts and cannot handle head churn.
+    let releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
       ? withSqliteBusyRetrySync(
-        () => statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber),
+        () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
         { label: `reviewer-settle-release-claim:${repoPath}#${prNumber}`, log }
       )
       : { changes: 0 };
-    const leaseReleaseResult = typeof statements.releaseReviewLease?.run === 'function'
-      ? withSqliteBusyRetrySync(
-        () => statements.releaseReviewLease.run(
-          failureAt,
-          result.error || 'Reviewer output targeted a stale PR head; requeued for current-head review.',
-          repoPath,
-          prNumber
-        ),
-        { label: `reviewer-settle-release-lease:${repoPath}#${prNumber}`, log }
-      )
-      : { changes: 0 };
+    if (releaseResult.changes === 0 && reviewerHeadSha &&
+        typeof statements.releaseLegacyStaleReviewerClaim?.run === 'function') {
+      releaseResult = withSqliteBusyRetrySync(
+        () => statements.releaseLegacyStaleReviewerClaim.run(repoPath, prNumber, reviewerHeadSha),
+        { label: `reviewer-settle-release-legacy-stale-claim:${repoPath}#${prNumber}`, log }
+      );
+    }
     log.warn(
       `[watcher] Reviewer output for ${repoPath}#${prNumber} was stale; ` +
       `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} ` +
-      `lease=${leaseReleaseResult.changes === 1 ? 'yes' : 'no'} for current-head re-review`
+      'for current-head re-review'
     );
     return;
   }

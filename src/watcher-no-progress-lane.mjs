@@ -1019,6 +1019,7 @@ export function clearOperatorDecisionAlertState(rootDir, identity, { logger = co
 // A draft looked identical to a stranded remediation, so nobody knew to mark it
 // ready (agent-os#7311).
 const OPERATOR_BLOCKED_REASON_TEXT = Object.freeze({
+  'review-retry-cap-exhausted': 'Reviewer retries on this head are exhausted. Inspect the preserved failure evidence and retrigger the review or push a new head.',
   'pr-is-draft': 'The PR is a draft; the pipeline never marks a PR ready for review, so the hammer will not take it. ' +
     'Mark it ready for review (gh pr ready) or close it.',
 });

@@ -50,6 +50,8 @@ function hasProviderOverloadedSignal(value) {
 }
 
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
+  // Exit 75 is also EX_TEMPFAIL. Only the anchored refusal marker below
+  // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
@@ -187,7 +189,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return ATTESTATION_SIGN_FAILED_FAILURE_CLASS;
   }
 
-  if (/\[stale-review-head\]/.test(lower)) {
+  if (/(?:^|\n)(?:\[reviewer\] github post failed [^\n]+: )?\[stale-review-head\]/.test(lower)) {
     return 'stale-review-head';
   }
 

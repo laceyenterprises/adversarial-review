@@ -363,7 +363,7 @@ function writeReviewRefusal(stderr, { repo, pr, refusalReason }) {
     stderr.write(
       [
         `refused:not-eligible: ${repo}#${pr} (failed)`,
-        'The watcher already retries failed review rows automatically.',
+        'The watcher re-arms failed reviews when the PR head changes; same-head retries remain capped.',
         'Resetting now would clear failed_at and failure_message before an operator can inspect the diagnostic evidence.',
         'Re-run with --allow-failed-reset only after reviewing the failure.',
         '',

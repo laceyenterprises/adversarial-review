@@ -130,7 +130,14 @@ Use `bin/primary-change-context.mjs` for full patches. Use this context to under
 If primary evidence is missing or unsupported, stop and use the existing operator
 escalation path. Never substitute the latest hammer head for the original change.
 
-A remediation may not revert, neutralize or invert any hunk of the primary change.
+The syntactic preservation gate covers production and config paths only. Test
+paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
+`**/__tests__/**`, including fixtures under test directories) are reported as
+informational `testRegionsChanged` evidence and verified by CI on the final head.
+Test repairs mandated by findings are allowed. Reviewers must still flag tests
+that invert or neutralize the tested behavior of the primary change.
+
+A remediation may not revert, neutralize or invert any protected hunk of the primary change.
 Preserve the effect of each changed region against the merge base. In-place bug,
 lint and formatting fixes to author-added lines are allowed, as are additive tests
 and docs. Returning a region to the base or restoring removed author code is a

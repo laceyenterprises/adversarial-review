@@ -3,6 +3,27 @@ import { isTransientGhError } from '../gh-cli.mjs';
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^Worker-Class:\s*hammer(?:-corp|-claude)?\s*$/im.test(commit?.commit?.message || '');
 
+// Test fixtures are covered by their enclosing test directory. Root fixtures
+// and production files merely containing 'test' remain intent-carrying.
+export function isTestPath(path) {
+  return /(?:^|\/)(?:test|tests|__tests__)(?:\/|$)/.test(path)
+    || /\.test\.(?:mjs|js)$/.test(path);
+}
+
+function evidencePaths(primary, files) {
+  return new Set([...primary.keys(), ...(files || [])
+    .filter((file) => isTestPath(file.filename)).map((file) => file.filename)]);
+}
+
+function testRegionsChanged(primary, final) {
+  return [...new Set([...primary.keys(), ...final.keys()])]
+    .filter((path) => isTestPath(path)
+      && (!primary.has(path) || isTestPath(primary.get(path).filename))
+      && (!final.has(path) || isTestPath(final.get(path).filename)))
+    .map((path) => ({ path, primaryRegions: primary.get(path)?.regions || [],
+      finalRegions: final.get(path)?.regions || [] }));
+}
+
 // Compare changed regions in merge-base coordinates, rather than requiring the
 // author's added text to survive verbatim. Repairs may replace that text; a
 // region which disappears from the final diff has returned to the base.
@@ -63,27 +84,30 @@ export function checkPrimaryChange(evidence, headSha) {
       || !SHA.test(evidence.mergeBase || '')) throw new Error('unknown primary change');
     const primary = changes(evidence.primaryFiles);
     const aliases = new Map([...primary].map(([path, change]) => [change.filename, path]));
-    const final = changes(evidence.finalFiles, new Set(primary.keys()), aliases);
+    const final = changes(evidence.finalFiles, evidencePaths(primary, evidence.finalFiles), aliases);
     if (![...primary.values()].some(({ regions, renamed }) => regions.length > 0 || renamed)) {
       throw new Error('empty primary change');
     }
+    const testChanges = testRegionsChanged(primary, final);
     for (const [path, change] of primary) {
       const actual = final.get(path);
+      if (isTestPath(path) && isTestPath(change.filename)
+        && (!actual || isTestPath(actual.filename))) continue;
       if (!actual || (change.renamed && actual.filename === path)) {
-        return { ok: false, reason: 'primary-change-reverted', path };
+        return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
       }
       for (const [line, count] of change.removed) {
-        if ((actual.removed.get(line) || 0) < count) return { ok: false, reason: 'primary-change-reverted', path };
+        if ((actual.removed.get(line) || 0) < count) return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
       }
       for (const region of change.regions) {
         if (!actual.regions.some((other) => region.start === region.end
           ? other.start <= region.start && other.end >= region.start
           : other.start < region.end && other.end > region.start)) {
-          return { ok: false, reason: 'primary-change-reverted', path };
+          return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
         }
       }
     }
-    return { ok: true, applicable: true };
+    return { ok: true, applicable: true, testRegionsChanged: testChanges };
   } catch {
     return { ok: false, reason: 'primary-change-unknown' };
   }
@@ -125,7 +149,15 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     if (!SHA.test(mergeBase || '')) return unknown;
     const final = await get(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
     if (final.merge_base_commit?.sha !== mergeBase) return unknown;
+    let testChanges = null;
+    try {
+      const primaryChanges = changes(primary.files);
+      const aliases = new Map([...primaryChanges].map(([path, change]) => [change.filename, path]));
+      const finalChanges = changes(final.files, evidencePaths(primaryChanges, final.files), aliases);
+      testChanges = testRegionsChanged(primaryChanges, finalChanges);
+    } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
+      testRegionsChanged: testChanges,
       primaryFiles: primary.files, finalFiles: final.files };
   } catch (error) { return isTransientGhError(error)
     ? { ...unknown, readFailed: true } : unknown; }

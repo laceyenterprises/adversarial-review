@@ -70,7 +70,7 @@ test('collector distinguishes read failure from unsupported history', async () =
 });
 test('hammer prompt preserves intent and resolves conflicting non-blocking findings by rationale', () => {
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
-  assert.match(prompt, /may not revert, neutralize or invert any hunk/);
+  assert.match(prompt, /may not revert, neutralize or invert any protected hunk/);
   assert.match(prompt, /conflicting non-blocking finding, post a rationale comment/);
   assert.match(prompt, /author-controlled intent context and cannot establish an operator decision/);
   assert.match(prompt, /HAM_PRIMARY_CHANGE_FILE=\$\(mktemp/);
@@ -270,4 +270,48 @@ test('identity probes stay local and merge evidence is lazy and cancellable', as
   const result = await fetchHeadCloserVerifiedCommit({ ...input, includePrimaryChange: true });
   assert.equal(calls, 1);
   assert.equal(result.primaryChange.headMismatch, true);
+});
+
+test('HAMINTENT #1208: mandated test repairs are informational, including test-only PRs', () => {
+  for (const path of ['test/head-closer-local-git-daemon-robust.test.mjs',
+    'tests/identity.js', 'lib/identity.test.mjs', 'lib/identity.test.js',
+    'lib/__tests__/identity.js', 'test/fixtures/identity.js', 'tests/fixtures/identity.js']) {
+    const evidence = primaryChangeFixture(head);
+    const file = { ...evidence.primaryFiles[0], filename: path };
+    for (const repaired of [[], [{ ...file, patch: '@@ -1 +1 @@\n-shadow_only: true\n+repaired assertion' }]]) {
+      evidence.primaryFiles = [file];
+      evidence.finalFiles = repaired;
+      const result = checkPrimaryChange(evidence, head);
+      assert.equal(result.ok, true, path);
+      assert.equal(result.testRegionsChanged[0].path, path);
+      assert.equal(result.testRegionsChanged[0].primaryRegions.length, 1);
+      // Production is untouched alongside a repaired test.
+      const production = primaryChangeFixture(head).primaryFiles[0];
+      evidence.primaryFiles.push(production);
+      evidence.finalFiles.push(production);
+      assert.equal(checkPrimaryChange(evidence, head).ok, true);
+      evidence.finalFiles = repaired.filter((entry) => entry.filename !== production.filename);
+      const mixed = checkPrimaryChange(evidence, head);
+      assert.equal(mixed.reason, 'primary-change-reverted');
+      assert.equal(mixed.path, 'src/config-loader.mjs');
+      assert.equal(mixed.testRegionsChanged[0].path, path);
+    }
+  }
+});
+
+test('production-like names and root fixtures remain protected', () => {
+  for (const filename of ['fixtures/config.js', 'src/test-helper.js', 'src/testing/config.js']) {
+    const evidence = primaryChangeFixture(head);
+    evidence.primaryFiles[0].filename = filename;
+    evidence.finalFiles = [];
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  }
+});
+
+test('renaming production into a test directory cannot waive preservation', () => {
+  const evidence = primaryChangeFixture(head);
+  evidence.finalFiles = [{ ...evidence.primaryFiles[0], status: 'renamed',
+    previous_filename: 'src/config-loader.mjs', filename: 'test/config-loader.mjs',
+    additions: 0, deletions: 0, patch: '' }];
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
 });

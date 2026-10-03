@@ -1180,10 +1180,18 @@ actual parent of the first hammer commit in the PR history, including after a
 rebase; a hammer-authored `Reviewed-Head` trailer cannot select an older author
 head. Both primary and final diffs are compared against the current PR base,
 using the same merge base so rebased upstream changes are excluded. Every
-changed region must still differ from that base, and removed-line occurrence
+changed region in production and config paths must still differ from that base, and removed-line occurrence
 counts must survive (whitespace is normalized). In-place fixes to added author
 lines are allowed. A preserved result means syntactic region coverage only; it cannot detect adjacent constant changes, false guards, or moved removed lines. This syntactic check does not prove semantic intent;
 reviewers and the hammer still inspect inversions and neutralizations.
+
+Test paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
+`**/__tests__/**`, including fixtures under test directories) are excluded from
+`primary-change-reverted` and reported as informational `testRegionsChanged`
+evidence. CI verifies tests against the final head; test repairs mandated by
+findings are allowed. Reviewers must still flag inversions or neutralizations of
+the tested primary-change behavior. Renaming production code into a test path
+does not exempt its protected baseline.
 
 The hammer's `bin/primary-change-context.mjs` reads each GitHub endpoint through
 `execGhWithRetry`: transient transport, timeout, rate-limit and HTTP 5xx failures

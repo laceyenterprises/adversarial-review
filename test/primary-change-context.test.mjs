@@ -59,7 +59,7 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
   ]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, '');
-  assert.deepEqual(JSON.parse(result.stdout), evidence);
+  assert.deepEqual(JSON.parse(result.stdout), { ...evidence, testRegionsChanged: [] });
   assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath,
     primaryPath, primaryPath, comparePath].map(path => ['api', path]));
 });

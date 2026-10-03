@@ -53,7 +53,8 @@ includes the reconciliation block and any supplied provenance metadata. Later
 appends preserve existing metadata and update reconciliation. A successful
 record cannot be demoted by a later append.
 
-For primary-change evidence, a post-lease `primary-change-read-failed` gate
+For primary-change evidence, a post-lease `primary-change-read-failed` or
+`primary-change-unknown` gate
 writes `reason: gate-read-failed`, `permanent: false`, and the concrete reason
 in `eligibilityReasons` / `preMergeReasons`. It omits `manualCloseRequired`,
 so a later tick may retry the same head after GitHub reads recover.

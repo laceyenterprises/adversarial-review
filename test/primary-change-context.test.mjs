@@ -16,7 +16,7 @@ const comparePath = `repos/fixture/repo/compare/${evidence.mergeBase}...${head}`
 const primaryPath = `repos/fixture/repo/compare/${evidence.mergeBase}...${evidence.primaryHead}`;
 const pr = { head: { sha: head }, base: { sha: evidence.mergeBase } };
 const history = { total_commits: 1, commits: [{ sha: head,
-  parents: [{ sha: evidence.primaryHead }], commit: { message: 'Worker-Class: hammer' } }] };
+  parents: [{ sha: evidence.primaryHead }], commit: { message: 'HAM repair\n\nWorker-Class: hammer' } }] };
 const compare = { merge_base_commit: { sha: evidence.mergeBase }, files: evidence.primaryFiles };
 
 function runCli(t, plan, argv = ['fixture/repo', '1208', head]) {

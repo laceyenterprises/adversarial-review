@@ -411,7 +411,13 @@ live head. `ama-check` requires `--primary-change` for HAM terminal remediation;
 the in-lease hammer merge independently fetches evidence and requires the same
 gate. `operator-approved` does not bypass it. Reverted changes and structural
 unknowns fail closed for operator inspection; transient read failures and head
-races defer without permanent failure markers. Preservation is syntactic region
+races defer without permanent failure markers. Authentication outages and
+cancellation are read failures; in-lease unknown evidence also remains
+non-permanent. Mixed read-outage/CI failures still dispatch CI remediation.
+The earliest daemon-owned HAM launch protects untagged repairs; a diverged
+rebase uses the first HAM commit parent. HAM identification reads terminal
+trailers, not quoted prose. Missing patches can establish preservation through
+identical blob SHA and change status; changed opaque blobs fail closed. Preservation is syntactic region
 coverage, not proof of semantic intent or immunity to adjacent neutralisation.
 
 ## 4.4 Closure convergence predicate

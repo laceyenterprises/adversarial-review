@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { checkPrimaryChange, fetchPrimaryChange, readPrimaryChangeLaunchHead } from '../src/ama/primary-change.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 const head = 'c'.repeat(40);
@@ -51,8 +53,8 @@ test('collector selects the author head before the FIRST hammer, including repea
     if (path.endsWith('/pulls/1207')) return { head: { sha: head }, base: { sha: base } };
     if (calls.length === 2) return { total_commits: 3, commits: [
       { sha: author, commit: { message: 'worker' } },
-      { sha: 'e'.repeat(40), parents: [{ sha: author }], commit: { message: 'Worker-Class: hammer' } },
-      { sha: head, parents: [{ sha: 'e'.repeat(40) }], commit: { message: 'Worker-Class: hammer' } }] };
+      { sha: 'e'.repeat(40), parents: [{ sha: author }], commit: { message: 'HAM repair\n\nWorker-Class: hammer' } },
+      { sha: head, parents: [{ sha: 'e'.repeat(40) }], commit: { message: 'HAM repair\n\nWorker-Class: hammer' } }] };
     return { merge_base_commit: { sha: base }, files: evidence.primaryFiles };
   };
   const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1207, headSha: head, get });
@@ -114,7 +116,7 @@ test('collector uses the rebased parent and current base, ignoring a stale Revie
     if (path.endsWith(`${base}...${parent}`)) return { merge_base_commit: { sha: base }, files: evidence.primaryFiles };
     if (path.endsWith(`${base}...${head}`)) return {
       total_commits: 1, commits: [{ sha: head, parents: [{ sha: parent }],
-        commit: { message: `Worker-Class: hammer\nReviewed-Head: ${original}` } }],
+        commit: { message: `HAM repair\n\nWorker-Class: hammer\nReviewed-Head: ${original}` } }],
       merge_base_commit: { sha: base }, files: [] };
     throw new Error(`unexpected ${path}`);
   };
@@ -237,7 +239,7 @@ test('all HAM classes and verified base merges preserve the first-parent author 
       if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: base } };
       if (path.endsWith(`${base}...${base}`)) return { status: 'identical' };
       return { total_commits: 1, commits: [{ sha: head, parents: [{ sha: author }, { sha: base }],
-        commit: { message: `Worker-Class: ${worker}` } }], merge_base_commit: { sha: base }, files: primaryChangeFixture(head).primaryFiles };
+        commit: { message: `HAM repair\n\nWorker-Class: ${worker}` } }], merge_base_commit: { sha: base }, files: primaryChangeFixture(head).primaryFiles };
     };
     const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get });
     assert.equal(evidence.primaryHead, author);
@@ -314,4 +316,99 @@ test('renaming production into a test directory cannot waive preservation', () =
     previous_filename: 'src/config-loader.mjs', filename: 'test/config-loader.mjs',
     additions: 0, deletions: 0, patch: '' }];
   assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
+
+test('installation auth outage and cancellation defer primary evidence', async () => {
+  for (const error of [Object.assign(new Error('HTTP 401'), { authOutage: true }),
+    Object.assign(new Error('cancelled'), { name: 'AbortError' }),
+    Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' })]) {
+    const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+      get: async () => { throw error; } });
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-read-failed');
+  }
+});
+
+test('opaque primary assets require the identical trusted blob and status', () => {
+  const file = { filename: 'asset.png', sha: 'a'.repeat(40), status: 'added', additions: 0, deletions: 0 };
+  const evidence = { ...primaryChangeFixture(head), primaryFiles: [file], finalFiles: [{ ...file }] };
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  evidence.finalFiles[0].sha = 'b'.repeat(40);
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-unknown');
+  evidence.finalFiles = [];
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
+test('rebased HAM head falls back from diverged launch to the rebased first HAM parent', async () => {
+  const launch = 'd'.repeat(40), author = 'a'.repeat(40), base = 'b'.repeat(40);
+  const file = primaryChangeFixture(head).primaryFiles;
+  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    dispatchedHead: launch, get: async (path) => {
+      if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: base } };
+      if (path.endsWith(`${launch}...${head}`)) return { status: 'diverged' };
+      return { total_commits: 1, commits: [{ sha: head, parents: [{ sha: author }],
+        commit: { message: 'HAM repair\n\nWorker-Class: hammer' } }],
+        merge_base_commit: { sha: base }, files: file };
+    } });
+  assert.equal(evidence.primaryHead, author);
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+});
+
+test('ancestor launch with a stale merge base uses the rebased HAM parent', async () => {
+  const launch = 'd'.repeat(40), author = 'a'.repeat(40), base = 'b'.repeat(40);
+  const file = primaryChangeFixture(head).primaryFiles;
+  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    dispatchedHead: launch, get: async (path) => {
+      if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: base } };
+      if (path.endsWith(`${launch}...${head}`)) return { status: 'ahead' };
+      if (path.endsWith(`${base}...${launch}`)) return { merge_base_commit: { sha: '9'.repeat(40) }, files: file };
+      return { total_commits: 1, commits: [{ sha: head, parents: [{ sha: author }],
+        commit: { message: 'HAM repair\n\nWorker-Class: hammer' } }],
+        merge_base_commit: { sha: base }, files: file };
+    } });
+  assert.equal(evidence.primaryHead, author);
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+});
+
+test('quoted HAM trailer outside terminal trailer block is not HAM authority', async () => {
+  const base = 'b'.repeat(40);
+  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    get: async (path) => path.includes('/pulls/')
+      ? { head: { sha: head }, base: { sha: base } }
+      : { total_commits: 1, commits: [{ sha: head, commit: {
+        message: 'Example\n\nWorker-Class: hammer\n\nThis is quoted documentation.' } }] } });
+  assert.equal(evidence.hasHammerCommits, false);
+});
+
+
+test('daemon dispatch records anchor untagged repairs at earliest trusted launch', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'primary-launch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const directory = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
+  mkdirSync(directory, { recursive: true });
+  const baseline = 'a'.repeat(40), base = 'b'.repeat(40);
+  for (const [index, record] of [
+    { repo: 'fixture/repo', prNumber: 1, workerClass: 'hammer',
+      dispatchedAt: '2026-10-01T00:00:00Z', targetRemediationSha: baseline },
+    { repo: 'fixture/repo', prNumber: 1, workerClass: 'hammer',
+      dispatchedAt: '2026-10-02T00:00:00Z', targetRemediationSha: head },
+  ].entries()) writeFileSync(join(directory, `fixture__repo-pr-1-${index}.json`), JSON.stringify(record));
+  assert.equal(readPrimaryChangeLaunchHead(rootDir, 'fixture/repo', 1), baseline);
+  const evidence = await fetchPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head,
+    get: async (path) => {
+      if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: base } };
+      if (path.endsWith(`${baseline}...${head}`)) return { status: 'ahead' };
+      return { total_commits: 1, commits: [{ sha: head, commit: { message: 'untagged repair' } }],
+        merge_base_commit: { sha: base }, files: primaryChangeFixture(head).primaryFiles };
+    } });
+  assert.equal(evidence.primaryHead, baseline);
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+});
+
+test('HAM-like subject without a provenance trailer is not HAM authority', async () => {
+  const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    get: async (path) => path.includes('/pulls/')
+      ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } }
+      : { total_commits: 1, commits: [{ sha: head, commit: { message: 'Worker-Class: hammer' } }] } });
+  assert.equal(result.hasHammerCommits, false);
 });

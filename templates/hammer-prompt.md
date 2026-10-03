@@ -605,6 +605,7 @@ Run the predicate against the live post-remediation head. Create an owned, run-s
 
 ```bash
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-primary-change.XXXXXX") || exit 1
+trap 'rm -f "$HAM_PRIMARY_CHANGE_FILE" "${HAM_VERDICT_FILE:-}" "${HAM_VERDICT_READY_FILE:-}"' EXIT
 chmod 600 "$HAM_PRIMARY_CHANGE_FILE"
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/primary-change-context.mjs <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" \
   > "$HAM_PRIMARY_CHANGE_FILE" || exit 1

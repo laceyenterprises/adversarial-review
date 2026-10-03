@@ -4717,8 +4717,7 @@ export async function maybeDispatchAmaCloser({
               const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
               const state = String(rollup?.state || '');
               return {
-                primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, headSha: rollup?.headSha || rollup?.headRefOid || '',
-                  dispatchedHead: existingRecord?.targetRemediationSha || null,
+                primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, rootDir, headSha: rollup?.headSha || rollup?.headRefOid || '',
                   get: async (path) => {
                     const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
                     return JSON.parse(stdout);

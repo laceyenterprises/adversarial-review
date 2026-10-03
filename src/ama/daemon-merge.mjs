@@ -756,9 +756,11 @@ export async function attemptDaemonCleanMerge({
       // made only of transient reads exhausts as `gate-read-failed`; any miss
       // carrying one stays NON-permanent so the next tick retries instead of
       // Gate 3 refusing the head forever on a half-read gate.
-      const transientReadOnly = elig.reasons.length > 0 &&
-        elig.reasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
-      const hasTransientRead = elig.reasons.some((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
+      const transientReadOnly = elig.reasons.includes('primary-change-unknown')
+        || (elig.reasons.length > 0
+          && elig.reasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(reason)));
+      const hasTransientRead = elig.reasons.some((reason) => TRANSIENT_GATE_READ_REASONS.has(reason)
+        || reason === 'primary-change-unknown');
       if (elig.reasons.includes('pr-mergeability-unknown') && attempts < retryCap) {
         await sleep(daemonMergeBackoffMs(attempts, { baseMs: backoffBaseMs, rng }));
         continue;
@@ -899,7 +901,8 @@ export async function attemptDaemonCleanMerge({
   // observability layer (ARR-02) can page on it instead of it being a silent
   // failed-without-merge. This does NOT change the merge decision.
   // A terminal carrying a transient read is retried next tick, never paged.
-  const terminalHasTransientRead = (terminal?.reasons || []).some((r) => TRANSIENT_GATE_READ_REASONS.has(r));
+  const terminalHasTransientRead = (terminal?.reasons || []).some((r) =>
+    TRANSIENT_GATE_READ_REASONS.has(r) || r === 'primary-change-unknown');
   const cleanParkManualCloseRequired = !merged && terminal?.reason !== 'gate-read-failed' &&
     !terminalHasTransientRead && isFullyCleanSettledReview(reviewState);
   let auditWritten = false;

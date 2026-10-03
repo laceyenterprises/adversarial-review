@@ -382,6 +382,7 @@ export async function runDaemonCleanMergeAttempt({
   resolveHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
   resolveAutonomousCloserCommitAccountabilityImpl = resolveAutonomousCloserCommitAccountability,
   env = process.env,
+  signal = null,
   authoritativeReviewerLogins = [],
   dismissStaleRequestChangesOnResolved = true,
   hamTerminalRemediationValidated = false,
@@ -802,9 +803,9 @@ export async function runDaemonCleanMergeAttempt({
   // refreshed live head above, after the same head-moved guard has ruled out a
   // snapshot mismatch, so it must pass that proven closer head to the merge
   // executor rather than a HAM audit head that may be absent or stale.
-  const readPrimaryChange = (headSha) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha,
+  const readPrimaryChange = (headSha) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha, rootDir,
     get: async (path) => {
-      const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env });
+      const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
       return JSON.parse(stdout);
     },
   });

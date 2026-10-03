@@ -1169,17 +1169,23 @@ reasons:
 | `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
 | `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
 | `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and use the operator fallback described below. |
-| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, binary or omitted/truncated patch, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Use the operator fallback described below after inspecting the unsupported files. |
-| `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Permanent authentication, permission, missing compare and malformed JSON errors are structural unknowns requiring operator inspection. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
+| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Use the operator fallback described below after inspecting the unsupported files. |
+| `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permanent permission, missing compare and malformed JSON errors are structural unknowns requiring operator inspection. An in-lease unknown after pre-lease validation remains non-permanent so a partial re-read cannot poison that head. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
 ### Primary-change evidence and operator recovery (HAMINTENT-01)
 
 Both merge paths use `src/ama/primary-change.mjs`. The protected baseline is the
-actual parent of the first hammer commit in the PR history, including after a
-rebase; a hammer-authored `Reviewed-Head` trailer cannot select an older author
+earliest daemon-owned dispatch launch head when available, covering untagged
+repairs. After a rebase diverges from that launch, it is the actual parent of
+the first hammer commit in the rebased PR history; a hammer-authored `Reviewed-Head` trailer cannot select an older author
 head. Both primary and final diffs are compared against the current PR base,
-using the same merge base so rebased upstream changes are excluded. Every
+using the same merge base so rebased upstream changes are excluded. Hammer identity
+comes only from the terminal commit trailer block. Binary and omitted-patch
+files can pass only with an identical GitHub blob SHA and change status;
+otherwise their preservation remains unknown. Structural hammer merge refusals
+are audited immediately with their primary-change reason, while read failures
+retry within the bounded gate window. Every
 changed region in production and config paths must still differ from that base, and removed-line occurrence
 counts must survive (whitespace is normalized). In-place fixes to added author
 lines are allowed. A preserved result means syntactic region coverage only; it cannot detect adjacent constant changes, false guards, or moved removed lines. This syntactic check does not prove semantic intent;

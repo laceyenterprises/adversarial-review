@@ -576,7 +576,7 @@ function daemonGateReasonsHammerRemediable(gateReasons) {
   // DIRTYOWN-01: a transient mergeability read riding along a real remediable
   // miss says nothing about the head — it must not turn that miss into a park.
   // A transient-only decline stays non-remediable (retried next tick).
-  const substantive = reasons.filter((r) => r !== 'pr-mergeability-unknown');
+  const substantive = reasons.filter((r) => !TRANSIENT_GATE_READ_REASONS.has(r));
   // EVERY remaining gate must be hammer-remediable.
   return substantive.length > 0
     && substantive.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
@@ -1617,6 +1617,7 @@ export async function maybeDispatchAmaClosureFor({
     const hammerRemediableFallback =
       daemonFailedClosed && isDaemonFailClosedHammerRemediable(daemonCleanMerge);
     if (hammerRemediableFallback) {
+      clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
       const fallbackReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
       logger?.log?.(JSON.stringify({
         schemaVersion: 1,

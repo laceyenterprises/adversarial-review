@@ -272,7 +272,7 @@ const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expect
     return JSON.parse(stdout);
   },
 });
-const ok = evaluateMergeEligibility({
+const eligibility = evaluateMergeEligibility({
   primaryChange,
   requirePrimaryChange: true,
   verdict: 'settled-success',
@@ -286,9 +286,10 @@ const ok = evaluateMergeEligibility({
   labels: rollup.labels,
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
-}).eligible;
+});
 console.log(JSON.stringify({
-  ok,
+  ok: eligibility.eligible,
+  reasons: eligibility.reasons,
   state,
   open,
   headMatches,
@@ -388,6 +389,13 @@ while :; do
     echo "HAM race: live PR head moved off validated head; releasing lease without merge or re-dispatch" >&2
     HAM_REMOTE_CI_STATUS=live-head-moved
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
+    ham_release_merge_lease
+    return 20
+  fi
+  HAM_PRIMARY_REFUSAL=$(jq -r '[.reasons[]? | select(. == "primary-change-reverted" or . == "primary-change-unknown")][0] // empty' "$HAM_GATE_JSON")
+  if [ -n "$HAM_PRIMARY_REFUSAL" ]; then
+    HAM_REMOTE_CI_STATUS="$HAM_PRIMARY_REFUSAL"
+    ham_append_terminal_audit failed-without-merge "$HAM_PRIMARY_REFUSAL" || true
     ham_release_merge_lease
     return 20
   fi
@@ -776,6 +784,8 @@ else
   ham_release_merge_lease
   return 1
 fi
+# Read by the wrapper sourcing this procedure.
+# shellcheck disable=SC2034
 HAM_PHASE_OUTCOME=merged
 return 0
 }

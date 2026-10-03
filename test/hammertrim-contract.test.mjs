@@ -142,6 +142,43 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME"
   const stale = run('/bin/bash', ['-c', shell.replace(`HAM_VERDICT_READY_FILE=${verdictPath}`, 'HAM_VERDICT_READY_FILE=') , '_', script], env);
   assert.match(stale.stdout, /STATUS=20 HELD=0/);
 });
+test('merge immediately records structural primary-change refusal and releases the lease', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-merge-verdict-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const prNumber = '424243';
+  const verdictPath = join(dir, 'verdict.json');
+  writeFileSync(verdictPath, JSON.stringify({ eligible: true, trace: { headMatch: { current: 'a'.repeat(40) }, branchProtection: { required: false } } }));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const gh = join(bin, 'gh');
+  writeFileSync(gh, '#!/bin/sh\necho GH_CALLED >&2\nexit 1\n');
+  chmodSync(gh, 0o755);
+  const nodeStub = join(bin, 'audit-node');
+  writeFileSync(nodeStub, '#!/bin/sh\nif [ \"$1\" = --input-type=module ]; then cat >/dev/null; echo \'{\"ok\":false,\"headMatches\":true,\"state\":\"OPEN\",\"checksConclusion\":\"SUCCESS\",\"reasons\":[\"primary-change-unknown\"]}\'; fi\nexit 0\n');
+  chmodSync(nodeStub, 0o755);
+  const env = {
+    HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424243', HAM_REPO: 'acme/repo',
+    HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
+    HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
+    HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
+    PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
+  };
+  const render = run('node', [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+  assert.equal(render.status, 0, render.stderr);
+  const script = join(dir, 'merge.sh');
+  writeFileSync(script, render.stdout);
+  const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${'a'.repeat(40)} HAM_PUBLISHED_AUDIT_HEAD=${'a'.repeat(40)} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdictPath} HAM_VERDICT_READY_FILE=${verdictPath} HAM_REMOTE_CI_WAIT_SECONDS=1 HAM_MERGE_RETRY_CAP=1
+ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
+source "$1"
+echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME REMOTE=$HAM_REMOTE_CI_STATUS"
+`;
+  const result = run('/bin/bash', ['-c', shell, '_', script], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /LEASE_RELEASED/);
+  assert.match(result.stdout, /STATUS=20 HELD=0 OUTCOME=/);
+  assert.match(result.stdout, /REMOTE=primary-change-unknown/);
+  assert.doesNotMatch(result.stderr, /GH_CALLED|github-gate-timeout/);
+});
 test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
   const rendered = composeCloserPrompt({
     prUrl: 'https://github.com/acme/repo/pull/42', repo: 'acme/repo', prNumber: 42,

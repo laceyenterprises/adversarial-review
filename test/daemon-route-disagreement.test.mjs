@@ -170,7 +170,7 @@ test('only pre-lease gate declines the hammer can fix are hammer-remediable', ()
   assert.equal(isDaemonNotTakenHammerRemediable(DUPLICATE_FAMILY), false);
   // DIRTYOWN-01: GitHub's still-computing UNKNOWN is a transient read, not a conflict.
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] }), false);
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'labels-unavailable'] }), false);
+  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'labels-unavailable'] }), true);
   // ...but an UNKNOWN riding along a real remediable miss must not turn it into a park.
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'pr-mergeability-unknown'] }), true);
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['lease-not-held', 'pr-mergeability-unknown'] }), false);
@@ -553,4 +553,22 @@ test('DIRTYOWN-01: a transient read reports the caller head and ignores a ledger
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+
+test('primary-change transport failure beside red CI dispatches hammer without manual park', async () => {
+  const rootDir = tempRoot();
+  try {
+    const closerCalls = [], logs = [], warns = [];
+    const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+      daemonResult: { disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible', permanent: false,
+        reasons: ['primary-change-read-failed', 'ci-not-green'] },
+      closerCalls, logs, warns,
+    }));
+    assert.equal(result.dispatched, true);
+    assert.equal(closerCalls.at(-1).force, true);
+    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
+    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

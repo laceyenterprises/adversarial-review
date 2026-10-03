@@ -896,3 +896,30 @@ test('primary-change read outage inside lease writes a retryable audit and next 
   const next = makeHarness({ priorAudit: { repo: 'o/r', prNumber: 7, headSha: HEAD, doc } });
   assert.equal((await attemptDaemonCleanMerge(baseArgs(next))).merged, true);
 });
+
+
+test('in-lease structural primary evidence miss cannot permanently poison a validated head', async () => {
+  const h = makeHarness({ liveGateSequence: [greenGate({ requirePrimaryChange: true,
+    primaryChange: { headSha: HEAD, hasHammerCommits: null } })] });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { retryCap: 1 }));
+  assert.equal(result.permanent, false);
+  assert.equal(result.manualCloseRequired, false);
+  assert.equal(h.calls.merge, 0);
+  const doc = h.auditStore.get('o/r#7@' + HEAD);
+  assert.equal(doc.attempts.at(-1).permanent, false);
+  const next = makeHarness({ priorAudit: { repo: 'o/r', prNumber: 7, headSha: HEAD, doc } });
+  assert.equal((await attemptDaemonCleanMerge(baseArgs(next))).merged, true);
+});
+
+test('in-lease missing primary evidence beside red CI remains a retryable read failure', async () => {
+  const h = makeHarness({ liveGate: greenGate({ requirePrimaryChange: true,
+    primaryChange: { headSha: HEAD, hasHammerCommits: null },
+    requiredChecks: [{ __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE' }],
+  }) });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { retryCap: 1 }));
+  assert.equal(result.reason, 'gate-read-failed');
+  assert.equal(result.permanent, false);
+  assert.equal(result.manualCloseRequired, false);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+});

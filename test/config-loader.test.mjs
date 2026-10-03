@@ -2150,23 +2150,23 @@ test('worker_pool.memory_injection canonical env aliases resolve through Node sc
   }
 });
 
-test('worker_pool.memory.dynamic defaults to shadow mode and permits explicit enforcement', () => {
+test('worker_pool.memory.dynamic defaults to enforcement and permits explicit shadow mode', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
     writeFile(top, 'version: 1\n');
     const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), true);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), false);
     assert.equal(cfg.get('worker_pool.memory.dynamic.enabled'), false);
     assert.equal(cfg.get('worker_pool.memory_retention.shadow_only'), true);
 
-    writeFile(top, 'version: 1\nworker_pool:\n  memory:\n    dynamic:\n      shadow_only: false\n');
-    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.memory.dynamic.shadow_only'), false);
+    writeFile(top, 'version: 1\nworker_pool:\n  memory:\n    dynamic:\n      shadow_only: true\n');
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.memory.dynamic.shadow_only'), true);
 
     writeFile(top, 'version: 1\n');
     for (const key of ['AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_SHADOW_ONLY', 'HQ_MEMORY_DYNAMIC_SHADOW_ONLY']) {
-      const overridden = loadConfig({ topPath: top, env: { [key]: 'false' } });
-      assert.equal(overridden.get('worker_pool.memory.dynamic.shadow_only'), false);
+      const overridden = loadConfig({ topPath: top, env: { [key]: 'true' } });
+      assert.equal(overridden.get('worker_pool.memory.dynamic.shadow_only'), true);
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -2182,7 +2182,7 @@ test('worker_pool.memory.dynamic legacy env aliases resolve through Node schema'
       topPath: top,
       env: {
         HQ_MEMORY_DYNAMIC_ENABLED: 'true',
-        HQ_MEMORY_DYNAMIC_SHADOW_ONLY: 'false',
+        HQ_MEMORY_DYNAMIC_SHADOW_ONLY: 'true',
         HQ_MEMORY_DYNAMIC_ADMIT_PERCENTILE: 'p50',
         HQ_MEMORY_DYNAMIC_PRESSURE_MARGIN_MB: '1024',
         HQ_MEMORY_DYNAMIC_RSS_WINDOW_MINUTES: '60',
@@ -2192,7 +2192,7 @@ test('worker_pool.memory.dynamic legacy env aliases resolve through Node schema'
       },
     });
     assert.equal(cfg.get('worker_pool.memory.dynamic.enabled'), true);
-    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), false);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), true);
     assert.equal(cfg.get('worker_pool.memory.dynamic.admit_percentile'), 'p50');
     assert.equal(cfg.get('worker_pool.memory.dynamic.pressure_margin_mb'), 1024);
     assert.equal(cfg.get('worker_pool.memory.dynamic.rss_window_minutes'), 60);

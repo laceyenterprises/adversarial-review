@@ -502,7 +502,7 @@ test('regression: getHeadCloserCommitSuppression recognizes the closer identity 
   assert.equal(result.reason, 'closer-commit-trailer');
 });
 
-test('fetchHeadCloserVerifiedCommit keeps local identity and marks unavailable intent history as a retryable read failure', async () => {
+test('fetchHeadCloserVerifiedCommit keeps local identity without fetching intent history', async () => {
   const git = makeFakeGit();
   let ghCalled = false;
   const commit = await fetchHeadCloserVerifiedCommit({
@@ -513,9 +513,8 @@ test('fetchHeadCloserVerifiedCommit keeps local identity and marks unavailable i
     execGhWithRetryImpl: async () => { ghCalled = true; throw new Error('should not reach gh'); },
     logger: { warn() {}, debug() {} },
   });
-  assert.equal(ghCalled, true);
-  assert.equal(commit.primaryChange.hasHammerCommits, null);
-  assert.equal(commit.primaryChange.readFailed, true);
+  assert.equal(ghCalled, false);
+  assert.equal(commit.primaryChange, undefined);
   assert.equal(commit.sha, HEAD_SHA);
   assert.match(commit.message, /Closed-By: hammer/);
 });
@@ -701,7 +700,7 @@ test('closer primary-change reads inherit caller env and preserve the retry budg
   const env = { GH_TOKEN: 'fixture-token' };
   let reads = 0;
   const commit = await fetchHeadCloserVerifiedCommit({ repoPath: 'laceyenterprises/agent-os',
-    prNumber: 5348, headSha: HEAD_SHA, env, execFileImpl: makeFakeGit(),
+    prNumber: 5348, headSha: HEAD_SHA, includePrimaryChange: true, env, execFileImpl: makeFakeGit(),
     execGhWithRetryImpl: async (options) => {
       assert.equal(options.env, env);
       assert.notEqual(options.retries, 0);
@@ -728,7 +727,7 @@ test('a transient primary-change API failure recovers within the default gh retr
       commits: [{ sha: HEAD_SHA, commit: { message: 'author change' } }] }) };
   };
   const commit = await fetchHeadCloserVerifiedCommit({ repoPath: 'laceyenterprises/agent-os',
-    prNumber: 5348, headSha: HEAD_SHA, execFileImpl,
+    prNumber: 5348, headSha: HEAD_SHA, includePrimaryChange: true, execFileImpl,
     execGhWithRetryImpl: (options) => execGhWithRetry({ ...options, sleep: async () => {} }),
     logger: { warn() {}, debug() {} } });
   assert.equal(prReads, 2);

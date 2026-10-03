@@ -3731,3 +3731,27 @@ test('clean daemon candidate defers primary-change API outages and forwards call
     assert.equal(result.needsOperator, false);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+
+test('transient primary-change reads do not hide CI or conflict remediation', async () => {
+  const rootDir = tempRoot();
+  const head = 'f'.repeat(40);
+  try {
+    for (const gate of ['ci-not-green', 'pr-not-mergeable']) {
+      const result = await runDaemonCleanMergeAttemptReal({
+        ...unattributedDaemonArgs({ rootDir, head }),
+        operatorApprovalEvent: operatorApprovedEventAt(head),
+        fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: null, readFailed: true }),
+        fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+          checks: [{ name: 'ci', conclusion: 'SUCCESS' }], labels: ['operator-approved'],
+          mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+        attemptDaemonCleanMergeImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason: 'not-eligible', reasons: ['primary-change-read-failed', gate] }),
+      });
+      assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+      assert.equal(result.reason, 'gate-not-eligible');
+      assert.equal(result.needsOperator, false);
+      assert.ok(result.reasons.includes(gate));
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

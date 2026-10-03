@@ -79,14 +79,14 @@ test('primary-change CLI does not retry permanent permission errors', (t) => {
   const result = runCli(t, [{ path: prPath,
     error: 'gh: Resource not accessible by integration (HTTP 403)' }]);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).readFailed, true);
+  assert.equal(checkPrimaryChange(JSON.parse(result.stdout), head).reason, 'primary-change-unknown');
   assert.deepEqual(result.calls, [['api', prPath]]);
 });
 
 test('primary-change CLI fails closed on malformed JSON without retrying the successful read', (t) => {
   const result = runCli(t, [{ path: prPath, raw: '{invalid' }]);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).readFailed, true);
+  assert.equal(checkPrimaryChange(JSON.parse(result.stdout), head).reason, 'primary-change-unknown');
   assert.deepEqual(result.calls, [['api', prPath]]);
 });
 

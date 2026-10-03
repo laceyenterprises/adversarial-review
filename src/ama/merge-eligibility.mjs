@@ -47,6 +47,7 @@ export const ELIGIBLE_MERGE_VERDICTS = Object.freeze([
 export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
   'primary-change-reverted',
   'primary-change-unknown',
+  'primary-change-read-failed',
   'verdict-not-eligible',
   'ci-not-green',
   'pr-mergeability-unknown',

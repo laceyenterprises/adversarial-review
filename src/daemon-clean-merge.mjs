@@ -1036,11 +1036,16 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
+  if (remediableGate && daemonResult?.reasons?.includes('primary-change-read-failed')) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+      reason: 'gate-not-eligible', needsOperator: false };
+  }
   if (daemonResult?.reasons?.includes('primary-change-read-failed')) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
       reason: 'gate-read-failed', needsOperator: false };
   }
-  if (daemonResult?.reasons?.some((reason) => reason.startsWith('primary-change-'))) {
+  if (daemonResult?.reasons?.some((reason) => ['primary-change-reverted', 'primary-change-unknown', 'primary-change-needs-operator'].includes(reason))) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
       reason: 'primary-change-needs-operator', needsOperator: true };
   }

@@ -351,6 +351,7 @@ test('exported vocabulary is stable and frozen', () => {
   assert.deepEqual(MERGE_ELIGIBILITY_REASONS, [
     'primary-change-reverted',
     'primary-change-unknown',
+    'primary-change-read-failed',
     'verdict-not-eligible',
     'ci-not-green',
     'pr-mergeability-unknown',
@@ -540,4 +541,11 @@ test('classifier enforces required check contexts when specified', () => {
     false,
     'failed required context is not green'
   );
+});
+
+test('hammer in-lease merge independently fetches required primary evidence', () => {
+  const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+  assert.match(source, /await fetchPrimaryChange\(\{/);
+  assert.match(source, /headSha: expectedHead/);
+  assert.match(source, /primaryChange,\s*requirePrimaryChange: true/);
 });

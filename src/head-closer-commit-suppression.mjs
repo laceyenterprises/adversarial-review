@@ -413,6 +413,8 @@ export async function fetchHeadCloserVerifiedCommit({
   headSha,
   hqRoot = process.env.HQ_ROOT,
   env = process.env,
+  signal,
+  includePrimaryChange = false,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
@@ -424,14 +426,14 @@ export async function fetchHeadCloserVerifiedCommit({
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
-  const withPrimaryChange = async (commit) => ({ ...normalizeVerifiedCloserCommit(commit),
+  const withPrimaryChange = async (commit) => includePrimaryChange ? ({ ...normalizeVerifiedCloserCommit(commit),
     primaryChange: await fetchPrimaryChange({ repo: repoPath, prNumber, headSha: sha,
       get: async (path) => {
-        const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env });
+        const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
         return JSON.parse(stdout);
       },
     }),
-  });
+  }) : normalizeVerifiedCloserCommit(commit);
   // Daemon-robust: read the closer commit from the local checkout first. The remote
   // `gh api commits` fetch fails-closed in the watcher daemon context (no interactive
   // gh auth), which silently starved the hammer stale-review-head resume for every
@@ -458,6 +460,7 @@ export async function fetchHeadCloserVerifiedCommit({
     const { stdout } = await execGhWithRetryImpl({
       execFileImpl,
       env,
+      signal,
       args: [
         'api',
         `repos/${repoPath}/commits/${sha}`,

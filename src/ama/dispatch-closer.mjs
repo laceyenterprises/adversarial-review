@@ -3826,6 +3826,8 @@ export async function resolveHamTerminalRemediationEvidence({
   fetchHeadCloserVerifiedCommitImpl = fetchHeadCloserVerifiedCommit,
   closerCommitSuppression = null,
   logger = console,
+  env = process.env,
+  signal,
 } = {}) {
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
@@ -3837,6 +3839,9 @@ export async function resolveHamTerminalRemediationEvidence({
     repoPath,
     prNumber,
     headSha: currentHead,
+    includePrimaryChange: true,
+    env,
+    signal,
     execFileImpl,
     logger,
   });
@@ -3884,6 +3889,7 @@ export async function maybeDispatchAmaCloser({
   emitProtectivePredecessorFindingImpl = null,
   logGate = dispatchCloserLogGate,
   logger = console,
+  env = process.env,
   signal = null,
 }) {
   throwIfAborted(signal);
@@ -3923,6 +3929,7 @@ export async function maybeDispatchAmaCloser({
         fetchPullRequestRollupImpl,
         logger,
         signal,
+        env,
       });
       throwIfAborted(signal);
       if (resolvedHamEvidence?.hamTerminalRemediation && resolvedHamEvidence?.hamTerminalRemediationGroundTruth) {
@@ -4711,8 +4718,9 @@ export async function maybeDispatchAmaCloser({
               const state = String(rollup?.state || '');
               return {
                 primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, headSha: rollup?.headSha || rollup?.headRefOid || '',
+                  dispatchedHead: existingRecord?.targetRemediationSha || null,
                   get: async (path) => {
-                    const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', path], timeoutMs: 15000, env: process.env });
+                    const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
                     return JSON.parse(stdout);
                   },
                 }),

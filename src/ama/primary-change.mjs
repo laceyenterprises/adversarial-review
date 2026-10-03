@@ -1,17 +1,17 @@
+import { isTransientGhError } from '../gh-cli.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
-const isHammer = (commit) => /^Worker-Class:\s*hammer\s*$/im.test(commit?.commit?.message || '')
-  || /^(?:the-hammer|hammer)(?:-|\[bot\]|$)/i.test(commit?.author?.login || '')
-  || /^(?:the-hammer|hammer)(?:-|\[bot\]|$)/i.test(commit?.committer?.login || '');
+const isHammer = (commit) => /^Worker-Class:\s*hammer(?:-corp|-claude)?\s*$/im.test(commit?.commit?.message || '');
 
 // Compare changed regions in merge-base coordinates, rather than requiring the
 // author's added text to survive verbatim. Repairs may replace that text; a
 // region which disappears from the final diff has returned to the base.
-function changes(files, paths = null) {
+function changes(files, paths = null, aliases = new Map()) {
   if (!Array.isArray(files) || files.length >= 300) throw new Error('missing or capped file list');
   const result = new Map();
   for (const file of files) {
-    const path = file.previous_filename || file.filename;
+    const original = file.previous_filename || file.filename;
+    const path = aliases.get(original) || original;
     if (paths && !paths.has(path) && !paths.has(file.filename)) continue;
     if (!file.filename || typeof file.patch !== 'string') {
       // GitHub omits the patch for a content-preserving rename.
@@ -54,14 +54,16 @@ function changes(files, paths = null) {
 }
 
 export function checkPrimaryChange(evidence, headSha) {
-  if (!evidence || evidence.headSha !== headSha) return { ok: false, reason: 'primary-change-unknown' };
+  if (!evidence) return { ok: false, reason: 'primary-change-unknown' };
+  if (evidence.headSha !== headSha || evidence.headMismatch) return { ok: false, reason: 'primary-change-read-failed' };
   if (evidence.readFailed === true) return { ok: false, reason: 'primary-change-read-failed' };
   if (evidence.hasHammerCommits === false) return { ok: true, applicable: false };
   try {
     if (evidence.hasHammerCommits !== true || !SHA.test(evidence.primaryHead || '')
       || !SHA.test(evidence.mergeBase || '')) throw new Error('unknown primary change');
     const primary = changes(evidence.primaryFiles);
-    const final = changes(evidence.finalFiles, new Set(primary.keys()));
+    const aliases = new Map([...primary].map(([path, change]) => [change.filename, path]));
+    const final = changes(evidence.finalFiles, new Set(primary.keys()), aliases);
     if (![...primary.values()].some(({ regions, renamed }) => regions.length > 0 || renamed)) {
       throw new Error('empty primary change');
     }
@@ -88,23 +90,36 @@ export function checkPrimaryChange(evidence, headSha) {
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
-export async function fetchPrimaryChange({ repo, prNumber, headSha, get }) {
+export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatchedHead = null }) {
   const unknown = { headSha, hasHammerCommits: null };
   try {
     if (!SHA.test(headSha || '')) return unknown;
     const pr = await get(`repos/${repo}/pulls/${prNumber}`);
-    if (pr.head?.sha !== headSha || !SHA.test(pr.base?.sha || '')) return unknown;
+    if (pr.head?.sha !== headSha) return { ...unknown, headMismatch: true };
+    if (!SHA.test(pr.base?.sha || '')) return unknown;
     const history = await get(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
     if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
       || history.commits.length >= 250
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
         || typeof commit?.commit?.message !== 'string')) return unknown;
     const first = history.commits.find(isHammer);
-    if (!first) return { headSha, hasHammerCommits: false };
-    if (first.parents?.length !== 1 || !SHA.test(first.parents[0].sha)) return unknown;
+    // A trusted dispatch launch SHA covers untagged CI/conflict repairs before
+    // the first tagged HAM commit. Never accept this value from a HAM claim.
+    if (dispatchedHead && !SHA.test(dispatchedHead)) return unknown;
+    if (!first && !dispatchedHead) return { headSha, hasHammerCommits: false };
+    if (!dispatchedHead && (!first.parents?.length || first.parents.length > 2
+      || !SHA.test(first.parents[0].sha))) return unknown;
+    if (!dispatchedHead && first.parents.length === 2) {
+      const baseParent = await get(`repos/${repo}/compare/${first.parents[1].sha}...${pr.base.sha}`);
+      if (!['ahead', 'identical'].includes(baseParent.status)) return unknown;
+    }
     // The actual first hammer parent includes every author commit, including
     // rebased author commits. A hammer-authored trailer cannot narrow it.
-    const primaryHead = first.parents[0].sha;
+    const primaryHead = dispatchedHead || first.parents[0].sha;
+    if (dispatchedHead) {
+      const ancestry = await get(`repos/${repo}/compare/${dispatchedHead}...${headSha}`);
+      if (!['ahead', 'identical'].includes(ancestry.status)) return unknown;
+    }
     const primary = await get(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
     const mergeBase = primary.merge_base_commit?.sha;
     if (!SHA.test(mergeBase || '')) return unknown;
@@ -112,5 +127,6 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get }) {
     if (final.merge_base_commit?.sha !== mergeBase) return unknown;
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
       primaryFiles: primary.files, finalFiles: final.files };
-  } catch { return { ...unknown, readFailed: true }; }
+  } catch (error) { return isTransientGhError(error)
+    ? { ...unknown, readFailed: true } : unknown; }
 }

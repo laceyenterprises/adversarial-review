@@ -16,7 +16,7 @@ function get(args) {
   if (result.error || result.status !== 0) throw new Error(`${args[0]} ${args[1]} failed: ${(result.stderr || result.error?.message || '').slice(-500)}`);
   return JSON.parse(result.stdout);
 }
-function compact(value, max = 1200) { return String(value || '').slice(0, max); }
+function compact(value, max = 1200) { return Buffer.from(String(value || ''), 'utf8').subarray(0, max).toString('utf8'); }
 try {
   const pr = get(['api', `repos/${repo}/pulls/${number}`]);
   const reviews = [];
@@ -59,18 +59,34 @@ try {
       } catch { /* Unreadable local lease is reported as unavailable below. */ }
     }
   }
-  const primaryChange = await fetchPrimaryChange({ repo, prNumber: number, headSha: head,
-    get: (path) => get(['api', path]) });
-  // Before the first hammer commit the current author head defines the primary diff.
-  if (primaryChange.hasHammerCommits === false) {
-    const authorDiff = get(['api', `repos/${repo}/compare/${pr.base.sha}...${head}`]);
-    primaryChange.primaryHead = head;
-    primaryChange.mergeBase = authorDiff.merge_base_commit?.sha;
-    primaryChange.primaryFiles = authorDiff.files;
-  }
+  let primaryChange;
+  try {
+    const evidence = await fetchPrimaryChange({ repo, prNumber: number, headSha: head,
+      get: (path) => get(['api', path]) });
+    if (evidence.hasHammerCommits === false) {
+      const authorDiff = get(['api', `repos/${repo}/compare/${pr.base.sha}...${head}`]);
+      evidence.primaryHead = head;
+      evidence.mergeBase = authorDiff.merge_base_commit?.sha;
+      evidence.primaryFiles = authorDiff.files;
+    }
+    primaryChange = {
+      status: evidence.readFailed ? 'read-failed' : evidence.hasHammerCommits === null ? 'unknown' : 'available',
+      primaryHead: evidence.primaryHead, mergeBase: evidence.mergeBase,
+      fullEvidenceCommand: `node bin/primary-change-context.mjs ${repo} ${number} ${head}`,
+      files: [], truncated: false,
+    };
+    for (const file of evidence.primaryFiles || []) {
+      const headers = (file.patch || '').split('\n').filter((line) => line.startsWith('@@'));
+      const item = { path: compact(file.filename, 200), regionCount: headers.length, hunks: headers.slice(0, 3).map((line) => compact(line, 100)) };
+      if (Buffer.byteLength(JSON.stringify(primaryChange)) + Buffer.byteLength(JSON.stringify(item)) > 2000) {
+        primaryChange.truncated = true; break;
+      }
+      primaryChange.files.push(item);
+    }
+  } catch { primaryChange = { status: 'read-failed' }; }
   const output = {
     primaryChange,
-    statedIntent: pr.body || '',
+    statedIntent: compact(pr.body, 800),
     pr: { repo, number: Number(number), state: pr.state, merged: Boolean(pr.merged_at), draft: Boolean(pr.draft), mergeable: pr.mergeable, mergeableState: pr.mergeable_state, base: pr.base?.ref },
     head,
     review: verdict ? { state: verdict.state, author: verdict.user?.login, submittedAt: verdict.submitted_at, findings: compact(verdict.body, 1800), findingsBytes, findingsTruncated: findingsBytes > Buffer.byteLength(compact(verdict.body, 1800)) } : null,
@@ -82,8 +98,16 @@ try {
     activeLease: state.activeLease || null,
     localStateAvailable: Boolean(statePath || existsSync(join(localRoot, 'data'))),
   };
-  const serialized = JSON.stringify(output);
-  if (Buffer.byteLength(serialized) > 1024 * 1024) throw new Error('snapshot exceeds 1 MiB');
+  let serialized = JSON.stringify(output);
+  if (Buffer.byteLength(serialized) >= 8192) {
+    output.snapshotTruncated = true;
+    output.statedIntent = '';
+    output.primaryChange = { status: primaryChange.status, fullEvidenceCommand: primaryChange.fullEvidenceCommand, truncated: true };
+    output.checks = output.checks.slice(0, 10).map((c) => ({ name: compact(c.name, 100), conclusion: compact(c.conclusion, 30) }));
+    output.requiredChecks = output.requiredChecks.slice(0, 10).map((c) => compact(c, 100));
+    serialized = JSON.stringify(output);
+  }
+  if (Buffer.byteLength(serialized) >= 8192) throw new Error('snapshot exceeds 8192 bytes');
   process.stdout.write(`${serialized}\n`);
 } catch (error) {
   process.stderr.write(`${compact(error.message, 800)}\n`);

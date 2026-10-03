@@ -53,7 +53,7 @@ import {
   dismissStandingChangesRequestedReviewsForHead,
   fetchPullRequestRollup,
 } from '../github-api.mjs';
-import { isTransientGhError } from '../gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from '../gh-cli.mjs';
 import {
   fetchHeadCloserVerifiedCommit,
   isTerminalCloserCommitIdentity,
@@ -3943,6 +3943,10 @@ export async function maybeDispatchAmaCloser({
 
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
+  if (verdict.reasons.includes('primary-change-read-failed')) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: 'gate-read-failed', reasons: verdict.reasons });
+  }
   if (verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'primary-change-needs-operator', reasons: verdict.reasons, needsOperator: true });
@@ -4708,7 +4712,7 @@ export async function maybeDispatchAmaCloser({
               return {
                 primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, headSha: rollup?.headSha || rollup?.headRefOid || '',
                   get: async (path) => {
-                    const { stdout } = await execFileImpl('gh', ['api', path], { timeout: 15000, maxBuffer: 10 * 1024 * 1024 });
+                    const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', path], timeoutMs: 15000, env: process.env });
                     return JSON.parse(stdout);
                   },
                 }),

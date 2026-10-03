@@ -879,3 +879,20 @@ test('protective predecessor: no declaration leaves common-case merge behavior u
   assert.equal(protectorReads, 0);
   assert.equal(h.calls.merge, 1);
 });
+
+
+test('primary-change read outage inside lease writes a retryable audit and next tick can merge', async () => {
+  const failed = greenGate({ requirePrimaryChange: true,
+    primaryChange: { headSha: HEAD, hasHammerCommits: null, readFailed: true } });
+  const h = makeHarness({ liveGateSequence: [failed] });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { retryCap: 1 }));
+  assert.equal(result.reason, 'gate-read-failed');
+  assert.equal(result.permanent, false);
+  assert.equal(result.manualCloseRequired, false);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(h.calls.release, 1);
+  const doc = h.auditStore.get('o/r#7@' + HEAD);
+  assert.equal(doc.attempts.at(-1).permanent, false);
+  const next = makeHarness({ priorAudit: { repo: 'o/r', prNumber: 7, headSha: HEAD, doc } });
+  assert.equal((await attemptDaemonCleanMerge(baseArgs(next))).merged, true);
+});

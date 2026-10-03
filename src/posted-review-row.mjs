@@ -721,11 +721,13 @@ export async function handlePostedReviewRow({
         amaClosureResult?.reason || 'unknown',
         amaClosureResult?.reasons,
       );
+      const recoveryHint = amaClosureResult?.reason === 'primary-change-needs-operator'
+        ? "(inspect the primary-change evidence; use current-head 'merge-agent-requested' for the operator-fallback lane; see RUNBOOK-ama-closure)"
+        : "(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible OR 'merge-agent-requested' for the operator-fallback lane)";
       logger.log(
         `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
         `(${namedReason}; reasons: ${reasonsHint}); awaiting operator action ` +
-        `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
-        `OR 'merge-agent-requested' for the operator-fallback lane)`
+        recoveryHint
       );
       return {
         handled: true,

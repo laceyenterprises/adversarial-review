@@ -412,6 +412,7 @@ export async function fetchHeadCloserVerifiedCommit({
   prNumber,
   headSha,
   hqRoot = process.env.HQ_ROOT,
+  env = process.env,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
@@ -426,7 +427,7 @@ export async function fetchHeadCloserVerifiedCommit({
   const withPrimaryChange = async (commit) => ({ ...normalizeVerifiedCloserCommit(commit),
     primaryChange: await fetchPrimaryChange({ repo: repoPath, prNumber, headSha: sha,
       get: async (path) => {
-        const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, retries: 0 });
+        const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env });
         return JSON.parse(stdout);
       },
     }),
@@ -434,7 +435,8 @@ export async function fetchHeadCloserVerifiedCommit({
   // Daemon-robust: read the closer commit from the local checkout first. The remote
   // `gh api commits` fetch fails-closed in the watcher daemon context (no interactive
   // gh auth), which silently starved the hammer stale-review-head resume for every
-  // closer-advanced head; local git needs no gh auth.
+  // closer-advanced head; local git needs no gh auth for identity. Primary-change
+  // read failures remain separate evidence and defer closure instead of parking.
   const localCommit = await fetchVerifiedCommitFromLocalGitImpl({
     repoPath,
     prNumber,
@@ -455,6 +457,7 @@ export async function fetchHeadCloserVerifiedCommit({
   try {
     const { stdout } = await execGhWithRetryImpl({
       execFileImpl,
+      env,
       args: [
         'api',
         `repos/${repoPath}/commits/${sha}`,

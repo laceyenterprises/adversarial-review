@@ -51,3 +51,9 @@ Directory: `data/daemon-merge-parks/`
 - Corrupt, unreadable, or structurally invalid files are removed on read so one
   bad diagnostic file cannot blind the rest of the health surface.
 - Records contain no secrets, review bodies, or remediation payloads.
+
+Primary-change refusal records `primary-change-unknown` or
+`primary-change-reverted` before returning operator ownership. The existing
+head-scoped `merge-agent-requested` fallback requires operator inspection;
+`operator-approved` alone cannot waive those reasons. Read outages instead
+record `gate-read-failed` and remain retryable. The record shape is unchanged.

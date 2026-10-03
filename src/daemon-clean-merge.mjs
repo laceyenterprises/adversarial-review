@@ -804,7 +804,7 @@ export async function runDaemonCleanMergeAttempt({
   // executor rather than a HAM audit head that may be absent or stale.
   const readPrimaryChange = (headSha) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha,
     get: async (path) => {
-      const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, retries: 0 });
+      const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env });
       return JSON.parse(stdout);
     },
   });
@@ -1036,6 +1036,10 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  if (daemonResult?.reasons?.includes('primary-change-read-failed')) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      reason: 'gate-read-failed', needsOperator: false };
+  }
   if (daemonResult?.reasons?.some((reason) => reason.startsWith('primary-change-'))) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
       reason: 'primary-change-needs-operator', needsOperator: true };

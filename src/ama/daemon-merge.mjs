@@ -103,6 +103,7 @@ const PERMANENT_TERMINAL_REASONS = Object.freeze([
  */
 export const TRANSIENT_GATE_READ_REASONS = new Set([
   'labels-unavailable',
+  'primary-change-read-failed',
   'pr-mergeability-unknown',
 ]);
 

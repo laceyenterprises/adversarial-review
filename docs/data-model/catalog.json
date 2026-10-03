@@ -9,7 +9,8 @@
       "schemaSurface": "src/ama/audit.mjs",
       "relatedSchemaSurfaces": [
         "bin/ama-audit.mjs",
-        "templates/hammer-prompt.md"
+        "templates/hammer-prompt.md",
+        "src/ama/daemon-merge.mjs"
       ],
       "owner": "AMA merge authority"
     },
@@ -227,6 +228,7 @@
       "path": "docs/data-model/daemon-merge-parks.md",
       "store": "data/daemon-merge-parks/",
       "schemaSurface": "src/daemon-merge-park-log.mjs",
+      "relatedSchemaSurfaces": ["src/ama/primary-change.mjs"],
       "owner": "AMA daemon clean-merge diagnostics"
     },
     {

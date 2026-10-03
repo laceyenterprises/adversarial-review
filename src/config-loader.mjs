@@ -2472,7 +2472,7 @@ function schemaV1() {
                 __strict: true,
                 __keys: {
                   enabled: { __type: TYPE_BOOL, __default: false },
-                  shadow_only: { __type: TYPE_BOOL, __default: true },
+                  shadow_only: { __type: TYPE_BOOL, __default: false },
                   admit_percentile: {
                     __type: TYPE_STRING,
                     __default: 'p95',

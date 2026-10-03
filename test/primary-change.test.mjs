@@ -335,6 +335,35 @@ test('production-like names and root fixtures remain protected', () => {
   }
 });
 
+test('HAMINTENT-01R: collector reports restored and newly added test regions', async () => {
+  const evidence = primaryChangeFixture(head);
+  const production = evidence.primaryFiles[0];
+  const restored = { ...production, filename: 'test/identity.test.mjs' };
+  const added = { filename: 'tests/fixtures/identity.js', status: 'added',
+    additions: 1, deletions: 0, patch: '@@ -0,0 +1 @@\n+assert.equal(ghCalled, false);' };
+  const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1208,
+    headSha: head, get: async (path) => {
+      if (path.endsWith('/pulls/1208')) {
+        return { head: { sha: head }, base: { sha: evidence.mergeBase } };
+      }
+      if (path.endsWith(`${evidence.mergeBase}...${head}`)) {
+        return { total_commits: 1, commits: [{ sha: head,
+          parents: [{ sha: evidence.primaryHead }],
+          commit: { message: 'Mandated test repair\n\nWorker-Class: hammer' } }],
+        merge_base_commit: { sha: evidence.mergeBase }, files: [production, added] };
+      }
+      assert.ok(path.endsWith(`${evidence.mergeBase}...${evidence.primaryHead}`));
+      return { merge_base_commit: { sha: evidence.mergeBase }, files: [production, restored] };
+    } });
+  assert.deepEqual(result.testRegionsChanged, [
+    { path: restored.filename, primaryRegions: [{ start: 1, end: 2 }], finalRegions: [] },
+    { path: added.filename, primaryRegions: [], finalRegions: [{ start: 0, end: 0 }] },
+  ]);
+  const checked = checkPrimaryChange(result, head);
+  assert.equal(checked.ok, true);
+  assert.deepEqual(checked.testRegionsChanged, result.testRegionsChanged);
+});
+
 test('renaming production into a test directory cannot waive preservation', () => {
   const evidence = primaryChangeFixture(head);
   evidence.finalFiles = [{ ...evidence.primaryFiles[0], status: 'renamed',

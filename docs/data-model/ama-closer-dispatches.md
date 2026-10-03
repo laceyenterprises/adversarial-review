@@ -3,7 +3,7 @@
 **Owner:** AMA closer dispatch and recovery
 **Store:** `data/follow-up-jobs/ama-closer-dispatches/`
 **Source of truth:** `src/ama/dispatch-closer.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`
+**Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`
 
 ## Purpose
 
@@ -86,3 +86,11 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   Record contents are always read fresh.
 - Writes are atomic JSON rewrites. Corrupt or unreadable records are skipped by
   bounded scans so one bad file cannot blind later active reservations.
+
+- Primary-change collection uses the earliest hammer launch with a valid 40-hex
+  `targetRemediationSha` as trusted author-baseline evidence, even when repairs
+  lack HAM trailers. If a rebase diverges from that launch, the first verified
+  HAM commit parent supplies the rebased baseline. Malformed matching JSON records are skipped. Matching-record I/O failures
+  defer intent collection as `primary-change-read-failed` rather than parking
+  permanently or silently dropping protection. Legacy records without valid
+  baseline SHAs do not hide later trusted launches.

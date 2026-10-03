@@ -1168,7 +1168,61 @@ reasons:
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
 | `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
+| `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and use the operator fallback described below. |
+| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Use the operator fallback described below after inspecting the unsupported files. |
+| `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permanent permission, missing compare and malformed JSON errors are structural unknowns requiring operator inspection. An in-lease unknown after pre-lease validation remains non-permanent so a partial re-read cannot poison that head. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
+
+### Primary-change evidence and operator recovery (HAMINTENT-01)
+
+Both merge paths use `src/ama/primary-change.mjs`. The protected baseline is the
+earliest daemon-owned dispatch launch head with a valid SHA when available, covering untagged
+repairs. After a rebase diverges from that launch, it is the actual parent of
+the first hammer commit in the rebased PR history; a hammer-authored `Reviewed-Head` trailer cannot select an older author
+head. Both primary and final diffs are compared against the current PR base,
+using the same merge base so rebased upstream changes are excluded. Hammer identity
+comes only from the terminal commit trailer block. Binary and omitted-patch
+files can pass only with an identical GitHub blob SHA and change status;
+otherwise their preservation remains unknown. Structural hammer merge refusals
+are audited immediately with their primary-change reason, while read failures
+retry within the bounded gate window. Every
+changed region in production and config paths must still differ from that base, and removed-line occurrence
+counts must survive (whitespace is normalized). In-place fixes to added author
+lines are allowed. A preserved result means syntactic region coverage only; it cannot detect adjacent constant changes, false guards, or moved removed lines. This syntactic check does not prove semantic intent;
+reviewers and the hammer still inspect inversions and neutralizations.
+
+Test paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
+`**/__tests__/**`, including fixtures under test directories) are excluded from
+`primary-change-reverted` and reported as informational `testRegionsChanged`
+evidence. CI verifies tests against the final head; test repairs mandated by
+findings are allowed. Reviewers must still flag inversions or neutralizations of
+the tested primary-change behavior. Renaming production code into a test path
+does not exempt its protected baseline.
+
+The hammer's `bin/primary-change-context.mjs` reads each GitHub endpoint through
+`execGhWithRetry`: transient transport, timeout, rate-limit and HTTP 5xx failures
+get at most three attempts with 500/1000ms backoff and a 15-second timeout per
+attempt. Permanent permission errors are not retried; rejected credentials use
+the helper's single forced token-refresh attempt. Exhausted reads and malformed
+JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
+`primary-change-read-failed` rather than a proven reversal. The hammer prompt's
+90-second process limit still bounds the complete collection.
+
+For `primary-change-unknown` or `primary-change-reverted`, inspect the head-scoped
+primary-change evidence (`node bin/primary-change-context.mjs <repo> <pr> <head>`)
+and the PR diff. Resolve missing evidence or restore the primary effect if that
+is the correct fix. If the operator accepts the exact head despite unsupported
+evidence or an intentional change, apply **`merge-agent-requested` at that head**
+to enter the existing attributable operator-fallback lane (AMA-06N). That lane
+is separate from AMA primary-change eligibility and retains its own merge
+checks. `operator-approved` and `adversarial-merge-requested` alone cannot clear
+this refusal. Re-apply the head-scoped request if the head moves. The daemon
+persists the specific park reason before returning `await-operator`.
+Read outages instead remain `gate-read-failed`: retry the normal tick after
+transport/auth recovery, without authorizing an intent exception. Local git
+still verifies closer identity without GitHub authentication; unavailable
+remote primary-change evidence defers closure rather than invalidating that
+identity or requesting a hand merge.
 
 ### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move
 
@@ -1400,3 +1454,21 @@ CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class 
 the second Codex OAuth account. It keeps the hammer route and merge-capability
 identity. The fallback default remains `[hammer-claude]`; account fallback
 selection and activation are governed by credential-capacity-expansion CCX-13.
+
+HAM context emits an under-8192-byte summary; use `bin/primary-change-context.mjs` for full patches. Commit identity stays local; merge decisions fetch primary evidence lazily and forward cancellation. The hammer in-lease merge re-fetches evidence independently of its claim. Transient evidence errors cannot suppress CI/conflict repair dispatch. Trusted dispatch launch heads can cover untagged repairs; fallback detection accepts only explicit hammer worker-class trailers (hammer, hammer-corp, hammer-claude), never login patterns. Base merges use the first parent only after verifying the second parent belongs to the base ancestry.
+
+Primary evidence readers use an explicit runtime root when supplied, otherwise
+`HAM_ROOT_DIR`, otherwise the code checkout. Deployments with a separate runtime
+root must set `HAM_ROOT_DIR` for CLI and head-closer processes; the daemon and
+rendered hammer lease gate pass their configured root. `ama-check --primary-change`
+is required for all calls; an explicit no-HAM evidence result is still required.
+Matching dispatch JSON that cannot be parsed is skipped; dispatch I/O errors
+defer with `primary-change-read-failed`. The earliest valid launch SHA wins.
+Each evaluation reads a compare endpoint once; pre-lease and in-lease evaluations
+remain independent to preserve fresh evidence. GitHub compare bounds are fewer
+than 250 commits and fewer than 300 files; larger or truncated comparisons remain
+structural unknowns. Omitted patches pass only with identical trusted blobs.
+A diverged launch without HAM trailers remains unknown: untagged automation
+cannot be excluded from that evidence (follow-up LAC-1832). Non-HAM remediation
+trailers cannot authorize primary reversals (follow-up LAC-1833). In-place repairs
+remain allowed, but preserving author intent takes precedence over those waivers.

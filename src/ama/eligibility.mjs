@@ -1,3 +1,4 @@
+import { checkPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-02 — Adversarial Merge Authority eligibility predicate.
  *
@@ -857,6 +858,7 @@ function validateHamTerminalRemediationEvidence(
     parent: directReviewedParent || reviewedHeadTrailerCoversRebase,
     commitIdentity: verifiedHamCommitIdentityMatches(verifiedCommit),
     nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
+    primaryChange: checkPrimaryChange(verifiedCommit?.primaryChange, currentHead).ok,
     auditComment:
       claimedAuditBody !== ''
       && verifiedAuditBody !== ''
@@ -877,7 +879,8 @@ function validateHamTerminalRemediationEvidence(
     && checks.head
     && checks.parent
     && checks.commitIdentity
-    && checks.nonEmptyCommit;
+    && checks.nonEmptyCommit
+    && checks.primaryChange;
   // HAMIDENT-02: diagnostic only; unlinked commits still fail the safety core.
   // Missing identity fields are not proof that GitHub explicitly returned null.
   const loginIsNull = (identity) => identity === null
@@ -887,7 +890,7 @@ function validateHamTerminalRemediationEvidence(
     committerLoginNull: Boolean(verifiedCommit && loginIsNull(verifiedCommit.committer)),
   };
   const identityOnlyFailure = activeClaimed === true
-    && checks.workerClass && checks.head && checks.parent && checks.nonEmptyCommit
+    && checks.workerClass && checks.head && checks.parent && checks.nonEmptyCommit && checks.primaryChange
     && !checks.commitIdentity;
   const reasonCode = identityOnlyFailure
     && commitIdentity.authorLoginNull && commitIdentity.committerLoginNull
@@ -1382,7 +1385,15 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     }
   }
 
+  const primaryEvidence = options?.primaryChange
+    || options?.hamTerminalRemediationGroundTruth?.commit?.primaryChange;
+  const primaryChange = primaryEvidence || hamTerminalRemediation.active
+    ? checkPrimaryChange(primaryEvidence, currentHead)
+    : { ok: true, applicable: false };
+  if (!primaryChange.ok) effectiveReasons.push(primaryChange.reason);
+
   const trace = {
+    primaryChange,
     verdict: {
       normalized: verdictNormalized,
       settledSuccess,

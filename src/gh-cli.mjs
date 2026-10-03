@@ -196,6 +196,7 @@ async function execGhWithRetry({
   execFileImpl = execFileAsync,
   args,
   env = process.env,
+  signal,
   timeoutMs = GH_LOOKUP_TIMEOUT_MS,
   retries = 2,
   backoffMs = 500,
@@ -209,6 +210,7 @@ async function execGhWithRetry({
   // the loop also burns.
   let authRemintAttempted = false;
   while (attempt <= retries) {
+    signal?.throwIfAborted();
     try {
       return await execFileImpl(
         'gh',
@@ -218,6 +220,7 @@ async function execGhWithRetry({
           maxBuffer: GH_LOOKUP_MAX_BUFFER,
           timeout: timeoutMs,
           killSignal: 'SIGTERM',
+          ...(signal ? { signal } : {}),
         }
       );
     } catch (err) {

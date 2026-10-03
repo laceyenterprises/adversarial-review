@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -9,7 +10,7 @@ import {
   maybeDispatchAmaClosureFor,
   readHeadAttestationChainForPr,
   resolveOperatorMergeAccountability,
-  runDaemonCleanMergeAttempt,
+  runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal,
   resolveDaemonWorkerIdentityForPr,
   resolveDaemonWorkerIdentityFromHeadAttestation,
 } from '../src/watcher.mjs';
@@ -17,6 +18,8 @@ import {
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
 } from '../src/ama/daemon-merge.mjs';
+import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+import { readDaemonMergeParks } from '../src/daemon-merge-park-log.mjs';
 import { __testables__ as daemonCleanMergeTestables } from '../src/daemon-clean-merge.mjs';
 
 // Integration test for the MSM-03 wiring seam in `maybeDispatchAmaClosureFor`:
@@ -3645,4 +3648,131 @@ test('resolveOperatorMergeAccountability requires a head-scoped, attributable, p
   // No events / empty head → null
   assert.equal(resolveOperatorMergeAccountability({ mergeHeadSha: head }), null);
   assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeHeadSha: '' }), null);
+});
+
+// Inject history evidence so these wiring fixtures remain offline.
+function runDaemonCleanMergeAttempt(args) {
+  return runDaemonCleanMergeAttemptReal({
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    ...args,
+  });
+}
+
+
+test('primary-change operator park records the concrete reason and remains attributable to AMA', async () => {
+  const rootDir = tempRoot();
+  try {
+    const result = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'primary-change-needs-operator', reasons: ['primary-change-unknown'], needsOperator: true }),
+      maybeDispatchAmaCloserImpl: async () => { throw new Error('must not dispatch'); } });
+    assert.equal(result.amaEnabled, true);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.needsOperator, true);
+    const [park] = readDaemonMergeParks({ rootDir });
+    assert.equal(park.reason, 'primary-change-unknown');
+    assert.equal(park.headSha, 'head-live');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('primary-change operator recovery requires a live label and fresh attributable exact-head request', async () => {
+  const rootDir = tempRoot();
+  try {
+    const event = { id: 'operator-intent', actor: 'operator', headSha: 'head-live',
+      createdAt: '2026-10-03T12:00:00Z' };
+    const refusal = { amaEnabled: true, dispatched: false, skipMergeAgent: true,
+      reason: 'primary-change-needs-operator', reasons: ['primary-change-unknown'], needsOperator: true };
+    const run = (mergeAgentRequestEvent, labelNames = ['merge-agent-requested'], result = refusal) =>
+      resolveMergeAgentCoexistenceForWatcher({ ...baseArgs(rootDir), labelNames,
+        mergeAgentRequestEvent, maybeDispatchAmaClosureForImpl: async () => result });
+    const recovered = await run(event);
+    assert.equal(recovered.outcome, 'dispatch-merge-agent');
+    assert.equal(recovered.coexistence.action, 'merge-agent-operator-fallback');
+    assert.equal(recovered.dispatchEnv.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
+    for (const invalid of [null, { ...event, headSha: 'old-head' }, { ...event, actor: '' },
+      { ...event, id: null }, { ...event, prUpdatedAt: '2026-10-03T13:00:00Z' }]) {
+      assert.equal((await run(invalid)).outcome, 'await-operator');
+    }
+    assert.equal((await run(event, [])).outcome, 'await-operator');
+    assert.equal((await run(event, ['operator-approved'])).outcome, 'await-operator');
+    const outage = { amaEnabled: true, dispatched: false, skipMergeAgent: true, reason: 'gate-read-failed' };
+    assert.equal((await run(event, ['merge-agent-requested'], outage)).outcome, 'ama-pending');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('clean daemon candidate defers primary-change API outages and forwards caller env', async () => {
+  const rootDir = tempRoot();
+  const head = 'f'.repeat(40);
+  const env = { HQ_ROOT: rootDir, GH_TOKEN: 'fixture-token' };
+  try {
+    let reads = 0;
+    const result = await runDaemonCleanMergeAttemptReal({
+      ...unattributedDaemonArgs({ rootDir, head }), env,
+      operatorApprovalEvent: operatorApprovedEventAt(head),
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+        checks: [{ name: 'ci', conclusion: 'SUCCESS' }], labels: ['operator-approved'],
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+      execGhWithRetryImpl: async (options) => {
+        assert.equal(options.env, env);
+        assert.notEqual(options.retries, 0);
+        reads += 1;
+        throw new Error('TLS handshake timeout');
+      },
+      attemptDaemonCleanMergeImpl: async (options) => {
+        assert.equal(options.liveGate.primaryChange.readFailed, true);
+        return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'not-eligible',
+          reasons: ['primary-change-read-failed'] };
+      },
+    });
+    assert.equal(reads, 1);
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(result.reason, 'gate-read-failed');
+    assert.equal(result.needsOperator, false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('transient primary-change reads do not hide CI or conflict remediation', async () => {
+  const rootDir = tempRoot();
+  const head = 'f'.repeat(40);
+  try {
+    for (const gate of ['ci-not-green', 'pr-not-mergeable']) {
+      const result = await runDaemonCleanMergeAttemptReal({
+        ...unattributedDaemonArgs({ rootDir, head }),
+        operatorApprovalEvent: operatorApprovedEventAt(head),
+        fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: null, readFailed: true }),
+        fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+          checks: [{ name: 'ci', conclusion: 'SUCCESS' }], labels: ['operator-approved'],
+          mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+        attemptDaemonCleanMergeImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason: 'not-eligible', reasons: ['primary-change-read-failed', gate] }),
+      });
+      assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+      assert.equal(result.reason, 'gate-not-eligible');
+      assert.equal(result.needsOperator, false);
+      assert.ok(result.reasons.includes(gate));
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('in-lease unknown evidence keeps the daemon retryable without an operator park', async () => {
+  const rootDir = tempRoot();
+  const head = 'f'.repeat(40);
+  try {
+    const result = await runDaemonCleanMergeAttemptReal({
+      ...unattributedDaemonArgs({ rootDir, head }),
+      operatorApprovalEvent: operatorApprovedEventAt(head),
+      fetchPrimaryChangeImpl: async () => primaryChangeFixture(head),
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+        checks: [{ name: 'ci', conclusion: 'SUCCESS' }], labels: ['operator-approved'],
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+      attemptDaemonCleanMergeImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-read-failed', reasons: ['primary-change-unknown'], permanent: false }),
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(result.needsOperator, false);
+    assert.equal(result.reason, 'gate-read-failed');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

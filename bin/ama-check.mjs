@@ -137,6 +137,7 @@ Usage:
   ama-check --pr <pr.json> --reviews <reviews.json>
             --protection <protection.json> --timeline <timeline.json>
             --reviewed-sha <sha> --reviewer <model> --risk-class <class>
+            --primary-change <evidence.json>
 
 Inputs:
   --pr            JSON from \`gh pr view --json number,headRefOid,state,isDraft,
@@ -154,6 +155,8 @@ Inputs:
                   or the configured builder route. Unknown values fail closed.
   --risk-class    resolved risk class from the spec/plan/dispatch sidecar
                   (low | medium | high | critical | unknown)
+  --primary-change Required for every invocation: JSON from
+                  primary-change-context.mjs for the live head; missing or unreadable primary history fails closed.
   --ham-terminal-remediation
                   optional JSON evidence for SPEC §1.1.1 HAM terminal
                   remediation validation. When present and valid, the
@@ -190,6 +193,7 @@ function parseInputs(argv) {
       'review-cycle-exhausted': { type: 'string' },
       'ham-terminal-remediation': { type: 'string' },
       'ham-commit': { type: 'string' },
+      'primary-change': { type: 'string' },
       'rebase-assessment': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -550,7 +554,16 @@ function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
+  const primaryChange = args['primary-change'] ? loadJson(args['primary-change'])
+    : { headSha: prMetadata.headSha, hasHammerCommits: null };
+  if (hamTerminalRemediationGroundTruth?.commit) {
+    hamTerminalRemediationGroundTruth = {
+      ...hamTerminalRemediationGroundTruth,
+      commit: { ...hamTerminalRemediationGroundTruth.commit, primaryChange },
+    };
+  }
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    primaryChange,
     hamTerminalRemediation,
     hamTerminalRemediationGroundTruth,
     rebaseReviewCoverage,

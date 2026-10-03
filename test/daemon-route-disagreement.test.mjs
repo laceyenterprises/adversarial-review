@@ -554,3 +554,21 @@ test('DIRTYOWN-01: a transient read reports the caller head and ignores a ledger
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+
+test('primary-change transport failure beside red CI dispatches hammer without manual park', async () => {
+  const rootDir = tempRoot();
+  try {
+    const closerCalls = [], logs = [], warns = [];
+    const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+      daemonResult: { disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible', permanent: false,
+        reasons: ['primary-change-read-failed', 'ci-not-green'] },
+      closerCalls, logs, warns,
+    }));
+    assert.equal(result.dispatched, true);
+    assert.equal(closerCalls.at(-1).force, true);
+    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
+    assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

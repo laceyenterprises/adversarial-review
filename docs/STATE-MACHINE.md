@@ -566,6 +566,14 @@ Key control points:
   recent hammer rebase/validation exists, the PR is not `MERGEABLE`, or the
   newer base touches files changed by this PR. Only the hammer's documented
   no-strict up-to-date lane may merge a `BEHIND` head after those guards pass.
+- **Primary-change gate (HAMINTENT-01).** Both paths preserve changed regions
+  from the actual first hammer parent against the current PR base. Repairs to
+  added author lines are allowed. Proven reversals and unsupported evidence
+  park with a recorded reason; `operator-approved` does not waive them. An
+  attributable current-head `merge-agent-requested` invokes the existing
+  operator-fallback lane after inspection (see RUNBOOK-ama-closure). Failed
+  reads defer as `gate-read-failed`, without a permanent head marker or operator
+  escalation; the next tick retries.
 - **`strict_mode`** (default `true`): the ordinary daemon lane requires a
   zero-finding review. Explicitly setting it `false` permits daemon merge
   over *known non-blocking* findings. A current-head `operator-approved`

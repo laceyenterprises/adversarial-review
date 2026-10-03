@@ -1,3 +1,4 @@
+import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir, hostname } from 'node:os';
@@ -367,6 +368,7 @@ export async function runDaemonCleanMergeAttempt({
   logger,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
+  fetchPrimaryChangeImpl = fetchPrimaryChange,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   fetchRollupImpl = fetchPullRequestRollup,
   acquireMergeLeaseImpl = acquireMergeLease,
@@ -380,6 +382,7 @@ export async function runDaemonCleanMergeAttempt({
   resolveHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
   resolveAutonomousCloserCommitAccountabilityImpl = resolveAutonomousCloserCommitAccountability,
   env = process.env,
+  signal = null,
   authoritativeReviewerLogins = [],
   dismissStaleRequestChangesOnResolved = true,
   hamTerminalRemediationValidated = false,
@@ -800,6 +803,13 @@ export async function runDaemonCleanMergeAttempt({
   // refreshed live head above, after the same head-moved guard has ruled out a
   // snapshot mismatch, so it must pass that proven closer head to the merge
   // executor rather than a HAM audit head that may be absent or stale.
+  const readPrimaryChange = (headSha) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha, rootDir,
+    get: async (path) => {
+      const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
+      return JSON.parse(stdout);
+    },
+  });
+  const primaryChange = await readPrimaryChange(liveHead);
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
   const daemonVerdict = hamTerminalRemediationHead
@@ -846,6 +856,8 @@ export async function runDaemonCleanMergeAttempt({
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
+      primaryChange,
+      requirePrimaryChange: true,
       candidateHead: liveHead,
       requiredChecks: resolveRollupRequiredChecks(liveRollup)
         ?? (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
@@ -967,6 +979,8 @@ export async function runDaemonCleanMergeAttempt({
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
       const state = String(rollup?.state || '');
       return {
+        primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
+        requirePrimaryChange: true,
         candidateHead: rollup?.headSha || rollup?.headRefOid || '',
         requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
         mergeable: rollup?.mergeable,
@@ -1023,6 +1037,26 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  // The in-lease gate has already classified a partial evidence re-read as
+  // retryable. Preserve that classification rather than creating an operator park.
+  if (daemonResult?.reason === 'gate-read-failed'
+    && daemonResult?.reasons?.includes('primary-change-unknown')) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      needsOperator: false };
+  }
+  const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
+  if (remediableGate && daemonResult?.reasons?.includes('primary-change-read-failed')) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+      reason: 'gate-not-eligible', needsOperator: false };
+  }
+  if (daemonResult?.reasons?.includes('primary-change-read-failed')) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      reason: 'gate-read-failed', needsOperator: false };
+  }
+  if (daemonResult?.reasons?.some((reason) => ['primary-change-reverted', 'primary-change-unknown', 'primary-change-needs-operator'].includes(reason))) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+      reason: 'primary-change-needs-operator', needsOperator: true };
+  }
   if (daemonResult?.reason === 'operator-approval-no-longer-current') {
     return NOT_TAKEN('operator-approval-no-longer-current');
   }

@@ -231,6 +231,8 @@ ham_refresh_github_gate_once() {
   HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
+import { fetchPrimaryChange } from '<<ROOT_DIR>>/src/ama/primary-change.mjs';
+import { execGhWithRetry } from '<<ROOT_DIR>>/src/gh-cli.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
 import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/checks-summary.mjs';
 
@@ -264,7 +266,15 @@ const open = state === 'OPEN';
 // BEHIND-but-MERGEABLE validated head is eligible instead of forcing a
 // churn-inducing rebase. Fail closed: any value other than '0' keeps the block.
 const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
-const ok = evaluateMergeEligibility({
+const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
+  get: async (path) => {
+    const { stdout } = await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 });
+    return JSON.parse(stdout);
+  },
+});
+const eligibility = evaluateMergeEligibility({
+  primaryChange,
+  requirePrimaryChange: true,
   verdict: 'settled-success',
   leaseHeld: true,
   requiredChecks: checks,
@@ -276,9 +286,10 @@ const ok = evaluateMergeEligibility({
   labels: rollup.labels,
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
-}).eligible;
+});
 console.log(JSON.stringify({
-  ok,
+  ok: eligibility.eligible,
+  reasons: eligibility.reasons,
   state,
   open,
   headMatches,
@@ -378,6 +389,13 @@ while :; do
     echo "HAM race: live PR head moved off validated head; releasing lease without merge or re-dispatch" >&2
     HAM_REMOTE_CI_STATUS=live-head-moved
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
+    ham_release_merge_lease
+    return 20
+  fi
+  HAM_PRIMARY_REFUSAL=$(jq -r '[.reasons[]? | select(. == "primary-change-reverted" or . == "primary-change-unknown")][0] // empty' "$HAM_GATE_JSON")
+  if [ -n "$HAM_PRIMARY_REFUSAL" ]; then
+    HAM_REMOTE_CI_STATUS="$HAM_PRIMARY_REFUSAL"
+    ham_append_terminal_audit failed-without-merge "$HAM_PRIMARY_REFUSAL" || true
     ham_release_merge_lease
     return 20
   fi
@@ -766,6 +784,8 @@ else
   ham_release_merge_lease
   return 1
 fi
+# Read by the wrapper sourcing this procedure.
+# shellcheck disable=SC2034
 HAM_PHASE_OUTCOME=merged
 return 0
 }

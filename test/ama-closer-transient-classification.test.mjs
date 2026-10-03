@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -435,4 +436,19 @@ test('maybeDispatchAmaCloser refuses invalid PR numbers before dispatch setup', 
   assert.equal(result.reason, 'invalid-pr-number');
   assert.equal(execCalls, 0);
   assert.equal(templateReads, 0);
+});
+
+
+test('HAMINTENT: the closer escalates an intent reversal instead of dispatching or merging', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-intent-escalation-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  const primaryChange = { ...primaryChangeFixture(inputs.prMetadata.headSha), finalFiles: [] };
+  const result = await maybeDispatchAmaCloser({ ...inputs, options: { primaryChange },
+    execFileImpl: async () => { assert.fail('intent reversal must not dispatch or merge'); },
+  });
+  assert.equal(result.reason, 'primary-change-needs-operator');
+  assert.equal(result.needsOperator, true);
+  assert.equal(result.dispatched, false);
+  assert.ok(result.reasons.includes('primary-change-reverted'));
 });

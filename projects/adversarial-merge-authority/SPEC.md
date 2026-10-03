@@ -316,6 +316,9 @@ without these documentation surfaces, including submodules whose superproject
 owns the docs, are exempt, but the HAM audit comment must record any skipped
 superproject-doc obligation.
 
+HAMINTENT-01 primary-change preservation is also a non-waivable safety-core
+check; see §4.2. HAM and operator approval cannot waive it.
+
 The evidence JSON is a claim, not authority. At closer runtime the predicate
 must verify that claim against durable GitHub state:
 
@@ -400,6 +403,22 @@ waive the non-blocking reasons after it verifies the HAM commit and audit
 comment. Final-hammer review-cycle exhaustion may waive non-blocking reasons
 only with current-head operator override, matching the existing verdict and
 blocking-finding gate semantics.
+
+
+HAMINTENT-01 is a non-waivable safety-core gate: primary author changes must
+remain in the final diff, evaluated from trusted GitHub compare history at the
+live head. `ama-check` requires `--primary-change` for every invocation, including non-HAM checks;
+the in-lease hammer merge independently fetches evidence and requires the same
+gate. `operator-approved` does not bypass it. Reverted changes and structural
+unknowns fail closed for operator inspection; transient read failures and head
+races defer without permanent failure markers. Authentication outages and
+cancellation are read failures; in-lease unknown evidence also remains
+non-permanent. Mixed read-outage/CI failures still dispatch CI remediation.
+The earliest daemon-owned HAM launch protects untagged repairs; a diverged
+rebase uses the first HAM commit parent. HAM identification reads terminal
+trailers, not quoted prose. Missing patches can establish preservation through
+identical blob SHA and change status; changed opaque blobs fail closed. Preservation is syntactic region
+coverage, not proof of semantic intent or immunity to adjacent neutralisation.
 
 ## 4.4 Closure convergence predicate
 

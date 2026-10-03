@@ -34,6 +34,10 @@ const SCHEMA_VERSION = 1;
 // Parks the operator can clear directly, mapped to the specific lever. Reasons
 // absent from this map still record — they just carry the generic remedy.
 const PARK_REMEDIES = Object.freeze(Object.assign(Object.create(null), {
+  'primary-change-read-failed': 'Retry a transient GitHub read; inspect bin/primary-change-context.mjs if it persists.',
+  'primary-change-unknown': 'Operator must inspect unsupported history with bin/primary-change-context.mjs; preservation is syntactic, not semantic.',
+  'primary-change-reverted': 'Restore the primary change; inspect bin/primary-change-context.mjs. Region preservation alone cannot prove semantic intent.',
+  'primary-change-needs-operator': 'Inspect bin/primary-change-context.mjs and the author intent before an operator decision.',
   'worker-identity-unresolved':
     'The PR has no `pr_opened` build-completion identity row, so both merge routes '
     + 'fail closed by design. If an interactive session opened this PR outside '

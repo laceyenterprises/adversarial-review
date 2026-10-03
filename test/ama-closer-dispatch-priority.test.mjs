@@ -808,3 +808,23 @@ test('MERGEORDER-01: dispatch boost emits a finding naming dependent and protect
   assert.match(findings[0].reason, /#6760/);
   assert.match(findings[0].reason, /#6767/);
 });
+
+
+test('transient primary evidence does not suppress CI/conflict repair dispatch', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-primary-read-repair-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const conflict of [false, true]) {
+    const deps = testDeps();
+    const args = baseArgs(rootDir, {
+      reviewState: { verdict: 'approved', blockingFindingCount: 0 },
+      prMetadata: { prNumber: conflict ? 406 : 405,
+        mergeableState: conflict ? 'CONFLICTING' : 'MERGEABLE',
+        statusCheckRollup: [{ name: REQUIRED_GATE, conclusion: 'FAILURE' }] },
+    });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      options: { primaryChange: { headSha: HEAD, hasHammerCommits: null, readFailed: true } },
+    });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.ok(deps.calls.some(({ args }) => args.includes('dispatch')));
+  }
+});

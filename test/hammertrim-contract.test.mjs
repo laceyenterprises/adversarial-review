@@ -142,6 +142,43 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME"
   const stale = run('/bin/bash', ['-c', shell.replace(`HAM_VERDICT_READY_FILE=${verdictPath}`, 'HAM_VERDICT_READY_FILE=') , '_', script], env);
   assert.match(stale.stdout, /STATUS=20 HELD=0/);
 });
+test('merge immediately records structural primary-change refusal and releases the lease', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-merge-verdict-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const prNumber = '424243';
+  const verdictPath = join(dir, 'verdict.json');
+  writeFileSync(verdictPath, JSON.stringify({ eligible: true, trace: { headMatch: { current: 'a'.repeat(40) }, branchProtection: { required: false } } }));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const gh = join(bin, 'gh');
+  writeFileSync(gh, '#!/bin/sh\necho GH_CALLED >&2\nexit 1\n');
+  chmodSync(gh, 0o755);
+  const nodeStub = join(bin, 'audit-node');
+  writeFileSync(nodeStub, '#!/bin/sh\nif [ \"$1\" = --input-type=module ]; then cat >/dev/null; echo \'{\"ok\":false,\"headMatches\":true,\"state\":\"OPEN\",\"checksConclusion\":\"SUCCESS\",\"reasons\":[\"primary-change-unknown\"]}\'; fi\nexit 0\n');
+  chmodSync(nodeStub, 0o755);
+  const env = {
+    HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424243', HAM_REPO: 'acme/repo',
+    HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
+    HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
+    HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
+    PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
+  };
+  const render = run('node', [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+  assert.equal(render.status, 0, render.stderr);
+  const script = join(dir, 'merge.sh');
+  writeFileSync(script, render.stdout);
+  const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${'a'.repeat(40)} HAM_PUBLISHED_AUDIT_HEAD=${'a'.repeat(40)} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdictPath} HAM_VERDICT_READY_FILE=${verdictPath} HAM_REMOTE_CI_WAIT_SECONDS=1 HAM_MERGE_RETRY_CAP=1
+ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
+source "$1"
+echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME REMOTE=$HAM_REMOTE_CI_STATUS"
+`;
+  const result = run('/bin/bash', ['-c', shell, '_', script], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /LEASE_RELEASED/);
+  assert.match(result.stdout, /STATUS=20 HELD=0 OUTCOME=/);
+  assert.match(result.stdout, /REMOTE=primary-change-unknown/);
+  assert.doesNotMatch(result.stderr, /GH_CALLED|github-gate-timeout/);
+});
 test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
   const rendered = composeCloserPrompt({
     prUrl: 'https://github.com/acme/repo/pull/42', repo: 'acme/repo', prNumber: 42,
@@ -203,7 +240,7 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const fixture = {
-    pr: { state: 'open', merged_at: null, draft: false, mergeable: false, mergeable_state: 'dirty', base: { ref: 'main' }, head: { sha: 'abc' }, changed_files: 1, additions: 3, deletions: 2 },
+    pr: { body: 'a'.repeat(799) + '😀end', state: 'open', merged_at: null, draft: false, mergeable: false, mergeable_state: 'dirty', base: { ref: 'main' }, head: { sha: 'abc' }, changed_files: 1, additions: 3, deletions: 2 },
     reviews: [{ commit_id: 'abc', state: 'COMMENTED', body: `## Adversarial Review\n${'Fix auth. '.repeat(250)}`, user: { login: 'reviewer' } }],
     files: [{ additions: 3, deletions: 2 }],
     checks: { statusCheckRollup: [{ name: 'CI', conclusion: 'SUCCESS' }] },
@@ -221,6 +258,8 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   assert.ok(Buffer.byteLength(result.stdout) < 8192);
   const snapshot = JSON.parse(result.stdout);
   assert.equal(snapshot.head, 'abc');
+  assert.equal(snapshot.statedIntent, 'a'.repeat(799));
+  assert.doesNotMatch(result.stdout, /�/);
   assert.match(snapshot.review.findings, /Fix auth/);
   assert.equal(snapshot.review.state, 'COMMENTED');
   assert.equal(snapshot.review.findingsTruncated, true);
@@ -240,4 +279,32 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   assert.equal(local.status, 0, local.stderr);
   assert.equal(JSON.parse(local.stdout).activeRemediation.jobId, 'job-local');
   assert.equal(JSON.parse(local.stdout).activeLease.leaseId, 'lease-local');
+});
+
+test('context bounds real primary patches and survives a failed compare', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-context-patches-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin'); mkdirSync(bin);
+  const head = 'c'.repeat(40), primary = 'b'.repeat(40), base = 'a'.repeat(40);
+  const gh = join(bin, 'gh');
+  writeFileSync(gh, `#!${process.execPath}
+const a = process.argv.join(' ');
+if (a.includes('/compare/')) {
+  if (process.env.FAIL_COMPARE) { process.stderr.write('HTTP 502'); process.exit(1); }
+  if (a.endsWith('${base}...${head}')) console.log(JSON.stringify({total_commits:1,commits:[{sha:'${head}',parents:[{sha:'${primary}'}],commit:{message:'Worker-Class: hammer'}}], merge_base_commit:{sha:'${base}'},files:[]}));
+  else console.log(JSON.stringify({merge_base_commit:{sha:'${base}'},files:Array.from({length:20},(_,i)=>({filename:'file'+i,patch:'@@ -1 +1 @@\\n+'+'x'.repeat(10000)}))}));
+} else if (a.includes('/reviews?')) console.log('[]');
+else if (a.includes('/protection')) console.log('{}');
+else if (a.includes('pr view')) console.log('{"statusCheckRollup":[]}');
+else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${base}',ref:'main'},body:'intent'}));
+`); chmodSync(gh, 0o755);
+  for (const failed of [false, true]) {
+    const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42'], {PATH: `${bin}:${process.env.PATH}`, ...(failed ? {FAIL_COMPARE:'1'} : {})});
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(Buffer.byteLength(result.stdout) < 8192);
+    const snapshot = JSON.parse(result.stdout);
+    assert.equal(snapshot.head, head);
+    assert.equal(snapshot.primaryChange.status, failed ? 'read-failed' : 'available');
+    assert.doesNotMatch(result.stdout, /x{100}/);
+  }
 });

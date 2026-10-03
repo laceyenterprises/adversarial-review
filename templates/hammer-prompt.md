@@ -119,6 +119,28 @@ held and fail closed otherwise. Use the scripts directly from this checkout;
 the context and bounded-runner helpers work without an Agent OS
 installation; the merge phase retains its existing HQ merge-signal integration.
 
+## Preserve the PR primary change (HAMINTENT-01)
+
+The primary change is the first non-hammer head (the worker or author's commits)
+against its merge base, before the first hammer remediation. `hammer-context`
+includes `primaryChange.primaryHead`, `mergeBase`, and per-file patches, plus
+`statedIntent` from the PR body (including Why or Operator decision sections).
+Use this context to understand intent; it does not suppress real blocking findings.
+If primary evidence is missing or unsupported, stop and use the existing operator
+escalation path. Never substitute the latest hammer head for the original change.
+
+A remediation may not revert, neutralize or invert any hunk of the primary change.
+Preserve its per-file added and removed lines in the final diff; additive tests,
+docs and fixes to unrelated lines are allowed. This rule also governs CI repairs.
+For a conflicting non-blocking finding, post a rationale comment on the PR citing
+the PR body's stated intent or operator decision. That counts as addressed;
+do not change the code to satisfy it. Record the exact finding and rationale in
+the audit comment (the rationale may be part of that single comment).
+For a conflicting blocking finding, use the existing escalation path. Never revert.
+A predicate refusal `primary-change-reverted` or `primary-change-unknown` requires
+operator escalation and the existing no-merge closing status, never merge or retry
+remediation by undoing the author change.
+
 ## Mandate
 
 0. If this PR already has a HAM-authored remediation commit, matching
@@ -154,8 +176,8 @@ installation; the merge phase retains its existing HQ merge-signal integration.
    within a small retry budget.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
-2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for
-   the findings the review raised. Do not add net-new FEATURE scope.
+2. Remediate ALL final comments, blocking and non-blocking, under the primary-change
+   preservation rule above. Rationale comments address conflicting non-blocking findings. Do not add net-new FEATURE scope.
 2b. **Get required checks and changed-surface tests green.** Run the tests that
    cover the files this PR touches against your post-remediation head, confirm
    every required GitHub check is green, and fix every failing regression. Red CI
@@ -568,6 +590,8 @@ match `<<REVIEWED_SHA>>`. The JSON claim alone does not satisfy the predicate.
 Run the predicate against the live post-remediation head. Create an owned, run-scoped verdict file after publishing the audit; export the path so the merge helper reads this run's result. Remove the file after the merge phase:
 
 ```bash
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/primary-change-context.mjs <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" \
+  > /tmp/ham-<<PR_NUMBER>>-primary-change.json || exit 1
 HAM_VERDICT_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-verdict.XXXXXX") || exit 1
 chmod 600 "$HAM_VERDICT_FILE"
 export HAM_VERDICT_FILE
@@ -584,6 +608,7 @@ HAM_VERDICT_READY_FILE=""
   --risk-class <<RISK_CLASS>> \
   --ham-terminal-remediation /tmp/ham-<<PR_NUMBER>>-terminal-remediation.json \
   --ham-commit /tmp/ham-<<PR_NUMBER>>-commit.json \
+  --primary-change /tmp/ham-<<PR_NUMBER>>-primary-change.json \
   > "$HAM_VERDICT_FILE" || exit 1
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
 ```

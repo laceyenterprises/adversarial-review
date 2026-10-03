@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -2031,6 +2032,7 @@ function hamEvidence({
     ticket: workerTicket,
     commit: {
       sha: headSha,
+      primaryChange: primaryChangeFixture(headSha),
       parentSha,
       trailers: {
         'Worker-Class': workerClass,
@@ -2068,6 +2070,7 @@ function hamGroundTruth({
   return {
     commit: {
       sha: headSha,
+      primaryChange: primaryChangeFixture(headSha),
       parentSha,
       author,
       ...(committer !== undefined ? { committer } : {}),
@@ -3269,3 +3272,18 @@ for (const variant of ['linked', 'missing', 'foreign', 'non-hammer']) {
     assert.equal(result.eligible, variant === 'linked');
   });
 }
+
+test('HAMINTENT: hammer provenance cannot self-certify a reverted or unknown primary change', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({ prMetadata: { headSha: 'def67890' } });
+  for (const primaryChange of [null, { ...primaryChangeFixture('def67890'), finalFiles: [] }]) {
+    const groundTruth = hamGroundTruth();
+    groundTruth.commit.primaryChange = primaryChange;
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+      hamTerminalRemediation: hamEvidence(), hamTerminalRemediationGroundTruth: groundTruth,
+    });
+    assert.equal(result.eligible, false);
+    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
+    assert.equal(result.trace.hamTerminalRemediation.checks.primaryChange, false);
+    assert.ok(result.reasons.includes(primaryChange ? 'primary-change-reverted' : 'primary-change-unknown'));
+  }
+});

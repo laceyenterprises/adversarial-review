@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -261,6 +262,7 @@ function runAmaCheck(tmp, {
   riskClass = 'low',
   strictNonBlockingRemediation = true,
   hamTerminalRemediation = null,
+  primaryChangeEvidence = undefined,
   rebaseAssessment = null,
   reviewCycleExhausted = null,
   rootDir = null,
@@ -269,6 +271,13 @@ function runAmaCheck(tmp, {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
   const configPath = writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation });
   const extraArgs = [];
+  if (primaryChangeEvidence !== null) {
+    paths.primaryChange = join(tmp, 'primary-change.json');
+    writeJson(paths.primaryChange, primaryChangeEvidence || (hamTerminalRemediation
+      ? primaryChangeFixture(HAM_SHA)
+      : { headSha: loadJson(paths.pr).headRefOid, hasHammerCommits: false }));
+    extraArgs.push('--primary-change', paths.primaryChange);
+  }
   if (hamTerminalRemediation) {
     paths.hamTerminalRemediation = join(tmp, 'ham-terminal-remediation.json');
     paths.hamCommit = join(tmp, 'ham-commit.json');
@@ -1767,4 +1776,15 @@ test('ama-check scopes Claude authority and ignores a newer Codex-family clean r
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+
+test('ama-check requires history evidence even when a caller omits the HAM claim', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-unknown-primary-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const result = runAmaCheck(tmp, { branchProtectionRequired: false, primaryChangeEvidence: null });
+  assert.equal(result.status, 0, result.stderr);
+  const verdict = JSON.parse(result.stdout);
+  assert.equal(verdict.eligible, false);
+  assert.ok(verdict.reasons.includes('primary-change-unknown'));
 });

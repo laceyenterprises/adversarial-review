@@ -1567,6 +1567,10 @@ export async function maybeDispatchAmaClosureFor({
     },
   );
   throwIfAborted(signal);
+  if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
+    return { outcome: 'await-operator', amaClosureResult: daemonCleanMerge,
+      coexistence: { action: COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION } };
+  }
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(

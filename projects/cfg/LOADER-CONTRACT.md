@@ -75,20 +75,18 @@ adversarial-review watcher:
 - `worker_pool.secrets_bus.*`
 
 `worker_pool.memory.dynamic` is strict and mirrors `enabled: false`,
-`shadow_only: true`, `admit_percentile: p95`, `pressure_margin_mb: 512`,
+`shadow_only: false`, `admit_percentile: p95`, `pressure_margin_mb: 512`,
 `rss_window_minutes: 30`, `oss_model_reserve_mb: 0`,
 `snapshot_stale_seconds: 60`, and `require_pressure_normal: true`.
 Python owns admission behavior; this Node subtree only validates shared config.
-The canonical Python schema on `agent-os/main` retains `shadow_only: true`
-with its fleet-default enforcement decision deferred until 2026-10-09.
-Keep the mirror shadow-safe until the canonical default changes and the
-superproject CFG schema parity gate validates the coordinated change.
+The mirror matches the canonical Python default (`shadow_only: false`) landed
+in [agent-os #7593](https://github.com/laceyenterprises/agent-os/pull/7593)
+(MEMENF-01).
 
-Hosts with `enabled: true` and no explicit `shadow_only` remain in shadow mode.
-Before any future coordinated default flip, hosts that want to remain in shadow
-mode must pin `worker_pool.memory.dynamic.shadow_only: true` in
-`config.local.yaml`; enforcement is an explicit opt-in with `shadow_only: false`
-while this default remains in place.
+Hosts with `enabled: true` and no explicit `shadow_only` use enforcement.
+Hosts that want shadow mode must pin
+`worker_pool.memory.dynamic.shadow_only: true` in `config.local.yaml`.
+`worker_pool.memory_retention.shadow_only` remains `true` by default.
 
 `worker_pool.oss_dispatch` is strict and mirrors `enabled` (bool, default
 `false`), `local_routes_enabled` (bool, default `false`),

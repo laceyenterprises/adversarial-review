@@ -75,11 +75,15 @@ const RETENTION_DEFAULTS = {
     keep_count: 3,
   },
   ephemeral: {
-    worker_worktrees_keep_hours: 168,
+    worker_worktrees_keep_hours: 48,
     worker_worktrees_keep_hours_under_pressure: 24,
-    disk_free_gb_floor: null,
+    disk_free_gb_floor: 300,
     gc_report_only: true,
     worker_worktrees_per_run_limit: 200,
+    worker_worktrees_hourly_drain_enabled: true,
+    worker_worktrees_failed_slot_salvage_after_hours: 168,
+    worker_worktrees_bulk_delete_ack_threshold: 200,
+    worker_worktrees_bulk_delete_ack_marker_path: '__HQ_ROOT__/retention/worker-worktrees-bulk-delete-ack',
     follow_up_workspaces_keep_hours: 72,
     acpx_sessions_keep_days: 30,
     acpx_sessions_gib_cap: 10.0,
@@ -3278,9 +3282,9 @@ test('retention full block accepts schema-default values', () => {
           postgres_backups:
             policy: standard_backup
         ephemeral:
-          worker_worktrees_keep_hours: 168
+          worker_worktrees_keep_hours: 48
           worker_worktrees_keep_hours_under_pressure: 24
-          disk_free_gb_floor: null
+          disk_free_gb_floor: 300
           gc_report_only: true
           worker_worktrees_per_run_limit: 200
           follow_up_workspaces_keep_hours: 72
@@ -3698,7 +3702,7 @@ test('retention full block resolves identically from config.yaml and config.loca
           postgres_backups:
             policy: standard_backup
         ephemeral:
-          worker_worktrees_keep_hours: 168
+          worker_worktrees_keep_hours: 48
           worker_worktrees_per_run_limit: 200
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
@@ -3736,7 +3740,7 @@ test('retention full block resolves identically from config.yaml and config.loca
           postgres_backups:
             policy: standard_backup
         ephemeral:
-          worker_worktrees_keep_hours: 168
+          worker_worktrees_keep_hours: 48
           worker_worktrees_per_run_limit: 200
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30
@@ -7549,5 +7553,24 @@ test('CCX-11 accepts hammer-corp primary closer in strict and runtime loaders', 
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('DISKLEAK-01 worker retention defaults and janitor safety keys mirror Python', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'diskleak-retention-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    const cfg = loadConfig({ topPath, env: {} });
+    assert.equal(cfg.get('retention.ephemeral.worker_worktrees_keep_hours'), 48);
+    assert.equal(cfg.get('retention.ephemeral.worker_worktrees_hourly_drain_enabled'), true);
+    assert.equal(cfg.get('retention.ephemeral.disk_free_gb_floor'), 300);
+    writeFileSync(topPath, 'version: 1\nretention:\n  ephemeral:\n    worker_worktrees_hourly_drain_enabled: false\n    worker_worktrees_failed_slot_salvage_after_hours: 48\n    worker_worktrees_bulk_delete_ack_threshold: 100\n    worker_worktrees_bulk_delete_ack_marker_path: __HQ_ROOT__/retention/ack\n');
+    const override = loadConfig({ topPath, env: {} });
+    assert.equal(override.get('retention.ephemeral.worker_worktrees_hourly_drain_enabled'), false);
+    assert.equal(override.get('retention.ephemeral.worker_worktrees_failed_slot_salvage_after_hours'), 48);
+    assert.equal(override.get('retention.ephemeral.worker_worktrees_bulk_delete_ack_threshold'), 100);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

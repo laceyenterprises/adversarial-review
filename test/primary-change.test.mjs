@@ -301,6 +301,31 @@ test('HAMINTENT #1208: mandated test repairs are informational, including test-o
   }
 });
 
+test('HAMINTENT-01R: restoring the local identity assertion preserves production intent', () => {
+  const evidence = primaryChangeFixture(head);
+  const production = evidence.primaryFiles[0];
+  const identityTest = {
+    filename: 'test/head-closer-local-git-daemon-robust.test.mjs',
+    status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -1 +1 @@\n-assert.equal(ghCalled, false);\n+assert.equal(ghCalled, true);',
+  };
+  evidence.primaryFiles = [identityTest, production];
+  // The mandated repair restores the assertion to its merge-base value.
+  evidence.finalFiles = [production];
+  const repaired = checkPrimaryChange(evidence, head);
+  assert.equal(repaired.ok, true);
+  assert.deepEqual(repaired.testRegionsChanged, [{
+    path: identityTest.filename, primaryRegions: [{ start: 1, end: 2 }], finalRegions: [],
+  }]);
+
+  // The same repair must not excuse the #1207 production config reversal.
+  evidence.finalFiles = [];
+  const reverted = checkPrimaryChange(evidence, head);
+  assert.equal(reverted.reason, 'primary-change-reverted');
+  assert.equal(reverted.path, 'src/config-loader.mjs');
+  assert.deepEqual(reverted.testRegionsChanged, repaired.testRegionsChanged);
+});
+
 test('production-like names and root fixtures remain protected', () => {
   for (const filename of ['fixtures/config.js', 'src/test-helper.js', 'src/testing/config.js']) {
     const evidence = primaryChangeFixture(head);

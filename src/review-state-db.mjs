@@ -29,6 +29,7 @@ import {
   SQL_HAS_COMPLETED_REVIEW_FOR_PR,
   SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
   prepareFinalizePendingTerminalFailure,
+  prepareReleaseReviewerClaim,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkTokenRefreshRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
@@ -283,20 +284,7 @@ export const stmtMarkReviewerPgid = db.prepare(
       AND pr_number = ?
       AND review_status = 'reviewing'`
 );
-export const stmtReleaseReviewerClaim = db.prepare(
-  `UPDATE reviewed_prs
-      SET review_status = 'pending',
-          reviewer_session_uuid = NULL,
-          reviewer_started_at = NULL,
-          reviewer_head_sha = NULL,
-          reviewer_timeout_ms = NULL,
-          reviewer_lease_expires_at = NULL,
-          reviewer_pgid = NULL
-    WHERE reviewer_session_uuid = ?
-      AND repo = ?
-      AND pr_number = ?
-      AND review_status = 'reviewing'`
-);
+export const stmtReleaseReviewerClaim = prepareReleaseReviewerClaim(db);
 export const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );

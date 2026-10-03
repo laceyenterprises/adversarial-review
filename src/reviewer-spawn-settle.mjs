@@ -18,6 +18,7 @@
 //  - markWatcherReviewHeartbeat stays in watcher (references the mutable
 //    watcherHeartbeat singleton and is used elsewhere) and is threaded into
 //    settleReviewerAttempt as the injected `markReviewHeartbeat` param.
+import { STALE_REVIEW_HEAD_EXIT_CODE } from './reviewer-outcomes.mjs';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
@@ -1189,34 +1190,24 @@ function settleReviewerAttempt({
     .filter(Boolean)
     .join('\n');
   const reviewCreateFailure = classifyGitHubReviewCreateFailure(fullFailureOutput);
-  const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
+  const failureClass = result.exitCode === STALE_REVIEW_HEAD_EXIT_CODE
+    ? 'stale-review-head'
+    : reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
   if (failureClass === 'stale-review-head') {
-    // Clear the session-bound claim first. The default releaseReviewLease
-    // statement is status-gated to review_status='reviewing', so after this
-    // no-budget release it records a 0-change cleanup check instead of charging
-    // review_attempts for ordinary head churn.
+    // Release only the session-bound claim. A failure/lease statement charges
+    // attempts and must never be used for ordinary head churn, even if the
+    // claim CAS loses to another watcher.
     const releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
       ? withSqliteBusyRetrySync(
         () => statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber),
         { label: `reviewer-settle-release-claim:${repoPath}#${prNumber}`, log }
       )
       : { changes: 0 };
-    const leaseReleaseResult = typeof statements.releaseReviewLease?.run === 'function'
-      ? withSqliteBusyRetrySync(
-        () => statements.releaseReviewLease.run(
-          failureAt,
-          result.error || 'Reviewer output targeted a stale PR head; requeued for current-head review.',
-          repoPath,
-          prNumber
-        ),
-        { label: `reviewer-settle-release-lease:${repoPath}#${prNumber}`, log }
-      )
-      : { changes: 0 };
     log.warn(
       `[watcher] Reviewer output for ${repoPath}#${prNumber} was stale; ` +
       `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} ` +
-      `lease=${leaseReleaseResult.changes === 1 ? 'yes' : 'no'} for current-head re-review`
+      'for current-head re-review'
     );
     return;
   }

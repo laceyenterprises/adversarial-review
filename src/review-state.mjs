@@ -1069,6 +1069,8 @@ function requestReviewRereview({
   allowFastMergeSkipped = false,
   db: dbOverride = null,
   logger = console,
+  expectedFailedHead = null,
+  inTransaction = false,
 }) {
   const db = dbOverride || openReviewStateDb(rootDir);
   const normalizedTargetRevisionRef = String(targetRevisionRef || '').trim() || null;
@@ -1076,6 +1078,18 @@ function requestReviewRereview({
   try {
     if (!dbOverride) {
       ensureReviewStateSchema(db);
+    }
+
+    if (!inTransaction) {
+      db.exec(`CREATE TABLE IF NOT EXISTS review_failure_archive (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
+        archived_at TEXT NOT NULL, reason TEXT NOT NULL, row_json TEXT NOT NULL
+      )`);
+      return db.transaction(() => requestReviewRereview({
+        rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, inTransaction: true,
+      })).immediate();
     }
 
     // A settled Comment only verdict owns this head even if a different
@@ -1154,7 +1168,7 @@ function requestReviewRereview({
              ${normalizedTargetRevisionRef ? 'revision_ref = ?,' : ''}
              ${buildReviewStateResetAssignments({
                overrides: {
-                 review_attempts: 'review_attempts',
+                 review_attempts: expectedFailedHead ? '0' : 'review_attempts',
                  last_attempted_at: 'last_attempted_at',
                  rereview_requested_at: '?',
                  rereview_reason: '?',
@@ -1163,10 +1177,16 @@ function requestReviewRereview({
        WHERE repo = ?
          AND pr_number = ?
          AND ${allowedPrStatePredicate}
-         AND review_status NOT IN ('reviewing', 'malformed', 'unroutable-bot-author', 'argus-security-queued', 'pending')`
-    ).run(...resetParams);
+         AND review_status NOT IN ('reviewing', 'malformed', 'unroutable-bot-author', 'argus-security-queued', 'pending')
+         ${expectedFailedHead ? "AND review_status = 'failed' AND reviewer_head_sha = ?" : ''}`
+    ).run(...resetParams, ...(expectedFailedHead ? [expectedFailedHead] : []));
 
     if (updateResult.changes === 1) {
+      if (currentRow?.review_status === 'failed') {
+        db.prepare(`INSERT INTO review_failure_archive
+          (repo, pr_number, archived_at, reason, row_json) VALUES (?, ?, ?, ?, ?)`)
+          .run(repo, prNumber, requestedAt, reason || 'Re-review requested', JSON.stringify(currentRow));
+      }
       return {
         triggered: true,
         status: 'pending',

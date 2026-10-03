@@ -20,7 +20,7 @@
  * process.
  * ────────────────────────────────────────────────────────────────────────────
  */
-
+import { reviewerPostFailureExitCode } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
 import {
   accessSync,
@@ -2371,7 +2371,7 @@ async function main() {
     console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
   } catch (err) {
     console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err.message);
-    process.exit(1);
+    process.exit(reviewerPostFailureExitCode(err));
   }
 
   const followUpClassification = classifyFollowUpCriticality(fullComment);

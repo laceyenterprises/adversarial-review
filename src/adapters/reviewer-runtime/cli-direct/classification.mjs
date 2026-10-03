@@ -1,3 +1,4 @@
+import { STALE_REVIEW_HEAD_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
 import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
 import { hasProviderCapacitySignal } from '../../../provider-capacity-signal.mjs';
 import {
@@ -50,6 +51,8 @@ function hasProviderOverloadedSignal(value) {
 }
 
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
+  // Reviewer exit 75 is a stale-head refusal: re-review, never a command failure.
+  if (exitCode === STALE_REVIEW_HEAD_EXIT_CODE) return 'stale-review-head';
   const text = String(stderr || '');
   const lower = text.toLowerCase();
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
@@ -187,7 +190,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return ATTESTATION_SIGN_FAILED_FAILURE_CLASS;
   }
 
-  if (/\[stale-review-head\]/.test(lower)) {
+  if (/(?:^|\n)(?:\[reviewer\] github post failed [^\n]+: )?\[stale-review-head\]/.test(lower)) {
     return 'stale-review-head';
   }
 

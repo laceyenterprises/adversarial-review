@@ -1875,3 +1875,47 @@ test('watcher declines an FSR-06B request it cannot verify instead of leaving th
     `FSR-06B declined: remediation-round-budget-exhausted; reviewed=${clone.reviewed} live=${clone.live}`
   );
 });
+
+for (const suppressionReason of ['same-head-review-in-flight', 'other-suppression']) {
+  test(`REVIEWSTALL-01: ${suppressionReason} does not consume attempts after new-head re-arm`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-reviewstall-suppression-'));
+    const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+    const registerPath = path.join(tmp, 'fixture-register.mjs');
+    const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+    try {
+      const loader = buildLoaderSource().replace(
+        "return async () => ({ suppressed: false, reason: 'fixture' });",
+        `return async () => ({ suppressed: true, reason: '${suppressionReason}' });`,
+      );
+      writeFileSync(loaderPath, loader);
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({
+        prePollSetup: `
+          db.prepare(\`INSERT INTO reviewed_prs
+            (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+             reviewer_head_sha, revision_ref, failed_at, failure_message)
+            VALUES (?, 101, '2026-10-03', 'claude', 'open', 'failed', 3,
+                    'old-head', 'old-head', '2026-10-03', 'Command failed with code 1')\`)
+            .run('laceyenterprises/adversarial-review');
+        `,
+        afterFirstPoll: `
+          const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+          assert.equal(row.review_status, 'pending');
+          assert.equal(row.review_attempts, 0);
+          assert.ok(!claims.some(claim => claim.prNumber === 101));
+          const archived = db.prepare('SELECT row_json FROM review_failure_archive WHERE pr_number = 101').get();
+          assert.equal(JSON.parse(archived.row_json).review_attempts, 3);
+          assert.equal(JSON.parse(archived.row_json).failure_message, 'Command failed with code 1');
+          await pollOnce(octokit, pollOptions);
+          assert.equal(db.prepare('SELECT review_attempts FROM reviewed_prs WHERE pr_number = 101').get().review_attempts, 0);
+        `,
+      }));
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}

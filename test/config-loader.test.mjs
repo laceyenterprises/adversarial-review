@@ -2150,23 +2150,23 @@ test('worker_pool.memory_injection canonical env aliases resolve through Node sc
   }
 });
 
-test('worker_pool.memory.dynamic defaults to enforcement and permits an explicit shadow override', () => {
+test('worker_pool.memory.dynamic defaults to shadow mode and permits explicit enforcement', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
     writeFile(top, 'version: 1\n');
     const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), false);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), true);
     assert.equal(cfg.get('worker_pool.memory.dynamic.enabled'), false);
     assert.equal(cfg.get('worker_pool.memory_retention.shadow_only'), true);
 
-    writeFile(top, 'version: 1\nworker_pool:\n  memory:\n    dynamic:\n      shadow_only: true\n');
-    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.memory.dynamic.shadow_only'), true);
+    writeFile(top, 'version: 1\nworker_pool:\n  memory:\n    dynamic:\n      shadow_only: false\n');
+    assert.equal(loadConfig({ topPath: top, env: {} }).get('worker_pool.memory.dynamic.shadow_only'), false);
 
     writeFile(top, 'version: 1\n');
     for (const key of ['AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_SHADOW_ONLY', 'HQ_MEMORY_DYNAMIC_SHADOW_ONLY']) {
-      const overridden = loadConfig({ topPath: top, env: { [key]: 'true' } });
-      assert.equal(overridden.get('worker_pool.memory.dynamic.shadow_only'), true);
+      const overridden = loadConfig({ topPath: top, env: { [key]: 'false' } });
+      assert.equal(overridden.get('worker_pool.memory.dynamic.shadow_only'), false);
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });

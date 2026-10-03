@@ -418,6 +418,17 @@
         "src/watcher-reviewer-pool.mjs"
       ],
       "owner": "reviewer runtime adapters and agy identity lease recovery"
+    },
+    {
+      "id": "review-failure-archive",
+      "title": "Review Failure Archive",
+      "path": "docs/data-model/review-failure-archive.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "src/review-state.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs"
+      ],
+      "owner": "watcher review-state recovery"
     }
   ]
 }

@@ -78,7 +78,7 @@ data/reviews.db
 | `reviewing` | reviewer subprocess in flight; durable claim before spawn |
 | `ci-blocked` | rereview admission found failed external CI on the current PR head and no follow-up job exists to requeue. Not claimable by reviewer dispatch; the watcher re-arms it when the head moves or CI turns green, and explicit remediation/operator re-review resets still go through `requestReviewRereview`. Same-head CI probes are backoff-gated so parked rows cannot make the watcher poll GitHub on every tick |
 | `posted` | review posted successfully |
-| `failed` | review attempt failed; eligible rows are auto-retried by the normal dispatch path on a later poll |
+| `failed` | review attempt failed; eligible same-head retries use normal dispatch gates; a new head archives the failure and re-arms the row before admission |
 | `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky unless a matching posted GitHub review is found; manual recovery uses `npm run reconcile-posted-orphans` for posted-review backfill or `npm run retrigger-review` after operator verification |
 | `malformed` | title guardrail failure; terminal by design |
 | `argus-security-queued` | bot-authored PR routed to the Argus security queue (ASR-04). **Not terminal** — the dispatch loop keeps visiting the row so a new head re-enqueues, and the adversarial gate reports `pending` (never `success`) until Argus answers or the narrow dependency-bot auto-adjudicator lands/completes the exact head. Excluded from malformed-title ticketing and from the adversarial stall count; a stuck security review surfaces on the Argus queue depth instead |
@@ -171,13 +171,25 @@ new PR
   retry transient connection failures for at most three total attempts with 100/200ms backoff;
   permanent query failures defer immediately.
 - `malformed` is intentionally sticky.
-- A `failed` row is not reset by a standalone sweep. Its `failed_at` and
-  `failure_message` remain visible until the watcher rediscovers that PR in an
-  active repo, passes the normal non-drain/subject/follow-up/backoff/admission
-  gates, passes the routing-tier readiness probe, and wins
-  `stmtMarkAttemptStarted`. That atomic claim is the point where failure
-  evidence is cleared because a replacement review pass is now durably
-  `reviewing`.
+- A `failed` row is not reset by a standalone sweep. When the watcher
+  rediscovers an open PR whose head differs from `reviewer_head_sha`,
+  `requestReviewRereview` atomically archives the entire failed row in
+  `review_failure_archive`, resets it to `pending` with `review_attempts = 0`,
+  clears `failed_at` / `failure_message` and spawn evidence, and records the
+  new `revision_ref`. This occurs before dispatch admission; a refused admission
+  consumes no attempt. The reset is gated on the observed failed head and never
+  overwrites a live claim. See [Review Failure Archive](data-model/review-failure-archive.md)
+  for queries and retention. A reset refusal or exception is logged and deferred.
+  On the same head, failure evidence remains until an eligible replacement wins
+  `stmtMarkAttemptStarted`; exhausted or non-recoverable failures stay terminal
+  and enter the operator-blocked no-progress lane with a deduplicated alert.
+  Lane persistence failures are logged without aborting the subject loop.
+- A stale-head post refusal releases the dispatch session's claim to `pending`
+  without charging `review_attempts`. CLI exit 75 requires an anchored
+  `[stale-review-head]` diagnostic to classify as stale churn; ordinary EX_TEMPFAIL
+  retains its failure classification. If the session release misses, the
+  no-charge fallback requires a `reviewing` row on the stale head with no session
+  UUID. A replacement session, including one on the same head, is never released.
 - Fresh transient reviewer failures (`cascade`, PR-local `oauth-broken`,
   `provider-overloaded`, `reviewer-timeout`, `launchctl-bootstrap`,
   `daemon-bounce`, `agy-identity-unavailable`, where no agy reviewer identity

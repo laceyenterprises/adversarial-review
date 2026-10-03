@@ -1,4 +1,3 @@
-import { STALE_REVIEW_HEAD_EXIT_CODE } from '../../../reviewer-outcomes.mjs';
 import { PROGRESS_TIMEOUT_REASON_PREFIX } from '../../../reviewer-timeout-reason.mjs';
 import { hasProviderCapacitySignal } from '../../../provider-capacity-signal.mjs';
 import {
@@ -51,8 +50,8 @@ function hasProviderOverloadedSignal(value) {
 }
 
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
-  // Reviewer exit 75 is a stale-head refusal: re-review, never a command failure.
-  if (exitCode === STALE_REVIEW_HEAD_EXIT_CODE) return 'stale-review-head';
+  // Exit 75 is also EX_TEMPFAIL. Only the anchored refusal marker below
+  // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
   const normalizedErrorCode = String(errorCode || '').toUpperCase();

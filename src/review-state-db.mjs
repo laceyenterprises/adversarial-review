@@ -30,6 +30,7 @@ import {
   SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
   prepareFinalizePendingTerminalFailure,
   prepareReleaseReviewerClaim,
+  prepareReleaseLegacyStaleReviewerClaim,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkTokenRefreshRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
@@ -285,6 +286,7 @@ export const stmtMarkReviewerPgid = db.prepare(
       AND review_status = 'reviewing'`
 );
 export const stmtReleaseReviewerClaim = prepareReleaseReviewerClaim(db);
+export const stmtReleaseLegacyStaleReviewerClaim = prepareReleaseLegacyStaleReviewerClaim(db);
 export const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );

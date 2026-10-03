@@ -18,7 +18,6 @@
 //  - markWatcherReviewHeartbeat stays in watcher (references the mutable
 //    watcherHeartbeat singleton and is used elsewhere) and is threaded into
 //    settleReviewerAttempt as the injected `markReviewHeartbeat` param.
-import { STALE_REVIEW_HEAD_EXIT_CODE } from './reviewer-outcomes.mjs';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
@@ -82,6 +81,7 @@ import {
   stmtMarkTokenRefreshHold,
   stmtGetReviewRow,
   stmtReleaseReviewerClaim,
+  stmtReleaseLegacyStaleReviewerClaim,
 } from './review-state-db.mjs';
 import { fetchPullRequestHeadAndState } from './github-api.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
@@ -1107,6 +1107,8 @@ function settleReviewerAttempt({
   repoPath,
   prNumber,
   result,
+  reviewerSessionUuid = result?.reviewerSessionUuid ?? null,
+  reviewerHeadSha = null,
   env = null,
   failureAt = new Date().toISOString(),
   maxRemediationRounds,
@@ -1116,6 +1118,7 @@ function settleReviewerAttempt({
     markPosted: stmtMarkPosted,
     markFailed: stmtMarkFailed,
     releaseReviewerClaim: stmtReleaseReviewerClaim,
+    releaseLegacyStaleReviewerClaim: stmtReleaseLegacyStaleReviewerClaim,
     releaseReviewLease: stmtReleaseReviewLease,
     markFailedQuota: stmtMarkFailedQuota,
     releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
@@ -1190,20 +1193,24 @@ function settleReviewerAttempt({
     .filter(Boolean)
     .join('\n');
   const reviewCreateFailure = classifyGitHubReviewCreateFailure(fullFailureOutput);
-  const failureClass = result.exitCode === STALE_REVIEW_HEAD_EXIT_CODE
-    ? 'stale-review-head'
-    : reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
+  const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
   if (failureClass === 'stale-review-head') {
-    // Release only the session-bound claim. A failure/lease statement charges
-    // attempts and must never be used for ordinary head churn, even if the
-    // claim CAS loses to another watcher.
-    const releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
+    // Claim identity comes from dispatch, not the runtime adapter's result.
+    // Failure/lease statements charge attempts and cannot handle head churn.
+    let releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
       ? withSqliteBusyRetrySync(
-        () => statements.releaseReviewerClaim.run(result.reviewerSessionUuid || null, repoPath, prNumber),
+        () => statements.releaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber),
         { label: `reviewer-settle-release-claim:${repoPath}#${prNumber}`, log }
       )
       : { changes: 0 };
+    if (releaseResult.changes === 0 && reviewerHeadSha &&
+        typeof statements.releaseLegacyStaleReviewerClaim?.run === 'function') {
+      releaseResult = withSqliteBusyRetrySync(
+        () => statements.releaseLegacyStaleReviewerClaim.run(repoPath, prNumber, reviewerHeadSha),
+        { label: `reviewer-settle-release-legacy-stale-claim:${repoPath}#${prNumber}`, log }
+      );
+    }
     log.warn(
       `[watcher] Reviewer output for ${repoPath}#${prNumber} was stale; ` +
       `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} ` +

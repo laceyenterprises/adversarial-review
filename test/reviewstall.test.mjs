@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
@@ -11,7 +11,8 @@ import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-di
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 import { parkExhaustedReview } from '../src/review-retry-exhaustion.mjs';
 import { readNoProgressLane } from '../src/watcher-no-progress-lane.mjs';
-import { prepareMarkAttemptStarted, prepareReleaseReviewerClaim } from '../src/review-state-statements.mjs';
+import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
+import { prepareMarkAttemptStarted, prepareReleaseReviewerClaim, prepareReleaseLegacyStaleReviewerClaim } from '../src/review-state-statements.mjs';
 
 const repo = 'fixture/reviewstall';
 function fixture(t) {
@@ -63,17 +64,34 @@ test('same-head failed row remains terminal at its cap; a raced reset cannot clo
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM review_failure_archive').get().n, 0);
 });
 
-test('stale subprocess refusal is machine-readable and releases without charging attempts', (t) => {
+test('real cli-direct stale subprocess result releases the dispatch claim without charging attempts', async (t) => {
   const { db, rootDir, row } = fixture(t);
   assert.equal(reviewerPostFailureExitCode({ failureClass: 'stale-review-head' }), 75);
   assert.equal(reviewerPostFailureExitCode(new Error('GitHub unavailable')), 1);
-  assert.equal(classifyReviewerFailure('', 75), 'stale-review-head');
+  assert.equal(classifyReviewerFailure('', 75), 'unknown');
+  assert.equal(classifyReviewerFailure('OAuth token expired', 75), 'oauth-broken');
+  assert.equal(classifyReviewerFailure('LiteLLM all upstream attempts failed', 75), 'cascade');
+  assert.equal(classifyReviewerFailure('[reviewer] GitHub post failed fixture#7576: [stale-review-head] refusing post', 75), 'stale-review-head');
   assert.equal(classifyReviewerFailure('Review body quotes [stale-review-head]', 1), 'unknown');
   db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_session_uuid = 'session'").run();
+  const adapter = createCliDirectReviewerRuntimeAdapter({
+    rootDir, preflightImpl: null, resolveNodeBinImpl: () => '/fixture/node',
+    spawnCapturedImpl: async () => {
+      throw Object.assign(new Error('Command failed with code 75'), {
+        exitCode: 75, stderr: '[stale-review-head] refusing GitHub review post',
+      });
+    },
+  });
+  const result = await adapter.spawnReviewer({
+    model: 'claude', sessionUuid: 'session', timeoutMs: 1000,
+    subjectContext: { repo, prNumber: 7576, reviewerHeadSha: 'head-A' },
+  });
+  assert.equal(result.exitCode, 75);
+  assert.equal(result.failureClass, 'stale-review-head');
+  assert.equal(result.reviewerSessionUuid, undefined);
   settleReviewerAttempt({
     repoPath: repo, prNumber: 7576,
-    result: { ok: false, exitCode: 75, error: 'Command failed with code 75',
-      stderr: '[stale-review-head] refusing GitHub review post', reviewerSessionUuid: 'session' },
+    reviewerSessionUuid: 'session', reviewerHeadSha: 'head-A', result,
     statements: {
       releaseReviewerClaim: prepareReleaseReviewerClaim(db),
       releaseReviewLease: { run() { assert.fail('stale refusal must not charge the lease failure budget'); } },
@@ -113,8 +131,6 @@ test('current-head exhaustion enters operator-blocked lane and pages/logs once a
 
 test('archive write failure rolls back re-arm and retains the failed row', (t) => {
   const { db, rootDir, row } = fixture(t);
-  // Create the archive through the same transition, without resetting a row.
-  requestReviewRereview({ db, rootDir, repo, prNumber: 999 });
   db.exec(`CREATE TRIGGER reject_archive BEFORE INSERT ON review_failure_archive
     BEGIN SELECT RAISE(ABORT, 'fixture archive unavailable'); END`);
   const before = row();
@@ -137,3 +153,88 @@ for (const prState of ['merged', 'closed']) {
     assert.equal(row().review_attempts, 3);
   });
 }
+
+for (const [session, head, expected] of [
+  [null, 'head-A', 'pending'],
+  [null, 'head-B', 'reviewing'],
+  ['replacement', 'head-A', 'reviewing'],
+  ['replacement', 'head-B', 'reviewing'],
+]) {
+  test(`stale fallback protects replacement claim session=${session} head=${head}`, (t) => {
+    const { db, row } = fixture(t);
+    db.prepare(`UPDATE reviewed_prs SET review_status = 'reviewing',
+      reviewer_session_uuid = ?, reviewer_head_sha = ?, reviewer_pgid = 123,
+      reviewer_lease_expires_at = '2026-10-04'`).run(session, head);
+    const before = row();
+    settleReviewerAttempt({
+      repoPath: repo, prNumber: 7576, reviewerSessionUuid: 'old-session', reviewerHeadSha: 'head-A',
+      result: { ok: false, failureClass: 'stale-review-head' },
+      statements: {
+        releaseReviewerClaim: prepareReleaseReviewerClaim(db),
+        releaseLegacyStaleReviewerClaim: prepareReleaseLegacyStaleReviewerClaim(db),
+      }, log: { warn() {} },
+    });
+    assert.equal(row().review_status, expected);
+    assert.equal(row().review_attempts, 3);
+    if (expected === 'reviewing') assert.deepEqual(row(), before);
+    else {
+      assert.equal(row().reviewer_pgid, null);
+      assert.equal(row().reviewer_lease_expires_at, null);
+    }
+  });
+}
+
+test('schema setup creates an indexed archive before re-arm and bounds retained snapshots', (t) => {
+  const { db, rootDir } = fixture(t);
+  ensureReviewStateSchema(db);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM review_failure_archive').get().n, 0);
+  const indexes = db.prepare("PRAGMA index_list('review_failure_archive')").all().map(row => row.name);
+  assert.ok(indexes.includes('idx_review_failure_archive_pr'));
+  assert.ok(indexes.includes('idx_review_failure_archive_age'));
+  const insert = db.prepare(`INSERT INTO review_failure_archive
+    (repo, pr_number, archived_at, reason, row_json) VALUES (?, ?, ?, 'fixture', '{}')`);
+  for (let i = 0; i < 105; i++) insert.run(repo, 7576, '2026-10-02T00:00:00.000Z');
+  insert.run('other/repo', 1, '2026-01-01T00:00:00.000Z');
+  insert.run('other/repo', 2, '2026-10-02T00:00:00.000Z');
+  const result = requestReviewRereview({
+    db, rootDir, repo, prNumber: 7576, expectedFailedHead: 'head-A',
+    targetRevisionRef: 'head-B', requestedAt: '2026-10-03T00:00:00.000Z',
+  });
+  assert.equal(result.triggered, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM review_failure_archive WHERE repo = ?').get(repo).n, 100);
+  assert.equal(db.prepare('SELECT MIN(id) AS id FROM review_failure_archive WHERE repo = ?').get(repo).id, 7);
+  assert.deepEqual(db.prepare('SELECT pr_number FROM review_failure_archive WHERE repo = ?').all('other/repo'), [{ pr_number: 2 }]);
+});
+
+test('exhaustion lane write failure is logged and contained', async (t) => {
+  const { rootDir } = fixture(t);
+  const invalidRoot = join(rootDir, 'file');
+  writeFileSync(invalidRoot, 'not a directory');
+  const logs = [];
+  assert.equal(await parkExhaustedReview({
+    rootDir: invalidRoot, repo, prNumber: 7576, headSha: 'head-A',
+    deliverAlertFn: async () => assert.fail('no alert after failed lane write'),
+    logger: { warn: message => logs.push(message) },
+  }), false);
+  assert.ok(logs.some(message => /Review exhaustion park failed/.test(message)));
+});
+
+test('settlement does not turn unmarked EX_TEMPFAIL into an uncharged stale-head retry', (t) => {
+  const { db, rootDir, row } = fixture(t);
+  db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_session_uuid = 'session'").run();
+  const result = { ok: false, exitCode: 75, error: 'temporary CLI failure',
+    failureClass: classifyReviewerFailure('temporary CLI failure', 75) };
+  settleReviewerAttempt({
+    rootDir, repoPath: repo, prNumber: 7576, result,
+    reviewerSessionUuid: 'session', reviewerHeadSha: 'head-A', leaseRecoveryEnabled: false,
+    statements: {
+      markFailed: db.prepare(`UPDATE reviewed_prs SET review_status = 'failed',
+        failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1
+        WHERE repo = ? AND pr_number = ?`),
+      getReviewRow: { get: row },
+      releaseReviewerClaim: { run() { assert.fail('unmarked EX_TEMPFAIL must retain its failure budget'); } },
+    }, log: { warn() {} },
+  });
+  assert.equal(row().review_status, 'failed');
+  assert.equal(row().review_attempts, 4);
+});

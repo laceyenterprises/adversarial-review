@@ -1976,15 +1976,23 @@ export async function processReviewSubject(entry, ctx) {
       const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
       if (current?.review_status === 'failed' && current.reviewer_head_sha &&
           subject.headSha && current.reviewer_head_sha !== subject.headSha && !subject.terminal) {
-        const rearmed = requestReviewRereview({
-          rootDir: ROOT, db, repo: repoPath, prNumber,
-          targetRevisionRef: pendingRevisionRef,
-          expectedFailedHead: current.reviewer_head_sha,
-          reason: 'Failed review superseded by a new PR head.',
-        });
-        if (!rearmed.triggered) return;
-        current = rearmed.reviewRow;
-        existing = current;
+        try {
+          const rearmed = requestReviewRereview({
+            rootDir: ROOT, db, repo: repoPath, prNumber,
+            targetRevisionRef: pendingRevisionRef,
+            expectedFailedHead: current.reviewer_head_sha,
+            reason: 'Failed review superseded by a new PR head.',
+          });
+          if (!rearmed.triggered) {
+            console.warn(`[watcher] Failed review re-arm blocked for ${repoPath}#${prNumber}: ${rearmed.reason}`);
+            return;
+          }
+          current = rearmed.reviewRow;
+          existing = current;
+        } catch (error) {
+          console.warn(`[watcher] Failed review re-arm failed for ${repoPath}#${prNumber}: ${error?.message || error}`);
+          return;
+        }
       }
 
       // RPL-04: drain this PR's durable rereview wake requests here, in the
@@ -2300,10 +2308,11 @@ export async function processReviewSubject(entry, ctx) {
           return;
         }
         finalizePendingTerminalFailureState(current);
-        console.log(
-          `[watcher] Skipping failed review ${repoPath}#${prNumber}: ` +
-            `failure is not infrastructure-recoverable; leaving evidence intact`
-        );
+        await parkExhaustedReview({
+          rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+          reason: 'failure is not infrastructure-recoverable; leaving evidence intact',
+          deliverAlertFn,
+        });
         return;
       }
       if (infraRecoveryClass === 'reviewer-command-failed') {
@@ -3341,6 +3350,8 @@ export async function processReviewSubject(entry, ctx) {
                   repoPath,
                   prNumber,
                   result: postedResult,
+                  reviewerSessionUuid,
+                  reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
                   reviewerModel: route.reviewerModel,
@@ -3399,6 +3410,8 @@ export async function processReviewSubject(entry, ctx) {
                   repoPath,
                   prNumber,
                   result,
+                  reviewerSessionUuid,
+                  reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
                   reviewerModel: route.reviewerModel,

@@ -1,3 +1,4 @@
+import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
  *
@@ -52,7 +53,7 @@ import {
   dismissStandingChangesRequestedReviewsForHead,
   fetchPullRequestRollup,
 } from '../github-api.mjs';
-import { isTransientGhError } from '../gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from '../gh-cli.mjs';
 import {
   fetchHeadCloserVerifiedCommit,
   isTerminalCloserCommitIdentity,
@@ -3877,6 +3878,7 @@ export async function maybeDispatchAmaCloser({
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
+  fetchPrimaryChangeImpl = fetchPrimaryChange,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
   emitProtectivePredecessorFindingImpl = null,
@@ -3941,6 +3943,14 @@ export async function maybeDispatchAmaCloser({
 
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
+  if (verdict.reasons.includes('primary-change-read-failed')) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: 'gate-read-failed', reasons: verdict.reasons });
+  }
+  if (verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: 'primary-change-needs-operator', reasons: verdict.reasons, needsOperator: true });
+  }
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;
   const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
@@ -4644,6 +4654,8 @@ export async function maybeDispatchAmaCloser({
               : [],
             requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
             liveGate: {
+              primaryChange: eligibilityOptions.hamTerminalRemediationGroundTruth?.commit?.primaryChange,
+              requirePrimaryChange: true,
               candidateHead: prMetadata?.headSha || '',
               requiredChecks: resolveRollupRequiredChecks(prMetadata) ?? [],
               mergeable: prMetadata?.mergeable || prMetadata?.mergeableState,
@@ -4698,6 +4710,13 @@ export async function maybeDispatchAmaCloser({
               const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
               const state = String(rollup?.state || '');
               return {
+                primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, headSha: rollup?.headSha || rollup?.headRefOid || '',
+                  get: async (path) => {
+                    const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', path], timeoutMs: 15000, env: process.env });
+                    return JSON.parse(stdout);
+                  },
+                }),
+                requirePrimaryChange: true,
                 candidateHead: rollup?.headSha || rollup?.headRefOid || '',
                 requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
                 mergeable: rollup?.mergeable,

@@ -3,7 +3,7 @@
 **Owner:** AMA merge authority
 **Store:** `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/`
 **Source of truth:** `src/ama/audit.mjs`
-**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`
+**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `src/ama/daemon-merge.mjs`
 
 ## Purpose
 
@@ -52,3 +52,8 @@ erDiagram
 includes the reconciliation block and any supplied provenance metadata. Later
 appends preserve existing metadata and update reconciliation. A successful
 record cannot be demoted by a later append.
+
+For primary-change evidence, a post-lease `primary-change-read-failed` gate
+writes `reason: gate-read-failed`, `permanent: false`, and the concrete reason
+in `eligibilityReasons` / `preMergeReasons`. It omits `manualCloseRequired`,
+so a later tick may retry the same head after GitHub reads recover.

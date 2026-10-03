@@ -205,7 +205,7 @@ test('reasons are emitted in the stable documented order', () => {
   assert.equal(result.eligible, false);
   // `pr-mergeability-unknown` and `pr-not-mergeable` are mutually exclusive.
   assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
-    (reason) => reason !== 'labels-unavailable' && reason !== 'pr-mergeability-unknown',
+    (reason) => !reason.startsWith('primary-change-') && reason !== 'labels-unavailable' && reason !== 'pr-mergeability-unknown',
   ));
 });
 
@@ -213,7 +213,7 @@ test('empty/no state → fail closed with labels-unavailable rather than a false
   const result = evaluateMergeEligibility();
   assert.equal(result.eligible, false);
   assert.deepEqual(result.reasons, MERGE_ELIGIBILITY_REASONS.filter(
-    (reason) => reason !== 'duplicate-family-unresolved' && reason !== 'pr-mergeability-unknown',
+    (reason) => !reason.startsWith('primary-change-') && reason !== 'duplicate-family-unresolved' && reason !== 'pr-mergeability-unknown',
   ));
 });
 
@@ -349,6 +349,8 @@ test('exported vocabulary is stable and frozen', () => {
   // A frozen Set is still mutable via .add(); a frozen array truly is not (blocking finding #509).
   assert.throws(() => ELIGIBLE_MERGE_VERDICTS.push('request-changes'));
   assert.deepEqual(MERGE_ELIGIBILITY_REASONS, [
+    'primary-change-reverted',
+    'primary-change-unknown',
     'verdict-not-eligible',
     'ci-not-green',
     'pr-mergeability-unknown',

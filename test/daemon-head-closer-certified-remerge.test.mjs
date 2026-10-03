@@ -1,10 +1,11 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
+import { runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal } from '../src/daemon-clean-merge.mjs';
 import {
   attemptDaemonCleanMerge,
   DAEMON_MERGE_DISPOSITION,
@@ -397,3 +398,11 @@ test('attemptDaemonCleanMerge Gate 1: WITHOUT the flag, a non-blocking review st
   assert.equal(res.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
   assert.equal(res.reason, 'non-blocking-findings-present');
 });
+
+// Inject history evidence so these wiring fixtures remain offline.
+function runDaemonCleanMergeAttempt(args) {
+  return runDaemonCleanMergeAttemptReal({
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
+    ...args,
+  });
+}

@@ -1,3 +1,4 @@
+import { checkPrimaryChange } from './primary-change.mjs';
 /**
  * MSM-02 — shared merge-eligibility predicate over already-fetched GitHub state.
  *
@@ -44,6 +45,8 @@ export const ELIGIBLE_MERGE_VERDICTS = Object.freeze([
  * do a stable `reasons[0]` "primary blocker" read.
  */
 export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
+  'primary-change-reverted',
+  'primary-change-unknown',
   'verdict-not-eligible',
   'ci-not-green',
   'pr-mergeability-unknown',
@@ -237,6 +240,10 @@ function headMatches(state) {
  */
 export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
+  if (state.primaryChange || state.requirePrimaryChange === true) {
+    const intent = checkPrimaryChange(state.primaryChange, state.candidateHead);
+    if (!intent.ok) reasons.push(intent.reason);
+  }
   const operatorOverride = hasOperatorApprovedOverride({
     operatorApprovedEvidence: state.operatorApprovedEvidence,
     operatorLogins: state.operatorLogins,

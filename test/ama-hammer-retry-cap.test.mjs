@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -115,6 +116,7 @@ function hammerDispatchDeps(overrides = {}) {
   const execCalls = [];
   return {
     execCalls,
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
       execCalls.push({ cmd, args });
       return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
@@ -169,6 +171,7 @@ function validHamTerminalRemediationOptions({
     hamTerminalRemediationGroundTruth: {
       commit: {
         sha: currentHead,
+        primaryChange: primaryChangeFixture(currentHead),
         parentSha: reviewedHead,
         author: 'hammer-worker',
         changedFiles: ['src/auth.js'],
@@ -1230,6 +1233,8 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
 
   assert.equal(result.reason, 'current-head-hammer-terminal-remediation-merged');
   assert.deepEqual(observedLiveGate, {
+    primaryChange: primaryChangeFixture(REVIEWED_HEAD),
+    requirePrimaryChange: true,
     candidateHead: REVIEWED_HEAD,
     requiredChecks: [
       { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
@@ -2825,6 +2830,7 @@ function spawnThenDieDeps(overrides = {}) {
   const execCalls = [];
   return {
     execCalls,
+    fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
       execCalls.push({ cmd, args });
       const err = new Error('worker_killed ~36s into planning');

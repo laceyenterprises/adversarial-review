@@ -1,3 +1,4 @@
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseCommitTrailers } from '../src/ama/ham-provenance.mjs';
@@ -66,7 +67,7 @@ const LIVE_AUDIT_BODY = [
 ].join('\n');
 
 function liveVerifiedCommit() {
-  return normalizeVerifiedCloserCommit({
+  return { ...normalizeVerifiedCloserCommit({
     sha: CURRENT_HEAD,
     parents: [{ sha: ACTUAL_PARENT }],
     commit: { message: LIVE_COMMIT_MESSAGE },
@@ -74,7 +75,7 @@ function liveVerifiedCommit() {
     committer: { login: 'the-hammer-lacey[bot]' },
     author: { login: null },
     files: CHANGED_FILES.map((filename) => ({ filename })),
-  });
+  }), primaryChange: primaryChangeFixture(CURRENT_HEAD) };
 }
 
 function liveAuditComment() {

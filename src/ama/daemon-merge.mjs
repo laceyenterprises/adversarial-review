@@ -103,6 +103,7 @@ const PERMANENT_TERMINAL_REASONS = Object.freeze([
  */
 export const TRANSIENT_GATE_READ_REASONS = new Set([
   'labels-unavailable',
+  'primary-change-read-failed',
   'pr-mergeability-unknown',
 ]);
 
@@ -248,6 +249,8 @@ export function daemonMergeBackoffMs(
 
 function normalizeGateState(live = {}) {
   return {
+    primaryChange: live.primaryChange,
+    requirePrimaryChange: live.requirePrimaryChange,
     candidateHead: String(live.candidateHead ?? live.headSha ?? live.headRefOid ?? '').trim(),
     requiredChecks: Array.isArray(live.requiredChecks)
       ? live.requiredChecks
@@ -536,6 +539,8 @@ export async function attemptDaemonCleanMerge({
   // lease acquisition; `leaseHeld:true` isolates the non-lease gates. ─────────
   const preLease = normalizeGateState(liveGate);
   const preEligibility = evaluateEligibilityImpl({
+    primaryChange: preLease.primaryChange,
+    requirePrimaryChange: preLease.requirePrimaryChange,
     verdict,
     operatorApprovedEvidence,
     operatorLogins,
@@ -722,6 +727,8 @@ export async function attemptDaemonCleanMerge({
     // Re-verify the full gate on the fresh read (CI could have gone red, the PR
     // could have been closed, mergeable could have flipped).
     const elig = evaluateEligibilityImpl({
+      primaryChange: live.primaryChange,
+      requirePrimaryChange: live.requirePrimaryChange,
       verdict,
       operatorApprovedEvidence,
       operatorLogins,

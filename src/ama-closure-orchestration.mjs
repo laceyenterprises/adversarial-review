@@ -1368,6 +1368,7 @@ export async function maybeDispatchAmaClosureFor({
             repoPath,
             prNumber,
             headSha: currentPrHeadSha,
+            env,
             execFileImpl: execFileAsync,
             logger,
             signal: operationSignal,
@@ -1567,6 +1568,15 @@ export async function maybeDispatchAmaClosureFor({
     },
   );
   throwIfAborted(signal);
+  if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
+    recordDaemonMergePark({ rootDir, repo: repoPath, prNumber,
+      headSha: currentPrHeadSha || null,
+      reason: daemonCleanMerge.reasons?.find((reason) => reason.startsWith('primary-change-'))
+        || daemonCleanMerge.reason });
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      reason: daemonCleanMerge.reason, reasons: daemonCleanMerge.reasons,
+      needsOperator: true, daemonCleanMerge }, { amaEnabled: true });
+  }
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
@@ -2173,6 +2183,23 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   throwIfAborted(signal);
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
+  }
+  // Primary-change refusal requires an explicit operator adjudication. Honor
+  // the existing scoped fallback request, never a generic approval or outage.
+  if (amaClosureResult?.reason === 'primary-change-needs-operator'
+    && amaClosureResult?.needsOperator === true
+    && labelNames?.includes('merge-agent-requested')
+    && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
+      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+    })) {
+    const coexistence = { action: COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK };
+    logger?.log?.(JSON.stringify({ event: 'ama.primary_change.operator_fallback',
+      repo: repoPath, pr: prNumber, headSha: currentRevisionRef || candidate?.headSha,
+      actor: mergeAgentRequestEvent.actor, eventId: mergeAgentRequestEvent.id,
+      reasons: amaClosureResult.reasons }));
+    return { outcome: 'dispatch-merge-agent', amaClosureResult, coexistence,
+      dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action) };
   }
   if (amaClosureResult?.skipMergeAgent) {
     if (amaClosureResult?.needsOperator === true) {

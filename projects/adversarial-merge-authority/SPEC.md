@@ -407,7 +407,7 @@ blocking-finding gate semantics.
 
 HAMINTENT-01 is a non-waivable safety-core gate: primary author changes must
 remain in the final diff, evaluated from trusted GitHub compare history at the
-live head. `ama-check` requires `--primary-change` for HAM terminal remediation;
+live head. `ama-check` requires `--primary-change` for every invocation, including non-HAM checks;
 the in-lease hammer merge independently fetches evidence and requires the same
 gate. `operator-approved` does not bypass it. Reverted changes and structural
 unknowns fail closed for operator inspection; transient read failures and head

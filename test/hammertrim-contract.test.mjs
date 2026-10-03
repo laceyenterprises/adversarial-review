@@ -240,7 +240,7 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const fixture = {
-    pr: { state: 'open', merged_at: null, draft: false, mergeable: false, mergeable_state: 'dirty', base: { ref: 'main' }, head: { sha: 'abc' }, changed_files: 1, additions: 3, deletions: 2 },
+    pr: { body: 'a'.repeat(799) + '😀end', state: 'open', merged_at: null, draft: false, mergeable: false, mergeable_state: 'dirty', base: { ref: 'main' }, head: { sha: 'abc' }, changed_files: 1, additions: 3, deletions: 2 },
     reviews: [{ commit_id: 'abc', state: 'COMMENTED', body: `## Adversarial Review\n${'Fix auth. '.repeat(250)}`, user: { login: 'reviewer' } }],
     files: [{ additions: 3, deletions: 2 }],
     checks: { statusCheckRollup: [{ name: 'CI', conclusion: 'SUCCESS' }] },
@@ -258,6 +258,8 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   assert.ok(Buffer.byteLength(result.stdout) < 8192);
   const snapshot = JSON.parse(result.stdout);
   assert.equal(snapshot.head, 'abc');
+  assert.equal(snapshot.statedIntent, 'a'.repeat(799));
+  assert.doesNotMatch(result.stdout, /�/);
   assert.match(snapshot.review.findings, /Fix auth/);
   assert.equal(snapshot.review.state, 'COMMENTED');
   assert.equal(snapshot.review.findingsTruncated, true);

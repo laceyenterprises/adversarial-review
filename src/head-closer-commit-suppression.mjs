@@ -415,6 +415,7 @@ export async function fetchHeadCloserVerifiedCommit({
   env = process.env,
   signal,
   includePrimaryChange = false,
+  rootDir,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
@@ -427,7 +428,7 @@ export async function fetchHeadCloserVerifiedCommit({
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
   const withPrimaryChange = async (commit) => includePrimaryChange ? ({ ...normalizeVerifiedCloserCommit(commit),
-    primaryChange: await fetchPrimaryChange({ repo: repoPath, prNumber, headSha: sha,
+    primaryChange: await fetchPrimaryChange({ repo: repoPath, prNumber, headSha: sha, rootDir, env,
       get: async (path) => {
         const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
         return JSON.parse(stdout);

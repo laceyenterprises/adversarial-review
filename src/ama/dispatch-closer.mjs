@@ -3825,6 +3825,7 @@ export async function resolveHamTerminalRemediationEvidence({
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
   fetchHeadCloserVerifiedCommitImpl = fetchHeadCloserVerifiedCommit,
   closerCommitSuppression = null,
+  rootDir,
   logger = console,
   env = process.env,
   signal,
@@ -3840,6 +3841,7 @@ export async function resolveHamTerminalRemediationEvidence({
     prNumber,
     headSha: currentHead,
     includePrimaryChange: true,
+    rootDir,
     env,
     signal,
     execFileImpl,
@@ -3924,6 +3926,7 @@ export async function maybeDispatchAmaCloser({
         reviewState,
         prMetadata,
         repoPath: dispatchContext?.repo,
+        rootDir: dispatchContext?.rootDir,
         prNumber,
         execFileImpl,
         fetchPullRequestRollupImpl,
@@ -3950,7 +3953,9 @@ export async function maybeDispatchAmaCloser({
 
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
-  if (verdict.reasons.includes('primary-change-read-failed')) {
+  const primaryReadRepair = verdict.reasons.includes('primary-change-read-failed')
+    && verdict.reasons.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
+  if (verdict.reasons.includes('primary-change-read-failed') && !primaryReadRepair) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
@@ -3982,7 +3987,9 @@ export async function maybeDispatchAmaCloser({
     // That evidence must prove Codex/remediator had a turn before terminal
     // Hammer authority can arm; rereview-only exhaustion is not enough.
     const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState);
-    const routeReasons = verdict.eligible ? eligibleHammerRouteReasons : verdict.reasons;
+    const routeReasons = verdict.eligible ? eligibleHammerRouteReasons
+      : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed')
+        : verdict.reasons;
     if (isHammerRouteStructurallyBlocked(routeReasons)) {
       return noAmaDispatch({
         dispatched: false,

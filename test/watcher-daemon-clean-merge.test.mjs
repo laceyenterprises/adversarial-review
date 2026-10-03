@@ -3755,3 +3755,24 @@ test('transient primary-change reads do not hide CI or conflict remediation', as
     }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+
+test('in-lease unknown evidence keeps the daemon retryable without an operator park', async () => {
+  const rootDir = tempRoot();
+  const head = 'f'.repeat(40);
+  try {
+    const result = await runDaemonCleanMergeAttemptReal({
+      ...unattributedDaemonArgs({ rootDir, head }),
+      operatorApprovalEvent: operatorApprovedEventAt(head),
+      fetchPrimaryChangeImpl: async () => primaryChangeFixture(head),
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+        checks: [{ name: 'ci', conclusion: 'SUCCESS' }], labels: ['operator-approved'],
+        mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+      attemptDaemonCleanMergeImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-read-failed', reasons: ['primary-change-unknown'], permanent: false }),
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(result.needsOperator, false);
+    assert.equal(result.reason, 'gate-read-failed');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

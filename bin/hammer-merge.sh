@@ -266,7 +266,7 @@ const open = state === 'OPEN';
 // BEHIND-but-MERGEABLE validated head is eligible instead of forcing a
 // churn-inducing rebase. Fail closed: any value other than '0' keeps the block.
 const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
-const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead,
+const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
   get: async (path) => {
     const { stdout } = await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 });
     return JSON.parse(stdout);

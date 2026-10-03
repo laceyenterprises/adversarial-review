@@ -16,7 +16,16 @@ function get(args) {
   if (result.error || result.status !== 0) throw new Error(`${args[0]} ${args[1]} failed: ${(result.stderr || result.error?.message || '').slice(-500)}`);
   return JSON.parse(result.stdout);
 }
-function compact(value, max = 1200) { return Buffer.from(String(value || ''), 'utf8').subarray(0, max).toString('utf8'); }
+function compact(value, max = 1200) {
+  let result = '';
+  let bytes = 0;
+  for (const point of String(value || '')) {
+    bytes += Buffer.byteLength(point);
+    if (bytes > max) break;
+    result += point;
+  }
+  return result;
+}
 try {
   const pr = get(['api', `repos/${repo}/pulls/${number}`]);
   const reviews = [];
@@ -61,7 +70,7 @@ try {
   }
   let primaryChange;
   try {
-    const evidence = await fetchPrimaryChange({ repo, prNumber: number, headSha: head,
+    const evidence = await fetchPrimaryChange({ repo, prNumber: number, headSha: head, rootDir: localRoot,
       get: (path) => get(['api', path]) });
     if (evidence.hasHammerCommits === false) {
       const authorDiff = get(['api', `repos/${repo}/compare/${pr.base.sha}...${head}`]);

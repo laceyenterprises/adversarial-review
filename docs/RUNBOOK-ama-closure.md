@@ -1176,7 +1176,7 @@ reasons:
 ### Primary-change evidence and operator recovery (HAMINTENT-01)
 
 Both merge paths use `src/ama/primary-change.mjs`. The protected baseline is the
-earliest daemon-owned dispatch launch head when available, covering untagged
+earliest daemon-owned dispatch launch head with a valid SHA when available, covering untagged
 repairs. After a rebase diverges from that launch, it is the actual parent of
 the first hammer commit in the rebased PR history; a hammer-authored `Reviewed-Head` trailer cannot select an older author
 head. Both primary and final diffs are compared against the current PR base,
@@ -1456,3 +1456,19 @@ identity. The fallback default remains `[hammer-claude]`; account fallback
 selection and activation are governed by credential-capacity-expansion CCX-13.
 
 HAM context emits an under-8192-byte summary; use `bin/primary-change-context.mjs` for full patches. Commit identity stays local; merge decisions fetch primary evidence lazily and forward cancellation. The hammer in-lease merge re-fetches evidence independently of its claim. Transient evidence errors cannot suppress CI/conflict repair dispatch. Trusted dispatch launch heads can cover untagged repairs; fallback detection accepts only explicit hammer worker-class trailers (hammer, hammer-corp, hammer-claude), never login patterns. Base merges use the first parent only after verifying the second parent belongs to the base ancestry.
+
+Primary evidence readers use an explicit runtime root when supplied, otherwise
+`HAM_ROOT_DIR`, otherwise the code checkout. Deployments with a separate runtime
+root must set `HAM_ROOT_DIR` for CLI and head-closer processes; the daemon and
+rendered hammer lease gate pass their configured root. `ama-check --primary-change`
+is required for all calls; an explicit no-HAM evidence result is still required.
+Matching dispatch JSON that cannot be parsed is skipped; dispatch I/O errors
+defer with `primary-change-read-failed`. The earliest valid launch SHA wins.
+Each evaluation reads a compare endpoint once; pre-lease and in-lease evaluations
+remain independent to preserve fresh evidence. GitHub compare bounds are fewer
+than 250 commits and fewer than 300 files; larger or truncated comparisons remain
+structural unknowns. Omitted patches pass only with identical trusted blobs.
+A diverged launch without HAM trailers remains unknown: untagged automation
+cannot be excluded from that evidence (follow-up LAC-1832). Non-HAM remediation
+trailers cannot authorize primary reversals (follow-up LAC-1833). In-place repairs
+remain allowed, but preserving author intent takes precedence over those waivers.

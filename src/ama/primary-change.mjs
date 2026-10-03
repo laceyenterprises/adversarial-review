@@ -1,12 +1,16 @@
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseCommitTrailers } from './ham-provenance.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
   parseCommitTrailers(commit?.commit?.message || '')['worker-class'] || '');
+
+export function primaryChangeRoot({ rootDir, env = process.env } = {}) {
+  return resolve(rootDir || env.HAM_ROOT_DIR || fileURLToPath(new URL('../../', import.meta.url)));
+}
 
 // Dispatch records are daemon-owned evidence. The earliest launch protects
 // untagged repairs too; a later launch must never narrow the author baseline.
@@ -15,13 +19,24 @@ export function readPrimaryChangeLaunchHead(rootDir, repo, prNumber) {
   let names;
   try { names = readdirSync(directory); } catch (error) {
     if (error.code === 'ENOENT') return null;
+    error.primaryChangeReadFailed = true;
     throw error;
   }
   const prefix = `${repo.replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}-pr-${Number(prNumber)}-`;
-  const records = names.filter((name) => name.startsWith(prefix) && name.endsWith('.json'))
-    .map((name) => JSON.parse(readFileSync(join(directory, name), 'utf8')))
-    .filter((record) => record.repo === repo && Number(record.prNumber) === Number(prNumber)
-      && /^hammer(?:-corp|-claude)?$/.test(record.workerClass || '') && record.dispatchedAt);
+  const records = [];
+  for (const name of names.filter((entry) => entry.startsWith(prefix) && entry.endsWith('.json'))) {
+    let text;
+    try { text = readFileSync(join(directory, name), 'utf8'); } catch (error) {
+      if (error.code === 'ENOENT') continue; // Atomic replacement raced the listing.
+      error.primaryChangeReadFailed = true;
+      throw error;
+    }
+    let record;
+    try { record = JSON.parse(text); } catch { continue; }
+    if (record?.repo === repo && Number(record.prNumber) === Number(prNumber)
+      && /^hammer(?:-corp|-claude)?$/.test(record.workerClass || '')
+      && record.dispatchedAt && SHA.test(record.targetRemediationSha || '')) records.push(record);
+  }
   records.sort((a, b) => String(a.dispatchedAt).localeCompare(String(b.dispatchedAt)));
   return records[0]?.targetRemediationSha || null;
 }
@@ -151,14 +166,21 @@ export function checkPrimaryChange(evidence, headSha) {
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
 export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatchedHead = null,
-  rootDir = fileURLToPath(new URL('../../', import.meta.url)) }) {
+  rootDir, env = process.env }) {
+  rootDir = primaryChangeRoot({ rootDir, env });
+  // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
+  const responses = new Map();
+  const read = (path) => {
+    if (!responses.has(path)) responses.set(path, Promise.resolve().then(() => get(path)));
+    return responses.get(path);
+  };
   const unknown = { headSha, hasHammerCommits: null };
   try {
     if (!SHA.test(headSha || '')) return unknown;
-    const pr = await get(`repos/${repo}/pulls/${prNumber}`);
+    const pr = await read(`repos/${repo}/pulls/${prNumber}`);
     if (pr.head?.sha !== headSha) return { ...unknown, headMismatch: true };
     if (!SHA.test(pr.base?.sha || '')) return unknown;
-    const history = await get(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
+    const history = await read(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
     if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
       || history.commits.length >= 250
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
@@ -172,27 +194,27 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     if (first && (!first.parents?.length || first.parents.length > 2
       || !SHA.test(first.parents[0].sha))) return unknown;
     if (first && first.parents.length === 2) {
-      const baseParent = await get(`repos/${repo}/compare/${first.parents[1].sha}...${pr.base.sha}`);
+      const baseParent = await read(`repos/${repo}/compare/${first.parents[1].sha}...${pr.base.sha}`);
       if (!['ahead', 'identical'].includes(baseParent.status)) return unknown;
     }
     // The actual first hammer parent includes every author commit, including
     // rebased author commits. A hammer-authored trailer cannot narrow it.
     let primaryHead = dispatchedHead || first.parents[0].sha;
     if (dispatchedHead) {
-      const ancestry = await get(`repos/${repo}/compare/${dispatchedHead}...${headSha}`);
+      const ancestry = await read(`repos/${repo}/compare/${dispatchedHead}...${headSha}`);
       if (!['ahead', 'identical'].includes(ancestry.status)) {
         if (!first) return unknown;
         primaryHead = first.parents[0].sha;
       }
     }
-    let primary = await get(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
-    const final = await get(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
+    let primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
+    const final = await read(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
     // A base merge can retain launch ancestry while advancing the merge base.
     // Use the same verified rebased HAM parent as the diverged-launch path.
     if (final.merge_base_commit?.sha !== primary.merge_base_commit?.sha
       && dispatchedHead && first && primaryHead !== first.parents[0].sha) {
       primaryHead = first.parents[0].sha;
-      primary = await get(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
+      primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
     }
     const mergeBase = primary.merge_base_commit?.sha;
     if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown;
@@ -206,7 +228,7 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
       testRegionsChanged: testChanges,
       primaryFiles: primary.files, finalFiles: final.files };
-  } catch (error) { return error?.authOutage === true || error?.name === 'AbortError'
+  } catch (error) { return error?.primaryChangeReadFailed === true || error?.authOutage === true || error?.name === 'AbortError'
     || error?.code === 'ABORT_ERR' || isTransientGhError(error)
     ? { ...unknown, readFailed: true } : unknown; }
 }

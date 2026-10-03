@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkPrimaryChange, fetchPrimaryChange, readPrimaryChangeLaunchHead } from '../src/ama/primary-change.mjs';
+import { checkPrimaryChange, fetchPrimaryChange, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 const head = 'c'.repeat(40);
@@ -51,7 +51,7 @@ test('collector selects the author head before the FIRST hammer, including repea
   const get = async (path) => {
     calls.push(path);
     if (path.endsWith('/pulls/1207')) return { head: { sha: head }, base: { sha: base } };
-    if (calls.length === 2) return { total_commits: 3, commits: [
+    if (calls.length === 2) return { merge_base_commit: { sha: base }, files: evidence.primaryFiles, total_commits: 3, commits: [
       { sha: author, commit: { message: 'worker' } },
       { sha: 'e'.repeat(40), parents: [{ sha: author }], commit: { message: 'HAM repair\n\nWorker-Class: hammer' } },
       { sha: head, parents: [{ sha: 'e'.repeat(40) }], commit: { message: 'HAM repair\n\nWorker-Class: hammer' } }] };
@@ -465,4 +465,54 @@ test('HAM-like subject without a provenance trailer is not HAM authority', async
       ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } }
       : { total_commits: 1, commits: [{ sha: head, commit: { message: 'Worker-Class: hammer' } }] } });
   assert.equal(result.hasHammerCommits, false);
+});
+
+
+test('dispatch baseline skips malformed and legacy records but defers I/O errors', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'primary-record-errors-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const directory = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
+  mkdirSync(directory, { recursive: true });
+  const record = { repo: 'fixture/repo', prNumber: 1, workerClass: 'hammer',
+    dispatchedAt: '2026-10-01T00:00:00Z' };
+  writeFileSync(join(directory, 'fixture__repo-pr-1-legacy.json'), JSON.stringify(record));
+  writeFileSync(join(directory, 'fixture__repo-pr-1-corrupt.json'), '{partial');
+  writeFileSync(join(directory, 'fixture__repo-pr-1-valid.json'), JSON.stringify({ ...record,
+    dispatchedAt: '2026-10-02T00:00:00Z', targetRemediationSha: 'a'.repeat(40) }));
+  assert.equal(readPrimaryChangeLaunchHead(rootDir, 'fixture/repo', 1), 'a'.repeat(40));
+  // A directory named as a record deterministically produces EISDIR even as root.
+  mkdirSync(join(directory, 'fixture__repo-pr-1-io.json'));
+  const evidence = await fetchPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 1,
+    headSha: head, get: async (path) => path.includes('/pulls/')
+      ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } }
+      : { total_commits: 0, commits: [] } });
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-read-failed');
+});
+
+test('compare cache is evaluation-local and runtime roots honor explicit and environment values', async () => {
+  const evidence = primaryChangeFixture(head);
+  const calls = [];
+  const get = async (path) => {
+    calls.push(path);
+    if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: evidence.mergeBase } };
+    return { total_commits: 1, commits: [{ sha: head, parents: [{ sha: evidence.primaryHead }],
+      commit: { message: 'repair\n\nWorker-Class: hammer' } }],
+    merge_base_commit: { sha: evidence.mergeBase }, files: evidence.primaryFiles };
+  };
+  for (let i = 0; i < 2; i += 1) {
+    assert.equal(checkPrimaryChange(await fetchPrimaryChange({ repo: 'fixture/repo',
+      prNumber: 1, headSha: head, get }), head).ok, true);
+  }
+  assert.equal(calls.length, 6); // PR, history/final, primary: fresh on each evaluation.
+  assert.equal(primaryChangeRoot({ env: { HAM_ROOT_DIR: '/runtime' } }), '/runtime');
+  assert.equal(primaryChangeRoot({ rootDir: '/explicit', env: { HAM_ROOT_DIR: '/runtime' } }), '/explicit');
+});
+
+test('a diverged trusted launch cannot waive untagged automation without actor evidence', async () => {
+  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    dispatchedHead: 'd'.repeat(40), get: async (path) => path.includes('/pulls/')
+      ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } }
+      : path.includes('d'.repeat(40)) ? { status: 'diverged' }
+        : { total_commits: 1, commits: [{ sha: head, commit: { message: 'untagged repair' } }] } });
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-unknown');
 });

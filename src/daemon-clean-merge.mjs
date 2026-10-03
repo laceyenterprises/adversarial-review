@@ -1037,6 +1037,13 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  // The in-lease gate has already classified a partial evidence re-read as
+  // retryable. Preserve that classification rather than creating an operator park.
+  if (daemonResult?.reason === 'gate-read-failed'
+    && daemonResult?.reasons?.includes('primary-change-unknown')) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      needsOperator: false };
+  }
   const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
   if (remediableGate && daemonResult?.reasons?.includes('primary-change-read-failed')) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,

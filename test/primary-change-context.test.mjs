@@ -15,7 +15,7 @@ const evidence = primaryChangeFixture(head);
 const comparePath = `repos/fixture/repo/compare/${evidence.mergeBase}...${head}`;
 const primaryPath = `repos/fixture/repo/compare/${evidence.mergeBase}...${evidence.primaryHead}`;
 const pr = { head: { sha: head }, base: { sha: evidence.mergeBase } };
-const history = { total_commits: 1, commits: [{ sha: head,
+const history = { merge_base_commit: { sha: evidence.mergeBase }, files: evidence.primaryFiles, total_commits: 1, commits: [{ sha: head,
   parents: [{ sha: evidence.primaryHead }], commit: { message: 'HAM repair\n\nWorker-Class: hammer' } }] };
 const compare = { merge_base_commit: { sha: evidence.mergeBase }, files: evidence.primaryFiles };
 
@@ -55,13 +55,12 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
     { path: comparePath, data: history },
     { path: primaryPath, error: 'gh: Bad Gateway (HTTP 502)' },
     { path: primaryPath, data: compare },
-    { path: comparePath, data: compare },
   ]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, '');
   assert.deepEqual(JSON.parse(result.stdout), { ...evidence, testRegionsChanged: [] });
   assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath,
-    primaryPath, primaryPath, comparePath].map(path => ['api', path]));
+    primaryPath, primaryPath].map(path => ['api', path]));
 });
 
 test('primary-change CLI exhausts transient reads after three attempts and fails closed', (t) => {

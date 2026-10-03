@@ -170,7 +170,7 @@ test('only pre-lease gate declines the hammer can fix are hammer-remediable', ()
   assert.equal(isDaemonNotTakenHammerRemediable(DUPLICATE_FAMILY), false);
   // DIRTYOWN-01: GitHub's still-computing UNKNOWN is a transient read, not a conflict.
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['pr-mergeability-unknown'] }), false);
-  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'labels-unavailable'] }), true);
+  assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'labels-unavailable'] }), false);
   // ...but an UNKNOWN riding along a real remediable miss must not turn it into a park.
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['ci-not-green', 'pr-mergeability-unknown'] }), true);
   assert.equal(isDaemonNotTakenHammerRemediable({ ...CI_NOT_GREEN, reasons: ['lease-not-held', 'pr-mergeability-unknown'] }), false);

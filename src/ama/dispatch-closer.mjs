@@ -1428,9 +1428,9 @@ function dispatchStatusReason(status) {
 
 async function readLaunchRequestStatusFromLedgerDefault(args) {
   const { readLaunchRequestStatusFromLedger, readLatestWorkerRunStatusFromLedger } = await import('../session-ledger-read-adapter.mjs');
-  const launch = readLaunchRequestStatusFromLedger(args);
+  const launch = await readLaunchRequestStatusFromLedger(args);
   if (launch?.ok && ['starting', 'running'].includes(launch.row?.status)) {
-    const worker = readLatestWorkerRunStatusFromLedger(args);
+    const worker = await readLatestWorkerRunStatusFromLedger(args);
     if (worker?.ok) return { ...launch, row: { ...launch.row, pid: worker.row.pid,
       workerStatus: worker.row.status, process_status: worker.row.process_status } };
   }
@@ -5695,13 +5695,15 @@ export async function maybeDispatchAmaCloser({
   let eligibleCloserBacklog = otherPrLaunches.length + 1;
   try { eligibleCloserBacklog = await observeCloserBacklog({ rootDir, repo, prNumber }); }
   catch (error) { logger?.warn?.(`AMA backlog observation failed: ${error.message}`); }
+  // A successful census can lower the cap below existing launches. Adding a
+  // candidate to the live count here would defeat that backpressure.
   const maxConcurrentLaunches = effectiveCloserCap(
-    Math.max(eligibleCloserBacklog, otherPrLaunches.length + 1),
+    eligibleCloserBacklog,
     cfg?.watcher?.ama_closer_max_concurrent_launches ?? cfg?.amaCloserMaxConcurrentLaunches ?? 3,
     cfg?.amaCloserConcurrentLaunchCeiling ?? 32,
   );
   logAmaCloserDispatchEvent(logger, 'ama.closer_queue_depth', {
-    eligibleBacklog: Math.max(eligibleCloserBacklog, otherPrLaunches.length + 1),
+    eligibleBacklog: eligibleCloserBacklog,
     liveLaunches: otherPrLaunches.length, effectiveCap: maxConcurrentLaunches,
   });
   if (samePrLaunch || otherPrLaunches.length >= maxConcurrentLaunches) {

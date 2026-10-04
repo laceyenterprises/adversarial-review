@@ -6,8 +6,10 @@ import path from 'node:path';
 
 import {
   AMA_HAMMER_BACKGROUND_REASON,
+  amaHammerBackgroundQueue,
   amaHammerBackgroundKey,
   createAmaHammerBackgroundQueue,
+  resetAmaHammerBackgroundQueueForTests,
   resolveAmaHammerDispatchMode,
 } from '../src/ama-hammer-background-dispatch.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
@@ -109,6 +111,40 @@ test('queue holds a newer head until the same PR run settles without blocking an
 
 test('background queue defaults to three launch slots', () => {
   assert.equal(createAmaHammerBackgroundQueue().snapshot().limit, 3);
+});
+
+test('process queue is independent of the first domain ceiling and retains each closer policy', async (t) => {
+  resetAmaHammerBackgroundQueueForTests();
+  t.after(resetAmaHammerBackgroundQueueForTests);
+  const gate = deferred();
+  const policies = [];
+  let queue;
+  try {
+    for (const [index, ceiling] of [3, 32, 32, 32].entries()) {
+      const result = await maybeDispatchAmaClosureFor(closureArgs({
+        prNumber: 265 + index,
+        resolveAmaHammerDispatchModeImpl: () => 'background',
+        loadConfigImpl: () => ({
+          getMergeAuthorityConfig: () => ({ enabled: true, amaCloserConcurrentLaunchCeiling: ceiling }),
+        }),
+        amaHammerBackgroundQueueImpl: (options) => {
+          assert.deepEqual(options, { maxConcurrent: 3 });
+          queue = amaHammerBackgroundQueue(options);
+          return queue;
+        },
+        maybeDispatchAmaCloserImpl: async ({ cfg }) => {
+          policies.push(cfg.amaCloserConcurrentLaunchCeiling);
+          return gate.promise;
+        },
+      }));
+      assert.equal(result.backgroundDispatch.state, 'started');
+    }
+    assert.deepEqual(policies, [3, 32, 32, 32]);
+    assert.equal(queue.snapshot().running, 4);
+  } finally {
+    gate.resolve({ dispatched: false, reason: 'ama-closer-launch-in-progress' });
+    await queue?.drain();
+  }
 });
 
 test('a failing background dispatch is reported and does not wedge the queue', async () => {

@@ -33,6 +33,7 @@ export const AMA_HAMMER_DISPATCH_MODES = Object.freeze(['inline', 'background'])
 export const DEFAULT_AMA_HAMMER_DISPATCH_MODE = 'inline';
 // Keep the background queue aligned with the closer's default capacity.
 export const DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT = 3;
+export const AMA_HAMMER_BACKGROUND_PROCESS_CEILING = 32;
 export const AMA_HAMMER_BACKGROUND_REASON = 'ama-closer-dispatch-backgrounded';
 // A settled outcome is only meaningful to the next tick or two for that PR@head.
 // Past this age the PR has moved on (new head, closed) and the outcome is dropped.
@@ -207,9 +208,13 @@ export function createAmaHammerBackgroundQueue({
 
 // One queue per watcher process. The watcher is a long-lived single process, so
 // module scope is the natural lifetime; tests construct their own queues.
+// The shared queue uses a process bound. Each run's maybeDispatchAmaCloser
+// enforces its domain ceiling; the first domain must not configure this queue.
 let processQueue = null;
-export function amaHammerBackgroundQueue({ maxConcurrent, ceiling = 32 } = {}) {
-  if (!processQueue) processQueue = createAmaHammerBackgroundQueue({ maxConcurrent, ceiling });
+export function amaHammerBackgroundQueue({ maxConcurrent } = {}) {
+  if (!processQueue) processQueue = createAmaHammerBackgroundQueue({
+    maxConcurrent, ceiling: AMA_HAMMER_BACKGROUND_PROCESS_CEILING,
+  });
   return processQueue;
 }
 

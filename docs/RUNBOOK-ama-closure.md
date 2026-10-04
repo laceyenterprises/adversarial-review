@@ -1519,9 +1519,15 @@ admission gate remains responsible for memory and load back-pressure.
 Only requested, leased, starting and running ledger launches consume capacity,
 with process liveness checked where known. Parked/blocked decision launches
 retain same-PR exclusivity but consume no fleet slots. Terminal launches release
-capacity without releasing safety leases or authorizing retries. Live launches
-and the newly eligible candidate are included in the eligible backlog census.
-The background dispatch queue scales with its eligible entries to the same ceiling.
+capacity without releasing safety leases or authorizing retries. The backlog
+census counts nonterminal closer candidates observed within ten minutes,
+including the current candidate. Live launches are compared against this
+backlog-derived cap; their count does not raise a successfully observed cap.
+The process-wide background dispatch queue scales with its eligible entries to
+a fixed ceiling of 32 (while preserving a higher configured host floor).
+Each queued run retains its own domain policy, which `maybeDispatchAmaCloser`
+checks before launching a worker. The first domain processed cannot set the
+shared queue's ceiling.
 
 The daemon clean path runs before hammer capacity, including automated recovery.
 No eligible inline merge waits behind `ama-closer-launch-in-progress`.

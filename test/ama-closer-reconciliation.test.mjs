@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../bin/reconcile-ama-closer-dispatches.mjs';
@@ -115,6 +117,39 @@ test('default ledger reader merges worker PID and process status into fleet capa
   assert.deepEqual(checkedPids.sort(), [4201, 4202]);
   assert.deepEqual(active.sort((a, b) => a.prNumber - b.prNumber).map(({ prNumber, holdsCapacity }) =>
     [prNumber, holdsCapacity]), [[1, true], [2, false], [3, false]]);
+
+  // Exercise the same default reader with promise-returning adapter exports.
+  // The loader wraps the real offline SQLite adapter, so both awaits are
+  // necessary to retain the worker PID and process status.
+  const loaderPath = join(root, 'async-ledger-loader.mjs');
+  writeFileSync(loaderPath, `
+    export async function load(url, context, nextLoad) {
+      const result = await nextLoad(url, context);
+      if (!url.endsWith('/src/session-ledger-read-adapter.mjs')) return result;
+      return { ...result, source: String(result.source)
+        .replace('export function readLaunchRequestStatusFromLedger(', 'export async function readLaunchRequestStatusFromLedger(')
+        .replace('export function readLatestWorkerRunStatusFromLedger(', 'export async function readLatestWorkerRunStatusFromLedger(') };
+    }
+  `);
+  execFileSync(process.execPath, ['--input-type=module', '--eval', `
+    import { register } from 'node:module';
+    import assert from 'node:assert/strict';
+    register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
+    const { findActiveAmaCloserLaunches } = await import(${JSON.stringify(new URL('../src/ama/dispatch-closer.mjs', import.meta.url).href)});
+    const checkedPids = [];
+    const active = await findActiveAmaCloserLaunches(${JSON.stringify(root)}, {
+      now: ${JSON.stringify(NOW)}, ledgerDbPath: ${JSON.stringify(ledgerDbPath)},
+      env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
+      processKillImpl: (pid, signal) => {
+        checkedPids.push(pid);
+        assert.equal(signal, 0);
+        if (pid === 4202) throw Object.assign(new Error('dead fixture worker'), { code: 'ESRCH' });
+      },
+    });
+    assert.deepEqual(checkedPids.sort(), [4201, 4202]);
+    assert.deepEqual(active.sort((a, b) => a.prNumber - b.prNumber)
+      .map(({ prNumber, holdsCapacity }) => [prNumber, holdsCapacity]), [[1, true], [2, false], [3, false]]);
+  `], { encoding: 'utf8', timeout: 10000, stdio: 'pipe' });
 });
 
 function fixture(t, label) {

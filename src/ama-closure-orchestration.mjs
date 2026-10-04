@@ -1893,7 +1893,6 @@ export async function maybeDispatchAmaClosureFor({
     });
     const backgroundQueue = amaHammerBackgroundQueueImpl({
       maxConcurrent: cfg.amaCloserMaxConcurrentLaunches,
-      ceiling: cfg.amaCloserConcurrentLaunchCeiling,
     });
     backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
     if (!backgroundSettled) {

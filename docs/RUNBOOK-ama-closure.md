@@ -1476,20 +1476,31 @@ remain allowed, but preserving author intent takes precedence over those waivers
 ### AMACAP-01 closer launch capacity and reconciliation
 
 `watcher.ama_closer_max_concurrent_launches` remains configurable (default 3).
-The cap counts authoritative non-terminal session-ledger launches across PRs,
-plus pending lease-held dispatches inside the bounded launch window. Terminal
+The cap counts non-terminal session-ledger launches across PRs within the
+existing dispatch-record and lease reclaim windows, plus pending lease-held
+dispatches inside the bounded launch window. Terminal
 launches immediately stop consuming capacity when the next dispatch scans the
-records. Ledger read failures hold capacity; confirmed missing LRQs expire after
-the existing pending-launch timeout. Launch completion is not merge success:
+records. Non-terminal ledger statuses and ledger read failures retain capacity
+only while the existing record/lease liveness checks pass; they do not bypass
+the age escape for workers that die without a terminal ledger write.
+Confirmed missing LRQs expire after the existing pending-launch timeout.
+Launch completion is not merge success:
 reconciliation leaves closer leases and merge leases untouched, and successful
 launches retain `unverified-terminal-success` until the normal outcome checks.
 Closers can spill to `hammer-claude` through the existing harness fallback (§2a).
 
-Preview the one-time backlog repair, then apply it against the runtime root:
+Preview the one-time backlog repair, then apply it against the runtime root.
+Run both commands as the canonical daemon owner for that root; replace
+`<daemon-user>` with the deployed runtime account (for example, `placey` on a
+placey-owned host). Verify the account against the daemon configuration and
+ownership of the dispatch directory and its existing JSON files first. Do not
+assume the interactive operator or HQ owner is also the dispatch-file owner:
+atomic replacement creates a file owned by the calling user and can lock out
+the daemon when run as another account.
 
 ```bash
-node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --dry-run
-node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root>
+sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --dry-run
+sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root>
 ```
 
 Both commands print scanned, terminal, missing, unreadable, changed, and active

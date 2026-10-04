@@ -1694,7 +1694,9 @@ function isAmaCloserMissingLrqTimedOut(record, options = {}) {
 }
 
 export function isAmaCloserLaunchInProgress(record, options = {}) {
-  if (Object.hasOwn(options, 'ledgerActive')) return options.ledgerActive;
+  // Terminal ledger evidence releases immediately; a non-terminal or failed
+  // ledger read must still respect the existing record and lease age escapes.
+  if (options.ledgerActive === false) return false;
   if ((record?.state !== 'dispatched' && record?.lastError)
     || String(record?.state || '').includes('blocked')
     || String(record?.state || '').includes('failed')

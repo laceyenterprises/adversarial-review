@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../bin/reconcile-ama-closer-dispatches.mjs';
-import { amaCloserDispatchFilePath, updateAmaCloserDispatchRecord, findActiveAmaCloserLaunches } from '../src/ama/dispatch-closer.mjs';
+import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, amaCloserDispatchFilePath, updateAmaCloserDispatchRecord, findActiveAmaCloserLaunches } from '../src/ama/dispatch-closer.mjs';
 
 test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-reconcile-'));
@@ -31,13 +31,36 @@ test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async
   assert.deepEqual(paths.map(p => readFileSync(p, 'utf8')), after);
 });
 
-test('missing ledger launch expires; ledger read failures hold capacity', async (t) => {
+test('missing ledger launch expires; unreadable ledger retains only fresh capacity', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-missing-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: 1, headSha: 'abc', state: 'dispatched', launchRequestId: 'missing', lastAttemptedAt: '2020-01-01T00:00:00Z' }));
-  assert.equal((await findActiveAmaCloserLaunches(root, { readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 1);
-  assert.equal((await findActiveAmaCloserLaunches(root, { readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) })).length, 0);
+  const now = '2026-10-03T00:00:00Z';
+  updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: 1, headSha: 'abc', state: 'dispatched', launchRequestId: 'missing', lastAttemptedAt: now }));
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 1);
+  const expiredNow = new Date(Date.parse(now) + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS).toISOString();
+  assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 0);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) })).length, 0);
 });
+
+for (const state of ['dispatching', 'dispatched']) {
+  test(`running ledger launch respects ${state} record age and latest observation`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'amacap-stale-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const identity = { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' };
+    const startedAt = '2026-10-03T00:00:00Z';
+    const now = new Date(Date.parse(startedAt) + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS).toISOString();
+    updateAmaCloserDispatchRecord(root, identity, () => ({
+      ...identity, state, launchRequestId: 'crashed', lastObservedStatus: 'running', lastAttemptedAt: startedAt,
+    }));
+    const options = { now, readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }) };
+    assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0);
+    assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(root, identity))).state, state,
+      'age expiry alone does not fabricate a terminal outcome');
+    updateAmaCloserDispatchRecord(root, identity, record => ({ ...record, state: 'dispatched', lastObservedAt: now }));
+    assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 1,
+      'a recent observation retains an older launch');
+  });
+}
 
 test('shared ledger adapter reads terminal and running SQLite launches offline', async (t) => {
   const { createRequire } = await import('node:module');
@@ -49,9 +72,9 @@ test('shared ledger adapter reads terminal and running SQLite launches offline',
   db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT)');
   for (const [i, status] of ['succeeded', 'running'].entries()) {
     db.prepare('INSERT INTO launch_requests VALUES (?, ?, NULL, NULL, NULL)').run(`lrq-${i}`, status);
-    updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: i + 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: i + 1, headSha: 'abc', state: 'dispatched', launchRequestId: `lrq-${i}`, lastAttemptedAt: '2020-01-01T00:00:00Z' }));
+    updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: i + 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: i + 1, headSha: 'abc', state: 'dispatched', launchRequestId: `lrq-${i}`, lastAttemptedAt: '2020-01-01T00:00:00Z', lastObservedAt: '2026-10-03T00:00:00Z' }));
   }
   db.close();
-  const active = await findActiveAmaCloserLaunches(root, { ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' } });
+  const active = await findActiveAmaCloserLaunches(root, { now: '2026-10-03T00:00:00Z', ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' } });
   assert.deepEqual(active.map(record => record.launchRequestId), ['lrq-1']);
 });

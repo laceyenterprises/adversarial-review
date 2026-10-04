@@ -3160,12 +3160,12 @@ test('three terminal ledger launches free capacity for a fourth PR', async (t) =
   assert.equal(result.dispatched, true);
 });
 
-test('old non-terminal ledger launch still blocks same PR', async (t) => {
+test('recently observed non-terminal ledger launch still blocks same PR', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'amacap-live-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }, () => ({
     repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD, state: 'dispatched',
-    launchRequestId: 'live', lastAttemptedAt: '2020-01-01T00:00:00Z',
+    launchRequestId: 'live', lastAttemptedAt: '2020-01-01T00:00:00Z', lastObservedAt: '2026-07-06T12:00:00Z',
   }));
   const deps = hammerDispatchDeps({ readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }) });
   const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });

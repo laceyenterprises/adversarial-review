@@ -2243,8 +2243,8 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
-              // PMARCACLASS-01: registry validation belongs to dispatch.
-              rca_worker_class: { __type: TYPE_STRING, __default: 'codex' },
+              // PMARCACLASS-01: reject unknown classes at the strict loader boundary.
+              rca_worker_class: { __type: TYPE_STRING, __default: 'codex', __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS },
             },
           },
           quota: {

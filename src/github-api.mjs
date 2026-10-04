@@ -491,6 +491,7 @@ function normalizeLabels(labelsConnection) {
 function normalizeComment(comment) {
   return {
     id: comment?.id == null ? null : String(comment.id),
+    ...(comment?.node_id ? { node_id: comment.node_id } : {}),
     author: normalizeAuthor(comment?.author),
     body: String(comment?.body || ''),
     createdAt: comment?.createdAt || null,
@@ -917,6 +918,7 @@ async function fetchLegacyComments(execFileImpl, repo, prNumber) {
     `repos/${repo}/issues/${normalizedPrNumber}/comments`,
     (data) => (Array.isArray(data) ? data : []).map((comment) => ({
       id: comment?.id == null ? null : String(comment.id),
+      ...(comment?.node_id ? { node_id: comment.node_id } : {}),
       author: normalizeAuthor(comment?.user),
       body: String(comment?.body || ''),
       createdAt: comment?.created_at || null,

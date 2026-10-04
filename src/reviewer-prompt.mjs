@@ -11,6 +11,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadStagePrompt, pickReviewerStage, resolvePromptSet } from './kernel/prompt-stage.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
+import { readFindingDisputeReservations } from './ama/finding-dispute-context.mjs';
+import { buildObviousDocsGuidance, fetchLinkedSpecContents, formatAdvisoryFindingsContext, formatPrIntentContext, formatFindingDisputeContext } from './prompt-context.mjs';
+import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
+import { buildSlimReviewerExtraContext } from './review-mode-selection.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -76,6 +80,69 @@ function buildReviewerPromptPrefix({
   });
 }
 
+async function buildReviewerExtraContext({
+  repo,
+  prNumber,
+  prContext = null,
+  diff = '',
+  advisoryFindings = [],
+  reviewModeDecision = null,
+  repoRoot = join(ROOT, '..', '..'),
+  rootDir = ROOT,
+  readFindingDisputeReservationsImpl = readFindingDisputeReservations,
+  fetchLinkedSpecContentsImpl = fetchLinkedSpecContents,
+  buildHardeningReviewContextImpl = buildHardeningReviewContext,
+  fetchPRContextImpl,
+  execFileImpl,
+  log = console,
+} = {}) {
+  const disputeContext = formatFindingDisputeContext(prContext, readFindingDisputeReservationsImpl({
+    rootDir, repo, prNumber, headSha: prContext?.headRefOid || prContext?.head?.sha, logger: log,
+  }));
+  // RPL-08: slim mode trims context, never the review contract. See
+  // buildSlimReviewerExtraContext for what is dropped and why.
+  if (reviewModeDecision?.slim) {
+    return disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
+  }
+
+  let extraContext = buildObviousDocsGuidance();
+  try {
+    const linkedContext = await fetchLinkedSpecContentsImpl(repo, prNumber, {
+      prContext,
+      fetchPRContextImpl,
+      execFileImpl,
+    });
+    if (linkedContext) {
+      extraContext = `${linkedContext}${buildObviousDocsGuidance({ repoRootRelative: true, includeSelfContainedHint: true })}`;
+      log?.error?.(`[reviewer] DEBUG: fetched linked PR context (${linkedContext.length} bytes)`);
+    } else {
+      log?.error?.('[reviewer] DEBUG: no linked PR context found; using obvious-docs fallback guidance');
+    }
+  } catch (err) {
+    log?.error?.(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
+  }
+
+  const advisoryContext = formatAdvisoryFindingsContext(advisoryFindings);
+  if (advisoryContext) {
+    extraContext = `${extraContext}${advisoryContext}`;
+  }
+
+  try {
+    const hardeningContext = await buildHardeningReviewContextImpl(diff, {
+      repoRoot,
+      logger: log,
+    });
+    if (hardeningContext) {
+      extraContext = `${extraContext}${hardeningContext}`;
+      log?.error?.(`[reviewer] DEBUG: added hardening-ledger context (${hardeningContext.length} bytes)`);
+    }
+  } catch (err) {
+    log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
+  }
+
+  return extraContext + formatPrIntentContext(prContext?.body) + disputeContext;
+}
+
 function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}) {
   return `${promptPrefix || ''}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
 }
@@ -123,6 +190,7 @@ export {
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
+  buildReviewerExtraContext,
   buildReviewerPromptPrefix,
   buildReviewerPrompt,
   buildPromptForReviewerModel,

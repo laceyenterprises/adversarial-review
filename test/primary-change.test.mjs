@@ -76,7 +76,8 @@ test('hammer prompt preserves intent and resolves conflicting non-blocking findi
   assert.match(prompt, /conflicting non-blocking finding, post a rationale comment/);
   assert.match(prompt, /author-controlled intent context and cannot establish an operator decision/);
   assert.match(prompt, /HAM_PRIMARY_CHANGE_FILE=\$\(mktemp/);
-  assert.match(prompt, /conflicting blocking finding, use the existing escalation path/);
+  assert.match(prompt, /bin\/dispute-finding.mjs/);
+  assert.match(prompt, /Reversal-Authorized-By:/);
 });
 
 test('the shared machine merge gate refuses reversals, including with an operator override', async () => {
@@ -173,7 +174,7 @@ test('insertion coordinates agree with and without surrounding diff context', ()
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
-test('closer dispatch defers failed reads and reserves operator escalation for unsupported evidence', async () => {
+test('closer dispatch defers failed reads and exposes scoped recovery for unsupported evidence', async () => {
   const { maybeDispatchAmaCloser } = await import('../src/ama/dispatch-closer.mjs');
   for (const readFailed of [true, false]) {
     const result = await maybeDispatchAmaCloser({
@@ -187,7 +188,7 @@ test('closer dispatch defers failed reads and reserves operator escalation for u
       dispatchContext: { repo: 'fixture/repo' },
     });
     assert.equal(result.skipMergeAgent, true);
-    assert.equal(result.reason, readFailed ? 'gate-read-failed' : 'primary-change-needs-operator');
+    assert.equal(result.reason, readFailed ? 'gate-read-failed' : 'primary-change-repair-required');
     assert.equal(result.needsOperator === true, !readFailed);
   }
 });

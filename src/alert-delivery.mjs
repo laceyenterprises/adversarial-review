@@ -603,9 +603,9 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
   };
 }
 
-// The pager carries stalled first-pass reviews and exhausted AMA recovery.
-// Both are SEV1 automation failures with open work; other pipeline notices
-// remain durable digest entries.
+// The pager carries stalled first-pass reviews, exhausted AMA recovery and
+// bounded intent-preservation exhaustion. Other pipeline notices remain
+// durable digest entries.
 function alertPresentationForDoc(doc) {
   const event = String(doc?.event || 'adversarial_review.notice');
   const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
@@ -635,6 +635,17 @@ function alertPresentationForDoc(doc) {
     return { severity: 'SEV1', headline: 'AMA automated recovery exhausted',
       body: String(doc?.text || event), action: 'Restore the named automation failure; retain all safety gates.',
       detail: `PR: ${payload.repo}#${payload.pr}; head: ${payload.head}; attempts: ${payload.attempts}; reason: ${payload.reason}` };
+  }
+
+  if (['ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted'].includes(event)) {
+    return {
+      severity: 'SEV1',
+      headline: 'Intent-preservation remediation exhausted',
+      body: `Autonomous finding resolution exhausted for ${payload.repo}#${payload.prNumber}.`,
+      action: 'Inspect the finding evidence and exact-head review hold.',
+      detail: String(doc.text || ''),
+    };
+
   }
 
   const recovered = event === 'watcher.recovered';
@@ -1351,11 +1362,14 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
-  if (event === 'ama.automated_recovery.exhausted' || event === 'ama.closure_lag.slo_breach') {
+  if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted'].includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
     doc.id = event === 'ama.closure_lag.slo_breach' ? closureLagAlertId(payload)
       : `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
+    if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted') {
+      doc.id = `${event}-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event === 'ama_primary_change_refusal_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex')}`;
+    }
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
       if (existsSync(existingPath)) {

@@ -712,7 +712,7 @@ export async function handlePostedReviewRow({
         amaClosureResult?.reason || 'unknown',
         amaClosureResult?.reasons,
       );
-      const recoveryHint = amaClosureResult?.reason === 'primary-change-needs-operator'
+      const recoveryHint = ['primary-change-needs-operator', 'primary-change-repair-required'].includes(amaClosureResult?.reason)
         ? "(inspect the primary-change evidence; use current-head 'merge-agent-requested' for the operator-fallback lane; see RUNBOOK-ama-closure)"
         : '(inspect and resolve the named safety hold under its existing approval policy; see RUNBOOK-ama-closure)';
       logger.log(

@@ -456,6 +456,35 @@
         "src/ama/recovery-launch-reconciliation.mjs"
       ],
       "owner": "AMA watcher recovery router"
+    },
+    {
+      "id": "ham-primary-change-refusals",
+      "title": "HAM Primary Change Refusals",
+      "path": "docs/data-model/ham-primary-change-refusals.md",
+      "store": "data/ham-primary-change-refusals.db",
+      "schemaSurface": "src/ama/primary-change-refusal.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs"
+      ],
+      "owner": "AMA primary-change merge hold and closer refusal paging"
+    },
+    {
+      "id": "ham-finding-disputes",
+      "title": "HAM Finding Disputes",
+      "path": "docs/data-model/ham-finding-disputes.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "src/review-state.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/finding-dispute.mjs",
+        "src/ama/finding-dispute-owner.mjs",
+        "src/ama/finding-dispute-context.mjs",
+        "bin/dispute-finding.mjs",
+        "src/prompt-context.mjs",
+        "src/reviewer.mjs",
+        "src/reviewer-prompt.mjs"
+      ],
+      "owner": "AMA bounded finding disputes and reviewer context provenance",
+      "recoveryColumns": ["reserved_at", "paged"]
     }
   ]
 }

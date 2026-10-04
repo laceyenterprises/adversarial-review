@@ -587,14 +587,29 @@ Key control points:
   recent hammer rebase/validation exists, the PR is not `MERGEABLE`, or the
   newer base touches files changed by this PR. Only the hammer's documented
   no-strict up-to-date lane may merge a `BEHIND` head after those guards pass.
-- **Primary-change gate (HAMINTENT-01).** Both paths preserve changed regions
-  from the actual first hammer parent against the current PR base. Repairs to
-  added author lines are allowed. Proven reversals and unsupported evidence
-  park with a recorded reason; `operator-approved` does not waive them. An
-  attributable current-head `merge-agent-requested` invokes the existing
-  operator-fallback lane after inspection (see RUNBOOK-ama-closure). Failed
-  reads defer as `gate-read-failed`, without a permanent head marker or operator
-  escalation; the next tick retries.
+- **Primary-change gate (HAMINTENT-02 / LAC-1833).** Both paths preserve changed
+  regions from the protected author baseline against the current PR base.
+  A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
+  blocking finding on its reviewed head, with File/Lines covering each reverted
+  base line (the uncited remainder stays protected) and verified
+  closure ancestry and live GitHub HAM committer identity (linked author fallback
+  only when no committer is linked). Missing, non-blocking and unrelated citations
+  remain refused.
+  A disputed blocking finding posts evidence and requests exact-head re-review
+  through `bin/dispute-finding.mjs`; the reviewer confirms or withdraws it. Before
+  opening the existing database, the helper checks effective UID ownership of
+  daemon state and the configured pager sink. Only the latest authoritative
+  review in live-head ancestry may be disputed.
+  Neither reversal authorization nor dispute raises `hq decision raise`. Predicate
+  refusals hold merge with `needsOperator: true`; an attributable current-head
+  `merge-agent-requested` event can dispatch the existing operator recovery lane.
+  The closer returns `primary-change-repair-required` and pages once per head
+  after three observations; the daemon returns `primary-change-needs-operator`
+  before the closer and does not increment that counter. Dispute exhaustion pages
+  once per PR; failed page enqueue releases the guard for a later retry.
+  Each finding's latest reserved comment is included, up to the context byte cap,
+  with REST node IDs preserved. Trusted HAM author plus durable comment
+  reservation/digest is required for dispute prompt context. Failed reads defer as `gate-read-failed`.
 - **`strict_mode`** (default `true`): the ordinary daemon lane requires a
   zero-finding review. Explicitly setting it `false` permits daemon merge
   over *known non-blocking* findings. A current-head `operator-approved`
@@ -902,3 +917,11 @@ Check in this order:
 5. worker log
 
 That order usually gets you to the truth fastest.
+
+HAMINTENT-02 final-review clarification: refusal page enqueue failure releases
+its guard for a later observation; transport delivery is independent. Reversal
+authority uses the parsed blocking verdict and latest authoritative review in
+parent ancestry. Non-triggered dispute requests preserve previous admitted
+provenance, and thrown requests also refund their reservation. Owner refusal (CLI 78) occurs before SQLite opens. Untrusted posted HAM
+provenance (CLI 79) refunds its reservation before closing. Both produce a
+no-merge handoff.

@@ -45,9 +45,8 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
-import { buildObviousDocsGuidance, fetchLinkedSpecContents, formatAdvisoryFindingsContext, formatPrIntentContext } from './prompt-context.mjs';
-import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
-import { buildReviewModeAuditBlock, buildSlimReviewerExtraContext, selectReviewMode } from './review-mode-selection.mjs';
+import { formatAdvisoryFindingsContext } from './prompt-context.mjs';
+import { buildReviewModeAuditBlock, selectReviewMode } from './review-mode-selection.mjs';
 import {
   VERDICT_MODE_ADVISORY_ONLY,
   VERDICT_MODE_ENFORCE,
@@ -154,6 +153,7 @@ import {
   REVIEWER_PROMPT_SET,
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
+  buildReviewerExtraContext as assembleReviewerExtraContext,
   buildReviewerPromptPrefix,
   buildReviewerPrompt,
   buildPromptForReviewerModel,
@@ -581,62 +581,8 @@ function buildLocalReviewShadowPrompt({ hostedReviewText, diff, extraContext = '
   ].filter(Boolean).join('\n');
 }
 
-async function buildReviewerExtraContext({
-  repo,
-  prNumber,
-  prContext = null,
-  diff = '',
-  advisoryFindings = [],
-  reviewModeDecision = null,
-  repoRoot = join(ROOT, '..', '..'),
-  fetchLinkedSpecContentsImpl = fetchLinkedSpecContents,
-  buildHardeningReviewContextImpl = buildHardeningReviewContext,
-  fetchPRContextImpl = fetchPRContext,
-  execFileImpl = execFileAsync,
-  log = console,
-} = {}) {
-  // RPL-08: slim mode trims context, never the review contract. See
-  // buildSlimReviewerExtraContext for what is dropped and why.
-  if (reviewModeDecision?.slim) {
-    return formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
-  }
-
-  let extraContext = buildObviousDocsGuidance();
-  try {
-    const linkedContext = await fetchLinkedSpecContentsImpl(repo, prNumber, {
-      prContext,
-      fetchPRContextImpl,
-      execFileImpl,
-    });
-    if (linkedContext) {
-      extraContext = `${linkedContext}${buildObviousDocsGuidance({ repoRootRelative: true, includeSelfContainedHint: true })}`;
-      log?.error?.(`[reviewer] DEBUG: fetched linked PR context (${linkedContext.length} bytes)`);
-    } else {
-      log?.error?.('[reviewer] DEBUG: no linked PR context found; using obvious-docs fallback guidance');
-    }
-  } catch (err) {
-    log?.error?.(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
-  }
-
-  const advisoryContext = formatAdvisoryFindingsContext(advisoryFindings);
-  if (advisoryContext) {
-    extraContext = `${extraContext}${advisoryContext}`;
-  }
-
-  try {
-    const hardeningContext = await buildHardeningReviewContextImpl(diff, {
-      repoRoot,
-      logger: log,
-    });
-    if (hardeningContext) {
-      extraContext = `${extraContext}${hardeningContext}`;
-      log?.error?.(`[reviewer] DEBUG: added hardening-ledger context (${hardeningContext.length} bytes)`);
-    }
-  } catch (err) {
-    log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
-  }
-
-  return extraContext + formatPrIntentContext(prContext?.body);
+async function buildReviewerExtraContext({ fetchPRContextImpl = fetchPRContext, execFileImpl = execFileAsync, ...options } = {}) {
+  return assembleReviewerExtraContext({ ...options, fetchPRContextImpl, execFileImpl });
 }
 
 function formatLocalReviewShadowArtifact({ request, reviewText, status = 'completed', reason = null }) {

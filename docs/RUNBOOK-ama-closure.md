@@ -1325,7 +1325,11 @@ Before taking over a settled primary-change refusal, the watcher checks for a
 live closer lease at any head, including a lease keyed to the previous head.
 Both inline and background modes evaluate the closer first; newly queued/running
 background work retains ownership until its gates return a result, and is not
-cancelled by the label. The scoped operator-fallback predicate requires the
+cancelled by the label. Once the guarded operator fallback is selected, its
+queue entry is aborted. Observing or submitting a newer head also aborts older
+entries for that PR: queued entries are removed without launching, while running
+entries retain their slot until settlement and do not retain cancelled outcomes.
+The scoped operator-fallback predicate requires the
 request label to remain present on the current snapshot and excludes
 `remediation_pending` rows. It also rejects `merge-agent-skip`, `do-not-merge`,
 `no-merge-hold`, `adversarial-merge-blocked`, `merge-agent-stuck`, and

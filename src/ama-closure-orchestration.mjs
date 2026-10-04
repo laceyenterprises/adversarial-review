@@ -2099,6 +2099,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
   recoverAmaAutomationImpl = recoverAmaAutomation,
+  amaHammerBackgroundQueueImpl = amaHammerBackgroundQueue,
   recoveryOptions = {},
   signal = null,
   operationTimeoutMs = DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS,
@@ -2217,6 +2218,10 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (amaCloserLeaseHeld) return { outcome: 'ama-pending', amaClosureResult, coexistence };
   if (coexistence.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
     && amaClosureOperatorPreemptable) {
+    amaHammerBackgroundQueueImpl().abort?.(amaHammerBackgroundKey({
+      repo: repoPath, prNumber,
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha,
+    }));
     logger?.log?.(JSON.stringify({ event: 'ama.primary_change.operator_fallback',
       repo: repoPath, pr: prNumber, headSha: currentRevisionRef || candidate?.headSha,
       actor: mergeAgentRequestEvent.actor, eventId: mergeAgentRequestEvent.id,

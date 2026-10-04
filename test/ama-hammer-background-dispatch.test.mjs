@@ -652,8 +652,10 @@ for (const reason of ['primary-change-needs-operator', 'primary-change-repair-re
   test(`scoped request may recover ${reason} without a live lease`, async (t) => {
     const args = closureArgs();
     t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    const aborted = [];
     const run = (labelNames, event = scopedEvent()) => resolveMergeAgentCoexistenceForWatcher({
       ...args, labelNames, mergeAgentRequestEvent: event,
+      amaHammerBackgroundQueueImpl: () => ({ abort: (key) => aborted.push(key) }),
       maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
         skipMergeAgent: true, reason, needsOperator: reason.startsWith('primary-change') }),
       recoverAmaAutomationImpl: async ({ result }) => ({
@@ -661,11 +663,13 @@ for (const reason of ['primary-change-needs-operator', 'primary-change-repair-re
       }),
     });
     assert.equal((await run(['merge-agent-requested'])).outcome, 'dispatch-merge-agent');
+    assert.deepEqual(aborted, [`${args.repoPath}#${args.prNumber}@${HEAD}`]);
     for (const stop of ['no-merge-hold', 'do-not-merge', 'merge-agent-skip',
       'adversarial-merge-blocked', 'merge-agent-stuck', 'duplicate-family-hold']) {
       assert.notEqual((await run(['merge-agent-requested', stop])).outcome, 'dispatch-merge-agent');
     }
     assert.notEqual((await run(['merge-agent-requested'], scopedEvent('old-head'))).outcome, 'dispatch-merge-agent');
+    assert.equal(aborted.length, 1, 'blocked and stale requests do not abort work');
   });
 }
 
@@ -744,4 +748,36 @@ test('a changed head discards the previous head settled refusal', async () => {
   await queue.drain();
   assert.equal(queue.takeSettled('o/r#1@new'), null);
   assert.equal(queue.takeSettled('o/r#1@old'), null);
+});
+
+
+test('stale-head cancellation signals the running task and drops its outcome', async () => {
+  const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 2 });
+  let oldSignal;
+  const gate = deferred();
+  queue.submit({ key: 'o/r#1@old', run: (signal) => {
+    oldSignal = signal;
+    return gate.promise;
+  } });
+  queue.submit({ key: 'o/r#1@new', run: async () => 'new' });
+  assert.equal(oldSignal.aborted, true);
+  assert.equal(queue.snapshot().running, 1);
+  gate.resolve('old');
+  await queue.drain();
+  assert.equal(queue.takeSettled('o/r#1@new').result, 'new');
+  assert.equal(queue.takeSettled('o/r#1@old'), null);
+});
+
+test('abort removes a queued task without launching it', async () => {
+  const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
+  const gate = deferred();
+  queue.submit({ key: 'other', run: () => gate.promise });
+  let launched = false;
+  queue.submit({ key: 'queued', run: async () => { launched = true; } });
+  assert.equal(queue.abort('queued'), true);
+  assert.equal(queue.abort('missing'), false);
+  assert.equal(queue.snapshot().waiting, 0);
+  gate.resolve();
+  await queue.drain();
+  assert.equal(launched, false);
 });

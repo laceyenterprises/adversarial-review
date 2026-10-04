@@ -320,20 +320,21 @@ async function runAcquire(argv, deps) {
     values['owner-pgid'] == null ? null : parsePositiveInteger(values['owner-pgid'], 'owner-pgid');
   const waitSeconds = parseNonNegativeNumber(values.wait, 'wait');
   const startedMs = deps.nowMs();
-  const initialHolder = inspectMergeLease({ rootDir, repo, base, now: deps.nowIso(),
-    host: deps.host, pidAliveFn: deps.pidAliveFn });
-  const holderRemaining = initialHolder.holder
-    && values['wait-for-holder-deadline']
-    ? Math.max(0, (initialHolder.deadlineSeconds || 0) - (initialHolder.ageSeconds || 0)) : 0;
-  // FIFO acquisition remains bounded, but permits the current holder to finish.
-  const deadlineMs = startedMs + (waitSeconds === 0 ? 0 : Math.min(1800, Math.max(waitSeconds, holderRemaining > 0 ? holderRemaining + 5 : 0))) * 1000;
-
   if (ownerPid === deps.selfPid) {
     throw usageError('--owner-pid must identify the caller, not the merge-lease CLI process');
   }
   if (!deps.pidAliveFn(ownerPid)) {
     throw usageError('--owner-pid is not live on this host');
   }
+  let acquisitionSeconds = waitSeconds;
+  if (values['wait-for-holder-deadline'] && waitSeconds > 0) {
+    const initialHolder = inspectMergeLease({ rootDir, repo, base, now: deps.nowIso(),
+      host: deps.host, pidAliveFn: deps.pidAliveFn });
+    const holderRemaining = initialHolder.holder
+      ? Math.max(0, (initialHolder.deadlineSeconds || 0) - (initialHolder.ageSeconds || 0)) : 0;
+    acquisitionSeconds = Math.min(1800, Math.max(waitSeconds, holderRemaining > 0 ? holderRemaining + 5 : 0));
+  }
+  const deadlineMs = startedMs + acquisitionSeconds * 1000;
 
   let gateAttempt = null;
   while (!gateAttempt) {

@@ -351,6 +351,11 @@ ham_required_gate_red() {
   jq -e '.checksConclusion != null and .checksConclusion != "SUCCESS" and .checksConclusion != "PENDING"' "$HAM_GATE_JSON" >/dev/null
 }
 
+ham_required_gate_pending_only() {
+  jq -e '.checksConclusion == "PENDING" and
+    (.reasons | type == "array" and length > 0 and all(.[]; . == "ci-not-green"))' "$HAM_GATE_JSON" >/dev/null
+}
+
 ham_live_head_moved() {
   jq -e '.headMatches == false' "$HAM_GATE_JSON" >/dev/null
 }
@@ -435,26 +440,32 @@ while :; do
     echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
-    ham_append_terminal_audit deferred required-checks-pending || true
-    HAM_PENDING_CHECK_STATES=$(jq -r '.checksConclusion // empty' "$HAM_GATE_JSON")
-    if [ -n "$HAM_PENDING_CHECK_STATES" ] && ! ham_required_gate_red; then
-      HAM_PENDING_CHECK_CLASSIFICATION=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs classify \
-        --stage required-checks --state "$HAM_PENDING_CHECK_STATES") || return 1
-      if [ "$(printf '%s' "$HAM_PENDING_CHECK_CLASSIFICATION" | jq -r '.retryable')" = "true" ]; then
-        ham_mark_merge_lease_retryable_abort required-checks-pending
-      fi
+    if ham_required_gate_pending_only; then
+      ham_append_terminal_audit deferred required-checks-pending || true
+      ham_mark_merge_lease_retryable_abort required-checks-pending
+    else
+      ham_append_terminal_audit failed-without-merge github-gate-timeout || true
     fi
     ham_release_merge_lease
     return 20
   fi
   # Remote CI does not own the serialized merge lane. Reacquisition below
-  # repeats the live exact-head gate before any merge attempt.
+  # repeats the live exact-head gate before any merge attempt. Refund this
+  # acquisition so the later reacquire is the only charged gate attempt.
+  ham_mark_merge_lease_retryable_abort remote-ci-wait
   ham_release_merge_lease || return 1
   echo "HAM remote CI: waiting for required checks on ${POST_REMEDIATION_SHA}" >&2
   sleep "$HAM_REMOTE_CI_POLL_SECONDS"
 done
 if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
   ham_acquire_merge_lease || return $?
+  # Base may have advanced while CI waited without the lease. Reuse verify-head's
+  # fail-closed overlap guard before accepting the validated head on that base.
+  if ham_base_touches_pr_files; then
+    ham_append_terminal_audit failed-without-merge base-changed-file-overlap || true
+    ham_release_merge_lease
+    return 20
+  fi
 fi
 HAM_PRE_MERGE_ELIGIBLE=1
 

@@ -335,7 +335,7 @@
       "path": "docs/data-model/hammer-retry-cap.md",
       "store": "data/follow-up-jobs/hammer-retry-cap/",
       "schemaSurface": "src/ama/hammer-retry-cap.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs"],
       "owner": "AMA hammer dispatch retry and redrive caps"
     },
     {

@@ -1853,21 +1853,34 @@ head receipts cannot refund an already launched attempt.
 Lease acquisition timeouts and pending-required-check deferrals are written as
 `deferred` AMA audit attempts, keyed by the full certified head. The closer
 resumes a validated HAM head through the existing daemon merge predicate rather
-than launching remediation again. Required checks, primary-change, exact-head,
+than launching remediation again only while verdict misses are limited to pending
+CI. Structural policy holds and operator-required refusals remain authoritative;
+red CI or conflicts route back to hammer remediation. A pending-check timeout
+is deferred only when pending CI is the sole live gate miss; conflicts, strict
+BEHIND, closed PRs and labels retain a failed-without-merge audit. Required checks,
+primary-change, exact-head,
 protective predecessors, branch protection and the autonomous execution switch
 remain mandatory, including the live read inside the lease. Moving the head
 invalidates the certification and removes the old audit from the active queue.
 
-Each observed deferred launch refunds the series, target and lifetime failure
-counters exactly once. The separate launch history allows up to twelve deferrals
-and six hours, with exponential backoff starting at two minutes and capped at
-thirty minutes. Contention does not trigger retry-cap paging. An expired queue
+Each observed deferred launch refunds the series and matching target failure
+counters exactly once, deduped against ordinary retry refunds. Lifetime refunds
+are limited to twelve across the entire PR by `lifetimeDeferralRefundCount`,
+which survives fresh reviews; legacy ledgers without proven refund usage get no
+new lifetime refunds until operator reconciliation. The separate series launch
+history expires at twelve deferrals or six hours, with exponential backoff
+starting at two minutes and capped at thirty minutes. Within the lifetime refund
+budget, contention does not trigger retry-cap paging; after it is spent, the
+normal lifetime ceiling remains enforced. An expired queue
 returns `hammer-deferral-budget-exhausted` for operator handling.
 
 The lease CLI already maintains FIFO waiters; its bounded acquisition window now
-covers the holder's remaining deadline plus five seconds, capped at thirty
-minutes. Zero-wait callers still return immediately. Hammer releases its lease
-before sleeping on remote CI and reacquires before the final fresh live gate.
-This permits other PRs to advance base during CI; branch protection and the
-existing final merge gate may consequently defer or reject the merge, preserving
-safety instead of serializing the entire remote CI wait.
+optionally covers the holder's remaining deadline plus five seconds, capped at
+thirty minutes when `--wait-for-holder-deadline` is set. Ordinary `--wait` callers keep
+the requested window; zero-wait callers still return immediately. Hammer
+releases its lease through retryable-abort before sleeping on remote CI, refunding
+that acquisition so the post-CI reacquire charges only one net gate attempt.
+After reacquisition it re-runs the fail-closed changed-file overlap guard from
+verify-head against the live base before the final fresh exact-head gate. Base
+changes overlapping PR files require rebase and revalidation even without a
+strict branch-protection rule; disjoint movement may proceed under that rule.

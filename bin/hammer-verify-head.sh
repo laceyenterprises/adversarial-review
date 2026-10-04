@@ -209,10 +209,23 @@ $HAM_GATE_CAP_COMMENT"
     echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s" >&2
     ham_park_json=$(mktemp "${TMPDIR:-/tmp}/ham-lease-park.XXXXXX") || return 1
     jq -n '{outcome:"deferred",reason:"merge-lease-timeout"}' > "$ham_park_json"
-    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append --hq-root <<HQ_ROOT>> \
+    if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append --hq-root <<HQ_ROOT>> \
       --repo <<REPO>> --pr <<PR_NUMBER>> --head "$POST_REMEDIATION_SHA" \
-      --outcome deferred --closure-authority ham-terminal-remediation --attempt-json "$ham_park_json" || { rm -f "$ham_park_json"; return 1; }
+      --outcome deferred --closure-authority ham-terminal-remediation \
+      --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> --attempt-json "$ham_park_json"; then
+      HAM_PARK_AUDIT_EXIT=0
+    else
+      HAM_PARK_AUDIT_EXIT=$?
+    fi
     rm -f "$ham_park_json"
+    if [ "$HAM_PARK_AUDIT_EXIT" -eq 65 ]; then
+      HAM_PARK_LIVE_STATE=$(gh pr view <<PR_URL>> --json state --jq '.state') || return 1
+      [ "$HAM_PARK_LIVE_STATE" = "MERGED" ] || return 1
+      HAM_PHASE_OUTCOME=already-merged
+      return 20
+    elif [ "$HAM_PARK_AUDIT_EXIT" -ne 0 ]; then
+      echo "AMG-04 warning: lease-timeout park audit failed (exit ${HAM_PARK_AUDIT_EXIT}); retaining contention outcome" >&2
+    fi
     HAM_PHASE_OUTCOME=parked:merge-lease-timeout
     return 20
   fi

@@ -1060,3 +1060,20 @@ test('LEASEPARK-01 holder-aware FIFO wait outlives the short acquisition window'
     assert.ok(jsonOutput(io).waited_s >= 3);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+test('ordinary acquire preserves --wait 3600; holder-aware acquire caps at 1800', async () => {
+  for (const holderAware of [false, true]) {
+    const rootDir = freshRoot();
+    try {
+      acquireFixture(rootDir, { deadlineSeconds: 7200 });
+      const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+        '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '3600',
+        ...(holderAware ? ['--wait-for-holder-deadline'] : [])], {
+          onSleep: ({ nowMs, advance }) => advance(Date.parse('2026-06-20T18:00:00Z')
+            + (holderAware ? 1800 : 3600) * 1000 - nowMs),
+        });
+      assert.equal(code, 75);
+      assert.equal(jsonOutput(io).waited_s, holderAware ? 1800 : 3600);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  }
+});

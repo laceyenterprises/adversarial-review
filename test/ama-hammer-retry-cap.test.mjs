@@ -107,6 +107,7 @@ function hammerDispatchArgs(rootDir, overrides = {}) {
       hqOwnerUser: CURRENT_USER,
       currentUser: CURRENT_USER,
       dispatchedAt: '2026-07-06T12:00:00Z',
+      closerTokenRollupPollDelaysMs: [],
       livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true, headRefName: 'hammer/live' }),
       ...overrides.dispatchContext,
     },
@@ -3217,9 +3218,11 @@ test('LEASEPARK-01 certified lease park resumes daemon merge without remediation
     attempt: { outcome: 'deferred', reason: 'merge-lease-timeout' }, now: '2026-07-06T12:01:00Z' });
   let merges = 0;
   const run = (dispatchedAt, currentHead = ADVANCED_HEAD) => maybeDispatchAmaCloser({
-    ...hammerDispatchArgs(rootDir, { reviewState: { reviewCycleExhausted: true },
+    ...hammerDispatchArgs(rootDir, { reviewState: { reviewCycleExhausted: true,
+      verdict: 'request changes', blockingFindingCount: 1, completedRemediationRounds: 1 },
       dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: currentHead },
-      prMetadata: { headSha: currentHead } }),
+      prMetadata: { headSha: currentHead,
+        statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] } }),
     options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
     ...hammerDispatchDeps({
       execFileImpl: async (_cmd, args) => {
@@ -3240,4 +3243,87 @@ test('LEASEPARK-01 certified lease park resumes daemon merge without remediation
   assert.equal(merges, 0);
   assert.equal((await run('2026-07-06T12:05:00Z')).reason, 'current-head-hammer-terminal-remediation-merged');
   assert.equal(merges, 1);
+});
+
+for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI becomes conflicting', 'stale park timestamp', 'corrupt audit', 'missing head']) {
+  test(`certified park preserves eligibility gates: ${scenario}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-policy-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const first = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps() });
+    assert.equal(first.dispatched, true);
+    const park = writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), repo: REPO, prNumber: PR_NUMBER,
+      headSha: ADVANCED_HEAD, attempt: { outcome: 'deferred', reason: 'required-checks-pending' },
+      now: scenario === 'stale park timestamp' ? '2026-07-06T11:59:00Z' : '2026-07-06T12:01:00Z' });
+    if (scenario === 'corrupt audit') {
+      // Corrupt the existing file without changing its identity.
+      const { amaAuditFilePath } = await import('../src/ama/audit.mjs');
+      writeFileSync(amaAuditFilePath(join(rootDir, 'hq-root'), REPO, PR_NUMBER, ADVANCED_HEAD), '{broken');
+    }
+    let merges = 0;
+    const calls = [];
+    const run = dispatchedAt => maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, {
+        reviewState: { reviewCycleExhausted: scenario !== 'risk class changes', ...(scenario === 'risk class changes' ? { riskClass: 'critical' } : {}) },
+        dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: ADVANCED_HEAD },
+        prMetadata: { headSha: scenario === 'missing head' ? null : ADVANCED_HEAD,
+          mergeableState: scenario === 'pending CI becomes conflicting' ? 'CONFLICTING' : 'MERGEABLE',
+          statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED',
+            conclusion: scenario === 'pending CI turns red' ? 'FAILURE' : 'SUCCESS' }] },
+      }),
+      options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
+      ...hammerDispatchDeps({
+        execFileImpl: async (_cmd, args) => {
+          calls.push(args);
+          if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+          return { stdout: JSON.stringify({ dispatchId: 'repair_dispatch', launchRequestId: 'repair_launch' }), stderr: '' };
+        },
+        attemptDaemonCleanMergeImpl: async () => { merges++; throw new Error('unsafe daemon merge'); },
+      }),
+    });
+    let result = await run('2026-07-06T12:05:00Z');
+    if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
+      assert.equal(result.reason, 'hammer-deferral-backoff');
+      result = await run('2026-07-06T12:08:00Z');
+    }
+    assert.equal(merges, 0);
+    if (scenario === 'risk class changes') {
+      assert.equal(result.dispatched, false);
+      assert.ok(result.reasons.includes('risk-class-not-permitted'));
+    } else if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.ok(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'));
+    }
+    assert.ok(park);
+  });
+}
+
+test('certified queue expires at the twelfth deferral without another merge or launch', async t => {
+  const { deferHammerRetryDispatch } = await import('../src/ama/hammer-retry-cap.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-limit-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps() });
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const args = { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now: '2026-07-06T12:01:00Z' };
+  deferHammerRetryDispatch(rootDir, identity, { ...args, launchRequestId: 'lrq_hammer' });
+  for (let i = 1; i < 12; i++) {
+    recordHammerRetryDispatch(rootDir, identity, args);
+    deferHammerRetryDispatch(rootDir, identity, { ...args, launchRequestId: `park-${i}` });
+  }
+  writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity, headSha: ADVANCED_HEAD,
+    attempt: { outcome: 'deferred', reason: 'required-checks-pending' }, now: args.now });
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, { reviewState: { reviewCycleExhausted: true },
+      dispatchContext: { baseBranch: 'main', dispatchedAt: '2026-07-06T12:05:00Z', targetRemediationSha: ADVANCED_HEAD },
+      prMetadata: { headSha: ADVANCED_HEAD, statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] } }),
+    options: validHamTerminalRemediationOptions(),
+    ...hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }) };
+        throw new Error('unexpected dispatch');
+      },
+      attemptDaemonCleanMergeImpl: async () => { throw new Error('unexpected merge'); },
+    }),
+  });
+  assert.equal(result.reason, 'hammer-deferral-budget-exhausted');
+  assert.equal(result.needsOperator, true);
 });

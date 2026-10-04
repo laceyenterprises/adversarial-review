@@ -340,15 +340,13 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     prNumber: Number(identity.prNumber),
     jobKey: incomingJobKey || normalizeKey(existing?.jobKey),
     attemptCount: decision.nextAttemptCount,
-    // Lifetime count accumulates across fresh-review resets and never rolls back.
+    // Lifetime count survives fresh reviews; only bounded deferral refunds reduce it.
     lifetimeAttemptCount: decision.nextLifetimeCount,
     targetRemediationSha: head || existingTargetSha,
     targetAttemptCount: targetShaChanged ? 1 : decision.nextTargetAttemptCount,
     // Refunded exits belong to the series, like attemptCount.
     ...retryableFieldsForSeries(decision.jobKeyChanged ? null : existing),
-    deferralLaunches: decision.jobKeyChanged ? [] : (existing?.deferralLaunches || []),
-    deferralStartedAt: decision.jobKeyChanged ? null : existing?.deferralStartedAt,
-    deferralNextAt: decision.jobKeyChanged ? null : existing?.deferralNextAt,
+    ...deferralFieldsForSeries(existing, decision.jobKeyChanged),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
@@ -427,6 +425,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     lifetimeSuppressed,
     targetSuppressed,
     ...retryableFieldsForSeries(jobKeyChanged ? null : existing),
+    ...deferralFieldsForSeries(existing, jobKeyChanged),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
@@ -486,7 +485,7 @@ export function refundHammerRetryDispatch(rootDir, identity, {
   const ledgerJobKey = normalizeKey(existing.jobKey);
   const incomingJobKey = normalizeKey(jobKey);
   if (ledgerJobKey && incomingJobKey && ledgerJobKey !== incomingJobKey) return refuse('series-changed');
-  if (launch && refundedLaunches.includes(launch)) return refuse('already-refunded');
+  if (launch && (refundedLaunches.includes(launch) || existing.deferralLaunches?.includes(launch))) return refuse('already-refunded');
   if (existing.suppressed || existing.lifetimeSuppressed || existing.targetSuppressed) return refuse('suppressed');
   const attemptCount = Math.max(0, Math.trunc(Number(existing.attemptCount) || 0));
   if (attemptCount === 0) return refuse('no-charged-attempt');
@@ -507,18 +506,41 @@ export function refundHammerRetryDispatch(rootDir, identity, {
   return { refunded: true, reason: 'hammer-exited-without-close', retryable: retryable + 1 };
 }
 
-// LEASEPARK-01: contention has its own bounded history, not a failure budget.
+// LEASEPARK-01: lifetime refund budget survives fresh reviews, bounding the
+// total extra launches even if every launch pushes and changes the job key.
+const LIFETIME_DEFERRAL_REFUND_BUDGET = 12;
+function deferralFieldsForSeries(existing, jobKeyChanged = false) {
+  const launches = Array.isArray(existing?.deferralLaunches) ? existing.deferralLaunches : [];
+  // Legacy ledgers cannot prove how many earlier series refunded lifetime
+  // charges. Refuse further lifetime refunds until an operator reconciles them.
+  const raw = existing?.lifetimeDeferralRefundCount ?? (existing ? LIFETIME_DEFERRAL_REFUND_BUDGET : 0);
+  const lifetimeDeferralRefundCount = Number.isSafeInteger(raw) && raw >= 0
+    ? Math.min(LIFETIME_DEFERRAL_REFUND_BUDGET, raw) : LIFETIME_DEFERRAL_REFUND_BUDGET;
+  return {
+    deferralLaunches: jobKeyChanged ? [] : launches,
+    deferralStartedAt: jobKeyChanged ? null : existing?.deferralStartedAt || null,
+    deferralNextAt: jobKeyChanged ? null : existing?.deferralNextAt || null,
+    lifetimeDeferralRefundCount,
+  };
+}
+
+// Contention has its own bounded history, separate from ordinary retry refunds.
 export function deferHammerRetryDispatch(rootDir, identity, { jobKey, launchRequestId, headSha, now } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !launchRequestId) return null;
-  const launches = ledger.deferralLaunches || [];
+  const fields = deferralFieldsForSeries(ledger);
+  const launches = fields.deferralLaunches;
   if (launches.includes(launchRequestId)) return ledger;
+  const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true;
+  const refund = !alreadyRefunded && launches.length < 12 && ledger.attemptCount > 0;
+  const lifetimeRefund = refund && fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET;
   const deferredAt = now || new Date().toISOString();
   const count = launches.length + 1;
-  const doc = { ...ledger,
-    attemptCount: Math.max(0, ledger.attemptCount - 1),
-    lifetimeAttemptCount: Math.max(0, ledger.lifetimeAttemptCount - 1),
-    targetAttemptCount: ledger.targetRemediationSha === headSha
+  const doc = { ...ledger, ...fields,
+    attemptCount: refund ? Math.max(0, ledger.attemptCount - 1) : ledger.attemptCount,
+    lifetimeAttemptCount: lifetimeRefund ? Math.max(0, ledger.lifetimeAttemptCount - 1) : ledger.lifetimeAttemptCount,
+    lifetimeDeferralRefundCount: fields.lifetimeDeferralRefundCount + (lifetimeRefund ? 1 : 0),
+    targetAttemptCount: refund && ledger.targetRemediationSha === headSha
       ? Math.max(0, ledger.targetAttemptCount - 1) : ledger.targetAttemptCount,
     deferralLaunches: [...launches, launchRequestId],
     deferralStartedAt: ledger.deferralStartedAt || deferredAt,

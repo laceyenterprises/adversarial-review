@@ -297,8 +297,8 @@
       "path": "docs/data-model/ama-closer-dispatches.md",
       "store": "data/follow-up-jobs/ama-closer-dispatches/",
       "schemaSurface": "src/ama/dispatch-closer.mjs",
-      "relatedSchemaSurfaces": ["src/ama/closer-terminal-cancel.mjs", "src/follow-up-stuck-claim-sweep.mjs", "src/ama/dead-hammer-rearm.mjs", "src/ama/primary-change.mjs"],
-      "owner": "AMA closer dispatch, lifecycle settlement, stale-head redrive, and recovery"
+      "relatedSchemaSurfaces": ["src/ama/closer-terminal-cancel.mjs", "src/follow-up-stuck-claim-sweep.mjs", "src/ama/dead-hammer-rearm.mjs", "src/ama/primary-change.mjs", "bin/reconcile-ama-closer-dispatches.mjs"],
+      "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery"
     },
     {
       "id": "ama-closer-leases",

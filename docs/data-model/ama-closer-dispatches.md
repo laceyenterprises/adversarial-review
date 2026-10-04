@@ -3,7 +3,7 @@
 **Owner:** AMA closer dispatch and recovery
 **Store:** `data/follow-up-jobs/ama-closer-dispatches/`
 **Source of truth:** `src/ama/dispatch-closer.mjs`
-**Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`
+**Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`
 
 ## Purpose
 
@@ -46,7 +46,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `promptPath` | string or null | Prompt file handed to `hq dispatch`. |
 | `promptDir` | string or null | Directory holding durable AMA closer prompts. |
 | `hqRoot` | string or null | HQ root used for the dispatch. |
-| `state` | string | Launch state such as `dispatching`, `dispatched`, `dispatch-deferred-transient`, `dispatch-failed`, `no-dispatch`, or `completed`. |
+| `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `infraRearmLoggedLaunchRequestId` | string, optional | Launch whose `ama_closer.infra_dead_hammer_rearm` event was already logged. The event is skipped while this equals `launchRequestId`, so it is logged once per launch whatever the re-arm reason. Stamped only while the record still names that launch. |
@@ -54,6 +54,8 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `branchHolderBlockCount` | non-negative integer | Count of branch-holder refusals for bounded same-PR worktree cleanup. |
 | `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |
 | `lastObservedAt` | string or null | ISO-8601 timestamp for the latest worker observation. |
+| `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded on `launch-terminal` records by launch-capacity reconciliation; cleared when launching again. |
+| `reconciledAt` | string, optional | ISO-8601 timestamp when launch-capacity reconciliation wrote `launch-terminal`; cleared when launching again. |
 | `lastAttemptedAt` | string or null | ISO-8601 timestamp for the latest launch attempt. |
 | `dispatchedAt` | string or null | ISO-8601 timestamp for a confirmed or ambiguous launch. |
 | `createdAt` | string or null | ISO-8601 timestamp from the first write when available. |
@@ -72,6 +74,25 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   `lastObservedAt`, `lastAttemptedAt`, `dispatchedAt`, and `createdAt`.
 - A `dispatching` record with no parseable timestamp is stale; a launch-only
   `dispatched` record without timestamps remains held until first observation.
+- Dispatch capacity first applies record identity, age and lease liveness checks.
+  Only launches that would otherwise consume a slot are probed in the ledger;
+  aged-out historical records are left for manual reconciliation. The first
+  unreadable ledger result suppresses further probes for that scan, retaining
+  capacity under the existing liveness rules. Cancellation is checked between
+  probes. `dispatching` intents are never probed or rewritten, since same-head
+  retries can still reference the previous LRQ.
+- Reconciliation annotates confirmed terminal `dispatched` launches as
+  `launch-terminal`, preserving existing fields and leaving closer and merge
+  leases untouched. Launch success alone is not merge success. Missing rows
+  expire after the pending-launch timeout; an unparseable launch timestamp
+  keeps the reservation until observation. New launch writes clear
+  `terminalLaunchStatus` and `reconciledAt`. Capacity recognizes `reaped` and
+  `cancelled` without widening the per-PR unknown-status retry/re-arm decision.
+- Manual reconciliation must run as the canonical daemon account for the runtime
+  root, pinning `--hq-root` and `--ledger-target` to match the watcher. The CLI
+  reports the resolved backend and source without exposing DSN credentials.
+  Atomic replacement takes the caller's ownership; see the owner-qualified
+  commands in `docs/RUNBOOK-ama-closure.md`.
 - `workerId` is authoritative for scoped hammer cleanup when present. Legacy
   records without `workerId` remain readable and use the historical unscoped
   hammer id as the fallback cleanup target.

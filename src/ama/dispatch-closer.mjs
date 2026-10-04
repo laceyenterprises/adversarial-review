@@ -1375,6 +1375,10 @@ const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
   'superseded',
   'reaped_stuck_requested',
 ]);
+// Capacity-only terminal evidence must not widen per-PR retry/re-arm authority.
+const AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
+  ...AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, 'reaped', 'cancelled',
+]);
 const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CODING_BRANCH_HOLDER_PREFIXES = [
@@ -1568,7 +1572,7 @@ function finalizeAmaCloserLeaseBestEffort({
  * merge path for this tick even though no fresh launch occurred.
  */
 
-function amaCloserDispatchDir(rootDir) {
+export function amaCloserDispatchDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
 }
 
@@ -1692,6 +1696,9 @@ function isAmaCloserMissingLrqTimedOut(record, options = {}) {
 }
 
 export function isAmaCloserLaunchInProgress(record, options = {}) {
+  // Terminal ledger evidence releases immediately; a non-terminal or failed
+  // ledger read must still respect the existing record and lease age escapes.
+  if (options.ledgerActive === false) return false;
   if ((record?.state !== 'dispatched' && record?.lastError)
     || String(record?.state || '').includes('blocked')
     || String(record?.state || '').includes('failed')
@@ -1793,22 +1800,116 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   return activeDispatches;
 }
 
-function findActiveAmaCloserLaunches(rootDir, options = {}) {
-  const active = listActiveAmaCloserDispatches(rootDir, options);
-  return active.filter((record) => {
+// Reconcile launch liveness only; terminal launch success is not proof of merge.
+// Never release either closer or merge leases here.
+export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
+  const now = options.now || new Date().toISOString();
+  const readStatus = options.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
+  const counts = { scanned: 0, terminal: 0, missing: 0, unreadable: 0, changed: 0 };
+  const active = [];
+  let ledgerUnreadable = false;
+  const scanStarted = Date.now();
+  const missingCandidates = [];
+  let probes = 0;
+  let missingProbes = 0;
+  const applyTerminal = (record, dispatchPath, terminalStatus, probe = {}) => {
+    const current = readJsonFile(dispatchPath);
+    if (current?.launchRequestId !== record.launchRequestId || current?.state !== record.state
+      || current?.lastObservedAt !== record.lastObservedAt) return false;
+    counts.changed += 1;
+    if (options.dryRun) return true;
+    const preserve = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus));
+    writeFileAtomic(dispatchPath, `${JSON.stringify({
+      ...current, state: 'launch-terminal',
+      lastObservedStatus: preserve ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
+      terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
+    }, null, 2)}\n`);
+    logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_capacity_reconciled', {
+      repo: record.repo, prNumber: record.prNumber, launchRequestId: record.launchRequestId,
+      terminalStatus, backend: probe.target?.backend || options.ledgerTarget?.backend || null,
+      source: probe.target?.source || options.ledgerTarget?.source || null,
+    });
+    return true;
+  };
+  for (const name of listSettledJsonNames(amaCloserDispatchDir(rootDir))) {
+    throwIfAborted(options.signal);
+    const dispatchPath = join(amaCloserDispatchDir(rootDir), name);
+    const record = readJsonFile(dispatchPath);
+    const prNumber = Number(record?.prNumber);
+    if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
+    if (record?.state !== 'dispatched' && record?.state !== 'dispatching') continue;
+    counts.scanned += 1;
     let lease = null;
     try {
-      lease = readAmaCloserLease(rootDir, {
-        repo: record.repo,
-        prNumber: record.prNumber,
-        headSha: record.headSha,
-      });
-    } catch {
-      lease = null;
+      lease = readAmaCloserLease(rootDir, record);
+    } catch { /* Preserve the existing lease-less liveness rules. */ }
+    const progressOptions = { ...options, now, lease };
+    const inProgress = isAmaCloserLaunchInProgress(record, progressOptions);
+    // Historical records do not belong on the synchronous dispatch hot path.
+    // The operator CLI can still reconcile them outside that path.
+    if (options.capacityOnly && !inProgress) continue;
+    // Same-head retries may still carry the previous LRQ during hq dispatch.
+    // Neither the daemon nor CLI may probe or rewrite that in-flight intent.
+    if (record.state === 'dispatching') {
+      if (inProgress) active.push({ ...record, prNumber, dispatchPath });
+      continue;
     }
-    const inProgress = isAmaCloserLaunchInProgress(record, { ...options, lease });
-    return inProgress;
-  });
+    const observedStatus = normalizeWorkerRunStatus(record.lastObservedStatus);
+    // Normal outcome reconciliation already observed terminal authority through
+    // HQ/ledger. Preserve that evidence rather than downgrade it to missing.
+    const observedTerminal = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(observedStatus);
+    let terminalStatus = observedTerminal ? observedStatus : null;
+    if (observedTerminal) counts.terminal += 1;
+    let probe;
+    if (!observedTerminal && record.launchRequestId) {
+      throwIfAborted(options.signal);
+      if (Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000)) ledgerUnreadable = true;
+      probe = ledgerUnreadable ? { ok: false, reason: 'scan-ledger-unreadable' } : await readStatus({
+        launchRequestId: record.launchRequestId,
+        rootDir, hqRoot: options.hqRoot,
+        ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
+        env: options.env || process.env,
+      });
+      if (!ledgerUnreadable) probes += 1;
+      throwIfAborted(options.signal);
+      const status = String(probe?.row?.status || '').trim().toLowerCase();
+      if (probe?.ok && status) {
+        terminalStatus = AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status) ? status : null;
+        if (terminalStatus) counts.terminal += 1;
+      } else if (probe?.reason === 'missing-launch-request-row') {
+        counts.missing += 1;
+        missingProbes += 1;
+        const age = amaCloserRecordAgeMs(record, { now });
+        if (age !== null && Number.isFinite(age) && age >= amaCloserPendingLeaseReclaimAgeMs(record)) {
+          missingCandidates.push({ record, dispatchPath, prNumber, probe });
+          continue;
+        }
+      } else {
+        counts.unreadable += 1;
+        ledgerUnreadable = true;
+      }
+    } else if (!observedTerminal && record.state === 'dispatched' && isAmaCloserMissingLrqTimedOut(record, { now })) {
+      terminalStatus = 'not-found';
+      counts.missing += 1;
+    }
+    progressOptions.ledgerActive = terminalStatus ? false : undefined;
+    const launchInProgress = isAmaCloserLaunchInProgress(record, progressOptions);
+    if (terminalStatus) {
+      applyTerminal(record, dispatchPath, terminalStatus, probe);
+      continue;
+    }
+    if (launchInProgress) active.push({ ...record, prNumber, dispatchPath });
+  }
+  const allMissing = probes > 0 && missingProbes === probes;
+  for (const candidate of missingCandidates) {
+    if (!allMissing && !ledgerUnreadable) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
+    else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath });
+  }
+  return { ...counts, allMissing, active };
+}
+
+export async function findActiveAmaCloserLaunches(rootDir, options = {}) {
+  return (await reconcileAmaCloserDispatches(rootDir, { ...options, capacityOnly: true })).active;
 }
 
 function writeAmaCloserDispatchRecord(rootDir, identity, doc) {
@@ -5560,7 +5661,12 @@ export async function maybeDispatchAmaCloser({
     );
   }
   const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
-  const activeLaunches = findActiveAmaCloserLaunches(rootDir, {
+  const activeLaunches = await findActiveAmaCloserLaunches(rootDir, {
+    signal,
+    readLaunchRequestStatusImpl,
+    hqRoot,
+    ledgerTarget: dispatchContext.ledgerTarget,
+    ledgerDbPath: dispatchContext.ledgerDbPath,
     now: dispatchContext.dispatchedAt,
     log: logger,
     processKillImpl,
@@ -6149,32 +6255,37 @@ export async function maybeDispatchAmaCloser({
   }
 
   const parsed = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || ''));
-  updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
-    ...(current || {}),
-    schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
-    repo,
-    prNumber,
-    headSha: targetRemediationSha,
-    reviewedSha,
-    targetRemediationSha,
-    dispatchReason,
-    workerClass,
-    dispatchWorkerClass,
-    workerId,
-    promptPath,
-    promptDir,
-    hqRoot,
-    lastAttemptedAt: dispatchContext.dispatchedAt,
-    dispatchedAt: dispatchContext.dispatchedAt,
-    dispatchId: parsed.dispatchId,
-    launchRequestId: parsed.launchRequestId,
-    retryCount: Number(current?.retryCount || priorRetryCount + 1),
-    branchHolderBlockCount: 0,
-    state: 'dispatched',
-    lastObservedStatus: 'starting',
-    lastObservedAt: dispatchContext.dispatchedAt,
-    lastError: null,
-  }));
+  updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+    const liveRecord = { ...(current || {}) };
+    delete liveRecord.terminalLaunchStatus;
+    delete liveRecord.reconciledAt;
+    return {
+      ...liveRecord,
+      schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
+      repo,
+      prNumber,
+      headSha: targetRemediationSha,
+      reviewedSha,
+      targetRemediationSha,
+      dispatchReason,
+      workerClass,
+      dispatchWorkerClass,
+      workerId,
+      promptPath,
+      promptDir,
+      hqRoot,
+      lastAttemptedAt: dispatchContext.dispatchedAt,
+      dispatchedAt: dispatchContext.dispatchedAt,
+      dispatchId: parsed.dispatchId,
+      launchRequestId: parsed.launchRequestId,
+      retryCount: Number(current?.retryCount || priorRetryCount + 1),
+      branchHolderBlockCount: 0,
+      state: 'dispatched',
+      lastObservedStatus: 'starting',
+      lastObservedAt: dispatchContext.dispatchedAt,
+      lastError: null,
+    };
+  });
 
   // AMA-07 — promote the lease from `pending` to `dispatched` now
   // that hq accepted the launch request. Failure here is best-effort:

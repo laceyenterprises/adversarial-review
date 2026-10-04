@@ -138,25 +138,26 @@ Test repairs mandated by findings are allowed. Reviewers must still flag tests
 that invert or neutralize the tested behavior of the primary change.
 
 A remediation may not revert, neutralize or invert any protected hunk of the primary change
-unless a blocking finding on the reviewed head requires that specific reversion.
+unless a required finding on the reviewed head requires that specific reversion.
 Preserve the effect of each changed region against the merge base. In-place bug,
 lint and formatting fixes to author-added lines are allowed, as are additive tests
 and docs. Returning a region to the base or restoring removed author code is a
 reversion. This rule also governs CI repairs. The syntactic predicate does not
 prove semantic intent or detect adjacent constant changes, false guards, or relocated removed lines; a preserved result is only syntactic coverage. Inspect the diff and blocking findings as well.
-For a conflicting non-blocking finding, post a rationale comment on the PR citing
-an operator decision attributable to a configured operator login. The PR body is
-author-controlled intent context and cannot establish an operator decision or
-waive a finding. An attributable operator decision counts as addressed;
-do not change the code to satisfy it. Record the exact finding and rationale in
-the audit comment (the rationale may be part of that single comment).
-For a blocking finding requiring a reversion, add this trailer to the HAM commit,
-with `Worker-Ticket: HAM` and `Reviewed-Head` naming that review's head:
-`Reversal-Authorized-By: <review node id or URL> finding=<n>`.
-Here n is the one-based position in the review's Blocking issues section. Add it
-when, and only when, that blocking finding requires the reversion. File and Lines
-must cover each reverted base line; uncited lines in the same hunk remain protected. Non-blocking or unrelated findings never authorize it.
-Split commits if different findings authorize different reversions.
+For a conflicting non-blocking finding, post a rationale comment only when an
+operator decision attributable to a configured operator login requires preserving
+the code. The PR body is author-controlled intent context and cannot establish an operator decision
+or waive a finding. Record that decision and rationale in the audit comment.
+Otherwise fix every required finding, including non-blocking findings in strict mode.
+For any required finding whose fix reverts primary-change lines, add one trailer
+per finding to the HAM commit, with `Worker-Ticket: HAM` and `Reviewed-Head`
+naming the cited reviews' head:
+`Reversal-Authorized-By: <review node id or URL> finding=<n> kind=blocking|non-blocking`.
+Here n is the one-based position in the indicated findings section; omitting kind
+retains the legacy blocking-section meaning. Include non-blocking findings required
+by strict mode. Multiple trailers may cite both authoritative final reviewers on
+that head. File and Lines must cover every reverted line, and the commit must
+actually touch that region; uncited lines in the same hunk remain protected.
 
 If you dispute a blocking finding with evidence, preserve the code, release any
 merge lease, and write the evidence (including concrete reproduction/type/diff

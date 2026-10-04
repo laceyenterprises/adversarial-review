@@ -1213,17 +1213,21 @@ JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
 `primary-change-read-failed` rather than a proven reversal. The hammer prompt's
 90-second process limit still bounds the complete collection.
 
-A blocking finding may authorize a specific reversal. The HAM commit must carry
-`Reversal-Authorized-By: <review node id or URL> finding=<n>`, `Worker-Ticket: HAM`,
+A required blocking or non-blocking finding may authorize a specific reversal. The HAM commit must carry
+`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=blocking|non-blocking]`, `Worker-Ticket: HAM`,
 and `Reviewed-Head` naming that review's head. The finding number is its one-based
-position in the Blocking issues section. The collector verifies authoritative
+position in the indicated section (blocking by default for legacy trailers).
+Emit one trailer per finding whose fix edits primary-change lines. Multiple
+trailers may cite the latest review from each authoritative reviewer family on
+the Reviewed-Head; another model does not supersede that family’s final review.
+The collector verifies authoritative
 reviewer identity, review/commit ancestry inside the protected closure, live HAM
 commit patches, and File/Lines coverage of each reverted base line. Base coordinates
 are projected into the reviewed and commit-parent heads, accounting for line shifts.
 Equal-length replacements map by line position; unequal-length replacements and
 insertions require the finding to cover the entire projected span. A one-line
 finding cannot waive the uncited remainder of a contiguous author hunk.
-Non-blocking findings, unrelated regions, missing trailers and old reviews outside
+Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 

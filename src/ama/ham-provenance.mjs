@@ -45,7 +45,7 @@ function normalizeHamLogin(value) {
 // The scan still terminates at the first non-trailer line, so prose can never be
 // absorbed, and line 0 (the subject) is never consumed even when it happens to
 // look like `Word: text`.
-export function parseCommitTrailers(message) {
+export function parseCommitTrailerValues(message) {
   const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
   const trailers = {};
   for (let index = lines.length - 1; index >= 1; index -= 1) {
@@ -53,9 +53,16 @@ export function parseCommitTrailers(message) {
     if (!line) continue;
     const match = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.+)$/.exec(line);
     if (!match) break;
-    trailers[match[1].trim().toLowerCase()] = match[2].trim();
+    const key = match[1].trim().toLowerCase();
+    (trailers[key] ||= []).unshift(match[2].trim());
   }
   return trailers;
+}
+
+// Preserve the existing single-value contract for provenance consumers.
+export function parseCommitTrailers(message) {
+  return Object.fromEntries(Object.entries(parseCommitTrailerValues(message))
+    .map(([key, values]) => [key, values[0]]));
 }
 
 export function parseRemediatedFindingsTrailer(value) {

@@ -167,7 +167,7 @@ function ensureReviewStateSchema(db) {
     paged INTEGER NOT NULL DEFAULT 0, head_sha TEXT, comment_id TEXT,
     comment_author TEXT, comment_sha256 TEXT, PRIMARY KEY(repo, pr_number, identity))`);
   // Upgrade helper-created HAMINTENT-02 stores without resetting their budgets.
-  for (const column of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256']) {
+  for (const column of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256', 'reserved_at']) {
     addColumnIfMissing(db, `ALTER TABLE ham_finding_disputes ADD COLUMN ${column} TEXT`);
   }
   db.exec(`CREATE TABLE IF NOT EXISTS review_failure_archive (

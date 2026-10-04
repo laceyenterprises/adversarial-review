@@ -290,7 +290,7 @@ test('failed exhaustion enqueue refunds the PR-wide page guard and permits a lat
   h.deps.page = async () => h.calls.push(['page']);
   await disputeFinding(h.args, h.deps);
   await disputeFinding(h.args, h.deps);
-  assert.equal(h.db.prepare('SELECT paged FROM ham_finding_disputes').get().paged, 1);
+  assert.equal(h.db.prepare('SELECT paged FROM ham_finding_disputes').get().paged, 2);
   assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
   assert.equal(h.calls.filter(([kind]) => kind === 'comment').length, 2);
 });
@@ -499,7 +499,10 @@ test('refused or thrown re-review restores previously admitted evidence', async 
     if (mode === 'throw') await assert.rejects(disputeFinding(h.args, h.deps), /request unavailable/);
     else await disputeFinding(h.args, h.deps);
     const after = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
-    for (const key of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256']) assert.equal(after[key], before[key]);
+    for (const key of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256']) {
+      if (mode === 'pending' && key === 'comment_id') assert.notEqual(after[key], before[key]);
+      else assert.equal(after[key], before[key]);
+    }
     assert.equal(after.requests, mode === 'throw' ? before.requests : before.requests + 1);
   }
 });
@@ -550,4 +553,38 @@ test('malformed newer authoritative review refuses an older reversal waiver', as
     get: collectorFixture([review, { ...review, node_id: 'PRR_bad', commit_id: '' }]) });
   assert.equal(e.hasHammerCommits, true);
   assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+});
+
+ test('stale killed reservation is reclaimed before budget enforcement', async (t) => {
+  const h = disputeHarness(t);
+  await disputeFinding(h.args, h.deps);
+  h.db.prepare("UPDATE ham_finding_disputes SET requests=2, reserved_at='2000-01-01T00:00:00.000Z'").run();
+  assert.equal((await disputeFinding(h.args, h.deps)).status, 'already-pending');
+  const row = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
+  assert.equal(row.requests, 2);
+  assert.equal(row.reserved_at, null);
+ });
+ test('blocking COMMENTED and DISMISSED reviews can be disputed', async (t) => {
+  for (const state of ['COMMENTED', 'DISMISSED']) {
+    const h = disputeHarness(t);
+    const get = h.deps.get;
+    h.deps.get = async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head, state }] : get(url);
+    assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
+  }
+ });
+
+test('capped authorization comparison refuses the waiver', () => {
+  for (const key of ['reviewedFiles', 'parentFiles']) {
+    const e = structuredClone(evidence());
+    e.reversalAuthorizations[0][key] = Array.from({ length: 300 }, () => file);
+    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+  }
+});
+test('uncertain exhaustion enqueue is retried after a killed caller', async (t) => {
+  const h = disputeHarness(t);
+  await disputeFinding(h.args, h.deps);
+  h.db.prepare('UPDATE ham_finding_disputes SET requests=2, paged=1').run();
+  await disputeFinding(h.args, h.deps);
+  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
+  assert.equal(h.db.prepare('SELECT paged FROM ham_finding_disputes').get().paged, 2);
 });

@@ -1677,3 +1677,22 @@ It does not automatically switch accounts or tokens. A non-triggered re-review
 restores previous admitted provenance; a thrown request also refunds its budget.
 Refusal paging releases its reserved guard after failed enqueue and retries on
 the next observation. Successful enqueue keeps the guard across restarts.
+
+### Dispute recovery and owner routing
+
+Hammer workers can run under a different UID than the canonical daemon. The
+prompt resolves the database owner and runs the dispute CLI through the existing
+`sudo -A -H -u <owner>` boundary, passing only the entitled HAM GitHub credential.
+The evidence file must be readable by that owner. An unavailable owner wrapper
+fails closed before database writes; do not change database ownership.
+
+Dispute and reversal accept authoritative CHANGES_REQUESTED, COMMENTED,
+DISMISSED and APPROVED reviews whose body parses as request-changes. An operator
+withdrawal must publish a newer authoritative review with the finding removed:
+dismissal alone does not withdraw the blocking body. The latest authoritative
+review in ancestry supersedes prior findings for both paths.
+
+Requests interrupted by the CLI alarm are reclaimable after five minutes.
+Pending/in-flight review CAS results retain the freshly posted evidence.
+Exhaustion enqueue claims are retried after crashes with deterministic alert
+IDs; terminal outbox entries also prevent duplicate pages.

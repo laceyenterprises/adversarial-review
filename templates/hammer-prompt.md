@@ -163,8 +163,14 @@ merge lease, and write the evidence (including concrete reproduction/type/diff
 proof) to a temporary file. Run the existing exact-head re-review path through:
 
 ```bash
+# Resolve the canonical daemon owner from the existing database, not the worker login.
+HAM_DISPUTE_OWNER=$(stat -f '%Su' <<ROOT_DIR>>/data/reviews.db) || exit 1
+HAM_DISPUTE_RUN=()
+if [ "$(id -un)" != "$HAM_DISPUTE_OWNER" ]; then
+  HAM_DISPUTE_RUN=(sudo -A -H -u "$HAM_DISPUTE_OWNER" env "GH_TOKEN=${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}")
+fi
 DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
-if /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
+if /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_DISPUTE_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
   --root-dir <<ROOT_DIR>> --repo <<REPO>> --pr <<PR_NUMBER>> \
   --head-sha "$DISPUTED_HEAD" --review '<review node id or URL>' \
   --finding '<n>' --evidence-file "$HAM_DISPUTE_EVIDENCE_FILE"; then

@@ -30,7 +30,7 @@ try {
     page: deliverAlert,
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  if (!result.triggered && result.status !== 'pending') process.exitCode = 1;
+  if (!result.triggered && !['pending', 'already-pending'].includes(result.status) && result.reason !== 'review-in-flight') process.exitCode = 1;
 } catch (error) {
   if (!error.message.includes('trusted HAM provenance')) throw error;
   process.stderr.write(`${JSON.stringify({ event: 'ama_finding_dispute_identity_refused', reason: error.message, exitCode: 79 })}\n`);

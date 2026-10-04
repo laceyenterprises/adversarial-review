@@ -24,3 +24,19 @@ export function amaAuthoritativeReviewerLoginsForModel(reviewerModel) {
 export function amaAllAuthoritativeReviewerLogins() {
   return [...new Set(Object.values(AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL).flat())];
 }
+
+// REST review lists are oldest first. Include dismissed blocking bodies:
+// withdrawing a finding requires a newer authoritative verdict.
+export async function latestAuthoritativeReviewInAncestry(reviews, headSha, compare) {
+  for (const entry of [...reviews].reverse()) {
+    if (!['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
+      || !amaAllAuthoritativeReviewerLogins().includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) continue;
+    if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
+    if (entry.commit_id !== headSha) {
+      const ancestry = await compare(entry.commit_id, headSha);
+      if (['behind', 'diverged'].includes(ancestry.status)) continue;
+      if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('cannot verify review ancestry');
+    }
+    return entry;
+  }
+}

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
+import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
-import { amaAllAuthoritativeReviewerLogins } from './reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, latestAuthoritativeReviewInAncestry } from './reviewer-authority.mjs';
 import { requestReviewRereview } from '../review-state.mjs';
 import { shouldEscalateReviewCycle, resolveReviewCycleCapConfig } from '../review-cycle-cap.mjs';
 
@@ -22,25 +23,15 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
   if (!Array.isArray(reviews) || reviews.length >= 100) throw new Error('missing or capped reviews');
   const review = reviews.find((entry) => [entry.node_id, entry.html_url].filter(Boolean).includes(reviewRef));
-  if (!/^[a-f0-9]{40}$/i.test(review?.commit_id || '') || review.state !== 'CHANGES_REQUESTED'
+  if (!/^[a-f0-9]{40}$/i.test(review?.commit_id || '') || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
+    || normalizeEffectiveReviewVerdict(review.body) !== 'request-changes'
     || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) {
     throw new Error('dispute requires authoritative blocking review');
   }
   // REST reviews are ordered oldest first. Only the latest submitted,
   // authoritative review in the live head's ancestry can be disputed.
-  let latest;
-  for (const entry of [...reviews].reverse()) {
-    if (!['CHANGES_REQUESTED', 'APPROVED', 'COMMENTED'].includes(entry.state)
-      || !amaAllAuthoritativeReviewerLogins().includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) continue;
-    if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
-    if (entry.commit_id !== headSha) {
-      const ancestry = await get(`repos/${repo}/compare/${entry.commit_id}...${headSha}`);
-      if (['behind', 'diverged'].includes(ancestry.status)) continue;
-      if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('cannot verify disputed review ancestry');
-    }
-    latest = entry;
-    break;
-  }
+  const latest = await latestAuthoritativeReviewInAncestry(reviews, headSha,
+    (from, to) => get(`repos/${repo}/compare/${from}...${to}`));
   if (latest !== review) throw new Error('dispute requires the latest authoritative review in live head ancestry');
   const finding = parseBlockingFindingsSection(review.body)?.[findingNumber - 1];
   if (!finding) throw new Error('blocking finding not found');
@@ -50,24 +41,30 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   const cap = shouldEscalateReviewCycle(db, { repo, prNumber, headSha,
     ...resolveReviewCycleCapConfig({ loadedConfig }) });
   const reservation = db.transaction(() => {
+    db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1), reserved_at=NULL
+      WHERE repo=? AND pr_number=? AND reserved_at IS NOT NULL AND reserved_at < ?`).run(repo, prNumber, new Date(Date.now() - 300000).toISOString());
     const row = db.prepare('SELECT * FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);
     const total = db.prepare('SELECT COALESCE(SUM(requests), 0) AS count FROM ham_finding_disputes WHERE repo=? AND pr_number=?').get(repo, prNumber).count;
+    if (row.reserved_at) throw new Error('dispute reservation already in flight');
     if (cap.escalate || total >= cap.cap || row.requests >= 2 || row.refusals >= 2) return false;
-    db.prepare('UPDATE ham_finding_disputes SET requests=requests+1 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
+    db.prepare('UPDATE ham_finding_disputes SET requests=requests+1, reserved_at=? WHERE repo=? AND pr_number=? AND identity=?').run(new Date().toISOString(), ...params);
     return row;
   }).immediate();
   const exhaust = async (reason) => {
-    const changed = db.prepare('UPDATE ham_finding_disputes SET paged=1 WHERE repo=? AND pr_number=? AND identity=? AND paged=0 AND NOT EXISTS (SELECT 1 FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND paged=1)').run(...params, repo, prNumber);
-    if (changed.changes) {
+    const changed = db.prepare('UPDATE ham_finding_disputes SET paged=1 WHERE repo=? AND pr_number=? AND identity=? AND paged=0 AND NOT EXISTS (SELECT 1 FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND paged>0)').run(...params, repo, prNumber);
+    const pendingPage = db.prepare('SELECT identity FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND paged=1').get(repo, prNumber);
+    if (changed.changes || pendingPage) {
+      const pageParams = [repo, prNumber, pendingPage?.identity || identity];
       const payload = { severity: 'SEV1', repo, prNumber, headSha, reviewRef, findingNumber, reason };
       logger.error?.(JSON.stringify({ event: 'ama_finding_dispute_exhausted', ...payload }));
       try {
         await page(`SEV1: finding dispute exhausted for ${repo}#${prNumber}: ${reason}`, {
           event: 'ama_finding_dispute_exhausted', payload,
         });
+        db.prepare('UPDATE ham_finding_disputes SET paged=2 WHERE repo=? AND pr_number=? AND identity=?').run(...pageParams);
       } catch (error) {
         // Keep the PR-wide CAS during enqueue, but refund it if no page queued.
-        db.prepare('UPDATE ham_finding_disputes SET paged=0 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
+        db.prepare('UPDATE ham_finding_disputes SET paged=0 WHERE repo=? AND pr_number=? AND identity=?').run(...pageParams);
         throw error;
       }
     }
@@ -100,12 +97,13 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   } catch (error) {
     // A failed post or head race is not a delivered re-review request.
     restoreProvenance();
-    db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1)
+    db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1), reserved_at=NULL
       WHERE repo=? AND pr_number=? AND identity=?`).run(...params);
     throw error;
   }
-  if (!result.triggered) restoreProvenance();
-  if (!result.triggered && result.status !== 'pending' && result.reason !== 'review-in-flight') {
+  db.prepare('UPDATE ham_finding_disputes SET reserved_at=NULL WHERE repo=? AND pr_number=? AND identity=?').run(...params);
+  if (!result.triggered && !['pending', 'already-pending'].includes(result.status) && result.reason !== 'review-in-flight') restoreProvenance();
+  if (!result.triggered && !['pending', 'already-pending'].includes(result.status) && result.reason !== 'review-in-flight') {
     db.prepare('UPDATE ham_finding_disputes SET refusals=refusals+1 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
     const row = db.prepare('SELECT refusals FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);
     if (row.refusals >= 2) return exhaust(result.reason);

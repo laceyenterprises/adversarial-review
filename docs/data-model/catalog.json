@@ -483,7 +483,8 @@
         "src/reviewer.mjs",
         "src/reviewer-prompt.mjs"
       ],
-      "owner": "AMA bounded finding disputes and reviewer context provenance"
+      "owner": "AMA bounded finding disputes and reviewer context provenance",
+      "recoveryColumns": ["reserved_at", "paged"]
     }
   ]
 }

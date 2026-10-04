@@ -1362,11 +1362,14 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
-  if (event === 'ama.automated_recovery.exhausted' || event === 'ama.closure_lag.slo_breach') {
+  if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted'].includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
     doc.id = event === 'ama.closure_lag.slo_breach' ? closureLagAlertId(payload)
       : `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
+    if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted') {
+      doc.id = `${event}-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event === 'ama_primary_change_refusal_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex')}`;
+    }
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
       if (existsSync(existingPath)) {

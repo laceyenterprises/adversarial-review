@@ -1052,3 +1052,16 @@ test('AMA recovery page outbox identity deduplicates retries before and after de
   assert.equal(afterDelivery.queued, false);
   assert.equal(readdirSync(pendingDir(rootDir)).filter((name) => name.endsWith('.json')).length, 0);
 });
+
+test('HAM exhaustion pages reuse deterministic identities after uncertain enqueue', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const event of ['ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted']) {
+    const options = { env, event, payload: { repo: 'fixture/repo', prNumber: 1, headSha: 'a'.repeat(40) },
+      requestText: async () => ({ statusCode: 200, body: '{}' }) };
+    const first = await deliverAlert('SEV1: exhausted', options);
+    const second = await deliverAlert('SEV1: exhausted again', options);
+    assert.equal(first.id, second.id);
+    assert.equal(second.queued, false);
+  }
+});

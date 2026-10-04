@@ -28,3 +28,5 @@ There is no automatic expiry or deletion. AMA owns these rows until an operator
 archives closed-PR diagnostics; do not delete an open head's page guard to reset
 its counter. A new head gets a new row. Schema convergence is idempotent
 `CREATE TABLE IF NOT EXISTS`; no existing columns are rewritten.
+
+Paging uses `paged=1` for uncertain enqueue and `paged=2` for confirmed durable enqueue. State 1 is retried after restart using a deterministic outbox identity, including terminal outbox entries.

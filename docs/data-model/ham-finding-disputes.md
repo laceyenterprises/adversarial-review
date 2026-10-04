@@ -13,9 +13,10 @@ The composite primary key is `(repo, pr_number, identity)`. `repo` is text,
 
 | Column | Type | Contract |
 |---|---|---|
+| `reserved_at` | TEXT, nullable | ISO UTC timestamp of an in-flight reservation; stale after five minutes. |
 | `requests` | INTEGER, default 0 | Reserved requests; at most two per identity and bounded by the configured PR-wide review cap. |
 | `refusals` | INTEGER, default 0 | Non-pending, non-in-flight review CAS refusals; two prevent further requests. |
-| `paged` | INTEGER, default 0 | One exhaustion enqueue claim per PR lifetime, guarded across all identities; cleared on a thrown pager error. Later heads do not reset it. |
+| `paged` | INTEGER, default 0 | 0 = unclaimed; 1 = uncertain enqueue; 2 = durable enqueue confirmed. PR-wide deterministic alert identity prevents duplicate pages across restarts. |
 | `head_sha` | TEXT, nullable | Exact live head for the latest helper-posted comment for this identity. |
 | `comment_id` | TEXT, nullable | GitHub comment node ID returned by the successful helper post. |
 | `comment_author` | TEXT, nullable | Trusted HAM login returned by GitHub for that post. |
@@ -32,7 +33,7 @@ posting. Failed posts, head rechecks and thrown review requests refund that
 reservation; those comments cannot enter dispute context. Successful post
 provenance is recorded before `requestReviewRereview` so an immediately claimed
 review sees it. Structured CAS refusals count toward the refusal budget.
-Only an admitted triggered request retains its new provenance; structured
+Triggered, pending and in-flight requests retain fresh provenance; other structured
 refusals restore the prior admission for that identity.
 
 The reviewer reads this table without writes, scoped by `(repo, PR, head)`.
@@ -49,7 +50,7 @@ Exhaustion atomically sets `paged` before emitting
 `ama_finding_dispute_exhausted` and attempting a SEV1 page. It records the
 enqueue claim, not remote delivery acknowledgment. If the pager throws, the
 claim is cleared and a later helper invocation can retry. Successful durable
-queueing retains the guard; the alert outbox retries delivery.
+queueing sets the guard to 2; the alert outbox retries delivery.
 
 ## Retention and migration
 
@@ -61,7 +62,7 @@ preserving existing request/refusal/page counts. Legacy rows without provenance
 cannot authorize prompt context.
 
 A structured re-review refusal restores the previous admitted comment provenance,
-including when a review is already pending. A thrown request also restores it
+except when a review is already pending or in flight. A thrown request also restores it
 and refunds the request reservation. Restoration compares the new comment ID
 so a concurrent newer admission cannot be overwritten. Refused comments remain
 on GitHub but never enter reserved reviewer context.
@@ -72,3 +73,13 @@ when the daemon owner check fails, and exits 79 with
 HAM provenance; its reservation is refunded and no re-review is admitted.
 The hammer preserves evidence and records no-merge
 status for canonical-owner handoff; it never changes user or credentials itself.
+
+### Crash recovery
+
+`reserved_at` (nullable TEXT, ISO UTC) marks an in-flight request. After five
+minutes, the next invocation refunds a stale reservation before enforcing the
+budget. Concurrent live reservations refuse a second caller. Posted provenance
+is retained for pending/in-flight reviews so they can read the fresh evidence.
+`paged` is 0 before a claim, 1 while enqueue is uncertain, and 2 after durable
+enqueue. A restart retries state 1 with the same deterministic outbox identity;
+pending, inflight, delivered and dead-letter entries all deduplicate that identity.

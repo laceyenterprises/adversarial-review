@@ -28,6 +28,7 @@ import {
   GithubAuthOutageError,
   execGhWithRetry,
   isGhAuthFailure,
+  isTransientGhError,
 } from '../src/gh-cli.mjs';
 
 const SILENT_LOG = { warn() {}, log() {}, error() {} };
@@ -40,6 +41,43 @@ function ghError(stderr, extra = {}) {
 
 // The exact stderr the live watcher produced against the expired ghs_ token.
 const BAD_CREDENTIALS = 'gh: Bad credentials (HTTP 401)';
+
+test('I/O and transport failures use bounded backoff without retrying permanent failures', async () => {
+  for (const error of [
+    ghError('spawn gh EIO', { code: 'EIO' }),
+    ghError('error connecting: connection reset by peer'),
+    ghError('socket hang up'),
+    ghError('unexpected EOF'),
+    ghError('network is unreachable'),
+  ]) {
+    assert.equal(isTransientGhError(error), true);
+    let attempts = 0;
+    const delays = [];
+    await assert.rejects(execGhWithRetry({
+      args: ['pr', 'view', '7'],
+      env: {},
+      execFileImpl: async () => { attempts += 1; throw error; },
+      sleep: async ms => { delays.push(ms); },
+      refreshGhAuthImpl: async () => { assert.fail('transport failure must not refresh authentication'); },
+    }), thrown => thrown === error);
+    assert.equal(attempts, 3);
+    assert.deepEqual(delays, [500, 1000]);
+  }
+  for (const error of [
+    ghError('Resource not accessible by integration (HTTP 403)'),
+    ghError('spawn gh ENOENT', { code: 'ENOENT' }),
+    ghError('spawn gh EACCES', { code: 'EACCES' }),
+  ]) {
+    assert.equal(isTransientGhError(error), false);
+    let attempts = 0;
+    await assert.rejects(execGhWithRetry({
+      args: ['pr', 'view', '7'], env: {},
+      execFileImpl: async () => { attempts += 1; throw error; },
+      sleep: async () => { assert.fail('permanent failure must not back off'); },
+    }), thrown => thrown === error);
+    assert.equal(attempts, 1);
+  }
+});
 
 test('isGhAuthFailure recognises rejected credentials but not 403', () => {
   assert.equal(isGhAuthFailure(ghError(BAD_CREDENTIALS)), true);

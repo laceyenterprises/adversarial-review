@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
@@ -308,3 +308,94 @@ else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${
     assert.doesNotMatch(result.stdout, /x{100}/);
   }
 });
+
+for (const scenario of ['accepted confirmation timeout', 'accepted confirmation permanent read error',
+  'superseded head', 'gate read failed', 'gate timeout', 'permanent merge rejection']) {
+  test(`rendered hammer receipt classification: ${scenario}`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'hammer-receipt-decision-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const head = 'a'.repeat(40);
+    const verdict = join(dir, 'verdict.json');
+    writeFileSync(verdict, JSON.stringify({ eligible: true, trace: {
+      headMatch: { current: head }, branchProtection: { required: false },
+    } }));
+    mkdirSync(join(dir, '.hq'));
+    writeFileSync(join(dir, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
+    const gate = { ok: true, state: 'OPEN', headMatches: true, expectedHead: head,
+      liveHead: head, checksConclusion: 'SUCCESS', reasons: [] };
+    if (scenario === 'superseded head') gate.headMatches = false;
+    if (scenario === 'gate timeout') { gate.ok = false; gate.checksConclusion = 'PENDING'; }
+    writeFileSync(join(dir, 'gate.json'), JSON.stringify(gate));
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    const gh = join(bin, 'gh');
+    writeFileSync(gh, `#!/bin/sh
+case "$*" in
+  "pr view "*"--json body"*) exit 0 ;;
+  'pr merge '*)
+    echo attempted > "$TMPDIR/merge-attempted"
+    if [ "$RECEIPT_SCENARIO" = 'permanent merge rejection' ]; then echo 'permission denied' >&2; exit 1; fi
+    exit 0 ;;
+  'pr view '*)
+    if [ "$RECEIPT_SCENARIO" = 'accepted confirmation timeout' ]; then echo 'TLS handshake timeout' >&2;
+    else echo 'permission denied' >&2; fi
+    exit 1 ;;
+  *) exit 1 ;;
+esac
+`, { mode: 0o755 });
+    const nodeStub = join(bin, 'audit-node');
+    writeFileSync(nodeStub, `#!/bin/sh
+case "$1" in
+  --input-type=module)
+    cat >/dev/null
+    if [ "$RECEIPT_SCENARIO" = 'gate read failed' ]; then exit 1; fi
+    cat "$TMPDIR/gate.json" ;;
+  */bin/merge-action-receipt.mjs) exec "$REAL_NODE" "$@" ;;
+  */bin/ama-audit.mjs)
+    echo "AUDIT $*"
+    while [ "$#" -gt 1 ]; do
+      if [ "$1" = --attempt-json ]; then cat "$2"; break; fi
+      shift
+    done ;;
+  *) exit 0 ;;
+esac
+`, { mode: 0o755 });
+    const env = {
+      HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424244', HAM_REPO: 'acme/repo',
+      HAM_PR_NUMBER: '424244', HAM_REVIEWED_SHA: head, HAM_TARGET_REMEDIATION_SHA: head,
+      HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: userInfo().username,
+      HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
+      PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, RECEIPT_SCENARIO: scenario, REAL_NODE: process.execPath,
+    };
+    const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+    assert.equal(render.status, 0, render.stderr);
+    const script = join(dir, 'merge.sh');
+    writeFileSync(script, render.stdout);
+    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=0 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=1
+ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
+ham_mark_merge_lease_retryable_abort() { :; }
+sleep() { :; }
+source "$1"
+echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM_MERGE_EXIT"
+`;
+    const result = run('/bin/bash', ['-c', shell, '_', script], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /HELD=0/);
+    if (scenario.startsWith('accepted')) {
+      assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim(), 'attempted');
+      assert.match(result.stdout, /OWN=1 EXIT=0/);
+      assert.match(result.stdout, /--outcome deferred/);
+      assert.match(result.stdout, /merge-confirmation-read-failed-after-merge-accepted/);
+    } else if (scenario !== 'permanent merge rejection') {
+      assert.equal(readdirSync(dir).includes('merge-attempted'), false);
+    }
+    const directory = join(dir, 'dispatch/audit/automation-merge-actions');
+    const receipts = (() => { try { return readdirSync(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } })();
+    assert.equal(receipts.length, scenario === 'permanent merge rejection' ? 1 : 0, result.stderr);
+    if (receipts.length) {
+      const receipt = JSON.parse(readFileSync(join(directory, receipts[0])));
+      assert.equal(receipt.merged, false);
+      assert.equal(receipt.reason, 'permanent-merge-rejection');
+    }
+  });
+}

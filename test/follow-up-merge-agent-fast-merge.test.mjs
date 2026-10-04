@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -1364,3 +1364,73 @@ test('fast-merge close audit write failure leaves retry sentinel on row', async 
   assert.match(updated.fast_merge_audit_error, /audit disk full/);
   assert.equal(JSON.parse(updated.fast_merge_audit_payload_json).action, 'blocked');
 });
+
+for (const scenario of ['adapter success', 'adapter error fallback', 'adapter refusal fallback', 'adapter error with fallback retry', 'different-head manual merge']) {
+  test(`fast-merge receipt ownership: ${scenario}`, async (t) => {
+    const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-merge-receipt-'));
+    const db = makeDb();
+    t.after(() => { db.close(); rmSync(hqRoot, { recursive: true, force: true }); });
+    seedHqOwnerConfig(hqRoot);
+    const head = 'a'.repeat(40);
+    seedFastMerge(db, 9901, { authorizedHeadSha: head });
+    const manualMerge = scenario === 'different-head manual merge';
+    const audits = [];
+    const baseGh = makeGhStub({
+      views: [openView(head), openView(head), {
+        ...openView(manualMerge ? 'b'.repeat(40) : head), state: 'MERGED', mergedAt: new Date().toISOString(),
+      }],
+      checks: [successChecks()],
+      merges: manualMerge ? [refusalError()] : scenario.endsWith('retry')
+        ? [transportError(), { stdout: 'Merged', stderr: '' }] : [],
+    });
+    let adapterCalls = 0;
+    const gh = async (cmd, args, options) => {
+      if (cmd === '/fixture/github-adapter') {
+        adapterCalls += 1;
+        if (scenario === 'adapter success') return { stdout: JSON.stringify({ ok: true }) };
+        if (scenario === 'adapter refusal fallback') return { stdout: JSON.stringify({ ok: false, reason: 'branch protection' }) };
+        throw Object.assign(new Error('adapter refused'), {
+          stderr: JSON.stringify({ ok: false, failureClass: 'permanent', error: 'branch protection' }),
+        });
+      }
+      return baseGh(cmd, args, options);
+    };
+    await withProcessEnv({ HQ_ROOT: hqRoot, GHA_ADAPTER_BIN: '/fixture/github-adapter' }, async () => {
+      const result = await processFastMergePR({ db, ghClient: gh, repo: REPO, prNumber: 9901,
+        authorizedHeadSha: head, auditWriter: entry => audits.push(entry), logger: { warn() {} } });
+      assert.equal(result.status, 'merged');
+      assert.equal(row(db, 9901).pr_state, 'fast_merge_merged');
+      if (manualMerge) assert.equal(result.manualMergeDetected, true);
+    });
+    assert.equal(adapterCalls, scenario.endsWith('retry') ? 2 : 1);
+    assert.equal(mergeCalls(baseGh).length, scenario === 'adapter success' ? 0 : scenario.endsWith('retry') ? 2 : 1);
+    assert.equal(audits.at(-1).action, 'merged');
+    const directory = path.join(hqRoot, 'dispatch/audit/automation-merge-actions');
+    const receipts = existsSync(directory) ? readdirSync(directory).map(name => JSON.parse(readFileSync(path.join(directory, name)))) : [];
+    assert.equal(receipts.length, manualMerge ? 0 : 1);
+    if (receipts.length) {
+      assert.equal(receipts[0].merged, true);
+      assert.equal(receipts[0].headSha, head);
+    }
+  });
+}
+
+for (const message of ['Head sha did not match pull request head', 'unclassified merge outcome', 'Pull request is not mergeable']) {
+  test(`fast-merge does not publish retryable refusal: ${message}`, async (t) => {
+    const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-no-refusal-'));
+    const db = makeDb();
+    t.after(() => { db.close(); rmSync(hqRoot, { recursive: true, force: true }); });
+    seedHqOwnerConfig(hqRoot);
+    const head = 'a'.repeat(40);
+    seedFastMerge(db, 9902, { authorizedHeadSha: head });
+    const gh = makeGhStub({ views: [openView(head), openView(head), openView(head)],
+      checks: [successChecks()], merges: [refusalError(message)] });
+    await withProcessEnv({ HQ_ROOT: hqRoot }, async () => {
+      const result = await processFastMergePR({ db, ghClient: gh, repo: REPO, prNumber: 9902,
+        authorizedHeadSha: head, auditWriter() {}, logger: { warn() {}, error() {} } });
+      assert.equal(result.status, 'skipped_still_pending');
+    });
+    const directory = path.join(hqRoot, 'dispatch/audit/automation-merge-actions');
+    assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0);
+  });
+}

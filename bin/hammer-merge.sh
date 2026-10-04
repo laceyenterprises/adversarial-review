@@ -2,6 +2,8 @@
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_merge_phase() {
 HAM_PHASE_OUTCOME=merge-error
+HAM_OWN_MERGE_EXECUTED=0
+HAM_MERGE_EXIT=1
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
   echo "AMG-04 hard-blocker: no hammer merge without holding the merge lease" >&2
   return 1
@@ -24,6 +26,20 @@ HAM_REMEDIATED_FINDINGS="${HAM_AUDIT_REMEDIATED_TOTAL:-} addressed (${HAM_AUDIT_
 ham_append_terminal_audit() {
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
+  # Record confirmed execution or a refusal before other bookkeeping can fail.
+  # The CLI filters refusal reasons to known decisions, excluding read failures.
+  ham_receipt_outcome=
+  if [ "$ham_audit_outcome" = succeeded ]; then
+    if [ "$HAM_OWN_MERGE_EXECUTED" -eq 1 ]; then ham_receipt_outcome=merged; fi
+  elif [ "$ham_audit_outcome" = failed-without-merge ] && [ "${HAM_MERGE_EXIT:-1}" -ne 0 ] \
+    && [ "${HAM_MERGE_ACCEPTED:-0}" -ne 1 ] && [ "$HAM_OWN_MERGE_EXECUTED" -ne 1 ]; then
+    ham_receipt_outcome=refused
+  fi
+  if [ -n "$ham_receipt_outcome" ]; then
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-action-receipt.mjs \
+      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" \
+      || echo "HAM warning: merge-action receipt unavailable; coverage remains pending" >&2
+  fi
   if [ "$ham_audit_outcome" != succeeded ]; then
     HAM_PHASE_OUTCOME="$ham_audit_reason"
   fi
@@ -674,6 +690,7 @@ $HAM_PROTECTIVE_PREDECESSORS
 EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
 
+  HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
@@ -681,6 +698,9 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?
   if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
+    if ! ham_merge_error_already_merged "$HAM_MERGE_STDOUT" && ! ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then
+      HAM_OWN_MERGE_EXECUTED=1
+    fi
     break
   fi
   if ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then

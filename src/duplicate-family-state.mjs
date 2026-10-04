@@ -955,13 +955,25 @@ export async function runDuplicateFamilyCensusForWatcher({
         repoPath, rootDir, env, spawnSyncImpl, readBuildCompletionSignalForPrImpl,
       });
       const candidateNumbers = new Set(preliminary.flatMap((family) => family.candidates.map((candidate) => candidate.prNumber)));
+      const readContent = db.prepare('SELECT work_identity_json FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?');
       for (const entry of entries) {
         const subject = entry.subject;
-        if (!candidateNumbers.has(Number(entry.prNumber || subject.number))) continue;
-        subject.duplicateContent = await collectDuplicateContent({
-          octokit, owner, repo, prNumber: entry.prNumber || subject.number,
-          headSha: subject.headSha || subject.headRefOid,
-        });
+        const prNumber = Number(entry.prNumber || subject.number);
+        if (!candidateNumbers.has(prNumber)) continue;
+        const cached = parseMaybeJson(readContent.get(repoPath, prNumber)?.work_identity_json, {})?.content;
+        subject.duplicateContent = contentSnapshot({ ...subject, duplicateContent: cached });
+        if (subject.duplicateContent) continue;
+        const headSha = subject.headSha || subject.headRefOid;
+        try {
+          subject.duplicateContent = await collectDuplicateContent({ octokit, owner, repo, prNumber, headSha });
+        } catch (err) {
+          // A candidate-local read failure must not invalidate the repo census.
+          subject.duplicateContent = { headSha, paths: null, reason: 'content-unavailable' };
+          log.error(`[watcher] duplicate-family content read failed for ${repoPath}#${prNumber}: ${err?.message || err}`);
+        }
+        if (!contentSnapshot(subject)) {
+          log.log(`[watcher] duplicate-family content unavailable for ${repoPath}#${prNumber}: ${subject.duplicateContent?.reason || 'content-unavailable'}`);
+        }
       }
     }
     const duplicateCensus = reconcileDuplicateFamiliesForRepo(db, entries, {
@@ -1307,7 +1319,6 @@ export async function reconcileDuplicateFamilyCloseouts({
     const ignored = Array.isArray(override.ignoredCandidates) ? override.ignoredCandidates : [];
     const losers = candidates.filter((row) => (
       row.role === 'loser'
-      && evaluateDuplicateFamilyCandidate(family, { prNumber: row.pr_number, headSha: row.head_sha }).held
       && String(row.pr_state || '').toLowerCase() === 'open'
       && parseMaybeJson(row.suppressions_json, []).length === 0
       && !ignored.some((entry) => Number(entry?.candidatePrNumber) === Number(row.pr_number))

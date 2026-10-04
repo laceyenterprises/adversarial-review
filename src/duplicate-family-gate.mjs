@@ -24,12 +24,15 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
     return { member: true, held: false, reason: null, release: status };
   }
 
-  const evidence = parseOverride(family.content_evidence_json);
-  const corroborated = (evidence.pairs || []).some((pair) => pair.corroborated === true
-    && pair.members?.some((member) => Number(member.prNumber) === Number(prNumber)
-      && String(member.headSha || '') === String(headSha || '')));
-  if (!corroborated) {
-    return { member: true, held: false, reason: null, release: 'identity-only-advisory' };
+  // Content heuristics qualify detection, never override operator adjudication.
+  if (status === 'advisory') {
+    const evidence = parseOverride(family.content_evidence_json);
+    const corroborated = (evidence.pairs || []).some((pair) => pair.corroborated === true
+      && pair.members?.some((member) => Number(member.prNumber) === Number(prNumber)
+        && String(member.headSha || '') === String(headSha || '')));
+    if (!corroborated) {
+      return { member: true, held: false, reason: null, release: 'identity-only-advisory' };
+    }
   }
 
   const override = parseOverride(family.operator_override_json);

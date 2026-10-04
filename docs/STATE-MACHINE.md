@@ -571,7 +571,14 @@ open PR so no daemon merge, hammer, or merge-agent dispatch can close it. If
 the same held PR is already terminal (`merged` or `closed`), the handler clears
 the no-progress lane and drops ownership instead of retaining a permanent row.
 `duplicate-family-hold` is watcher-owned: it is projected from duplicate-family
-census rows, blocks the autonomous merge lanes without making the required
+census rows. Advisory candidates require current-head content corroboration
+(pairwise changed-path Jaccard at least 0.3, excluding incident-record/code
+pairs); shared identity alone does not hold them. Operator-adjudicated
+`survivor-selected`, `survivor-merged`, and `abandoned` families retain holds
+regardless of legacy or unavailable content, with existing exact-head
+survivor/ignore releases. Candidate-local content read failures do not abort the
+repo census or adjudicated loser closeout. The hold blocks autonomous merge lanes
+without making the required
 adversarial-gate status fail by itself, and clears on the next
 census/reconciliation tick after the family deactivates or the candidate is
 suppressed/released.

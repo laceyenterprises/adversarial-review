@@ -1220,7 +1220,7 @@ test('DUPFAM-01 removes legacy hold labels for identity-only families', async ()
   } finally { db.close(); }
 });
 
-test('watcher collects paginated content only for identity families and rejects moving heads', async () => {
+test('watcher caches paginated content by head and isolates moving heads', async () => {
   const db = memoryDb();
   try {
     const calls = [];
@@ -1240,10 +1240,53 @@ test('watcher collects paginated content only for identity families and rejects 
     assert.equal(first.families[0].contentEvidence.held, true);
     assert.equal(first.families[0].contentEvidence.pairs[0].overlap.length, 101);
     assert.deepEqual(calls, [[1, 1], [1, 2], [2, 1], [2, 2]]);
+    await runDuplicateFamilyCensusForWatcher(args);
+    assert.equal(calls.length, 4, 'unchanged heads reuse persisted content');
     moved = true;
-    assert.match((await runDuplicateFamilyCensusForWatcher(args)).error.message, /head moved/);
+    entries[0].subject.headSha = 'new-head-1';
+    const next = await runDuplicateFamilyCensusForWatcher(args);
+    assert.equal(next.error, undefined);
+    assert.equal(next.families[0].contentEvidence.held, false);
+    assert.equal(next.families[0].contentEvidence.pairs[0].reason, 'content-unavailable');
+    assert.deepEqual(calls.slice(4), [[1, 1], [1, 2]]);
   } finally { db.close(); }
 });
+
+for (const failure of ['truncated', 'moved', 'api-error']) {
+  test(`one ${failure} PR does not abort healthy family detection`, async () => {
+    const db = memoryDb();
+    let failedCalls = 0;
+    try {
+      const result = await runDuplicateFamilyCensusForWatcher({
+        db, repoPath: REPO, env: {},
+        subjectEntries: [subject(1), subject(2), subject(3), subject(4, {
+          title: '[codex] OTHER-01 separate', headRefName: 'codex/other-01',
+        }), subject(5, { title: '[codex] OTHER-01 separate', headRefName: 'claude/other-01' })],
+        readBuildCompletionSignalForPrImpl: provenanceReader({}), log: { log() {}, error() {} },
+        octokit: { rest: { pulls: {
+          listFiles: async ({ pull_number, page }) => {
+            if (pull_number === 1) {
+              failedCalls += 1;
+              if (failure === 'api-error') throw Object.assign(new Error('upstream failed'), { status: 503 });
+              if (failure === 'truncated') return { data: Array.from({ length: 100 }, (_, i) => ({ filename: `src/${page}-${i}.mjs` })) };
+            }
+            return { data: [{ filename: 'src/shared.mjs' }] };
+          },
+          get: async ({ pull_number }) => ({ data: { head: { sha: pull_number === 1 && failure === 'moved' ? 'new-head' : `head-${pull_number}` } } }),
+        } } },
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.families.length, 2);
+      const family = result.families.find((row) => row.candidates.some((candidate) => candidate.prNumber === 1));
+      assert.equal(family.contentEvidence.held, true, 'healthy siblings still corroborate');
+      assert.equal(family.contentEvidence.pairs.find((pair) => pair.members.some((member) => member.prNumber === 1)).reason, 'content-unavailable');
+      const persisted = readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 1 });
+      assert.equal(evaluateDuplicateFamilyCandidate(persisted, { prNumber: 1, headSha: 'head-1' }).held, false);
+      assert.equal(evaluateDuplicateFamilyCandidate(persisted, { prNumber: 2, headSha: 'head-2' }).held, true);
+      assert.equal(failedCalls, failure === 'truncated' ? 30 : failure === 'api-error' ? 3 : 1);
+    } finally { db.close(); }
+  });
+}
 
 test('incident record exclusions beat overlap for every supported record directory', () => {
   for (const path of ['docs/postmortems/SEV3.md', 'docs/reports/report.md', 'service/docs/SEV3-record.md']) {

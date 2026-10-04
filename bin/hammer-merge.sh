@@ -36,8 +36,8 @@ ham_append_terminal_audit() {
     ham_receipt_outcome=refused
   fi
   if [ -n "$ham_receipt_outcome" ]; then
-    /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-action-receipt.mjs \
-      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" \
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-action-receipt.mjs \
+      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" "${HAM_MERGE_EXECUTED_AT:-}" \
       || echo "HAM warning: merge-action receipt unavailable; coverage remains pending" >&2
   fi
   if [ "$ham_audit_outcome" != succeeded ]; then
@@ -690,6 +690,7 @@ $HAM_PROTECTIVE_PREDECESSORS
 EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
 
+  HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \

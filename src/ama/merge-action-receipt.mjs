@@ -14,9 +14,9 @@ export function isExecutedMergeRefusal(reason) {
   ].includes(reason);
 }
 
-function trusted(path, uid, directory = false) {
+function trusted(path, uid, directory = false, sharedParent = false) {
   const info = lstatSync(path);
-  if (info.uid !== uid || (info.mode & 0o022) || !(directory ? info.isDirectory() : info.isFile())) {
+  if (info.uid !== uid || (info.mode & (sharedParent ? 0o002 : 0o022)) || !(directory ? info.isDirectory() : info.isFile())) {
     throw new Error(`Untrusted merge-action path: ${path}`);
   }
 }
@@ -25,7 +25,7 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
   merged, reason = null, executedAt = new Date().toISOString(), action = 'gh pr merge' }) {
   if (!hqRoot) throw new Error('Merge-action receipt requires HQ root');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isInteger(prNumber) || prNumber < 1
-    || !/^[a-f0-9]{40}$/.test(headSha) || typeof merged !== 'boolean' || (!merged && !reason)
+    || !/^[a-f0-9]{40}$/.test(headSha) || typeof merged !== 'boolean' || (!merged && !isExecutedMergeRefusal(reason))
     || !['ama-daemon', 'closer-hammer'].includes(producerClass)
     || !['gh pr merge', 'api merge'].includes(action) || !Number.isFinite(Date.parse(executedAt))) {
     throw new Error('Invalid merge-action receipt');
@@ -38,7 +38,7 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
   const directory = join(hqRoot, 'dispatch', 'audit', 'automation-merge-actions');
   for (const path of [join(hqRoot, 'dispatch'), join(hqRoot, 'dispatch', 'audit'), directory]) {
     try { mkdirSync(path, { mode: 0o750 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
-    trusted(path, identity.uid, true);
+    trusted(path, identity.uid, true, path !== directory);
   }
   const record = { actor: producerClass === 'ama-daemon' ? 'AMA' : 'hammer', action, merged,
     reason, repo, prNumber, headSha, executedAt, producerClass, receiptProtocol: 'OPSEV1-03' };
@@ -64,8 +64,17 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
   return target;
 }
 
+const publicationFailures = new Map();
+
 export function recordMergeActionBestEffort(args, logger = console) {
-  try { return writeMergeActionReceipt(args); } catch (error) {
+  try {
+    const result = writeMergeActionReceipt(args);
+    publicationFailures.delete(args.hqRoot);
+    return result;
+  } catch (error) {
+    const failures = (publicationFailures.get(args.hqRoot) || 0) + 1;
+    publicationFailures.set(args.hqRoot, failures);
+    if (failures === 2) logger?.error?.(`[merge-action] ALERT: repeated receipt publication failure at ${args.hqRoot}: ${error.message}`);
     logger?.warn?.(`[merge-action] receipt unavailable for ${args.repo}#${args.prNumber}: ${error.message}`);
     return null;
   }

@@ -1414,3 +1414,23 @@ for (const scenario of ['adapter success', 'adapter error fallback', 'adapter re
     }
   });
 }
+
+for (const message of ['Head sha did not match pull request head', 'unclassified merge outcome', 'Pull request is not mergeable']) {
+  test(`fast-merge does not publish retryable refusal: ${message}`, async (t) => {
+    const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-no-refusal-'));
+    const db = makeDb();
+    t.after(() => { db.close(); rmSync(hqRoot, { recursive: true, force: true }); });
+    seedHqOwnerConfig(hqRoot);
+    const head = 'a'.repeat(40);
+    seedFastMerge(db, 9902, { authorizedHeadSha: head });
+    const gh = makeGhStub({ views: [openView(head), openView(head), openView(head)],
+      checks: [successChecks()], merges: [refusalError(message)] });
+    await withProcessEnv({ HQ_ROOT: hqRoot }, async () => {
+      const result = await processFastMergePR({ db, ghClient: gh, repo: REPO, prNumber: 9902,
+        authorizedHeadSha: head, auditWriter() {}, logger: { warn() {}, error() {} } });
+      assert.equal(result.status, 'skipped_still_pending');
+    });
+    const directory = path.join(hqRoot, 'dispatch/audit/automation-merge-actions');
+    assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0);
+  });
+}

@@ -1471,8 +1471,7 @@ async function processFastMergePR({
       currentHeadSha: preMergeView.headRefOid,
       refusalReason,
     }));
-    recordMergeActionBestEffort({ hqRoot: resolveHqRoot(env), repo, prNumber, headSha: exactHeadSha,
-      merged: false, reason: refusalReason, action: 'gh pr merge', executedAt: mergeExecutedAt }, logger);
+    // This branch is retryable/unclassified; closure audit only, never refusal evidence.
     return { status: 'skipped_still_pending', reason: 'merge-refused', refusalReason };
   }
 

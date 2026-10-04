@@ -56,7 +56,9 @@ prevents the hammer from writing a refusal even if confirmation later fails;
 the closure audit still records the deferred outcome.
 
 At the adapter seam, a returned `ok: false` is refusal evidence only when it is
-neither transient nor an already-merged/idempotent response. Thrown errors must
+`failureClass: "permanent"` and excludes stale-head, missing-resource,
+transient and already-merged/idempotent responses. Both returned and thrown
+refusals use `permanent-merge-rejection`. Thrown errors must
 contain a parsed JSON payload with `ok: false` and `failureClass: "permanent"`,
 with the same exclusions. Unstructured, timeout and transport errors supply no
 receipt. Callers can pass `producerClass`, `hqRoot` and `logger` in the adapter
@@ -65,8 +67,9 @@ options; defaults remain `ama-daemon`, `env.HQ_ROOT` and `console`.
 ## Publication and failure behavior
 
 The writer requires the current username to match `.hq/config.json`'s
-`ownerUser` and the HQ root to belong to that user's UID. Audit directories must
-be real directories owned by that UID and not writable by group or others.
+`ownerUser` and the HQ root to belong to that user's UID. Audit parents must be real owner-UID directories and may be group-writable
+(the canonical audit directory is `0775`), but never world-writable. The leaf
+`automation-merge-actions` directory must also reject group writes.
 New directories use mode `0750`. Receipt files use mode `0640`, the owner's
 UID and the HQ root's GID.
 
@@ -79,7 +82,9 @@ name. A failure after linking may leave the published receipt in place.
 Success requires caller-side live exact-head confirmation and evidence of its
 own merge execution; idempotent/already-merged responses must not claim a new
 execution. The hammer CLI additionally requires a merge timestamp within two
-minutes of its execution timestamp. The hammer CLI and adapter's direct
+minutes of the timestamp captured when the hammer issued the merge, rather
+than when delayed confirmation finished. The outer hammer alarm is 60 seconds
+to cover the three-attempt read budget. The hammer CLI and adapter's direct
 `gh pr view` confirmation use `execGhWithRetry`: at most three transient-read
 attempts, 500/1000ms backoff, and a 15-second subprocess timeout per attempt.
 Timeouts, EIO, transport errors, rate limits and HTTP 5xx are retryable.
@@ -88,7 +93,8 @@ helper's separate, single token-refresh attempt. Malformed JSON or an unverified
 head produces no success receipt.
 
 Daemon callers use `recordMergeActionBestEffort`, which logs receipt-write
-failures and preserves the merge result. The adapter likewise warns after
+failures and preserves the merge result. A second consecutive publication
+failure emits an error-level alert, deduplicated until successful publication. The adapter likewise warns after
 verification exhaustion without reissuing the merge. The CLI exits non-zero on
 verification or publication failure except for the isolated-worker handoff below.
 Receipt failure never changes the existing authority flags or eligibility gates.
@@ -97,9 +103,11 @@ Receipt failure never changes the existing authority flags or eligibility gates.
 
 When the CLI is not running as `ownerUser`, it can instead append a request to
 `$HQ_ROOT/workers/<HQ_WORKER_ID>/merge-action-requests/<uuid>.json`, provided a
-valid worker ID and `HQ_LAUNCH_REQUEST_ID` (or `LAUNCH_REQUEST_ID`) are present.
+valid worker ID (excluding all-dot IDs) and `HQ_LAUNCH_REQUEST_ID` (or `LAUNCH_REQUEST_ID`) are present.
 The request has the same record fields plus `launchRequestId`. Its directory
 uses mode `0750`, its file uses `0640`, and the file is owned by the worker UID
-with the HQ root's GID. Only HQ-owner teardown publishes these requests as
-trusted receipts. That consumer belongs to the Agent OS superproject; this
+with the HQ root's GID. Requests are written to a temporary file, attributed and permissioned, then
+renamed into place; failures remove the temporary file. Worker claims are
+untrusted: HQ-owner teardown must independently re-verify the exact head and
+merge time with GitHub before publishing trusted receipts. That consumer belongs to the Agent OS superproject; this
 repository owns the writer and request format.

@@ -41,7 +41,10 @@ dispatcher debugging), see
 Merge execution evidence (OPSEV1-03) is appended under
 `$HQ_ROOT/dispatch/audit/automation-merge-actions/` by the daemon, fast-merge
 adapter paths and hammer. Fast-merge owns its receipt across the adapter and
-admin fallback, disabling publication at the adapter seam. Refusal receipts
+admin fallback, disabling publication at the adapter seam. An adapter `ok: false`
+throws into the existing exact-head `gh --admin` fallback, including policy
+refusals; operators should account for this escalation in fast-merge policy.
+Retryable or unclassified fast-merge refusals remain closure-audit evidence only. Refusal receipts
 require an explicit permanent rejection or eligibility/policy decision under a
 held lease; read failures, transient exhaustion, superseded/deferred outcomes
 and accepted-but-unconfirmed merges remain closure-audit evidence only.

@@ -59,7 +59,7 @@ export function createGithubAdapterMergeSurface({
           matchHeadCommit: revisionRef,
           mergeMethod: mergeMethod || defaultMergeMethod,
           deleteBranch: true,
-        }, { execFileImpl, env, rootDir });
+        }, { execFileImpl, env, rootDir, producerClass: 'closer-hammer' });
       } catch (err) {
         const payload = adapterErrorPayload(err);
         if (isAlreadyMergedAtRevision(payload, revisionRef)) {

@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
+import { recordMergeActionBestEffort, writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
 
 for (const operation of ['fchmodSync', 'fchownSync', 'writeFileSync', 'fsyncSync']) {
   test(`receipt closes its descriptor and removes temporary file when ${operation} fails`, (t) => {
@@ -64,9 +64,11 @@ test('hammer CLI verifies stub gh and writes merge/refusal or isolated-worker re
     const gh = join(root, 'gh');
     writeFileSync(gh, '#!/bin/sh\ncat "$(dirname "$0")/pr.json"\n', { mode: 0o755 });
     writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }));
+    const issuedAt = new Date(Date.now() - 180_000).toISOString();
     const env = { ...process.env, PATH: `${root}:${process.env.PATH}` };
     const args = [cli.pathname, root, 'test/repo', '7', 'a'.repeat(40)];
-    assert.equal(spawnSync(process.execPath, [...args, 'merged'], { env }).status, 0);
+    writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: issuedAt }));
+    assert.equal(spawnSync(process.execPath, [...args, 'merged', '', issuedAt], { env, timeout: 5000 }).status, 0);
     assert.equal(spawnSync(process.execPath, [...args, 'refused', 'primary-change-reverted'], { env }).status, 0);
     assert.equal(readdirSync(join(root, 'dispatch/audit/automation-merge-actions')).length, 2);
     writeFileSync(join(root, 'pr.json'), JSON.stringify({ state: 'OPEN', headRefOid: 'a'.repeat(40) }));
@@ -76,6 +78,10 @@ test('hammer CLI verifies stub gh and writes merge/refusal or isolated-worker re
     env.HQ_WORKER_ID = 'worker-1';
     env.HQ_LAUNCH_REQUEST_ID = 'lrq-1';
     assert.equal(spawnSync(process.execPath, [...args, 'refused', 'predicate-not-eligible'], { env }).status, 0);
+    env.HQ_WORKER_ID = '..';
+    assert.notEqual(spawnSync(process.execPath, [...args, 'refused', 'predicate-not-eligible'], { env, timeout: 5000 }).status, 0);
+    assert.equal(fs.existsSync(join(root, 'merge-action-requests')), false);
+    env.HQ_WORKER_ID = 'worker-1';
     const requests = readdirSync(join(root, 'workers/worker-1/merge-action-requests'));
     assert.equal(requests.length, 1);
     assert.equal(readdirSync(join(root, 'dispatch/audit/automation-merge-actions')).length, 2);
@@ -101,8 +107,8 @@ test('API merge seam records verified merges and refused exact-head writes', asy
     refuse = true;
     await assert.rejects(writeAdapterPullRequestMerge('test/repo', 7, { matchHeadCommit: 'a'.repeat(40) }, options), /head mismatch/);
     const actions = readdirSync(join(root, 'dispatch/audit/automation-merge-actions')).map(name => JSON.parse(readFileSync(join(root, 'dispatch/audit/automation-merge-actions', name))));
-    assert.equal(actions.length, 2);
-    assert.deepEqual(actions.map(a => a.merged).sort(), [false, true]);
+    assert.equal(actions.length, 1);
+    assert.deepEqual(actions.map(a => a.merged).sort(), [true]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -183,7 +189,10 @@ for (const scenario of [
   { name: 'transport timeout', error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }), receipts: 0 },
   { name: 'structured transient error', error: Object.assign(new Error('adapter failed'), { stderr: JSON.stringify({ ok: false, failureClass: 'transient', error: 'HTTP 503' }) }), receipts: 0 },
   { name: 'already merged at revision', error: Object.assign(new Error('adapter failed'), { stderr: JSON.stringify({ ok: false, failureClass: 'permanent', error: 'already merged', matchHeadCommit: 'a'.repeat(40) }) }), receipts: 0, finalization: true },
-  { name: 'returned permanent refusal', payload: { ok: false, reason: 'head mismatch' }, receipts: 1 },
+  { name: 'returned stale head', payload: { ok: false, failureClass: 'permanent', reason: 'head mismatch' }, receipts: 0 },
+  { name: 'returned stale sha', payload: { ok: false, failureClass: 'permanent', reason: 'Head sha did not match pull request head' }, receipts: 0 },
+  { name: 'returned unclassified refusal', payload: { ok: false, reason: 'denied' }, receipts: 0 },
+  { name: 'returned permanent refusal', payload: { ok: false, failureClass: 'permanent', reason: 'policy denied' }, receipts: 1 },
   { name: 'returned transient failure', payload: { ok: false, error: 'HTTP 503' }, receipts: 0 },
   { name: 'returned transient class without prose', payload: { ok: false, failureClass: 'transient' }, receipts: 0 },
   { name: 'returned transport code without prose', payload: { ok: false, code: 'ECONNRESET' }, receipts: 0 },
@@ -241,5 +250,40 @@ for (const reason of ['github-gate-read-failed', 'github-gate-timeout', 'merge-r
       assert.equal(result.status, 0, String(result.stderr));
       assert.deepEqual(readdirSync(root), []);
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const mode of [0o775, 0o777]) {
+  test(`receipt parent mode ${mode.toString(8)} preserves leaf trust`, () => {
+    const root = mkdtempSync(join(tmpdir(), 'shared-audit-'));
+    try {
+      mkdirSync(join(root, '.hq'));
+      writeFileSync(join(root, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
+      mkdirSync(join(root, 'dispatch/audit'), { recursive: true });
+      fs.chmodSync(join(root, 'dispatch/audit'), mode);
+      const args = { hqRoot: root, repo: 'test/repo', prNumber: 7, headSha: 'a'.repeat(40), merged: true };
+      if (mode === 0o777) assert.throws(() => writeMergeActionReceipt(args), /Untrusted/);
+      else {
+        assert.ok(writeMergeActionReceipt(args));
+        fs.chmodSync(join(root, 'dispatch/audit/automation-merge-actions'), 0o775);
+        assert.throws(() => writeMergeActionReceipt(args), /Untrusted/);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+test('repeated publication failure emits one loud alert until recovery', () => {
+  const messages = [];
+  const args = { hqRoot: '/nonexistent-receipt-test', repo: 'test/repo', prNumber: 7 };
+  const logger = { warn() {}, error(message) { messages.push(message); } };
+  for (let i = 0; i < 4; i++) assert.equal(recordMergeActionBestEffort(args, logger), null);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /ALERT/);
+});
+
+for (const reason of ['stale-head', 'unclassified', 'merge-refused-retryable']) {
+  test(`receipt writer rejects ${reason} at shared publication boundary`, () => {
+    assert.throws(() => writeMergeActionReceipt({ hqRoot: '/unused', repo: 'test/repo', prNumber: 7,
+      headSha: 'a'.repeat(40), merged: false, reason }), /Invalid/);
   });
 }

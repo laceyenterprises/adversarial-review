@@ -596,7 +596,8 @@ function adapterMergeRefused(payload) {
   return payload?.ok === false && !payload.merged && payload.state !== 'MERGED'
     && !payload.idempotent && !payload.data?.idempotent
     && !isUnsupportedOperationPayload(payload)
-    && !['transient', 'retryable'].includes(payload.failureClass)
+    && payload.failureClass === 'permanent'
+    && !/head[ -]?(mismatch|changed)|head sha did not match|stale[ -]?(head|revision)|match.head.commit|404|not found/i.test(JSON.stringify(payload))
     && !/already merged/i.test(JSON.stringify(payload))
     && !isTransientGhError({ code: payload.code, stderr: JSON.stringify(payload) });
 }
@@ -624,7 +625,7 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
         let payload;
         try { payload = JSON.parse(String(output)); } catch { continue; }
         if (payload?.failureClass === 'permanent' && adapterMergeRefused(payload)) {
-          recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' }, logger);
+          recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'permanent-merge-rejection' }, logger);
           break;
         }
       }
@@ -650,7 +651,7 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
     } catch (error) { logger?.warn?.(`[merge-action] API post-merge verification unavailable: ${error.message}`); }
   }
   if (result?.ran && adapterMergeRefused(result.payload)) {
-    recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' }, logger);
+    recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'permanent-merge-rejection' }, logger);
   }
   return result;
 }

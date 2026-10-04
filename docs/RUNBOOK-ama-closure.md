@@ -1307,7 +1307,7 @@ Preservation refusals retain the merge hold as
 `primary-change-repair-required` with `needsOperator: true` until the REMORPHAN-01
 watchdog admits a repair worker. Refusal observations alone no longer page.
 The dispute page guard persists across restarts. Read outages remain `gate-read-failed`
-and retry normal ticks after transport/auth recovery. Refusal-store or pager
+and retry normal ticks after transport/auth recovery. Recovery-store or pager
 failures are logged and always retain `skipMergeAgent: true`.
 
 For a refused head, inspect `bin/primary-change-context.mjs` evidence and repair
@@ -1342,18 +1342,35 @@ the primary-change predicate. REMORPHAN-01 automatically dispatches a repair
 HAM after six consecutive ownerless ticks on an open, non-draft, unheld head.
 Its primary-line edits require the HAMINTENT-03 per-finding
 `Reversal-Authorized-By` contract or restoration of the reverted lines.
-The same watchdog covers unresolved stopped remediation, blocking findings below
-max rounds without a pending job, and closer-authored stale heads (STALECLOSER-01).
+The same watchdog covers `no-progress` / `remediation-stopped` remediation,
+blocking findings with explicit valid round/max-round evidence below max and no
+pending job, and closer-authored stale heads (STALECLOSER-01). `operator-stop`
+and every other unrecognized stop code forbid recovery; a missing plan does not
+default to below max. A scoped `merge-agent-requested` retains its operator
+fallback precedence, including on heads whose watchdog budget is exhausted.
 A closer head that HAM cannot re-certify gets one exact-head re-review.
 Admission never waives CI, primary-change, identity, policy or merge leases.
-Across-head launch records and pending reviewer/remediator queues retain ownership;
-unreadable evidence fails closed. Two reserved attempts per head exhaust into one
-durable SEV1 page containing the refusal and last-attempt evidence. Live-owner and
-transient dispatch refusals refund their reservation. State and a nonblocking
-process lock live under `data/follow-up-jobs/orphan-watchdog`; restarts preserve
-attempts and page deduplication. Recovery dispatch runs inline even when ordinary
-HAM dispatch uses the background queue, so its result can be accounted for. See
-[data-model/ham-primary-change-refusals.md](data-model/ham-primary-change-refusals.md)
+Across-head live launch records and pending reviewer/remediator queues retain
+ownership. Launch terminality shares the closer capacity classifier, including
+operator triage and reaped statuses; terminal rekey-successor ancestry releases
+obsolete source records. Unreadable, corrupt or missing launch evidence holds
+dispatch and pages SEV1 after six consecutive uncertain ticks. Ownership probes
+use PR-filtered settled directory listings and the coexistence timeout, with
+synchronous ledger subprocesses bounded by the remaining probe budget.
+Two settled attempts per head exhaust into one durable SEV1 page with bounded
+reason, stop, round and last-attempt summaries. Live-owner refusals,
+`gate-read-failed`, operation timeouts, transient GitHub errors and aborts refund
+their reservation. An interrupted outcome-unknown reservation is reconciled
+against same-head dispatch evidence before another attempt; uncertainty never
+authorizes a duplicate. Page enqueue failures are persisted and retried without
+throwing out of coexistence. State and a nonblocking process lock live under
+`data/follow-up-jobs/orphan-watchdog`; restarts preserve budgets and page guards.
+Orphan admission widens covered primary-repair/closer-head routing after the
+ownerless grace, but pending-CI-only misses keep the mechanical validate-and-click
+closer instead of a terminal-remediation HAM. Recovery dispatch runs inline even
+when ordinary HAM dispatch uses the background queue, so its result can be accounted for. See
+[data-model/orphan-watchdog.md](data-model/orphan-watchdog.md), the legacy
+[refusal store](data-model/ham-primary-change-refusals.md) (no production writer),
 and [data-model/ham-finding-disputes.md](data-model/ham-finding-disputes.md).
 
 ### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move

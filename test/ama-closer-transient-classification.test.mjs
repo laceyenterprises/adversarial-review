@@ -498,3 +498,23 @@ test('REMORPHAN-01 primary repair reaches HAM dispatch with per-finding trailer 
   assert.match(prompt, /Reversal-Authorized-By: <review node id or URL> finding=<n> kind=<blocking\|non-blocking>/);
   assert.match(prompt, /never waive primary-change or CI gates/);
 });
+
+test('orphan admission retains the mechanical closer for pending-CI-only misses', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-orphan-mechanical-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  inputs.prMetadata.statusCheckRollup = [{ name: 'test', status: 'IN_PROGRESS' }];
+  let prompt;
+  const calls = [];
+  await maybeDispatchAmaCloser({ ...inputs,
+    options: { primaryChange: primaryChangeFixture(inputs.headSha) },
+    dispatchContext: { ...inputs.dispatchContext, orphanRecovery: { primaryRepair: true } },
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+    writeFileImpl: (_dir, _path, body) => { prompt = body; },
+    execFileImpl: async (_cmd, args) => { calls.push(args); throw new Error('test provisioning refusal'); },
+  });
+  assert.ok(calls.some(args => args.includes('dispatch')));
+  const dispatchArgs = calls.find(args => args.includes('dispatch'));
+  assert.equal(dispatchArgs[dispatchArgs.indexOf('--priority') + 1], 'critical');
+  assert.doesNotMatch(prompt, /REMORPHAN-01 owner-of-last-resort pass/);
+});

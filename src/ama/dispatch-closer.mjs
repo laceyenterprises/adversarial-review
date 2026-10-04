@@ -1,3 +1,4 @@
+import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
@@ -1371,18 +1372,6 @@ const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES = new Set([
   'operator_triage_required',
   'reaped_stuck_requested',
 ]);
-const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
-  'succeeded',
-  'failed',
-  'operator_triage_required',
-  'canceled',
-  'superseded',
-  'reaped_stuck_requested',
-]);
-// Capacity-only terminal evidence must not widen per-PR retry/re-arm authority.
-const AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
-  ...AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, 'reaped', 'cancelled',
-]);
 const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CODING_BRANCH_HOLDER_PREFIXES = [
@@ -1884,7 +1873,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       throwIfAborted(options.signal);
       const status = String(probe?.row?.status || '').trim().toLowerCase();
       if (probe?.ok && status) {
-        terminalStatus = AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status) ? status : null;
+        terminalStatus = isTerminalLaunchRequestStatus(status) ? status : null;
         if (terminalStatus) counts.terminal += 1;
       } else if (probe?.reason === 'missing-launch-request-row') {
         counts.missing += 1;
@@ -4144,9 +4133,10 @@ export async function maybeDispatchAmaCloser({
       );
     const automatedRecoveryAdmit = dispatchContext?.automatedRecovery === true
       && automatedHammerReasonsCovered(routeReasons);
-    // Recovery may widen worker-class admission only. Ownership, actionable
-    // reasons, comment-only grace and mechanical-CI routing remain authoritative.
-    const autoHammer = orphanAdmit || (!pendingCiMechanicalGateMiss &&
+    // Ordinary recovery widens worker-class admission only. Orphan recovery also
+    // admits covered primary-repair/closer-head reasons after its ownerless grace.
+    // Pending-CI-only misses still use the mechanical validate-and-click closer.
+    const autoHammer = (!pendingCiMechanicalGateMiss && orphanAdmit) || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -4313,7 +4303,7 @@ export async function maybeDispatchAmaCloser({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   });
 
-  if (orphanAdmit) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
+  if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
   const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };

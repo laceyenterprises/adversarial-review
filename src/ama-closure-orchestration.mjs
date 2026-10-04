@@ -2182,20 +2182,6 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
-  const orphan = await recoverOrphanImpl({
-    rootDir, repo: repoPath, prNumber,
-    headSha: candidate?.headSha || currentRevisionRef || dispatchJob?.headSha || '',
-    candidate, labels: labelNames, result: amaClosureResult, reviewStateRow, dispatchJob, logger, signal,
-    dispatchHammer: (orphanRecovery) => maybeDispatchAmaClosureForImpl({
-      rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
-      operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
-      repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
-      operationTimeoutMs, operationTracker, orphanRecovery,
-      priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
-    }),
-    ...orphanOptions,
-  });
-  if (orphan) return orphan;
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
   const safetyHold = isSafetyRecoveryHold(amaClosureResult);
@@ -2247,6 +2233,26 @@ export async function resolveMergeAgentCoexistenceForWatcher({
       reasons: amaClosureResult.reasons }));
     return { outcome: 'dispatch-merge-agent', amaClosureResult, coexistence,
       dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action) };
+  }
+  if (!mergeAgentRequestedScoped) {
+    const orphan = await recoverOrphanImpl({
+      rootDir, repo: repoPath, prNumber,
+      headSha: candidate?.headSha || currentRevisionRef || dispatchJob?.headSha || '',
+      candidate, labels: labelNames, result: amaClosureResult, reviewStateRow, dispatchJob, logger, signal,
+      dispatchHammer: (orphanRecovery) => maybeDispatchAmaClosureForImpl({
+        rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
+        operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
+        repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
+        operationTimeoutMs, operationTracker, orphanRecovery,
+        priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
+      }),
+      ownershipOperation: (fn) => runCoexistenceOperation(
+        'orphan-ownership', fn, { timeoutMs: operationTimeoutMs, parentSignal: signal,
+          operationTracker, logger, repoPath, prNumber }),
+      ownershipTimeoutMs: operationTimeoutMs,
+      ...orphanOptions,
+    });
+    if (orphan) return orphan;
   }
   if (amaClosureResult?.commentOnlyFinalRoundAwaitingCi === true) {
     logger?.log?.(`[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only final-round head; not counted toward the retain-loop cap`);

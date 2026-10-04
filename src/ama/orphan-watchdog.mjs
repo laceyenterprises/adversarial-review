@@ -1,47 +1,98 @@
 // REMORPHAN-01: dispatch admission only. HAM retains all live merge predicates.
 import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
 import { getHeadCloserCommitSuppression } from '../head-closer-commit-suppression.mjs';
+import { isTransientGhError } from '../gh-cli.mjs';
+import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
+import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 
-const TERMINAL = new Set(['succeeded', 'completed', 'failed', 'cancelled', 'canceled', 'superseded', 'rejected']);
 const REPAIR_REASONS = new Set(['primary-change-reverted', 'primary-change-unknown']);
 const ALLOWED = new Set(['blocking-findings-present', 'verdict-not-settled-success', 'verdict-not-eligible',
   'ci-not-green', 'pr-not-mergeable', 'stale-review-head', 'non-blocking-findings-present', ...REPAIR_REASONS]);
+const REFUND_REASONS = new Set(['active-remediation-job', 'lease-held', 'live-run-in-flight', 'hammer-closer-in-flight',
+  'ama-closer-launch-in-progress', 'dispatch-status-unknown', 'dispatch-deferred-transient', 'gate-read-failed',
+  'ama-coexistence-operation-timeout']);
+const text = value => String(value || '').slice(0, 300);
 export function orphanDispatchReasonsCovered(reasons) {
   return reasons.length > 0 && reasons.every(reason => ALLOWED.has(reason));
 }
 
-// Scan across heads: an owner that pushed still owns the PR. Missing/unreadable
-// ledger evidence is ownership uncertainty, never proof that a launch died.
-export async function hasOrphanOwner({ rootDir, repo, prNumber, reviewStateRow, labels = [],
-  readStatusImpl = readLaunchRequestStatusFromLedger }) {
+// Unknown evidence holds dispatch, but is distinct from a proven live owner.
+export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
+  readStatusImpl = readLaunchRequestStatusFromLedger, timeoutMs = 5000, signal = null, reservationStartedAt = null }) {
   if (['pending', 'reviewing', 'pending-upstream'].includes(reviewStateRow?.review_status)
-    || reviewStateRow?.remediation_pending) return true;
+    || reviewStateRow?.remediation_pending) return { owned: true };
+  const prefix = `${String(repo).replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}-pr-${Number(prNumber)}-`;
+  const deadline = Date.now() + (Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000);
+  const result = { owned: false, uncertain: false, reservationDispatched: false, reasons: [], launchIds: [] };
+  const uncertain = reason => { result.uncertain = true; if (result.reasons.length < 5) result.reasons.push(text(reason)); };
+  const namesFor = dir => {
+    let error;
+    const names = listSettledJsonNames(dir, { fsImpl: {
+      statSync: (...args) => { try { return statSync(...args); } catch (err) { error = err; throw err; } },
+      readdirSync: (...args) => { try { return readdirSync(...args); } catch (err) { error = err; throw err; } },
+    } });
+    if (error && error.code !== 'ENOENT') uncertain('dispatch-directory-unreadable');
+    return names;
+  };
+  const readRecord = path => {
+    try { return JSON.parse(readFileSync(path, 'utf8')); }
+    catch (err) { if (err.code !== 'ENOENT') uncertain('dispatch-record-unreadable'); return null; }
+  };
+  // A terminal rekey destination is proof that its historical source heads no
+  // longer own the PR, even if their old dispatch/ledger rows were never repaired.
+  const superseded = new Set();
+  const leaseDir = join(rootDir, 'data', 'ama-closer-leases');
+  for (const name of namesFor(leaseDir).filter(name => name.startsWith(prefix))) {
+    const lease = readRecord(join(leaseDir, name));
+    if (lease?.repo !== repo || Number(lease.prNumber) !== Number(prNumber) || lease.status !== 'terminal') continue;
+    for (const head of [lease.rekeyedFromHeadSha, ...(lease.supersededHeads || [])]) if (head) superseded.add(head);
+  }
   let mergeRecordSeen = false;
   for (const bucket of ['pending', 'in-progress', 'ama-closer-dispatches', 'merge-agent-dispatches']) {
     const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
-    let names;
-    try { names = readdirSync(dir); } catch (err) { if (err.code === 'ENOENT') continue; throw err; }
-    for (const name of names.filter(name => name.endsWith('.json'))) {
-      const record = JSON.parse(readFileSync(join(dir, name), 'utf8'));
-      if (record.repo !== repo || Number(record.prNumber) !== Number(prNumber)) continue;
+    const queue = ['pending', 'in-progress'].includes(bucket);
+    for (const name of namesFor(dir).filter(name => queue || name.startsWith(prefix))) {
+      if (signal?.aborted || Date.now() >= deadline) { uncertain('ownership-probe-timeout'); return result; }
+      const record = readRecord(join(dir, name));
+      if (!record || record.repo !== repo || Number(record.prNumber) !== Number(prNumber)) continue;
       if (bucket === 'merge-agent-dispatches') mergeRecordSeen = true;
-      if (['pending', 'in-progress'].includes(bucket)) return true;
-      if (record.state === 'dispatching') return true;
+      if (queue) return { ...result, owned: true };
+      if (bucket === 'ama-closer-dispatches' && superseded.has(record.headSha)) continue;
       const launchRequestId = record.launchRequestId || record.dispatchId;
+      if (record.state === 'dispatching') { result.owned = true; continue; }
       if (!launchRequestId) {
-        if (record.state === 'dispatched') return true;
+        if (record.state === 'dispatched') uncertain('missing-launch-request-id');
         continue;
       }
-      const probe = await readStatusImpl({ launchRequestId, rootDir });
-      if (!probe?.ok || !TERMINAL.has(String(probe.row?.status || '').toLowerCase())) return true;
+      if (result.launchIds.length < 5) result.launchIds.push(text(launchRequestId));
+      let probe;
+      try {
+        probe = await readStatusImpl({ launchRequestId, rootDir, signal,
+          // The adapter uses synchronous psql: a Promise timeout alone cannot
+          // interrupt it. Bound the subprocess by the remaining probe budget.
+          spawnSyncImpl: (cmd, args, options) => spawnSync(cmd, args, {
+            ...options, timeout: Math.max(1, Math.min(options?.timeout || 30000, deadline - Date.now())),
+          }) });
+      } catch { uncertain('ledger-read-failed'); continue; }
+      if (!probe?.ok) { uncertain(probe?.reason || 'ledger-read-failed'); continue; }
+      if (reservationStartedAt && record.headSha === headSha && record.state === 'dispatched'
+        && Date.parse(record.dispatchedAt) >= Date.parse(reservationStartedAt)) result.reservationDispatched = true;
+      if (!isTerminalLaunchRequestStatus(probe.row?.status)) result.owned = true;
     }
   }
-  return labels.includes('merge-agent-dispatched') && !mergeRecordSeen;
+  if (labels.includes('merge-agent-dispatched') && !mergeRecordSeen) uncertain('missing-merge-agent-dispatch-record');
+  return result;
+}
+
+export async function hasOrphanOwner(options) {
+  const ownership = await probeOrphanOwnership(options);
+  return ownership.owned || ownership.uncertain;
 }
 
 async function defaultPage(text, options) {
@@ -53,21 +104,30 @@ async function defaultRereview(options) {
   const { requestReviewRereview } = await import('../review-state.mjs');
   return requestReviewRereview(options);
 }
+function attemptSummary(retry) {
+  return { dispatched: retry?.dispatched === true, reason: text(retry?.reason),
+    launchRequestId: text(retry?.launchRequestId || retry?.dispatchId) };
+}
 
 export async function recoverOrphan({ rootDir, repo, prNumber, headSha, candidate, labels = [],
   result, reviewStateRow, dispatchJob, dispatchHammer, ticks = 6, maxAttempts = 2,
-  hasOwnerImpl = hasOrphanOwner, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
+  hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
+  ownershipOperation = fn => fn({}), ownershipTimeoutMs = 5000,
   closerHeadImpl = getHeadCloserCommitSuppression, logger = console, signal = null }) {
   const reasons = result?.reasons || result?.daemonCleanMerge?.reasons || [];
   const primary = ['primary-change-repair-required', 'primary-change-needs-operator'].includes(result?.reason);
   const blocking = reasons.includes('blocking-findings-present');
   const stale = reasons.includes('stale-review-head');
   const stopped = dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code;
-  const belowMax = Number(dispatchJob?.remediationPlan?.currentRound || dispatchJob?.remediationPlan?.round || dispatchJob?.remediationRound || 0)
-    < Number(dispatchJob?.remediationPlan?.maxRounds || 2);
+  const round = dispatchJob?.remediationPlan?.currentRound ?? dispatchJob?.remediationPlan?.round ?? dispatchJob?.remediationRound;
+  const maxRounds = dispatchJob?.remediationPlan?.maxRounds;
+  const validRound = value => (typeof value === 'number' || (typeof value === 'string' && /^\d+$/.test(value)))
+    && Number.isSafeInteger(Number(value)) && Number(value) >= 0;
+  const belowMax = validRound(round) && validRound(maxRounds) && Number(round) < Number(maxRounds);
+  const stopAllowed = !stopped || ['no-progress', 'remediation-stopped'].includes(stopped);
   const candidateAllowed = Boolean(headSha && candidate?.merged !== true && String(candidate?.prState || '').toLowerCase() === 'open'
     && !candidate?.isDraft && !labels.some(label => ['do-not-merge', 'no-merge-hold', 'merge-agent-skip'].includes(label))
-    && result?.amaEnabled);
+    && result?.amaEnabled && stopAllowed);
   const eligible = candidateAllowed && orphanDispatchReasonsCovered(reasons)
     && (primary || stale || (blocking && (stopped === 'no-progress' || stopped === 'remediation-stopped' || belowMax)));
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'orphan-watchdog');
@@ -81,14 +141,54 @@ export async function recoverOrphan({ rootDir, repo, prNumber, headSha, candidat
     catch (err) { if (['EAGAIN', 'EWOULDBLOCK'].includes(err.code)) return { outcome: 'ama-pending', amaClosureResult: result }; throw err; }
     db = new Database(join(dir, `${key}.db`));
     db.exec('CREATE TABLE IF NOT EXISTS heads (head TEXT PRIMARY KEY, ticks INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, paged INTEGER DEFAULT 0, rereview INTEGER DEFAULT 0, evidence TEXT)');
+    const columns = new Set(db.prepare('PRAGMA table_info(heads)').all().map(column => column.name));
+    for (const [name, type] of Object.entries({ reserved: 'INTEGER DEFAULT 0', uncertaintyTicks: 'INTEGER DEFAULT 0', uncertaintyPaged: 'INTEGER DEFAULT 0', pageError: 'TEXT' })) {
+      if (!columns.has(name)) db.exec(`ALTER TABLE heads ADD COLUMN ${name} ${type}`);
+    }
     db.prepare('INSERT OR IGNORE INTO heads(head) VALUES (?)').run(headSha);
-    // A head change interrupts consecutive observations, but never refunds attempts.
-    db.prepare('UPDATE heads SET ticks=0 WHERE head<>?').run(headSha);
-    const reset = () => { db.prepare('UPDATE heads SET ticks=0 WHERE head=?').run(headSha); return null; };
+    db.prepare('UPDATE heads SET ticks=0, uncertaintyTicks=0 WHERE head<>?').run(headSha);
+    const reset = () => { db.prepare('UPDATE heads SET ticks=0, uncertaintyTicks=0 WHERE head=?').run(headSha); return null; };
     const retainedBudget = candidateAllowed && /(?:retry.*exhausted|lifetime.*(?:ceiling|exhausted))/.test(result?.reason || '')
       && db.prepare('SELECT attempts FROM heads WHERE head=?').get(headSha).attempts >= maxAttempts;
     if (!eligible && !retainedBudget) return reset();
-    if (await hasOwnerImpl({ rootDir, repo, prNumber, reviewStateRow, labels })) return reset();
+    let state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
+    let ownership;
+    try {
+      const probe = await ownershipOperation(({ signal: childSignal }) => hasOwnerImpl({ rootDir, repo, prNumber,
+        headSha, reviewStateRow, labels, signal: childSignal || signal, timeoutMs: ownershipTimeoutMs,
+        reservationStartedAt: state.reserved ? JSON.parse(state.evidence || 'null')?.reservationStartedAt : null }));
+      ownership = typeof probe === 'boolean' ? { owned: probe } : probe;
+    } catch { ownership = { uncertain: true, reasons: ['ownership-probe-failed'] }; }
+    const page = async (event, guard, payload) => {
+      try {
+        await pageImpl(`SEV1 orphan recovery ${event}: ${repo}#${prNumber}@${headSha}`, {
+          event: `ama.orphan_recovery.${event}`, payload: { severity: 'SEV1', repo, prNumber, headSha,
+            reasons: reasons.slice(0, 10).map(text), stopCode: text(stopped), round, maxRounds, ...payload } });
+        db.prepare(`UPDATE heads SET ${guard}=1, pageError=NULL WHERE head=?`).run(headSha);
+      } catch (error) {
+        db.prepare('UPDATE heads SET pageError=? WHERE head=?').run(text(error.message || error), headSha);
+        logger?.warn?.(`Orphan recovery page enqueue failed: ${text(error.message || error)}`);
+      }
+    };
+    if (state.reserved && ownership?.reservationDispatched) {
+      db.prepare('UPDATE heads SET reserved=0, evidence=? WHERE head=?').run(JSON.stringify({ dispatched: true, reason: 'reservation-reconciled' }), headSha);
+      state.reserved = 0;
+    }
+    if (ownership?.owned) return reset();
+    if (!ownership || ownership.uncertain) {
+      db.prepare('UPDATE heads SET ticks=0, uncertaintyTicks=uncertaintyTicks+1 WHERE head=?').run(headSha);
+      state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
+      if (state.uncertaintyTicks >= ticks && !state.uncertaintyPaged) {
+        await page('ownership-uncertain', 'uncertaintyPaged', { ownershipReasons: ownership?.reasons || [], launchIds: ownership?.launchIds || [] });
+      }
+      return { outcome: 'ama-pending', amaClosureResult: result, orphan: state };
+    }
+    db.prepare('UPDATE heads SET uncertaintyTicks=0 WHERE head=?').run(headSha);
+    if (state.reserved) {
+      // No launch evidence and no owner: interrupted pre-launch reservation.
+      db.prepare('UPDATE heads SET attempts=MAX(0,attempts-1), reserved=0, ticks=0, evidence=? WHERE head=?')
+        .run(JSON.stringify({ dispatched: false, reason: 'reservation-refunded' }), headSha);
+    }
     let closerHead = false;
     if (stale) {
       const proof = await closerHeadImpl({ repoPath: repo, prNumber, headSha, logger });
@@ -96,50 +196,43 @@ export async function recoverOrphan({ rootDir, repo, prNumber, headSha, candidat
       if (!closerHead) return reset();
     }
     db.prepare('UPDATE heads SET ticks=ticks+1 WHERE head=?').run(headSha);
-    const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
+    state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
     const pending = { outcome: 'ama-pending', amaClosureResult: result, orphan: state };
     if (state.attempts >= maxAttempts) {
-      if (!state.paged) {
-        const payload = { severity: 'SEV1', repo, prNumber, headSha, reasons, result, reviewStateRow, dispatchJob,
-          attempts: state.attempts, lastAttempt: JSON.parse(state.evidence || 'null') };
-        await pageImpl(`SEV1 orphan recovery exhausted: ${repo}#${prNumber}@${headSha}`, {
-          event: 'ama.orphan_recovery.exhausted', payload });
-        db.prepare('UPDATE heads SET paged=1 WHERE head=?').run(headSha);
-      }
+      if (!state.paged) await page('exhausted', 'paged', { attempts: state.attempts, lastAttempt: JSON.parse(state.evidence || 'null') });
       return { ...pending, outcome: 'recovery-exhausted' };
     }
     if (state.ticks < ticks) return pending;
     if (closerHead && state.attempts > 0 && !state.rereview && JSON.parse(state.evidence || 'null')?.dispatched) {
       const review = await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
         reason: `system-orphan-head-review:${headSha}`, logger });
-      if (review?.triggered || review?.reason === 'already-pending') {
-        db.prepare('UPDATE heads SET rereview=1, ticks=0 WHERE head=?').run(headSha);
-      }
+      if (review?.triggered || review?.reason === 'already-pending') db.prepare('UPDATE heads SET rereview=1, ticks=0 WHERE head=?').run(headSha);
       return pending;
     }
-    // Reserve before dispatch; a crash cannot start an unaccounted third HAM.
-    db.prepare('UPDATE heads SET attempts=attempts+1, ticks=0 WHERE head=?').run(headSha);
+    const reservation = JSON.stringify({ reservationStartedAt: new Date().toISOString(), reason: 'reserved-outcome-unknown' });
+    db.prepare('UPDATE heads SET attempts=attempts+1, reserved=1, ticks=0, evidence=? WHERE head=?').run(reservation, headSha);
     let retry;
+    let refund = false;
+    let abortedError;
     try {
       if (signal?.aborted) throw signal.reason || new Error('orphan recovery aborted');
       retry = await dispatchHammer({ primaryRepair: primary, closerHead });
+      refund = !retry?.dispatched && REFUND_REASONS.has(retry?.reason);
     } catch (error) {
-      if (signal?.aborted) throw error;
-      retry = { dispatched: false, reason: String(error.message || error) };
+      refund = signal?.aborted || error?.name === 'AbortError' || error?.code === 'ABORT_ERR'
+        || error?.code === 'AMA_COEXISTENCE_ABORTED' || error?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT' || isTransientGhError(error);
+      retry = { dispatched: false, reason: text(error.message || error) };
+      if (signal?.aborted) abortedError = error;
     }
-    db.prepare('UPDATE heads SET evidence=? WHERE head=?').run(JSON.stringify(retry), headSha);
-    if (['active-remediation-job', 'lease-held', 'live-run-in-flight', 'hammer-closer-in-flight',
-      'ama-closer-launch-in-progress', 'dispatch-status-unknown', 'dispatch-deferred-transient'].includes(retry?.reason)) {
-      db.prepare('UPDATE heads SET attempts=attempts-1 WHERE head=?').run(headSha);
-      return pending;
-    }
+    db.prepare('UPDATE heads SET evidence=?, reserved=0, attempts=MAX(0,attempts-?), ticks=0 WHERE head=?')
+      .run(JSON.stringify(attemptSummary(retry)), refund ? 1 : 0, headSha);
+    if (abortedError) throw abortedError;
+    if (refund) return pending;
     if (retry?.dispatched) return { outcome: 'ama-dispatched', amaClosureResult: retry };
     if (closerHead && !state.rereview) {
       const review = await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
         reason: `system-orphan-head-review:${headSha}`, logger });
-      if (review?.triggered || review?.reason === 'already-pending') {
-        db.prepare('UPDATE heads SET rereview=1 WHERE head=?').run(headSha);
-      }
+      if (review?.triggered || review?.reason === 'already-pending') db.prepare('UPDATE heads SET rereview=1 WHERE head=?').run(headSha);
     }
     return pending;
   } finally { db?.close(); closeSync(fd); }

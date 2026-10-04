@@ -2789,6 +2789,7 @@ test('post-merge activation rollout controls load through strict Node schema and
           enforce: false
           dispatch_on_fail: false
           baseline_worker_boot_probe_interval_seconds: 1200
+          baseline_worker_boot_resolve_budget_seconds: 25
           hold_alert_budget_seconds: 6000
           hold_alert_consecutive_passes: 4
     `);
@@ -2806,6 +2807,7 @@ test('post-merge activation rollout controls load through strict Node schema and
     assert.equal(cfg.get('deploy.post_merge_activation.enforce'), true);
     assert.equal(cfg.get('deploy.post_merge_activation.dispatch_on_fail'), true);
     assert.equal(cfg.get('deploy.post_merge_activation.baseline_worker_boot_probe_interval_seconds'), 1200);
+    assert.equal(cfg.get('deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds'), 25);
     assert.equal(cfg.get('deploy.post_merge_activation.hold_alert_budget_seconds'), 7200);
     assert.equal(cfg.get('deploy.post_merge_activation.hold_alert_consecutive_passes'), 5);
     assert.equal(

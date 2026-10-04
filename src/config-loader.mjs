@@ -527,6 +527,12 @@ function schemaV1() {
                 __type: TYPE_BOOL,
                 __default: false,
               },
+              baseline_worker_boot_resolve_budget_seconds: {
+                __type: TYPE_INT,
+                __default: 20,
+                __min: 1,
+                __max: 60,
+              },
               baseline_worker_boot_probe_interval_seconds: {
                 __type: TYPE_INT,
                 __default: 1800,

@@ -8,10 +8,14 @@ import { writeFileAtomic } from '../atomic-write.mjs';
 import { reconcileRecoveryLaunches } from './recovery-launch-reconciliation.mjs';
 
 const FINDING_REASONS = new Set([
-  'blocking-findings-present', 'blocking-findings-unknown',
+  'blocking-findings-unknown',
   'non-blocking-findings-present', 'non-blocking-findings-unknown',
-  'verdict-not-settled-success', 'remediation-pending', 'remediation-state-unknown',
+  'verdict-not-settled-success',
   'ci-not-green', 'pr-not-mergeable',
+]);
+
+const FOLLOW_UP_REASONS = new Set([
+  'blocking-findings-present', 'remediation-pending', 'remediation-state-unknown',
 ]);
 
 // This authorizes remediation DISPATCH only, never a merge or a gate waiver.
@@ -50,6 +54,13 @@ async function recoverAmaAutomationLocked({
   if (reason === 'daemon-merged') return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult: result };
   if (isSafetyRecoveryHold(result)) return { outcome: 'await-operator', amaClosureResult: result };
   if (/autonomous-merge.*disabled|ama-disabled/.test(reason)) return { outcome: 'ama-pending', amaClosureResult: result };
+  // The ordinary closer already admits exhausted cycles after follow-up
+  // ownership is released. Recovery cannot mint that authority or charge the
+  // recovery budget while the Codex-first lane still owns findings/the head.
+  if (reasons.some((item) => FOLLOW_UP_REASONS.has(item))) {
+    return { outcome: 'ama-pending', amaClosureResult: result,
+      recovery: { action: 'await-remediation' } };
+  }
   const key = createHash('sha256').update(`${repo}#${prNumber}@${headSha || 'unknown'}`).digest('hex');
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'ama-automated-recovery');
   const path = join(dir, `${key}.json`);

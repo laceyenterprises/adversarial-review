@@ -4024,9 +4024,10 @@ export async function maybeDispatchAmaCloser({
       );
     const automatedRecoveryAdmit = dispatchContext?.automatedRecovery === true
       && automatedHammerReasonsCovered(routeReasons);
-    const autoHammer = automatedRecoveryAdmit ||
-      !pendingCiMechanicalGateMiss &&
-      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit)
+    // Recovery may widen worker-class admission only. Ownership, actionable
+    // reasons, comment-only grace and mechanical-CI routing remain authoritative.
+    const autoHammer = !pendingCiMechanicalGateMiss &&
+      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
         routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||

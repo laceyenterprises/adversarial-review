@@ -2505,7 +2505,7 @@ test('live closed PRs cannot spawn recovery automation', async () => {
   assert.equal(amaClosureInvoked, false, 'the live closed state prevents dispatch this tick');
 });
 
-test('resolveMergeAgentCoexistenceForWatcher recovers finding ineligibility with its named reason', async (t) => {
+test('resolveMergeAgentCoexistenceForWatcher retains follow-up findings ownership with its named reason', async (t) => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'ama-finding-recovery-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const decision = await resolveMergeAgentCoexistenceForWatcher({
@@ -2538,7 +2538,7 @@ test('resolveMergeAgentCoexistenceForWatcher recovers finding ineligibility with
   });
 
   assert.equal(decision.outcome, 'ama-pending');
-  assert.equal(decision.recovery.action, 'hammer');
+  assert.equal(decision.recovery.action, 'await-remediation');
   assert.equal(decision.amaClosureResult.namedReason, 'not-eligible:blocking-findings-present');
 });
 

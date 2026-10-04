@@ -441,6 +441,60 @@ test('LCR: non-exhausted request-changes findings do not dispatch hammer before 
   assert.equal(deps.calls.length, 0, 'no hq hammer dispatch');
 });
 
+for (const [name, reviewState] of [
+  ['fresh request-changes', {}],
+  ['pending follow-up even at exhaustion', { remediationPending: true, reviewCycleExhausted: true, completedRemediationRounds: 2 }],
+  ['unknown follow-up state', { remediationPending: undefined }],
+  ['rereview-only exhaustion', { blockingFindingState: 'unknown', reviewCycleExhausted: true, completedRemediationRounds: 0, completedRereviewRounds: 3 }],
+  ['fresh comment-only before grace', { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1 }],
+]) {
+  test(`recovery flag preserves ordinary hammer gates: ${name}`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'recovery-codex-first-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({
+      ...baseArgs(rootDir, { reviewState, dispatchContext: { automatedRecovery: true } }),
+      ...deps,
+    });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(deps.calls.length, 0, 'recovery must not launch a competing hammer');
+  });
+}
+
+test('recovery preserves strict comment-only dispatch after grace and exhausted follow-up handoff', async (t) => {
+  for (const [reviewState, dispatchContext] of [
+    [{ verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1 },
+      { settledCommentOnlyTerminalMs: 60_000, commentOnlyTerminalGraceMs: 60_000 }],
+    [{ reviewCycleExhausted: true, completedRemediationRounds: 2 }, {}],
+  ]) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'recovery-terminal-handoff-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const result = await maybeDispatchAmaCloser({
+      ...baseArgs(rootDir, { reviewState,
+        dispatchContext: { ...dispatchContext, automatedRecovery: true } }),
+      ...deps,
+    });
+    assert.equal(result.dispatched, true);
+    assert.equal(deps.calls.length, 1);
+    assert.equal(flagValue(deps.calls[0].args, '--priority'), 'normal');
+  }
+});
+
+test('recovery preserves mechanical pending-CI validate-and-click routing', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'recovery-mechanical-ci-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...cleanValidateAndClickArgs(rootDir, { dispatchContext: { automatedRecovery: true } }),
+    ...deps,
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.calls.length, 1);
+  assert.equal(flagValue(deps.calls[0].args, '--priority'), 'critical', 'pending CI must retain its mechanical prompt');
+});
+
 test('LCR: rereview-only exhaustion does not dispatch hammer before Codex remediation', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-rereview-only-codex-first-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

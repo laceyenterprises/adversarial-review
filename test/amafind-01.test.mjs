@@ -77,6 +77,36 @@ test('strict non-blocking findings dispatch hammer without changing merge safety
   assert.equal(__testables__.isHammerRouteStructurallyBlocked(['label-do-not-merge']), true);
 });
 
+for (const ownershipReason of ['remediation-pending', 'remediation-state-unknown', 'blocking-findings-present']) {
+  test(`watcher recovery cannot preempt follow-up ownership: ${ownershipReason}`, async (t) => {
+    const reasons = ['verdict-not-settled-success', ownershipReason, 'ci-not-green'];
+    const result = { amaEnabled: true, skipMergeAgent: true, reason: 'not-eligible', reasons };
+    const { args, calls } = harness(t, result);
+    assert.equal(automatedHammerReasonsCovered(reasons), false);
+    const input = { rootDir: args.rootDir, repoPath: args.repo, prNumber: 1, currentRevisionRef: 'head',
+      reviewStateRow: { ...args.reviewStateRow, verdict: 'Request changes' },
+      candidate: { prState: 'open' }, dispatchJob: {}, logger: args.logger,
+      recoveryOptions: { pageImpl: args.pageImpl, requestRereviewImpl: args.requestRereviewImpl },
+      maybeDispatchAmaClosureForImpl: async (options) => {
+        if (options.automatedRecovery) { calls.hammer += 1; return { dispatched: true }; }
+        return result;
+      } };
+    for (let i = 0; i < 5; i += 1) {
+      const waiting = await resolveMergeAgentCoexistenceForWatcher(input);
+      assert.equal(waiting.outcome, 'ama-pending');
+      assert.equal(waiting.recovery.action, 'await-remediation');
+    }
+    assert.equal(calls.hammer, 0);
+    assert.equal(calls.rereview.length, 0);
+    assert.equal(calls.page.length, 0, 'waiting for follow-up must not exhaust recovery');
+    // Once the ordinary closer proves exhaustion and ownership release,
+    // terminal remediation remains reachable on the next tick.
+    assert.equal((await resolveMergeAgentCoexistenceForWatcher({ ...input,
+      maybeDispatchAmaClosureForImpl: async () => ({ dispatched: true }),
+    })).outcome, 'ama-dispatched');
+  });
+}
+
 for (const reason of ['label-do-not-merge', 'risk-class-not-permitted', 'two-key-high-risk', 'security-hold', 'destructive-migration', 'primary-change-needs-operator']) {
   test(`safety holds retain operator adjudication: ${reason}`, async (t) => {
     const { args, calls } = harness(t, { reason: 'not-eligible', reasons: [reason] });

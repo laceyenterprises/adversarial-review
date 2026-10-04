@@ -540,7 +540,12 @@ down exactly one of two paths:
 
 AMAFIND-01 recovery precedes any generic operator hand-off. Stale reviewed heads
 request a current-head re-review; unknown findings request one re-review then
-hammer remediation; strict-mode comment-only findings dispatch the hammer.
+retry the ordinary closer; strict-mode comment-only findings dispatch the hammer
+only after its existing grace, proven final-round resume or exhaustion gates.
+Blocking findings and unknown/pending remediation state retain Codex-first
+follow-up ownership without spending recovery attempts or paging. Recovery
+widens worker-class admission only; the ordinary closer proves terminal
+authority after exhaustion and follow-up ownership release.
 Terminal or phantom launches reconcile through ledger-backed liveness checks.
 Every retry retains all ordinary safety, identity and merge gates. Only safety
 holds await adjudication. A per-head durable recovery budget exhausts into a

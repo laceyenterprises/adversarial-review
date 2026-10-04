@@ -1433,14 +1433,23 @@ record for another watcher retry. The command remains self-gated by
 The watcher routes AMA ineligibility through `src/ama/automated-recovery.mjs`
 for both posted reviews and reviewer-timeout exhaustion. A stale review requests
 one current-head re-review through the review-state CAS. Missing findings
-sections request a re-review once per head; a subsequent malformed review goes
-to the hammer. A strict-mode comment-only review with standing non-blocking
-findings goes to the hammer. The shared kernel findings parser supplies both
+sections request a re-review once per head; a subsequent malformed review may
+retry the closer, subject to its ordinary terminal-remediation gates. A
+strict-mode comment-only review with standing non-blocking findings reaches the
+hammer after the existing terminal grace, proven final-round resume, or cycle
+exhaustion admits it. The shared kernel findings parser supplies both
 eligibility counts and the attestation's total blocking plus non-blocking count.
 
 Recovery retries re-enter the ordinary closer gates and leases. They authorize
 remediation dispatch, never a merge waiver. Hard-stop labels, risk policy,
 security holds and destructive-change safety holds still require adjudication.
+Recovery only widens worker-class admission; it never bypasses mechanical
+pending-CI routing, actionable-reason checks or Codex-first ownership. Refusals
+containing `remediation-pending`, `remediation-state-unknown` or
+`blocking-findings-present` wait for the follow-up lane without spending recovery
+attempts or paging. The ordinary closer remains responsible for admitting an
+exhausted Request-changes cycle after remediation ownership is released and
+completed-remediation evidence is satisfied.
 Missing identity or safety evidence remains fail-closed and retries automatically.
 A live closed or merged candidate never starts recovery.
 

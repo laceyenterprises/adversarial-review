@@ -10,7 +10,7 @@
 // this module's own location (same src/ dir), matching the monolith's ROOT.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -289,7 +289,38 @@ function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFile
   return dest;
 }
 
+async function configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, execFileImpl }) {
+  // Set worktree git identity *before* the PR checkout so the very first
+  // commits the remediation worker makes (including any in-process author
+  // hooks that read `git config user.*` at startup) see the correct values.
+  // cloneRemediationWorkspace creates standalone clones. Worktree scoping is
+  // defensive; worker-pool shared-base provisioning is fixed by the companion
+  // agent-os IDENTBASE-01 change. Refuse shared/external metadata before enabling
+  // the extension so a reused linked worktree cannot mutate another repo's config
+  // or hooks. A re-run against our own standalone clone is idempotent.
+  // The identity is keyed on workerClass so the soon-to-land claude-code
+  // remediation path doesn't need a separate code change here.
+  const gitIdentity = remediationWorkerGitIdentity(workerClass);
+  const workspaceGitDir = join(workspaceDir, '.git');
+  if (!lstatSync(workspaceGitDir).isDirectory()
+    || existsSync(join(workspaceGitDir, 'commondir'))
+    || existsSync(join(workspaceGitDir, 'worktrees'))) {
+    throw new Error(`Remediation workspace requires standalone Git metadata: ${workspaceDir}`);
+  }
+  await execFileImpl('git', ['-C', workspaceDir, 'config', 'extensions.worktreeConfig', 'true'], {
+    maxBuffer: 1 * 1024 * 1024,
+  });
+  await execFileImpl('git', ['-C', workspaceDir, 'config', '--worktree', 'user.name', gitIdentity.name], {
+    maxBuffer: 1 * 1024 * 1024,
+  });
+  await execFileImpl('git', ['-C', workspaceDir, 'config', '--worktree', 'user.email', gitIdentity.email], {
+    maxBuffer: 1 * 1024 * 1024,
+  });
+
+}
+
 export {
+  configureRemediationWorkspaceIdentity,
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS,
   MERGE_AGENT_FALLBACK_PUSH_PROVIDER,

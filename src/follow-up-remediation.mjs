@@ -12,6 +12,7 @@ import {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
+  configureRemediationWorkspaceIdentity,
   installWorkerProvenanceHook,
   remediationWorkerGitIdentity,
   remediationWorkerPushProvider,
@@ -1190,32 +1191,7 @@ async function prepareWorkspaceForJob({
     });
   }
 
-  // Set worktree git identity *before* the PR checkout so the very first
-  // commits the remediation worker makes (including any in-process author
-  // hooks that read `git config user.*` at startup) see the correct values.
-  // cloneRemediationWorkspace creates standalone clones. Worktree scoping is
-  // defensive; worker-pool shared-base provisioning is fixed by the companion
-  // agent-os IDENTBASE-01 change. Refuse shared/external metadata before enabling
-  // the extension so a reused linked worktree cannot mutate another repo's config
-  // or hooks. A re-run against our own standalone clone is idempotent.
-  // The identity is keyed on workerClass so the soon-to-land claude-code
-  // remediation path doesn't need a separate code change here.
-  const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const workspaceGitDir = join(workspaceDir, '.git');
-  if (!lstatSync(workspaceGitDir).isDirectory()
-    || existsSync(join(workspaceGitDir, 'commondir'))
-    || existsSync(join(workspaceGitDir, 'worktrees'))) {
-    throw new Error(`Remediation workspace requires standalone Git metadata: ${workspaceDir}`);
-  }
-  await execFileImpl('git', ['-C', workspaceDir, 'config', 'extensions.worktreeConfig', 'true'], {
-    maxBuffer: 1 * 1024 * 1024,
-  });
-  await execFileImpl('git', ['-C', workspaceDir, 'config', '--worktree', 'user.name', gitIdentity.name], {
-    maxBuffer: 1 * 1024 * 1024,
-  });
-  await execFileImpl('git', ['-C', workspaceDir, 'config', '--worktree', 'user.email', gitIdentity.email], {
-    maxBuffer: 1 * 1024 * 1024,
-  });
+  await configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, execFileImpl });
 
   // Install the worker-provenance commit-msg hook in this workspace's
   // .git/hooks. The hook reads worker-context env vars at commit time

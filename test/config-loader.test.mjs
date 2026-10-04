@@ -7632,3 +7632,17 @@ test('DISKLEAK-01 worker retention defaults and janitor safety keys mirror Pytho
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('PMARCACLASS-01 RCA class defaults to codex and accepts an operator override', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pma-rca-class-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.post_merge_actions.rca_worker_class'), 'codex');
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  post_merge_actions:\n    rca_worker_class: claude-code\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.post_merge_actions.rca_worker_class'), 'claude-code');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

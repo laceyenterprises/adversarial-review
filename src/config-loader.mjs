@@ -2239,6 +2239,14 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          post_merge_actions: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              // PMARCACLASS-01: registry validation belongs to dispatch.
+              rca_worker_class: { __type: TYPE_STRING, __default: 'codex' },
+            },
+          },
           quota: {
             __type: TYPE_DICT,
             __strict: true,

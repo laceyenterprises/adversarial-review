@@ -861,6 +861,7 @@ export async function runDaemonCleanMergeAttempt({
     liveGate: {
       primaryChange,
       requirePrimaryChange: true,
+      strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
       candidateHead: liveHead,
       requiredChecks: resolveRollupRequiredChecks(liveRollup)
         ?? (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
@@ -984,6 +985,7 @@ export async function runDaemonCleanMergeAttempt({
       return {
         primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
         requirePrimaryChange: true,
+        strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
         candidateHead: rollup?.headSha || rollup?.headRefOid || '',
         requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
         mergeable: rollup?.mergeable,

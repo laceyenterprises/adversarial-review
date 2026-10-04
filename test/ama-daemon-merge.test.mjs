@@ -950,3 +950,17 @@ test('AMASCALE: a failed metric observer cannot delay or prevent eligible merge'
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
   assert.equal(h.calls.merge, 1);
 });
+
+test('strict non-blocking policy reaches both pre-lease and fresh in-lease primary-change evaluation', async () => {
+  const h = makeHarness({ liveGate: greenGate({ strictNonBlockingRemediation: false }) });
+  const seen = [];
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    liveGate: greenGate({ strictNonBlockingRemediation: true }),
+    evaluateEligibilityImpl: (state) => {
+      seen.push(state.strictNonBlockingRemediation);
+      return { eligible: true, reasons: [] };
+    },
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.deepEqual(seen, [true, false]);
+});

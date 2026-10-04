@@ -151,12 +151,17 @@ or waive a finding. Record that decision and rationale in the audit comment.
 Otherwise fix every required finding, including non-blocking findings in strict mode.
 For any required finding whose fix reverts primary-change lines, add one trailer
 per finding to the HAM commit, with `Worker-Ticket: HAM` and `Reviewed-Head`
-naming the cited reviews' head:
-`Reversal-Authorized-By: <review node id or URL> finding=<n> kind=blocking|non-blocking`.
+naming the cited reviews' shared head:
+`Reversal-Authorized-By: <review node id or URL> finding=<n> kind=<blocking|non-blocking>`.
+Choose exactly one kind; for example:
+`Reversal-Authorized-By: PRR_example finding=2 kind=blocking`
+`Reversal-Authorized-By: PRR_example finding=1 kind=non-blocking`
 Here n is the one-based position in the indicated findings section; omitting kind
 retains the legacy blocking-section meaning. Include non-blocking findings required
 by strict mode. Multiple trailers may cite both authoritative final reviewers on
-that head. File and Lines must cover every reverted line, and the commit must
+that head. Split HAM commits by reviewed head when findings cite reviews on
+different heads: each commit has one `Reviewed-Head` and only citations for that
+head. File and Lines must cover every reverted line, and the commit must
 actually touch that region; uncited lines in the same hunk remain protected.
 
 If you dispute a blocking finding with evidence, preserve the code, release any

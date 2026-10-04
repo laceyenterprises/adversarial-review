@@ -1,4 +1,4 @@
-import { amaAllAuthoritativeReviewerLogins, amaAuthoritativeReviewerLoginsForModel, latestAuthoritativeReviewInAncestry } from './reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, latestAuthoritativeReviewInAncestry } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -195,22 +195,32 @@ function reversalCitations(message) {
     .filter(Boolean);
 }
 
-function reversalAuthorized(evidence, path, region, cache) {
+function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     try {
       const { commit, review, reviewedFiles, parentFiles } = authorization;
+      if (!cache.has(review)) cache.set(review, {
+        verdict: normalizeEffectiveReviewVerdict(review.body),
+        findings: { blocking: parseBlockingFindingsSection(review.body),
+          'non-blocking': parseNonBlockingFindingsSection(review.body) },
+      });
+      const parsedReview = cache.get(review);
       if (!isHammer(commit) || !trustedHammerCommit(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
         || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
-        || !['request-changes', 'approved', 'comment-only'].includes(normalizeEffectiveReviewVerdict(review.body))
+        || !['request-changes', 'approved', 'comment-only'].includes(parsedReview.verdict)
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
-      const trailers = parseCommitTrailers(commit.commit.message);
+      if (!cache.has(commit)) cache.set(commit, {
+        trailers: parseCommitTrailers(commit.commit.message), citations: reversalCitations(commit.commit.message),
+      });
+      const { trailers, citations } = cache.get(commit);
       if (trailers['worker-ticket'] !== 'HAM' || trailers['reviewed-head'] !== review.commit_id) return false;
-      return reversalCitations(commit.commit.message).some((cite) => {
+      return citations.some((cite) => {
         if (![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
         // Unqualified legacy citations retain their blocking-section meaning.
-        if (cite[3] !== 'non-blocking' && normalizeEffectiveReviewVerdict(review.body) !== 'request-changes') return false;
-        const parser = cite[3] === 'non-blocking' ? parseNonBlockingFindingsSection : parseBlockingFindingsSection;
-        const finding = parser(review.body)?.[Number(cite[2]) - 1];
+        const kind = cite[3] || 'blocking';
+        if (kind === 'non-blocking' ? strictNonBlockingRemediation !== true
+          : parsedReview.verdict !== 'request-changes') return false;
+        const finding = parsedReview.findings[kind]?.[Number(cite[2]) - 1];
         if (!finding) return false;
         const lines = /^`?(\d+)(?:\s*[-–]\s*(\d+))?`?$/.exec(finding.lines || '');
         if (!lines) return false;
@@ -227,7 +237,8 @@ function reversalAuthorized(evidence, path, region, cache) {
   });
 }
 
-export function checkPrimaryChange(evidence, headSha) {
+// Non-blocking waivers require an explicit effective strict-mode policy.
+export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemediation = false } = {}) {
   if (!evidence) return { ok: false, reason: 'primary-change-unknown' };
   if (evidence.headSha !== headSha || evidence.headMismatch) return { ok: false, reason: 'primary-change-read-failed' };
   if (evidence.readFailed === true) return { ok: false, reason: 'primary-change-read-failed' };
@@ -249,7 +260,7 @@ export function checkPrimaryChange(evidence, headSha) {
         && (!actual || isTestPath(actual.filename))) continue;
       if ((change.renamed && actual?.filename === path) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
-          && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache)))))) {
+          && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)))))) {
         return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
       }
       if (!actual) continue;
@@ -267,7 +278,7 @@ export function checkPrimaryChange(evidence, headSha) {
       const authorizedByText = new Map();
       for (const entry of change.regions.flatMap((region) => region.removedLines)) {
         if (!actualPositionsByText.get(entry.text)?.has(entry.position)
-          && reversalAuthorized(evidence, path, { start: entry.position, end: entry.position + 1 }, authorizationCache)) {
+          && reversalAuthorized(evidence, path, { start: entry.position, end: entry.position + 1 }, authorizationCache, strictNonBlockingRemediation)) {
           authorizedByText.set(entry.text, (authorizedByText.get(entry.text) || 0) + 1);
         }
       }
@@ -282,7 +293,7 @@ export function checkPrimaryChange(evidence, headSha) {
           if (!actual.regions.some((other) => unit.start === unit.end
             ? other.start <= unit.start && other.end >= unit.start
             : other.start < unit.end && other.end > unit.start)
-            && !reversalAuthorized(evidence, path, unit, authorizationCache)) {
+            && !reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)) {
             return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
           }
         }
@@ -349,6 +360,7 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     const mergeBase = primary.merge_base_commit?.sha;
     if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown;
     const reversalAuthorizations = [];
+    const authorizedPairs = new Set();
     const closure = history.commits.slice(history.commits.findIndex((commit) => commit.sha === primaryHead) + 1);
     const candidates = closure.filter((candidate) => isHammer(candidate)
       && parseCommitTrailers(candidate.commit.message)['reversal-authorized-by']);
@@ -364,18 +376,20 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
           const trailers = parseCommitTrailers(candidate.commit.message);
           const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
           if (!review || review.commit_id !== trailers['reviewed-head']) continue;
+          const pair = `${candidate.sha}:${review.node_id || review.html_url}`;
+          if (authorizedPairs.has(pair)) continue;
           const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
             || !trustedHammerCommit(commit)
             || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
           const parentSha = commit.parents[0].sha;
           const login = String(review.user?.login || '').replace(/\[bot\]$/, '');
-          const family = ['claude', 'codex', 'gemini'].map(amaAuthoritativeReviewerLoginsForModel)
-            .find((logins) => logins.includes(login)) || [];
+          const family = amaReviewerFamilyForLogin(login);
+          if (!family) continue;
           // Each reviewer family has its own final verdict; another model's
           // review cannot supersede this model's finding authority.
           const latest = await latestAuthoritativeReviewInAncestry(reviews.filter((entry) =>
-            family.includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))), parentSha,
+            amaReviewerFamilyForLogin(entry.user?.login) === family), parentSha,
             (from, to) => read(`repos/${repo}/compare/${from}...${to}`));
           if (latest !== review) continue;
           const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
@@ -388,6 +402,7 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
           if (!Array.isArray(reviewed.files) || reviewed.files.length >= 300
             || !Array.isArray(parent.files) || parent.files.length >= 300) continue;
           reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
+          authorizedPairs.add(pair);
         } catch (error) {
           if (error?.primaryChangeReadFailed === true || error?.authOutage === true
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;

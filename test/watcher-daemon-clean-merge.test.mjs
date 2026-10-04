@@ -905,6 +905,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
         mergeMethod: 'squash',
         autonomousMergeExecutionEnabled: true,
         strictMode: false,
+        strictNonBlockingRemediation: false,
         hammerLifetimeDispatchCeiling: 3,
       },
       repoPath: 'acme/repo',
@@ -964,8 +965,10 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       attemptDaemonCleanMergeImpl: async (attemptArgs) => {
         capturedAttemptArgs = attemptArgs;
         assert.deepEqual(attemptArgs.liveGate.requiredChecks, []);
+        assert.equal(attemptArgs.liveGate.strictNonBlockingRemediation, false);
         const refreshedGate = await attemptArgs.fetchLiveGateImpl();
         assert.deepEqual(refreshedGate.requiredChecks, []);
+        assert.equal(refreshedGate.strictNonBlockingRemediation, false);
         return attemptArgs.runMergeImpl({
         repo: 'acme/repo',
         prNumber: 300,

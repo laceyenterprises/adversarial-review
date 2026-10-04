@@ -603,13 +603,17 @@ Key control points:
 - **Primary-change gate (HAMINTENT-02 / LAC-1833).** Both paths preserve changed
   regions from the protected author baseline against the current PR base.
   A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
-  required blocking or non-blocking finding on its reviewed head, with File/Lines covering each reverted
-  base line (the uncited remainder stays protected) and verified
-  closure ancestry and live GitHub HAM committer identity (linked author fallback
+  blocking finding, or a non-blocking finding required by the effective
+  `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict
+  advisory findings cannot authorize reversals. File/Lines must cover each reverted
+  base line (the uncited remainder stays protected). Authorization also requires
+  verified closure ancestry and live GitHub HAM committer identity (linked author fallback
   only when no committer is linked). Repeat the trailer for every finding whose
-  fix edits primary-change lines, with `kind=blocking|non-blocking` (blocking
+  fix edits primary-change lines, with `kind=blocking` or `kind=non-blocking` (blocking
   by default). Each reviewer family supplies its own latest final review; multiple
-  final reviewers can be cited together. Missing and unrelated citations remain refused.
+  final reviewers on the same head can be cited together. Split HAM commits by
+  reviewed head when reviews differ; each commit binds one `Reviewed-Head` to its
+  citations. Missing and unrelated citations remain refused.
   A disputed blocking finding posts evidence and requests exact-head re-review
   through `bin/dispute-finding.mjs`; the reviewer confirms or withdraws it. Before
   opening the existing database, the helper checks effective UID ownership of

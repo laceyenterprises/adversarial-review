@@ -1213,13 +1213,20 @@ JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
 `primary-change-read-failed` rather than a proven reversal. The hammer prompt's
 90-second process limit still bounds the complete collection.
 
-A required blocking or non-blocking finding may authorize a specific reversal. The HAM commit must carry
-`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=blocking|non-blocking]`, `Worker-Ticket: HAM`,
+A blocking finding may authorize a specific reversal. A non-blocking finding may
+also authorize one only when the effective `strict_non_blocking_remediation` policy
+is enabled; advisory findings in non-strict mode cannot waive preservation.
+Closure eligibility and both pre-lease and in-lease merge evaluations pass the
+same effective policy to the primary-change predicate. The HAM commit must carry
+`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=<blocking|non-blocking>]`, `Worker-Ticket: HAM`,
 and `Reviewed-Head` naming that review's head. The finding number is its one-based
 position in the indicated section (blocking by default for legacy trailers).
 Emit one trailer per finding whose fix edits primary-change lines. Multiple
 trailers may cite the latest review from each authoritative reviewer family on
 the Reviewed-Head; another model does not supersede that family’s final review.
+Choose one literal kind (`kind=blocking` or `kind=non-blocking`). If cited reviews
+have different heads, split HAM commits by reviewed head, with one `Reviewed-Head`
+and its matching citations per commit.
 The collector verifies authoritative
 reviewer identity, review/commit ancestry inside the protected closure, live HAM
 commit patches, and File/Lines coverage of each reverted base line. Base coordinates

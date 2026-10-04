@@ -21,6 +21,12 @@ export function amaAuthoritativeReviewerLoginsForModel(reviewerModel) {
   return AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL[route?.reviewerModel] || [];
 }
 
+export function amaReviewerFamilyForLogin(login) {
+  const normalized = String(login ?? '').replace(/\[bot\]$/, '');
+  return Object.entries(AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL)
+    .find(([, logins]) => logins.includes(normalized))?.[0] || null;
+}
+
 export function amaAllAuthoritativeReviewerLogins() {
   return [...new Set(Object.values(AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL).flat())];
 }

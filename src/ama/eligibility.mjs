@@ -783,6 +783,7 @@ function validateHamTerminalRemediationEvidence(
     verifiedCommit = null,
     verifiedAuditComment = null,
     blockingFindings = { known: false, count: 0 },
+    strictNonBlockingRemediation = false,
     logger = null,
   } = {},
 ) {
@@ -858,7 +859,7 @@ function validateHamTerminalRemediationEvidence(
     parent: directReviewedParent || reviewedHeadTrailerCoversRebase,
     commitIdentity: verifiedHamCommitIdentityMatches(verifiedCommit),
     nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
-    primaryChange: checkPrimaryChange(verifiedCommit?.primaryChange, currentHead).ok,
+    primaryChange: checkPrimaryChange(verifiedCommit?.primaryChange, currentHead, { strictNonBlockingRemediation }).ok,
     auditComment:
       claimedAuditBody !== ''
       && verifiedAuditBody !== ''
@@ -1026,6 +1027,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const currentHead = String(prMetadata?.headSha || '');
   const blockingFindings = classifyBlockingFindings(reviewState);
   const nonBlockingFindings = classifyNonBlockingFindings(reviewState);
+  const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation !== false;
   const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
     options?.hamTerminalRemediation || null,
     {
@@ -1034,6 +1036,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       verifiedCommit: options?.hamTerminalRemediationGroundTruth?.commit || null,
       verifiedAuditComment: options?.hamTerminalRemediationGroundTruth?.auditComment || null,
       blockingFindings,
+      strictNonBlockingRemediation,
       logger: options?.logger || null,
     },
   );
@@ -1055,7 +1058,6 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
 
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
   const remediationPending = reviewState?.remediationPending === true;
-  const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation !== false;
 
   // SPEC §4.2 #1 — settled-success verdict OR operator-approved override.
   const verdictNormalized = String(reviewState?.verdict || '').toLowerCase();
@@ -1388,7 +1390,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const primaryEvidence = options?.primaryChange
     || options?.hamTerminalRemediationGroundTruth?.commit?.primaryChange;
   const primaryChange = primaryEvidence || hamTerminalRemediation.active
-    ? checkPrimaryChange(primaryEvidence, currentHead)
+    ? checkPrimaryChange(primaryEvidence, currentHead, { strictNonBlockingRemediation })
     : { ok: true, applicable: false };
   if (!primaryChange.ok) effectiveReasons.push(primaryChange.reason);
 

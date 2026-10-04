@@ -4800,6 +4800,7 @@ export async function maybeDispatchAmaCloser({
             liveGate: {
               primaryChange: eligibilityOptions.hamTerminalRemediationGroundTruth?.commit?.primaryChange,
               requirePrimaryChange: true,
+              strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
               candidateHead: prMetadata?.headSha || '',
               requiredChecks: resolveRollupRequiredChecks(prMetadata) ?? [],
               mergeable: prMetadata?.mergeable || prMetadata?.mergeableState,
@@ -4861,6 +4862,7 @@ export async function maybeDispatchAmaCloser({
                   },
                 }),
                 requirePrimaryChange: true,
+                strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
                 candidateHead: rollup?.headSha || rollup?.headRefOid || '',
                 requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
                 mergeable: rollup?.mergeable,

@@ -19,6 +19,7 @@ import { getConfig } from './config-loader.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS, quotaHoldTarget } from './remediation-quota-evidence.mjs';
 import { claimFollowUpForReview } from './follow-up-review-claim.mjs';
+import { withCommentOnlyRecovery } from './comment-only-recovery-record.mjs';
 import { scanArchivedStoppedFollowUpJobs } from './comment-only-final-round.mjs';
 import {
   DEFAULT_RISK_CLASS,
@@ -1707,6 +1708,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   // re-review suppression and the closer hand-off read it from every terminal
   // directory, not only `completed/`, and from the stopped-job archive.
   const recordCommentOnlyFinalRound = (job, status) => {
+    job = withCommentOnlyRecovery(rootDir, job);
     if (job.finalRound !== 'comment-only' || job.reReview?.suppressed !== 'comment-only-final-round' ||
         !String(job.revisionRef || '').trim()) return;
     commentOnlyFinalRoundRevisionRefs.add(String(job.revisionRef).trim());
@@ -1742,8 +1744,10 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     for (const name of names) {
       const jobPath = join(dir, name);
       let job;
+      let rawJob;
       try {
-        job = readFollowUpJob(jobPath);
+        rawJob = JSON.parse(readFileSync(jobPath, 'utf8'));
+        job = normalizeFollowUpJob(rawJob);
       } catch (err) {
         // Per-file fail-soft: a single bad JSON record cannot remove
         // history for unrelated PRs in the same directory. Logging
@@ -1760,7 +1764,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
 
-      if (terminalKeys.has(key)) recordCommentOnlyFinalRound(job, key);
+      if (terminalKeys.has(key)) recordCommentOnlyFinalRound(rawJob, key);
 
       if (terminalKeys.has(key)) {
         // `claimNextFollowUpJob` increments `currentRound` on claim,

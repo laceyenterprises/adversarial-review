@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Reject worker-authored changes to indexes generated after merge."""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+
+
+GENERATED_PATHS = ("docs/INDEX.md", "projects/INDEX.md")
+MESSAGE = "generated file; automation regenerates it on main — revert your edit"
+
+
+def git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    args = parser.parse_args()
+    diff = git("diff", "--name-only", f"{args.base}...{args.head}", "--", *GENERATED_PATHS)
+    if diff.returncode != 0:
+        print(diff.stderr.strip() or "could not inspect generated index diff", file=sys.stderr)
+        return 2
+
+    violations: list[str] = []
+    for path in (line for line in diff.stdout.splitlines() if line):
+        subjects = git("log", "--format=%s", f"{args.base}..{args.head}", "--", path)
+        if subjects.returncode != 0:
+            print(
+                subjects.stderr.strip() or f"could not inspect commits for {path}", file=sys.stderr
+            )
+            return 2
+        if not subjects.stdout.splitlines() or any(
+            not subject.startswith("[system]") for subject in subjects.stdout.splitlines()
+        ):
+            violations.append(path)
+
+    if violations:
+        for path in violations:
+            print(f"{path}: {MESSAGE}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

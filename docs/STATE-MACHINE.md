@@ -530,6 +530,15 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 > and for hosts without AMA. Operational runbook:
 > [`RUNBOOK-ama-closure.md`](RUNBOOK-ama-closure.md).
 
+A merge-agent rebase of a worker-authored head creates a new SHA that remains
+reviewable unless it carries recognized terminal closer trailers or linked
+closer-author HAM-ticket provenance. A closer committer stamp alone does not
+suppress review, certify daemon clean merge, or arm stale-head hammer resume.
+The watcher runs review on that new SHA before ordinary closure resumes; busy
+bases can therefore produce another rebase/review cycle. Real terminal HAM
+commits with an unlinked author remain accepted by eligibility and reversal
+checks when their linked HAM committer carries the full terminal trailer set.
+
 Once a review settles on the current head, each watcher tick routes closure
 down exactly one of two paths:
 

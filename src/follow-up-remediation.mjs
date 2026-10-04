@@ -1141,9 +1141,33 @@ async function prepareWorkspaceForJob({
     prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
     return prBranchMetadataPromise;
   };
+  // Refuse genuinely shared metadata before inspection can reset a workspace.
+  // A standalone clone with leftover worktree registrations is recoverable,
+  // but preserve its contents and require the expected remote before recloning.
+  const existingGitDir = join(workspaceDir, '.git');
+  const existingGitMetadata = lstatSync(existingGitDir, { throwIfNoEntry: false });
+  let preservedWorktreeRegistrations = false;
+  if (existingGitMetadata) {
+    if (!existingGitMetadata.isDirectory() || existsSync(join(existingGitDir, 'commondir'))) {
+      throw new Error(`Remediation workspace requires standalone Git metadata: ${workspaceDir}`);
+    }
+    if (existsSync(join(existingGitDir, 'worktrees'))) {
+      const state = await inspectWorkspaceState({ workspaceDir, expectedRepo: repo, allowDirty: true, execFileImpl });
+      if (state.actualRepo !== repo || lstatSync(workspaceDir).isSymbolicLink()) {
+        throw new Error(`Cannot safely preserve remediation workspace with worktree registrations: ${workspaceDir}`);
+      }
+      preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId: job.jobId,
+        reason: 'leftover-worktree-registrations', log });
+      preservedWorktreeRegistrations = true;
+    }
+  }
   const { workspaceState, resumeEligible } = await inspectWorkspaceForRetry({
     workspaceDir, workspaceRootDir, jobId: job.jobId, expectedRepo: repo, retryHistory, execFileImpl, log,
   });
+  if (preservedWorktreeRegistrations) {
+    workspaceState.reset = true;
+    workspaceState.reason = 'leftover-worktree-registrations';
+  }
 
   if (!existsSync(join(workspaceDir, '.git'))) {
     // Clone with plain `git` over HTTPS rather than `gh repo clone`. `gh repo

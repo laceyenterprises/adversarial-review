@@ -2326,12 +2326,20 @@ HAM worker-ticket provenance is defined once by
 `src/ama/ham-provenance.mjs::isHamWorkerTicket`: after trimming whitespace,
 accept exactly `HAM` or `AMA-PR-<n>` (decimal digits), case-insensitively.
 `HAM-<suffix>`, `HAM anything`, and other prefix lookalikes do not qualify.
-Closer identity suppression, fast-merge changed-head verification, and
-primary-change reversal authorization all use this predicate. Identity-based
-suppression and reversal authorization require a linked closer/HAM **author**;
-a foreign HAM committer from a rebase is insufficient. Explicit `Closed-By` /
-`Closer` suppression remains a separate trailer-only path, including local Git
-reads without linked GitHub identity; see the limitation in
+Closer identity suppression, fast-merge changed-head verification, primary-change
+reversal authorization, and AMA terminal-remediation eligibility use this ticket
+predicate. `hamCommitIdentityMatches` shares the linked-login rule: accept a
+HAM author, or a HAM committer only with `Worker-Class: hammer` (including
+`hammer-corp` / `hammer-claude` for reversal authorization), a valid
+`Worker-Ticket`, and `Closed-By: hammer (adversarial-pipe-mode)`. This preserves
+legacy HAM commits whose GitHub author is unlinked while rejecting a foreign
+HAM committer stamped by a rebase without that provenance. Eligibility still
+requires its exact `Worker-Class: hammer` safety check. Closer suppression uses
+its narrower closer-login allowlist and requires a HAM ticket in its identity
+branch. Explicit `Closed-By` / `Closer` suppression remains a separate
+trailer-only path, including local Git reads without linked GitHub identity.
+Linked author and committer logins are email-based signals, not proof of the
+push actor; see the limitation in
 [`KNOWN-SHARP-EDGES.md`](../KNOWN-SHARP-EDGES.md#terminal-closer-trailers-are-not-identity-proof).
 
 The only supported changed-head exception is a HAM terminal-remediation commit

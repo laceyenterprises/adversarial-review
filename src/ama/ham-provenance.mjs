@@ -94,4 +94,19 @@ export function hamAuditCommentAuthorMatches(authorOrComment) {
   return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
 }
 
+// Linked logins are provenance signals, not cryptographic identity proof.
+// A rebase can stamp a HAM committer on unrelated work. Accept that signal only
+// with the full terminal HAM trailer set, including for legacy unlinked authors.
+export function hamCommitIdentityMatches(commit, {
+  trailers = parseCommitTrailers(commit?.commit?.message || commit?.message || ''),
+  loginMatches = hamAuditCommentAuthorMatches,
+} = {}) {
+  const login = (identity) => typeof identity === 'object' ? identity?.login : identity;
+  if (loginMatches(login(commit?.author))) return true;
+  return loginMatches(login(commit?.committer))
+    && /^hammer(?:-corp|-claude)?$/i.test(trailers['worker-class'] || '')
+    && isHamWorkerTicket(trailers['worker-ticket'])
+    && trailers['closed-by'] === 'hammer (adversarial-pipe-mode)';
+}
+
 export { HAM_AUDIT_COMMENT_AUTHOR_LOGINS };

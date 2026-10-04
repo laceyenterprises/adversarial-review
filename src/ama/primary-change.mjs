@@ -5,15 +5,11 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
-import { hamAuditCommentAuthorMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
+import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
   parseCommitTrailers(commit?.commit?.message || '')['worker-class'] || '');
-// Rebases can stamp a HAM committer onto a worker-authored commit. Reversal
-// authority requires the linked HAM author, independently of the committer.
-const trustedHammerCommit = (commit) => hamAuditCommentAuthorMatches(
-  commit?.author?.login);
 
 export function primaryChangeRoot({ rootDir, env = process.env } = {}) {
   return resolve(rootDir || env.HAM_ROOT_DIR || fileURLToPath(new URL('../../', import.meta.url)));
@@ -205,7 +201,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
           'non-blocking': parseNonBlockingFindingsSection(review.body) },
       });
       const parsedReview = cache.get(review);
-      if (!isHammer(commit) || !trustedHammerCommit(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
+      if (!isHammer(commit) || !hamCommitIdentityMatches(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
         || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
         || !['request-changes', 'approved', 'comment-only'].includes(parsedReview.verdict)
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
@@ -381,7 +377,7 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
           authorizedPairs.add(pair);
           const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
-            || !trustedHammerCommit(commit)
+            || !hamCommitIdentityMatches(commit)
             || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
           const parentSha = commit.parents[0].sha;
           if (!await isCurrentAuthoritativeFamilyReview(review, reviews, parentSha,

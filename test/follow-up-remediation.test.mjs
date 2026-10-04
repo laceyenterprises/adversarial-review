@@ -12750,3 +12750,67 @@ for (const variant of ['ci-only', 'ci-still-pending', 'genuine', 'mixed', 'unpus
     }
   });
 }
+
+
+for (const resume of [false, true]) {
+  test(`prepareWorkspaceForJob preserves and reclones leftover worktree registrations (resume=${resume})`, async (t) => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'remediation-metadata-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const job = makeJob();
+    const workspaceRoot = resolveRemediationWorkspaceRoot({ rootDir, env: {} });
+    const workspaceDir = path.join(workspaceRoot, job.jobId);
+    mkdirSync(path.join(workspaceDir, '.git', 'worktrees'), { recursive: true });
+    writeFileSync(path.join(workspaceDir, 'repair.txt'), 'preserve local work');
+    if (resume) job.remediationPlan.retryHistory = [{ retryMetadata: { code: 'worker-killed-resume' },
+      worker: { workspaceDir } }];
+    const calls = [];
+    const result = await prepareWorkspaceForJob({ rootDir, job, env: {}, log: { warn() {}, info() {} },
+      execFileImpl: async (command, args) => {
+        calls.push([command, ...args]);
+        if (command === 'git' && args[0] === 'config') return { stdout: `https://github.com/${job.repo}.git\n` };
+        if (command === 'git' && args[0] === 'status') return { stdout: ' M repair.txt\n' };
+        if (command === 'git' && args[0] === 'clone') mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
+        if (command === 'gh') return { stdout: JSON.stringify({ base: { ref: 'main' },
+          head: { ref: 'feature', repo: { full_name: job.repo } } }) };
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const backup = readdirSync(workspaceRoot).find(name => name.startsWith(`${job.jobId}.resume-backup-`));
+    assert.ok(backup);
+    assert.deepEqual(result.workspaceState, { action: 'recloned', reason: 'leftover-worktree-registrations' });
+    assert.equal(readFileSync(path.join(workspaceRoot, backup, 'repair.txt'), 'utf8'), 'preserve local work');
+    assert.equal(existsSync(path.join(result.workspaceDir, '.git', 'worktrees')), false);
+    assert.equal(calls.filter(call => call[1] === 'clone').length, 1);
+    assert.equal(calls.some(call => call.includes('extensions.worktreeConfig')), true);
+  });
+}
+
+for (const metadata of ['git-file', 'git-symlink', 'git-broken-symlink', 'commondir', 'foreign-remote']) {
+  test(`prepareWorkspaceForJob refuses unsafe metadata before mutations: ${metadata}`, async (t) => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'remediation-shared-metadata-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const job = makeJob();
+    const workspaceDir = path.join(resolveRemediationWorkspaceRoot({ rootDir, env: {} }), job.jobId);
+    const gitDir = path.join(workspaceDir, '.git');
+    mkdirSync(workspaceDir, { recursive: true });
+    if (metadata === 'git-file') writeFileSync(gitDir, 'gitdir: /external\n');
+    else if (metadata === 'git-symlink') symlinkSync(rootDir, gitDir);
+    else if (metadata === 'git-broken-symlink') symlinkSync(path.join(rootDir, 'absent'), gitDir);
+    else {
+      mkdirSync(gitDir);
+      if (metadata === 'commondir') writeFileSync(path.join(gitDir, 'commondir'), '/external');
+      else mkdirSync(path.join(gitDir, 'worktrees'));
+    }
+    writeFileSync(path.join(workspaceDir, 'repair-preserved.txt'), 'unchanged');
+    const calls = [];
+    await assert.rejects(prepareWorkspaceForJob({ rootDir, job, env: {}, log: { warn() {} },
+      execFileImpl: async (command, args) => {
+        calls.push([command, ...args]);
+        return { stdout: args[0] === 'config' ? 'https://github.com/foreign/repo.git\n' : '' };
+      },
+    }), /standalone Git metadata|Cannot safely preserve/);
+    assert.ok(calls.every(call => call[0] === 'git' && ['config', 'status'].includes(call[1])));
+    if (metadata !== 'git-broken-symlink') assert.equal(existsSync(gitDir), true);
+    else assert.equal(readFileSync(path.join(workspaceDir, 'repair-preserved.txt'), 'utf8'), 'unchanged');
+  });
+}

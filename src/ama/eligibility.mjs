@@ -27,6 +27,8 @@ import {
 } from './labels.mjs';
 import {
   hamAuditCommentAuthorMatches,
+  hamCommitIdentityMatches,
+  isHamWorkerTicket,
   parseRemediatedFindingsTrailer,
 } from './ham-provenance.mjs';
 import { normalizeCoverageTitle } from '../kernel/remediation-reply.mjs';
@@ -537,19 +539,6 @@ function verifiedCommitHasNonEmptyDiff(verifiedCommit) {
   return Array.isArray(verifiedCommit.changedFiles) && verifiedCommit.changedFiles.length > 0;
 }
 
-function verifiedHamCommitIdentityMatches(verifiedCommit) {
-  if (!verifiedCommit || typeof verifiedCommit !== 'object') return false;
-  const committer = typeof verifiedCommit.committer === 'object'
-    ? verifiedCommit.committer?.login
-    : verifiedCommit.committer;
-  if (committer) return hamAuditCommentAuthorMatches(committer);
-  const author = typeof verifiedCommit.author === 'object'
-    ? verifiedCommit.author?.login
-    : verifiedCommit.author;
-  if (author) return hamAuditCommentAuthorMatches(author);
-  return false;
-}
-
 function validateRebaseReviewCoverageEvidence(
   evidence,
   {
@@ -839,8 +828,8 @@ function validateHamTerminalRemediationEvidence(
   // `directReviewedParent`, so a hammer head with commits between it and the
   // reviewed head could never self-certify. Accept either honest claim: the
   // reviewed-head binding comes from the trailer (attested by a verified hammer
-  // committer via `checks.commitIdentity`), and the claim must still agree with
-  // ground truth about the parent it names.
+  // identity and HAM provenance via `checks.commitIdentity`), and the claim
+  // must still agree with ground truth about the parent it names.
   const parentClaimHonest =
     shaClaimMatches(parentSha, String(reviewedHead || ''))
     || (verifiedParentSha !== '' && shaClaimMatches(parentSha, verifiedParentSha));
@@ -851,13 +840,13 @@ function validateHamTerminalRemediationEvidence(
     && parentClaimHonest;
   const checks = {
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
-    ticket: /^(HAM|AMA-PR-\d+)$/i.test(ticket),
+    ticket: isHamWorkerTicket(ticket),
     head:
       verifiedCommitSha !== ''
       && verifiedCommitSha === String(currentHead || '')
       && shaClaimMatches(commitSha, verifiedCommitSha),
     parent: directReviewedParent || reviewedHeadTrailerCoversRebase,
-    commitIdentity: verifiedHamCommitIdentityMatches(verifiedCommit),
+    commitIdentity: hamCommitIdentityMatches(verifiedCommit, { trailers: verifiedTrailers }),
     nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
     primaryChange: checkPrimaryChange(verifiedCommit?.primaryChange, currentHead, { strictNonBlockingRemediation }).ok,
     auditComment:

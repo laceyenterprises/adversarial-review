@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
-import { isHamWorkerTicket, parseCommitTrailers } from './ama/ham-provenance.mjs';
+import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -337,13 +337,17 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
 
   const candidates = [
     commit?.author?.login,
+    commit?.committer?.login,
   ].map(normalizeIdentityPart).filter(Boolean);
   const closerIdentity = candidates.find((candidate) => TERMINAL_CLOSER_BOT_IDENTITIES.has(candidate));
-  // Rebase may stamp a foreign committer from shared config. Only an actual
-  // closer author with HAM provenance may suppress by identity; Closed-By
-  // remains the explicit terminal marker above (including unlinked bot commits).
+  // Rebase may stamp a foreign committer from shared config. The shared
+  // helper requires a closer author or full terminal HAM committer provenance.
+  // Closed-By remains the explicit terminal marker above (including unlinked bots).
   const workerTicket = normalizedTrailers['worker-ticket'] || '';
-  if (closerIdentity && isHamWorkerTicket(workerTicket)) {
+  if (closerIdentity && isHamWorkerTicket(workerTicket) && hamCommitIdentityMatches(commit, {
+    trailers: normalizedTrailers,
+    loginMatches: (login) => TERMINAL_CLOSER_BOT_IDENTITIES.has(normalizeIdentityPart(login)),
+  })) {
     return {
       suppressed: true,
       reason: 'closer-commit-identity',

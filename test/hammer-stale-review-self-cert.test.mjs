@@ -377,3 +377,18 @@ test('orchestration: an external push at a stale head NEVER arms hammer resume (
   // EXTERNAL PUSH → resume NEVER armed. This is the safety invariant.
   assert.equal(payload.dispatchContext.allowStaleReviewHeadHammerResume, false);
 });
+
+
+test('watcher orchestration: merge-agent rebase of worker-authored head stays reviewable and cannot resume', async () => {
+  const commit = { author: { login: 'codex-worker-bot' },
+    committer: { login: 'merge-agent-lacey' },
+    message: 'worker change\n\nWorker-Class: codex\nWorker-Ticket: LAC-1223' };
+  const suppression = isTerminalCloserCommitIdentity(commit);
+  assert.equal(suppression.suppressed, false);
+  const payload = await runOrchestrationForSuppression(suppression.suppressed);
+  assert.equal(payload.dispatchContext.allowStaleReviewHeadHammerResume, false);
+  assert.equal(isHammerRemediableEligibilityMiss(['stale-review-head'], {
+    reviewCycleExhausted: false,
+    allowStaleReviewHeadHammerResume: payload.dispatchContext.allowStaleReviewHeadHammerResume,
+  }), false);
+});

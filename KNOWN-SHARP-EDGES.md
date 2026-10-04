@@ -212,6 +212,13 @@ linked author identity. A worker or contributor can copy those message trailers
 and suppress re-review or arm stale-head closer resume. The linked-author plus
 HAM-ticket identity branch does not eliminate this older trailer-only risk.
 
+GitHub links both `author.login` and `committer.login` from commit email
+headers. A pusher can forge either by setting the corresponding Git email to
+an allowlisted bot's address. A linked author plus HAM ticket, or a linked
+committer plus the full HAM trailers, prevents accidental committer stamping
+from being sufficient but does not authenticate a deliberate forger. Signed
+commit verification or verified push-actor evidence would be needed for that.
+
 Local Git reads intentionally keep working without GitHub credentials and have
 no linked login data. Binding only the remote branch to a closer author would
 leave the local-first path able to bypass that binding. A follow-up must carry

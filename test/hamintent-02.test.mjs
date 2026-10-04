@@ -22,8 +22,8 @@ const file = { filename: path, status: 'modified', additions: 1, deletions: 1,
 const body = `## Blocking issues\n- **Narrow push enforcement**\n  - **File:** \`${path}\`\n  - **Lines:** \`10\`\n  - **Problem:** Push ratchet blocks unrelated work.\n  - **Recommended fix:** Revert this push enforcement.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes`;
 const review = { node_id: 'PRR_fixture', html_url: 'https://github.com/fixture/repo/pull/1#pullrequestreview-1',
   commit_id: author, state: 'CHANGES_REQUESTED', user: { login: 'lacey-codex-reviewer[bot]' }, body };
-const commit = { sha: head, parents: [{ sha: author }], author: { login: 'the-hammer-lacey[bot]' }, committer: { login: 'the-hammer-lacey[bot]' },
-  commit: { message: `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${author}\nReversal-Authorized-By: PRR_fixture finding=1` },
+const commit = { sha: head, parents: [{ sha: author }], author: { login: null }, committer: { login: 'the-hammer-lacey[bot]' },
+  commit: { message: `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${author}\nReversal-Authorized-By: PRR_fixture finding=1` },
   files: [{ ...file, patch: '@@ -10 +10 @@\n-enforcement: true\n+enforcement: false' }] };
 function evidence() {
   return { headSha: head, hasHammerCommits: true, primaryHead: author, mergeBase: base,
@@ -382,7 +382,7 @@ test('context includes every reserved finding, only its latest comment, with a t
   assert.ok(bounded.length > 240000);
 });
 
-test('reversal requires GitHub-linked HAM author in collector and predicate', async () => {
+test('reversal accepts linked HAM author or a committer with full terminal provenance in collector and predicate', async () => {
   const compare = { merge_base_commit: { sha: base }, status: 'ahead', files: [file] };
   for (const identity of [
     { committer: { login: 'pr-author' }, author: { login: 'the-hammer-lacey[bot]' } },
@@ -394,7 +394,8 @@ test('reversal requires GitHub-linked HAM author in collector and predicate', as
   ]) {
     const liveCommit = { ...commit, ...identity };
     const e = structuredClone(evidence()); e.reversalAuthorizations[0].commit = liveCommit;
-    const allowed = identity.author?.login === 'the-hammer-lacey[bot]';
+    const allowed = identity.author?.login === 'the-hammer-lacey[bot]'
+      || ['the-hammer-lacey[bot]', 'merge-agent-lacey'].includes(identity.committer?.login);
     assert.equal(checkPrimaryChange(e, head).ok, Boolean(allowed));
     const collected = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
       get: async (url) => {
@@ -608,4 +609,20 @@ test('primary-change reversal shares exact HAM and AMA dispatch ticket provenanc
     e.reversalAuthorizations[0].commit.commit.message = commit.commit.message.replace('Worker-Ticket: HAM', `Worker-Ticket: ${ticket}`);
     assert.equal(checkPrimaryChange(e, head).ok, allowed, ticket);
   }
+});
+
+
+test('unlinked-author HAM reversal requires every terminal provenance trailer; bare rebase stamps refuse', () => {
+  assert.equal(commit.author.login, null); // Captured production identity shape.
+  for (const trailer of ['Worker-Class: hammer', 'Worker-Ticket: HAM',
+    'Closed-By: hammer (adversarial-pipe-mode)']) {
+    const e = structuredClone(evidence());
+    e.reversalAuthorizations[0].commit.commit.message = commit.commit.message.replace(trailer, '');
+    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted', trailer);
+  }
+  const e = structuredClone(evidence());
+  e.reversalAuthorizations[0].commit.author = { login: 'codex-worker-bot' };
+  e.reversalAuthorizations[0].commit.commit.message = commit.commit.message.replace(
+    'Closed-By: hammer (adversarial-pipe-mode)', '');
+  assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
 });

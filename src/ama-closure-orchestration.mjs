@@ -1903,23 +1903,9 @@ export async function maybeDispatchAmaClosureFor({
       maxConcurrent: cfg.amaCloserMaxConcurrentLaunches,
     });
     backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
-    const scopedRequest = labelNames?.includes('merge-agent-requested')
-      && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
-        headSha: dispatchContext.targetRemediationSha,
-        prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
-      });
-    if (scopedRequest) {
-      const held = isHeldAmaCloserLease(rootDir, {
-        repo: repoPath, prNumber, headSha: dispatchContext.targetRemediationSha,
-      });
-      if (held) return withAmaDispatchMetadata({
-        dispatched: false, skipMergeAgent: true, reason: 'lease-held',
-      }, { amaEnabled: true });
-      backgroundQueue.cancel?.(backgroundKey);
-      if (!backgroundSettled) return withAmaDispatchMetadata({
-        dispatched: false, skipMergeAgent: true, reason: AMA_HAMMER_BACKGROUND_REASON,
-      }, { amaEnabled: true });
-    }
+    // A scoped request must observe the closer's gates before taking ownership.
+    // Skipping a fresh run here would erase a consumed safety refusal on the
+    // next tick, letting the same label bypass risk policy or a dispatch cap.
     if (!backgroundSettled) {
       const submission = backgroundQueue.submit({
         key: backgroundKey,
@@ -2193,21 +2179,42 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
-  // Only explicit, scoped operator authority may preempt a safety refusal or
-  // a background/status attempt. Exact-head lease ownership still wins.
-  if (amaClosureResult?.amaEnabled
-    && (isSafetyRecoveryHold(amaClosureResult)
-      || [AMA_HAMMER_BACKGROUND_REASON, 'dispatch-status-unknown'].includes(amaClosureResult?.reason))
-    && !isHeldAmaCloserLease(rootDir, { repo: repoPath, prNumber,
-      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha })
-    && !labelNames?.some((label) => ['merge-agent-skip', 'do-not-merge'].includes(label))
+  const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
+  const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
+  const safetyHold = isSafetyRecoveryHold(amaClosureResult);
+  const liveLease = amaEnabled && findLiveAmaCloserLease(rootDir, { repo: repoPath, prNumber });
+  const amaCloserLeaseHeld = Boolean(liveLease && isHeldAmaCloserLease(rootDir, {
+    repo: repoPath, prNumber, headSha: liveLease.headSha,
+  }));
+  // The only safety exception is scoped primary-change evidence recovery.
+  // A newly submitted background run has not evaluated its gates yet and
+  // cannot be preempted; an unresolved status probe can yield without a lease.
+  const amaClosureOperatorPreemptable = (
+    ['primary-change-needs-operator', 'primary-change-repair-required'].includes(amaClosureResult?.reason)
+      && amaClosureResult?.needsOperator === true
+  ) || (amaClosureResult?.reason === 'dispatch-status-unknown' && !safetyHold);
+  const mergeAgentRequestedScoped = !labelNames?.some((label) =>
+    ['merge-agent-skip', 'do-not-merge', 'no-merge-hold'].includes(label))
     && !reviewStateRow?.remediation_pending
     && labelNames?.includes('merge-agent-requested')
     && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
       headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
       prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
-    })) {
-    const coexistence = { action: COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK };
+    });
+  const coexistence = decideMergeAgentCoexistence({
+    amaEnabled,
+    amaClosureDispatched: false,
+    amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent) || safetyHold,
+    amaCloserLeaseHeld,
+    amaClosureOperatorPreemptable,
+    amaClosureEligibilityMiss,
+    amaClosureRecoverableFailure: amaEnabled && !amaClosureResult?.skipMergeAgent
+      && !safetyHold && !amaClosureEligibilityMiss,
+    mergeAgentRequestedScoped,
+  });
+  if (amaCloserLeaseHeld) return { outcome: 'ama-pending', amaClosureResult, coexistence };
+  if (coexistence.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
+    && amaClosureOperatorPreemptable) {
     logger?.log?.(JSON.stringify({ event: 'ama.primary_change.operator_fallback',
       repo: repoPath, pr: prNumber, headSha: currentRevisionRef || candidate?.headSha,
       actor: mergeAgentRequestEvent.actor, eventId: mergeAgentRequestEvent.id,
@@ -2219,7 +2226,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     logger?.log?.(`[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only final-round head; not counted toward the retain-loop cap`);
     return { outcome: 'ama-pending', amaClosureResult };
   }
-  if (amaClosureResult?.amaEnabled && (amaClosureResult?.skipMergeAgent || (amaClosureResult?.reason === 'not-eligible'
+  if (amaClosureResult?.amaEnabled && (safetyHold || amaClosureResult?.skipMergeAgent || (amaClosureResult?.reason === 'not-eligible'
     && !isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
       headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
       prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
@@ -2240,28 +2247,6 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     });
   }
   if (amaClosureResult?.skipMergeAgent) return { outcome: 'ama-pending', amaClosureResult };
-
-  const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
-  const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
-  const amaClosureRecoverableFailure = amaEnabled
-    && !amaClosureResult?.dispatched
-    && !amaClosureResult?.skipMergeAgent
-    && !amaClosureEligibilityMiss;
-  const mergeAgentRequestedScoped = isMergeAgentRequestedScoped(
-    mergeAgentRequestEvent,
-    {
-      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
-      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
-    },
-  );
-  const coexistence = decideMergeAgentCoexistence({
-    amaEnabled,
-    amaClosureDispatched: Boolean(amaClosureResult?.dispatched),
-    amaClosurePending: Boolean(amaClosureResult?.skipMergeAgent),
-    amaClosureEligibilityMiss,
-    amaClosureRecoverableFailure,
-    mergeAgentRequestedScoped,
-  });
 
   if (coexistence.action === COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION) {
     return { outcome: 'await-operator', amaClosureResult, coexistence };

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -502,65 +502,190 @@ test('background mode: a closer that throws is applied next tick as ama-dispatch
   assert.equal(second.reason, 'ama-dispatch-failed');
 });
 
-test('#7681 replay: retained refusal dispatches operator fallback without another background run', async () => {
+test('#7681: scoped primary-change recovery applies a settled refusal without another run', async () => {
   const queue = createAmaHammerBackgroundQueue();
-  const args = closureArgs();
-  const key = amaHammerBackgroundKey({ repo: args.repoPath, prNumber: args.prNumber, headSha: HEAD });
-  queue.submit({ key, run: async () => ({
-    dispatched: false, skipMergeAgent: true, needsOperator: true,
-    reason: 'primary-change-repair-required',
-  }) });
-  await queue.drain();
   let calls = 0;
-  const run = (eventHead = HEAD) => resolveMergeAgentCoexistenceForWatcher({
-    ...args, labelNames: ['merge-agent-requested'],
-    mergeAgentRequestEvent: {
-      id: 'operator-event', actor: 'operator', headSha: eventHead,
-      createdAt: '2026-10-04T13:56:00Z',
+  const args = closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async () => {
+      calls += 1;
+      return { dispatched: false, skipMergeAgent: true, needsOperator: true,
+        reason: 'primary-change-repair-required' };
     },
-    maybeDispatchAmaClosureForImpl: (input) => maybeDispatchAmaClosureFor({
-      ...args, ...input,
-      resolveAmaHammerDispatchModeImpl: () => 'background',
-      amaHammerBackgroundQueueImpl: () => queue,
-      maybeDispatchAmaCloserImpl: async () => { calls += 1; throw new Error('must not dispatch'); },
-    }),
-    recoverAmaAutomationImpl: async ({ result }) => ({ outcome: 'await-operator', amaClosureResult: result }),
   });
-  for (let walk = 0; walk < 3; walk += 1) {
-    const result = await run();
-    assert.equal(result.outcome, 'dispatch-merge-agent');
-    assert.deepEqual(result.dispatchEnv, { AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true' });
-  }
-  assert.equal((await run('stale-head')).outcome, 'await-operator');
-  assert.equal(calls, 0);
-  assert.deepEqual(queue.snapshot().keys, []);
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  const result = await resolveMergeAgentCoexistenceForWatcher({
+    ...args, labelNames: ['merge-agent-requested'],
+    mergeAgentRequestEvent: scopedEvent(),
+    maybeDispatchAmaClosureForImpl: (input) => maybeDispatchAmaClosureFor({ ...args, ...input }),
+  });
+  assert.equal(result.outcome, 'dispatch-merge-agent');
+  assert.deepEqual(result.dispatchEnv, { AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true' });
+  assert.equal(calls, 1, 'the applying tick does not rerun the closer');
+  assert.deepEqual(queue.snapshot().settledKeys, []);
 });
 
-test('a new head discards the retained refusal', async () => {
+function scopedEvent(headSha = HEAD) {
+  return { id: 'operator-event', actor: 'operator', headSha, createdAt: '2026-10-04T13:56:00Z' };
+}
+
+for (const headSha of [HEAD, 'previous-head']) {
+  test(`scoped request preserves live closer ownership at ${headSha}`, async (t) => {
+    const args = closureArgs();
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repoPath,
+      prNumber: args.prNumber, headSha, watcherPid: process.pid });
+    for (const skipMergeAgent of [true, false]) {
+      const result = await resolveMergeAgentCoexistenceForWatcher({
+        ...args, labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
+        maybeDispatchAmaClosureForImpl: async () => ({
+          amaEnabled: true, dispatched: false, skipMergeAgent, reason: 'dispatch-status-unknown',
+        }),
+        recoverAmaAutomationImpl: async () => assert.fail('a live lease retains ownership'),
+      });
+      assert.equal(result.outcome, 'ama-pending');
+      assert.equal(result.coexistence.action, 'ama-closer-pending');
+      assert.equal(result.dispatchEnv, undefined);
+    }
+  });
+}
+
+for (const hold of [
+  { reason: 'risk-class-not-permitted' },
+  { reason: 'security-hold' },
+  { reason: 'destructive-migration' },
+  { reason: 'label-no-merge-hold' },
+  { reason: 'two-key' },
+  { reason: 'hammer-retry-cap-suppressed', needsOperator: true },
+  { reason: 'not-eligible', reasons: ['risk-class-not-permitted'], needsOperator: true },
+]) {
+  test(`scoped label cannot bypass ${hold.reason}`, async (t) => {
+    const args = closureArgs();
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    for (const skipMergeAgent of [true, false]) {
+      const result = await resolveMergeAgentCoexistenceForWatcher({
+        ...args, labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
+        maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+          skipMergeAgent, ...hold }),
+        recoveryOptions: { pageImpl: async () => assert.fail('safety holds do not page recovery') },
+      });
+      assert.equal(result.outcome, 'await-operator');
+      assert.equal(result.dispatchEnv, undefined);
+    }
+  });
+}
+
+for (const reason of ['primary-change-needs-operator', 'primary-change-repair-required', 'dispatch-status-unknown']) {
+  test(`scoped request may recover ${reason} without a live lease`, async (t) => {
+    const args = closureArgs();
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    const run = (labelNames, event = scopedEvent()) => resolveMergeAgentCoexistenceForWatcher({
+      ...args, labelNames, mergeAgentRequestEvent: event,
+      maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+        skipMergeAgent: true, reason, needsOperator: reason.startsWith('primary-change') }),
+      recoverAmaAutomationImpl: async ({ result }) => ({
+        outcome: reason === 'dispatch-status-unknown' ? 'ama-pending' : 'await-operator', amaClosureResult: result,
+      }),
+    });
+    assert.equal((await run(['merge-agent-requested'])).outcome, 'dispatch-merge-agent');
+    for (const stop of ['no-merge-hold', 'do-not-merge', 'merge-agent-skip']) {
+      assert.notEqual((await run(['merge-agent-requested', stop])).outcome, 'dispatch-merge-agent');
+    }
+    assert.notEqual((await run(['merge-agent-requested'], scopedEvent('old-head'))).outcome, 'dispatch-merge-agent');
+  });
+}
+
+test('background mode re-evaluates a cleared safety hold on the same head', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  let held = true;
+  let calls = 0;
+  const args = closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async () => {
+      calls += 1;
+      return held
+        ? { dispatched: false, skipMergeAgent: true, needsOperator: true, reason: 'risk-class-not-permitted' }
+        : { dispatched: true, launchRequestId: 'lrq_recovered' };
+    },
+  });
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  assert.equal((await maybeDispatchAmaClosureFor(args)).reason, 'risk-class-not-permitted');
+  held = false;
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(calls, 2);
+  assert.equal(result.dispatched, true);
+});
+
+test('a scoped label still evaluates closer safety gates on every background cycle', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  let calls = 0;
+  const args = closureArgs({
+    labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async () => {
+      calls += 1;
+      return { dispatched: false, skipMergeAgent: true, needsOperator: true,
+        reason: 'hammer-retry-cap-suppressed' };
+    },
+  });
+  const run = () => resolveMergeAgentCoexistenceForWatcher({
+    ...args,
+    maybeDispatchAmaClosureForImpl: (input) => maybeDispatchAmaClosureFor({ ...args, ...input }),
+    recoveryOptions: { pageImpl: async () => assert.fail('safety holds do not page recovery') },
+  });
+  for (let cycle = 0; cycle < 3; cycle += 1) {
+    assert.equal((await run()).outcome, 'ama-pending');
+    await queue.drain();
+    assert.equal((await run()).outcome, 'await-operator');
+  }
+  assert.equal(calls, 3);
+});
+
+test('safety refusals are consumed once and expire under the normal TTL', async () => {
+  let now = 0;
+  const queue = createAmaHammerBackgroundQueue({ nowMs: () => now, settledTtlMs: 500 });
+  const submit = () => queue.submit({ key: 'o/r#1@head', run: async () => ({
+    dispatched: false, needsOperator: true, reason: 'primary-change-repair-required',
+  }) });
+  submit();
+  await queue.drain();
+  assert.ok(queue.takeSettled('o/r#1@head'));
+  assert.equal(queue.takeSettled('o/r#1@head'), null);
+  submit();
+  await queue.drain();
+  now = 501;
+  assert.equal(queue.takeSettled('o/r#1@head'), null);
+});
+
+for (const throws of [false, true]) {
+  test(`cancelled background ${throws ? 'error' : 'result'} is never replayed`, async () => {
+    const queue = createAmaHammerBackgroundQueue();
+    const gate = deferred();
+    let signal;
+    queue.submit({ key: 'o/r#1@head', run: (input) => { signal = input; return gate.promise; } });
+    queue.cancel('o/r#1@head');
+    assert.equal(signal.aborted, true);
+    if (throws) gate.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+    else gate.resolve({ reason: 'operator-fallback-requested' });
+    await queue.drain();
+    assert.equal(queue.takeSettled('o/r#1@head'), null);
+  });
+}
+
+
+test('a changed head discards the previous head settled refusal', async () => {
   const queue = createAmaHammerBackgroundQueue();
   queue.submit({ key: 'o/r#1@old', run: async () => ({
     dispatched: false, needsOperator: true, reason: 'primary-change-repair-required',
   }) });
   await queue.drain();
-  assert.ok(queue.takeSettled('o/r#1@old'));
-  queue.submit({ key: 'o/r#1@new', run: async () => ({ dispatched: false }) });
-  await queue.drain();
+  assert.equal(queue.takeSettled('o/r#1@new'), null);
   assert.equal(queue.takeSettled('o/r#1@old'), null);
-});
-
-test('scoped request preserves live exact-head lease ownership', async () => {
-  const args = closureArgs();
-  acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repoPath,
-    prNumber: args.prNumber, headSha: HEAD, watcherPid: process.pid });
-  const result = await resolveMergeAgentCoexistenceForWatcher({
-    ...args, labelNames: ['merge-agent-requested'],
-    mergeAgentRequestEvent: { id: 'lease-event', actor: 'operator',
-      headSha: HEAD, createdAt: '2026-10-04T13:56:00Z' },
-    maybeDispatchAmaClosureForImpl: async () => ({
-      amaEnabled: true, dispatched: false, skipMergeAgent: true,
-      reason: AMA_HAMMER_BACKGROUND_REASON,
-    }),
-    recoverAmaAutomationImpl: async ({ result }) => ({ outcome: 'ama-pending', amaClosureResult: result }),
-  });
-  assert.equal(result.outcome, 'ama-pending');
 });

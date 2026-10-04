@@ -1,4 +1,3 @@
-import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
 import { effectiveCloserCap, warnCloserFloor } from './ama/closure-capacity.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
@@ -126,12 +125,12 @@ export function createAmaHammerBackgroundQueue({
     entry.promise = settled
       .then(
         (result) => {
-          recordSettled(entry.key, { ok: true, result });
+          if (!entry.cancelled) recordSettled(entry.key, { ok: true, result });
           entry.onSettled?.({ ok: true, result, elapsedMs: nowMs() - entry.startedAtMs });
           return result;
         },
         (error) => {
-          recordSettled(entry.key, { ok: false, error });
+          if (!entry.cancelled) recordSettled(entry.key, { ok: false, error });
           entry.onSettled?.({ ok: false, error, elapsedMs: nowMs() - entry.startedAtMs });
           return null;
         },
@@ -176,11 +175,9 @@ export function createAmaHammerBackgroundQueue({
       return { state: 'queued', key, queuedAtMs: entry.queuedAtMs };
     },
     /**
-     * Return the settled outcome for `key`, retaining safety refusals until
-     * the head changes (subject to the bounded map). Other outcomes are consumed.
-     * Return
-     * (`{ ok, result | error, settledAtMs }`), or null when there is none or it
-     * is older than `settledTtlMs`.
+     * Consume the settled outcome for `key` (`{ ok, result | error, settledAtMs }`),
+     * or return null when there is none or it is older than `settledTtlMs`.
+     * Refusals are consumed too, so subsequent ticks re-evaluate same-head gates.
      */
     takeSettled(key) {
       for (const oldKey of settled.keys()) {
@@ -188,9 +185,8 @@ export function createAmaHammerBackgroundQueue({
       }
       const outcome = settled.get(key);
       if (!outcome) return null;
-      const refusal = outcome.ok && !outcome.result?.dispatched && isSafetyRecoveryHold(outcome.result);
-      if (!refusal) settled.delete(key);
-      if (!refusal && nowMs() - outcome.settledAtMs > settledTtlMs) return null;
+      settled.delete(key);
+      if (nowMs() - outcome.settledAtMs > settledTtlMs) return null;
       return outcome;
     },
     cancel(key) {

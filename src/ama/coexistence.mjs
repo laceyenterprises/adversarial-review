@@ -55,7 +55,7 @@ export const MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE = 'true';
  *                                     Re-emitted here only for symmetry; the
  *                                     watcher returns immediately on it.
  *   ama-closer-pending                AMA dispatch is in-flight (lease held
- *                                     for the exact head); watcher
+ *                                     for any head of the PR); watcher
  *                                     should NOT also dispatch merge-agent.
  *   merge-agent-operator-fallback     cfg.enabled=true AND a current-head
  *                                     non-author merge-agent-requested
@@ -117,20 +117,21 @@ export function isMergeAgentRequestedScoped(event, prMetadata) {
  * Decision precedence:
  *
  *   1. AMA fired → AMA-CLOSER (no merge-agent on this tick).
- *   2. Scoped operator request preempts pending probes/background work.
- *      A live exact-head closer lease retains AMA ownership.
- *   3. cfg.enabled=false → MERGE-AGENT-DEFAULT (current behavior).
- *   4. cfg.enabled=true + current-head non-author `merge-agent-requested`
+ *   2. A live closer lease at any head retains AMA ownership.
+ *   3. Scoped operator request preempts only explicitly preemptable holds/probes.
+ *   4. cfg.enabled=false → MERGE-AGENT-DEFAULT (current behavior).
+ *   5. cfg.enabled=true + current-head non-author `merge-agent-requested`
  *      → MERGE-AGENT-OPERATOR-FALLBACK (with override env).
- *   5. cfg.enabled=true + AMA launch/status failure + no operator fallback
+ *   6. cfg.enabled=true + AMA launch/status failure + no operator fallback
  *      → MERGE-AGENT-RECOVERY-FALLBACK.
- *   6. cfg.enabled=true + AMA NOT eligible + no operator fallback
+ *   7. cfg.enabled=true + AMA NOT eligible + no operator fallback
  *      → AWAIT-OPERATOR-ACTION.
  *
  * @param {Object} args
  * @param {boolean} args.amaEnabled
  * @param {boolean} args.amaClosureDispatched
- * @param {boolean=} args.amaCloserLeaseHeld Live closer lease for the exact head.
+ * @param {boolean=} args.amaCloserLeaseHeld Live closer lease at any head of the PR.
+ * @param {boolean=} args.amaClosureOperatorPreemptable Scoped recovery may preempt this hold/probe.
  * @param {boolean=} args.amaClosurePending
  * @param {boolean=} args.amaClosureEligibilityMiss
  * @param {boolean=} args.amaClosureRecoverableFailure
@@ -142,6 +143,7 @@ export function decideMergeAgentCoexistence({
   amaClosureDispatched,
   amaClosurePending = false,
   amaCloserLeaseHeld = false,
+  amaClosureOperatorPreemptable = false,
   amaClosureEligibilityMiss = false,
   amaClosureRecoverableFailure = false,
   mergeAgentRequestedScoped,
@@ -149,10 +151,13 @@ export function decideMergeAgentCoexistence({
   if (amaClosureDispatched) {
     return { action: COEXISTENCE_ACTION.AMA_CLOSER };
   }
-  if (amaEnabled && mergeAgentRequestedScoped && !amaCloserLeaseHeld) {
+  if (amaCloserLeaseHeld) {
+    return { action: COEXISTENCE_ACTION.AMA_CLOSER_PENDING };
+  }
+  if (amaEnabled && mergeAgentRequestedScoped && amaClosureOperatorPreemptable) {
     return { action: COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK };
   }
-  if (amaClosurePending || amaCloserLeaseHeld) {
+  if (amaClosurePending) {
     return { action: COEXISTENCE_ACTION.AMA_CLOSER_PENDING };
   }
   if (!amaEnabled) {

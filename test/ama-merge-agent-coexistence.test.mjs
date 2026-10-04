@@ -260,9 +260,18 @@ test('mergeAgentDispatchEnvForAction returns null for every non-fallback action'
   }
 });
 
-test('scoped operator request preempts a background attempt or status probe', () => {
+test('scoped operator request preempts an explicitly recoverable hold or status probe', () => {
   assert.equal(decideMergeAgentCoexistence({
     amaEnabled: true, amaClosureDispatched: false, amaClosurePending: true,
-    mergeAgentRequestedScoped: true,
+    mergeAgentRequestedScoped: true, amaClosureOperatorPreemptable: true,
   }).action, COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK);
+});
+
+
+test('scoped operator request does not preempt arbitrary pending work or safety holds', () => {
+  const result = decideMergeAgentCoexistence({
+    amaEnabled: true, amaClosureDispatched: false, amaClosurePending: true,
+    mergeAgentRequestedScoped: true,
+  });
+  assert.equal(result.action, COEXISTENCE_ACTION.AMA_CLOSER_PENDING);
 });

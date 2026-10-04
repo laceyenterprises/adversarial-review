@@ -287,7 +287,7 @@ The control is `watcher.ama_hammer_dispatch_mode`, with env override
 | Mode | Contract |
 |---|---|
 | `inline` (default) | The posted-review phase awaits the hammer `hq dispatch` attempt before moving to the next row. This is the historical behavior and the fail-safe fallback for missing, unreadable, or unknown config values. |
-| `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher does not fall through to merge-agent. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
+| `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher retains ownership until the closer gates return an outcome; a scoped operator label does not skip that evaluation. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
 
 The queue is process-local, bounded, and keyed by PR@head
 (`<owner>/<repo>#<pr>@<head>`). It starts hammer `hq dispatch`
@@ -319,7 +319,11 @@ for review, and its operator alert says the PR is a draft. A settle-log failure 
 leave an unhandled background promise rejection.
 
 When a run settles, the queue keeps its outcome for that PR@head (at most 256
-outcomes, dropped after an hour). The next tick for that PR@head **applies the
+outcomes, dropped after an hour). Safety refusals are consumed once too, so
+removing a hold or applying same-head two-key evidence lets the next submitting
+tick re-evaluate it. Repeated primary-change refusals still reach the closer's
+three-observation SEV1 page threshold; replay does not replace an observation.
+The next tick for that PR@head **applies the
 outcome instead of submitting again**: the result goes through the same handling
 as an inline call. A terminal rejection from the closer's own gates (hammer retry
 cap, structural ineligibility) or a thrown error (`ama-dispatch-failed`) reaches
@@ -1311,7 +1315,18 @@ the PR branch or restore missing history/patch access. A new head re-evaluates
 the predicate. If evidence recovery needs another worker, an attributable operator
 can apply `merge-agent-requested` scoped to the current head and latest PR update.
 The existing operator-fallback lane accepts both the closer's
-`primary-change-repair-required` and the daemon's `primary-change-needs-operator`.
+`primary-change-repair-required` and the daemon's `primary-change-needs-operator`,
+with `needsOperator: true`. This exception does not include other safety holds:
+risk/two-key policy, security, destructive-change holds, hard-stop labels
+(including `no-merge-hold`) and hammer-cap suppression retain adjudication.
+A scoped request can also take over an unresolved `dispatch-status-unknown`
+probe when no live closer lease exists for the PR at any head. Lease age is
+checked using the existing pending/dispatched expiry rules, including a lease
+still keyed to the previous head before rekeying. Both inline and background
+modes evaluate the closer first; newly queued/running background work retains
+ownership until its gates return a result, and is not cancelled by the label.
+This avoids both skipping safety gates and replaying a cancelled run as an
+automatic merge-agent recovery failure.
 Generic `operator-approved`, stale label events and read outages do not activate
 this route. This is a recovery dispatch, not AMA merge eligibility or a waiver of
 the primary-change predicate. No automatic hammer repair is dispatched from the

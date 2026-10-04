@@ -1246,8 +1246,8 @@ test('watcher caches paginated content by head and isolates moving heads', async
     entries[0].subject.headSha = 'new-head-1';
     const next = await runDuplicateFamilyCensusForWatcher(args);
     assert.equal(next.error, undefined);
-    assert.equal(next.families[0].contentEvidence.held, false);
-    assert.equal(next.families[0].contentEvidence.pairs[0].reason, 'content-unavailable');
+    assert.equal(next.families[0].contentEvidence.held, true);
+    assert.equal(next.families[0].contentEvidence.pairs[0].reason, 'content-pending');
     assert.deepEqual(calls.slice(4), [[1, 1], [1, 2]]);
   } finally { db.close(); }
 });
@@ -1279,7 +1279,7 @@ for (const failure of ['truncated', 'moved', 'api-error']) {
       assert.equal(result.families.length, 2);
       const family = result.families.find((row) => row.candidates.some((candidate) => candidate.prNumber === 1));
       assert.equal(family.contentEvidence.held, true, 'healthy siblings still corroborate');
-      assert.equal(family.contentEvidence.pairs.find((pair) => pair.members.some((member) => member.prNumber === 1)).reason, 'content-unavailable');
+      assert.equal(family.contentEvidence.pairs.find((pair) => pair.members.some((member) => member.prNumber === 1)).reason, 'content-pending');
       const persisted = readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 1 });
       assert.equal(evaluateDuplicateFamilyCandidate(persisted, { prNumber: 1, headSha: 'head-1' }).held, false);
       assert.equal(evaluateDuplicateFamilyCandidate(persisted, { prNumber: 2, headSha: 'head-2' }).held, true);
@@ -1299,7 +1299,7 @@ test('incident record exclusions beat overlap for every supported record directo
   }
 });
 
-test('ignored corroborated candidates hold again only after new-head content corroborates', () => {
+test('stale ignores cannot release a previously corroborated pending pair', () => {
   const db = memoryDb();
   try {
     const entries = [subject(1), subject(2)];
@@ -1311,9 +1311,116 @@ test('ignored corroborated candidates hold again only after new-head content cor
     assert.equal(gate('head-1').held, false);
     entries[0].subject.headSha = 'moved';
     reconcileDuplicateFamiliesForRepo(db, entries, options);
-    assert.equal(gate('moved').held, false);
+    assert.equal(gate('moved').held, true);
     entries[0].subject.duplicateContent.headSha = 'moved';
     reconcileDuplicateFamiliesForRepo(db, entries, options);
     assert.equal(gate('moved').held, true);
   } finally { db.close(); }
+});
+
+for (const failure of ['503', 'content-head-moved', 'content-truncated']) {
+  test(`corroborated holds survive a head move and ${failure} until complete negative evidence`, async () => {
+    const db = memoryDb();
+    try {
+      const entries = [subject(1), subject(2)];
+      let failing = false;
+      let negative = false;
+      let attempts = 0;
+      const labels = new Map([[1, new Set()], [2, new Set()]]);
+      const removals = [];
+      const logs = [];
+      const args = { db, subjectEntries: entries, repoPath: REPO, env: {},
+        readBuildCompletionSignalForPrImpl: provenanceReader({}),
+        log: { log: (line) => logs.push(line), error() {} },
+        octokit: { rest: {
+          pulls: {
+            listFiles: async ({ pull_number, page }) => {
+              if (failing && pull_number === 1) {
+                attempts += 1;
+                if (failure === '503') throw Object.assign(new Error('unavailable'), { status: 503 });
+                if (failure === 'content-truncated') return { data: Array.from({ length: 100 }, (_, i) => ({ filename: `src/${page}-${i}.mjs` })) };
+              }
+              return { data: [{ filename: negative && pull_number === 1 ? 'src/different.mjs' : 'src/shared.mjs' }] };
+            },
+            get: async ({ pull_number }) => ({ data: { head: {
+              sha: failing && failure === 'content-head-moved' && pull_number === 1 ? 'newer-head' : entries[pull_number - 1].subject.headSha,
+            } } }),
+          },
+          issues: {
+            addLabels: async ({ issue_number, labels: additions }) => {
+              for (const label of additions) labels.get(issue_number).add(label);
+            },
+            removeLabel: async ({ issue_number, name }) => {
+              removals.push([issue_number, name]);
+              labels.get(issue_number).delete(name);
+            },
+          },
+        } } };
+      const tick = async () => {
+        for (const entry of entries) entry.subject.labels = [...labels.get(entry.prNumber)];
+        const census = await runDuplicateFamilyCensusForWatcher(args);
+        assert.equal(census.error, undefined);
+        await reconcileDuplicateFamilyLabels({ db, repoPath: REPO, census, octokit: args.octokit });
+        return census;
+      };
+      await tick();
+      failing = true;
+      entries[0].subject.headSha = 'moved-head';
+      for (let i = 0; i < 2; i += 1) {
+        const census = await tick();
+        assert.equal(census.families[0].contentEvidence.pairs[0].pending, true);
+        assert.equal(census.families[0].contentEvidence.pairs[0].held, true);
+        for (const entry of entries) {
+          const family = readDuplicateFamilyForPr(db, { repo: REPO, prNumber: entry.prNumber });
+          assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: entry.prNumber, headSha: entry.subject.headSha }).held, true);
+          assert.ok(labels.get(entry.prNumber).has('duplicate-family-hold'));
+        }
+      }
+      assert.deepEqual(removals, []);
+      assert.equal(attempts, failure === '503' ? 6 : failure === 'content-truncated' ? 60 : 2);
+      const logged = logs.filter((line) => line.startsWith('{')).map((line) => JSON.parse(line));
+      assert.equal(logged[0].contentSignals.pairs[0].overlapCount, 1);
+      assert.ok(logged.every((line) => !Object.hasOwn(line.contentSignals.pairs[0], 'overlap')));
+      failing = false;
+      negative = true;
+      await tick();
+      assert.deepEqual(removals, [[1, 'duplicate-family-hold'], [2, 'duplicate-family-hold']]);
+    } finally { db.close(); }
+  });
+}
+
+test('pending or unverified evidence never removes existing advisory hold labels', async () => {
+  for (const pending of [true, false]) {
+    const db = memoryDb();
+    try {
+      const entries = [subject(1, { paths: ['src/a.mjs'], labels: ['duplicate-family-hold'] }),
+        subject(2, { paths: ['src/b.mjs'], labels: ['duplicate-family-hold'] })];
+      if (pending) entries[0].subject.duplicateContent = null;
+      const census = reconcileDuplicateFamiliesForRepo(db, entries, {
+        repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({}),
+      });
+      const removed = [];
+      await reconcileDuplicateFamilyLabels({ db, repoPath: REPO,
+        census: pending ? census : { error: new Error('unverified') },
+        logger: { log() {}, error() {} }, octokit: { rest: { issues: {
+          addLabels: async () => {}, removeLabel: async (input) => removed.push(input),
+        } } },
+      });
+      assert.deepEqual(removed, []);
+    } finally { db.close(); }
+  }
+});
+
+test('nested source build directories and code under docs count toward overlap', () => {
+  for (const path of ['src/build/compile.mjs', 'src/vendor/library.go', 'tools/docs/gen.mjs']) {
+    const family = detectDuplicateFamiliesForRepo([subject(1, { paths: [path] }), subject(2, { paths: [path] })], {
+      repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({}),
+    })[0];
+    assert.equal(family.contentEvidence.held, true);
+  }
+  const excluded = detectDuplicateFamiliesForRepo([
+    subject(1, { paths: ['docs/reports/incident.md'] }),
+    subject(2, { paths: ['docs/reports/incident.md', 'tools/docs/gen.mjs'] }),
+  ], { repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({}) })[0];
+  assert.equal(excluded.contentEvidence.pairs[0].reason, 'incident-record-code-pair');
 });

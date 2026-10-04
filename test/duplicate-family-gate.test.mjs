@@ -63,3 +63,21 @@ test('adjudicated families retain holds regardless of content evidence', () => {
     }
   }
 });
+
+test('pending advisory pairs retain only prior holds at the observed head and honor exact-head ignores', () => {
+  for (const held of [true, false]) {
+    const family = { status: 'advisory', content_evidence_json: JSON.stringify({ pairs: [{
+      corroborated: false, pending: true, held, members: [{ prNumber: 41, headSha: 'moved' }, { prNumber: 42, headSha: 'b' }],
+    }] }) };
+    const gate = evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'moved' });
+    assert.equal(gate.held, held);
+    assert.equal(gate.pending, true);
+    assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'newer' }).held, false);
+    assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 43, headSha: 'c' }).held, false);
+    family.operator_override_json = JSON.stringify({ ignoredCandidates: [{ candidatePrNumber: 41, candidateHeadSha: 'moved' }] });
+    const ignored = evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'moved' });
+    assert.equal(ignored.held, false);
+    assert.equal(ignored.release, 'ignored-not-duplicate');
+    assert.equal(ignored.pending, undefined);
+  }
+});

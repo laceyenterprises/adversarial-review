@@ -24,17 +24,6 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
     return { member: true, held: false, reason: null, release: status };
   }
 
-  // Content heuristics qualify detection, never override operator adjudication.
-  if (status === 'advisory') {
-    const evidence = parseOverride(family.content_evidence_json);
-    const corroborated = (evidence.pairs || []).some((pair) => pair.corroborated === true
-      && pair.members?.some((member) => Number(member.prNumber) === Number(prNumber)
-        && String(member.headSha || '') === String(headSha || '')));
-    if (!corroborated) {
-      return { member: true, held: false, reason: null, release: 'identity-only-advisory' };
-    }
-  }
-
   const override = parseOverride(family.operator_override_json);
   const ignored = Array.isArray(override.ignoredCandidates) ? override.ignoredCandidates : [];
   const currentIgnore = ignored.find((entry) => (
@@ -44,6 +33,20 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
   ));
   if (currentIgnore) {
     return { member: true, held: false, reason: null, release: 'ignored-not-duplicate' };
+  }
+
+  // Content heuristics qualify detection, never override operator adjudication.
+  let pending = false;
+  if (status === 'advisory') {
+    const evidence = parseOverride(family.content_evidence_json);
+    const pairs = (evidence.pairs || []).filter((pair) => pair.members?.some((member) =>
+      Number(member.prNumber) === Number(prNumber)
+      && String(member.headSha || '') === String(headSha || '')));
+    pending = pairs.some((pair) => pair.pending === true);
+    if (!pairs.some((pair) => pair.corroborated === true || (pair.pending === true && pair.held === true))) {
+      return { member: true, held: false, reason: null,
+        release: pending ? 'content-pending' : 'identity-only-advisory', ...(pending ? { pending: true } : {}) };
+    }
   }
 
   const selection = override.selection || (
@@ -66,6 +69,7 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
     held: true,
     reason: DUPLICATE_FAMILY_UNRESOLVED_REASON,
     release: null,
+    ...(pending ? { pending: true } : {}),
   };
 }
 

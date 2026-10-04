@@ -573,7 +573,11 @@ the no-progress lane and drops ownership instead of retaining a permanent row.
 `duplicate-family-hold` is watcher-owned: it is projected from duplicate-family
 census rows. Advisory candidates require current-head content corroboration
 (pairwise changed-path Jaccard at least 0.3, excluding incident-record/code
-pairs); shared identity alone does not hold them. Operator-adjudicated
+pairs), or retain a previously corroborated pair while content is pending
+(including head changes, failed reads, stale snapshots, and truncated listings).
+Only complete current-head negative evidence releases that content hold; shared
+identity alone does not create one. Pending or unverified census evidence never
+removes an existing hold absent a verified suppression/operator release. Operator-adjudicated
 `survivor-selected`, `survivor-merged`, and `abandoned` families retain holds
 regardless of legacy or unavailable content, with existing exact-head
 survivor/ignore releases. Candidate-local content read failures do not abort the

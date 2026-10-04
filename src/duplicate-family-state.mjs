@@ -281,6 +281,11 @@ function contentSnapshot(subject) {
   return snapshot;
 }
 
+function summarizeContentEvidence(pairs) {
+  return { pairs, held: pairs.some((pair) => pair.held), reason: pairs.some((pair) => pair.pending)
+    ? 'content-pending' : pairs.some((pair) => pair.corroborated) ? 'content-corroborated' : 'identity-only-advisory' };
+}
+
 function contentEvidence(candidates) {
   const pairs = [];
   for (let i = 0; i < candidates.length; i += 1) {
@@ -289,26 +294,27 @@ function contentEvidence(candidates) {
       const a = contentSnapshot(left.subject);
       const b = contentSnapshot(right.subject);
       const paths = (snapshot) => [...new Set((snapshot?.paths || []).filter((path) =>
-        !/(^|\/)(?:node_modules|vendor|dist|build|generated)\/|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/.test(path)))];
+        !/^(?:node_modules|vendor|dist|build|generated)\/|(?:^|\/)node_modules\/|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/.test(path)))];
       const ap = paths(a);
       const bp = paths(b);
       const record = (ps) => ps.length > 0 && ps.every((path) =>
         /^(?:docs\/(?:postmortems|reports)\/|(?:.*\/)?docs\/SEV)/.test(path));
-      const code = (ps) => ps.some((path) => !/(^|\/)docs\/|\.md$/i.test(path));
+      const code = (ps) => ps.some((path) => /\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|kts|c|cc|cpp|h|hpp|cs|rb|php|swift|sh|bash|zsh|sql|vue|svelte)$/i.test(path));
       const excluded = (record(ap) && code(bp)) || (record(bp) && code(ap));
       const overlap = ap.filter((path) => bp.includes(path));
       const union = new Set([...ap, ...bp]).size;
       const jaccard = union ? overlap.length / union : 0;
       const corroborated = Boolean(a && b && !excluded && jaccard >= 0.3);
+      const pending = !a || !b;
       pairs.push({
         members: [{ prNumber: left.prNumber, headSha: left.headSha }, { prNumber: right.prNumber, headSha: right.headSha }],
-        kind: 'changed-path-overlap', jaccard, overlap, corroborated,
-        reason: excluded ? 'incident-record-code-pair' : !a || !b ? 'content-unavailable'
+        kind: 'changed-path-overlap', jaccard: pending ? null : jaccard, overlap, corroborated, pending, held: corroborated,
+        reason: pending ? 'content-pending' : excluded ? 'incident-record-code-pair'
           : corroborated ? 'path-overlap-corroborated' : 'insufficient-path-overlap',
       });
     }
   }
-  return { pairs, held: pairs.some((pair) => pair.corroborated), reason: pairs.some((pair) => pair.corroborated) ? 'content-corroborated' : 'identity-only-advisory' };
+  return summarizeContentEvidence(pairs);
 }
 
 function signalMap(signals) {
@@ -819,6 +825,16 @@ export function upsertDuplicateFamilies(db, families, {
         now,
       );
       const row = readExistingFamilyByKey(db, family.familyKey);
+      const previous = REACTIVATABLE_STATUSES.has(String(existing?.status || '').toLowerCase())
+        ? {} : parseMaybeJson(existing?.content_evidence_json, {});
+      const pairKey = (pair) => (pair.members || []).map((member) => Number(member.prNumber)).sort((a, b) => a - b).join('|');
+      const priorHolds = new Set((previous.pairs || [])
+        .filter((pair) => pair.corroborated === true || (pair.pending === true && pair.held === true))
+        .map(pairKey));
+      // An unreadable new head cannot disprove a previously corroborated pair.
+      // Match PR identities, not heads, and retain this decision across ticks.
+      family.contentEvidence = summarizeContentEvidence((family.contentEvidence?.pairs || []).map((pair) =>
+        pair.pending ? { ...pair, held: priorHolds.has(pairKey(pair)) } : pair));
       db.prepare('UPDATE duplicate_families SET content_evidence_json = ? WHERE family_id = ?')
         .run(JSON.stringify(family.contentEvidence || {}), row.family_id);
       const persistedCandidates = Array.isArray(family.allCandidates) ? family.allCandidates : family.candidates;
@@ -992,7 +1008,9 @@ export async function runDuplicateFamilyCensusForWatcher({
       );
     }
     for (const family of duplicateCensus.families) {
-      log.log(JSON.stringify({ familyId: family.familyId, identitySignals: family.identitySignals, contentSignals: family.contentEvidence, holdDecisions: family.holdDecisions }));
+      const contentSignals = { ...family.contentEvidence, pairs: family.contentEvidence.pairs.map(({ overlap, ...pair }) =>
+        ({ ...pair, overlapCount: overlap.length })) };
+      log.log(JSON.stringify({ familyId: family.familyId, identitySignals: family.identitySignals, contentSignals, holdDecisions: family.holdDecisions }));
     }
     return duplicateCensus;
   } catch (err) {
@@ -1475,7 +1493,8 @@ export async function reconcileDuplicateFamilyLabels({ db, octokit, repoPath, lo
       ? [DUPLICATE_FAMILY_LABEL, ...(held ? [DUPLICATE_FAMILY_HOLD_LABEL] : []), ...(roleLabel ? [roleLabel] : [])]
       : [];
     const additions = projectionVerified ? wanted.filter((name) => !current.has(name)) : [];
-    const removeHold = !held && current.has(DUPLICATE_FAMILY_HOLD_LABEL);
+    const removeHold = projectionVerified && (!gate.pending || suppressed)
+      && !held && current.has(DUPLICATE_FAMILY_HOLD_LABEL);
     const removeFamily = !familyActive && current.has(DUPLICATE_FAMILY_LABEL);
     const obsoleteRoleLabels = [DUPLICATE_FAMILY_SURVIVOR_LABEL, DUPLICATE_FAMILY_LOSER_LABEL]
       .filter((name) => current.has(name) && (!familyActive || name !== roleLabel));

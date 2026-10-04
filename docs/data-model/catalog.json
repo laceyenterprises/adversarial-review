@@ -214,7 +214,7 @@
         "src/duplicate-family-workflow-cli.mjs",
         "src/adapters/subject/github-pr/duplicate-content.mjs"
       ],
-      "owner": "duplicate-family merge gate"
+      "owner": "duplicate-family merge gate with retained holds for pending content evidence"
     },
     {
       "id": "watcher-no-progress-lane",

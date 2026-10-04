@@ -1388,8 +1388,9 @@ test('prepareWorkspaceForJob clones missing repos and checks out the PR branch',
   assert.deepEqual(calls.map((call) => [call.command, ...call.args]), [
     ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
     ['git', 'clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
-    ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
-    ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
+    ['git', '-C', result.workspaceDir, 'config', 'extensions.worktreeConfig', 'true'],
+    ['git', '-C', result.workspaceDir, 'config', '--worktree', 'user.name', 'Codex Remediation Worker'],
+    ['git', '-C', result.workspaceDir, 'config', '--worktree', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
     ['git', '-C', result.workspaceDir, 'remote', 'set-branches', '--add', 'origin', 'clio-feature'],
     ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature', '+refs/heads/main:refs/remotes/origin/main'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
@@ -3085,8 +3086,9 @@ test('prepareWorkspaceForJob reclones stale workspaces with the wrong repo remot
     ['git', 'status', '--short'],
     ['gh', 'api', 'repos/laceyenterprises/clio/pulls/7'],
     ['git', 'clone', '--no-checkout', '--single-branch', '--branch', 'main', 'https://github.com/laceyenterprises/clio.git', result.workspaceDir],
-    ['git', '-C', result.workspaceDir, 'config', 'user.name', 'Codex Remediation Worker'],
-    ['git', '-C', result.workspaceDir, 'config', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
+    ['git', '-C', result.workspaceDir, 'config', 'extensions.worktreeConfig', 'true'],
+    ['git', '-C', result.workspaceDir, 'config', '--worktree', 'user.name', 'Codex Remediation Worker'],
+    ['git', '-C', result.workspaceDir, 'config', '--worktree', 'user.email', 'codex-remediation-worker@laceyenterprises.com'],
     ['git', '-C', result.workspaceDir, 'remote', 'set-branches', '--add', 'origin', 'clio-feature'],
     ['git', '-C', result.workspaceDir, 'fetch', 'origin', '+refs/heads/clio-feature:refs/remotes/origin/clio-feature', '+refs/heads/main:refs/remotes/origin/main'],
     ['git', '-C', result.workspaceDir, 'checkout', '-B', 'clio-feature', 'origin/clio-feature'],
@@ -3145,10 +3147,11 @@ test('prepareWorkspaceForJob uses the claude-code identity when workerClass="cla
     (c) => c.command === 'git' && c.args.includes('config')
   );
   assert.deepEqual(
-    configCalls.map((c) => c.args.slice(-2)),
+    configCalls.map((c) => c.args.slice(3)),
     [
-      ['user.name', 'Claude Code Remediation Worker'],
-      ['user.email', 'claude-code-remediation-worker@laceyenterprises.com'],
+      ['extensions.worktreeConfig', 'true'],
+      ['--worktree', 'user.name', 'Claude Code Remediation Worker'],
+      ['--worktree', 'user.email', 'claude-code-remediation-worker@laceyenterprises.com'],
     ]
   );
 });

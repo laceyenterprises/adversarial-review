@@ -336,10 +336,14 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
   }
 
   const candidates = [
-    commit?.committer?.login,
+    commit?.author?.login,
   ].map(normalizeIdentityPart).filter(Boolean);
   const closerIdentity = candidates.find((candidate) => TERMINAL_CLOSER_BOT_IDENTITIES.has(candidate));
-  if (closerIdentity) {
+  // Rebase may stamp a foreign committer from shared config. Only an actual
+  // closer author with HAM provenance may suppress by identity; Closed-By
+  // remains the explicit terminal marker above (including unlinked bot commits).
+  const workerTicket = normalizedTrailers['worker-ticket'] || '';
+  if (closerIdentity && /^HAM(?:$|[-\s])/i.test(workerTicket)) {
     return {
       suppressed: true,
       reason: 'closer-commit-identity',
@@ -500,7 +504,7 @@ export async function getHeadCloserCommitSuppression({
   // Daemon-robust: the terminal-closer identity is carried in the commit message
   // (`Closed-By: hammer` trailer), which local git reads without gh auth. The remote
   // probe below is the fallback for the rare case the commit is absent from the local
-  // checkout, and for a committer.login-only closer identity (not derivable locally).
+  // checkout, and for an author.login closer identity (not derivable locally).
   const localCommit = await fetchVerifiedCommitFromLocalGitImpl({
     repoPath,
     prNumber,
@@ -525,7 +529,7 @@ export async function getHeadCloserCommitSuppression({
         'api',
         `repos/${repoPath}/commits/${sha}`,
         '--jq',
-        '{sha:.sha,message:.commit.message,committerLogin:.committer.login}',
+        '{sha:.sha,message:.commit.message,authorLogin:.author.login}',
       ],
       retries: retryDelays.length,
       backoffMs: Number(retryDelays[0]) || 500,
@@ -535,7 +539,7 @@ export async function getHeadCloserCommitSuppression({
     const commit = {
       sha: raw.sha || sha,
       message: raw.message || '',
-      committer: { login: raw.committerLogin || null },
+      author: { login: raw.authorLogin || null },
     };
     return isTerminalCloserCommitIdentity(commit);
   } catch (err) {

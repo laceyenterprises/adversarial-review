@@ -1166,19 +1166,23 @@ async function prepareWorkspaceForJob({
     });
   }
 
-  // Set local git identity *before* the PR checkout so the very first
+  // Set worktree git identity *before* the PR checkout so the very first
   // commits the remediation worker makes (including any in-process author
   // hooks that read `git config user.*` at startup) see the correct values.
-  // Local config (no --global) is scoped to .git/config in this workspace
-  // alone — it cannot leak into the operator's other repos. Idempotent: a
+  // Linked worktrees share .git/config with their base clone. Enable the
+  // worktree extension first so --worktree never falls back to shared config.
+  // Idempotent: a
   // re-run against an existing workspace just overwrites the same values.
   // The identity is keyed on workerClass so the soon-to-land claude-code
   // remediation path doesn't need a separate code change here.
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.name', gitIdentity.name], {
+  await execFileImpl('git', ['-C', workspaceDir, 'config', 'extensions.worktreeConfig', 'true'], {
     maxBuffer: 1 * 1024 * 1024,
   });
-  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.email', gitIdentity.email], {
+  await execFileImpl('git', ['-C', workspaceDir, 'config', '--worktree', 'user.name', gitIdentity.name], {
+    maxBuffer: 1 * 1024 * 1024,
+  });
+  await execFileImpl('git', ['-C', workspaceDir, 'config', '--worktree', 'user.email', gitIdentity.email], {
     maxBuffer: 1 * 1024 * 1024,
   });
 

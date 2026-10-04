@@ -478,7 +478,7 @@ test('getHeadCloserCommitSuppression forwards local checkout ownership injection
       stdout: JSON.stringify({
         sha: HEAD_SHA,
         message: 'external',
-        committerLogin: 'some-human',
+        authorLogin: 'some-human',
       }),
     }),
     ...sentinels,
@@ -590,7 +590,7 @@ test('fallback: when local fetch cannot make the commit readable, getHeadCloserC
       stdout: JSON.stringify({
         sha: HEAD_SHA,
         message: HAMMER_MESSAGE,
-        committerLogin: null,
+        authorLogin: null,
       }),
     };
   };
@@ -610,13 +610,13 @@ test('fallback: when local fetch cannot make the commit readable, getHeadCloserC
   );
 });
 
-test('safety: an external (non-closer) commit at a local head is NOT suppressed, and still consults gh for a committer.login-only identity', async () => {
+test('safety: an external (non-closer) commit at a local head is NOT suppressed, and still consults gh for an author.login identity', async () => {
   const external = makeFakeGit({ message: 'just a normal external push\n\nSigned-off-by: someone' });
   let ghCalled = false;
   const gh = async () => {
     ghCalled = true;
     // gh sees a plain external commit too — no closer identity.
-    return { stdout: JSON.stringify({ sha: HEAD_SHA, message: 'external', committerLogin: 'some-human' }) };
+    return { stdout: JSON.stringify({ sha: HEAD_SHA, message: 'external', authorLogin: 'some-human' }) };
   };
   const result = await getHeadCloserCommitSuppression({
     repoPath: 'laceyenterprises/agent-os',
@@ -626,7 +626,7 @@ test('safety: an external (non-closer) commit at a local head is NOT suppressed,
     execGhWithRetryImpl: gh,
     logger: { warn() {}, debug() {} },
   });
-  // local git found no closer trailer -> fell through to gh -> gh found no closer identity either.
+  // local git found no closer trailer -> fell through to gh -> gh found no closer author identity either.
   assert.equal(ghCalled, true);
   assert.equal(result.suppressed, false);
 });

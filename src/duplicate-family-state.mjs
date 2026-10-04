@@ -1,3 +1,4 @@
+import { collectDuplicateContent } from './adapters/subject/github-pr/duplicate-content.mjs';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -151,6 +152,9 @@ export function ensureDuplicateFamilySchema(db) {
     );
 
   `);
+  if (!db.prepare('PRAGMA table_info(duplicate_families)').all().some((column) => column.name === 'content_evidence_json')) {
+    db.exec("ALTER TABLE duplicate_families ADD COLUMN content_evidence_json TEXT NOT NULL DEFAULT '{}'");
+  }
   migrateDuplicateFamilyCandidatesPrimaryKey(db);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_duplicate_family_candidates_pr
@@ -267,6 +271,44 @@ export function extractDuplicateWorkIdentity(entry, {
     signals,
     provenance: provenance.ok ? { ok: true, resolvedBy: provenance.resolvedBy } : provenance,
   };
+}
+
+// Only complete, head-bound file snapshots can corroborate an identity.
+function contentSnapshot(subject) {
+  const snapshot = subject?.duplicateContent;
+  if (!snapshot?.headSha || !Array.isArray(snapshot.paths)
+      || snapshot.headSha !== (subject.headSha || subject.headRefOid)) return null;
+  return snapshot;
+}
+
+function contentEvidence(candidates) {
+  const pairs = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    for (const right of candidates.slice(i + 1)) {
+      const left = candidates[i];
+      const a = contentSnapshot(left.subject);
+      const b = contentSnapshot(right.subject);
+      const paths = (snapshot) => [...new Set((snapshot?.paths || []).filter((path) =>
+        !/(^|\/)(?:node_modules|vendor|dist|build|generated)\/|(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/.test(path)))];
+      const ap = paths(a);
+      const bp = paths(b);
+      const record = (ps) => ps.length > 0 && ps.every((path) =>
+        /^(?:docs\/(?:postmortems|reports)\/|(?:.*\/)?docs\/SEV)/.test(path));
+      const code = (ps) => ps.some((path) => !/(^|\/)docs\/|\.md$/i.test(path));
+      const excluded = (record(ap) && code(bp)) || (record(bp) && code(ap));
+      const overlap = ap.filter((path) => bp.includes(path));
+      const union = new Set([...ap, ...bp]).size;
+      const jaccard = union ? overlap.length / union : 0;
+      const corroborated = Boolean(a && b && !excluded && jaccard >= 0.3);
+      pairs.push({
+        members: [{ prNumber: left.prNumber, headSha: left.headSha }, { prNumber: right.prNumber, headSha: right.headSha }],
+        kind: 'changed-path-overlap', jaccard, overlap, corroborated,
+        reason: excluded ? 'incident-record-code-pair' : !a || !b ? 'content-unavailable'
+          : corroborated ? 'path-overlap-corroborated' : 'insufficient-path-overlap',
+      });
+    }
+  }
+  return { pairs, held: pairs.some((pair) => pair.corroborated), reason: pairs.some((pair) => pair.corroborated) ? 'content-corroborated' : 'identity-only-advisory' };
 }
 
 function signalMap(signals) {
@@ -404,6 +446,8 @@ export function detectDuplicateFamiliesForRepo(subjectEntries, {
       status: DUPLICATE_FAMILY_STATUS_ADVISORY,
       strongestSignal: commonSignals[0] || null,
       commonSignals,
+      identitySignals: exemplar.signals.filter((signal) => commonSignals.includes(signal.kind)),
+      contentEvidence: contentEvidence(openUnsuppressed),
       candidates: openUnsuppressed,
       allCandidates: group,
     });
@@ -629,6 +673,7 @@ function mergePersistedDuplicateCandidates(db, subjectEntries, repoPath) {
         headSha: row.head_sha,
         baseSha: row.base_sha,
         labels,
+        duplicateContent: workIdentity.content || null,
       },
       current: { pr_state: row.pr_state },
       duplicateWorkIdentity: {
@@ -774,6 +819,8 @@ export function upsertDuplicateFamilies(db, families, {
         now,
       );
       const row = readExistingFamilyByKey(db, family.familyKey);
+      db.prepare('UPDATE duplicate_families SET content_evidence_json = ? WHERE family_id = ?')
+        .run(JSON.stringify(family.contentEvidence || {}), row.family_id);
       const persistedCandidates = Array.isArray(family.allCandidates) ? family.allCandidates : family.candidates;
       const nextOverride = updateOperatorOverrideForHeadMove(row, persistedCandidates);
       if (nextOverride !== (row.operator_override_json || null)) {
@@ -790,7 +837,7 @@ export function upsertDuplicateFamilies(db, families, {
           candidate.headBranch,
           candidate.headSha,
           candidate.baseSha,
-          JSON.stringify(candidate.workIdentity || {}),
+          JSON.stringify({ ...candidate.workIdentity, content: contentSnapshot(candidate.subject) }),
           JSON.stringify(candidate.signals || []),
           JSON.stringify(candidate.suppressions || []),
           JSON.stringify(labelNames(candidate.subject?.labels)),
@@ -839,6 +886,14 @@ export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = 
     deactivateMissing: true,
     observedCandidateKeys,
   });
+  for (const family of families) {
+    const persisted = readExistingFamilyByKey(db, family.familyKey);
+    family.holdDecisions = family.candidates.map((candidate) => ({
+      prNumber: candidate.prNumber,
+      headSha: candidate.headSha,
+      ...evaluateDuplicateFamilyCandidate(persisted, { prNumber: candidate.prNumber, headSha: candidate.headSha }),
+    }));
+  }
   return { families, familyIds };
 }
 
@@ -847,15 +902,17 @@ export async function runDuplicateFamilyCensusForWatcher({
   subjectEntries,
   repoPath,
   rootDir,
+  octokit,
   env = process.env,
   log = console,
+  readBuildCompletionSignalForPrImpl: readSignal = readBuildCompletionSignalForPr,
 } = {}) {
   let provenanceDisabledReason = null;
   const readBuildCompletionSignalForPrImpl = (args) => {
     if (provenanceDisabledReason) {
       return { ok: false, reason: provenanceDisabledReason };
     }
-    const result = readBuildCompletionSignalForPr(args);
+    const result = readSignal(args);
     if (!result?.ok && shouldDisableProvenanceForTick(result.reason)) {
       provenanceDisabledReason = result.reason || 'duplicate-family-provenance-unavailable';
       throw new Error(`Transient provenance failure: ${provenanceDisabledReason}`);
@@ -890,7 +947,24 @@ export async function runDuplicateFamilyCensusForWatcher({
         spawnSyncImpl,
       });
     }
-    const duplicateCensus = reconcileDuplicateFamiliesForRepo(db, subjectEntries, {
+    const entries = (subjectEntries || []).map((entry) => ({ ...entry, subject: { ...entry.subject } }));
+    if (octokit) {
+      ensureDuplicateFamilySchema(db);
+      const [owner, repo] = repoPath.split('/');
+      const preliminary = detectDuplicateFamiliesForRepo(mergePersistedDuplicateCandidates(db, entries, repoPath), {
+        repoPath, rootDir, env, spawnSyncImpl, readBuildCompletionSignalForPrImpl,
+      });
+      const candidateNumbers = new Set(preliminary.flatMap((family) => family.candidates.map((candidate) => candidate.prNumber)));
+      for (const entry of entries) {
+        const subject = entry.subject;
+        if (!candidateNumbers.has(Number(entry.prNumber || subject.number))) continue;
+        subject.duplicateContent = await collectDuplicateContent({
+          octokit, owner, repo, prNumber: entry.prNumber || subject.number,
+          headSha: subject.headSha || subject.headRefOid,
+        });
+      }
+    }
+    const duplicateCensus = reconcileDuplicateFamiliesForRepo(db, entries, {
       repoPath,
       rootDir,
       hqRoot: env.HQ_ROOT || null,
@@ -904,6 +978,9 @@ export async function runDuplicateFamilyCensusForWatcher({
         `${duplicateCensus.familyIds.length} active duplicate famil` +
         `${duplicateCensus.familyIds.length === 1 ? 'y' : 'ies'}`
       );
+    }
+    for (const family of duplicateCensus.families) {
+      log.log(JSON.stringify({ familyId: family.familyId, identitySignals: family.identitySignals, contentSignals: family.contentEvidence, holdDecisions: family.holdDecisions }));
     }
     return duplicateCensus;
   } catch (err) {
@@ -1230,6 +1307,7 @@ export async function reconcileDuplicateFamilyCloseouts({
     const ignored = Array.isArray(override.ignoredCandidates) ? override.ignoredCandidates : [];
     const losers = candidates.filter((row) => (
       row.role === 'loser'
+      && evaluateDuplicateFamilyCandidate(family, { prNumber: row.pr_number, headSha: row.head_sha }).held
       && String(row.pr_state || '').toLowerCase() === 'open'
       && parseMaybeJson(row.suppressions_json, []).length === 0
       && !ignored.some((entry) => Number(entry?.candidatePrNumber) === Number(row.pr_number))

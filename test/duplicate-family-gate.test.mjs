@@ -10,6 +10,7 @@ import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 
 const baseFamily = {
   status: 'advisory',
+  content_evidence_json: JSON.stringify({ pairs: [{ corroborated: true, members: [{ prNumber: 41, headSha: 'a' }] }] }),
   selected_survivor_pr_number: null,
   report_path: null,
   operator_override_json: null,
@@ -43,4 +44,12 @@ test('AMA operator-requested path cannot override duplicate-family hold', () => 
   );
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes(DUPLICATE_FAMILY_UNRESOLVED_REASON));
+});
+
+test('identity-only and legacy evidence never impose a duplicate hold', () => {
+  const result = evaluateDuplicateFamilyCandidate({ status: 'advisory', strongest_signal: 'branch-ticket' }, { prNumber: 41, headSha: 'a' });
+  assert.equal(result.member, true);
+  assert.equal(result.held, false);
+  assert.equal(result.reason, null);
+  assert.equal(result.release, 'identity-only-advisory');
 });

@@ -39,6 +39,9 @@ function fixture() {
   for (const prNumber of [101, 102, 103]) {
     insert.run(FAMILY, REPO, prNumber, `DPA-04 ${prNumber}`, `branch-${prNumber}`, `head-${prNumber}`, now, now, now);
   }
+  db.prepare('UPDATE duplicate_families SET content_evidence_json = ?').run(JSON.stringify({
+    pairs: [{ corroborated: true, members: [101, 102, 103, 104].map((prNumber) => ({ prNumber, headSha: `head-${prNumber}` })) }],
+  }));
   return db;
 }
 
@@ -144,7 +147,7 @@ test('report enforcement rejects unverified paths and head movement invalidates 
     select(db);
     assert.equal(
       evaluateDuplicateFamilyCandidate(familyFor(db, 101), { prNumber: 101, headSha: 'head-101-moved' }).held,
-      true,
+      false,
     );
   } finally { db.close(); }
 });
@@ -184,7 +187,7 @@ test('current-head ignored-not-duplicate releases only that loser', () => {
     });
     assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102' }).held, false);
     assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 103), { prNumber: 103, headSha: 'head-103' }).held, true);
-    assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102-moved' }).held, true);
+    assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102-moved' }).held, false);
   } finally { db.close(); }
 });
 
@@ -345,7 +348,7 @@ test('late unadjudicated candidate keeps the family held after survivor merge', 
   } finally { db.close(); }
 });
 
-test('moved loser head keeps the family unresolved and held', async () => {
+test('moved loser head keeps closeout unresolved until content is recomputed', async () => {
   const db = fixture();
   const closes = [];
   const logs = [];
@@ -361,7 +364,7 @@ test('moved loser head keeps the family unresolved and held', async () => {
     assert.equal(result.closed, 1);
     assert.deepEqual(closes.map((entry) => entry.pull_number), [103]);
     assert.equal(familyFor(db, 102).status, 'survivor-merged');
-    assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102-new' }).held, true);
+    assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102-new' }).held, false);
     assert.match(logs.join('\n'), /moved loser.*re-adjudication required/);
   } finally { db.close(); }
 });

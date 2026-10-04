@@ -1405,7 +1405,7 @@ async function pollOnce(
       hasReviewRow: (entry) => Boolean('current' in entry ? entry.current : (entry.current = stmtGetReviewRow.get(repoPath, entry.prNumber))),
     });
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
-    const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
+    const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, octokit, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger: console, census: duplicateFamilyCensus, cfg: loadConfigCached({ env: process.env }).getMergeAuthorityConfig() });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, {

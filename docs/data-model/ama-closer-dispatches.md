@@ -54,8 +54,8 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `branchHolderBlockCount` | non-negative integer | Count of branch-holder refusals for bounded same-PR worktree cleanup. |
 | `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |
 | `lastObservedAt` | string or null | ISO-8601 timestamp for the latest worker observation. |
-| `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded by launch-capacity reconciliation. |
-| `reconciledAt` | string, optional | ISO-8601 timestamp when launch-capacity reconciliation wrote `launch-terminal`. |
+| `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded on `launch-terminal` records by launch-capacity reconciliation; cleared when launching again. |
+| `reconciledAt` | string, optional | ISO-8601 timestamp when launch-capacity reconciliation wrote `launch-terminal`; cleared when launching again. |
 | `lastAttemptedAt` | string or null | ISO-8601 timestamp for the latest launch attempt. |
 | `dispatchedAt` | string or null | ISO-8601 timestamp for a confirmed or ambiguous launch. |
 | `createdAt` | string or null | ISO-8601 timestamp from the first write when available. |
@@ -74,14 +74,24 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   `lastObservedAt`, `lastAttemptedAt`, `dispatchedAt`, and `createdAt`.
 - A `dispatching` record with no parseable timestamp is stale; a launch-only
   `dispatched` record without timestamps remains held until first observation.
-- Launch-capacity reconciliation immediately excludes terminal ledger launches
-  and atomically annotates their records as `launch-terminal`. It preserves
-  existing fields and leaves closer and merge leases untouched; launch success
-  alone is not merge success. Missing launch rows expire after the pending-launch
-  timeout. A non-terminal ledger status or unreadable ledger does not bypass
-  dispatch-record or lease reclaim checks, so crashed workers can age out.
+- Dispatch capacity first applies record identity, age and lease liveness checks.
+  Only launches that would otherwise consume a slot are probed in the ledger;
+  aged-out historical records are left for manual reconciliation. The first
+  unreadable ledger result suppresses further probes for that scan, retaining
+  capacity under the existing liveness rules. Cancellation is checked between
+  probes. `dispatching` intents are never probed or rewritten, since same-head
+  retries can still reference the previous LRQ.
+- Reconciliation annotates confirmed terminal `dispatched` launches as
+  `launch-terminal`, preserving existing fields and leaving closer and merge
+  leases untouched. Launch success alone is not merge success. Missing rows
+  expire after the pending-launch timeout; an unparseable launch timestamp
+  keeps the reservation until observation. New launch writes clear
+  `terminalLaunchStatus` and `reconciledAt`. Capacity recognizes `reaped` and
+  `cancelled` without widening the per-PR unknown-status retry/re-arm decision.
 - Manual reconciliation must run as the canonical daemon account for the runtime
-  root. Atomic replacement takes the caller's ownership; see the owner-qualified
+  root, pinning `--hq-root` and `--ledger-target` to match the watcher. The CLI
+  reports the resolved backend and source without exposing DSN credentials.
+  Atomic replacement takes the caller's ownership; see the owner-qualified
   commands in `docs/RUNBOOK-ama-closure.md`.
 - `workerId` is authoritative for scoped hammer cleanup when present. Legacy
   records without `workerId` remain readable and use the historical unscoped

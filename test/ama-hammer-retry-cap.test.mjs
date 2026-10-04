@@ -2215,6 +2215,8 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
     prNumber: PR_NUMBER,
     headSha: REVIEWED_HEAD,
     state: 'dispatched',
+    terminalLaunchStatus: 'failed',
+    reconciledAt: 'old-launch',
     launchRequestId: 'lrq_terminal_failed',
     dispatchId: 'dispatch-terminal-failed',
     workerClass: 'hammer',
@@ -2228,6 +2230,12 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
       deps.execCalls.push({ cmd, args });
       if (args[0] === 'dispatch' && args[1] === 'status') {
         return { stdout: JSON.stringify({ status: 'unknown' }), stderr: '' };
+      }
+      if (args[0] === 'dispatch') {
+        const intent = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+        assert.equal(Object.hasOwn(intent, 'terminalLaunchStatus'), false);
+        assert.equal(Object.hasOwn(intent, 'reconciledAt'), false);
+        updateAmaCloserDispatchRecord(rootDir, intent, current => ({ ...current, terminalLaunchStatus: 'failed', reconciledAt: 'old-cli-write' }));
       }
       return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
     },
@@ -2256,6 +2264,8 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
   });
   assert.equal(record.launchRequestId, 'lrq_retry');
   assert.equal(record.lastObservedStatus, 'starting');
+  assert.equal(Object.hasOwn(record, 'terminalLaunchStatus'), false);
+  assert.equal(Object.hasOwn(record, 'reconciledAt'), false);
 });
 
 test('AMAGAP-01: unknown dispatch status parks when ledger requires operator triage', async (t) => {
@@ -3155,7 +3165,10 @@ test('three terminal ledger launches free capacity for a fourth PR', async (t) =
   const deps = hammerDispatchDeps({
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
   });
-  assert.equal((await findActiveAmaCloserLaunches(rootDir, deps)).length, 0);
+  assert.equal((await findActiveAmaCloserLaunches(rootDir, { ...deps, now: '2026-07-06T12:00:00Z' })).length, 0);
+  for (let prNumber = 1; prNumber <= 3; prNumber += 1) {
+    assert.equal(readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber, headSha: REVIEWED_HEAD }).state, 'launch-terminal');
+  }
   const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
   assert.equal(result.dispatched, true);
 });
@@ -3171,3 +3184,25 @@ test('recently observed non-terminal ledger launch still blocks same PR', async 
   const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
   assert.equal(result.reason, 'ama-closer-launch-in-progress');
 });
+
+for (const status of ['reaped', 'cancelled']) {
+  test(`capacity terminal ${status} does not widen per-PR unknown-status retry authority`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hammer-reaped-unknown-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+      ...identity, state: 'dispatched', launchRequestId: 'lrq_reaped', dispatchId: 'dispatch_reaped',
+      workerClass: 'hammer', lastObservedStatus: 'unknown',
+      lastObservedAt: '2026-07-06T12:00:00Z', dispatchedAt: '2026-07-06T12:00:00Z',
+    }));
+    const deps = hammerDispatchDeps({
+      execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'unknown' }), stderr: '' }),
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status } }),
+    });
+    const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'dispatch-status-unknown');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity).lastObservedStatus, 'unknown');
+    assert.equal(readHammerRetryCapLedger(rootDir, identity), null);
+  });
+}

@@ -1483,7 +1483,15 @@ launches immediately stop consuming capacity when the next dispatch scans the
 records. Non-terminal ledger statuses and ledger read failures retain capacity
 only while the existing record/lease liveness checks pass; they do not bypass
 the age escape for workers that die without a terminal ledger write.
-Confirmed missing LRQs expire after the existing pending-launch timeout.
+Confirmed missing LRQs expire after the existing pending-launch timeout;
+launch-only records with no parseable launch timestamp stay held. Before any
+ledger query, the dispatch scan checks identity, record age and lease liveness.
+Aged-out records release capacity without a probe or rewrite; historical cleanup
+belongs to the CLI. The first unreadable ledger result stops further queries in
+that scan, and cancellation is checked between probes. In-flight `dispatching`
+intents are never probed or rewritten, because retries may carry a previous LRQ.
+New launch writes clear old `terminalLaunchStatus` and `reconciledAt` annotations.
+The capacity-only `reaped`/`cancelled` statuses do not expand per-PR retry authority.
 Launch completion is not merge success:
 reconciliation leaves closer leases and merge leases untouched, and successful
 launches retain `unverified-terminal-success` until the normal outcome checks.
@@ -1499,12 +1507,18 @@ atomic replacement creates a file owned by the calling user and can lock out
 the daemon when run as another account.
 
 ```bash
-sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --dry-run
-sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root>
+sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --hq-root <hq-root> --ledger-target <ledger-target> --dry-run
+sudo -A -H -u <daemon-user> node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --hq-root <hq-root> --ledger-target <ledger-target>
 ```
 
-Both commands print scanned, terminal, missing, unreadable, changed, and active
-counts. Apply preserves original fields, writes `state: launch-terminal`, the
+Pin `<hq-root>` and `<ledger-target>` to the values used by the watcher;
+`--ledger-target` accepts a SQLite path/`sqlite://` URI or Postgres DSN.
+This avoids environment loss under `sudo -H`. Both commands print the resolved
+ledger backend and source (without DSN credentials), plus scanned, terminal,
+missing, unreadable, changed, and active counts. Target resolution failure aborts
+before rewriting records. Verify the preview's ledger metadata before apply.
+Apply preserves original fields, writes `state: launch-terminal`, the
 ledger terminal status, and `reconciledAt`; repeated apply makes no further
-changes. The normal dispatch capacity scan also performs this reconciliation.
+changes. The normal dispatch capacity scan reconciles only launches still within
+the record/lease liveness window; the CLI also visits historical dispatched records.
 No cap default or shared CFG schema changes are included in this single-repo fix.

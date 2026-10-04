@@ -611,8 +611,10 @@ Key control points:
   in-lease GitHub gate (`bin/hammer-merge.sh`). The hammer gate reloads the same
   merge-authority config as `ama-check`; strict remediation defaults to enabled.
   The uncited remainder stays protected. Authorization also requires
-  verified closure ancestry and live GitHub HAM committer identity (linked author fallback
-  only when no committer is linked). Repeat the trailer for every finding whose
+  verified closure ancestry, a live GitHub-linked HAM author, and a `Worker-Ticket`
+  of `HAM` or `AMA-PR-<n>`. A HAM committer alone cannot authorize a reversal;
+  rebases may stamp that committer onto another worker's commit. Repeat the trailer
+  for every finding whose
   fix edits primary-change lines, with `kind=blocking` or `kind=non-blocking` (blocking
   by default). Each reviewer family supplies its own latest final review; multiple
   final reviewers on the same head can be cited together. Split HAM commits by

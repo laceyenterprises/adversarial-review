@@ -5,15 +5,15 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
-import { hamAuditCommentAuthorMatches, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
+import { hamAuditCommentAuthorMatches, isHamWorkerTicket, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
   parseCommitTrailers(commit?.commit?.message || '')['worker-class'] || '');
-// Match the existing eligibility identity contract: committer takes precedence,
-// with linked author as fallback only when GitHub has no linked committer.
+// Rebases can stamp a HAM committer onto a worker-authored commit. Reversal
+// authority requires the linked HAM author, independently of the committer.
 const trustedHammerCommit = (commit) => hamAuditCommentAuthorMatches(
-  commit?.committer?.login || commit?.author?.login);
+  commit?.author?.login);
 
 export function primaryChangeRoot({ rootDir, env = process.env } = {}) {
   return resolve(rootDir || env.HAM_ROOT_DIR || fileURLToPath(new URL('../../', import.meta.url)));
@@ -213,7 +213,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         trailers: parseCommitTrailers(commit.commit.message), citations: reversalCitations(commit.commit.message),
       });
       const { trailers, citations } = cache.get(commit);
-      if (trailers['worker-ticket'] !== 'HAM' || trailers['reviewed-head'] !== review.commit_id) return false;
+      if (!isHamWorkerTicket(trailers['worker-ticket']) || trailers['reviewed-head'] !== review.commit_id) return false;
       return citations.some((cite) => {
         if (![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
         // Unqualified legacy citations retain their blocking-section meaning.

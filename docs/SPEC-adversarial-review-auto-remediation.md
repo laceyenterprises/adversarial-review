@@ -2322,6 +2322,18 @@ For each row the daemon must:
 
 The `--admin` flag is an intentional branch-protection bypass for this lane. The safety floor is therefore explicit and cumulative: the row must already be in the watcher-authorized fast-merge state, the live head must still equal the authorized SHA, CI must summarize as successful, an allowlisted `fast-merge:*` label must still be present, and `fast-merge-veto` must remain absent. If any of those predicates stop being true, the daemon must fail closed to the normal adversarial-review path or leave the row in `fast_merge_skipped` for a later poll; it must not broaden merge authority.
 
+HAM worker-ticket provenance is defined once by
+`src/ama/ham-provenance.mjs::isHamWorkerTicket`: after trimming whitespace,
+accept exactly `HAM` or `AMA-PR-<n>` (decimal digits), case-insensitively.
+`HAM-<suffix>`, `HAM anything`, and other prefix lookalikes do not qualify.
+Closer identity suppression, fast-merge changed-head verification, and
+primary-change reversal authorization all use this predicate. Identity-based
+suppression and reversal authorization require a linked closer/HAM **author**;
+a foreign HAM committer from a rebase is insufficient. Explicit `Closed-By` /
+`Closer` suppression remains a separate trailer-only path, including local Git
+reads without linked GitHub identity; see the limitation in
+[`KNOWN-SHARP-EDGES.md`](../KNOWN-SHARP-EDGES.md#terminal-closer-trailers-are-not-identity-proof).
+
 The only supported changed-head exception is a HAM terminal-remediation commit
 directly on top of the authorized head. That exception is fail-closed. For any
 lane that waives stale-head, blocking-finding, remediation-state, or non-HAM

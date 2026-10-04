@@ -1206,10 +1206,10 @@ the first hammer commit in the rebased PR history; a hammer-authored `Reviewed-H
 head. Both primary and final diffs are compared against the current PR base,
 using the same merge base so rebased upstream changes are excluded. Hammer closure detection
 uses the terminal commit trailer block. Reversal authorization additionally
-requires the live GitHub committer to match the existing trusted HAM login set
-(`hamAuditCommentAuthorMatches`); a linked author is the fallback only when
-GitHub has no linked committer. Missing or non-HAM identities cannot authorize
-reversals, even with valid trailers. Binary and omitted-patch
+requires the live GitHub author to match the existing trusted HAM login set
+(`hamAuditCommentAuthorMatches`), independently of the committer. Rebases may
+stamp a HAM committer onto a worker-authored commit, so missing or non-HAM
+authors cannot authorize reversals, even with valid trailers. Binary and omitted-patch
 files can pass only with an identical GitHub blob SHA and change status;
 otherwise their preservation remains unknown. Structural hammer merge refusals
 are audited immediately with their primary-change reason, while read failures
@@ -1245,7 +1245,7 @@ merge checks, and the hammer's in-lease GitHub gate (`bin/hammer-merge.sh`).
 The hammer gate resolves `loadConfigCached().getMergeAuthorityConfig()` on each
 live gate read, just as `ama-check` does, with strict remediation enabled unless
 `strictNonBlockingRemediation` is explicitly `false`. The HAM commit must carry
-`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=<blocking|non-blocking>]`, `Worker-Ticket: HAM`,
+`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=<blocking|non-blocking>]`, `Worker-Ticket: HAM` (or `AMA-PR-<n>`),
 and `Reviewed-Head` naming that review's head. The finding number is its one-based
 position in the indicated section (blocking by default for legacy trailers).
 Emit one trailer per finding whose fix edits primary-change lines. Multiple

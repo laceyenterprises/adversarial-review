@@ -22,7 +22,7 @@ const file = { filename: path, status: 'modified', additions: 1, deletions: 1,
 const body = `## Blocking issues\n- **Narrow push enforcement**\n  - **File:** \`${path}\`\n  - **Lines:** \`10\`\n  - **Problem:** Push ratchet blocks unrelated work.\n  - **Recommended fix:** Revert this push enforcement.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes`;
 const review = { node_id: 'PRR_fixture', html_url: 'https://github.com/fixture/repo/pull/1#pullrequestreview-1',
   commit_id: author, state: 'CHANGES_REQUESTED', user: { login: 'lacey-codex-reviewer[bot]' }, body };
-const commit = { sha: head, parents: [{ sha: author }], committer: { login: 'the-hammer-lacey[bot]' },
+const commit = { sha: head, parents: [{ sha: author }], author: { login: 'the-hammer-lacey[bot]' }, committer: { login: 'the-hammer-lacey[bot]' },
   commit: { message: `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${author}\nReversal-Authorized-By: PRR_fixture finding=1` },
   files: [{ ...file, patch: '@@ -10 +10 @@\n-enforcement: true\n+enforcement: false' }] };
 function evidence() {
@@ -382,19 +382,19 @@ test('context includes every reserved finding, only its latest comment, with a t
   assert.ok(bounded.length > 240000);
 });
 
-test('reversal requires GitHub-linked HAM identity in collector and predicate', async () => {
+test('reversal requires GitHub-linked HAM author in collector and predicate', async () => {
   const compare = { merge_base_commit: { sha: base }, status: 'ahead', files: [file] };
   for (const identity of [
     { committer: { login: 'pr-author' }, author: { login: 'the-hammer-lacey[bot]' } },
     { committer: null, author: { login: 'pr-author' } },
     { committer: null, author: null },
+    { committer: { login: 'the-hammer-lacey[bot]' }, author: null },
     { committer: null, author: { login: 'the-hammer-lacey[bot]' } },
     { committer: { login: 'merge-agent-lacey' }, author: { login: 'pr-author' } },
   ]) {
     const liveCommit = { ...commit, ...identity };
     const e = structuredClone(evidence()); e.reversalAuthorizations[0].commit = liveCommit;
-    const allowed = !identity.committer && identity.author?.login === 'the-hammer-lacey[bot]'
-      || identity.committer?.login === 'merge-agent-lacey';
+    const allowed = identity.author?.login === 'the-hammer-lacey[bot]';
     assert.equal(checkPrimaryChange(e, head).ok, Boolean(allowed));
     const collected = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
       get: async (url) => {
@@ -599,4 +599,13 @@ test('same-head cross-family dispute routes back to the cited family', async (t)
   assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
   assert.equal(h.calls[1][1].reviewerFamily, 'codex');
   assert.equal(h.db.prepare('SELECT reviewer FROM reviewed_prs').get().reviewer, 'codex');
+});
+
+test('primary-change reversal shares exact HAM and AMA dispatch ticket provenance', () => {
+  for (const [ticket, allowed] of [['HAM', true], ['AMA-PR-42', true], ['ham', true],
+    ['HAM-123', false], ['HAM anything', false], ['AMA-PR-x', false]]) {
+    const e = structuredClone(evidence());
+    e.reversalAuthorizations[0].commit.commit.message = commit.commit.message.replace('Worker-Ticket: HAM', `Worker-Ticket: ${ticket}`);
+    assert.equal(checkPrimaryChange(e, head).ok, allowed, ticket);
+  }
 });

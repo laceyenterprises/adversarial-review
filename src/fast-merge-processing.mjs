@@ -50,7 +50,7 @@ import {
   AMA_CLOSER_LEASE_STATUS,
   readAmaCloserLease,
 } from './ama/closer-lease.mjs';
-import { parseRemediatedFindingsTrailer } from './ama/ham-provenance.mjs';
+import { isHamWorkerTicket, parseRemediatedFindingsTrailer } from './ama/ham-provenance.mjs';
 import {
   findMalformedProtectivePredecessorLines,
   isProtectorOpen,
@@ -470,7 +470,7 @@ async function verifyFastMergeHamRemediationHead({
     const remediatedFindingCounts = parseRemediatedFindingsTrailer(trailers['remediated-findings']);
     const commitChecks = {
       workerClass: trailers['worker-class'] === 'hammer',
-      ticket: /^(HAM|AMA-PR-\d+)$/i.test(String(trailers['worker-ticket'] || '').trim()),
+      ticket: isHamWorkerTicket(trailers['worker-ticket']),
       reviewedHead: String(trailers['reviewed-head'] || '').trim() === reviewedHead,
       closedBy: trailers['closed-by'] === 'hammer (adversarial-pipe-mode)',
       head: verifiedCommit.sha === liveHead,

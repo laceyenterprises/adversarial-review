@@ -30,6 +30,12 @@ function normalizeHamLogin(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+// The hammer emits HAM or its AMA dispatch ticket. Prefix lookalikes and
+// arbitrary HAM suffixes are not provenance; all closure gates share this rule.
+export function isHamWorkerTicket(value) {
+  return /^(HAM|AMA-PR-\d+)$/i.test(String(value || '').trim());
+}
+
 // HSC-01: blank lines BETWEEN trailer lines must not truncate the scan. The
 // hammer commits its provenance with one `git commit -m` per trailer
 // (templates/hammer-prompt.md), and git renders every `-m` as its OWN paragraph

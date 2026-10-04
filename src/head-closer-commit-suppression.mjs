@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
-import { parseCommitTrailers } from './ama/ham-provenance.mjs';
+import { isHamWorkerTicket, parseCommitTrailers } from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -343,7 +343,7 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
   // closer author with HAM provenance may suppress by identity; Closed-By
   // remains the explicit terminal marker above (including unlinked bot commits).
   const workerTicket = normalizedTrailers['worker-ticket'] || '';
-  if (closerIdentity && /^HAM(?:$|[-\s])/i.test(workerTicket)) {
+  if (closerIdentity && isHamWorkerTicket(workerTicket)) {
     return {
       suppressed: true,
       reason: 'closer-commit-identity',

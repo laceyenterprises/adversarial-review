@@ -1459,12 +1459,27 @@ ownership; live launches and failed ledger reads are never reclaimed.
 
 Recovery state is durable under `data/follow-up-jobs/ama-automated-recovery/`,
 keyed by repo, PR and head, and protected by a crash-releasing kernel flock.
-After three recovery attempts, or a requested re-review stalled for 30 minutes,
-the watcher returns `recovery-exhausted`, persists and logs
+The action cap follows `amaRetainLoopCapFor(dispatchJob.remediationPlan.maxRounds)`.
+Only confirmed dispatches, triggered re-reviews, and non-cancellation action
+errors spend attempts. Active hammers/remediators, background launches, lease
+contention, uncertain dispatch status, comment-only grace, and proven final-round
+CI waits return `ama-pending` without consuming the budget. Configuration/draft
+refusals and explicit `needsOperator` results retain adjudication without paging.
+Abort and coexistence-timeout errors propagate without charging recovery.
+
+A refused action or exhausted action cap must remain non-progressing for 30
+minutes (`stuckDeadlineMs`), independent of tick count. Re-review queue states
+`pending`, `reviewing`, and `pending-upstream` are exempt from the recovery
+re-review deadline; their own stall monitoring owns queue latency. An unchanged
+posted snapshot without an active review expires after 30 minutes. At either
+non-progress deadline the watcher returns `recovery-exhausted`, persists and logs
 `ama.automated_recovery.exhausted` with severity SEV1, reason, PR, head and
 attempts, and queues one page with a stable outbox identity. Failed page enqueue
 retries without duplicating a successfully queued page. A new head starts a new
 recovery budget. The merge kill switch continues to disable execution.
+Store fields, lock semantics, retention, and safe reset procedure are documented
+in [AMA Automated Recovery](data-model/ama-automated-recovery.md). There is no
+automatic pruning of state or stable lock files.
 
 CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class on
 the second Codex OAuth account. It keeps the hammer route and merge-capability

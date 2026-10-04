@@ -10,7 +10,7 @@
 The watcher records a disagreement when the daemon clean-merge attempt declines
 on a tick but the AMA closer answers `daemon-clean-route` for the same PR. This
 ledger counts those observations per PR head so a repeated refusal can route to
-the capped hammer or surface an operator-visible park. It does not authorize a
+the capped hammer or enter automated recovery. It does not authorize a
 merge; the daemon and closer still apply their normal eligibility gates.
 
 One JSON file per `(repo, PR)` lives at
@@ -42,8 +42,11 @@ its name. The writer replaces the file when a new head begins a series.
   escalates. The bound is `DAEMON_ROUTE_DISAGREEMENT_BOUND` in the source module.
 - On a later tick with a hammer-remediable daemon decline, a count at the bound
   makes the closer dispatch through the existing capped hammer path. Other
-  declines produce an operator-visible park after the bound; the daemon still
-  retries on later ticks. See `docs/RUNBOOK-ama-closure.md` for the gate list.
+  declines keep the diagnostic park record and enter
+  [automated recovery](ama-automated-recovery.md) after the bound; the park is not
+  itself a `needsOperator` hand-off or page. Recovery preserves safety/configuration
+  holds, waits for active owners, and pages only after sustained non-progress.
+  See `docs/RUNBOOK-ama-closure.md` for the gate list.
 - A successful daemon clean merge removes the file. A missing file begins a new
   series. An unreadable file is logged and treated as a fresh series. Writes
   and removal are best-effort and do not interrupt route arbitration.

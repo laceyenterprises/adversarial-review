@@ -81,7 +81,7 @@ function coexistenceArgs(rootDir, headSha, amaResult) {
     currentRevisionRef: headSha,
     logger: { warn() {}, log() {}, info() {} },
     maybeDispatchAmaClosureForImpl: async () => amaResult,
-    recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {}, maxAttempts: AMA_RETAIN_LOOP_CAP },
+    recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {}, maxAttempts: AMA_RETAIN_LOOP_CAP, stuckDeadlineMs: 1000, now: () => 0 },
   };
 }
 
@@ -103,12 +103,12 @@ test('coexistence: bounded not-eligible recovery exhausts with SEV1; a new head 
       );
       assert.equal(res.outcome, 'ama-pending', `retain ${i + 1} should still be ama-pending`);
     }
-    // The (K+1)th retain on HEAD_A escalates.
-    const escalated = await resolveMergeAgentCoexistenceForWatcher(
-      coexistenceArgs(rootDir, HEAD_A, NOT_ELIGIBLE_RETAIN),
-    );
+    // Refused re-reviews spend no attempts; elapsed non-progress escalates.
+    const expired = coexistenceArgs(rootDir, HEAD_A, NOT_ELIGIBLE_RETAIN);
+    expired.recoveryOptions.now = () => 1000;
+    const escalated = await resolveMergeAgentCoexistenceForWatcher(expired);
     assert.equal(escalated.outcome, 'recovery-exhausted');
-    assert.equal(escalated.recovery.attempts, AMA_RETAIN_LOOP_CAP);
+    assert.equal(escalated.recovery.attempts, 0);
 
     // A NEW head resets → back to ama-pending.
     const reset = await resolveMergeAgentCoexistenceForWatcher(

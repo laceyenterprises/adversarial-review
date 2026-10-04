@@ -10,6 +10,7 @@ import {
   resolveAmaCloserDispatchPriority,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
+import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import {
   findMalformedProtectivePredecessorLines,
@@ -453,11 +454,12 @@ for (const [name, reviewState] of [
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const deps = testDeps();
     const result = await maybeDispatchAmaCloser({
-      ...baseArgs(rootDir, { reviewState, dispatchContext: { automatedRecovery: true } }),
+      ...baseArgs(rootDir, { reviewState, dispatchContext: { automatedRecovery: true, settledCommentOnlyTerminalMs: 0 } }),
       ...deps,
     });
     assert.equal(result.dispatched, false);
     assert.equal(result.reason, 'not-eligible');
+    assert.equal(result.recoveryWait, name === 'fresh comment-only before grace' ? 'comment-only-grace' : undefined);
     assert.equal(deps.calls.length, 0, 'recovery must not launch a competing hammer');
   });
 }
@@ -881,4 +883,41 @@ test('transient primary evidence does not suppress CI/conflict repair dispatch',
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.ok(deps.calls.some(({ args }) => args.includes('dispatch')));
   }
+});
+
+
+test('watcher never exhausts a real pre-grace comment-only closer across ticks', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'recovery-comment-grace-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  let age = 0;
+  let pages = 0;
+  let evaluations = 0;
+  const input = { rootDir, repoPath: 'acme/repo', prNumber: 404,
+    currentRevisionRef: HEAD, candidate: { prState: 'open', headSha: HEAD },
+    dispatchJob: {}, reviewStateRow: {}, logger: deps.logger,
+    recoveryOptions: { pageImpl: async () => { pages += 1; }, now: () => age },
+    maybeDispatchAmaClosureForImpl: async (options) => {
+      evaluations += 1;
+      const result = await maybeDispatchAmaCloser({
+        ...baseArgs(rootDir, {
+          reviewState: { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 1 },
+          dispatchContext: { settledCommentOnlyTerminalMs: age, automatedRecovery: options.automatedRecovery },
+        }), ...deps,
+      });
+      return { ...result, amaEnabled: true };
+    } };
+  for (let tick = 0; tick < 8; tick += 1) {
+    age = tick * 60_000;
+    const waiting = await resolveMergeAgentCoexistenceForWatcher(input);
+    assert.equal(waiting.outcome, 'ama-pending');
+    assert.equal(waiting.amaClosureResult.recoveryWait, 'comment-only-grace');
+    assert.equal(waiting.recovery.attempts, 0);
+  }
+  assert.equal(evaluations, 8, 'a grace hold needs only the initial closer evaluation');
+  assert.equal(pages, 0);
+  assert.equal(deps.calls.length, 0);
+  age = 10 * 60_000;
+  assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'ama-dispatched');
+  assert.equal(deps.calls.length, 1, 'ordinary hammer admission resumes after grace');
 });

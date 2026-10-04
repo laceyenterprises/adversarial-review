@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { amaRetainLoopCapFor } from '../kernel/convergence-budget.mjs';
 import { reconcileRecoveryLaunches } from './recovery-launch-reconciliation.mjs';
 
 const FINDING_REASONS = new Set([
@@ -18,6 +19,18 @@ const FOLLOW_UP_REASONS = new Set([
   'blocking-findings-present', 'remediation-pending', 'remediation-state-unknown',
 ]);
 
+const IN_PROGRESS_REASONS = new Set([
+  'hammer-closer-in-flight', 'lease-held', 'live-run-in-flight',
+  'active-remediation-job', 'ama-closer-dispatch-backgrounded',
+  'dispatch-status-unknown', 'closer-lease-held-by-other-process',
+  'daemon-deferred', 'deferred',
+]);
+
+const CONFIG_HOLD_REASONS = new Set([
+  'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'pr-is-draft',
+  'current-head-ham-terminal-remediation-needs-operator',
+]);
+
 // This authorizes remediation DISPATCH only, never a merge or a gate waiver.
 export function automatedHammerReasonsCovered(reasons) {
   return Array.isArray(reasons) && reasons.length > 0
@@ -27,7 +40,9 @@ export function automatedHammerReasonsCovered(reasons) {
 export function isSafetyRecoveryHold(result) {
   const reasons = [result?.reason, result?.operatorReason, ...(result?.reasons || []),
     ...(result?.daemonCleanMerge?.reasons || [])].filter(Boolean);
-  return reasons.some((reason) => /^(?:not-eligible:)?label-/.test(reason)
+  return result?.needsOperator === true
+    || reasons.some((reason) => CONFIG_HOLD_REASONS.has(String(reason).replace(/^not-eligible:/, ''))
+    || /^(?:not-eligible:)?label-/.test(reason)
     || /(?:two-key|security-hold|destructive-migration|risk-class-not-permitted|primary-change-(?:reverted|needs-operator))/.test(reason));
 }
 
@@ -46,21 +61,11 @@ async function recoverAmaAutomationLocked({
   rootDir, repo, prNumber, headSha, result, reviewStateRow,
   dispatchHammer, reclaimLaunch = () => reconcileRecoveryLaunches({ rootDir, logger }),
   requestRereviewImpl = requestRereview, pageImpl = page,
-  logger = console, maxAttempts = 3, now = () => Date.now(), rereviewDeadlineMs = 30 * 60 * 1000,
+  logger = console, maxAttempts = amaRetainLoopCapFor(), now = () => Date.now(),
+  rereviewDeadlineMs = 30 * 60 * 1000, stuckDeadlineMs = 30 * 60 * 1000, signal = null,
 }) {
   const reason = result?.reason || 'unknown';
   const reasons = result?.reasons || result?.daemonCleanMerge?.reasons || [];
-  // A completed merge and the kill switch must never redrive automation.
-  if (reason === 'daemon-merged') return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult: result };
-  if (isSafetyRecoveryHold(result)) return { outcome: 'await-operator', amaClosureResult: result };
-  if (/autonomous-merge.*disabled|ama-disabled/.test(reason)) return { outcome: 'ama-pending', amaClosureResult: result };
-  // The ordinary closer already admits exhausted cycles after follow-up
-  // ownership is released. Recovery cannot mint that authority or charge the
-  // recovery budget while the Codex-first lane still owns findings/the head.
-  if (reasons.some((item) => FOLLOW_UP_REASONS.has(item))) {
-    return { outcome: 'ama-pending', amaClosureResult: result,
-      recovery: { action: 'await-remediation' } };
-  }
   const key = createHash('sha256').update(`${repo}#${prNumber}@${headSha || 'unknown'}`).digest('hex');
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'ama-automated-recovery');
   const path = join(dir, `${key}.json`);
@@ -70,6 +75,31 @@ async function recoverAmaAutomationLocked({
   catch (err) { if (err.code !== 'ENOENT') throw err; }
   state ||= { repo, pr: prNumber, head: headSha, attempts: 0, rereviewRequested: false, paged: false };
   const save = () => writeFileAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
+  const clearStall = () => {
+    if (state.blockedSince != null) {
+      delete state.blockedSince;
+      save();
+    }
+  };
+  const waiting = (action, amaClosureResult = result) => {
+    clearStall();
+    return { outcome: 'ama-pending', amaClosureResult, recovery: { ...state, action } };
+  };
+  const ordinaryWait = (value) => IN_PROGRESS_REASONS.has(value?.reason)
+    || value?.daemonCleanMerge?.disposition === 'deferred'
+    || value?.recoveryWait || value?.commentOnlyFinalRoundAwaitingCi === true
+    || FOLLOW_UP_REASONS.has(value?.reason)
+    || (value?.reasons || []).some((item) => FOLLOW_UP_REASONS.has(item));
+  // Ownership and ordinary time gates are progress, not failed recovery.
+  if (reason === 'daemon-merged') return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult: result };
+  if (isSafetyRecoveryHold(result)) {
+    clearStall();
+    return { outcome: 'await-operator', amaClosureResult: result };
+  }
+  if (/autonomous-merge.*disabled|ama-disabled/.test(reason)) return waiting('disabled');
+  if (ordinaryWait(result)) return waiting(
+    FOLLOW_UP_REASONS.has(reason) || reasons.some((item) => FOLLOW_UP_REASONS.has(item))
+      ? 'await-remediation' : 'in-progress');
   const exhausted = async () => {
     const event = state.event || { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
       reason, reasons, repo, pr: prNumber, head: headSha, attempts: state.attempts };
@@ -94,31 +124,45 @@ async function recoverAmaAutomationLocked({
     }
     return { outcome: 'recovery-exhausted', amaClosureResult: result, recovery: state };
   };
+  const stalled = async (action, amaClosureResult = result) => {
+    state.blockedSince ??= now();
+    state.lastReason = amaClosureResult?.reason || reason;
+    save();
+    if (state.event || now() - state.blockedSince >= stuckDeadlineMs) return exhausted();
+    return { outcome: 'ama-pending', amaClosureResult, recovery: { ...state, action } };
+  };
+  const charge = () => {
+    state.attempts += 1;
+    state.lastReason = reason;
+    clearStall();
+    save();
+  };
   if (reason === 'ama-closer-launch-in-progress') {
     let launch;
     try { launch = await reclaimLaunch(); }
     catch (err) { logger.warn?.(`[ama-recovery] launch reconciliation failed: ${err?.message || err}`); }
-    if (launch?.active > 0) return { outcome: 'ama-pending', amaClosureResult: result,
-      recovery: { ...state, action: 'active-launch', launch } };
-    if (launch?.reclaimed > 0) return { outcome: 'ama-pending', amaClosureResult: result,
-      recovery: { ...state, action: 'reclaim-launch', launch } };
+    if (launch?.active > 0) return waiting('active-launch');
+    if (launch?.reclaimed > 0) return waiting('reclaim-launch');
   }
   const stale = reasons.includes('stale-review-head') || reasons.includes('stale-head');
   const malformed = reasons.some((item) => /findings-unknown$/.test(item));
   // While a requested pass owns the row, don't consume retries or start HAM.
   const reviewStamp = String(reviewStateRow?.posted_at || reviewStateRow?.reviewer_session_uuid || 'unobserved');
-  if (state.rereviewPending && (['pending', 'reviewing', 'pending-upstream'].includes(reviewStateRow?.review_status)
-    || reviewStamp === state.rereviewBaseline)) {
+  if (state.rereviewPending && ['pending', 'reviewing', 'pending-upstream'].includes(reviewStateRow?.review_status)) {
+    return waiting('await-review');
+  }
+  if (state.rereviewPending && reviewStamp === state.rereviewBaseline) {
     if (now() - state.rereviewRequestedAt >= rereviewDeadlineMs) return exhausted();
     return { outcome: 'ama-pending', amaClosureResult: result, recovery: state };
   }
-  if (state.attempts >= maxAttempts || /(?:retry-cap|lifetime-cap).*exhausted/.test(reason)) return exhausted();
-  state.attempts += 1;
-  state.lastReason = reason;
-  save();
+  if (state.rereviewPending) {
+    state.rereviewPending = false;
+    save();
+  }
+  if (state.event) return exhausted();
+  if (state.attempts >= maxAttempts || /(?:retry-cap|lifetime-cap).*exhausted/.test(reason)) return stalled('attempt-cap');
   try {
     if (stale || (malformed && !state.rereviewRequested)) {
-      state.rereviewRequested = true;
       state.rereviewBaseline = reviewStamp;
       state.rereviewRequestedAt = now();
       save();
@@ -126,21 +170,37 @@ async function recoverAmaAutomationLocked({
         targetRevisionRef: headSha, reason: `AMA automated recovery: ${stale ? 'stale-review-head' : 'malformed-findings'}`,
         automaticMalformedRecovery: malformed, logger });
       state.rereviewPending = rereview?.triggered === true || rereview?.reason === 'already-pending';
+      if (state.rereviewPending) {
+        state.rereviewRequested = true;
+        if (rereview?.triggered === true) charge();
+        else clearStall();
+      }
       save();
+      if (!state.rereviewPending) return stalled('rereview-refused');
       return { outcome: 'ama-pending', amaClosureResult: result, recovery: { ...state, action: 'rereview', rereview } };
     }
     if (automatedHammerReasonsCovered(reasons)) {
       const retry = await dispatchHammer();
-      return { outcome: retry?.dispatched ? 'ama-dispatched' : 'ama-pending',
-        amaClosureResult: retry, recovery: { ...state, action: 'hammer' } };
+      if (retry?.dispatched) {
+        charge();
+        return { outcome: 'ama-dispatched', amaClosureResult: retry, recovery: { ...state, action: 'hammer' } };
+      }
+      if (ordinaryWait(retry)) return waiting('in-progress', retry);
+      if (isSafetyRecoveryHold(retry)) {
+        clearStall();
+        return { outcome: 'await-operator', amaClosureResult: retry, recovery: state };
+      }
+      return stalled('hammer-refused', retry);
     }
     // Unavailable safety/identity evidence stays fail-closed, with bounded
     // automated retries and a loud exhaustion event instead of an operator park.
-    return { outcome: 'ama-pending', amaClosureResult: result, recovery: { ...state, action: 'retry' } };
+    return stalled('retry');
   } catch (err) {
+    if (signal?.aborted || ['AbortError', 'AmaCoexistenceAbortError'].includes(err?.name)
+      || ['ABORT_ERR', 'AMA_COEXISTENCE_ABORTED', 'AMA_COEXISTENCE_OPERATION_TIMEOUT'].includes(err?.code)) throw err;
+    charge();
     logger.warn?.(`[ama-recovery] ${repo}#${prNumber}: ${err?.message || err}`);
-    return state.attempts >= maxAttempts ? exhausted()
-      : { outcome: 'ama-pending', amaClosureResult: result, recovery: { ...state, error: String(err?.message || err) } };
+    return stalled('error');
   }
 }
 

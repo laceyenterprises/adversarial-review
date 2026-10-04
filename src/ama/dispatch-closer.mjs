@@ -4057,6 +4057,10 @@ export async function maybeDispatchAmaCloser({
           skipMergeAgent: true,
           reason: 'not-eligible',
           reasons: routeReasons,
+          ...(settledCommentOnlyTerminalMs !== null
+            && settledCommentOnlyTerminalMs < commentOnlyTerminalGraceMs
+            && hasCommentOnlyTerminalResumeReason(routeReasons)
+            ? { recoveryWait: 'comment-only-grace' } : {}),
         });
       }
     } else {

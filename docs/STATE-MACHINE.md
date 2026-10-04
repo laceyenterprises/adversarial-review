@@ -547,11 +547,17 @@ follow-up ownership without spending recovery attempts or paging. Recovery
 widens worker-class admission only; the ordinary closer proves terminal
 authority after exhaustion and follow-up ownership release.
 Terminal or phantom launches reconcile through ledger-backed liveness checks.
-Every retry retains all ordinary safety, identity and merge gates. Only safety
-holds await adjudication. A per-head durable recovery budget exhausts into a
+Every retry retains all ordinary safety, identity and merge gates. Safety and
+explicit configuration/operator holds await adjudication. Active owners, lease
+contention, background dispatch, grace and proven final-round CI waits do not
+spend recovery attempts. A per-head durable recovery budget exhausts into a
 structured SEV1 event and one deduplicated page, never a silent operator wait.
-A requested pass owns its row until a new posting is observed or its bounded
-recovery deadline expires. Live terminal PRs never redrive.
+The action cap follows the job's convergence budget; exhausted actions and
+non-progressing refusals page only after a 30-minute wall-clock stall. A requested
+pass owns its row until a new posting is observed. Active reviewer queue states
+are exempt from the 30-minute unchanged-posting deadline. Live terminal PRs never
+redrive. See [AMA Automated Recovery](data-model/ama-automated-recovery.md) for
+state fields, retention and reset.
 
 The background hammer queue rechecks the live PR state, head, draft flag, and
 mergeability when each queued entry gets a slot. Changed or unreadable state

@@ -267,7 +267,8 @@ test('CI pending past the deadline on a proven final-round head counts toward th
       rootDir, reviewStateRow: {}, dispatchJob: {}, candidate: { headSha: PUSHED },
       repoPath: REPO, prNumber: PR, currentRevisionRef: PUSHED,
       logger: { log: (line) => logs.push(line), warn: (line) => logs.push(line), error: (line) => logs.push(line) },
-      recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {} },
+      recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {},
+        stuckDeadlineMs: 1000, now: () => tick * 1000 },
       maybeDispatchAmaClosureForImpl: async () => closure,
     });
   }

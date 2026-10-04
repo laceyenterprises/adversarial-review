@@ -38,6 +38,7 @@ import {
   resolveProtectivePredecessorDeclaration,
 } from './ama/protective-predecessor.mjs';
 import { recoverAmaAutomation } from './ama/automated-recovery.mjs';
+import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { loadConfigCached } from './config-loader.mjs';
@@ -2181,7 +2182,8 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     return recoverAmaAutomationImpl({
       rootDir, repo: repoPath, prNumber,
       headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
-      result: amaClosureResult, reviewStateRow, logger,
+      result: amaClosureResult, reviewStateRow, logger, signal,
+      maxAttempts: amaRetainLoopCapFor(dispatchJob?.remediationPlan?.maxRounds),
       dispatchHammer: () => maybeDispatchAmaClosureForImpl({
         rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
         operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,

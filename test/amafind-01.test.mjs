@@ -107,7 +107,7 @@ for (const ownershipReason of ['remediation-pending', 'remediation-state-unknown
   });
 }
 
-for (const reason of ['label-do-not-merge', 'risk-class-not-permitted', 'two-key-high-risk', 'security-hold', 'destructive-migration', 'primary-change-needs-operator']) {
+for (const reason of ['label-do-not-merge', 'risk-class-not-permitted', 'two-key-high-risk', 'security-hold', 'destructive-migration', 'primary-change-needs-operator', 'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'pr-is-draft', 'current-head-ham-terminal-remediation-needs-operator']) {
   test(`safety holds retain operator adjudication: ${reason}`, async (t) => {
     const { args, calls } = harness(t, { reason: 'not-eligible', reasons: [reason] });
     assert.equal((await recoverAmaAutomation(args)).outcome, 'await-operator');
@@ -115,15 +115,18 @@ for (const reason of ['label-do-not-merge', 'risk-class-not-permitted', 'two-key
   });
 }
 
-test('exhaustion persists one SEV1 event and pages once across repeated polls', async (t) => {
-  const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['worker-identity-unresolved'] });
-  for (let i = 0; i < 3; i += 1) assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-pending');
+test('wall-clock exhaustion persists one SEV1 event independent of tick count', async (t) => {
+  let time = 0;
+  const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['worker-identity-unresolved'] },
+    { now: () => time, stuckDeadlineMs: 1000 });
+  for (let i = 0; i < 10; i += 1) assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-pending');
+  time = 1000;
   for (let i = 0; i < 3; i += 1) assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
   assert.equal(calls.page.length, 1);
   assert.equal(calls.events.length, 1);
   assert.deepEqual(calls.events[0], { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
-    reason: 'not-eligible', reasons: ['worker-identity-unresolved'], repo: 'fixture/repo', pr: 1, head: 'head', attempts: 3 });
-  assert.equal((await recoverAmaAutomation({ ...args, headSha: 'new-head' })).recovery.attempts, 1);
+    reason: 'not-eligible', reasons: ['worker-identity-unresolved'], repo: 'fixture/repo', pr: 1, head: 'head', attempts: 0 });
+  assert.equal((await recoverAmaAutomation({ ...args, headSha: 'new-head' })).recovery.attempts, 0);
 });
 
 test('watcher shared router retries closure with recovery flag and protects terminal PRs', async (t) => {
@@ -167,8 +170,11 @@ test('live launches spend no recovery budget; uncertain launch reads exhaust lou
     assert.equal(waiting.recovery.action, 'active-launch');
     assert.equal(waiting.recovery.attempts, 0);
   }
-  const uncertain = { ...args, reclaimLaunch: async () => ({ active: 0, reclaimed: 0, uncertain: 1 }) };
-  for (let i = 0; i < 3; i += 1) await recoverAmaAutomation(uncertain);
+  let time = 0;
+  const uncertain = { ...args, now: () => time, stuckDeadlineMs: 1000,
+    reclaimLaunch: async () => ({ active: 0, reclaimed: 0, uncertain: 1 }) };
+  for (let i = 0; i < 10; i += 1) await recoverAmaAutomation(uncertain);
+  time = 1000;
   assert.equal((await recoverAmaAutomation(uncertain)).outcome, 'recovery-exhausted');
   assert.equal(calls.page.length, 1);
 });
@@ -186,4 +192,159 @@ test('concurrent recovery calls cannot duplicate a re-review or dispatch a hamme
   assert.equal(calls.hammer, 0);
   release();
   await first;
+});
+
+function watcherInput(args, result, dispatchHammer = args.dispatchHammer) {
+  return { rootDir: args.rootDir, repoPath: args.repo, prNumber: args.prNumber,
+    currentRevisionRef: args.headSha, reviewStateRow: args.reviewStateRow,
+    candidate: { prState: 'open' }, dispatchJob: {}, logger: args.logger,
+    recoveryOptions: { pageImpl: args.pageImpl, requestRereviewImpl: args.requestRereviewImpl,
+      now: args.now, stuckDeadlineMs: args.stuckDeadlineMs },
+    maybeDispatchAmaClosureForImpl: async (options) => options.automatedRecovery ? dispatchHammer() : result };
+}
+
+for (const reason of ['hammer-closer-in-flight', 'lease-held', 'live-run-in-flight',
+  'active-remediation-job', 'ama-closer-dispatch-backgrounded', 'dispatch-status-unknown',
+  'closer-lease-held-by-other-process', 'daemon-deferred', 'deferred']) {
+  test(`watcher preserves budget for in-flight ownership across ticks: ${reason}`, async (t) => {
+    let time = 0;
+    const result = { amaEnabled: true, skipMergeAgent: true, reason };
+    const { args, calls } = harness(t, result, { now: () => time });
+    for (let tick = 0; tick < 8; tick += 1) {
+      time += 60 * 60 * 1000;
+      const waiting = await resolveMergeAgentCoexistenceForWatcher(watcherInput(args, result));
+      assert.equal(waiting.outcome, 'ama-pending');
+      assert.equal(waiting.recovery.attempts, 0);
+    }
+    assert.equal(calls.hammer + calls.rereview.length + calls.page.length, 0);
+  });
+}
+
+for (const retry of [
+  { reason: 'not-eligible', recoveryWait: 'comment-only-grace' },
+  { reason: 'not-eligible', commentOnlyFinalRoundAwaitingCi: true },
+  { reason: 'active-remediation-job' },
+  { reason: 'ama-closer-dispatch-backgrounded' },
+  { reason: 'daemon-failed-closed', daemonCleanMerge: { disposition: 'deferred' } },
+]) {
+  test(`refused recovery hammer spends no attempts: ${retry.recoveryWait || retry.reason}`, async (t) => {
+    let time = 0;
+    const result = { amaEnabled: true, skipMergeAgent: true,
+      reason: 'not-eligible', reasons: ['non-blocking-findings-present'] };
+    const { args, calls } = harness(t, result, { now: () => time });
+    const input = watcherInput(args, result, async () => retry);
+    for (let tick = 0; tick < 8; tick += 1) {
+      time += 60 * 1000;
+      const waiting = await resolveMergeAgentCoexistenceForWatcher(input);
+      assert.equal(waiting.outcome, 'ama-pending');
+      assert.equal(waiting.recovery.attempts, 0);
+      assert.equal(waiting.recovery.blockedSince, undefined);
+    }
+    assert.equal(calls.page.length, 0);
+    assert.equal((await resolveMergeAgentCoexistenceForWatcher(watcherInput(args, result))).outcome, 'ama-dispatched');
+    assert.equal(calls.hammer, 1, 'dispatch remains reachable once ordinary admission clears');
+  });
+}
+
+test('unclassified hammer refusal expires by wall clock without burning attempts', async (t) => {
+  let time = 0;
+  const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['non-blocking-findings-present'] },
+    { now: () => time, stuckDeadlineMs: 1000, dispatchHammer: async () => ({ dispatched: false, reason: 'gate-read-failed' }) });
+  for (let tick = 0; tick < 8; tick += 1) {
+    const waiting = await recoverAmaAutomation(args);
+    assert.equal(waiting.outcome, 'ama-pending');
+    assert.equal(waiting.recovery.attempts, 0);
+  }
+  time = 1000;
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+  assert.equal(calls.page.length, 1);
+});
+
+test('observed ownership clears a prior stall deadline', async (t) => {
+  let time = 0;
+  const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['worker-identity-unresolved'] },
+    { now: () => time, stuckDeadlineMs: 1000 });
+  await recoverAmaAutomation(args);
+  time = 900;
+  await recoverAmaAutomation({ ...args, result: { reason: 'hammer-closer-in-flight' } });
+  time = 1000;
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-pending');
+  assert.equal(calls.page.length, 0);
+});
+
+test('recovery cap follows the job round budget, not watcher tick count', async (t) => {
+  let time = 0;
+  const result = { amaEnabled: true, skipMergeAgent: true,
+    reason: 'not-eligible', reasons: ['non-blocking-findings-present'] };
+  const { args, calls } = harness(t, result, { now: () => time, stuckDeadlineMs: 1000 });
+  const input = { ...watcherInput(args, result), dispatchJob: { remediationPlan: { maxRounds: 4 } } };
+  for (let tick = 0; tick < 4; tick += 1) {
+    assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'ama-dispatched');
+  }
+  assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'ama-pending');
+  assert.equal(calls.hammer, 4);
+  time = 1000;
+  assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'recovery-exhausted');
+  assert.equal(calls.page.length, 1);
+});
+
+for (const code of ['ABORT_ERR', 'AMA_COEXISTENCE_ABORTED', 'AMA_COEXISTENCE_OPERATION_TIMEOUT']) {
+  test(`recovery rethrows ${code} without spending attempts`, async (t) => {
+    const error = Object.assign(new Error(code), { code });
+    const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['non-blocking-findings-present'] },
+      { dispatchHammer: async () => { throw error; } });
+    await assert.rejects(recoverAmaAutomation(args), (err) => err === error);
+    const waiting = await recoverAmaAutomation({ ...args, result: { reason: 'hammer-closer-in-flight' } });
+    assert.equal(waiting.recovery.attempts, 0);
+    assert.equal(calls.page.length, 0);
+  });
+}
+
+for (const review_status of ['pending', 'reviewing', 'pending-upstream']) {
+  test(`queued rereview remains owned after the recovery deadline: ${review_status}`, async (t) => {
+    let time = 0;
+    const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['blocking-findings-unknown'] },
+      { now: () => time, rereviewDeadlineMs: 1000 });
+    await recoverAmaAutomation(args);
+    time = 5000;
+    const waiting = await recoverAmaAutomation({ ...args, reviewStateRow: { review_status } });
+    assert.equal(waiting.outcome, 'ama-pending');
+    assert.equal(waiting.recovery.attempts, 1);
+    assert.equal(calls.page.length, 0);
+  });
+}
+
+test('explicit configuration/operator holds do not page or dispatch', async (t) => {
+  const { args, calls } = harness(t, { reason: 'dispatch-suppressed', needsOperator: true });
+  for (let tick = 0; tick < 8; tick += 1) assert.equal((await recoverAmaAutomation(args)).outcome, 'await-operator');
+  assert.equal(calls.hammer + calls.rereview.length + calls.page.length, 0);
+});
+
+test('action errors consume only the action cap and wait for elapsed failure before paging', async (t) => {
+  let time = 0;
+  let dispatches = 0;
+  const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['non-blocking-findings-present'] }, {
+    now: () => time, stuckDeadlineMs: 1000, maxAttempts: 2,
+    dispatchHammer: async () => { dispatches += 1; throw new Error('dispatch failed'); },
+  });
+  assert.equal((await recoverAmaAutomation(args)).recovery.attempts, 1);
+  assert.equal((await recoverAmaAutomation(args)).recovery.attempts, 2);
+  for (let tick = 0; tick < 8; tick += 1) assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-pending');
+  assert.equal(dispatches, 2);
+  assert.equal(calls.page.length, 0);
+  time = 1000;
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+  assert.equal(calls.page.length, 1);
+});
+
+test('caller cancellation with a custom reason propagates without budget burn', async (t) => {
+  const controller = new AbortController();
+  const error = new Error('caller stopped');
+  const { args } = harness(t, { reason: 'not-eligible', reasons: ['non-blocking-findings-present'] }, {
+    signal: controller.signal,
+    dispatchHammer: async () => { controller.abort(error); throw error; },
+  });
+  await assert.rejects(recoverAmaAutomation(args), (err) => err === error);
+  const waiting = await recoverAmaAutomation({ ...args, signal: null, result: { reason: 'hammer-closer-in-flight' } });
+  assert.equal(waiting.recovery.attempts, 0);
 });

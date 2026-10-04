@@ -1056,12 +1056,19 @@ test('AMA recovery page outbox identity deduplicates retries before and after de
 test('HAM exhaustion pages reuse deterministic identities after uncertain enqueue', async (t) => {
   const { env, rootDir } = makeEnv();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  for (const event of ['ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted']) {
+  for (const event of ['ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted', 'ama.orphan_recovery.exhausted']) {
     const options = { env, event, payload: { repo: 'fixture/repo', prNumber: 1, headSha: 'a'.repeat(40) },
       requestText: async () => ({ statusCode: 200, body: '{}' }) };
     const first = await deliverAlert('SEV1: exhausted', options);
     const second = await deliverAlert('SEV1: exhausted again', options);
     assert.equal(first.id, second.id);
     assert.equal(second.queued, false);
+    if (event === 'ama.orphan_recovery.exhausted') {
+      const otherHead = await deliverAlert('SEV1: new head', { ...options, payload: { ...options.payload, headSha: 'b'.repeat(40) } });
+      assert.notEqual(first.id, otherHead.id);
+      const deliveredPath = sinkPath(rootDir, 'delivered', `${first.id}.json`);
+      renameSync(first.queuePath, deliveredPath);
+      assert.equal((await deliverAlert('SEV1: retry after crash', options)).queued, false);
+    }
   }
 });

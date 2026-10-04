@@ -1304,9 +1304,9 @@ spending another request. A successful durable enqueue retains the guard;
 the alert outbox owns delivery retries. Failed comment writes or head rechecks refund the request reservation;
 the cycle threshold uses `shouldEscalateReviewCycle.escalate`.
 Preservation refusals retain the merge hold as
-`primary-change-repair-required` with `needsOperator: true`; three closer refusals on the
-same head emit `ama_primary_change_refusal_exhausted` with SEV1 and page once.
-Both page guards persist across restarts. Read outages remain `gate-read-failed`
+`primary-change-repair-required` with `needsOperator: true` until the REMORPHAN-01
+watchdog admits a repair worker. Refusal observations alone no longer page.
+The dispute page guard persists across restarts. Read outages remain `gate-read-failed`
 and retry normal ticks after transport/auth recovery. Refusal-store or pager
 failures are logged and always retain `skipMergeAgent: true`.
 
@@ -1338,9 +1338,21 @@ the eligibility-miss recovery routing. Timeout handoffs normalize the live
 GitHub label objects into names before applying it.
 Generic `operator-approved`, stale label events and read outages do not activate
 this route. This is a recovery dispatch, not AMA merge eligibility or a waiver of
-the primary-change predicate. No automatic hammer repair is dispatched from the
-refusal branch. The daemon parks with `needsOperator: true` before the closer,
-so it does not contribute to the closer's refusal counter/page. See
+the primary-change predicate. REMORPHAN-01 automatically dispatches a repair
+HAM after six consecutive ownerless ticks on an open, non-draft, unheld head.
+Its primary-line edits require the HAMINTENT-03 per-finding
+`Reversal-Authorized-By` contract or restoration of the reverted lines.
+The same watchdog covers unresolved stopped remediation, blocking findings below
+max rounds without a pending job, and closer-authored stale heads (STALECLOSER-01).
+A closer head that HAM cannot re-certify gets one exact-head re-review.
+Admission never waives CI, primary-change, identity, policy or merge leases.
+Across-head launch records and pending reviewer/remediator queues retain ownership;
+unreadable evidence fails closed. Two reserved attempts per head exhaust into one
+durable SEV1 page containing the refusal and last-attempt evidence. Live-owner and
+transient dispatch refusals refund their reservation. State and a nonblocking
+process lock live under `data/follow-up-jobs/orphan-watchdog`; restarts preserve
+attempts and page deduplication. Recovery dispatch runs inline even when ordinary
+HAM dispatch uses the background queue, so its result can be accounted for. See
 [data-model/ham-primary-change-refusals.md](data-model/ham-primary-change-refusals.md)
 and [data-model/ham-finding-disputes.md](data-model/ham-finding-disputes.md).
 

@@ -1,3 +1,4 @@
+import { recoverOrphan } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
@@ -722,6 +723,7 @@ export function writeAutonomousMergeDisabledAudit({
 
 export async function maybeDispatchAmaClosureFor({
   automatedRecovery = false,
+  orphanRecovery = null,
   priorDaemonCleanMerge = null,
   rootDir = ROOT,
   reviewStateRow,
@@ -1584,7 +1586,7 @@ export async function maybeDispatchAmaClosureFor({
       eligible: false, reason: daemonCleanMerge.reason, logger }); }
     catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
   }
-  if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
+  if (!orphanRecovery && daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
     recordDaemonMergePark({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha || null,
       reason: daemonCleanMerge.reasons?.find((reason) => reason.startsWith('primary-change-'))
@@ -1593,7 +1595,7 @@ export async function maybeDispatchAmaClosureFor({
       reason: daemonCleanMerge.reason, reasons: daemonCleanMerge.reasons,
       needsOperator: true, daemonCleanMerge }, { amaEnabled: true });
   }
-  if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
+  if (!(orphanRecovery && daemonCleanMerge?.reason === 'primary-change-needs-operator') && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
       `[watcher] AMA daemon clean-merge ${daemonCleanMerge.disposition} for ${repoPath}#${prNumber}` +
@@ -1822,6 +1824,7 @@ export async function maybeDispatchAmaClosureFor({
     logger,
   });
   const dispatchContext = {
+    orphanRecovery,
     automatedRecovery,
     forceHammerAfterDaemonFailure: isDaemonFailClosedHammerRemediable(daemonCleanMerge)
       || forceHammerAfterRouteDisagreement,
@@ -1893,7 +1896,7 @@ export async function maybeDispatchAmaClosureFor({
   // from the closer's own gates (retry cap, ineligibility) still reaches the
   // merge-agent fallback and alerting, one tick later.
   let backgroundSettled = null;
-  if (resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
+  if (!orphanRecovery && resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
     const backgroundKey = amaHammerBackgroundKey({
       repo: repoPath,
       prNumber,
@@ -2101,6 +2104,8 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   recoverAmaAutomationImpl = recoverAmaAutomation,
   amaHammerBackgroundQueueImpl = amaHammerBackgroundQueue,
   recoveryOptions = {},
+  recoverOrphanImpl = recoverOrphan,
+  orphanOptions = {},
   signal = null,
   operationTimeoutMs = DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS,
   operationTracker = null,
@@ -2177,6 +2182,20 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
+  const orphan = await recoverOrphanImpl({
+    rootDir, repo: repoPath, prNumber,
+    headSha: candidate?.headSha || currentRevisionRef || dispatchJob?.headSha || '',
+    candidate, labels: labelNames, result: amaClosureResult, reviewStateRow, dispatchJob, logger, signal,
+    dispatchHammer: (orphanRecovery) => maybeDispatchAmaClosureForImpl({
+      rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
+      operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
+      repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
+      operationTimeoutMs, operationTracker, orphanRecovery,
+      priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
+    }),
+    ...orphanOptions,
+  });
+  if (orphan) return orphan;
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
   const safetyHold = isSafetyRecoveryHold(amaClosureResult);

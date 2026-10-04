@@ -2047,3 +2047,35 @@ test('HELDHEAD request exceptions preserve later subjects in the same watcher ti
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+for (const exact of [true, false]) test(`REMORPHAN exact-head recovery ${exact ? 'spawns' : 'cannot follow a moved head'} on a closer commit`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-orphan-head-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource()
+      .replace("return async () => ({ suppressed: false, reason: 'fixture' });", "return async () => ({ suppressed: true, reason: 'closer-commit-trailer' });")
+      .replace("export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: false, reason: 'fixture' }; }", "export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: true, reason: 'closer-commit-trailer' }; }"));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs
+        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         review_attempts, revision_ref, rereview_requested_at, rereview_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`).run(
+        'laceyenterprises/adversarial-review', 101, '2026-10-04T00:00:00Z', 'gemini',
+        'open', 'pending', 0, 'sha-happy-101', '2026-10-04T01:00:00Z',
+        'system-orphan-head-review:${exact ? 'sha-happy-101' : 'old-head'}');
+    ` }));
+    const run = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+      env: fixtureEnv(installGhFixture(tmp)),
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.equal(run.status, 0, output);
+    const line = run.stdout.split(/\r?\n/).find(line => line.startsWith(SUMMARY_MARKER));
+    assert.ok(line, output);
+    const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+    assert.equal(summary.reviewerSpawns.some(spawn => spawn.subjectContext?.reviewerHeadSha === 'sha-happy-101'), exact, output);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

@@ -1,7 +1,7 @@
+import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
-import { recordPrimaryChangeRefusal } from './primary-change-refusal.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
@@ -4005,7 +4005,6 @@ export async function maybeDispatchAmaCloser({
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
-  recordPrimaryChangeRefusalImpl = recordPrimaryChangeRefusal,
   emitProtectivePredecessorFindingImpl = null,
   logGate = dispatchCloserLogGate,
   logger = console,
@@ -4077,14 +4076,11 @@ export async function maybeDispatchAmaCloser({
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
-  if (verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
-    try {
-      await recordPrimaryChangeRefusalImpl({ rootDir: dispatchContext?.rootDir,
-        repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha, reasons: verdict.reasons },
-      { page: deliverAlertImpl, logger });
-    } catch (error) {
-      logger?.warn?.(`[ama-closer] primary-change refusal recording failed; retaining merge hold: ${error?.message || error}`);
-    }
+  const orphanAdmit = Boolean(dispatchContext?.orphanRecovery)
+    && orphanDispatchReasonsCovered(verdict.reasons)
+    && (!verdict.reasons.includes('stale-review-head')
+      || (dispatchContext.orphanRecovery.closerHead === true && dispatchContext.allowStaleReviewHeadHammerResume === true));
+  if (!orphanAdmit && verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true });
   }
@@ -4150,7 +4146,7 @@ export async function maybeDispatchAmaCloser({
       && automatedHammerReasonsCovered(routeReasons);
     // Recovery may widen worker-class admission only. Ownership, actionable
     // reasons, comment-only grace and mechanical-CI routing remain authoritative.
-    const autoHammer = !pendingCiMechanicalGateMiss &&
+    const autoHammer = orphanAdmit || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -4167,7 +4163,7 @@ export async function maybeDispatchAmaCloser({
         commentOnlyTerminalGraceMs,
         commentOnlyFinalRoundResume: commentOnlyFinalRoundAdmit,
         commentOnlyFinalRoundConflicting: dispatchContext?.commentOnlyFinalRoundConflicting === true,
-      });
+      }));
     if (!autoHammer) {
       if (pendingCiMechanicalGateMiss) {
         logger.log?.(
@@ -4292,7 +4288,7 @@ export async function maybeDispatchAmaCloser({
     auditRef,
     closedBy: undefined,
   });
-  const prompt = composeCloserPrompt({
+  let prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
     repo,
     prNumber,
@@ -4316,6 +4312,8 @@ export async function maybeDispatchAmaCloser({
     // follow-up ledger before it honors any waiver.
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   });
+
+  if (orphanAdmit) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
   const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };

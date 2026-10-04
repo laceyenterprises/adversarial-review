@@ -18,5 +18,6 @@ export function isExplicitOperatorRetriggerReason(reason) {
 }
 
 export function isExactHeadReviewRecoveryReason(reason) {
-  return isExplicitOperatorRetriggerReason(reason) || String(reason || '').startsWith('system-held-head-review:');
+  return isExplicitOperatorRetriggerReason(reason) || String(reason || '').startsWith('system-held-head-review:')
+    || String(reason || '').startsWith('system-orphan-head-review:');
 }

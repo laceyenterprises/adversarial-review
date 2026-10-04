@@ -111,6 +111,26 @@ export function createAmaHammerBackgroundQueue({
     }
   }
 
+  function abort(key) {
+    const entry = entries.get(key);
+    if (!entry) return false;
+    entry.controller.abort();
+    settled.delete(key);
+    if (entry.state === 'queued') {
+      waiting.splice(waiting.indexOf(entry), 1);
+      entries.delete(key);
+    }
+    // Running entries retain their slot until they settle, preventing overlap
+    // even when a runner cannot immediately honor cancellation.
+    return true;
+  }
+
+  function discardOlderHeads(key) {
+    for (const oldKey of entries.keys()) {
+      if (prKey(oldKey) === prKey(key) && oldKey !== key) abort(oldKey);
+    }
+  }
+
   function launch(entry) {
     running += 1;
     runningPrKeys.add(entry.prKey);
@@ -118,19 +138,19 @@ export function createAmaHammerBackgroundQueue({
     entry.startedAtMs = nowMs();
     let settled;
     try {
-      settled = Promise.resolve(entry.run());
+      settled = Promise.resolve(entry.run(entry.controller.signal));
     } catch (err) {
       settled = Promise.reject(err);
     }
     entry.promise = settled
       .then(
         (result) => {
-          recordSettled(entry.key, { ok: true, result });
+          if (!entry.controller.signal.aborted) recordSettled(entry.key, { ok: true, result });
           entry.onSettled?.({ ok: true, result, elapsedMs: nowMs() - entry.startedAtMs });
           return result;
         },
         (error) => {
-          recordSettled(entry.key, { ok: false, error });
+          if (!entry.controller.signal.aborted) recordSettled(entry.key, { ok: false, error });
           entry.onSettled?.({ ok: false, error, elapsedMs: nowMs() - entry.startedAtMs });
           return null;
         },
@@ -148,10 +168,16 @@ export function createAmaHammerBackgroundQueue({
   }
 
   return {
+    /** Cancel waiting work or signal a running task without freeing its slot early. */
+    abort,
     /**
      * @returns {{state: 'started'|'queued'|'in-flight', key: string, queuedAtMs: number}}
      */
     submit({ key, run, onSettled = null }) {
+      discardOlderHeads(key);
+      for (const oldKey of settled.keys()) {
+        if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
+      }
       const existing = entries.get(key);
       if (existing) {
         // Report what the existing entry is actually doing: still waiting for a
@@ -162,7 +188,7 @@ export function createAmaHammerBackgroundQueue({
           queuedAtMs: existing.queuedAtMs,
         };
       }
-      const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null };
+      const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null, controller: new AbortController() };
       entries.set(key, entry);
       if (running < limit() && !runningPrKeys.has(entry.prKey)) {
         launch(entry);
@@ -172,11 +198,15 @@ export function createAmaHammerBackgroundQueue({
       return { state: 'queued', key, queuedAtMs: entry.queuedAtMs };
     },
     /**
-     * Remove and return the settled outcome for `key`
-     * (`{ ok, result | error, settledAtMs }`), or null when there is none or it
-     * is older than `settledTtlMs`.
+     * Consume the settled outcome for `key` (`{ ok, result | error, settledAtMs }`),
+     * or return null when there is none or it is older than `settledTtlMs`.
+     * Refusals are consumed too, so subsequent ticks re-evaluate same-head gates.
      */
     takeSettled(key) {
+      discardOlderHeads(key);
+      for (const oldKey of settled.keys()) {
+        if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
+      }
       const outcome = settled.get(key);
       if (!outcome) return null;
       settled.delete(key);

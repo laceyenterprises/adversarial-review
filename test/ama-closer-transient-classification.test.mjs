@@ -1,3 +1,4 @@
+import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -471,3 +472,29 @@ for (const failure of ['SQLITE_BUSY', 'EACCES', 'ENOSPC', 'corrupt database', 'p
     assert.match(warnings[0], new RegExp(failure));
   });
 }
+
+
+test('three background primary-change closer refusals on one head page once', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-background-refusals-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  const queue = createAmaHammerBackgroundQueue();
+  let pages = 0;
+  const key = `${inputs.dispatchContext.repo}#${inputs.prMetadata.prNumber}@${inputs.headSha}`;
+  for (let observation = 1; observation <= 4; observation += 1) {
+    queue.submit({ key, run: () => maybeDispatchAmaCloser({ ...inputs,
+      options: { primaryChange: { ...primaryChangeFixture(inputs.headSha), finalFiles: [] } },
+      deliverAlertImpl: async (_text, options) => {
+        pages += 1;
+        assert.equal(options.event, 'ama_primary_change_refusal_exhausted');
+        assert.equal(options.payload.severity, 'SEV1');
+      },
+      logger: { error() {}, warn() {} },
+      execFileImpl: async () => assert.fail('a preservation refusal must not dispatch'),
+    }) });
+    await queue.drain();
+    assert.equal(queue.takeSettled(key).result.reason, 'primary-change-repair-required');
+    assert.equal(queue.takeSettled(key), null, 'the next cycle must re-run the closer');
+    assert.equal(pages, observation < 3 ? 0 : 1);
+  }
+});

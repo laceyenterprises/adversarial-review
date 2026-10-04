@@ -287,7 +287,7 @@ The control is `watcher.ama_hammer_dispatch_mode`, with env override
 | Mode | Contract |
 |---|---|
 | `inline` (default) | The posted-review phase awaits the hammer `hq dispatch` attempt before moving to the next row. This is the historical behavior and the fail-safe fallback for missing, unreadable, or unknown config values. |
-| `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher does not fall through to merge-agent. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
+| `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher retains ownership until the closer gates return an outcome; a scoped operator label does not skip that evaluation. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
 
 The queue is process-local, bounded, and keyed by PR@head
 (`<owner>/<repo>#<pr>@<head>`). It starts hammer `hq dispatch`
@@ -319,7 +319,11 @@ for review, and its operator alert says the PR is a draft. A settle-log failure 
 leave an unhandled background promise rejection.
 
 When a run settles, the queue keeps its outcome for that PR@head (at most 256
-outcomes, dropped after an hour). The next tick for that PR@head **applies the
+outcomes, dropped after an hour). Safety refusals are consumed once too, so
+removing a hold or applying same-head two-key evidence lets the next submitting
+tick re-evaluate it. Repeated primary-change refusals still reach the closer's
+three-observation SEV1 page threshold; replay does not replace an observation.
+The next tick for that PR@head **applies the
 outcome instead of submitting again**: the result goes through the same handling
 as an inline call. A terminal rejection from the closer's own gates (hammer retry
 cap, structural ineligibility) or a thrown error (`ama-dispatch-failed`) reaches
@@ -1311,7 +1315,27 @@ the PR branch or restore missing history/patch access. A new head re-evaluates
 the predicate. If evidence recovery needs another worker, an attributable operator
 can apply `merge-agent-requested` scoped to the current head and latest PR update.
 The existing operator-fallback lane accepts both the closer's
-`primary-change-repair-required` and the daemon's `primary-change-needs-operator`.
+`primary-change-repair-required` and the daemon's `primary-change-needs-operator`,
+with `needsOperator: true`. This exception does not include other safety holds:
+risk/two-key policy, security, destructive-change holds, hard-stop labels
+(including `no-merge-hold`) and hammer-cap suppression retain adjudication.
+An unresolved `dispatch-status-unknown` probe retains AMA ownership even after
+its dispatched lease expires: lease age cannot prove the hammer has stopped.
+Before taking over a settled primary-change refusal, the watcher checks for a
+live closer lease at any head, including a lease keyed to the previous head.
+Both inline and background modes evaluate the closer first; newly queued/running
+background work retains ownership until its gates return a result, and is not
+cancelled by the label. Once the guarded operator fallback is selected, its
+queue entry is aborted. Observing or submitting a newer head also aborts older
+entries for that PR: queued entries are removed without launching, while running
+entries retain their slot until settlement and do not retain cancelled outcomes.
+The scoped operator-fallback predicate requires the
+request label to remain present on the current snapshot and excludes
+`remediation_pending` rows. It also rejects `merge-agent-skip`, `do-not-merge`,
+`no-merge-hold`, `adversarial-merge-blocked`, `merge-agent-stuck`, and
+`duplicate-family-hold`. The same predicate controls both fallback selection and
+the eligibility-miss recovery routing. Timeout handoffs normalize the live
+GitHub label objects into names before applying it.
 Generic `operator-approved`, stale label events and read outages do not activate
 this route. This is a recovery dispatch, not AMA merge eligibility or a waiver of
 the primary-change predicate. No automatic hammer repair is dispatched from the
@@ -1527,9 +1551,13 @@ record for another watcher retry. The command remains self-gated by
 ### AMAFIND-01: automated recovery and safety holds
 
 The watcher routes AMA ineligibility through `src/ama/automated-recovery.mjs`
-for both posted reviews and reviewer-timeout exhaustion. A stale review requests
-one current-head re-review through the review-state CAS. Missing findings
-sections request a re-review once per head; a subsequent malformed review may
+for both posted reviews and reviewer-timeout exhaustion. The timeout-exhaustion
+handoff uses the live candidate's labels for scoped fallback and hard skips,
+rather than the earlier discovery snapshot: a newly applied request is eligible
+for scope validation, a removed request grants no override, and newly applied
+hard-stop labels retain ownership. Ordinary AMA safety gates still apply.
+A stale review requests one current-head re-review through the review-state CAS.
+Missing findings sections request a re-review once per head; a subsequent malformed review may
 retry the closer, subject to its ordinary terminal-remediation gates. A
 strict-mode comment-only review with standing non-blocking findings reaches the
 hammer after the existing terminal grace, proven final-round resume, or cycle

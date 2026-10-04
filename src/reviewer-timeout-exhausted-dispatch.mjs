@@ -20,6 +20,7 @@ import {
 import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestration.mjs';
+import { normalizeLabelNames } from './review-cycle-cap-actions.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
 import {
   buildMergeAgentDispatchJob,
@@ -118,7 +119,10 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       reviewStateRow: existing,
       dispatchJob,
       candidate,
-      labelNames,
+      // The live candidate is newer than discovery: use its label presence for
+      // both scoped requests and hard skips, including labels added or removed
+      // while this tick was in flight.
+      labelNames: normalizeLabelNames(Array.isArray(candidate?.labels) ? candidate.labels : labelNames),
       operatorApprovalEvent,
       mergeAgentRequestEvent,
       adversarialMergeRequestedEvent,

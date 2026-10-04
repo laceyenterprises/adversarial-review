@@ -118,7 +118,10 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       reviewStateRow: existing,
       dispatchJob,
       candidate,
-      labelNames,
+      // The live candidate is newer than discovery: use its label presence for
+      // both scoped requests and hard skips, including labels added or removed
+      // while this tick was in flight.
+      labelNames: Array.isArray(candidate?.labels) ? candidate.labels : labelNames,
       operatorApprovalEvent,
       mergeAgentRequestEvent,
       adversarialMergeRequestedEvent,

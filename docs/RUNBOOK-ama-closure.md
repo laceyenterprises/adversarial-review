@@ -1542,9 +1542,13 @@ record for another watcher retry. The command remains self-gated by
 ### AMAFIND-01: automated recovery and safety holds
 
 The watcher routes AMA ineligibility through `src/ama/automated-recovery.mjs`
-for both posted reviews and reviewer-timeout exhaustion. A stale review requests
-one current-head re-review through the review-state CAS. Missing findings
-sections request a re-review once per head; a subsequent malformed review may
+for both posted reviews and reviewer-timeout exhaustion. The timeout-exhaustion
+handoff uses the live candidate's labels for scoped fallback and hard skips,
+rather than the earlier discovery snapshot: a newly applied request is eligible
+for scope validation, a removed request grants no override, and newly applied
+hard-stop labels retain ownership. Ordinary AMA safety gates still apply.
+A stale review requests one current-head re-review through the review-state CAS.
+Missing findings sections request a re-review once per head; a subsequent malformed review may
 retry the closer, subject to its ordinary terminal-remediation gates. A
 strict-mode comment-only review with standing non-blocking findings reaches the
 hammer after the existing terminal grace, proven final-round resume, or cycle

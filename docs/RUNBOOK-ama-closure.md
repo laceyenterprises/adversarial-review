@@ -1706,8 +1706,12 @@ A file intent is not proof of a committed SQLite reset: admission reuses its
 original `requestedAt` until the row confirms that request on the withheld head
 or an exact-head reviewer. Request exceptions and commit rollbacks remain
 retryable; missing terminal files or an absent archive defer the lookup. Once
-armed, recovery cannot reset again, and a failed review records `alertedAt`
-without changing the original request timestamp.
+armed, recovery cannot reset again. Legacy posted or pending exact-head reviews
+are preserved. Only failures terminal under normal retry policy page, with a
+dedicated `withheld-head-review-failed` reason and alert-delivery debounce; no
+job-file `alertedAt` is committed before delivery. Shared writer/archive locking
+and fresh reads protect job updates; recovery errors are isolated per subject.
 The fresh verdict feeds normal AMA/hammer closure. A moved head stays held for
 that recovery, and a failed bounded review pages once through operator-blocked.
-Pending CI alone is work-complete; the proven-head CI wait remains unchanged.
+Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
+`reported-pending`. The proven-head CI wait remains unchanged.

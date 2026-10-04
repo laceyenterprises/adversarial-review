@@ -1,3 +1,4 @@
+import { writeFollowUpJob, withFollowUpJobLock } from './follow-up-job-write.mjs';
 import {
   existsSync,
   mkdirSync,
@@ -214,10 +215,6 @@ function ensureFollowUpJobDirs(rootDir) {
   Object.keys(FOLLOW_UP_JOB_DIRS).forEach((key) => {
     mkdirSync(getFollowUpJobDir(rootDir, key), { recursive: true });
   });
-}
-
-function writeFollowUpJob(jobPath, job) {
-  writeFileAtomic(jobPath, `${JSON.stringify(job, null, 2)}\n`);
 }
 
 function normalizeMaxRounds(maxRounds, { fallback = LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS } = {}) {
@@ -1087,7 +1084,11 @@ function stoppedAgeMs(job, st, nowMs) {
   return Number.isFinite(stoppedAtMs) ? nowMs - stoppedAtMs : nowMs - st.mtimeMs;
 }
 
-function archiveStoppedFollowUpJobs({
+function archiveStoppedFollowUpJobs(options = {}) {
+  return withFollowUpJobLock(join(options.rootDir, 'data', 'follow-up-jobs'), () => archiveStoppedFollowUpJobsLocked(options));
+}
+
+function archiveStoppedFollowUpJobsLocked({
   rootDir,
   nowMs = Date.now(),
   ttlMs = 24 * 60 * 60 * 1000,

@@ -1313,8 +1313,9 @@ test('HELDHEAD-01 #7689 replay resets exactly one withheld exact head and pages 
   assert.equal(db.prepare('SELECT revision_ref FROM reviewed_prs').get().revision_ref, head);
   assert.equal(tick().triggered, false);
   db.prepare("UPDATE reviewed_prs SET review_status = 'failed', reviewer_head_sha = ?").run(head);
-  assert.equal(tick().page, true);
-  assert.equal(tick().page, undefined);
+  assert.equal(tick().page, undefined, 'normal failed-review retry may still recover');
+  assert.equal(tick({ terminalFailure: true }).page, true);
+  assert.equal(tick({ terminalFailure: true }).page, true, 'delivery failure remains retryable');
 });
 
 for (const status of ['posted', 'pending']) {
@@ -1351,10 +1352,10 @@ for (const status of ['posted', 'pending']) {
       assert.deepEqual(JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview, intent);
       assert.equal(tick({ request: () => assert.fail('committed recovery must not reset again') }).triggered, false);
       db.prepare("UPDATE reviewed_prs SET review_status = 'failed', reviewer_head_sha = ?").run(head);
-      assert.equal(tick({ requestedAt: '2026-10-04T14:03:00.000Z' }).page, true);
+      assert.equal(tick({ requestedAt: '2026-10-04T14:03:00.000Z', terminalFailure: true }).page, true);
       const paged = JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview;
       assert.equal(paged.requestedAt, requestedAt);
-      assert.equal(paged.alertedAt, '2026-10-04T14:03:00.000Z');
+      assert.equal(paged.alertedAt, undefined, 'no delivery acknowledgment has happened');
       assert.equal(tick().page, undefined);
     });
   }
@@ -1384,4 +1385,22 @@ test('HELDHEAD-01 recovery locates and updates an archived stopped job', (t) => 
   assert.equal(tick().triggered, true);
   assert.ok(JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview);
   assert.equal(tick().triggered, false);
+});
+
+for (const status of ['posted', 'pending']) {
+  test(`HELDHEAD legacy ${status} exact-head review is preserved without an intent`, (t) => {
+    const { head, db, tick, jobPath } = withheldHeadFixture(t, { status });
+    db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = ?').run(head);
+    assert.equal(tick({ request: () => assert.fail('exact-head review must not reset') }).reason, 'already-reviewed');
+    assert.equal(JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview, undefined);
+  });
+}
+
+test('HELDHEAD automatic request retains settled comment-only verdict guard', (t) => {
+  const { rootDir, repo, head, db } = withheldHeadFixture(t);
+  db.prepare(`INSERT INTO reviewer_passes (repo, pr_number, head_sha, reviewer_class, attempt_number, started_at, metadata_json, pass_kind, status, verdict)
+    VALUES (?, 7689, ?, 'claude', 1, '2026-10-04T00:00:00Z', '{}', 'first-pass', 'completed', 'comment-only')`).run(repo, head);
+  const result = requestReviewRereview({ rootDir, repo, prNumber: 7689, targetRevisionRef: head,
+    reason: 'system-held-head-review: recovery', automaticWithheldHeadRecovery: true, db });
+  assert.equal(result.reason, 'comment-only-verdict-settled');
 });

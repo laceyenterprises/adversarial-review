@@ -1748,3 +1748,8 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('system exact-head recovery does not authorize terminal closer override', () => {
+  assert.equal(isExplicitOperatorReviewRetrigger({ rereview_requested_at: '2026-10-04T14:00:00Z',
+    rereview_reason: 'system-held-head-review: recovery' }), false);
+});

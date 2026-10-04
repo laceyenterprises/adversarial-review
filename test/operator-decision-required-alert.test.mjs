@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { processReviewSubject } from '../src/pollonce-phases.mjs';
+import { maybeFireOperatorDecisionRequiredAlert } from '../src/watcher-no-progress-lane.mjs';
 import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import {
   hasOperatorDecisionRequiredAlerted,
@@ -26,6 +27,23 @@ async function withRootAsync(fn) {
 
 const HEAD = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const REPO = 'o/r';
+
+test('withheld-head failure retries failed delivery and debounces only after queuing', async () => {
+  await withRootAsync(async (rootDir) => {
+    const options = { rootDir, identity: { repo: REPO, prNumber: 1 }, headSha: HEAD,
+      fingerprint: `withheld-head-review:${HEAD}`, operatorReason: 'withheld-head-review-failed',
+      noProgressTicks: 1, thresholdTicks: 1 };
+    await assert.rejects(maybeFireOperatorDecisionRequiredAlert({ ...options,
+      deliverAlertFn: async () => { throw new Error('queue unavailable'); } }), /queue unavailable/);
+    const alerts = [];
+    const deliverAlertFn = async (text, meta) => alerts.push({ text, meta });
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({ ...options, deliverAlertFn }), true);
+    assert.equal(await maybeFireOperatorDecisionRequiredAlert({ ...options, deliverAlertFn }), false);
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].text, /terminal.*normal retry policy/);
+    assert.equal(alerts[0].meta.payload.reason, 'withheld-head-review-failed');
+  });
+});
 
 function writeStoppedRequestChangesJob(root, stopCode = 'manual-stop') {
   const dir = getFollowUpJobDir(root, 'stopped');

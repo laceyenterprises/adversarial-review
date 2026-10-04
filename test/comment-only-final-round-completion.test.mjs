@@ -309,7 +309,7 @@ test('HELDHEAD-01 pending-only CI reply is work-complete even when replay proof 
     command === 'git' && args.includes('cherry')
       ? { stdout: `+ ${reviewedHead}\n` } : pushedWorkspaceExec()(command, args) });
   assert.equal(result.completed, true);
-  assert.equal(result.completionFields.finalRoundOutcome.ciState, 'pending');
+  assert.equal(result.completionFields.finalRoundOutcome.ciState, 'reported-pending');
   assert.equal(result.completionFields.withheldPushHeadSha, pushedHead);
   assert.equal(result.workerPushedHeadSha, null);
 });

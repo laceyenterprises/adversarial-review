@@ -33,6 +33,7 @@
       "relatedSchemaSurfaces": [
         "src/follow-up-remediation.mjs",
         "src/comment-only-final-round.mjs",
+        "src/follow-up-job-write.mjs",
         "src/pollonce-phases.mjs",
         "src/comment-only-final-round-completion.mjs",
         "src/follow-up-review-claim.mjs",

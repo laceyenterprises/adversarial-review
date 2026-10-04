@@ -11,7 +11,8 @@
 //
 // Pending CI is classified structurally: the reply's `kind: 'pending-ci'` field,
 // corroborated by this reconciler's own CI probe of the proven pushed head. The
-// worker's free-text title is never read to decide that CI is merely pending.
+// For a withheld push, ciState records only reported-pending, not probed CI.
+// The worker's free-text title is never read to decide that CI is merely pending.
 import { writeFileAtomic } from './atomic-write.mjs';
 import { isTransientGitFailure, proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import {
@@ -157,11 +158,10 @@ export async function resolveCommentOnlyFinalRoundCompletion({
     ? push.liveHeadSha
     : null;
 
-
   const blockers = Array.isArray(reply.blockers) ? reply.blockers : [];
   const operationalBlockers = Array.isArray(reply.operationalBlockers) ? reply.operationalBlockers : [];
   let classification;
-  let ciState = reply.reReview?.normalizedFrom === 'ci-pending-only' ? 'pending' : null;
+  let ciState = reply.reReview?.normalizedFrom === 'ci-pending-only' ? 'reported-pending' : null;
   if (blockers.length > 0) {
     classification = { pendingCiOnly: false, reason: 'review-blockers' };
   } else if (operationalBlockers.length > 0 && workerPushedHeadSha) {

@@ -74,6 +74,7 @@ function buildLoaderSource({
     [fileUrl('src', 'adversarial-gate-status.mjs')]: 'fixture:adversarial-gate-status',
     [fileUrl('src', 'adversarial-gate-context.mjs')]: 'fixture:adversarial-gate-context',
     [fileUrl('src', 'duplicate-family-state.mjs')]: 'fixture:duplicate-family-state',
+    ...(process.env.FIXTURE_THROW_HELDHEAD_REQUEST === '1' ? { [fileUrl('src', 'comment-only-final-round.mjs')]: 'fixture:heldhead' } : {}),
     [fileUrl('src', 'follow-up-jobs.mjs')]: 'fixture:follow-up-jobs',
     [fileUrl('src', 'remediation-prompt.mjs')]: 'fixture:remediation-prompt',
     [fileUrl('src', 'follow-up-merge-agent.mjs')]: 'fixture:follow-up-merge-agent',
@@ -109,6 +110,20 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url === 'fixture:heldhead') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export function hasInProgressCommentOnlyFinalRound() { return false; }
+      export function hasCommentOnlyFinalRoundPush() { return false; }
+      export function hasUnprovenCommentOnlyFinalRoundHead() { return false; }
+      export function hasSettledCommentOnlyReviewHead() { return false; }
+      export function scanArchivedStoppedFollowUpJobs() { return []; }
+      export function findFinalRoundJobForProvenPush() { return null; }
+      export function proveCommentOnlyFinalRoundHead() { return false; }
+      export function suppressFinalRoundFollowUp() { return false; }
+      export function withheldHeadRecoveryCandidates(root, options) { return options.prNumber === 101 ? [{ job: { completion: {} } }] : []; }
+      export function recoverWithheldFinalRoundHead(options) { return options.request({ automaticWithheldHeadRecovery: true }); }
+    `)} };
+  }
   if (url === 'fixture:review-state') {
     return {
       format: 'module',
@@ -119,6 +134,12 @@ export async function load(url, context, nextLoad) {
         let db = null;
         export * from ${JSON.stringify(reviewStateActualUrl)};
         export const ensureReviewStateSchema = actual.ensureReviewStateSchema;
+        export function requestReviewRereview(options) {
+          if (process.env.FIXTURE_THROW_HELDHEAD_REQUEST === '1' && options.automaticWithheldHeadRecovery) {
+            throw new Error('fixture held-head request failure');
+          }
+          return actual.requestReviewRereview(options);
+        }
         export function openReviewStateDb() {
           if (!db) {
             db = new Database(':memory:');
@@ -1998,3 +2019,31 @@ for (const scenario of ['stale-subprocess', 'rearm-exception', 'rearm-refused', 
     }
   });
 }
+
+test('HELDHEAD request exceptions preserve later subjects in the same watcher tick', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-heldhead-'));
+  const loaderPath = path.join(tmp, 'loader.mjs');
+  const registerPath = path.join(tmp, 'register.mjs');
+  const runnerPath = path.join(tmp, 'runner.mjs');
+  const old = process.env.FIXTURE_THROW_HELDHEAD_REQUEST;
+  try {
+    process.env.FIXTURE_THROW_HELDHEAD_REQUEST = '1';
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', env: { ...fixtureEnv(installGhFixture(tmp)), FIXTURE_THROW_HELDHEAD_REQUEST: '1' }, timeout: 30000,
+    });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /Withheld-head recovery deferred.*fixture held-head request failure/);
+    const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
+    const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+    assert.equal(summary.pollError, null);
+    assert.equal(summary.rows['102'].review_status, 'posted');
+  } finally {
+    if (old === undefined) delete process.env.FIXTURE_THROW_HELDHEAD_REQUEST;
+    else process.env.FIXTURE_THROW_HELDHEAD_REQUEST = old;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

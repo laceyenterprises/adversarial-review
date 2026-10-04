@@ -82,3 +82,5 @@ next tick initializes fresh recovery state, while the ordinary closer leases,
 hammer caps, and review-state CAS continue to apply. Do not edit or remove state
 concurrently with a watcher, and do not reset the independent closer caps as a
 side effect of this procedure.
+
+Launch reconciliation invoked by per-head recovery is scoped to the same repository, PR number and head SHA; unrelated dispatches neither delay recovery nor get reclaimed by it. Both `verdict-not-eligible` (daemon) and `verdict-not-settled-success` (closer) authorize remediation dispatch, while independent safety holds remain fail closed.

@@ -11,7 +11,7 @@ import { reconcileRecoveryLaunches } from './recovery-launch-reconciliation.mjs'
 const FINDING_REASONS = new Set([
   'blocking-findings-unknown',
   'non-blocking-findings-present', 'non-blocking-findings-unknown',
-  'verdict-not-settled-success',
+  'verdict-not-settled-success', 'verdict-not-eligible',
   'ci-not-green', 'pr-not-mergeable',
 ]);
 
@@ -59,7 +59,7 @@ async function page(text, options) {
 
 async function recoverAmaAutomationLocked({
   rootDir, repo, prNumber, headSha, result, reviewStateRow,
-  dispatchHammer, reclaimLaunch = () => reconcileRecoveryLaunches({ rootDir, logger }),
+  dispatchHammer, reclaimLaunch = () => reconcileRecoveryLaunches({ rootDir, repo, prNumber, headSha, logger }),
   requestRereviewImpl = requestRereview, pageImpl = page,
   logger = console, maxAttempts = amaRetainLoopCapFor(), now = () => Date.now(),
   rereviewDeadlineMs = 30 * 60 * 1000, stuckDeadlineMs = 30 * 60 * 1000, signal = null,

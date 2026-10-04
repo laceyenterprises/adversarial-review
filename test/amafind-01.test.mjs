@@ -348,3 +348,33 @@ test('caller cancellation with a custom reason propagates without budget burn', 
   const waiting = await recoverAmaAutomation({ ...args, signal: null, result: { reason: 'hammer-closer-in-flight' } });
   assert.equal(waiting.recovery.attempts, 0);
 });
+
+test('daemon request-changes verdict dispatches recovery hammer', async (t) => {
+  const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['verdict-not-eligible'] });
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-dispatched');
+  assert.equal(calls.hammer, 1);
+  assert.equal(automatedHammerReasonsCovered(['verdict-not-eligible', 'label-do-not-merge']), false);
+});
+
+test('per-head launch reconciliation ignores unrelated active and uncertain launches', async () => {
+  const records = [
+    { repo: 'other/repo', prNumber: 1, headSha: 'head' },
+    { repo: 'fixture/repo', prNumber: 2, headSha: 'head' },
+    { repo: 'fixture/repo', prNumber: 1, headSha: 'old' },
+    { repo: 'fixture/repo', prNumber: 1, headSha: 'head', launchRequestId: 'own' },
+  ];
+  const probed = [];
+  const result = await reconcileRecoveryLaunches({ rootDir: '/unused', repo: 'fixture/repo', prNumber: 1, headSha: 'head',
+    listActiveImpl: () => records, isPhantomImpl: () => false,
+    readStatusImpl: async ({ launchRequestId }) => {
+      probed.push(launchRequestId);
+      return { ok: true, row: { status: 'running' } };
+    },
+  });
+  assert.deepEqual(probed, ['own']);
+  assert.deepEqual(result, { reclaimed: 0, active: 1, uncertain: 0 });
+  assert.deepEqual(await reconcileRecoveryLaunches({ rootDir: '/unused', repo: 'fixture/repo', prNumber: 3, headSha: 'head',
+    listActiveImpl: () => records, isPhantomImpl: () => false,
+    readStatusImpl: async () => { throw new Error('unrelated launch probed'); },
+  }), { reclaimed: 0, active: 0, uncertain: 0 });
+});

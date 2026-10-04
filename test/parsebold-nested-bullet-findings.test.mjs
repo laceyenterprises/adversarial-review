@@ -42,7 +42,7 @@ test('agent-os#7334: the nested-bullet card keeps its own fields and the previou
   assert.ok(scratch, 'the nested-bullet card must be its own finding');
   assert.equal(scratch.file, '`modules/worker-pool/lib/python/cwp_dispatch/op_adapter.py`');
   assert.equal(scratch.lines, '`656-669`');
-  assert.match(scratch.problem, /^Cleanup runs only through `atexit`\./);
+  assert.match(scratch.problem, /^- Cleanup runs only through `atexit`\./);
   assert.match(scratch.problem, /The path is predictable and keyed on pid\./);
   assert.match(scratch.problem, /can depend on test order when a test doesn't set `OP_SHIM_DB_PATH`\.$/);
   assert.match(scratch.whyItMatters, /^This is low-severity accumulation/);
@@ -84,7 +84,7 @@ test('an empty label takes the more-indented bullets under it, in blocking secti
     '  - **Why it matters:** It matters.',
   ]));
   assert.deepEqual(findings.map((finding) => finding.title), ['First finding', 'Second finding']);
-  assert.equal(findings[1].problem, 'Part one. Part two.');
+  assert.equal(findings[1].problem, '- Part one.\n\n1. Part two.');
   assert.equal(findings[1].whyItMatters, 'It matters.');
 });
 
@@ -98,7 +98,7 @@ test('nested value lines are consumed, so a nested `File:` bullet cannot split t
   ]));
   assert.equal(findings.length, 1);
   assert.equal(findings[0].file, '`a.mjs`');
-  assert.equal(findings[0].problem, 'File: handles leak when the child exits early.');
+  assert.equal(findings[0].problem, '- File: handles leak when the child exits early.');
 });
 
 test('an empty label with nothing nested under it still fails closed', () => {
@@ -115,4 +115,13 @@ test('an empty label with nothing nested under it still fails closed', () => {
   ]));
   // Unchanged behavior: the card without a Problem is not a card boundary.
   assert.deepEqual(findings.map((finding) => finding.title), ['First finding']);
+});
+
+test('next-line markdown keeps code fences and paragraph breaks', () => {
+  const [finding] = parseBlockingFindingsSection(reviewWithBlocking([
+    '- **Markdown finding**', '  - **File:** a.mjs', '  - **Lines:** 1',
+    '  - **Problem:**', '    First paragraph.', '', '    ```js',
+    '    run();', '    ```', '', '    Last paragraph.',
+  ]));
+  assert.equal(finding.problem, 'First paragraph.\n\n```js\nrun();\n```\n\nLast paragraph.');
 });

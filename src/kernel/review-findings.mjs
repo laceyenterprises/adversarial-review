@@ -134,14 +134,14 @@ function parseReviewFindingsSection(reviewBody, headingPattern) {
     for (let index = startIndex + 1; index < lines.length; index += 1) {
       const raw = lines[index];
       if (!raw.trim()) {
-        if (label.value) parts.push('');
+        parts.push('');
         continue;
       }
       if (indentWidth(raw) <= labelIndent || matchBoldLabel(raw) || isFindingBoundary(raw)) break;
-      parts.push(label.value ? raw.trim() : raw.trim().replace(/^(?:[-*+]|\d+[.)])[ \t]+/, ''));
+      parts.push(raw.trim());
       end = index;
     }
-    const value = parts.join(label.value ? '\n' : ' ').trim();
+    const value = parts.join('\n').trim();
     return value ? { field: label.field, value, end } : null;
   };
 

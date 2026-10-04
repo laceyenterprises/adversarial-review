@@ -8,7 +8,7 @@ import { readAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
 const TERMINAL = new Set(['succeeded', 'completed', 'failed', 'cancelled', 'canceled', 'superseded']);
 
 export async function reconcileRecoveryLaunches({
-  rootDir, logger = console, env = process.env,
+  rootDir, repo, prNumber, headSha, logger = console, env = process.env,
   readStatusImpl = readLatestWorkerRunStatusFromLedger,
   listActiveImpl = null, isPhantomImpl = null,
 }) {
@@ -21,6 +21,10 @@ export async function reconcileRecoveryLaunches({
   let active = 0;
   let uncertain = 0;
   for (const record of listActiveImpl(rootDir, { logger })) {
+    // Per-head recovery must not wait on or reclaim another PR's launch.
+    if (repo !== undefined && record.repo !== repo) continue;
+    if (prNumber !== undefined && Number(record.prNumber) !== Number(prNumber)) continue;
+    if (headSha !== undefined && record.headSha !== headSha) continue;
     const launchRequestId = record.launchRequestId || record.dispatchId;
     if (!launchRequestId) { uncertain += 1; continue; }
     let probe;

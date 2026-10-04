@@ -35,6 +35,20 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
     return { member: true, held: false, reason: null, release: 'ignored-not-duplicate' };
   }
 
+  // Content heuristics qualify detection, never override operator adjudication.
+  let pending = false;
+  if (status === 'advisory') {
+    const evidence = parseOverride(family.content_evidence_json);
+    const pairs = (evidence.pairs || []).filter((pair) => pair.members?.some((member) =>
+      Number(member.prNumber) === Number(prNumber)
+      && String(member.headSha || '') === String(headSha || '')));
+    pending = pairs.some((pair) => pair.pending === true);
+    if (!pairs.some((pair) => pair.corroborated === true || (pair.pending === true && pair.held === true))) {
+      return { member: true, held: false, reason: null,
+        release: pending ? 'content-pending' : 'identity-only-advisory', ...(pending ? { pending: true } : {}) };
+    }
+  }
+
   const selection = override.selection || (
     override.transition === 'survivor-selected' ? override : null
   );
@@ -55,6 +69,7 @@ export function evaluateDuplicateFamilyCandidate(family = null, {
     held: true,
     reason: DUPLICATE_FAMILY_UNRESOLVED_REASON,
     release: null,
+    ...(pending ? { pending: true } : {}),
   };
 }
 

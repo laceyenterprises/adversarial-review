@@ -10,6 +10,7 @@ import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 
 const baseFamily = {
   status: 'advisory',
+  content_evidence_json: JSON.stringify({ pairs: [{ corroborated: true, members: [{ prNumber: 41, headSha: 'a' }] }] }),
   selected_survivor_pr_number: null,
   report_path: null,
   operator_override_json: null,
@@ -43,4 +44,40 @@ test('AMA operator-requested path cannot override duplicate-family hold', () => 
   );
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes(DUPLICATE_FAMILY_UNRESOLVED_REASON));
+});
+
+test('identity-only and legacy advisory evidence never impose a duplicate hold', () => {
+  const result = evaluateDuplicateFamilyCandidate({ status: 'advisory', strongest_signal: 'branch-ticket' }, { prNumber: 41, headSha: 'a' });
+  assert.equal(result.member, true);
+  assert.equal(result.held, false);
+  assert.equal(result.reason, null);
+  assert.equal(result.release, 'identity-only-advisory');
+});
+
+test('adjudicated families retain holds regardless of content evidence', () => {
+  for (const status of ['survivor-selected', 'survivor-merged', 'abandoned']) {
+    for (const content_evidence_json of ['{}', JSON.stringify({ pairs: [{ corroborated: false, jaccard: 0.1 }] })]) {
+      const family = { ...baseFamily, status, content_evidence_json };
+      assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'a' }).held, true);
+      assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'moved' }).held, true);
+    }
+  }
+});
+
+test('pending advisory pairs retain only prior holds at the observed head and honor exact-head ignores', () => {
+  for (const held of [true, false]) {
+    const family = { status: 'advisory', content_evidence_json: JSON.stringify({ pairs: [{
+      corroborated: false, pending: true, held, members: [{ prNumber: 41, headSha: 'moved' }, { prNumber: 42, headSha: 'b' }],
+    }] }) };
+    const gate = evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'moved' });
+    assert.equal(gate.held, held);
+    assert.equal(gate.pending, true);
+    assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'newer' }).held, false);
+    assert.equal(evaluateDuplicateFamilyCandidate(family, { prNumber: 43, headSha: 'c' }).held, false);
+    family.operator_override_json = JSON.stringify({ ignoredCandidates: [{ candidatePrNumber: 41, candidateHeadSha: 'moved' }] });
+    const ignored = evaluateDuplicateFamilyCandidate(family, { prNumber: 41, headSha: 'moved' });
+    assert.equal(ignored.held, false);
+    assert.equal(ignored.release, 'ignored-not-duplicate');
+    assert.equal(ignored.pending, undefined);
+  }
 });

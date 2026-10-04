@@ -10,12 +10,16 @@
 The duplicate-family census records groups of open PRs that appear to represent
 the same work identity in the same target repo and base branch. The watcher
 updates this state during polling so operator surfaces can see likely redundant
-PRs and so unresolved duplicate families can block autonomous merge lanes until
-the family is resolved or suppressed.
+PRs. Identity grouping alone is advisory: an advisory candidate blocks
+autonomous merge lanes when current-head changed-file content corroborates
+it with another candidate, or when content is pending for a previously
+corroborated pair (including after a head move). Operator-adjudicated families retain their holds
+independently of content evidence until resolved, deactivated, or explicitly
+released.
 
-For an active unresolved family, `reconcileDuplicateFamilyLabels()` projects the
-store into GitHub by applying `duplicate-family` and
-`duplicate-family-hold`; the hold label is the merge-blocking contract consumed
+For an active unresolved family, `reconcileDuplicateFamilyLabels()` applies
+`duplicate-family` to members and `duplicate-family-hold` to held candidates;
+the hold label is the merge-blocking contract consumed
 by AMA, hammer routing, merge-agent dispatch, and fast-merge. After an operator
 selects a survivor and that survivor is observed merged, the watcher may close
 non-suppressed, non-ignored loser PRs from these rows only when merge authority
@@ -37,6 +41,7 @@ One row per detected work-identity family.
 | `base_branch` | Base branch shared by the active duplicate candidates. |
 | `normalized_work_identity` | Normalized ticket, explicit identity label, or dispatch identity used for grouping. |
 | `status` | Family lifecycle status: `advisory` while at least two live unsuppressed candidates remain; `inactive` after the census no longer sees a duplicate family; `survivor-selected` after an operator selects a survivor and verified report; `survivor-merged` after the selected survivor is confirmed merged and loser closeout is still in progress; `resolved` after all closable losers are closed; `abandoned` after an operator records no safe survivor. A later duplicate census reactivates only `inactive` and `resolved` rows to `advisory` and clears stale survivor-selection fields. |
+| `content_evidence_json` | JSON object with `pairs`, aggregate `held`, and `reason`; defaults to `{}` for legacy rows. Each pair contains head-bound `members: [{ prNumber, headSha }, ...]`, `kind: changed-path-overlap`, `jaccard`, `overlap` paths, `corroborated`, `pending`, `held`, and `reason`. Pending pairs have `jaccard: null`, `reason: content-pending`, and retain `held: true` if the same two PRs were previously corroborated or pending-held, even across head changes. Complete negative evidence clears that retained decision. Advisory holds require a current-head corroborated or pending-held pair; unknown evidence alone does not create a new hold. Reactivation of inactive/resolved families starts fresh evidence. |
 | `strongest_signal` | First common strong signal kind shared by active candidates. |
 | `selected_survivor_pr_number` | Optional operator-selected PR number to keep as the survivor. |
 | `report_path` | Optional path to an operator-facing duplicate report artifact. |
@@ -65,7 +70,7 @@ belong to only one family at a time; reassignment updates the row's
 | `head_sha` | Candidate head SHA. |
 | `base_sha` | Candidate base SHA or merge-base evidence when available. |
 | `role` | `candidate` before adjudication, then exactly one unsuppressed `survivor`; non-suppressed remaining members become `loser`, while suppressed members and exact-head `ignored-not-duplicate` overrides stay `candidate`. |
-| `work_identity_json` | Extracted identity payload and provenance resolution. |
+| `work_identity_json` | Extracted identity payload and provenance resolution, plus `content: { headSha, paths }` for a complete head-verified changed-file listing, or `content: null` when unavailable. Older rows may omit `content`. Snapshots are reusable only at the same head SHA. |
 | `signals_json` | Strong signal evidence used by the detector. |
 | `suppressions_json` | Suppression evidence such as stack/follow-up labels or the PR-wide exclusion label. |
 | `labels_json` | Candidate label names at last census. |
@@ -85,7 +90,12 @@ Slice absence by itself is not treated as closure. Existing databases created wi
 ## Operational Contract
 
 - `ensureDuplicateFamilySchema(db)` creates both tables and the supporting
-  candidate PR, candidate `family_id`, and family status indexes.
+  candidate PR, candidate `family_id`, and family status indexes. On first schema
+  access it adds missing `content_evidence_json` with default `{}`. The census
+  recomputes evidence only for families emitted by detection, not every legacy
+  row. Non-redetected adjudicated families may retain `{}` safely because their
+  operator decisions do not depend on content corroboration. Deployment requires
+  the normal code update and watcher restart; no manual database edits are needed.
 - Existing `duplicate_family_candidates` tables with the former
   `(family_id, repo, pr_number)` primary key are rebuilt to `(repo, pr_number)`
   inside a single SQLite transaction. If any rebuild step fails, the original
@@ -96,6 +106,26 @@ Slice absence by itself is not treated as closure. Existing databases created wi
   advisory family. Candidates carrying suppression evidence, such as
   `not-a-duplicate-stack`, stack/follow-up labels, or sibling stack-base
   evidence, are persisted for operator context but are not held.
+- Content corroboration uses pairwise changed-path Jaccard overlap with threshold
+  `0.3`, after excluding root directories `node_modules`, `vendor`,
+  `dist`, `build`, or `generated`, nested `node_modules`, and package lockfiles.
+  Code is identified by source-file extension, including source under `docs/`
+  and nested build/vendor directories. An incident-record-only
+  candidate (under `docs/postmortems/`, `docs/reports/`, or a `docs/SEV` path)
+  paired with code is excluded even if paths overlap. Missing complete snapshots
+  yield pending pair evidence, retaining a prior corroborated hold until complete
+  current-head snapshots prove insufficient overlap or the incident exclusion.
+  Complete insufficient overlap yields `insufficient-path-overlap`; identity
+  remains visible without an advisory hold.
+- The GitHub content adapter lists 100 files per page, verifies the live head,
+  and treats a full page 30 as `content-truncated` because completeness cannot be
+  established at the 3000-file cap. Moved heads return `content-head-moved`;
+  failed reads return `content-unavailable`. Transient reads make at most three
+  attempts with 100/200ms backoff. These candidate-local failures are logged and
+  mark only that candidate's pairs pending; prior corroborated pairs remain held.
+  Healthy families and adjudicated closeout continue. Complete persisted snapshots are reused at the
+  same head; unavailable snapshots are retried on later ticks. Census logs contain
+  overlap counts and pair decisions; full overlap paths stay in the database.
 - `upsertDuplicateFamilies()` persists all candidates in each returned family,
   while `candidate_count` tracks only the active open unsuppressed subset. If a
   PR is detected in a different family, its existing candidate row is reassigned
@@ -116,8 +146,13 @@ Slice absence by itself is not treated as closure. Existing databases created wi
   Absence from the watcher slice is never written back as `pr_state='closed'`;
   only an observed subject state may change the cached PR state.
 - `reconcileDuplicateFamilyLabels()` writes the GitHub labels after each census:
-  active unresolved unsuppressed candidates receive `duplicate-family` and
-  `duplicate-family-hold`; suppressed candidates receive only
+  active unresolved unsuppressed candidates receive `duplicate-family`; advisory
+  candidates receive `duplicate-family-hold` with current-head content
+  corroboration or a retained pending hold. Pending candidate evidence never
+  removes an existing hold absent suppression or an exact-head operator release. `survivor-selected`, `survivor-merged`, and `abandoned` candidates
+  keep the operator-adjudicated hold regardless of missing or low-overlap
+  evidence, except for exact-head survivor/ignore releases. Suppressed candidates
+  receive only
   `duplicate-family`; operator-selected survivors receive
   `duplicate-family-survivor`; non-suppressed losers receive
   `duplicate-family-loser`; inactive and resolved families have watcher-owned
@@ -132,8 +167,9 @@ Slice absence by itself is not treated as closure. Existing databases created wi
 - `reconcileDuplicateFamilyCloseouts()` runs after label reconciliation only
   when the census for the tick is verified and merge authority is armed. It
   re-reads the selected survivor and each loser from GitHub before mutating,
-  confirms the survivor is merged at the selected head, skips selections whose
-  audit comment remains pending, skips suppressed
+  confirms the survivor is merged at the selected head, closes adjudicated losers
+  without requiring content evidence (including legacy `{}` rows), skips
+  selections whose audit comment remains pending, skips suppressed
   candidates and ignored candidates even when an ignore is stale, comments with
   the survivor/report audit trail, closes only open non-suppressed losers, and
   marks the family `resolved` only after no stale ignored, unadjudicated, or
@@ -148,6 +184,7 @@ Slice absence by itself is not treated as closure. Existing databases created wi
   census for the tick rather than deactivating existing active families. When a
   census tick fails, label reconciliation refuses to add or re-add
   watcher-owned duplicate-family labels from unverified persisted state; a later
-  successful census is required before new hold projection resumes.
+  successful census is required before new hold projection resumes. Unverified
+  ticks also refuse hold removal, preserving existing safety labels.
 - The tables contain no secrets; JSON payloads store PR metadata, labels,
   provenance resolution state, and operator disposition metadata only.

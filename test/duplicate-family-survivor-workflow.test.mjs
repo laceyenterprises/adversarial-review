@@ -11,6 +11,7 @@ import {
   abandonDuplicateFamily,
   ensureDuplicateFamilySchema,
   ignoreDuplicateFamilyCandidate,
+  reconcileDuplicateFamiliesForRepo,
   reconcileDuplicateFamilyCloseouts,
   selectDuplicateFamilySurvivor,
 } from '../src/duplicate-family-state.mjs';
@@ -39,6 +40,9 @@ function fixture() {
   for (const prNumber of [101, 102, 103]) {
     insert.run(FAMILY, REPO, prNumber, `DPA-04 ${prNumber}`, `branch-${prNumber}`, `head-${prNumber}`, now, now, now);
   }
+  db.prepare('UPDATE duplicate_families SET content_evidence_json = ?').run(JSON.stringify({
+    pairs: [{ corroborated: true, members: [101, 102, 103, 104].map((prNumber) => ({ prNumber, headSha: `head-${prNumber}` })) }],
+  }));
   return db;
 }
 
@@ -345,7 +349,7 @@ test('late unadjudicated candidate keeps the family held after survivor merge', 
   } finally { db.close(); }
 });
 
-test('moved loser head keeps the family unresolved and held', async () => {
+test('moved loser head stays held and keeps closeout unresolved for re-adjudication', async () => {
   const db = fixture();
   const closes = [];
   const logs = [];
@@ -365,6 +369,41 @@ test('moved loser head keeps the family unresolved and held', async () => {
     assert.match(logs.join('\n'), /moved loser.*re-adjudication required/);
   } finally { db.close(); }
 });
+
+for (const disposition of ['closed', 'close-failed', 'head-moved']) {
+  test(`legacy evidence with one open loser honors adjudication: ${disposition}`, async () => {
+    const db = fixture();
+    const closes = [];
+    try {
+      select(db);
+      db.prepare("UPDATE duplicate_families SET status = 'survivor-merged', content_evidence_json = '{}'").run();
+      db.prepare("UPDATE duplicate_family_candidates SET pr_state = 'merged' WHERE pr_number = 101").run();
+      db.prepare("UPDATE duplicate_family_candidates SET pr_state = 'closed' WHERE pr_number = 103").run();
+      const census = reconcileDuplicateFamiliesForRepo(db, [{ prNumber: 102, subject: {
+        number: 102, title: '[codex] DPA-04 loser', state: 'OPEN',
+        baseRefName: 'main', headRefName: 'branch-102', headSha: 'head-102',
+      } }], { repoPath: REPO, env: {}, readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }) });
+      assert.equal(census.families.length, 0);
+      assert.equal(familyFor(db, 102).content_evidence_json, '{}');
+      assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 101), { prNumber: 101, headSha: 'head-101' }).release, 'survivor-merged');
+      assert.equal(evaluateDuplicateFamilyCandidate(familyFor(db, 102), { prNumber: 102, headSha: 'head-102' }).held, true);
+      const states = disposition === 'head-moved' ? { 102: { state: 'open', head: { sha: 'new-head' } } } : {};
+      const octokit = closeoutOctokit({ closes, states });
+      if (disposition === 'close-failed') octokit.rest.pulls.update = async () => { throw new Error('close failed'); };
+      const result = await reconcileDuplicateFamilyCloseouts({
+        db, octokit, repoPath: REPO, census,
+        cfg: { enabled: true, autonomousMergeExecutionEnabled: true }, logger: { log() {}, error() {} },
+      });
+      assert.equal(result.closed, disposition === 'closed' ? 1 : 0);
+      assert.equal(familyFor(db, 102).status, disposition === 'closed' ? 'resolved' : 'survivor-merged');
+      assert.deepEqual(closes.map((entry) => entry.pull_number), disposition === 'closed' ? [102] : []);
+      if (disposition !== 'closed') {
+        assert.equal(db.prepare('SELECT pr_state FROM duplicate_family_candidates WHERE pr_number = 102').get().pr_state, 'open');
+        assert.notEqual(JSON.parse(familyFor(db, 102).transition_log_json).at(-1).transition, 'resolved');
+      }
+    } finally { db.close(); }
+  });
+}
 
 test('closeout comment dedupe reads later pages before posting', async () => {
   const db = fixture();

@@ -606,7 +606,11 @@ Key control points:
   blocking finding, or a non-blocking finding required by the effective
   `strict_non_blocking_remediation` policy, on its reviewed head. Non-strict
   advisory findings cannot authorize reversals. File/Lines must cover each reverted
-  base line (the uncited remainder stays protected). Authorization also requires
+  base line. All three evaluators receive the effective policy: closure eligibility
+  (`bin/ama-check.mjs`), daemon pre-lease and in-lease merge checks, and the hammer's
+  in-lease GitHub gate (`bin/hammer-merge.sh`). The hammer gate reloads the same
+  merge-authority config as `ama-check`; strict remediation defaults to enabled.
+  The uncited remainder stays protected. Authorization also requires
   verified closure ancestry and live GitHub HAM committer identity (linked author fallback
   only when no committer is linked). Repeat the trailer for every finding whose
   fix edits primary-change lines, with `kind=blocking` or `kind=non-blocking` (blocking

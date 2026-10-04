@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
@@ -105,6 +110,88 @@ test('advisory non-blocking citations cannot waive preservation in non-strict mo
   evidence.primaryFiles = [{ ...file, additions: 2, deletions: 2,
     patch: file.patch.split('\n').slice(0, 6).join('\n') }];
   assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: false }).ok, true);
+});
+
+test('rendered hammer merge gate and ama-check agree on non-blocking HAM citations', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'hamintent-merge-policy-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const evidence = await collect();
+  const commit = evidence.reversalAuthorizations[0].commit;
+  const rollup = { headSha: head, headRefOid: head, state: 'OPEN', isDraft: false,
+    mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],
+    statusCheckRollup: [{ name: 'test', conclusion: 'SUCCESS' }] };
+  const comparison = { status: 'ahead', merge_base_commit: { sha: base }, files: [file] };
+  const responses = {
+    'repos/fixture/repo/pulls/1': { head: { sha: head }, base: { sha: base } },
+    'repos/fixture/repo/pulls/1/reviews?per_page=100': reviews,
+    [`repos/fixture/repo/commits/${head}`]: commit,
+    [`repos/fixture/repo/compare/${base}...${head}`]: { ...comparison, files: [], total_commits: 2,
+      commits: [{ sha: author, commit: { message: 'author' } }, commit] },
+    [`repos/fixture/repo/compare/${base}...${author}`]: comparison,
+    [`repos/fixture/repo/compare/${author}...${author}`]: { ...comparison, status: 'identical' },
+  };
+  const json = (name, value) => {
+    const path = join(directory, `${name}.json`);
+    writeFileSync(path, JSON.stringify(value));
+    return path;
+  };
+  const fixturePath = json('github', { responses, rollup });
+  // Replace only GitHub I/O; execute the real collector, config loader and predicates.
+  const loader = join(directory, 'github-loader.mjs');
+  writeFileSync(loader, `
+    import { readFileSync } from 'node:fs';
+    const fixture = JSON.parse(readFileSync(${JSON.stringify(fixturePath)}, 'utf8'));
+    export async function load(url, context, nextLoad) {
+      let source;
+      if (url.endsWith('/src/github-api.mjs')) {
+        source = 'export async function fetchPullRequestRollup() { return ' + JSON.stringify(fixture.rollup) + '; }';
+      } else if (url.endsWith('/src/gh-cli.mjs')) {
+        source = 'const responses = ' + JSON.stringify(fixture.responses) + ';' +
+          'export function isTransientGhError() { return false; }' +
+          'export async function execGhWithRetry({ args }) {' +
+          'if (args[0] !== "api" || !(args[1] in responses)) throw new Error("Unexpected API: " + args);' +
+          'return { stdout: JSON.stringify(responses[args[1]]) }; }';
+      }
+      return source === undefined ? nextLoad(url, context) : { format: 'module', source, shortCircuit: true };
+    }
+  `);
+  const env = { ...process.env, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '1',
+    HAM_PR_URL: 'https://github.com/fixture/repo/pull/1',
+    HAM_REVIEWED_SHA: author, HAM_TARGET_REMEDIATION_SHA: head, HAM_MERGE_METHOD: 'squash',
+    HAM_HQ_ROOT: directory, HAM_REVIEWER: 'claude', HAM_RISK_CLASS: 'low',
+    POST_REMEDIATION_SHA: head, HAM_BRANCH_PROTECTION_REQUIRED: 'false' };
+  const run = (args, options = {}) => {
+    const result = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 15000, ...options });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const rendered = run([join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render']);
+  const gate = rendered.match(/ham_refresh_github_gate_once\(\)[\s\S]*?<<'NODE' > "\$HAM_GATE_JSON"\n([\s\S]*?)\nNODE/)?.[1];
+  assert.ok(gate, 'rendered hammer merge must contain its live gate heredoc');
+  const cliArgs = [join(root, 'bin/ama-check.mjs'),
+    '--pr', json('pr', rollup), '--reviews', json('reviews', { reviews: [{
+      state: 'COMMENTED', author: { login: 'claude-reviewer-lacey' }, commit: { oid: head },
+      submittedAt: '2026-10-04T12:00:00Z',
+      body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only',
+    }] }), '--protection', json('protection', {}), '--timeline', json('timeline', []),
+    '--primary-change', json('primary-change', evidence), '--reviewed-sha', head,
+    '--reviewer', 'claude', '--risk-class', 'low', '--repo', 'fixture/repo', '--root-dir', directory];
+  for (const policy of [true, false, undefined]) {
+    const config = join(directory, 'config.yaml');
+    writeFileSync(config, `version: 1\nroles:\n  adversarial:\n    merge_authority:\n      enabled: true\n` +
+      (policy === undefined ? '' : `      strict_non_blocking_remediation: ${policy}\n`) +
+      '      eligibility:\n        risk_classes: [low]\n      branch_protection:\n        required: false\n');
+    const options = { env: { ...env, AGENT_OS_CONFIG_PATH: config } };
+    const closure = JSON.parse(run(cliArgs, options));
+    const merge = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { ...options, input: gate }));
+    const expected = policy !== false;
+    assert.equal(closure.eligible, expected, JSON.stringify(closure));
+    assert.equal(merge.ok, closure.eligible, JSON.stringify(merge));
+    assert.equal(closure.trace.primaryChange.ok, expected);
+    assert.deepEqual(merge.reasons, expected ? [] : ['primary-change-reverted']);
+  }
 });
 
 test('collector deduplicates review pairs while all findings still authorize their own regions', async () => {

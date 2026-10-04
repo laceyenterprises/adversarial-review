@@ -1216,8 +1216,12 @@ JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
 A blocking finding may authorize a specific reversal. A non-blocking finding may
 also authorize one only when the effective `strict_non_blocking_remediation` policy
 is enabled; advisory findings in non-strict mode cannot waive preservation.
-Closure eligibility and both pre-lease and in-lease merge evaluations pass the
-same effective policy to the primary-change predicate. The HAM commit must carry
+All three evaluators pass the effective policy to the primary-change predicate:
+closure eligibility (`bin/ama-check.mjs`), the daemon's pre-lease and in-lease
+merge checks, and the hammer's in-lease GitHub gate (`bin/hammer-merge.sh`).
+The hammer gate resolves `loadConfigCached().getMergeAuthorityConfig()` on each
+live gate read, just as `ama-check` does, with strict remediation enabled unless
+`strictNonBlockingRemediation` is explicitly `false`. The HAM commit must carry
 `Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=<blocking|non-blocking>]`, `Worker-Ticket: HAM`,
 and `Reviewed-Head` naming that review's head. The finding number is its one-based
 position in the indicated section (blocking by default for legacy trailers).

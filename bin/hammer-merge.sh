@@ -232,6 +232,7 @@ ham_refresh_github_gate_once() {
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
 import { fetchPrimaryChange } from '<<ROOT_DIR>>/src/ama/primary-change.mjs';
+import { loadConfigCached } from '<<ROOT_DIR>>/src/config-loader.mjs';
 import { execGhWithRetry } from '<<ROOT_DIR>>/src/gh-cli.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
 import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/checks-summary.mjs';
@@ -266,6 +267,8 @@ const open = state === 'OPEN';
 // BEHIND-but-MERGEABLE validated head is eligible instead of forcing a
 // churn-inducing rebase. Fail closed: any value other than '0' keeps the block.
 const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
+// Resolve the same effective policy as bin/ama-check.mjs, including its strict default.
+const cfg = loadConfigCached().getMergeAuthorityConfig();
 const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
   get: async (path) => {
     const { stdout } = await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 });
@@ -275,6 +278,7 @@ const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expect
 const eligibility = evaluateMergeEligibility({
   primaryChange,
   requirePrimaryChange: true,
+  strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
   verdict: 'settled-success',
   leaseHeld: true,
   requiredChecks: checks,

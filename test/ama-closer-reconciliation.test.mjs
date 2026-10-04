@@ -38,7 +38,8 @@ test('missing ledger launch expires; unreadable ledger retains only fresh capaci
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const now = '2026-10-03T00:00:00Z';
   updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: 1, headSha: 'abc', state: 'dispatched', launchRequestId: 'missing', lastAttemptedAt: now }));
-  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 1);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) }))[0].holdsCapacity, true);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) }))[0].holdsCapacity, true);
   const expiredNow = new Date(Date.parse(now) + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS).toISOString();
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 0);
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) })).length, 0);
@@ -116,7 +117,7 @@ test('default ledger reader merges worker PID and process status into fleet capa
   });
   assert.deepEqual(checkedPids.sort(), [4201, 4202]);
   assert.deepEqual(active.sort((a, b) => a.prNumber - b.prNumber).map(({ prNumber, holdsCapacity }) =>
-    [prNumber, holdsCapacity]), [[1, true], [2, false], [3, false]]);
+    [prNumber, holdsCapacity]), [[1, true], [2, true], [3, false]]);
 
   // Exercise the same default reader with promise-returning adapter exports.
   // The loader wraps the real offline SQLite adapter, so both awaits are
@@ -148,7 +149,7 @@ test('default ledger reader merges worker PID and process status into fleet capa
     });
     assert.deepEqual(checkedPids.sort(), [4201, 4202]);
     assert.deepEqual(active.sort((a, b) => a.prNumber - b.prNumber)
-      .map(({ prNumber, holdsCapacity }) => [prNumber, holdsCapacity]), [[1, true], [2, false], [3, false]]);
+      .map(({ prNumber, holdsCapacity }) => [prNumber, holdsCapacity]), [[1, true], [2, true], [3, false]]);
   `], { encoding: 'utf8', timeout: 10000, stdio: 'pipe' });
 });
 

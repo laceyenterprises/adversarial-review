@@ -721,6 +721,7 @@ export function writeAutonomousMergeDisabledAudit({
 
 export async function maybeDispatchAmaClosureFor({
   automatedRecovery = false,
+  priorDaemonCleanMerge = null,
   rootDir = ROOT,
   reviewStateRow,
   dispatchJob,
@@ -1535,11 +1536,12 @@ export async function maybeDispatchAmaClosureFor({
   //                     tick with no double-merge.
   throwIfAborted(signal);
   try {
-    await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    if (!priorDaemonCleanMerge && !wouldUseDaemonPath) await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       eligible: !wouldUseDaemonPath && isEligibleForAmaClosure(reviewState, prMetadata, cfg).eligible,
       sloMs: cfg.closureLagSloMs, logger });
   } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
-  const daemonCleanMerge = await runCoexistenceOperation(
+  const daemonCleanMerge = priorDaemonCleanMerge && priorDaemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.DEFERRED
+    ? priorDaemonCleanMerge : await runCoexistenceOperation(
     'daemon-clean-merge-attempt',
     ({ signal: operationSignal }) => runDaemonCleanMergeAttemptImpl({
       rootDir,
@@ -1576,6 +1578,11 @@ export async function maybeDispatchAmaClosureFor({
     },
   );
   throwIfAborted(signal);
+  if (!priorDaemonCleanMerge && daemonCleanMerge?.reason === 'not-eligible') {
+    try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      eligible: false, reason: daemonCleanMerge.reason, logger }); }
+    catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
+  }
   if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
     recordDaemonMergePark({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha || null,
@@ -2159,10 +2166,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     };
   }
   throwIfAborted(signal);
-  try { await observeClosureLag({ rootDir, repo: repoPath, prNumber,
+  logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
     reason: amaClosureResult?.dispatched ? 'hammer-running'
-      : amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending', logger }); }
-  catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
+      : amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending' }));
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
@@ -2202,6 +2208,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
         operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
         repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
         operationTimeoutMs, operationTracker, automatedRecovery: true,
+        priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
       }),
       ...recoveryOptions,
     });

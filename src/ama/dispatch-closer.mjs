@@ -1,5 +1,5 @@
 import { observeCloserBacklog } from './closure-lag.mjs';
-import { effectiveCloserCap, launchHoldsCloserCapacity } from './closure-capacity.mjs';
+import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
@@ -1908,7 +1908,9 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       continue;
     }
     if (launchInProgress) active.push({ ...record, prNumber, dispatchPath,
-      holdsCapacity: launchHoldsCloserCapacity(probe?.ok ? probe.row : null, options.processKillImpl) });
+      holdsCapacity: probe?.ok && probe.row
+        ? launchHoldsCloserCapacity(probe.row, options.processKillImpl)
+        : amaCloserRecordAgeMs(record, { now }) < amaCloserPendingLeaseReclaimAgeMs(record) });
   }
   const allMissing = probes > 0 && missingProbes === probes;
   for (const candidate of missingCandidates) {
@@ -3986,6 +3988,7 @@ export async function maybeDispatchAmaCloser({
   dispatchContext,
   execFileImpl = execFileAsync,
   processKillImpl = process.kill,
+  observeCloserBacklogImpl = observeCloserBacklog,
   readTemplateImpl = null,
   writeFileImpl = null,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
@@ -5692,11 +5695,12 @@ export async function maybeDispatchAmaCloser({
     && Number(record.prNumber) === Number(prNumber));
   const otherPrLaunches = activeLaunches.filter((record) => record.holdsCapacity === true
     && (record.repo !== repo || Number(record.prNumber) !== Number(prNumber)));
-  let eligibleCloserBacklog = otherPrLaunches.length + 1;
-  try { eligibleCloserBacklog = await observeCloserBacklog({ rootDir, repo, prNumber }); }
+  let eligibleCloserBacklog = 0;
+  try { eligibleCloserBacklog = await observeCloserBacklogImpl({ rootDir, repo, prNumber, logger }); }
   catch (error) { logger?.warn?.(`AMA backlog observation failed: ${error.message}`); }
   // A successful census can lower the cap below existing launches. Adding a
   // candidate to the live count here would defeat that backpressure.
+  warnCloserFloor(cfg?.watcher?.ama_closer_max_concurrent_launches ?? cfg?.amaCloserMaxConcurrentLaunches ?? 3, cfg?.amaCloserConcurrentLaunchCeiling ?? 32, logger);
   const maxConcurrentLaunches = effectiveCloserCap(
     eligibleCloserBacklog,
     cfg?.watcher?.ama_closer_max_concurrent_launches ?? cfg?.amaCloserMaxConcurrentLaunches ?? 3,

@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 
 const flock = promisify(fsExt.flock);
 
-async function locked(rootDir, action) {
+async function locked(rootDir, action, logger = console) {
   const dir = join(rootDir, 'data', 'ama-closure-lag');
   await mkdir(dir, { recursive: true });
   const lock = await open(join(dir, 'state.lock'), 'a');
@@ -26,14 +26,23 @@ async function locked(rootDir, action) {
     const path = join(dir, 'state.json');
     let state;
     try { state = JSON.parse(await readFile(path, 'utf8')); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; state = { prs: {}, samples: [], breaches: {} }; }
+    catch (error) {
+      if (error instanceof SyntaxError) {
+        const quarantine = `${path}.corrupt-${Date.now()}-${randomUUID()}`;
+        await rename(path, quarantine);
+        logger?.error?.(`AMA closure-lag corrupt state quarantined: ${quarantine}`);
+      } else if (error.code !== 'ENOENT') throw error;
+      state = { prs: {}, samples: [], breaches: {} };
+    }
+    const before = JSON.stringify(state);
     const result = action(state);
     for (const id of Object.keys(state.breaches)) {
       if (id.startsWith('pr:')) {
         const pr = state.prs[id.slice(3)];
-        if (!pr || pr.terminal) delete state.breaches[id];
+        if (!pr || pr.terminal || pr.eligibleAt == null) delete state.breaches[id];
       }
     }
+    if (JSON.stringify(state) === before) return result;
     const tmpPath = join(dir, `.state.${randomUUID()}.tmp`);
     try {
       const tmp = await open(tmpPath, 'wx', 0o644);
@@ -53,15 +62,16 @@ async function locked(rootDir, action) {
   }
 }
 
-export async function observeCloserBacklog({ rootDir, repo, prNumber, now = Date.now() }) {
+export async function observeCloserBacklog({ rootDir, repo, prNumber, now = Date.now(), logger = console }) {
   return locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
     state.prs[key] ??= {};
+    if (state.prs[key].terminal) state.prs[key] = {};
     state.prs[key].closerSeenAt = now;
     // A stale observation is not a current eligible backlog. Active launches
     // are counted independently by the caller and retain their exclusivity.
     return Object.values(state.prs).filter((pr) => pr.closerSeenAt >= now - 600000 && !pr.terminal).length;
-  });
+  }, logger);
 }
 
 async function page(text, options) {
@@ -70,13 +80,17 @@ async function page(text, options) {
   return deliverAlert(text, options);
 }
 
-export async function observeClosureLag({ rootDir, repo, prNumber, headSha, eligible = false,
+export async function observeClosureLag({ rootDir, repo, prNumber, headSha, eligible = null,
   merged = false, closed = false, mergedAt = null, reason = null,
   now = Date.now(), sloMs = null, logger = console, pageImpl = page }) {
   const result = await locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
     let pr = state.prs[key];
     if (!pr) pr = state.prs[key] = {};
+    if (!merged && !closed && (eligible === false || (headSha && pr.headSha && headSha !== pr.headSha) || (eligible && pr.terminal))) {
+      pr = state.prs[key] = { headSha };
+      delete state.breaches[`pr:${key}`];
+    }
     if (eligible && pr.eligibleAt == null) {
       Object.assign(pr, { eligibleAt: now, headSha, terminal: false });
     }
@@ -103,7 +117,7 @@ export async function observeClosureLag({ rootDir, repo, prNumber, headSha, elig
     const lags = [...state.samples.map((sample) => sample.lagMs), ...pending.map(([, value]) => Math.max(0, now - value.eligibleAt))].sort((a, b) => a - b);
     const p95 = lags.length ? lags[Math.ceil(lags.length * 0.95) - 1] : 0;
     events.push({ event: 'ama.closure_queue_depth', value: pending.length, p95_lag_ms: p95 });
-    const blockers = pending.map(([name, value]) => ({ pr: name, reason: value.reason, lag_ms: now - value.eligibleAt }));
+    const blockers = pending.map(([name, value]) => ({ pr: name, reason: String(value.reason).slice(0, 160), lag_ms: now - value.eligibleAt }));
     const breaches = [];
     const addBreach = (id, details) => {
       if (!state.breaches[id]) {
@@ -115,21 +129,25 @@ export async function observeClosureLag({ rootDir, repo, prNumber, headSha, elig
     };
     if (sloMs != null) state.sloMs = Math.max(1, Number(sloMs) || 1800000);
     const limit = state.sloMs || 1800000;
-    if (p95 > limit) addBreach('p95', { p95_lag_ms: p95, slo_ms: limit, blockers,
-      completed: state.samples.filter((sample) => sample.lagMs > limit).map(({ pr, reason, lagMs }) => ({ pr, reason, lag_ms: lagMs })) });
-    else if (state.breaches.p95?.paged) delete state.breaches.p95;
+    const completed = state.samples.filter((sample) => sample.lagMs > limit).map(({ pr, reason, lagMs }) => ({ pr, reason, lag_ms: lagMs }));
+    const top = (items) => items.sort((a, b) => b.lag_ms - a.lag_ms).slice(0, 5)
+      .map((item) => ({ ...item, pr: String(item.pr).slice(0, 120), reason: String(item.reason).slice(0, 160) }));
+    if (p95 > limit) addBreach('p95', { p95_lag_ms: p95, slo_ms: limit,
+      blockers: top([...blockers]), blockers_omitted: Math.max(0, blockers.length - 5),
+      completed: top(completed), completed_omitted: Math.max(0, completed.length - 5) });
+    else delete state.breaches.p95;
     for (const blocker of blockers) {
       if (blocker.lag_ms > 3600000) addBreach(`pr:${blocker.pr}`, blocker);
     }
     return { events, breaches };
-  });
+  }, logger);
   for (const event of result.events) {
     const sink = event.severity === 'SEV1' ? (logger?.error || logger?.info) : logger?.info;
     sink?.call(logger, JSON.stringify(event));
   }
   for (const event of result.breaches) {
     try {
-      await pageImpl(`SEV1 AMA closure lag: ${JSON.stringify(event)}`, { event: event.event, payload: event });
+      await pageImpl(`SEV1 AMA closure lag: ${JSON.stringify(event)}`.slice(0, 3500), { event: event.event, payload: event });
       await locked(rootDir, (state) => { if (state.breaches[event.id]) state.breaches[event.id].paged = true; });
     } catch (error) { logger?.error?.(`AMA closure-lag page failed: ${error.message}`); }
   }

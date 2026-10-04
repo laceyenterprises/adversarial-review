@@ -1,4 +1,4 @@
-import { effectiveCloserCap } from './ama/closure-capacity.mjs';
+import { effectiveCloserCap, warnCloserFloor } from './ama/closure-capacity.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
 //
@@ -212,6 +212,7 @@ export function createAmaHammerBackgroundQueue({
 // enforces its domain ceiling; the first domain must not configure this queue.
 let processQueue = null;
 export function amaHammerBackgroundQueue({ maxConcurrent } = {}) {
+  if (!processQueue) warnCloserFloor(maxConcurrent ?? DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT, AMA_HAMMER_BACKGROUND_PROCESS_CEILING);
   if (!processQueue) processQueue = createAmaHammerBackgroundQueue({
     maxConcurrent, ceiling: AMA_HAMMER_BACKGROUND_PROCESS_CEILING,
   });

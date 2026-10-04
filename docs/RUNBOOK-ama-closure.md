@@ -1517,7 +1517,7 @@ no changes to the Python or shell strict schemas are needed. The worker-pool
 admission gate remains responsible for memory and load back-pressure.
 
 Only requested, leased, starting and running ledger launches consume capacity,
-with process liveness checked where known. Parked/blocked decision launches
+with terminal ledger evidence required before PID absence releases a slot. Parked/blocked decision launches
 retain same-PR exclusivity but consume no fleet slots. Terminal launches release
 capacity without releasing safety leases or authorizing retries. The backlog
 census counts nonterminal closer candidates observed within ten minutes,
@@ -1545,7 +1545,7 @@ their PR is terminal or no longer present in the state, including undelivered
 pages; active PR breaches retain their delivery deduplication. State access uses
 asynchronous IO and atomic replacement under a nonblocking advisory lock with
 a one-second acquisition budget. Observation failures are logged by callers and
-dispatch retains its live-launch census fallback. See the
+dispatch falls back to the configured floor on census failure. Invalid JSON is quarantined and logged at error level before starting a fresh diagnostic ledger. See the
 [closure-lag data model](data-model/ama-closure-lag.md) for fields and retention.
 Diagnostics grant no merge authority.
 
@@ -1553,7 +1553,7 @@ The cap reconciles session-ledger launches within the
 existing dispatch-record and lease reclaim windows, plus pending lease-held
 dispatches inside the bounded launch window. Terminal
 launches immediately stop consuming capacity when the next dispatch scans the
-records. Unreadable ledger evidence consumes no fleet capacity, but preserves
+records. Unreadable or missing ledger evidence and dispatching intents hold fleet capacity for the existing bounded pending-launch window, preserving
 same-PR ownership under the existing record/lease liveness checks. Live ledger
 statuses still obey the age escape for workers that die without a terminal write.
 Confirmed missing LRQs expire after the existing pending-launch timeout;
@@ -1597,3 +1597,5 @@ the record/lease liveness window; the CLI also visits historical dispatched reco
 No cap default or shared CFG schema changes are included in this single-repo fix.
 
 HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The scan admits ledger queries for at most one second (an already-started query retains the adapter timeout); subsequent records retain the existing age/lease liveness rules. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
+
+HAM closure diagnostics hardening: explicit ineligibility or a new head resets the eligible wait and removes stale PR pages; reopened candidates start fresh. Unchanged observations skip durable writes, redundant recovery observations are omitted, and recovery reuses the first daemon result unless deferred. SEV1 payloads keep the five longest pending and completed waits with omitted counts; page text is capped at 3500 characters. Process startup warns when the configured max acts as a floor below the adaptive ceiling.

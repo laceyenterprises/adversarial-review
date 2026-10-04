@@ -627,8 +627,8 @@ function alertPresentationForDoc(doc) {
     const waits = [...(payload.blockers || []), ...(payload.completed || [])];
     if (payload.reason) waits.push({ pr: payload.pr, reason: payload.reason, lag_ms: payload.lag_ms });
     return { severity: 'SEV1', headline: 'AMA closure lag SLO breached',
-      body: String(doc?.text || event), action: 'Repair the named closure blocker; retain all safety gates.',
-      detail: waits.map((wait) => `${wait.pr}: ${wait.reason} (${wait.lag_ms}ms)`).join('; ') };
+      body: String(doc?.text || event).slice(0, 2000), action: 'Repair the named closure blocker; retain all safety gates.',
+      detail: `${waits.slice(0, 10).map((wait) => `${wait.pr}: ${wait.reason} (${wait.lag_ms}ms)`).join('; ')}; +${(payload.blockers_omitted || 0) + (payload.completed_omitted || 0)} more`.slice(0, 1000) };
   }
 
   if (event === 'ama.automated_recovery.exhausted') {

@@ -20,19 +20,17 @@ events and pending breach pages; it logs events and delivers pages after saving
 the state. The watcher records eligibility and backlog, and lifecycle sync or
 inline merge completion marks terminal PRs. Completion lag is sampled only once.
 
-Every state write removes PR-specific breaches whose PR is absent or terminal,
+Every state write removes PR-specific breaches whose PR is absent, ineligible or terminal,
 whether paged or undelivered. This also cleans orphaned breaches left by older
 writers. Active PR breaches retain their original event and delivery flag. Lag
 observations prune terminal PRs older than 24 hours and retain at most 10000
-completion samples from the last 24 hours. A delivered p95 breach is cleared
-when p95 recovers, allowing a new episode; an undelivered p95 breach remains
-retryable. PR-specific breaches begin after an eligible wait exceeds one hour.
+completion samples from the last 24 hours. A p95 breach is cleared when p95 recovers, allowing a new episode. PR-specific breaches begin after an eligible wait exceeds one hour.
 
 Writers serialize through the stable `state.lock` file. Lock probes and filesystem
 operations are asynchronous; exclusive nonblocking probes retry every 25ms for
 at most one second. This avoids blocking either the event loop or the IO thread
-pool behind another writer. Contention expiry or IO/parse failures reject the
-observation and release the descriptor; callers log the diagnostic failure and
-dispatch falls back to its live-launch census. State is replaced atomically via
+pool behind another writer. Contention expiry or IO failures reject the observation and release the descriptor; census failure falls back to the configured floor. Invalid JSON is renamed to a unique `state.json.corrupt-*` quarantine, logged at error level, and replaced with fresh diagnostic state. Unchanged observations skip writes. State is replaced atomically via
 a unique temporary file, file fsync and rename, with best-effort directory fsync.
 Page delivery and its acknowledgement use separate lock acquisitions.
+
+Explicit ineligibility or a changed head clears the wait; eligible reopened PRs start a new wait. The p95 event carries at most five `blockers` and five `completed` entries sorted by lag, with `blockers_omitted` and `completed_omitted` counts. Reasons and PR identifiers are bounded in page summaries; page text is capped at 3500 characters.

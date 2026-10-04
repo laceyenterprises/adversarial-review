@@ -329,6 +329,7 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         execFileImpl: execFileAsync,
       });
       try { await observeClosureLag({ rootDir: ROOT, repo, prNumber,
+        headSha: freshState.headRefOid,
         merged: freshState.merged === true || String(freshState.state).toUpperCase() === 'MERGED',
         closed: String(freshState.state).toUpperCase() === 'CLOSED' && freshState.merged !== true,
         mergedAt: freshState.mergedAt }); }

@@ -8,7 +8,8 @@
       "store": "data/ama-closure-lag/state.json",
       "schemaSurface": "src/ama/closure-lag.mjs",
       "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/pr-lifecycle-sync.mjs", "src/daemon-clean-merge.mjs"],
-      "owner": "AMA closure diagnostics and SLO paging"
+      "owner": "AMA closure diagnostics and SLO paging",
+      "breachSummary": { "maxBlockers": 5, "maxCompleted": 5, "omittedFields": ["blockers_omitted", "completed_omitted"], "maxPageCharacters": 3500 }
     },
     {
       "id": "ama-audit",

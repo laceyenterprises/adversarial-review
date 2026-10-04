@@ -3782,3 +3782,18 @@ test('in-lease unknown evidence keeps the daemon retryable without an operator p
     assert.equal(result.reason, 'gate-read-failed');
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISPOSITION.DEFERRED]) {
+  test(`recovery reuses daemon result except when deferred: ${disposition}`, async () => {
+    const rootDir = tempRoot();
+    try {
+      let calls = 0;
+      await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir), automatedRecovery: true,
+        priorDaemonCleanMerge: { disposition, reason: 'not-eligible' },
+        runDaemonCleanMergeAttemptImpl: async () => { calls++; return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'not-eligible' }; },
+        maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'not-eligible' }),
+      });
+      assert.equal(calls, disposition === DAEMON_MERGE_DISPOSITION.DEFERRED ? 1 : 0);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  });
+}

@@ -1848,3 +1848,26 @@ pending hold without consuming the store-error alert slot. Uncovered or persiste
 owned primary-change refusals page after six observations, without authorizing
 HAM dispatch. Reservations persist the expected dispatch-record head so reviewed
 head receipts cannot refund an already launched attempt.
+### LEASEPARK-01: certified-head contention queue
+
+Lease acquisition timeouts and pending-required-check deferrals are written as
+`deferred` AMA audit attempts, keyed by the full certified head. The closer
+resumes a validated HAM head through the existing daemon merge predicate rather
+than launching remediation again. Required checks, primary-change, exact-head,
+protective predecessors, branch protection and the autonomous execution switch
+remain mandatory, including the live read inside the lease. Moving the head
+invalidates the certification and removes the old audit from the active queue.
+
+Each observed deferred launch refunds the series, target and lifetime failure
+counters exactly once. The separate launch history allows up to twelve deferrals
+and six hours, with exponential backoff starting at two minutes and capped at
+thirty minutes. Contention does not trigger retry-cap paging. An expired queue
+returns `hammer-deferral-budget-exhausted` for operator handling.
+
+The lease CLI already maintains FIFO waiters; its bounded acquisition window now
+covers the holder's remaining deadline plus five seconds, capped at thirty
+minutes. Zero-wait callers still return immediately. Hammer releases its lease
+before sleeping on remote CI and reacquires before the final fresh live gate.
+This permits other PRs to advance base during CI; branch protection and the
+existing final merge gate may consequently defer or reject the merge, preserving
+safety instead of serializing the entire remote CI wait.

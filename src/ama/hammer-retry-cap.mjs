@@ -346,6 +346,9 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     targetAttemptCount: targetShaChanged ? 1 : decision.nextTargetAttemptCount,
     // Refunded exits belong to the series, like attemptCount.
     ...retryableFieldsForSeries(decision.jobKeyChanged ? null : existing),
+    deferralLaunches: decision.jobKeyChanged ? [] : (existing?.deferralLaunches || []),
+    deferralStartedAt: decision.jobKeyChanged ? null : existing?.deferralStartedAt,
+    deferralNextAt: decision.jobKeyChanged ? null : existing?.deferralNextAt,
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
@@ -502,4 +505,26 @@ export function refundHammerRetryDispatch(rootDir, identity, {
   };
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return { refunded: true, reason: 'hammer-exited-without-close', retryable: retryable + 1 };
+}
+
+// LEASEPARK-01: contention has its own bounded history, not a failure budget.
+export function deferHammerRetryDispatch(rootDir, identity, { jobKey, launchRequestId, headSha, now } = {}) {
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  if (!ledger || ledger.__corrupt || ledger.jobKey !== jobKey || !launchRequestId) return null;
+  const launches = ledger.deferralLaunches || [];
+  if (launches.includes(launchRequestId)) return ledger;
+  const deferredAt = now || new Date().toISOString();
+  const count = launches.length + 1;
+  const doc = { ...ledger,
+    attemptCount: Math.max(0, ledger.attemptCount - 1),
+    lifetimeAttemptCount: Math.max(0, ledger.lifetimeAttemptCount - 1),
+    targetAttemptCount: ledger.targetRemediationSha === headSha
+      ? Math.max(0, ledger.targetAttemptCount - 1) : ledger.targetAttemptCount,
+    deferralLaunches: [...launches, launchRequestId],
+    deferralStartedAt: ledger.deferralStartedAt || deferredAt,
+    deferralNextAt: new Date(Date.parse(deferredAt) + Math.min(1800, 60 * 2 ** Math.min(count, 5)) * 1000).toISOString(),
+    updatedAt: deferredAt,
+  };
+  writeHammerRetryCapLedger(rootDir, identity, doc);
+  return doc;
 }

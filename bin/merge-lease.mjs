@@ -303,6 +303,7 @@ async function runAcquire(argv, deps) {
     'owner-pgid': { type: 'string' },
     wait: { type: 'string' },
     'required-checks-green': { type: 'boolean' },
+    'wait-for-holder-deadline': { type: 'boolean' },
   });
   if (values.help) {
     deps.stdout.write(USAGE);
@@ -319,7 +320,13 @@ async function runAcquire(argv, deps) {
     values['owner-pgid'] == null ? null : parsePositiveInteger(values['owner-pgid'], 'owner-pgid');
   const waitSeconds = parseNonNegativeNumber(values.wait, 'wait');
   const startedMs = deps.nowMs();
-  const deadlineMs = startedMs + (waitSeconds * 1000);
+  const initialHolder = inspectMergeLease({ rootDir, repo, base, now: deps.nowIso(),
+    host: deps.host, pidAliveFn: deps.pidAliveFn });
+  const holderRemaining = initialHolder.holder
+    && values['wait-for-holder-deadline']
+    ? Math.max(0, (initialHolder.deadlineSeconds || 0) - (initialHolder.ageSeconds || 0)) : 0;
+  // FIFO acquisition remains bounded, but permits the current holder to finish.
+  const deadlineMs = startedMs + (waitSeconds === 0 ? 0 : Math.min(1800, Math.max(waitSeconds, holderRemaining > 0 ? holderRemaining + 5 : 0))) * 1000;
 
   if (ownerPid === deps.selfPid) {
     throw usageError('--owner-pid must identify the caller, not the merge-lease CLI process');

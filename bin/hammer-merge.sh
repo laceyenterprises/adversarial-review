@@ -435,7 +435,7 @@ while :; do
     echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
-    ham_append_terminal_audit failed-without-merge github-gate-timeout || true
+    ham_append_terminal_audit deferred required-checks-pending || true
     HAM_PENDING_CHECK_STATES=$(jq -r '.checksConclusion // empty' "$HAM_GATE_JSON")
     if [ -n "$HAM_PENDING_CHECK_STATES" ] && ! ham_required_gate_red; then
       HAM_PENDING_CHECK_CLASSIFICATION=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs classify \
@@ -447,9 +447,15 @@ while :; do
     ham_release_merge_lease
     return 20
   fi
+  # Remote CI does not own the serialized merge lane. Reacquisition below
+  # repeats the live exact-head gate before any merge attempt.
+  ham_release_merge_lease || return 1
   echo "HAM remote CI: waiting for required checks on ${POST_REMEDIATION_SHA}" >&2
   sleep "$HAM_REMOTE_CI_POLL_SECONDS"
 done
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
+  ham_acquire_merge_lease || return $?
+fi
 HAM_PRE_MERGE_ELIGIBLE=1
 
 HAM_MERGE_ATTEMPTS=0

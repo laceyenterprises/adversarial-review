@@ -1040,3 +1040,23 @@ test('merge-lease acquire reclaims stale dead-owner-pid holder during wait', asy
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('LEASEPARK-01 holder-aware FIFO wait outlives the short acquisition window', async () => {
+  const rootDir = freshRoot();
+  try {
+    const holder = acquireFixture(rootDir, { deadlineSeconds: 10 });
+    let released = false;
+    const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+      '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '1', '--wait-for-holder-deadline'], {
+      onSleep: ({ nowMs }) => {
+        if (!released && nowMs >= Date.parse('2026-06-20T18:00:03Z')) {
+          releaseMergeLease({ rootDir, repo: REPO, base: BASE, ...holder.lease });
+          released = true;
+        }
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(jsonOutput(io).acquired, true);
+    assert.ok(jsonOutput(io).waited_s >= 3);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

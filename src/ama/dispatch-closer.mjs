@@ -122,6 +122,7 @@ import {
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
+  deferHammerRetryDispatch,
   refundHammerRetryDispatch,
 } from './hammer-retry-cap.mjs';
 import {
@@ -4076,7 +4077,13 @@ export async function maybeDispatchAmaCloser({
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;
   const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
-  if (!verdict.eligible || eligibleHammerRouteReasons.length > 0) {
+  const queuedParkAudit = readAmaAuditEntry(dispatchContext.hqRoot || DEFAULT_HQ_ROOT, dispatchContext.repo,
+    prNumber, prMetadata?.headSha);
+  const queuedParkReason = queuedParkAudit?.status === 'deferred'
+    ? queuedParkAudit.attempts?.at(-1)?.reason : null;
+  const resumeCertifiedPark = verdict.trace?.hamTerminalRemediation?.ok === true
+    && ['merge-lease-timeout', 'required-checks-pending'].includes(queuedParkReason);
+  if (!resumeCertifiedPark && (!verdict.eligible || eligibleHammerRouteReasons.length > 0)) {
     if (!verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true) {
       return noAmaDispatch({
         dispatched: false,
@@ -4357,6 +4364,32 @@ export async function maybeDispatchAmaCloser({
   const auditTerminalOutcome = existingRecord
     ? existingRecordAuditTerminalOutcome
     : (headAdvancedDuringDispatch ? targetHeadAuditTerminalOutcome : reviewedHeadAuditTerminalOutcome);
+  const queuedHead = prMetadata?.headSha;
+  const parkAudit = readAmaAuditEntry(hqRoot, repo, prNumber, queuedHead);
+  const parkAttempt = parkAudit?.attempts?.at(-1);
+  const parkReason = parkAttempt?.reason;
+  const deferredPark = parkAudit?.status === 'deferred'
+    && ['merge-lease-timeout', 'required-checks-pending'].includes(parkReason)
+    && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
+  const certifiedPark = validatedHamTerminalRemediation
+    && deferredPark;
+  let parkLedger = null;
+  if (deferredPark && existingRecord?.launchRequestId) {
+    parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
+      jobKey: reviewedSha, headSha: existingRecord.headSha,
+      launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
+    });
+  }
+  if (deferredPark && !certifiedPark && parkLedger) {
+    const nowMs = Date.parse(dispatchContext.dispatchedAt || new Date().toISOString());
+    const expired = parkLedger.deferralLaunches.length > 12
+      || nowMs - Date.parse(parkLedger.deferralStartedAt) >= 6 * 3600_000;
+    if (expired || nowMs < Date.parse(parkLedger.deferralNextAt)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-deferral-backoff',
+        needsOperator: expired });
+    }
+  }
   // HAMBG-02: a lease rekeyed onto the head the recorded hammer pushed is that
   // hammer's own lease. Answering `closer-lease-held-by-other-process` for it
   // kept adversarial-review#1178 parked for 30 minutes after its hammer had
@@ -4635,13 +4668,14 @@ export async function maybeDispatchAmaCloser({
         }, { level: 'warn' });
       }
     }
-    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed')) {
       if (
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
         && auditTerminalOutcome !== 'succeeded'
         // HAMBG-02: the validated-HAM exemption holds only while the same-head
         // daemon merge below can act on it. With a readable merged signal it
         // fell through to treating the hammer as merged without asking GitHub.
+        && !certifiedPark
         && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
       ) {
         const terminalLivePr = await probeAmaLivePrForMergeDispatch({
@@ -4743,6 +4777,7 @@ export async function maybeDispatchAmaCloser({
       }
       if (
         !hammerEndedWithoutMerge &&
+        !certifiedPark &&
         existingDispatchHeadAdvanced &&
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
       ) {
@@ -4764,12 +4799,22 @@ export async function maybeDispatchAmaCloser({
           lastError: 'terminal-dispatch-superseded-by-head-advance',
         }));
       } else if (
-        currentHeadFinalHammerTerminalRemediation &&
-        validatedHamTerminalRemediation &&
-        mergedSignalUnknown &&
-        AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+        (certifiedPark || (currentHeadFinalHammerTerminalRemediation &&
+        validatedHamTerminalRemediation && mergedSignalUnknown)) &&
+        (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed'))
       ) {
-        const reason = 'current-head-hammer-already-ran-needs-operator';
+        if (certifiedPark && parkLedger) {
+          const nowMs = Date.parse(dispatchContext.dispatchedAt || new Date().toISOString());
+          const expired = parkLedger.deferralLaunches.length > 12
+            || nowMs - Date.parse(parkLedger.deferralStartedAt) >= 6 * 3600_000;
+          if (expired || nowMs < Date.parse(parkLedger.deferralNextAt)) {
+            return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+              reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-merge-ready-backoff',
+              needsOperator: expired });
+          }
+        }
+        const mergeHead = certifiedPark ? queuedHead : reviewedSha;
+        const reason = certifiedPark ? 'hammer-merge-ready-deferred' : 'current-head-hammer-already-ran-needs-operator';
         let sameHeadHamMerge = null;
         let sameHeadHamMergeReason = null;
         if (!baseBranch) {
@@ -4780,7 +4825,7 @@ export async function maybeDispatchAmaCloser({
             repo,
             prNumber,
             base: baseBranch,
-            validatedHead: reviewedSha,
+            validatedHead: mergeHead,
             verdict: 'ham_terminal_remediation_validated',
             reviewState,
             branchProtectionRequired: cfg?.branchProtection?.required !== false,
@@ -4835,7 +4880,7 @@ export async function maybeDispatchAmaCloser({
             emitFindingImpl: emitProtectivePredecessorFindingImpl,
             allowHamTerminalRemediation: true,
             dismissStaleRequestChangesImpl: dispatchContext.dismissStaleRequestChangesOnResolved !== false
-              ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, reviewedSha, {
+              ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, mergeHead, {
                   authoritativeReviewerLogins,
                   message:
                     `AMA hammer final remediation resolved findings on ${reviewedSha}; ` +
@@ -4873,7 +4918,7 @@ export async function maybeDispatchAmaCloser({
                 repo,
                 base: baseBranch,
                 holderPr: prNumber,
-                holderHead: reviewedSha,
+                holderHead: mergeHead,
                 holderPid: process.pid,
                 holderHost: hostname(),
                 now: dispatchContext.dispatchedAt || new Date().toISOString(),
@@ -5041,7 +5086,7 @@ export async function maybeDispatchAmaCloser({
           dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
           launchRequestId: existingRecord.launchRequestId || null,
           promptPath: existingRecord.promptPath || null,
-          needsOperator: true,
+          needsOperator: !certifiedPark,
         });
       }
       if (

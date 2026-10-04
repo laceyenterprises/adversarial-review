@@ -923,3 +923,30 @@ test('in-lease missing primary evidence beside red CI remains a retryable read f
   assert.equal(h.calls.merge, 0);
   assert.equal(h.calls.release, 1);
 });
+
+
+test('AMASCALE: live eligibility is observed before lease contention, never on stale head', async () => {
+  const h = makeHarness({ leaseAcquired: false });
+  let observed = 0;
+  const onEligibleImpl = ({ headSha }) => {
+    assert.equal(headSha, HEAD);
+    assert.equal(h.calls.acquire, 0);
+    observed++;
+  };
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { onEligibleImpl }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+  assert.equal(observed, 1);
+  await attemptDaemonCleanMerge(baseArgs(makeHarness(), {
+    liveGate: greenGate({ candidateHead: 'stale-head' }), onEligibleImpl,
+  }));
+  assert.equal(observed, 1);
+});
+
+test('AMASCALE: a failed metric observer cannot delay or prevent eligible merge', async () => {
+  const h = makeHarness();
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    onEligibleImpl: () => { throw new Error('metric unavailable'); },
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.calls.merge, 1);
+});

@@ -1,3 +1,4 @@
+import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
 // ARC-18: extracted from watcher.mjs. The AMA (autonomous-merge-authority)
@@ -1533,9 +1534,12 @@ export async function maybeDispatchAmaClosureFor({
   //   - deferred      → lease contention / audit bootstrap failure; retry next
   //                     tick with no double-merge.
   throwIfAborted(signal);
-  const daemonCleanMerge = automatedRecovery
-    ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'automated-hammer-recovery' }
-    : await runCoexistenceOperation(
+  try {
+    await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      eligible: !wouldUseDaemonPath && isEligibleForAmaClosure(reviewState, prMetadata, cfg).eligible,
+      sloMs: cfg.closureLagSloMs, logger });
+  } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
+  const daemonCleanMerge = await runCoexistenceOperation(
     'daemon-clean-merge-attempt',
     ({ signal: operationSignal }) => runDaemonCleanMergeAttemptImpl({
       rootDir,
@@ -1595,6 +1599,8 @@ export async function maybeDispatchAmaClosureFor({
     // the one that applied (foundry#35, 8.8h on `worker-identity-unresolved`).
     // Diagnostics only — nothing reads these records to decide a merge.
     if (daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
+      try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, merged: true, logger }); }
+      catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
       clearDaemonRouteDisagreement(rootDir, { repo: repoPath, prNumber });
     } else {
@@ -1887,6 +1893,7 @@ export async function maybeDispatchAmaClosureFor({
     });
     const backgroundQueue = amaHammerBackgroundQueueImpl({
       maxConcurrent: cfg.amaCloserMaxConcurrentLaunches,
+      ceiling: cfg.amaCloserConcurrentLaunchCeiling,
     });
     backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
     if (!backgroundSettled) {
@@ -2100,6 +2107,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   const liveMerged =
     candidate?.merged === true || String(candidate?.prState || '').toLowerCase() === 'merged';
   if (liveMerged || String(candidate?.prState || '').toLowerCase() === 'closed') {
+    try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, merged: liveMerged,
+      closed: !liveMerged, mergedAt: candidate?.mergedAt, logger }); }
+    catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
     return { outcome: 'pr-terminal', terminalReason: liveMerged ? 'merged' : 'closed' };
   }
   let amaClosureResult;
@@ -2150,6 +2160,10 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     };
   }
   throwIfAborted(signal);
+  try { await observeClosureLag({ rootDir, repo: repoPath, prNumber,
+    reason: amaClosureResult?.dispatched ? 'hammer-running'
+      : amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending', logger }); }
+  catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }

@@ -1,3 +1,4 @@
+import { closureLagAlertId } from './ama/closure-lag.mjs';
 import {
   existsSync,
   mkdirSync,
@@ -620,6 +621,14 @@ function alertPresentationForDoc(doc) {
       action: 'Check /v1/dispatch and watcher reviewer spawns.',
       detail: 'Freshness is based on published reviews, even when review_status is stale.',
     };
+  }
+
+  if (event === 'ama.closure_lag.slo_breach') {
+    const waits = [...(payload.blockers || []), ...(payload.completed || [])];
+    if (payload.reason) waits.push({ pr: payload.pr, reason: payload.reason, lag_ms: payload.lag_ms });
+    return { severity: 'SEV1', headline: 'AMA closure lag SLO breached',
+      body: String(doc?.text || event), action: 'Repair the named closure blocker; retain all safety gates.',
+      detail: waits.map((wait) => `${wait.pr}: ${wait.reason} (${wait.lag_ms}ms)`).join('; ') };
   }
 
   if (event === 'ama.automated_recovery.exhausted') {
@@ -1342,10 +1351,11 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
-  if (event === 'ama.automated_recovery.exhausted') {
+  if (event === 'ama.automated_recovery.exhausted' || event === 'ama.closure_lag.slo_breach') {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
-    doc.id = `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
+    doc.id = event === 'ama.closure_lag.slo_breach' ? closureLagAlertId(payload)
+      : `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
       if (existsSync(existingPath)) {

@@ -65,6 +65,8 @@
     "workerClassFallback": ["hammer-claude"],
     "mergeMethod": "squash",
     "hammerLifetimeDispatchCeiling": 6,
+    "amaCloserConcurrentLaunchCeiling": 32,
+    "closureLagSloMs": 1800000,
     "lha": {
       "consumeAttestations": true
     },

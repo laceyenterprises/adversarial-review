@@ -271,8 +271,9 @@ The control is `watcher.ama_hammer_dispatch_mode`, with env override
 | `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher does not fall through to merge-agent. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
 
 The queue is process-local, bounded, and keyed by PR@head
-(`<owner>/<repo>#<pr>@<head>`). It starts at most three hammer `hq dispatch`
-subprocesses concurrently, runs eligible waiters FIFO, and coalesces duplicate
+(`<owner>/<repo>#<pr>@<head>`). It starts hammer `hq dispatch`
+subprocesses at the configured floor (default three), scales with eligible entries
+up to the domain ceiling, runs eligible waiters FIFO, and coalesces duplicate
 submissions for the same PR@head while one is queued or running. Different heads
 of the same PR run serially because they share a worker worktree. The closer
 also checks active dispatch records for the same PR at any head before launch;
@@ -1504,16 +1505,44 @@ cannot be excluded from that evidence (follow-up LAC-1832). Non-HAM remediation
 trailers cannot authorize primary reversals (follow-up LAC-1833). In-place repairs
 remain allowed, but preserving author intent takes precedence over those waivers.
 
-### AMACAP-01 closer launch capacity and reconciliation
+### AMACAP-01 / AMASCALE-01 closer launch capacity and reconciliation
 
-`watcher.ama_closer_max_concurrent_launches` remains configurable (default 3).
-The cap counts non-terminal session-ledger launches across PRs within the
+`watcher.ama_closer_max_concurrent_launches` remains the configurable floor
+(default 3); existing host overrides continue to raise that floor. AMASCALE-01
+scales capacity as `clamp(eligible closer backlog, floor, ceiling)`. The repo-owned
+`domains/code-pr.json` merge-authority policy sets
+`amaCloserConcurrentLaunchCeiling` (default 32) and `closureLagSloMs` (default
+1800000). These are domain policy fields, not new shared config.yaml keys;
+no changes to the Python or shell strict schemas are needed. The worker-pool
+admission gate remains responsible for memory and load back-pressure.
+
+Only requested, leased, starting and running ledger launches consume capacity,
+with process liveness checked where known. Parked/blocked decision launches
+retain same-PR exclusivity but consume no fleet slots. Terminal launches release
+capacity without releasing safety leases or authorizing retries. Live launches
+and the newly eligible candidate are included in the eligible backlog census.
+The background dispatch queue scales with its eligible entries to the same ceiling.
+
+The daemon clean path runs before hammer capacity, including automated recovery.
+No eligible inline merge waits behind `ama-closer-launch-in-progress`.
+
+`ama.closure_lag` emits `eligible_at`, `merged_at`, and `lag_ms` once per PR;
+`ama.closure_queue_depth` emits the eligible unmerged queue depth and p95 lag.
+Observations persist under the runtime root in `data/ama-closure-lag/`. Lifecycle
+sync settles hammer merges from live terminal state, while inline merges settle
+at success. A rolling 24-hour p95 includes completed lags and pending eligible
+waits. Exceeding the configured SLO or any eligible wait over 60 minutes creates
+an automated `ama.closure_lag.slo_breach` SEV1 event naming blocking reasons.
+Pages are durable and deduplicated; delivery failures retry, and a recovered p95
+can start a new breach episode. Diagnostics grant no merge authority.
+
+The cap reconciles session-ledger launches within the
 existing dispatch-record and lease reclaim windows, plus pending lease-held
 dispatches inside the bounded launch window. Terminal
 launches immediately stop consuming capacity when the next dispatch scans the
-records. Non-terminal ledger statuses and ledger read failures retain capacity
-only while the existing record/lease liveness checks pass; they do not bypass
-the age escape for workers that die without a terminal ledger write.
+records. Unreadable ledger evidence consumes no fleet capacity, but preserves
+same-PR ownership under the existing record/lease liveness checks. Live ledger
+statuses still obey the age escape for workers that die without a terminal write.
 Confirmed missing LRQs expire after the existing pending-launch timeout;
 launch-only records with no parseable launch timestamp stay held. Before any
 ledger query, the dispatch scan checks identity, record age and lease liveness.

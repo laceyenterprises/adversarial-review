@@ -609,8 +609,9 @@ Key control points:
 - **`watcher.ama_hammer_dispatch_mode`** (default `inline`): controls only
   whether the posted-review phase waits for the hammer `hq dispatch` call.
   `background` keeps the same MSM hammer path but submits it to a process-local
-  queue with one entry per PR@head, at most three concurrent dispatches across
-  different PRs, and FIFO eligible waiters. The queue serializes different
+  queue with one entry per PR@head, a backlog-scaled limit across different
+  PRs, and FIFO eligible waiters. The configured floor defaults to three and
+  the domain-policy ceiling defaults to 32; worker admission owns host pressure. The queue serializes different
   heads of one PR, and the closer checks active same-PR launch records before
   dispatch. Changing `watcher.ama_closer_max_concurrent_launches` requires a
   watcher restart because the process-local queue captures it on creation.

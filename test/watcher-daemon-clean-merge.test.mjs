@@ -1,3 +1,4 @@
+import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -204,12 +205,19 @@ test('AMA disabled audit eligibility reads required check contexts from merge-au
   }
 });
 
-test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', async () => {
+test('eligible daemon merge during recovery bypasses full closer capacity', async () => {
   const rootDir = tempRoot();
   try {
+    for (let prNumber = 900; prNumber < 932; prNumber++) {
+      const identity = { repo: 'acme/repo', prNumber, headSha: baseArgs(rootDir).candidate.headSha };
+      updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+        state: 'dispatched', launchRequestId: `live-${prNumber}`, lastObservedStatus: 'running',
+        lastAttemptedAt: new Date().toISOString() }));
+    }
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
+      automatedRecovery: true,
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.MERGED,
         reason: 'merged',
@@ -218,7 +226,7 @@ test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', 
       }),
       maybeDispatchAmaCloserImpl: async () => {
         closerCalls += 1;
-        return { dispatched: true };
+        return { dispatched: false, reason: 'ama-closer-launch-in-progress' };
       },
     });
 

@@ -1,3 +1,4 @@
+import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── PR lifecycle sync: merge-closeout capture + fast-merge close path ─────────
 //
 // ARC-18: extracted from watcher.mjs as leaf helpers — the merged-PR closeout
@@ -327,6 +328,11 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
       const freshState = await fetchPullRequestHeadAndState(repo, prNumber, {
         execFileImpl: execFileAsync,
       });
+      try { await observeClosureLag({ rootDir: ROOT, repo, prNumber,
+        merged: freshState.merged === true || String(freshState.state).toUpperCase() === 'MERGED',
+        closed: String(freshState.state).toUpperCase() === 'CLOSED' && freshState.merged !== true,
+        mergedAt: freshState.mergedAt }); }
+      catch (error) { console.warn(`AMA closure-lag lifecycle observation failed: ${error.message}`); }
       return { ...freshState, labels: freshState.labels };
     },
     // Durable owed work. Everything here either writes a local queue record or

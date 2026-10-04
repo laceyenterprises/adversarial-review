@@ -1,3 +1,5 @@
+import { observeCloserBacklog } from './closure-lag.mjs';
+import { effectiveCloserCap, launchHoldsCloserCapacity } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
@@ -1425,8 +1427,14 @@ function dispatchStatusReason(status) {
 }
 
 async function readLaunchRequestStatusFromLedgerDefault(args) {
-  const { readLaunchRequestStatusFromLedger } = await import('../session-ledger-read-adapter.mjs');
-  return readLaunchRequestStatusFromLedger(args);
+  const { readLaunchRequestStatusFromLedger, readLatestWorkerRunStatusFromLedger } = await import('../session-ledger-read-adapter.mjs');
+  const launch = readLaunchRequestStatusFromLedger(args);
+  if (launch?.ok && ['starting', 'running'].includes(launch.row?.status)) {
+    const worker = readLatestWorkerRunStatusFromLedger(args);
+    if (worker?.ok) return { ...launch, row: { ...launch.row, pid: worker.row.pid,
+      workerStatus: worker.row.status, process_status: worker.row.process_status } };
+  }
+  return launch;
 }
 
 /**
@@ -1852,7 +1860,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     // Same-head retries may still carry the previous LRQ during hq dispatch.
     // Neither the daemon nor CLI may probe or rewrite that in-flight intent.
     if (record.state === 'dispatching') {
-      if (inProgress) active.push({ ...record, prNumber, dispatchPath });
+      if (inProgress) active.push({ ...record, prNumber, dispatchPath, holdsCapacity: true });
       continue;
     }
     const observedStatus = normalizeWorkerRunStatus(record.lastObservedStatus);
@@ -1899,7 +1907,8 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       applyTerminal(record, dispatchPath, terminalStatus, probe);
       continue;
     }
-    if (launchInProgress) active.push({ ...record, prNumber, dispatchPath });
+    if (launchInProgress) active.push({ ...record, prNumber, dispatchPath,
+      holdsCapacity: launchHoldsCloserCapacity(probe?.ok ? probe.row : null, options.processKillImpl) });
   }
   const allMissing = probes > 0 && missingProbes === probes;
   for (const candidate of missingCandidates) {
@@ -5681,10 +5690,20 @@ export async function maybeDispatchAmaCloser({
   });
   const samePrLaunch = activeLaunches.find((record) => record.repo === repo
     && Number(record.prNumber) === Number(prNumber));
-  const otherPrLaunches = activeLaunches.filter((record) => record.repo !== repo
-    || Number(record.prNumber) !== Number(prNumber));
-  const maxConcurrentLaunches = Math.max(1, Number(cfg?.watcher?.ama_closer_max_concurrent_launches
-    ?? cfg?.amaCloserMaxConcurrentLaunches ?? 3) || 3);
+  const otherPrLaunches = activeLaunches.filter((record) => record.holdsCapacity === true
+    && (record.repo !== repo || Number(record.prNumber) !== Number(prNumber)));
+  let eligibleCloserBacklog = otherPrLaunches.length + 1;
+  try { eligibleCloserBacklog = observeCloserBacklog({ rootDir, repo, prNumber }); }
+  catch (error) { logger?.warn?.(`AMA backlog observation failed: ${error.message}`); }
+  const maxConcurrentLaunches = effectiveCloserCap(
+    Math.max(eligibleCloserBacklog, otherPrLaunches.length + 1),
+    cfg?.watcher?.ama_closer_max_concurrent_launches ?? cfg?.amaCloserMaxConcurrentLaunches ?? 3,
+    cfg?.amaCloserConcurrentLaunchCeiling ?? 32,
+  );
+  logAmaCloserDispatchEvent(logger, 'ama.closer_queue_depth', {
+    eligibleBacklog: Math.max(eligibleCloserBacklog, otherPrLaunches.length + 1),
+    liveLaunches: otherPrLaunches.length, effectiveCap: maxConcurrentLaunches,
+  });
   if (samePrLaunch || otherPrLaunches.length >= maxConcurrentLaunches) {
     const activeLaunch = samePrLaunch || otherPrLaunches[0];
     logAmaCloserDispatchEvent(logger, 'ama_closer.dispatch_deferred_active_launch', {

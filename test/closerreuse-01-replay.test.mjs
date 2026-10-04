@@ -119,6 +119,7 @@ function closerArgs(rootDir, { dispatchedAt, prNumber = PR_NUMBER, head = HEAD }
       eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false },
       branchProtection: { required: false },
       amaCloserMaxConcurrentLaunches: 1,
+      amaCloserConcurrentLaunchCeiling: 1, // Pin the replay's deliberately saturated capacity.
     },
     dispatchContext: {
       rootDir,

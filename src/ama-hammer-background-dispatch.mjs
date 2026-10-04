@@ -1,3 +1,4 @@
+import { effectiveCloserCap } from './ama/closure-capacity.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
 //
@@ -74,11 +75,12 @@ export function amaHammerBackgroundKey({ repo, prNumber, headSha }) {
  */
 export function createAmaHammerBackgroundQueue({
   maxConcurrent = DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT,
+  ceiling = maxConcurrent,
   nowMs = () => Date.now(),
   settledTtlMs = DEFAULT_AMA_HAMMER_SETTLED_TTL_MS,
   settledMaxEntries = DEFAULT_AMA_HAMMER_SETTLED_MAX_ENTRIES,
 } = {}) {
-  const limit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 1);
+  const limit = () => effectiveCloserCap(entries.size, maxConcurrent, ceiling);
   const entries = new Map();
   const settled = new Map();
   const waiting = [];
@@ -91,7 +93,7 @@ export function createAmaHammerBackgroundQueue({
   }
 
   function launchWaiting() {
-    while (running < limit) {
+    while (running < limit()) {
       const nextIndex = waiting.findIndex((entry) => !runningPrKeys.has(entry.prKey));
       if (nextIndex < 0) return;
       const [next] = waiting.splice(nextIndex, 1);
@@ -161,7 +163,7 @@ export function createAmaHammerBackgroundQueue({
       }
       const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null };
       entries.set(key, entry);
-      if (running < limit && !runningPrKeys.has(entry.prKey)) {
+      if (running < limit() && !runningPrKeys.has(entry.prKey)) {
         launch(entry);
         return { state: 'started', key, queuedAtMs: entry.queuedAtMs };
       }
@@ -184,7 +186,7 @@ export function createAmaHammerBackgroundQueue({
       return {
         running,
         waiting: waiting.length,
-        limit,
+        limit: limit(),
         keys: [...entries.keys()],
         settledKeys: [...settled.keys()],
       };
@@ -206,8 +208,8 @@ export function createAmaHammerBackgroundQueue({
 // One queue per watcher process. The watcher is a long-lived single process, so
 // module scope is the natural lifetime; tests construct their own queues.
 let processQueue = null;
-export function amaHammerBackgroundQueue({ maxConcurrent } = {}) {
-  if (!processQueue) processQueue = createAmaHammerBackgroundQueue({ maxConcurrent });
+export function amaHammerBackgroundQueue({ maxConcurrent, ceiling = 32 } = {}) {
+  if (!processQueue) processQueue = createAmaHammerBackgroundQueue({ maxConcurrent, ceiling });
   return processQueue;
 }
 

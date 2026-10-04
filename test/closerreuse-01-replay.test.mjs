@@ -185,7 +185,9 @@ function closerDeps({ nextLaunch = NEXT_LRQ, launchStatus = 'failed', launchRows
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     readLaunchRequestStatusImpl: async ({ launchRequestId }) => (launchRows[launchRequestId]
       ? { ok: true, row: launchRows[launchRequestId] }
-      : { ok: false, reason: 'missing-launch-request-row' }),
+      : launchRequestId === DEAD_LRQ
+        ? { ok: true, row: { status: launchStatus } }
+        : { ok: false, reason: 'missing-launch-request-row' }),
     deliverAlertImpl: async (alert) => {
       alerts.push(alert);
       return { ok: true };
@@ -311,7 +313,7 @@ for (const retryCount of [undefined, 1]) {
     seedDeadHammer(rootDir, { retryCount });
     seedOtherPrLaunch(rootDir);
     writeWorkerStdout(rootDir, DEAD_LRQ, DEAD_HAMMER_429_STDOUT);
-    const launchRows = { [DEAD_LRQ]: deadLaunchRow(DEAD_LRQ) };
+    const launchRows = { [DEAD_LRQ]: deadLaunchRow(DEAD_LRQ), [OTHER_LRQ]: { status: 'running' } };
 
     // 09:18Z, the first pass after the death: the pass is recorded, then the
     // re-dispatch waits for #7344's launch.
@@ -338,6 +340,7 @@ for (const retryCount of [undefined, 1]) {
 
     // #7344's launch finishes: the next pass re-arms the dead hammer's head.
     releaseOtherPrLaunch(rootDir);
+    launchRows[OTHER_LRQ] = { status: 'succeeded' };
     const third = closerDeps({ launchRows });
     const pass3 = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T09:41:02Z' }), ...third });
     assert.equal(pass3.dispatched, true, JSON.stringify(pass3));

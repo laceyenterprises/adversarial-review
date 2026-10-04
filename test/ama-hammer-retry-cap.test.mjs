@@ -14,6 +14,7 @@ import {
   AMA_CLOSER_REDISPATCH_BOUND,
   amaCloserDispatchFilePath,
   isAmaCloserLaunchInProgress,
+  findActiveAmaCloserLaunches,
   isActiveAmaCloserDispatchRecord,
   isReclaimableDispatchedAmaCloserLease,
   listActiveAmaCloserDispatches,
@@ -121,6 +122,7 @@ function hammerDispatchDeps(overrides = {}) {
       execCalls.push({ cmd, args });
       return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
     },
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
@@ -2840,6 +2842,7 @@ function spawnThenDieDeps(overrides = {}) {
       err.stderr = 'worker_killed';
       throw err;
     },
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
@@ -2977,6 +2980,7 @@ test('a never-spawned dispatch (admit refusal, no lrq) does NOT count toward the
       err.stderr = 'admit refusal: worker not admitted';
       throw err;
     },
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
@@ -3137,3 +3141,33 @@ for (const [state, headBranchExists, reason] of [
     assert.equal(fs.existsSync(recordPath), false);
   });
 }
+
+// AMACAP-01: authoritative launch completion frees fleet capacity.
+test('three terminal ledger launches free capacity for a fourth PR', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'amacap-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (let prNumber = 1; prNumber <= 3; prNumber += 1) {
+    updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber, headSha: REVIEWED_HEAD }, () => ({
+      repo: REPO, prNumber, headSha: REVIEWED_HEAD, state: 'dispatched',
+      launchRequestId: `lrq-${prNumber}`, lastAttemptedAt: '2026-07-06T11:59:00Z',
+    }));
+  }
+  const deps = hammerDispatchDeps({
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+  });
+  assert.equal((await findActiveAmaCloserLaunches(rootDir, deps)).length, 0);
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+  assert.equal(result.dispatched, true);
+});
+
+test('old non-terminal ledger launch still blocks same PR', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'amacap-live-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }, () => ({
+    repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD, state: 'dispatched',
+    launchRequestId: 'live', lastAttemptedAt: '2020-01-01T00:00:00Z',
+  }));
+  const deps = hammerDispatchDeps({ readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }) });
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...deps });
+  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+});

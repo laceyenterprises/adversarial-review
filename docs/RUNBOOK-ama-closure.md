@@ -1472,3 +1472,28 @@ A diverged launch without HAM trailers remains unknown: untagged automation
 cannot be excluded from that evidence (follow-up LAC-1832). Non-HAM remediation
 trailers cannot authorize primary reversals (follow-up LAC-1833). In-place repairs
 remain allowed, but preserving author intent takes precedence over those waivers.
+
+### AMACAP-01 closer launch capacity and reconciliation
+
+`watcher.ama_closer_max_concurrent_launches` remains configurable (default 3).
+The cap counts authoritative non-terminal session-ledger launches across PRs,
+plus pending lease-held dispatches inside the bounded launch window. Terminal
+launches immediately stop consuming capacity when the next dispatch scans the
+records. Ledger read failures hold capacity; confirmed missing LRQs expire after
+the existing pending-launch timeout. Launch completion is not merge success:
+reconciliation leaves closer leases and merge leases untouched, and successful
+launches retain `unverified-terminal-success` until the normal outcome checks.
+Closers can spill to `hammer-claude` through the existing harness fallback (§2a).
+
+Preview the one-time backlog repair, then apply it against the runtime root:
+
+```bash
+node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root> --dry-run
+node bin/reconcile-ama-closer-dispatches.mjs --root-dir <runtime-root>
+```
+
+Both commands print scanned, terminal, missing, unreadable, changed, and active
+counts. Apply preserves original fields, writes `state: launch-terminal`, the
+ledger terminal status, and `reconciledAt`; repeated apply makes no further
+changes. The normal dispatch capacity scan also performs this reconciliation.
+No cap default or shared CFG schema changes are included in this single-repo fix.

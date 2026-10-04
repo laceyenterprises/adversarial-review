@@ -3,6 +3,18 @@
 This table is the operator-facing source of truth for labels that change the
 adversarial-review, remediation, AMA, or merge-agent control flow.
 
+During discovery, a fresh attributable current-head event for
+`merge-agent-requested`, `retrigger-review`, `retrigger-remediation`,
+`address-all-findings`, or `operator-approved` clears the PR's entire no-progress
+lane ledger and requests an immediate watcher re-walk. This reset bypasses the
+per-head decision-reset cap and clears operator-decision alert deduplication,
+so an unchanged blocker may alert again after the PR re-parks. The event's
+durable receipt suppresses repeated resets after a successful wake request;
+ordinary dispatch and merge guards still apply. `address-all-findings` has no
+watcher-side action consumer here beyond requesting that re-walk. See
+[Operator Label Wakes](data-model/operator-label-wakes.md) for evidence,
+recovery, and indefinite receipt retention.
+
 | Label | Scope | Authority / Audit | Effect |
 |---|---|---|---|
 | `operator-approved` | Current PR head SHA | Attributable scoped label event with event id/node id and timestamp. Single-operator deployments may use same-login evidence; freshness and head scope remain mandatory. | Bypasses adversarial review/remediation state for merge-agent and gate decisions, while preserving open-PR, hard-skip, mergeability, and green-check gates. |

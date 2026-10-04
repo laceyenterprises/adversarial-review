@@ -225,9 +225,24 @@
       "store": "data/watcher-no-progress-lane/",
       "schemaSurface": "src/watcher-no-progress-lane.mjs",
       "relatedSchemaSurfaces": [
-        "src/posted-review-row.mjs"
+        "src/posted-review-row.mjs",
+        "src/operator-label-wake.mjs"
       ],
       "owner": "watcher posted-review dispatch fairness"
+    },
+    {
+      "id": "operator-label-wakes",
+      "title": "Operator Label Wakes",
+      "path": "docs/data-model/operator-label-wakes.md",
+      "store": "data/operator-label-wakes/",
+      "schemaSurface": "src/operator-label-wake.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/adapters/operator/github-pr-label-controls/index.mjs",
+        "src/watcher-no-progress-lane.mjs",
+        "src/watcher-wake.mjs"
+      ],
+      "owner": "watcher operator-label wake observation"
     },
     {
       "id": "alert-delivery-state",

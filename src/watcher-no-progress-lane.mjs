@@ -380,7 +380,7 @@ export function readNoProgressLane(rootDir, identity, { logger = console } = {})
 
 export function clearNoProgressLane(rootDir, identity, { logger = console } = {}) {
   const filePath = noProgressLaneFilePath(rootDir, identity);
-  clearOperatorDecisionAlertState(rootDir, identity, { logger });
+  if (!clearOperatorDecisionAlertState(rootDir, identity, { logger })) return false;
   try {
     rmSync(filePath, { force: true });
     return true;

@@ -6,14 +6,22 @@ adversarial-review, remediation, AMA, or merge-agent control flow.
 During discovery, a fresh attributable current-head event for
 `merge-agent-requested`, `retrigger-review`, `retrigger-remediation`,
 `address-all-findings`, or `operator-approved` clears the PR's entire no-progress
-lane ledger and requests an immediate watcher re-walk. This reset bypasses the
-per-head decision-reset cap and clears operator-decision alert deduplication,
+lane ledger after successfully requesting an immediate watcher re-walk. This
+reset bypasses the per-head decision-reset cap and clears operator-decision alert deduplication,
 so an unchanged blocker may alert again after the PR re-parks. The event's
 durable receipt suppresses repeated resets after a successful wake request;
 ordinary dispatch and merge guards still apply. `address-all-findings` has no
 watcher-side action consumer here beyond requesting that re-walk. See
 [Operator Label Wakes](data-model/operator-label-wakes.md) for evidence,
-recovery, and indefinite receipt retention.
+recovery, and indefinite receipt retention. New wake/reset events must be no
+more than 30 minutes old (override with positive
+`ADVERSARIAL_OPERATOR_LABEL_WAKE_MAX_AGE_MS`) and not future-dated. Existing
+reservations remain retryable after that window. Old persistent labels therefore
+do not reset the backlog after deployment or receipt loss; remove and reapply
+a label to renew expired wake intent. Normal action consumers keep their own
+head-scoping rules. Failed wake requests preserve lane backoff and alert
+suppression; reset failures retain the receipt for retry. Corrupt receipts warn
+and recover as reservations, and each retry uses a new wake request ID.
 
 | Label | Scope | Authority / Audit | Effect |
 |---|---|---|---|

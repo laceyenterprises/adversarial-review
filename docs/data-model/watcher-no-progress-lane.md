@@ -87,7 +87,9 @@ Optional `stalledEvent` field:
   can receive the same decision alert again. A completed event receipt
   suppresses further resets for that event. See
   [Operator Label Wakes](operator-label-wakes.md) for the five accepted labels,
-  receipt lifecycle, and retention.
+  receipt lifecycle, the 30-minute bound for new resets, and retention.
+  `clearNoProgressLane` returns false if clearing alert debounce fails and
+  preserves the lane ledger in that case.
 - Stalled-event delivery is prepare-and-acknowledge. The watcher may persist
   `stalledEvent.emitted=false` before calling the event sink, but it flips the
   value to `true` only after the sink resolves successfully. A transient sink

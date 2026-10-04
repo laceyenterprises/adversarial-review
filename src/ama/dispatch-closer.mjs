@@ -1,3 +1,4 @@
+import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
@@ -1010,7 +1011,7 @@ function isTerminalBranchHolderWorkerRunStatus(status) {
   return Boolean(normalized) && BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES.has(normalized);
 }
 
-function isPhantomActiveWorkerRun(row, processKillImpl = process.kill) {
+export function isPhantomActiveWorkerRun(row, processKillImpl = process.kill) {
   const status = normalizeWorkerRunStatus(row?.status);
   if (!AMA_CLOSER_ACTIVE_STATUSES.has(status)) return false;
   const pid = row?.pid ?? row?.worker_process_pid;
@@ -4021,7 +4022,9 @@ export async function maybeDispatchAmaCloser({
       hasCommentOnlyTerminalResumeReason(
         routeReasons.filter((reason) => reason !== 'stale-review-head'),
       );
-    const autoHammer =
+    const automatedRecoveryAdmit = dispatchContext?.automatedRecovery === true
+      && automatedHammerReasonsCovered(routeReasons);
+    const autoHammer = automatedRecoveryAdmit ||
       !pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit)
       && (

@@ -1276,6 +1276,9 @@ test('postGitHubReviewWithCapture includes pack lockhash in signed reviewed atte
       '## Blocking issues',
       '- None.',
       '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
       '## Verdict',
       'Comment only',
     ].join('\n');

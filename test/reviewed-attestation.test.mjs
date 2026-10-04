@@ -161,6 +161,9 @@ test('reviewed attestation signing uses the shipped flag contract and records th
       '## Blocking issues',
       '- **Regression**',
       '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
       '## Verdict',
       'Request changes',
     ].join('\n'),
@@ -798,7 +801,7 @@ test('reviewed attestation signing rejects an explicit non-reviewer signer subje
       headSha: 'def456',
       reviewerIdentity: 'claude-reviewer-lacey',
       verdict: 'comment-only',
-      reviewBody: '## Blocking issues\n- None.\n\n## Verdict\nComment only',
+      reviewBody: '## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only',
       execFileImpl: async (_cmd, args) => {
         const payload = buildReviewedAttestationPayload({
           repo: 'laceyenterprises/agent-os',
@@ -1044,7 +1047,7 @@ test('reviewed attestation emit fails closed when hq attest record rejects the s
       headSha: 'def456',
       reviewerIdentity: 'claude-reviewer-lacey',
       verdict: 'comment-only',
-      reviewBody: '## Blocking issues\n- None.\n\n## Verdict\nComment only',
+      reviewBody: '## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Verdict\nComment only',
       execFileImpl: (_cmd, args) => {
         calls.push(args);
         if (args[1] === 'record') {

@@ -261,6 +261,7 @@ function runAmaCheck(tmp, {
   reviewer = 'codex',
   riskClass = 'low',
   strictNonBlockingRemediation = true,
+  timeline = null,
   hamTerminalRemediation = null,
   primaryChangeEvidence = undefined,
   rebaseAssessment = null,
@@ -269,6 +270,7 @@ function runAmaCheck(tmp, {
   env = {},
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
+  if (timeline !== null) writeJson(paths.timeline, timeline);
   const configPath = writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation });
   const extraArgs = [];
   if (primaryChangeEvidence !== null) {
@@ -1402,7 +1404,7 @@ test('ama-check blocks direct close for settled comment-only with open non-block
   }
 });
 
-test('ama-check allows Approved settled-success when non-blocking section is omitted', () => {
+test('ama-check fails closed on an Approved body missing its non-blocking section', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-approved-no-nonblocking-'));
   try {
     const body = [
@@ -1416,6 +1418,7 @@ test('ama-check allows Approved settled-success when non-blocking section is omi
       'Approved',
     ].join('\n');
     const result = runAmaCheck(tmp, {
+      timeline: [],
       branchProtectionRequired: false,
       protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
       prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
@@ -1431,10 +1434,10 @@ test('ama-check allows Approved settled-success when non-blocking section is omi
     });
     assert.equal(result.status, 0, result.stderr);
     const verdict = JSON.parse(result.stdout);
-    assert.equal(verdict.trace.verdict.nonBlockingFindings.known, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.verdict.nonBlockingFindings.known, false, JSON.stringify(verdict, null, 2));
     assert.equal(verdict.trace.verdict.nonBlockingFindings.count, 0);
-    assert.equal(verdict.trace.verdict.settledSuccess, true);
-    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.verdict.settledSuccess, false);
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

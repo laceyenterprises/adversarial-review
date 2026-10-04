@@ -81,6 +81,7 @@ function coexistenceArgs(rootDir, headSha, amaResult) {
     currentRevisionRef: headSha,
     logger: { warn() {}, log() {}, info() {} },
     maybeDispatchAmaClosureForImpl: async () => amaResult,
+    recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {}, maxAttempts: AMA_RETAIN_LOOP_CAP },
   };
 }
 
@@ -92,7 +93,7 @@ const NOT_ELIGIBLE_RETAIN = {
   amaEnabled: true,
 };
 
-test('coexistence: bounded not-eligible retains escalate to await-operator; a new head resets', async () => {
+test('coexistence: bounded not-eligible recovery exhausts with SEV1; a new head resets', async () => {
   const rootDir = tempRoot();
   try {
     // Retains 1..K on HEAD_A stay ama-pending.
@@ -106,9 +107,8 @@ test('coexistence: bounded not-eligible retains escalate to await-operator; a ne
     const escalated = await resolveMergeAgentCoexistenceForWatcher(
       coexistenceArgs(rootDir, HEAD_A, NOT_ELIGIBLE_RETAIN),
     );
-    assert.equal(escalated.outcome, 'await-operator');
-    assert.equal(escalated.coexistence.action, 'await-operator-action');
-    assert.equal(escalated.retainLoopCap.retainCount, AMA_RETAIN_LOOP_CAP + 1);
+    assert.equal(escalated.outcome, 'recovery-exhausted');
+    assert.equal(escalated.recovery.attempts, AMA_RETAIN_LOOP_CAP);
 
     // A NEW head resets → back to ama-pending.
     const reset = await resolveMergeAgentCoexistenceForWatcher(
@@ -133,7 +133,7 @@ test('coexistence: a NON-not-eligible skipMergeAgent reason never escalates (onl
       const res = await resolveMergeAgentCoexistenceForWatcher(
         coexistenceArgs(rootDir, HEAD_A, daemonMerged),
       );
-      assert.equal(res.outcome, 'ama-pending', 'daemon-merged is terminal-ish and never counts toward the cap');
+      assert.equal(res.outcome, 'pr-terminal', 'daemon-merged terminates without redriving');
     }
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

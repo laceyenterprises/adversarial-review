@@ -1,3 +1,4 @@
+import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 
@@ -15,7 +16,6 @@ const REBASE_HARD_STOP_LABELS = new Set(
   [...HARD_STOP_LABELS].filter((label) => label !== 'merge-agent-stuck'),
 );
 const UNADDRESSABLE_CATEGORIES = new Set(['auth', 'schema-migration', 'external-system', 'policy']);
-const NESTED_FIELD_LABEL_PATTERN = String.raw`(?:Category|File|Lines|Problem|Why it matters|Recommended fix)`;
 
 function normalizeOptionalString(value) {
   if (value == null) return null;
@@ -79,83 +79,22 @@ function statedVerdictDisplay(reviewBody) {
   return null;
 }
 
-function topLevelBulletIndexes(lines) {
-  const indexes = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    if (/^-\s+/.test(lines[i])) indexes.push(i);
-  }
-  return indexes;
-}
-
-function sectionIsNone(lines) {
-  const nonEmpty = lines.map((line) => line.trimEnd()).filter((line) => line.trim());
-  if (nonEmpty.length === 0) return true;
-  if (!/^-\s+none\.?(?:\s+.*)?$/i.test(nonEmpty[0].trim())) return false;
-  return nonEmpty.slice(1).every((line) => /^\s+/.test(line));
-}
-
-function parseNestedField(blockLines, label) {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`^\\s+-\\s+\\*\\*${escaped}:\\*\\*\\s*(.*)$`, 'i');
-  const nestedFieldPattern = new RegExp(`^\\s+-\\s+\\*\\*${NESTED_FIELD_LABEL_PATTERN}:\\*\\*`, 'i');
-  for (let index = 0; index < blockLines.length; index += 1) {
-    const line = blockLines[index];
-    const match = line.match(pattern);
-    if (!match) continue;
-
-    const parts = [match[1].trim()];
-    for (let next = index + 1; next < blockLines.length; next += 1) {
-      const nextLine = blockLines[next];
-      if (/^-\s+/.test(nextLine) || nestedFieldPattern.test(nextLine)) break;
-      if (!nextLine.trim()) {
-        parts.push('');
-        continue;
-      }
-      if (!/^\s+/.test(nextLine)) break;
-      parts.push(nextLine.trim());
-    }
-    return normalizeOptionalString(parts.join('\n'));
-  }
-  return null;
-}
-
-function parseFindingBlock(blockLines, kind) {
-  const category = parseNestedField(blockLines, 'Category');
-  const titleLine = blockLines[0] || '';
-  const titleMatch = titleLine.match(/^-\s+\*\*(.+?)\*\*(.*)$/);
-  const title = titleMatch ? normalizeOptionalString(titleMatch[1].replace(/[ \t]*:[ \t]*$/u, '')) : null;
-  return {
-    kind,
-    title,
-    category: category == null ? null : category.toLowerCase(),
-    file: parseNestedField(blockLines, 'File'),
-    lines: parseNestedField(blockLines, 'Lines'),
-    problem: parseNestedField(blockLines, 'Problem'),
-    whyItMatters: parseNestedField(blockLines, 'Why it matters'),
-    recommendedFix: parseNestedField(blockLines, 'Recommended fix'),
-  };
-}
-
 function parseIssueSection(reviewBody, heading, kind) {
-  const section = extractSection(reviewBody, heading);
-  if (section == null) {
-    return { missing: true, count: 0, findings: [] };
-  }
-  const lines = section.replace(/\r\n/g, '\n').split('\n');
-  if (sectionIsNone(lines)) {
-    return { missing: false, count: 0, findings: [] };
-  }
-
-  const indexes = topLevelBulletIndexes(lines);
-  if (indexes.length === 0) {
-    return { missing: false, count: section.trim() ? 1 : 0, findings: section.trim() ? [parseFindingBlock([], kind)] : [] };
-  }
-
-  const findings = indexes.map((start, index) => {
-    const end = index + 1 < indexes.length ? indexes[index + 1] : lines.length;
-    return parseFindingBlock(lines.slice(start, end), kind);
-  });
-  return { missing: false, count: findings.length, findings };
+  const parsed = parseReviewFindings(reviewBody)[kind === 'blocking' ? 'blocking' : 'nonBlocking'];
+  return {
+    missing: parsed.state === 'unknown',
+    count: parsed.count,
+    findings: parsed.findings.map((finding) => ({
+      kind,
+      title: normalizeOptionalString(finding.title),
+      category: normalizeOptionalString(finding.category)?.toLowerCase() ?? null,
+      file: normalizeOptionalString(finding.file),
+      lines: normalizeOptionalString(finding.lines),
+      problem: normalizeOptionalString(finding.problem),
+      whyItMatters: normalizeOptionalString(finding.whyItMatters),
+      recommendedFix: normalizeOptionalString(finding.recommendedFix),
+    })),
+  };
 }
 
 function normalizeLabels(labels) {
@@ -312,7 +251,7 @@ function classify(input = {}) {
     };
   }
 
-  if (verdict === 'Request changes') {
+  if (verdict === 'Request changes' || (verdict === 'Comment only' && blockingFindings === 0 && nonBlockingFindings > 0 && !hardStop)) {
     const blockerCategories = blocking.findings
       .map((finding) => finding.category)
       .filter(Boolean);

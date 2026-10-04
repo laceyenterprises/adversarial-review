@@ -393,6 +393,21 @@ findings, and, by default, known-zero structured non-blocking findings.
 `true`; setting it to `false` restores the legacy direct-close behavior where
 non-blocking findings do not affect settled-success eligibility.
 
+AMAFIND-01 uses one kernel findings parser for blocking/non-blocking eligibility,
+remediation identities, rescue classification and reviewed attestation counts.
+Attestations record the total blocking plus non-blocking count. Missing sections
+remain unknown, including on an Approved body; no empty list is synthesized from
+missing evidence.
+
+Recoverable AMA ineligibility does not await operator action. A stale head
+requests a current-head re-review; malformed findings request one re-review then
+hammer remediation; strict-mode comment-only findings dispatch the hammer.
+Recovery dispatch always re-enters the closer's ordinary structural, identity,
+lease and merge checks. Ledger-proven phantom/terminal launch ownership is
+reconciled through the existing closer liveness predicates (AMACAP-01 seam).
+Safety holds retain adjudication. Exhausted automatic retries persist a
+structured SEV1 (reason, PR, head, attempts) and queue one deduplicated page.
+
 When strict non-blocking remediation is enabled, a settled-success review with
 standing structured non-blocking findings is refused with
 `non-blocking-findings-present`. A settled-success review whose non-blocking

@@ -1,3 +1,4 @@
+import { parseReviewFindings } from './review-findings.mjs';
 /**
  * @typedef {import('./contracts.js').ReviewVerdictKind} ReviewVerdictKind
  * @typedef {import('./contracts.js').Verdict} Verdict
@@ -249,29 +250,9 @@ function updateMarkdownFenceMarker(openMarker, trimmedLine) {
   return openMarker;
 }
 
-function sectionIsNone(lines) {
-  const nonEmpty = lines.map((line) => line.trimEnd()).filter((line) => line.trim());
-  if (nonEmpty.length === 0) return true;
-  if (!/^-\s+none\.?(?:\s+.*)?$/i.test(nonEmpty[0].trim())) return false;
-  return nonEmpty.slice(1).every((line) => /^\s+/.test(line));
-}
-
 function classifyStructuredBlockingIssues(reviewBody) {
-  const section = extractMarkdownSection(reviewBody, 'Blocking issues');
-  if (section == null) {
-    return { count: 0, state: 'unknown' };
-  }
-
-  const lines = section.split('\n');
-  if (sectionIsNone(lines)) {
-    return { count: 0, state: 'known' };
-  }
-
-  const topLevelFindings = lines.filter((line) => /^-\s+/.test(line));
-  return {
-    count: Math.max(1, topLevelFindings.length),
-    state: 'known',
-  };
+  const { count, state } = parseReviewFindings(reviewBody).blocking;
+  return { count, state };
 }
 
 function normalizeEffectiveReviewVerdict(reviewBody, { log = null, context = '' } = {}) {

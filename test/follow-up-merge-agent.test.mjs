@@ -182,7 +182,7 @@ test('extractNonBlockingFindingIdentities returns every compact non-blocking iss
   );
 });
 
-test('classifyNonBlockingFindings treats None and omitted settled sections as known zero', () => {
+test('classifyNonBlockingFindings treats None as zero and missing sections as unknown', () => {
   const noneBody = [
     '## Summary',
     'Clean.',
@@ -209,7 +209,7 @@ test('classifyNonBlockingFindings treats None and omitted settled sections as kn
   );
   assert.deepEqual(
     classifyNonBlockingFindings(omittedBody, { lastVerdict: 'approved' }),
-    { count: 0, state: 'known' },
+    { count: 0, state: 'unknown' },
   );
 });
 

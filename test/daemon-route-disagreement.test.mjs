@@ -311,18 +311,14 @@ test('a non-remediable disagreement parks with an operator-visible alert past th
     assert.ok(closerCalls.every((c) => c.force === false), 'a non-remediable decline never forces the hammer');
     assert.equal(parked.dispatched, false);
     assert.equal(parked.skipMergeAgent, true);
-    assert.equal(parked.needsOperator, true);
+    assert.equal(parked.needsOperator, undefined);
     assert.equal(parked.reason, DAEMON_ROUTE_DISAGREEMENT_REASON);
     assert.equal(parked.operatorReason, 'daemon-route-disagreement:duplicate-family-unresolved');
     assert.equal(parked.routeDisagreement.count, DAEMON_ROUTE_DISAGREEMENT_BOUND + 1);
 
-    const alert = jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required');
-    assert.equal(alert.length, 1, 'the pageable park event fires');
-    assert.equal(alert[0].reason, DAEMON_ROUTE_DISAGREEMENT_REASON);
-    assert.deepEqual(alert[0].reasons, ['duplicate-family-unresolved']);
-    assert.equal(alert[0].hammerFallback, false);
+    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
     assert.equal(jsonEvents(logs, 'ama.daemon_route_disagreement').at(-1).escalation, 'park');
-    assert.match(warns.join('\n'), /not hammer-remediable; parking for the operator/);
+    assert.match(warns.join('\n'), /not hammer-remediable; retrying through automated recovery/);
 
     const park = JSON.parse(readFileSync(parkRecordPath(rootDir, REPO, PR), 'utf8'));
     assert.equal(park.reason, DAEMON_ROUTE_DISAGREEMENT_REASON);
@@ -330,8 +326,8 @@ test('a non-remediable disagreement parks with an operator-visible alert past th
 
     // It stays parked on later ticks, but pages once per head.
     const stillParked = await maybeDispatchAmaClosureFor(args);
-    assert.equal(stillParked.needsOperator, true);
-    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 1);
+    assert.equal(stillParked.needsOperator, undefined);
+    assert.equal(jsonEvents(logs, 'ama.daemon_clean_park.manual_close_required').length, 0);
     assert.equal(jsonEvents(logs, 'ama.daemon_route_disagreement').at(-1).escalation, 'park');
     assert.equal(
       JSON.parse(readFileSync(parkRecordPath(rootDir, REPO, PR), 'utf8')).observationCount,
@@ -353,7 +349,8 @@ test('a non-remediable disagreement parks with an operator-visible alert past th
       logger: args.logger,
       maybeDispatchAmaClosureForImpl: (callArgs) => maybeDispatchAmaClosureFor({ ...args, ...callArgs, rootDir }),
     });
-    assert.equal(coexistence.outcome, 'await-operator');
+    assert.equal(coexistence.outcome, 'ama-pending');
+    assert.equal(coexistence.recovery.action, 'retry');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

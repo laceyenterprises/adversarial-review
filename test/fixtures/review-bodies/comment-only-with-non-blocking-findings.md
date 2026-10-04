@@ -1,5 +1,5 @@
 ## Summary
-This body is intentionally inconsistent with the live reviewer contract.
+A settled comment-only review with advisory findings requires automated remediation.
 
 ## Blocking issues
 - None.
@@ -13,7 +13,7 @@ This body is intentionally inconsistent with the live reviewer contract.
   - **Recommended fix:** Rename the command in the runbook paragraph.
 
 ## Suggested fixes
-- Preserve the classifier contract asserted by this fixture.
+- Remediate the advisory finding before strict-mode closure.
 
 ## Verdict
 Comment only

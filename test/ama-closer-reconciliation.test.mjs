@@ -81,6 +81,42 @@ test('shared ledger adapter reads terminal and running SQLite launches offline',
   assert.deepEqual(active.map(record => record.launchRequestId), ['lrq-1']);
 });
 
+test('default ledger reader merges worker PID and process status into fleet capacity evidence', async (t) => {
+  const { createRequire } = await import('node:module');
+  const Database = createRequire(import.meta.url)('better-sqlite3');
+  const root = fixture(t, 'process-capacity');
+  const ledgerDbPath = join(root, 'ledger.sqlite');
+  const db = new Database(ledgerDbPath);
+  try {
+    db.exec(`
+      CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT);
+      CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, updated_at TEXT, ended_at TEXT, started_at TEXT);
+      CREATE TABLE worker_processes (worker_process_id INTEGER PRIMARY KEY, launch_request_id TEXT, pid INTEGER,
+        process_status TEXT, updated_at TEXT, exited_at TEXT, started_at TEXT, created_at TEXT);
+    `);
+    for (const [i, processStatus] of ['running', 'running', 'exited'].entries()) {
+      const prNumber = i + 1;
+      const lrq = `lrq-${prNumber}`;
+      db.prepare('INSERT INTO launch_requests VALUES (?, ?, NULL, NULL, NULL)').run(lrq, 'running');
+      db.prepare('INSERT INTO worker_runs VALUES (?, ?, ?, NULL, NULL, NULL)').run(`wr-${prNumber}`, lrq, 'running');
+      db.prepare('INSERT INTO worker_processes VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)').run(prNumber, lrq, 4200 + prNumber, processStatus);
+      dispatchRecord(root, prNumber);
+    }
+  } finally { db.close(); }
+  const checkedPids = [];
+  const active = await findActiveAmaCloserLaunches(root, {
+    now: NOW, ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
+    processKillImpl: (pid, signal) => {
+      checkedPids.push(pid);
+      assert.equal(signal, 0);
+      if (pid === 4202) throw Object.assign(new Error('dead fixture worker'), { code: 'ESRCH' });
+    },
+  });
+  assert.deepEqual(checkedPids.sort(), [4201, 4202]);
+  assert.deepEqual(active.sort((a, b) => a.prNumber - b.prNumber).map(({ prNumber, holdsCapacity }) =>
+    [prNumber, holdsCapacity]), [[1, true], [2, false], [3, false]]);
+});
+
 function fixture(t, label) {
   const root = mkdtempSync(join(tmpdir(), `amacap-${label}-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -1,7 +1,10 @@
 import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fsExt from 'fs-ext';
+import { readFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { effectiveCloserCap, launchHoldsCloserCapacity } from '../src/ama/closure-capacity.mjs';
@@ -31,7 +34,7 @@ test('ten eligible PRs launch concurrently; admission refusal passes through', a
   const wait = new Promise((resolve) => { finish = resolve; });
   let launched = 0;
   for (let prNumber = 1; prNumber <= 10; prNumber++) {
-    assert.equal(observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber }), prNumber);
+    assert.equal(await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber }), prNumber);
     queue.submit({ key: `test/repo#${prNumber}@head`, run: async () => { launched++; await wait; return { reason: 'worker-admission-memory-pressure' }; } });
   }
   assert.equal(launched, 10);
@@ -67,4 +70,71 @@ test('closure-lag pages present the SEV1 and name the blocking PR and reason', (
   assert.equal(alert.severity, 'SEV1');
   assert.equal(alert.headline, 'AMA closure lag SLO breached');
   assert.match(alert.detail, /test\/repo#1: merge-lease-held/);
+});
+
+test('contended lag lock leaves timers and IO responsive and times out safely', { timeout: 5000 }, async (t) => {
+  const rootDir = root(t);
+  await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 1 });
+  const dir = join(rootDir, 'data', 'ama-closure-lag');
+  const before = readFileSync(join(dir, 'state.json'), 'utf8');
+  const fd = openSync(join(dir, 'state.lock'), 'a');
+  fsExt.flockSync(fd, 'ex');
+  try {
+    const observation = observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 2 });
+    let settled = false;
+    observation.then(() => { settled = true; }, () => { settled = true; });
+    const rejection = assert.rejects(observation, (error) => ['EAGAIN', 'EWOULDBLOCK'].includes(error.code));
+    await delay(50);
+    assert.equal(settled, false);
+    assert.equal(await readFile(join(dir, 'state.json'), 'utf8'), before);
+    await rejection;
+  } finally { fsExt.flockSync(fd, 'un'); closeSync(fd); }
+  assert.equal(await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 2 }), 2);
+});
+
+test('parse failures release the lag lock without replacing the bad state', async (t) => {
+  const rootDir = root(t);
+  const args = { rootDir, repo: 'test/repo', prNumber: 1 };
+  await observeCloserBacklog(args);
+  const path = join(rootDir, 'data', 'ama-closure-lag', 'state.json');
+  writeFileSync(path, 'invalid JSON');
+  await assert.rejects(observeCloserBacklog(args), SyntaxError);
+  assert.equal(readFileSync(path, 'utf8'), 'invalid JSON');
+  rmSync(path);
+  assert.equal(await observeCloserBacklog(args), 1);
+});
+
+test('concurrent lag writers serialize without losing observations or exhausting IO workers', { timeout: 5000 }, async (t) => {
+  const rootDir = root(t);
+  const counts = await Promise.all(Array.from({ length: 16 }, (_, i) =>
+    observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: i + 1, now: 1000 })));
+  assert.deepEqual(counts.sort((a, b) => a - b), Array.from({ length: 16 }, (_, i) => i + 1));
+});
+
+test('terminal and orphan PR breaches are removed while active breach dedupe survives', async (t) => {
+  const rootDir = root(t);
+  const args = { rootDir, repo: 'test/repo', headSha: 'head', logger: {}, pageImpl: async () => {} };
+  for (const prNumber of [1, 2, 3]) {
+    await observeClosureLag({ ...args, prNumber, eligible: true, now: 1000 });
+  }
+  await observeClosureLag({ ...args, prNumber: 3, now: 3601001 });
+  const path = join(rootDir, 'data', 'ama-closure-lag', 'state.json');
+  const state = JSON.parse(readFileSync(path, 'utf8'));
+  state.breaches['pr:test/repo#1'].paged = false;
+  state.breaches['pr:missing/repo#99'] = { event: {}, paged: false };
+  writeFileSync(path, JSON.stringify(state));
+  await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 3, now: 3601002 });
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).breaches['pr:missing/repo#99'], undefined);
+  await observeClosureLag({ ...args, prNumber: 1, merged: true, now: 3601003 });
+  await observeClosureLag({ ...args, prNumber: 2, closed: true, now: 3601004 });
+  const terminal = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(Object.keys(terminal.breaches).sort(), ['p95', 'pr:test/repo#3']);
+  assert.equal(terminal.breaches['pr:test/repo#3'].paged, true);
+  const pages = [];
+  await observeClosureLag({ ...args, prNumber: 3, now: 90001005, pageImpl: async (text) => pages.push(text) });
+  const pruned = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(pruned.prs['test/repo#1'], undefined);
+  assert.equal(pruned.prs['test/repo#2'], undefined);
+  assert.equal(pruned.breaches['pr:test/repo#3'].paged, true);
+  assert.deepEqual(pages, []);
 });

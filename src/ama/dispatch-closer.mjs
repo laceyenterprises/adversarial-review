@@ -5693,7 +5693,7 @@ export async function maybeDispatchAmaCloser({
   const otherPrLaunches = activeLaunches.filter((record) => record.holdsCapacity === true
     && (record.repo !== repo || Number(record.prNumber) !== Number(prNumber)));
   let eligibleCloserBacklog = otherPrLaunches.length + 1;
-  try { eligibleCloserBacklog = observeCloserBacklog({ rootDir, repo, prNumber }); }
+  try { eligibleCloserBacklog = await observeCloserBacklog({ rootDir, repo, prNumber }); }
   catch (error) { logger?.warn?.(`AMA backlog observation failed: ${error.message}`); }
   const maxConcurrentLaunches = effectiveCloserCap(
     Math.max(eligibleCloserBacklog, otherPrLaunches.length + 1),

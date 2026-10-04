@@ -1534,7 +1534,14 @@ at success. A rolling 24-hour p95 includes completed lags and pending eligible
 waits. Exceeding the configured SLO or any eligible wait over 60 minutes creates
 an automated `ama.closure_lag.slo_breach` SEV1 event naming blocking reasons.
 Pages are durable and deduplicated; delivery failures retry, and a recovered p95
-can start a new breach episode. Diagnostics grant no merge authority.
+can start a new breach episode. PR-specific breach records are removed when
+their PR is terminal or no longer present in the state, including undelivered
+pages; active PR breaches retain their delivery deduplication. State access uses
+asynchronous IO and atomic replacement under a nonblocking advisory lock with
+a one-second acquisition budget. Observation failures are logged by callers and
+dispatch retains its live-launch census fallback. See the
+[closure-lag data model](data-model/ama-closure-lag.md) for fields and retention.
+Diagnostics grant no merge authority.
 
 The cap reconciles session-ledger launches within the
 existing dispatch-record and lease reclaim windows, plus pending lease-held

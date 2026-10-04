@@ -1,27 +1,59 @@
 // Diagnostics only. This state never authorizes a merge or releases a lease.
 import fsExt from 'fs-ext';
-import { createHash } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { writeFileAtomic } from '../atomic-write.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
-function locked(rootDir, action) {
+const flock = promisify(fsExt.flock);
+
+async function locked(rootDir, action) {
   const dir = join(rootDir, 'data', 'ama-closure-lag');
-  mkdirSync(dir, { recursive: true });
-  const fd = openSync(join(dir, 'state.lock'), 'a');
+  await mkdir(dir, { recursive: true });
+  const lock = await open(join(dir, 'state.lock'), 'a');
+  let acquired = false;
   try {
-    fsExt.flockSync(fd, 'ex');
+    const deadline = Date.now() + 1000;
+    for (;;) {
+      try { await flock(lock.fd, 'exnb'); acquired = true; break; }
+      catch (error) {
+        if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code) || Date.now() >= deadline) throw error;
+        // Never occupy a libuv worker waiting for the holder's async IO.
+        await delay(25);
+      }
+    }
     const path = join(dir, 'state.json');
     let state;
-    try { state = JSON.parse(readFileSync(path, 'utf8')); }
+    try { state = JSON.parse(await readFile(path, 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') throw error; state = { prs: {}, samples: [], breaches: {} }; }
     const result = action(state);
-    writeFileAtomic(path, `${JSON.stringify(state)}\n`);
+    for (const id of Object.keys(state.breaches)) {
+      if (id.startsWith('pr:')) {
+        const pr = state.prs[id.slice(3)];
+        if (!pr || pr.terminal) delete state.breaches[id];
+      }
+    }
+    const tmpPath = join(dir, `.state.${randomUUID()}.tmp`);
+    try {
+      const tmp = await open(tmpPath, 'wx', 0o644);
+      try { await tmp.writeFile(`${JSON.stringify(state)}\n`); await tmp.sync(); }
+      finally { await tmp.close(); }
+      await rename(tmpPath, path);
+      // As with writeFileAtomic, parent-directory durability is best-effort.
+      try {
+        const parent = await open(dir, 'r');
+        try { await parent.sync(); } finally { await parent.close(); }
+      } catch { /* the replacement is already visible */ }
+    } finally { await rm(tmpPath, { force: true }); }
     return result;
-  } finally { fsExt.flockSync(fd, 'un'); closeSync(fd); }
+  } finally {
+    try { if (acquired) await flock(lock.fd, 'un'); }
+    finally { await lock.close(); }
+  }
 }
 
-export function observeCloserBacklog({ rootDir, repo, prNumber, now = Date.now() }) {
+export async function observeCloserBacklog({ rootDir, repo, prNumber, now = Date.now() }) {
   return locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
     state.prs[key] ??= {};
@@ -41,7 +73,7 @@ async function page(text, options) {
 export async function observeClosureLag({ rootDir, repo, prNumber, headSha, eligible = false,
   merged = false, closed = false, mergedAt = null, reason = null,
   now = Date.now(), sloMs = null, logger = console, pageImpl = page }) {
-  const result = locked(rootDir, (state) => {
+  const result = await locked(rootDir, (state) => {
     const key = `${repo}#${prNumber}`;
     let pr = state.prs[key];
     if (!pr) pr = state.prs[key] = {};
@@ -98,7 +130,7 @@ export async function observeClosureLag({ rootDir, repo, prNumber, headSha, elig
   for (const event of result.breaches) {
     try {
       await pageImpl(`SEV1 AMA closure lag: ${JSON.stringify(event)}`, { event: event.event, payload: event });
-      locked(rootDir, (state) => { if (state.breaches[event.id]) state.breaches[event.id].paged = true; });
+      await locked(rootDir, (state) => { if (state.breaches[event.id]) state.breaches[event.id].paged = true; });
     } catch (error) { logger?.error?.(`AMA closure-lag page failed: ${error.message}`); }
   }
   return result;

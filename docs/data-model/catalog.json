@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "ama-closure-lag",
+      "title": "AMA Closure Lag",
+      "path": "docs/data-model/ama-closure-lag.md",
+      "store": "data/ama-closure-lag/state.json",
+      "schemaSurface": "src/ama/closure-lag.mjs",
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/pr-lifecycle-sync.mjs", "src/daemon-clean-merge.mjs"],
+      "owner": "AMA closure diagnostics and SLO paging"
+    },
+    {
       "id": "ama-audit",
       "title": "AMA Closure Audit",
       "path": "docs/data-model/ama-audit.md",

@@ -580,8 +580,10 @@ identity alone does not create one. Pending or unverified census evidence never
 removes an existing hold absent a verified suppression/operator release. Operator-adjudicated
 `survivor-selected`, `survivor-merged`, and `abandoned` families retain holds
 regardless of legacy or unavailable content, with existing exact-head
-survivor/ignore releases. Candidate-local content read failures do not abort the
-repo census or adjudicated loser closeout. The hold blocks autonomous merge lanes
+survivor/ignore releases. Candidate-local content read failures retain their original error status and
+message through the adapter. The watcher catches them per candidate, preserves
+the diagnostic and unavailable-content hold, and continues the repo census and
+adjudicated loser closeout. The hold blocks autonomous merge lanes
 without making the required
 adversarial-gate status fail by itself, and clears on the next
 census/reconciliation tick after the family deactivates or the candidate is

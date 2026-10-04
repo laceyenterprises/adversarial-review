@@ -21,17 +21,13 @@ async function readWithRetry(read) {
 export async function collectDuplicateContent({ octokit, owner, repo, prNumber, headSha }) {
   const paths = [];
   const unavailable = (reason) => ({ headSha, paths: null, reason });
-  try {
-    for (let page = 1; ; page += 1) {
-      const { data } = await readWithRetry(() => octokit.rest.pulls.listFiles({ owner, repo, pull_number: prNumber, per_page: 100, page }));
-      paths.push(...data.map((file) => file.filename));
-      if (data.length < 100) break;
-      if (page >= 30) return unavailable('content-truncated');
-    }
-    const { data: live } = await readWithRetry(() => octokit.rest.pulls.get({ owner, repo, pull_number: prNumber }));
-    if (live.head.sha !== headSha) return unavailable('content-head-moved');
-    return { headSha, paths };
-  } catch {
-    return unavailable('content-unavailable');
+  for (let page = 1; ; page += 1) {
+    const { data } = await readWithRetry(() => octokit.rest.pulls.listFiles({ owner, repo, pull_number: prNumber, per_page: 100, page }));
+    paths.push(...data.map((file) => file.filename));
+    if (data.length < 100) break;
+    if (page >= 30) return unavailable('content-truncated');
   }
+  const { data: live } = await readWithRetry(() => octokit.rest.pulls.get({ owner, repo, pull_number: prNumber }));
+  if (live.head.sha !== headSha) return unavailable('content-head-moved');
+  return { headSha, paths };
 }

@@ -37,14 +37,14 @@ test('transient file and head reads retry with a three-attempt bound', async () 
   assert.equal(heads, 3);
 });
 
-test('permanent failures are unavailable without retry and moved heads discard paths', async () => {
+test('permanent failures retain their original diagnostics without retry and moved heads discard paths', async () => {
   let calls = 0;
   const pulls = {
     listFiles: async () => { calls += 1; throw Object.assign(new Error('not found'), { status: 404 }); },
     get: async () => ({ data: { head: { sha: 'moved' } } }),
   };
   const octokit = { rest: { pulls } };
-  assert.deepEqual(await collectDuplicateContent({ ...args, octokit }), { headSha: 'head', paths: null, reason: 'content-unavailable' });
+  await assert.rejects(collectDuplicateContent({ ...args, octokit }), (error) => error.message === 'not found' && error.status === 404);
   assert.equal(calls, 1);
   pulls.listFiles = async () => ({ data: [{ filename: 'src/a.mjs' }] });
   assert.deepEqual(await collectDuplicateContent({ ...args, octokit }), { headSha: 'head', paths: null, reason: 'content-head-moved' });

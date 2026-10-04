@@ -479,7 +479,8 @@
         "src/ama/finding-dispute-context.mjs",
         "bin/dispute-finding.mjs",
         "src/prompt-context.mjs",
-        "src/reviewer.mjs"
+        "src/reviewer.mjs",
+        "src/reviewer-prompt.mjs"
       ],
       "owner": "AMA bounded finding disputes and reviewer context provenance"
 

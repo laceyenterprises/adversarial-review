@@ -3,7 +3,7 @@
 **Owner:** AMA bounded finding disputes and reviewer context provenance
 **Store:** `data/reviews.db`, table `ham_finding_disputes`
 **Source of truth:** `src/review-state.mjs` (`ensureReviewStateSchema`)
-**Runtime surface:** `src/ama/finding-dispute.mjs`, `src/ama/finding-dispute-context.mjs`, `bin/dispute-finding.mjs`, `src/prompt-context.mjs`, `src/reviewer.mjs`
+**Runtime surface:** `src/ama/finding-dispute.mjs`, `src/ama/finding-dispute-context.mjs`, `bin/dispute-finding.mjs`, `src/prompt-context.mjs`, `src/reviewer.mjs`, `src/reviewer-prompt.mjs`
 
 ## Schema
 

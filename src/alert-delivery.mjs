@@ -602,11 +602,9 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
   };
 }
 
-// The adversarial-review alert channel is a pager.  A stalled first-pass review
-// is the one condition that needs to interrupt an operator: there is open work
-// and the review service is not producing reviews.  Every other pipeline event
-// remains durable and visible in the digest, but it must not compete with that
-// signal as a page.
+// The pager carries stalled first-pass reviews and exhausted AMA recovery.
+// Both are SEV1 automation failures with open work; other pipeline notices
+// remain durable digest entries.
 function alertPresentationForDoc(doc) {
   const event = String(doc?.event || 'adversarial_review.notice');
   const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
@@ -622,6 +620,12 @@ function alertPresentationForDoc(doc) {
       action: 'Check /v1/dispatch and watcher reviewer spawns.',
       detail: 'Freshness is based on published reviews, even when review_status is stale.',
     };
+  }
+
+  if (event === 'ama.automated_recovery.exhausted') {
+    return { severity: 'SEV1', headline: 'AMA automated recovery exhausted',
+      body: String(doc?.text || event), action: 'Restore the named automation failure; retain all safety gates.',
+      detail: `PR: ${payload.repo}#${payload.pr}; head: ${payload.head}; attempts: ${payload.attempts}; reason: ${payload.reason}` };
   }
 
   const recovered = event === 'watcher.recovered';
@@ -1338,6 +1342,18 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
+  if (event === 'ama.automated_recovery.exhausted') {
+    // Recovery retries after a crash or transport error reuse the same outbox
+    // identity, even if the alert has already moved to a terminal directory.
+    doc.id = `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
+    for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
+      const existingPath = alertDocPath(rootDir, state, doc.id);
+      if (existsSync(existingPath)) {
+        if (state === 'pending' || state === 'inflight') scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
+        return { status: state, queued: false, id: doc.id, queuePath: existingPath };
+      }
+    }
+  }
   const queued = queueAlertDoc(rootDir, doc);
   scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
   return {

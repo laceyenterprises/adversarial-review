@@ -393,6 +393,28 @@ findings, and, by default, known-zero structured non-blocking findings.
 `true`; setting it to `false` restores the legacy direct-close behavior where
 non-blocking findings do not affect settled-success eligibility.
 
+AMAFIND-01 uses one kernel findings parser for blocking/non-blocking eligibility,
+remediation identities, rescue classification and reviewed attestation counts.
+Attestations record the total blocking plus non-blocking count. Missing sections
+remain unknown, including on an Approved body; no empty list is synthesized from
+missing evidence.
+
+Recoverable AMA ineligibility does not await operator action. A stale head
+requests a current-head re-review; malformed findings request one re-review then
+retry the ordinary closer; strict-mode comment-only findings dispatch the hammer
+only after the existing terminal grace, proven final-round resume or exhaustion
+gates admit it. Recovery may widen worker-class admission only; pending-CI
+mechanical routing, actionable-reason checks and Codex-first ownership remain
+mandatory alongside structural, identity, lease and merge checks. Refusals with
+`remediation-pending`, `remediation-state-unknown` or `blocking-findings-present`
+wait for follow-up remediation without consuming recovery attempts or paging.
+The ordinary closer admits exhausted Request-changes cycles only after follow-up
+ownership release and the required completed-remediation evidence.
+Ledger-proven phantom/terminal launch ownership is
+reconciled through the existing closer liveness predicates (AMACAP-01 seam).
+Safety holds retain adjudication. Exhausted automatic retries persist a
+structured SEV1 (reason, PR, head, attempts) and queue one deduplicated page.
+
 When strict non-blocking remediation is enabled, a settled-success review with
 standing structured non-blocking findings is refused with
 `non-blocking-findings-present`. A settled-success review whose non-blocking

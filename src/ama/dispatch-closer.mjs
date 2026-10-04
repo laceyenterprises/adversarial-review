@@ -1,3 +1,4 @@
+import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
@@ -1010,7 +1011,7 @@ function isTerminalBranchHolderWorkerRunStatus(status) {
   return Boolean(normalized) && BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES.has(normalized);
 }
 
-function isPhantomActiveWorkerRun(row, processKillImpl = process.kill) {
+export function isPhantomActiveWorkerRun(row, processKillImpl = process.kill) {
   const status = normalizeWorkerRunStatus(row?.status);
   if (!AMA_CLOSER_ACTIVE_STATUSES.has(status)) return false;
   const pid = row?.pid ?? row?.worker_process_pid;
@@ -4122,9 +4123,12 @@ export async function maybeDispatchAmaCloser({
       hasCommentOnlyTerminalResumeReason(
         routeReasons.filter((reason) => reason !== 'stale-review-head'),
       );
-    const autoHammer =
-      !pendingCiMechanicalGateMiss &&
-      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit)
+    const automatedRecoveryAdmit = dispatchContext?.automatedRecovery === true
+      && automatedHammerReasonsCovered(routeReasons);
+    // Recovery may widen worker-class admission only. Ownership, actionable
+    // reasons, comment-only grace and mechanical-CI routing remain authoritative.
+    const autoHammer = !pendingCiMechanicalGateMiss &&
+      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
         routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||
@@ -4154,6 +4158,10 @@ export async function maybeDispatchAmaCloser({
           skipMergeAgent: true,
           reason: 'not-eligible',
           reasons: routeReasons,
+          ...(settledCommentOnlyTerminalMs !== null
+            && settledCommentOnlyTerminalMs < commentOnlyTerminalGraceMs
+            && hasCommentOnlyTerminalResumeReason(routeReasons)
+            ? { recoveryWait: 'comment-only-grace' } : {}),
         });
       }
     } else {

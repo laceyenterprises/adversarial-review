@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -1247,3 +1247,30 @@ test("requestReviewRereview bumps pending rows only for canonical retrigger-revi
   assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
   assert.equal(result.reviewRow.rereview_reason, 'retrigger-review: retry current head');
 });
+
+
+for (const [name, body, status, expected] of [
+  ['malformed settled pass', '## Verdict\nComment only', 'posted', true],
+  ['well-formed settled pass', '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nComment only', 'posted', false],
+  ['active reviewer', '## Verdict\nComment only', 'reviewing', false],
+]) {
+  test(`AMAFIND-01 malformed recovery respects the review CAS: ${name}`, (t) => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'amafind-review-cas-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const repo = 'fixture/repo';
+    insertReviewRow(rootDir, { repo, prNumber: 42, reviewStatus: status, reviewerHeadSha: 'head' });
+    const db = openReviewStateDb(rootDir);
+    try {
+      db.prepare(`INSERT INTO reviewer_passes
+        (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status, metadata_json, verdict, body_md, head_sha)
+        VALUES (?, ?, 1, 'claude', 'first-pass', '2026-10-03T00:00:00Z', 'completed', '{}', 'comment-only', ?, 'head')`)
+        .run(repo, 42, body);
+      const result = requestReviewRereview({ rootDir, db, repo, prNumber: 42, targetRevisionRef: 'head',
+        reason: 'AMA automated recovery: malformed-findings', automaticMalformedRecovery: true,
+        logger: { warn() {}, log() {} } });
+      assert.equal(result.triggered, expected);
+      assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = 42').get(repo).review_status,
+        expected ? 'pending' : status);
+    } finally { db.close(); }
+  });
+}

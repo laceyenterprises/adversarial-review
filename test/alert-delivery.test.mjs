@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -1024,4 +1025,30 @@ test('health-probe and hammer-cap callers both resolve through the shared alert 
     readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8'),
     /scheduleAlertDrain\(\);/
   );
+});
+
+test('AMA recovery exhaustion is a SEV1 page with structured recovery evidence', () => {
+  const page = alertPresentationForDoc({ event: 'ama.automated_recovery.exhausted',
+    text: 'Automation cannot recover', payload: { repo: 'fixture/repo', pr: 42, head: 'abc', attempts: 3, reason: 'unknown-findings' } });
+  assert.equal(page.severity, 'SEV1');
+  assert.match(page.detail, /fixture\/repo#42.*abc.*3.*unknown-findings/);
+});
+
+test('AMA recovery page outbox identity deduplicates retries before and after delivery', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = { env, event: 'ama.automated_recovery.exhausted',
+    payload: { repo: 'fixture/repo', pr: 42, head: 'abc', reason: 'not-eligible', attempts: 3 },
+    requestText: async () => ({ statusCode: 200, body: '{}' }) };
+  const first = await deliverAlert('Recovery exhausted', options);
+  const second = await deliverAlert('Recovery exhausted', options);
+  assert.equal(first.id, second.id);
+  assert.equal(second.queued, false);
+  assert.equal(readdirSync(pendingDir(rootDir)).filter((name) => name.endsWith('.json')).length, 1);
+  const deliveredPath = sinkPath(rootDir, 'delivered', `${first.id}.json`);
+  renameSync(first.queuePath, deliveredPath);
+  const afterDelivery = await deliverAlert('Recovery exhausted', options);
+  assert.equal(afterDelivery.status, 'delivered');
+  assert.equal(afterDelivery.queued, false);
+  assert.equal(readdirSync(pendingDir(rootDir)).filter((name) => name.endsWith('.json')).length, 0);
 });

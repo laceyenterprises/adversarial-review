@@ -151,7 +151,9 @@
       "store": "data/reviewed-attestations/",
       "schemaSurface": "src/reviewed-attestation.mjs",
       "relatedSchemaSurfaces": [
-        "src/watcher-tick-preflight.mjs"
+        "src/watcher-tick-preflight.mjs",
+        "src/kernel/review-findings.mjs",
+        "src/reviewer.mjs"
       ],
       "owner": "reviewed attestation signing and watcher retry"
     },
@@ -431,6 +433,19 @@
         "src/pollonce-phases.mjs"
       ],
       "owner": "watcher review-state recovery"
+    },
+    {
+      "id": "ama-automated-recovery",
+      "title": "AMA Automated Recovery",
+      "path": "docs/data-model/ama-automated-recovery.md",
+      "store": "data/follow-up-jobs/ama-automated-recovery/<sha256>.{json,lock}",
+      "schemaSurface": "src/ama/automated-recovery.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama-closure-orchestration.mjs",
+        "src/ama/dispatch-closer.mjs",
+        "src/ama/recovery-launch-reconciliation.mjs"
+      ],
+      "owner": "AMA watcher recovery router"
     }
   ]
 }

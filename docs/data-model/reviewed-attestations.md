@@ -48,3 +48,13 @@ operator-only cleanup.
   fails, the pending entry remains available for operator inspection.
 - The files contain no secrets. They contain repository, pull request, exact head
   SHA, reviewer identity, verdict metadata, timestamps, and failure text.
+
+## Findings count
+
+`payload.findings_count` is the total number of blocking **plus non-blocking**
+findings in the posted review, parsed by `src/kernel/review-findings.mjs` through
+`normalizeFindingsCount`. It is a nonnegative integer only when both sections
+are known; an absent or unparseable section yields `null`, never an implicit
+zero. Explicit empty sections yield zero. A `Comment only` verdict can therefore
+carry a positive count. The signed payload and queued retry preserve this same
+value; downstream consumers must not interpret it as a blocking-only count.

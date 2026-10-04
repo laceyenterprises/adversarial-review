@@ -538,6 +538,27 @@ down exactly one of two paths:
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture), the PR needs a rebase, or CI needs repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head, returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks, a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (hammer-remediable gate failures can hand off to the capped hammer), `deferred` (lease contention; retry next tick), `not-taken` (falls through to the hammer route, except a revoked approval needed for eligibility or accountability holds the tick). |
 
+AMAFIND-01 recovery precedes any generic operator hand-off. Stale reviewed heads
+request a current-head re-review; unknown findings request one re-review then
+retry the ordinary closer; strict-mode comment-only findings dispatch the hammer
+only after its existing grace, proven final-round resume or exhaustion gates.
+Blocking findings and unknown/pending remediation state retain Codex-first
+follow-up ownership without spending recovery attempts or paging. Recovery
+widens worker-class admission only; the ordinary closer proves terminal
+authority after exhaustion and follow-up ownership release.
+Terminal or phantom launches reconcile through ledger-backed liveness checks.
+Every retry retains all ordinary safety, identity and merge gates. Safety and
+explicit configuration/operator holds await adjudication. Active owners, lease
+contention, background dispatch, grace and proven final-round CI waits do not
+spend recovery attempts. A per-head durable recovery budget exhausts into a
+structured SEV1 event and one deduplicated page, never a silent operator wait.
+The action cap follows the job's convergence budget; exhausted actions and
+non-progressing refusals page only after a 30-minute wall-clock stall. A requested
+pass owns its row until a new posting is observed. Active reviewer queue states
+are exempt from the 30-minute unchanged-posting deadline. Live terminal PRs never
+redrive. See [AMA Automated Recovery](data-model/ama-automated-recovery.md) for
+state fields, retention and reset.
+
 The background hammer queue rechecks the live PR state, head, draft flag, and
 mergeability when each queued entry gets a slot. Changed or unreadable state
 settles without launching a hammer; the next tick applies that outcome.

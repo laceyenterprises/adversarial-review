@@ -1133,7 +1133,7 @@ was red to one and not the other. Both now call one classifier
 | Daemon decline | Escalation |
 |---|---|
 | `not-eligible` whose gates are all hammer-remediable (`verdict-not-eligible`, `ci-not-green`, `pr-not-mergeable`, `stale-head`), optionally with `pr-mergeability-unknown` alongside | The closer is called with `forceHammerAfterDaemonFailure`, so the capped hammer takes the PR (per-PR hammer-retry-cap applies). Emits `ama.daemon_route_disagreement.hammer_fallback`. |
-| Any other decline (e.g. `duplicate-family-unresolved`, a transient read mixed with a non-remediable gate or `lease-not-held`, `prior-daemon-terminal-failure`, `findings-unknown`) | Parks: a `daemon-route-disagreement` park record (visible to `review-pipeline-health`) and one `ama.daemon_clean_park.manual_close_required` page per head with `reason: daemon-route-disagreement`. The coexistence outcome is `await-operator`. The daemon still runs every tick, so clearing the named gate lets it merge. |
+| Any other decline (e.g. `duplicate-family-unresolved`, a transient read mixed with a non-remediable gate or `lease-not-held`, `prior-daemon-terminal-failure`, `findings-unknown`) | Keeps the diagnostic `daemon-route-disagreement` park record and enters bounded automated recovery. Safety holds retain adjudication; other exhausted recovery emits a structured SEV1 and one page. |
 
 ### `merge-agent-skipped-ama-enabled`
 
@@ -1428,27 +1428,58 @@ or stderr from the subcommand), then re-run the hq command manually or reset the
 record for another watcher retry. The command remains self-gated by
 `HQ_AUTO_DAG_WALK` and cleanly no-ops for non-DAG PRs.
 
-### Watcher info: "AMA enabled but not eligible … awaiting operator action"
+### AMAFIND-01: automated recovery and safety holds
 
-When AMA is enabled, the watcher does NOT silently fall back to
-merge-agent on an ineligible PR (SPEC §4.8). The watcher logs the
-eligibility reasons and waits. The operator has two options:
+The watcher routes AMA ineligibility through `src/ama/automated-recovery.mjs`
+for both posted reviews and reviewer-timeout exhaustion. A stale review requests
+one current-head re-review through the review-state CAS. Missing findings
+sections request a re-review once per head; a subsequent malformed review may
+retry the closer, subject to its ordinary terminal-remediation gates. A
+strict-mode comment-only review with standing non-blocking findings reaches the
+hammer after the existing terminal grace, proven final-round resume, or cycle
+exhaustion admits it. The shared kernel findings parser supplies both
+eligibility counts and the attestation's total blocking plus non-blocking count.
 
-The parenthesized `namedReason` in this log is a stable single-token summary
-for scraping (`not-eligible:<first-reason>` for eligibility misses, otherwise
-the no-dispatch `reason`). The separate `reasons:` field remains the fuller
-diagnostic list.
+Recovery retries re-enter the ordinary closer gates and leases. They authorize
+remediation dispatch, never a merge waiver. Hard-stop labels, risk policy,
+security holds and destructive-change safety holds still require adjudication.
+Recovery only widens worker-class admission; it never bypasses mechanical
+pending-CI routing, actionable-reason checks or Codex-first ownership. Refusals
+containing `remediation-pending`, `remediation-state-unknown` or
+`blocking-findings-present` wait for the follow-up lane without spending recovery
+attempts or paging. The ordinary closer remains responsible for admitting an
+exhausted Request-changes cycle after remediation ownership is released and
+completed-remediation evidence is satisfied.
+Missing identity or safety evidence remains fail-closed and retries automatically.
+A live closed or merged candidate never starts recovery.
 
-1. **Make AMA-eligible** — apply `operator-approved` /
-   `adversarial-merge-requested` per §5 to override the failing gates.
-2. **Operator-fallback lane** — apply a fresh current-head
-   `merge-agent-requested`. On single-operator hosts this may be the
-   same login as the PR author; the scoped label event is the control
-   signal the live gate enforces. The watcher's next tick dispatches
-   merge-agent with `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`, and
-   AMA-06A's admit gate lets it through.
+Launch recovery uses the existing closer liveness predicates and ledger adapter
+(the AMACAP-01 accounting seam). Proven terminal or phantom launches release
+ownership; live launches and failed ledger reads are never reclaimed.
 
-The full SPEC reference: §4.8 coexistence table + §6 AC#9 rollback.
+Recovery state is durable under `data/follow-up-jobs/ama-automated-recovery/`,
+keyed by repo, PR and head, and protected by a crash-releasing kernel flock.
+The action cap follows `amaRetainLoopCapFor(dispatchJob.remediationPlan.maxRounds)`.
+Only confirmed dispatches, triggered re-reviews, and non-cancellation action
+errors spend attempts. Active hammers/remediators, background launches, lease
+contention, uncertain dispatch status, comment-only grace, and proven final-round
+CI waits return `ama-pending` without consuming the budget. Configuration/draft
+refusals and explicit `needsOperator` results retain adjudication without paging.
+Abort and coexistence-timeout errors propagate without charging recovery.
+
+A refused action or exhausted action cap must remain non-progressing for 30
+minutes (`stuckDeadlineMs`), independent of tick count. Re-review queue states
+`pending`, `reviewing`, and `pending-upstream` are exempt from the recovery
+re-review deadline; their own stall monitoring owns queue latency. An unchanged
+posted snapshot without an active review expires after 30 minutes. At either
+non-progress deadline the watcher returns `recovery-exhausted`, persists and logs
+`ama.automated_recovery.exhausted` with severity SEV1, reason, PR, head and
+attempts, and queues one page with a stable outbox identity. Failed page enqueue
+retries without duplicating a successfully queued page. A new head starts a new
+recovery budget. The merge kill switch continues to disable execution.
+Store fields, lock semantics, retention, and safe reset procedure are documented
+in [AMA Automated Recovery](data-model/ama-automated-recovery.md). There is no
+automatic pruning of state or stable lock files.
 
 CCX-11 (2026-09-30): `hammer-corp` is an accepted primary/fallback hammer class on
 the second Codex OAuth account. It keeps the hammer route and merge-capability

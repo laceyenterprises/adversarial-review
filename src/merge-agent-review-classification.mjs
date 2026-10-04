@@ -12,8 +12,8 @@
 // This is a leaf module: it imports only from sibling modules and never
 // from follow-up-merge-agent.mjs, keeping the import graph acyclic.
 
-import { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
-import { normalizeReviewVerdict, sanitizeReviewPayloadBestEffort } from './review-verdict.mjs';
+import { parseReviewFindings } from './kernel/review-findings.mjs';
+import { sanitizeReviewPayloadBestEffort } from './review-verdict.mjs';
 import { getReviewRow, openReviewStateDb } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { CASCADE_FAILURE_CAP, readCascadeState } from './reviewer-cascade.mjs';
@@ -26,26 +26,16 @@ function classifyBlockingFindings(reviewBody) {
   // `## Blocking issues` section. Without this the closer resolves
   // `state:'unknown'` on such bodies and REFUSES the budget-exhausted final
   // pass, so the PR never closes and re-enters the review loop.
-  const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
-  if (parsed.blocking.missing) {
+  const parsed = parseReviewFindings(sanitizeReviewPayloadBestEffort(reviewBody));
+  if (parsed.blocking.state === 'unknown') {
     return { count: 0, state: 'unknown' };
   }
   return { count: parsed.blocking.count, state: 'known' };
 }
 
-function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  if (!String(reviewBody ?? '').trim()) return { count: 0, state: 'unknown' };
-  const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
-  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
-  const verdictKey = normalizedVerdict === 'unknown'
-    ? String(lastVerdict || '').trim().toLowerCase()
-    : normalizedVerdict;
-  if (parsed.nonBlocking.missing) {
-    return verdictKey === 'approved'
-      ? { count: 0, state: 'known' }
-      : { count: 0, state: 'unknown' };
-  }
-  return { count: parsed.nonBlocking.count, state: 'known' };
+function classifyNonBlockingFindings(reviewBody) {
+  const { count, state } = parseReviewFindings(sanitizeReviewPayloadBestEffort(reviewBody)).nonBlocking;
+  return { count, state };
 }
 
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {

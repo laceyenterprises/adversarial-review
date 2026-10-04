@@ -228,7 +228,8 @@ test('pending CI on a proven final-round head waits without spending the retain-
     const outcome = await resolveMergeAgentCoexistenceForWatcher({
       rootDir, reviewStateRow: {}, dispatchJob: {}, candidate: { headSha: PUSHED },
       repoPath: REPO, prNumber: PR, currentRevisionRef: PUSHED,
-      logger: { log: (line) => logs.push(line), warn: (line) => logs.push(line) },
+      logger: { log: (line) => logs.push(line), warn: (line) => logs.push(line), error: (line) => logs.push(line) },
+      recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {} },
       maybeDispatchAmaClosureForImpl: async () => closure,
     });
     assert.equal(outcome.outcome, 'ama-pending', `tick ${tick} must not route to AWAIT_OPERATOR_ACTION`);
@@ -261,14 +262,16 @@ test('CI pending past the deadline on a proven final-round head counts toward th
 
   const logs = [];
   let outcome = null;
-  for (let tick = 0; tick < 12 && outcome?.outcome !== 'await-operator'; tick += 1) {
+  for (let tick = 0; tick < 12 && outcome?.outcome !== 'recovery-exhausted'; tick += 1) {
     outcome = await resolveMergeAgentCoexistenceForWatcher({
       rootDir, reviewStateRow: {}, dispatchJob: {}, candidate: { headSha: PUSHED },
       repoPath: REPO, prNumber: PR, currentRevisionRef: PUSHED,
-      logger: { log: (line) => logs.push(line), warn: (line) => logs.push(line) },
+      logger: { log: (line) => logs.push(line), warn: (line) => logs.push(line), error: (line) => logs.push(line) },
+      recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {},
+        stuckDeadlineMs: 1000, now: () => tick * 1000 },
       maybeDispatchAmaClosureForImpl: async () => closure,
     });
   }
-  assert.equal(outcome.outcome, 'await-operator', 'a hung CI wait escalates to the operator');
-  assert.ok(logs.some((line) => /retain-loop cap reached/.test(line)));
+  assert.equal(outcome.outcome, 'recovery-exhausted', 'a hung CI wait exhausts automated recovery');
+  assert.ok(logs.some((line) => /ama.automated_recovery.exhausted/.test(line)));
 });

@@ -1,3 +1,4 @@
+import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
@@ -1080,6 +1081,7 @@ function requestReviewRereview({
   db: dbOverride = null,
   logger = console,
   expectedFailedHead = null,
+  automaticMalformedRecovery = false,
   inTransaction = false,
 }) {
   const db = dbOverride || openReviewStateDb(rootDir);
@@ -1093,7 +1095,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, inTransaction: true,
       })).immediate();
     }
 
@@ -1112,9 +1114,10 @@ function requestReviewRereview({
             AND status = 'completed'`
       ).all(repo, prNumber, targetHead);
       if (settledBodies.some((pass) =>
-        pass.verdict === 'comment-only' ||
-        (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only')
-      ) || hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
+        (pass.verdict === 'comment-only' ||
+        (pass.body_md && normalizeEffectiveReviewVerdict(pass.body_md) === 'comment-only'))
+        && !(automaticMalformedRecovery && parseReviewFindings(pass.body_md).findingsCount === null)
+      ) || (!automaticMalformedRecovery && hasSettledCommentOnlyReviewHead(rootDir, { repo, prNumber, headSha: targetHead }, logger))) {
         logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: settled comment-only verdict`);
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }

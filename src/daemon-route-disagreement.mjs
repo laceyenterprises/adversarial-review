@@ -369,7 +369,7 @@ export function observeDaemonRouteDisagreement({
       (!recorded.escalate
         ? ''
         : park
-          ? ' — not hammer-remediable; parking for the operator'
+          ? ' — not hammer-remediable; retrying through automated recovery'
           : ' — the next closer call forces the capped hammer'),
   );
   if (!park) return { ...recorded, parkResult: null };
@@ -381,29 +381,11 @@ export function observeDaemonRouteDisagreement({
       // Diagnostics only; the alert below still fires.
     }
   }
-  // Same pageable event the daemon clean-park path already emits, so the
-  // superproject observability layer alerts on it without new wiring. Paged
-  // once per head; later ticks keep the disagreement log line and park record.
-  if (recorded.count === bound + 1) {
-    logger?.log?.(JSON.stringify({
-      schemaVersion: 1,
-      event: 'ama.daemon_clean_park.manual_close_required',
-      repo,
-      pr: prNumber,
-      headSha: recorded.headSha,
-      reason: DAEMON_ROUTE_DISAGREEMENT_REASON,
-      reasons: decline.daemonReasons.length ? decline.daemonReasons : [decline.daemonReason],
-      ...decline,
-      disagreements: recorded.count,
-      hammerFallback: false,
-    }));
-  }
   return {
     ...recorded,
     parkResult: {
       dispatched: false,
       skipMergeAgent: true,
-      needsOperator: true,
       reason: DAEMON_ROUTE_DISAGREEMENT_REASON,
       operatorReason: `${DAEMON_ROUTE_DISAGREEMENT_REASON}:${decline.daemonReasons[0] || decline.daemonReason}`,
       reasons: decline.daemonReasons,

@@ -2471,7 +2471,7 @@ test('BUG-1: resolveMergeAgentCoexistenceForWatcher drops ownership for an alrea
   assert.equal(amaClosureInvoked, false, 'AMA closer must not run for a terminal PR');
 });
 
-test('BUG-1: a closed (unmerged) PR is NOT terminal-dropped (merged-only guard; closed can reopen, per SEV1 #643 precedent)', async () => {
+test('live closed PRs cannot spawn recovery automation', async () => {
   let amaClosureInvoked = false;
   const decision = await resolveMergeAgentCoexistenceForWatcher({
     reviewStateRow: makeReviewRow(),
@@ -2501,12 +2501,15 @@ test('BUG-1: a closed (unmerged) PR is NOT terminal-dropped (merged-only guard; 
     },
   });
 
-  assert.notEqual(decision.outcome, 'pr-terminal', 'closed PR must not be terminal-dropped');
-  assert.equal(amaClosureInvoked, true, 'closed PR is not short-circuited; the closer still runs');
+  assert.equal(decision.outcome, 'pr-terminal');
+  assert.equal(amaClosureInvoked, false, 'the live closed state prevents dispatch this tick');
 });
 
-test('resolveMergeAgentCoexistenceForWatcher preserves await-operator with named ineligible reason', async () => {
+test('resolveMergeAgentCoexistenceForWatcher retains follow-up findings ownership with its named reason', async (t) => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'ama-finding-recovery-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const decision = await resolveMergeAgentCoexistenceForWatcher({
+    rootDir,
     reviewStateRow: makeReviewRow(),
     dispatchJob: {
       repo: 'laceyenterprises/adversarial-review',
@@ -2534,7 +2537,8 @@ test('resolveMergeAgentCoexistenceForWatcher preserves await-operator with named
     }),
   });
 
-  assert.equal(decision.outcome, 'await-operator');
+  assert.equal(decision.outcome, 'ama-pending');
+  assert.equal(decision.recovery.action, 'await-remediation');
   assert.equal(decision.amaClosureResult.namedReason, 'not-eligible:blocking-findings-present');
 });
 

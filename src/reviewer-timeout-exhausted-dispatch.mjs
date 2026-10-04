@@ -154,6 +154,10 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       );
       return { handled: true, dispatchJob, amaClosureResult };
     }
+    if (coexistenceDecision.outcome === 'recovery-exhausted') {
+      return { handled: true, outcome: 'recovery-exhausted',
+        amaClosureResult: coexistenceDecision.amaClosureResult };
+    }
     if (coexistenceDecision.outcome === 'await-operator') {
       const { amaClosureResult } = coexistenceDecision;
       const reasonsHint = Array.isArray(amaClosureResult?.reasons)
@@ -161,9 +165,8 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         : amaClosureResult?.reason || 'unknown';
       logger.log(
         `[watcher] reviewer-timeout exhaustion parked for ${repoPath}#${prNumber}: ` +
-        `AMA enabled but not eligible (reasons: ${reasonsHint}); awaiting operator action ` +
-        `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
-        `OR 'merge-agent-requested' for the operator-fallback lane)`
+        `AMA enabled but not eligible (reasons: ${reasonsHint}); safety hold requires operator action ` +
+        '(inspect and resolve the named safety hold under its existing approval policy)'
       );
       return { handled: true, dispatchJob, amaClosureResult };
     }

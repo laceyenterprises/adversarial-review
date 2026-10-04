@@ -458,7 +458,7 @@ test('daemon fail-closed → skips closer dispatch; no hammer from the retry pat
   }
 });
 
-test('daemon clean-park fail-closed emits an operator-visible manual-close signal (LAC-1559)', async () => {
+test('daemon fail-closed retains its reasons for automated recovery (LAC-1559)', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -491,12 +491,9 @@ test('daemon clean-park fail-closed emits an operator-visible manual-close signa
     const parkEvent = logs
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
-    assert.ok(parkEvent, 'a structured manual-close-required event must be emitted');
-    assert.equal(parkEvent.repo, 'acme/repo');
-    assert.equal(parkEvent.pr, 300);
-    assert.equal(parkEvent.reason, 'merge-retry-budget-exhausted');
-    assert.equal(parkEvent.hammerFallback, false);
-    assert.match(warns.join('\n'), /manual close required/i);
+    assert.equal(parkEvent, undefined, 'the shared recovery router owns exhaustion paging');
+    assert.ok(logs.some((line) => /shared recovery router/.test(line)));
+
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -568,7 +565,7 @@ test('an UNKNOWN-mergeability daemon miss never pages for a manual close (DIRTYO
   }
 });
 
-test('permanent daemon failure pages even without a clean-review marker', async () => {
+test('permanent daemon failure reaches shared recovery without a manual-close page', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -587,7 +584,8 @@ test('permanent daemon failure pages even without a clean-review marker', async 
     const parkEvent = logs
       .map((line) => { try { return JSON.parse(line); } catch { return null; } })
       .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
-    assert.equal(parkEvent?.reason, 'permanent-merge-rejection');
+    assert.equal(parkEvent, undefined);
+    assert.ok(logs.some((line) => /shared recovery router/.test(line)));
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -3482,7 +3480,7 @@ test('daemon route disagreement hands off to the capped hammer and names failing
   }
 });
 
-test('daemon fail-closed on branch-protection-missing-gate parks for operator closeout', async () => {
+test('daemon missing branch protection stays fail-closed for automated retry', async () => {
   const rootDir = tempRoot();
   try {
     const logs = [];
@@ -3509,8 +3507,8 @@ test('daemon fail-closed on branch-protection-missing-gate parks for operator cl
     assert.equal(result.skipMergeAgent, true);
     const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
     const parkEvent = parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required');
-    assert.ok(parkEvent, 'a route that cannot hand off alerts even without a clean-review marker');
-    assert.deepEqual(parkEvent.reasons, ['branch-protection-missing-gate']);
+    assert.equal(parkEvent, undefined);
+    assert.deepEqual(result.daemonCleanMerge.reasons, ['branch-protection-missing-gate']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

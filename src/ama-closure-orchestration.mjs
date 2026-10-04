@@ -37,7 +37,7 @@ import {
   protectivePredecessorMergeWindowFinding,
   resolveProtectivePredecessorDeclaration,
 } from './ama/protective-predecessor.mjs';
-import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
+import { recoverAmaAutomation } from './ama/automated-recovery.mjs';
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
@@ -719,6 +719,7 @@ export function writeAutonomousMergeDisabledAudit({
  */
 
 export async function maybeDispatchAmaClosureFor({
+  automatedRecovery = false,
   rootDir = ROOT,
   reviewStateRow,
   dispatchJob,
@@ -1532,7 +1533,9 @@ export async function maybeDispatchAmaClosureFor({
   //   - deferred      → lease contention / audit bootstrap failure; retry next
   //                     tick with no double-merge.
   throwIfAborted(signal);
-  const daemonCleanMerge = await runCoexistenceOperation(
+  const daemonCleanMerge = automatedRecovery
+    ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'automated-hammer-recovery' }
+    : await runCoexistenceOperation(
     'daemon-clean-merge-attempt',
     ({ signal: operationSignal }) => runDaemonCleanMergeAttemptImpl({
       rootDir,
@@ -1640,45 +1643,10 @@ export async function maybeDispatchAmaClosureFor({
       );
       // Fall through to the hammer dispatch below. Do NOT return here.
     } else {
-      // A selected daemon route that cannot hand off needs an operator signal,
-      // including approval overrides whose review was not fully clean. The
-      // superproject observability layer pages on this existing event.
-      const transientEligibilityRead =
-        daemonCleanMerge.reason === 'gate-not-eligible' &&
-        daemonGateReasonsTransientRead(daemonCleanMerge.reasons);
-      if (
-        daemonFailedClosed &&
-        !transientEligibilityRead &&
-        (daemonCleanMerge.manualCloseRequired === true ||
-          daemonCleanMerge.permanent === true ||
-          ['worker-identity-unresolved', 'gate-not-eligible'].includes(daemonCleanMerge.reason))
-      ) {
-        // Surface the exact eligibility gate(s) that tripped (a stable subset of
-        // {verdict-not-eligible|ci-not-green|pr-not-mergeable|stale-head|
-        // lease-not-held}) so the operator page names WHY the clean PR could not
-        // land instead of only the generic terminal `reason`. The daemon threads
-        // these up on the fail-closed result; default to [] when absent.
-        const parkReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
-        logger?.log?.(JSON.stringify({
-          schemaVersion: 1,
-          event: 'ama.daemon_clean_park.manual_close_required',
-          repo: repoPath,
-          pr: prNumber,
-          headSha: gateSnapshot?.reviewedHeadSha || null,
-          reason: daemonCleanMerge.reason,
-          reasons: parkReasons,
-          attempts: daemonCleanMerge.attempts || 0,
-          hammerFallback: false,
-        }));
-        logger?.warn?.(
-          `[watcher] AMA daemon route PARKED — manual close required for ` +
-            `${repoPath}#${prNumber}@${daemonHeadShort}: merge ` +
-            `could not be completed (${daemonCleanMerge.reason}` +
-            (parkReasons.length ? `; gates=${parkReasons.join(',')}` : '') +
-            `) and this terminal is not hammer-remediable. Operator must close ` +
-            `manually; see the daemon-merge audit record.`,
-        );
-      }
+      logger?.log?.(
+        `[watcher] AMA daemon deferred ${repoPath}#${prNumber}: ${daemonCleanMerge.reason}; ` +
+          'the shared recovery router will retry or report SEV1 exhaustion',
+      );
       // Daemon owns this tick — skip BOTH the hammer dispatch and the merge-agent
       // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
       // so the watcher returns without dispatching anything.
@@ -1840,6 +1808,7 @@ export async function maybeDispatchAmaClosureFor({
     logger,
   });
   const dispatchContext = {
+    automatedRecovery,
     forceHammerAfterDaemonFailure: isDaemonFailClosedHammerRemediable(daemonCleanMerge)
       || forceHammerAfterRouteDisagreement,
     daemonFailureReasons: Array.isArray(daemonCleanMerge?.reasons)
@@ -2112,6 +2081,8 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   domainId = 'code-pr',
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
+  recoverAmaAutomationImpl = recoverAmaAutomation,
+  recoveryOptions = {},
   signal = null,
   operationTimeoutMs = DEFAULT_AMA_CLOSURE_OPERATION_TIMEOUT_MS,
   operationTracker = null,
@@ -2124,16 +2095,12 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   // PR) → `skipMergeAgent` → outcome `ama-pending`, so the watcher logs
   // "AMA hammer route retained ownership ... daemon-failed-closed" every tick
   // forever (observed on merged #639/#640/#642/#643/#3945). Drop ownership.
-  //
-  // MERGED-ONLY, deliberately not `closed`: this mirrors the SEV1 review-claim
-  // guard's hard-won precedent (#643/#3946) — a merged PR is permanently
-  // terminal, but a `closed` PR can be REOPENED, so treating closed as terminal
-  // risks dropping a PR that is about to come back. Merged is the observed
-  // retention case; a closed PR stays on its existing eligibility path.
+  // A live CLOSED read also suppresses dispatch on this tick. Reopened PRs
+  // return through the next live OPEN candidate; the claim CAS is unchanged.
   const liveMerged =
     candidate?.merged === true || String(candidate?.prState || '').toLowerCase() === 'merged';
-  if (liveMerged) {
-    return { outcome: 'pr-terminal', terminalReason: 'merged' };
+  if (liveMerged || String(candidate?.prState || '').toLowerCase() === 'closed') {
+    return { outcome: 'pr-terminal', terminalReason: liveMerged ? 'merged' : 'closed' };
   }
   let amaClosureResult;
   try {
@@ -2203,69 +2170,30 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     return { outcome: 'dispatch-merge-agent', amaClosureResult, coexistence,
       dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action) };
   }
-  if (amaClosureResult?.skipMergeAgent) {
-    if (amaClosureResult?.needsOperator === true) {
-      return { outcome: 'await-operator', amaClosureResult,
-        coexistence: { action: COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION } };
-    }
-    // FIX (stale-review-head spin, #5053): the `not-eligible` retain shape is the
-    // ONLY skipMergeAgent case that can spin unbounded — every other reason
-    // (daemon-merged, hammer-retry-cap-exhausted, autonomous-merge-disabled, …) is
-    // already terminal or operator-facing. Cap consecutive `not-eligible` retains
-    // on the SAME head: after AMA_RETAIN_LOOP_CAP of them, stop returning
-    // `ama-pending` (which the watcher re-polls forever) and route to
-    // AWAIT_OPERATOR_ACTION so the escalation in `coexistence.mjs` becomes
-    // reachable. A new head resets the counter (recordAmaRetain is head-keyed), so a
-    // legitimately progressing PR is never falsely escalated.
-    if (amaClosureResult?.reason === 'not-eligible' && amaClosureResult?.commentOnlyFinalRoundAwaitingCi === true) {
-      logger?.log?.(
-        `[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only ` +
-          'final-round head; the hammer takes it when CI is green (not counted toward the retain-loop cap)',
-      );
-    } else if (amaClosureResult?.reason === 'not-eligible') {
-      const retainHead = currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null;
-      // Cap this series against THIS job's resolved remediation budget rather
-      // than the module default, so an operator who raises (or lowers) the round
-      // budget moves the retain cap with it. `remediationPlan.maxRounds` is the
-      // already-resolved effective budget for the job; when it is absent the
-      // derivation falls back to the medium default, which is the value this
-      // call site used before the budget was coupled.
-      const retain = recordAmaRetain(rootDir, { repo: repoPath, prNumber }, {
-        headSha: retainHead,
-        cap: amaRetainLoopCapFor(dispatchJob?.remediationPlan?.maxRounds),
-        now: new Date().toISOString(),
-        logger,
-      });
-      if (retain.capExceeded) {
-        logger?.warn?.(
-          `[watcher] AMA retain-loop cap reached for ${repoPath}#${prNumber}` +
-            `@${String(retainHead || 'unknown').slice(0, 12)}: ${retain.retainCount} ` +
-            `consecutive not-eligible retains on the same head (cap ${retain.cap}). ` +
-            `This PR cannot self-resolve — routing to AWAIT_OPERATOR_ACTION. Operator: ` +
-            `apply the 'operator-approved' label to force past stale-review-head, or ` +
-            `close/repair the PR. A new head resets the counter.`,
-        );
-        logger?.log?.(JSON.stringify({
-          schemaVersion: 1,
-          event: 'ama.retain_loop_cap_reached',
-          repo: repoPath,
-          pr: prNumber,
-          headSha: retainHead,
-          retainCount: retain.retainCount,
-          cap: retain.cap,
-          amaReason: amaClosureResult?.reason || null,
-          amaReasons: Array.isArray(amaClosureResult?.reasons) ? amaClosureResult.reasons : [],
-        }));
-        return {
-          outcome: 'await-operator',
-          amaClosureResult,
-          coexistence: { action: COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION },
-          retainLoopCap: { retainCount: retain.retainCount, cap: retain.cap, headSha: retainHead },
-        };
-      }
-    }
+  if (amaClosureResult?.commentOnlyFinalRoundAwaitingCi === true) {
+    logger?.log?.(`[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only final-round head; not counted toward the retain-loop cap`);
     return { outcome: 'ama-pending', amaClosureResult };
   }
+  if (amaClosureResult?.amaEnabled && (amaClosureResult?.skipMergeAgent || (amaClosureResult?.reason === 'not-eligible'
+    && !isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
+      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+    })))) {
+    return recoverAmaAutomationImpl({
+      rootDir, repo: repoPath, prNumber,
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
+      result: amaClosureResult, reviewStateRow, logger, signal,
+      maxAttempts: amaRetainLoopCapFor(dispatchJob?.remediationPlan?.maxRounds),
+      dispatchHammer: () => maybeDispatchAmaClosureForImpl({
+        rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
+        operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
+        repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
+        operationTimeoutMs, operationTracker, automatedRecovery: true,
+      }),
+      ...recoveryOptions,
+    });
+  }
+  if (amaClosureResult?.skipMergeAgent) return { outcome: 'ama-pending', amaClosureResult };
 
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';

@@ -697,21 +697,12 @@ export async function handlePostedReviewRow({
       return { handled: true, outcome: 'ama-pending', gateDecision: gateProjection?.decision || null };
     }
 
-    // AMA-06N — coexistence decision per SPEC §4.8. When AMA is
-    // enabled and the hammer route didn't fire (not eligible, dispatch
-    // failed, etc.), the watcher must NOT auto-fall-through to merge-
-    // agent. The operator either fixes eligibility (apply
-    // operator-approved / adversarial-merge-requested) OR explicitly
-    // applies `merge-agent-requested` on the current head to invoke
-    // the operator-fallback lane.
-    //
-    // Operator-fallback dispatches merge-agent WITH the
-    // `AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true` env so the AMA-06A
-    // admit gate (agent-os side) lets it through.
-    //
-    // When AMA is disabled, the action is `merge-agent-default` and
-    // the existing dispatch runs unchanged (no override env, no
-    // logging change).
+    // Shared AMA recovery owns transient/finding misses. Only safety holds
+    // arrive here as await-operator; exhausted recovery must not fall through.
+    if (coexistenceDecision.outcome === 'recovery-exhausted') {
+      return { handled: true, outcome: 'recovery-exhausted',
+        amaClosureResult: coexistenceDecision.amaClosureResult };
+    }
     if (coexistenceDecision.outcome === 'await-operator') {
       const { amaClosureResult } = coexistenceDecision;
       const reasonsHint = Array.isArray(amaClosureResult?.reasons)
@@ -723,10 +714,10 @@ export async function handlePostedReviewRow({
       );
       const recoveryHint = amaClosureResult?.reason === 'primary-change-needs-operator'
         ? "(inspect the primary-change evidence; use current-head 'merge-agent-requested' for the operator-fallback lane; see RUNBOOK-ama-closure)"
-        : "(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible OR 'merge-agent-requested' for the operator-fallback lane)";
+        : '(inspect and resolve the named safety hold under its existing approval policy; see RUNBOOK-ama-closure)';
       logger.log(
         `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
-        `(${namedReason}; reasons: ${reasonsHint}); awaiting operator action ` +
+        `(${namedReason}; reasons: ${reasonsHint}); safety hold requires operator action ` +
         recoveryHint
       );
       return {

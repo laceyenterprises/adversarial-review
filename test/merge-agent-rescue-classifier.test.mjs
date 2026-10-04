@@ -61,7 +61,7 @@ const decisionFixtures = [
   ['request-changes-with-blockers-addressable.md', 'remediation-eligible'],
   ['request-changes-with-blockers-auth.md', 'escalate-blockers'],
   ['request-changes-with-blockers-schema-migration.md', 'escalate-blockers'],
-  ['comment-only-with-non-blocking-findings.md', 'inconclusive'],
+  ['comment-only-with-non-blocking-findings.md', 'remediation-eligible'],
   ['operator-approved-override.md', 'merge-eligible', {
     operatorApprovalHeadSha: HEAD_SHA,
     operatorApprovalLabelEventId: 'evt-operator-approved',
@@ -516,4 +516,9 @@ test('watcher smoke: remediation-eligible fixture still waits while budget remai
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('comment-only remediation recovery retains hard-stop labels', () => {
+  const result = classify(inputFor('comment-only-with-non-blocking-findings.md', { labels: ['paused-for-redesign'] }));
+  assert.equal(result.decision, 'inconclusive');
 });

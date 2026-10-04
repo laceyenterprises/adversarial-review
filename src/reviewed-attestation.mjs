@@ -5,7 +5,8 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { classifyStructuredBlockingIssues } from './kernel/verdict.mjs';
+import { parseReviewFindings } from './kernel/review-findings.mjs';
+import { sanitizeReviewPayloadBestEffort } from './review-verdict.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS = 15_000;
@@ -84,8 +85,7 @@ function execFileWithStdin(execFileImpl, command, args, options, input) {
 }
 
 function normalizeFindingsCount(reviewBody) {
-  const blocking = classifyStructuredBlockingIssues(reviewBody || '');
-  return blocking.state === 'known' ? blocking.count : null;
+  return parseReviewFindings(sanitizeReviewPayloadBestEffort(reviewBody)).findingsCount;
 }
 
 function buildReviewedAttestationPayload({

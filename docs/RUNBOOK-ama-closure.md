@@ -1319,14 +1319,19 @@ The existing operator-fallback lane accepts both the closer's
 with `needsOperator: true`. This exception does not include other safety holds:
 risk/two-key policy, security, destructive-change holds, hard-stop labels
 (including `no-merge-hold`) and hammer-cap suppression retain adjudication.
-A scoped request can also take over an unresolved `dispatch-status-unknown`
-probe when no live closer lease exists for the PR at any head. Lease age is
-checked using the existing pending/dispatched expiry rules, including a lease
-still keyed to the previous head before rekeying. Both inline and background
-modes evaluate the closer first; newly queued/running background work retains
-ownership until its gates return a result, and is not cancelled by the label.
-This avoids both skipping safety gates and replaying a cancelled run as an
-automatic merge-agent recovery failure.
+An unresolved `dispatch-status-unknown` probe retains AMA ownership even after
+its dispatched lease expires: lease age cannot prove the hammer has stopped.
+Before taking over a settled primary-change refusal, the watcher checks for a
+live closer lease at any head, including a lease keyed to the previous head.
+Both inline and background modes evaluate the closer first; newly queued/running
+background work retains ownership until its gates return a result, and is not
+cancelled by the label. The scoped operator-fallback predicate requires the
+request label to remain present on the current snapshot and excludes
+`remediation_pending` rows. It also rejects `merge-agent-skip`, `do-not-merge`,
+`no-merge-hold`, `adversarial-merge-blocked`, `merge-agent-stuck`, and
+`duplicate-family-hold`. The same predicate controls both fallback selection and
+the eligibility-miss recovery routing. Timeout handoffs normalize the live
+GitHub label objects into names before applying it.
 Generic `operator-approved`, stale label events and read outages do not activate
 this route. This is a recovery dispatch, not AMA merge eligibility or a waiver of
 the primary-change predicate. No automatic hammer repair is dispatched from the

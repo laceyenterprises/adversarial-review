@@ -118,7 +118,7 @@ export function isMergeAgentRequestedScoped(event, prMetadata) {
  *
  *   1. AMA fired → AMA-CLOSER (no merge-agent on this tick).
  *   2. A live closer lease at any head retains AMA ownership.
- *   3. Scoped operator request preempts only explicitly preemptable holds/probes.
+ *   3. Scoped operator request preempts only settled primary-change refusals.
  *   4. cfg.enabled=false → MERGE-AGENT-DEFAULT (current behavior).
  *   5. cfg.enabled=true + current-head non-author `merge-agent-requested`
  *      → MERGE-AGENT-OPERATOR-FALLBACK (with override env).
@@ -131,7 +131,7 @@ export function isMergeAgentRequestedScoped(event, prMetadata) {
  * @param {boolean} args.amaEnabled
  * @param {boolean} args.amaClosureDispatched
  * @param {boolean=} args.amaCloserLeaseHeld Live closer lease at any head of the PR.
- * @param {boolean=} args.amaClosureOperatorPreemptable Scoped recovery may preempt this hold/probe.
+ * @param {boolean=} args.amaClosureOperatorPreemptable Scoped recovery may preempt this primary-change refusal.
  * @param {boolean=} args.amaClosurePending
  * @param {boolean=} args.amaClosureEligibilityMiss
  * @param {boolean=} args.amaClosureRecoverableFailure

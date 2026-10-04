@@ -260,7 +260,7 @@ test('mergeAgentDispatchEnvForAction returns null for every non-fallback action'
   }
 });
 
-test('scoped operator request preempts an explicitly recoverable hold or status probe', () => {
+test('scoped operator request preempts a settled primary-change refusal', () => {
   assert.equal(decideMergeAgentCoexistence({
     amaEnabled: true, amaClosureDispatched: false, amaClosurePending: true,
     mergeAgentRequestedScoped: true, amaClosureOperatorPreemptable: true,

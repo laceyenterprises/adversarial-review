@@ -125,12 +125,12 @@ export function createAmaHammerBackgroundQueue({
     entry.promise = settled
       .then(
         (result) => {
-          if (!entry.cancelled) recordSettled(entry.key, { ok: true, result });
+          recordSettled(entry.key, { ok: true, result });
           entry.onSettled?.({ ok: true, result, elapsedMs: nowMs() - entry.startedAtMs });
           return result;
         },
         (error) => {
-          if (!entry.cancelled) recordSettled(entry.key, { ok: false, error });
+          recordSettled(entry.key, { ok: false, error });
           entry.onSettled?.({ ok: false, error, elapsedMs: nowMs() - entry.startedAtMs });
           return null;
         },
@@ -189,14 +189,6 @@ export function createAmaHammerBackgroundQueue({
       if (nowMs() - outcome.settledAtMs > settledTtlMs) return null;
       return outcome;
     },
-    cancel(key) {
-      const entry = entries.get(key);
-      if (entry) {
-        entry.cancelled = true;
-        entry.controller.abort();
-      }
-    },
-    isCancelled(key) { return entries.get(key)?.cancelled === true; },
     snapshot() {
       return {
         running,

@@ -1912,7 +1912,7 @@ export async function maybeDispatchAmaClosureFor({
         // Detached from this step's deadline on purpose: the whole point is that
         // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
         // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). The
-        // cancellation signal belongs to this queue entry, not the step deadline.
+        // signal belongs to this queue entry, not the step deadline.
         run: async (backgroundSignal) => {
           // A saturated queue can hold this closure across several watcher
           // ticks. Recheck live state at launch, after it gets a queue slot.
@@ -1943,9 +1943,6 @@ export async function maybeDispatchAmaClosureFor({
           }
           if (liveMergeability !== 'MERGEABLE' && liveMergeability !== 'CONFLICTING') {
             return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
-          }
-          if (backgroundQueue.isCancelled?.(backgroundKey)) {
-            return { dispatched: false, reason: 'operator-fallback-requested' };
           }
           return maybeDispatchAmaCloserImpl({ ...closerArgs, signal: backgroundSignal });
         },
@@ -2182,25 +2179,30 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
   const safetyHold = isSafetyRecoveryHold(amaClosureResult);
-  const liveLease = amaEnabled && findLiveAmaCloserLease(rootDir, { repo: repoPath, prNumber });
-  const amaCloserLeaseHeld = Boolean(liveLease && isHeldAmaCloserLease(rootDir, {
-    repo: repoPath, prNumber, headSha: liveLease.headSha,
-  }));
   // The only safety exception is scoped primary-change evidence recovery.
   // A newly submitted background run has not evaluated its gates yet and
-  // cannot be preempted; an unresolved status probe can yield without a lease.
+  // cannot be preempted. Unknown dispatch status retains ownership even after
+  // lease expiry: age alone cannot prove that the hammer has stopped.
   const amaClosureOperatorPreemptable = (
     ['primary-change-needs-operator', 'primary-change-repair-required'].includes(amaClosureResult?.reason)
       && amaClosureResult?.needsOperator === true
-  ) || (amaClosureResult?.reason === 'dispatch-status-unknown' && !safetyHold);
+  );
   const mergeAgentRequestedScoped = !labelNames?.some((label) =>
-    ['merge-agent-skip', 'do-not-merge', 'no-merge-hold'].includes(label))
+    ['merge-agent-skip', 'do-not-merge', 'no-merge-hold', 'adversarial-merge-blocked',
+      'merge-agent-stuck', 'duplicate-family-hold'].includes(label))
     && !reviewStateRow?.remediation_pending
     && labelNames?.includes('merge-agent-requested')
     && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
       headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
       prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
     });
+  // Scan leases only before taking over a settled primary-change refusal.
+  // Terminal results and other safety holds keep their normal recovery routing.
+  const liveLease = amaEnabled && mergeAgentRequestedScoped && amaClosureOperatorPreemptable
+    && findLiveAmaCloserLease(rootDir, { repo: repoPath, prNumber });
+  const amaCloserLeaseHeld = Boolean(liveLease && isHeldAmaCloserLease(rootDir, {
+    repo: repoPath, prNumber, headSha: liveLease.headSha,
+  }));
   const coexistence = decideMergeAgentCoexistence({
     amaEnabled,
     amaClosureDispatched: false,
@@ -2227,10 +2229,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     return { outcome: 'ama-pending', amaClosureResult };
   }
   if (amaClosureResult?.amaEnabled && (safetyHold || amaClosureResult?.skipMergeAgent || (amaClosureResult?.reason === 'not-eligible'
-    && !isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
-      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,
-      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
-    })))) {
+    && !mergeAgentRequestedScoped))) {
     return recoverAmaAutomationImpl({
       rootDir, repo: repoPath, prNumber,
       headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,

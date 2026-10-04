@@ -1,7 +1,7 @@
 import test from 'node:test';
-import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -316,7 +316,7 @@ test('background mode: a slow hammer dispatch no longer holds the caller, and PR
   assert.equal(
     seenPayloads[0].signal.aborted,
     false,
-    'background run uses its own cancellation signal, detached from the step deadline',
+    'background run uses its own signal, detached from the step deadline',
   );
 
   // Next tick, same PR@head, dispatch still running: no second `hq dispatch`.
@@ -541,7 +541,7 @@ for (const headSha of [HEAD, 'previous-head']) {
       const result = await resolveMergeAgentCoexistenceForWatcher({
         ...args, labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
         maybeDispatchAmaClosureForImpl: async () => ({
-          amaEnabled: true, dispatched: false, skipMergeAgent, reason: 'dispatch-status-unknown',
+          amaEnabled: true, dispatched: false, skipMergeAgent, needsOperator: true, reason: 'primary-change-repair-required',
         }),
         recoverAmaAutomationImpl: async () => assert.fail('a live lease retains ownership'),
       });
@@ -549,6 +549,77 @@ for (const headSha of [HEAD, 'previous-head']) {
       assert.equal(result.coexistence.action, 'ama-closer-pending');
       assert.equal(result.dispatchEnv, undefined);
     }
+  });
+}
+
+for (const headSha of [HEAD, 'previous-head', null]) {
+  test(`unknown dispatch status retains ownership with expired or absent lease at ${headSha}`, async (t) => {
+    const args = closureArgs();
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    if (headSha) {
+      const identity = { repo: args.repoPath, prNumber: args.prNumber, headSha };
+      const now = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+      acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, watcherPid: process.pid, now });
+      updateAmaCloserLease({ rootDir: args.rootDir, ...identity,
+        status: 'dispatched', lrqId: 'lrq-still-unknown', now });
+      assert.equal(isHeldAmaCloserLease(args.rootDir, identity), false);
+    }
+    const result = await resolveMergeAgentCoexistenceForWatcher({
+      ...args, labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
+      maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+        skipMergeAgent: true, reason: 'dispatch-status-unknown' }),
+      recoveryOptions: {
+        dispatchHammer: async () => assert.fail('unknown dispatch status must not launch another hammer'),
+        pageImpl: async () => assert.fail('unknown dispatch status is an ordinary ownership wait'),
+      },
+    });
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(result.recovery.action, 'in-progress');
+    assert.equal(result.dispatchEnv, undefined);
+  });
+}
+
+for (const corrupt of [false, true]) {
+  for (const { reason, needsOperator, outcome } of [
+    { reason: 'daemon-merged', outcome: 'pr-terminal' },
+    { reason: 'security-hold', needsOperator: true, outcome: 'await-operator' },
+  ]) {
+    test(`${reason} keeps recovery routing with a ${corrupt ? 'corrupt' : 'live'} closer lease`, async (t) => {
+      const args = closureArgs();
+      t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+      const { leasePath } = acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repoPath,
+        prNumber: args.prNumber, headSha: 'previous-head', watcherPid: process.pid });
+      if (corrupt) writeFileSync(leasePath, '{broken');
+      const result = await resolveMergeAgentCoexistenceForWatcher({
+        ...args, labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
+        maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+          skipMergeAgent: true, needsOperator, reason }),
+        recoveryOptions: { pageImpl: async () => assert.fail('terminal/safety results do not page recovery') },
+      });
+      assert.equal(result.outcome, outcome);
+      assert.equal(result.dispatchEnv, undefined);
+    });
+  }
+}
+
+for (const { labelNames, remediationPending } of [
+  { labelNames: [], remediationPending: false },
+  { labelNames: ['merge-agent-requested'], remediationPending: true },
+  { labelNames: ['merge-agent-requested', 'no-merge-hold'], remediationPending: false },
+]) {
+  test(`eligibility recovery shares scoped predicate: labels=${labelNames} remediation=${remediationPending}`, async (t) => {
+    const args = closureArgs();
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    let recovered = false;
+    const result = await resolveMergeAgentCoexistenceForWatcher({
+      ...args, labelNames, mergeAgentRequestEvent: scopedEvent(),
+      reviewStateRow: { ...args.reviewStateRow, remediation_pending: remediationPending },
+      maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
+        reason: 'not-eligible', reasons: ['ci-not-green'] }),
+      recoverAmaAutomationImpl: async () => { recovered = true; return { outcome: 'ama-pending' }; },
+    });
+    assert.equal(recovered, true, 'a scoped event alone must not skip automated recovery');
+    assert.equal(result.outcome, 'ama-pending');
   });
 }
 
@@ -577,7 +648,7 @@ for (const hold of [
   });
 }
 
-for (const reason of ['primary-change-needs-operator', 'primary-change-repair-required', 'dispatch-status-unknown']) {
+for (const reason of ['primary-change-needs-operator', 'primary-change-repair-required']) {
   test(`scoped request may recover ${reason} without a live lease`, async (t) => {
     const args = closureArgs();
     t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
@@ -586,11 +657,12 @@ for (const reason of ['primary-change-needs-operator', 'primary-change-repair-re
       maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
         skipMergeAgent: true, reason, needsOperator: reason.startsWith('primary-change') }),
       recoverAmaAutomationImpl: async ({ result }) => ({
-        outcome: reason === 'dispatch-status-unknown' ? 'ama-pending' : 'await-operator', amaClosureResult: result,
+        outcome: 'await-operator', amaClosureResult: result,
       }),
     });
     assert.equal((await run(['merge-agent-requested'])).outcome, 'dispatch-merge-agent');
-    for (const stop of ['no-merge-hold', 'do-not-merge', 'merge-agent-skip']) {
+    for (const stop of ['no-merge-hold', 'do-not-merge', 'merge-agent-skip',
+      'adversarial-merge-blocked', 'merge-agent-stuck', 'duplicate-family-hold']) {
       assert.notEqual((await run(['merge-agent-requested', stop])).outcome, 'dispatch-merge-agent');
     }
     assert.notEqual((await run(['merge-agent-requested'], scopedEvent('old-head'))).outcome, 'dispatch-merge-agent');
@@ -663,22 +735,6 @@ test('safety refusals are consumed once and expire under the normal TTL', async 
   now = 501;
   assert.equal(queue.takeSettled('o/r#1@head'), null);
 });
-
-for (const throws of [false, true]) {
-  test(`cancelled background ${throws ? 'error' : 'result'} is never replayed`, async () => {
-    const queue = createAmaHammerBackgroundQueue();
-    const gate = deferred();
-    let signal;
-    queue.submit({ key: 'o/r#1@head', run: (input) => { signal = input; return gate.promise; } });
-    queue.cancel('o/r#1@head');
-    assert.equal(signal.aborted, true);
-    if (throws) gate.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
-    else gate.resolve({ reason: 'operator-fallback-requested' });
-    await queue.drain();
-    assert.equal(queue.takeSettled('o/r#1@head'), null);
-  });
-}
-
 
 test('a changed head discards the previous head settled refusal', async () => {
   const queue = createAmaHammerBackgroundQueue();

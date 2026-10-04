@@ -181,16 +181,18 @@ function scanCommentOnlyJobs(rootDir, status, repo, prNumber, log) {
 // push, its withheld head, and its one-follow-up-per-review key.
 const ARCHIVED_STOPPED_DIR = 'stopped-archived';
 
-export function scanArchivedStoppedFollowUpJobs(rootDir, repo, prNumber, log = console) {
-  let months;
+function archivedStoppedJobDirs(rootDir) {
   try {
-    months = readdirSync(join(rootDir, 'data', 'follow-up-jobs', ARCHIVED_STOPPED_DIR), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    return readdirSync(join(rootDir, 'data', 'follow-up-jobs', ARCHIVED_STOPPED_DIR), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory()).map((entry) => `${ARCHIVED_STOPPED_DIR}/${entry.name}`).sort();
   } catch (err) {
     if (err?.code === 'ENOENT') return [];
     throw err;
   }
-  return months.flatMap((month) => scanCommentOnlyJobs(rootDir, `${ARCHIVED_STOPPED_DIR}/${month}`, repo, prNumber, log));
+}
+
+export function scanArchivedStoppedFollowUpJobs(rootDir, repo, prNumber, log = console) {
+  return archivedStoppedJobDirs(rootDir).flatMap((dir) => scanCommentOnlyJobs(rootDir, dir, repo, prNumber, log));
 }
 
 // Terminal jobs for the PR, archived stopped jobs included, as { status, job }.
@@ -293,8 +295,9 @@ export async function proveCommentOnlyFinalRoundHead({
 }
 
 // HELDHEAD-01: called in watcher admission, before ordinary budget suppression.
-// The review-store transaction serializes callers; audit is persisted before
-// reset so a crash can withhold work, but can never spend a second review.
+// The review-store transaction serializes callers. The file is a durable intent;
+// only a matching database request or exact-head reviewer proves it was armed.
+// Reuse an uncommitted intent after a rollback without spending another review.
 export function recoverWithheldFinalRoundHead({ rootDir, repo, prNumber, headSha,
   reviewRow, owned = false, terminal = false, request, log = console,
   requestedAt = new Date().toISOString(),
@@ -304,26 +307,33 @@ export function recoverWithheldFinalRoundHead({ rootDir, repo, prNumber, headSha
     isTerminalFinalRound(status, job) && job.completion?.withheldPushHeadSha === headSha);
   if (!matches.length) return null;
   const prior = matches.find(({ job }) => job.completion?.withheldHeadReReview);
-  const failedRecovery = reviewRow?.review_status === 'failed' &&
+  const audit = prior?.job.completion.withheldHeadReReview;
+  const reviewArmed = prior && (
+    (reviewRow?.rereview_requested_at === audit.requestedAt && reviewRow?.revision_ref === headSha) ||
+    reviewRow?.reviewer_head_sha === headSha);
+  const failedRecovery = reviewArmed && reviewRow?.review_status === 'failed' &&
     (reviewRow.reviewer_head_sha || reviewRow.revision_ref) === headSha;
-  const resetNeverArmed = prior && !['pending', 'reviewing', 'pending-upstream', 'ci-blocked'].includes(reviewRow?.review_status) &&
-    reviewRow?.rereview_requested_at !== prior.job.completion.withheldHeadReReview.requestedAt &&
-    reviewRow?.reviewer_head_sha !== headSha;
-  const page = prior && (failedRecovery || resetNeverArmed) &&
-    !prior.job.completion.withheldHeadReReview.alertedAt;
-  if (prior && !page) return { triggered: false, reason: 'withheld-head-review-already-requested' };
+  const page = failedRecovery && !audit.alertedAt;
+  if (prior && (reviewArmed || audit.alertedAt) && !page) {
+    return { triggered: false, reason: 'withheld-head-review-already-requested' };
+  }
   if (reviewRow?.pr_state !== 'open') return null;
+  const located = [];
   for (const { status, job } of matches) {
     let dir = status;
     if (!statExists(join(rootDir, 'data', 'follow-up-jobs', dir, `${job.jobId}.json`))) {
-      dir = readdirSync(join(rootDir, 'data', 'follow-up-jobs', ARCHIVED_STOPPED_DIR))
-        .map((month) => `${ARCHIVED_STOPPED_DIR}/${month}`)
+      dir = archivedStoppedJobDirs(rootDir)
         .find((candidate) => statExists(join(rootDir, 'data', 'follow-up-jobs', candidate, `${job.jobId}.json`)));
     }
-    if (!dir) throw new Error(`Missing terminal job ${job.jobId}`);
+    if (!dir) return { triggered: false, reason: 'terminal-job-missing' };
+    located.push({ dir, job });
+  }
+  const alertedAt = requestedAt;
+  requestedAt = audit?.requestedAt || requestedAt;
+  for (const { dir, job } of located) {
     writeFileAtomic(join(rootDir, 'data', 'follow-up-jobs', dir, `${job.jobId}.json`),
       `${JSON.stringify({ ...job, completion: { ...job.completion,
-        withheldHeadReReview: { ...(job.completion.withheldHeadReReview || {}), ...(page ? { alertedAt: requestedAt } : {}), headSha, requestedAt, reason: 'system: unproven final-round push requires exact-head review' },
+        withheldHeadReReview: { ...(job.completion.withheldHeadReReview || {}), ...(page ? { alertedAt } : {}), headSha, requestedAt, reason: 'system: unproven final-round push requires exact-head review' },
       } }, null, 2)}\n`);
   }
   if (page) return { triggered: false, page: true, reason: 'withheld-head-review-failed' };

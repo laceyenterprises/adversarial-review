@@ -1701,7 +1701,13 @@ IDs; terminal outbox entries also prevent duplicate pages.
 
 A terminal final round whose replay proof failed records the withheld head.
 When that head is still current and has no live review or closer owner, watcher
-admission queues one exact-head review and audits it on the terminal job.
+admission queues one exact-head review and audits its intent on the terminal job.
+A file intent is not proof of a committed SQLite reset: admission reuses its
+original `requestedAt` until the row confirms that request on the withheld head
+or an exact-head reviewer. Request exceptions and commit rollbacks remain
+retryable; missing terminal files or an absent archive defer the lookup. Once
+armed, recovery cannot reset again, and a failed review records `alertedAt`
+without changing the original request timestamp.
 The fresh verdict feeds normal AMA/hammer closure. A moved head stays held for
 that recovery, and a failed bounded review pages once through operator-blocked.
 Pending CI alone is work-complete; the proven-head CI wait remains unchanged.

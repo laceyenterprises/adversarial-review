@@ -55,11 +55,19 @@ to one hour before treating the proof as withheld.
 When the proof is withheld while the PR head moved, the job records that head as
 `completion.withheldPushHeadSha`. HELDHEAD-01 queues one automatic exact-head
 review when that SHA remains current and no reviewer or closer owns it. The
-job records `completion.withheldHeadReReview` before the guarded reset, with a
-system reason. This spends the same one-shot admission bypass as an explicit
-`retrigger-review:` request. A repeated tick cannot request another review.
-If that review fails, the operator-blocked lane pages once; a moved PR head
-never receives a review of the withheld SHA. The historical
+job records `completion.withheldHeadReReview` as a durable intent before the
+guarded reset, with `headSha`, `requestedAt`, and a system `reason`. The file
+write does not prove the SQLite transaction committed. If the row lacks both a
+matching `rereview_requested_at` / `revision_ref` and an exact-head
+`reviewer_head_sha`, watcher admission retries the same intent using its original
+`requestedAt`; a request exception or transaction rollback does not page or
+consume the recovery. Missing terminal files (including an absent archive
+directory) defer the lookup without resetting the row. Once the database
+confirms the request or exact-head reviewer, repeated ticks cannot request
+another review. This spends the same one-shot admission bypass as an explicit
+`retrigger-review:` request. If that review fails, the operator-blocked lane
+pages once and records `alertedAt` without changing the intent's `requestedAt`;
+a moved PR head never receives a review of the withheld SHA. The historical
 `adversarial_review.comment_only_final_round_push_unproven` page is replaced by
 this automatic recovery. No withheld proof grants AMA authority; the fresh
 verdict supplies the proof needed by normal AMA/hammer closure.

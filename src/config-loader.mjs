@@ -2366,7 +2366,7 @@ function schemaV1() {
             __strict: true,
             __keys: {
               night_mode: { __type: TYPE_STRING, __default: 'normal', __enum: ['hot', 'normal', 'throttled', 'background'] },
-              schedule_windows: { __type: TYPE_DICT, __strict: false, __default: {}, __extra_keys_schema: { __type: TYPE_STRING, __enum: ['hot', 'normal', 'throttled', 'background'] } },
+              schedule_windows: { __type: TYPE_DICT, __strict: false, __extra_keys_schema: { __type: TYPE_STRING, __enum: ['hot', 'normal', 'throttled', 'background'] } },
               resource_admission: { __type: TYPE_DICT, __strict: true, __keys: {
                 min_cpu_idle_percent: { __type: TYPE_FLOAT, __default: 15.0, __min: 0.0, __max: 100.0, __enforceMax: true },
                 safety_load_per_core: { __type: TYPE_FLOAT, __default: 32.0, __min: 1.0, __max: 128.0, __enforceMax: true },

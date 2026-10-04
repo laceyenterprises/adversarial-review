@@ -13,8 +13,8 @@ test('NIGHTMODE-01 strict loader accepts schedule and CPU admission configuratio
     const cfg = loadConfig({ topPath, env: {} });
     assert.equal(cfg.get('worker_pool.dispatch.night_mode'), 'normal');
     assert.deepEqual(cfg.get('worker_pool.dispatch.schedule_windows'), { '22-7': 'hot' });
-    assert.equal(cfg.get('worker_pool.dispatch.resource_admission.min_cpu_idle_percent'), 20);
-    assert.equal(cfg.get('worker_pool.dispatch.resource_admission.safety_load_per_core'), 32);
+    assert.equal(cfg.get('worker_pool.dispatch.resource_admission.min_cpu_idle_percent'), 20.0);
+    assert.equal(cfg.get('worker_pool.dispatch.resource_admission.safety_load_per_core'), 32.0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

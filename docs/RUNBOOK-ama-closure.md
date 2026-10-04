@@ -1696,3 +1696,12 @@ Requests interrupted by the CLI alarm are reclaimable after five minutes.
 Pending/in-flight review CAS results retain the freshly posted evidence.
 Exhaustion enqueue claims are retried after crashes with deterministic alert
 IDs; terminal outbox entries also prevent duplicate pages.
+
+### HELDHEAD-01: unproven comment-only final-round pushes
+
+A terminal final round whose replay proof failed records the withheld head.
+When that head is still current and has no live review or closer owner, watcher
+admission queues one exact-head review and audits it on the terminal job.
+The fresh verdict feeds normal AMA/hammer closure. A moved head stays held for
+that recovery, and a failed bounded review pages once through operator-blocked.
+Pending CI alone is work-complete; the proven-head CI wait remains unchanged.

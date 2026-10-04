@@ -1,3 +1,4 @@
+import { recoverWithheldFinalRoundHead } from '../src/comment-only-final-round.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -1274,3 +1275,38 @@ for (const [name, body, status, expected] of [
     } finally { db.close(); }
   });
 }
+
+
+test('HELDHEAD-01 #7689 replay resets exactly one withheld exact head and pages once on failure', (t) => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'heldhead-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const head = '5'.repeat(40);
+  const repo = 'example/repo';
+  const jobId = 'example__repo-pr-7689-final';
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, `${jobId}.json`), JSON.stringify({
+    jobId, repo, prNumber: 7689, status: 'stopped', finalRound: 'comment-only',
+    revisionRef: 'e'.repeat(40), reReview: { suppressed: 'comment-only-final-round' },
+    completion: { withheldPushHeadSha: head,
+      finalRoundOutcome: { completed: false, push: 'reviewed-commit-not-replayed e97991190cc6' } },
+  }));
+  insertReviewRow(rootDir, { repo, prNumber: 7689, reviewerHeadSha: 'e'.repeat(40) });
+  const db = openReviewStateDb(rootDir);
+  t.after(() => db.close());
+  const tick = (overrides = {}) => db.transaction(() => recoverWithheldFinalRoundHead({
+    rootDir, repo, prNumber: 7689, headSha: head,
+    reviewRow: db.prepare('SELECT * FROM reviewed_prs').get(),
+    request: (options) => requestReviewRereview({ ...options, db, inTransaction: true }),
+    ...overrides,
+  })).immediate();
+  assert.equal(tick({ headSha: '6'.repeat(40) }), null);
+  assert.equal(tick({ owned: true }), null);
+  assert.equal(tick({ terminal: true }), null);
+  assert.equal(tick().triggered, true);
+  assert.equal(db.prepare('SELECT revision_ref FROM reviewed_prs').get().revision_ref, head);
+  assert.equal(tick().triggered, false);
+  db.prepare("UPDATE reviewed_prs SET review_status = 'failed', reviewer_head_sha = ?").run(head);
+  assert.equal(tick().page, true);
+  assert.equal(tick().page, undefined);
+});

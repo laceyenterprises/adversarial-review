@@ -53,12 +53,16 @@ persists, reconcile leaves the job in progress and retries on later ticks for up
 to one hour before treating the proof as withheld.
 
 When the proof is withheld while the PR head moved, the job records that head as
-`completion.withheldPushHeadSha`, an
-`adversarial_review.comment_only_final_round_push_unproven` alert fires, and
-re-review of that exact head is refused unless an operator gives an explicit
-`retrigger-review:` reason. A later head re-enters normal review. Reconciliation
-still records a completed round when push proof is unavailable, but that record
-carries no AMA final-round authority.
+`completion.withheldPushHeadSha`. HELDHEAD-01 queues one automatic exact-head
+review when that SHA remains current and no reviewer or closer owns it. The
+job records `completion.withheldHeadReReview` before the guarded reset, with a
+system reason. This spends the same one-shot admission bypass as an explicit
+`retrigger-review:` request. A repeated tick cannot request another review.
+If that review fails, the operator-blocked lane pages once; a moved PR head
+never receives a review of the withheld SHA. The historical
+`adversarial_review.comment_only_final_round_push_unproven` page is replaced by
+this automatic recovery. No withheld proof grants AMA authority; the fresh
+verdict supplies the proof needed by normal AMA/hammer closure.
 
 A final round completes when the reply has no `blockers[]`, the push is proven or
 the reply says `completed`, and every operational blocker is PR-head CI that is

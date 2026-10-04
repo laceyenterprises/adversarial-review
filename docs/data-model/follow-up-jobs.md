@@ -31,10 +31,17 @@ workspace for this proof. Every withheld proof logs its reason
 (`finalRoundOutcome.push`, for example `live-head-mismatch`,
 `foreign-commit-in-push`, `branch-contamination-audit-failed`). When the proof
 is withheld while the PR head moved, the job records that head as
-`completion.withheldPushHeadSha`, an
-`adversarial_review.comment_only_final_round_push_unproven` alert fires, and
-`requestReviewRereview` refuses that head (`comment-only-final-round-push-unproven`)
-unless an operator explicitly retriggers review.
+`completion.withheldPushHeadSha`. HELDHEAD-01 queues one automatic exact-head
+review when that SHA remains current and no reviewer or closer owns it. The
+job records `completion.withheldHeadReReview` before the guarded reset, with a
+system reason. This spends the same one-shot admission bypass as an explicit
+`retrigger-review:` request. A repeated tick cannot request another review.
+If that review fails, the operator-blocked lane pages once; a moved PR head
+never receives a review of the withheld SHA. The historical
+`adversarial_review.comment_only_final_round_push_unproven` page is replaced by
+this automatic recovery. No withheld proof grants AMA authority; the fresh
+verdict supplies the proof needed by normal AMA/hammer closure.
+
 Absent or malformed push proof grants no AMA final-round handoff.
 
 `completion.finalRoundOutcome` (COMMENTCLOSE-01) records the reconciler's

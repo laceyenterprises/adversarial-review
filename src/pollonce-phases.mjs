@@ -1,3 +1,5 @@
+import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
+import { recoverWithheldFinalRoundHead, hasUnprovenCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
 // ARC-18: extracted per-PR processing phase of pollOnce (watcher.mjs).
 //
 // `processReviewSubject` is the body of the per-PR loop that pollOnce runs for
@@ -1264,7 +1266,10 @@ export async function processReviewSubject(entry, ctx) {
         execFileImpl: execFileAsync,
         logger: console,
       });
-      const stalePostedReviewSuppression = postedReviewHeadMoved
+      const withheldHeadRecovery = !subject.terminal && hasUnprovenCommentOnlyFinalRoundHead(ROOT, {
+        repo: repoPath, prNumber, headSha: subject.headSha,
+      });
+      const stalePostedReviewSuppression = postedReviewHeadMoved || withheldHeadRecovery
         ? await getStalePostedReviewAutoRereviewSuppression({
           rootDir: ROOT,
           repoPath,
@@ -1280,11 +1285,34 @@ export async function processReviewSubject(entry, ctx) {
         })
         : { suppressed: false, reason: null };
       const stalePostedReviewCloserSuppression =
-        postedReviewHeadMoved && !stalePostedReviewSuppression.suppressed
+        (postedReviewHeadMoved || withheldHeadRecovery) && !stalePostedReviewSuppression.suppressed
           ? await resolveHeadCloserCommitSuppression()
           : { suppressed: false, reason: null };
+      if (withheldHeadRecovery && !subject.terminal && !stalePostedReviewSuppression.suppressed &&
+          !stalePostedReviewCloserSuppression.suppressed) {
+        const recovered = db.transaction(() => recoverWithheldFinalRoundHead({
+          rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+          reviewRow: stmtGetReviewRow.get(repoPath, prNumber),
+          request: (options) => requestReviewRereview({ ...options, db, inTransaction: true }),
+        })).immediate();
+        if (recovered?.page) {
+          const identity = { repo: repoPath, prNumber };
+          const fingerprint = `withheld-head-review:${subject.headSha}`;
+          recordNoProgressLaneRun(ROOT, identity, {
+            headSha: subject.headSha, fingerprint,
+            progressClass: 'operator-decision-required',
+            operatorReason: 'review-retry-cap-exhausted',
+          });
+          await maybeFireOperatorDecisionRequiredAlert({
+            rootDir: ROOT, identity, headSha: subject.headSha, fingerprint,
+            operatorReason: 'review-retry-cap-exhausted', noProgressTicks: 1,
+            thresholdTicks: 1, deliverAlertFn,
+          });
+        }
+        if (recovered?.triggered) existing = stmtGetReviewRow.get(repoPath, prNumber);
+      }
       const stalePostedReviewBudgetSuppression =
-        postedReviewHeadMoved &&
+        postedReviewHeadMoved && existing?.review_status === 'posted' &&
           !stalePostedReviewSuppression.suppressed &&
           !stalePostedReviewCloserSuppression.suppressed
           ? getStalePostedReviewBudgetSuppression({
@@ -1326,7 +1354,7 @@ export async function processReviewSubject(entry, ctx) {
         );
       } else if (postedReviewHeadMoved && finalRoundInProgress) {
         console.log(`[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: comment-only final round is in progress`);
-      } else if (postedReviewHeadMoved) {
+      } else if (postedReviewHeadMoved && existing?.review_status === 'posted') {
         try {
           const refreshResult = requestReviewRereview({
             rootDir: ROOT,

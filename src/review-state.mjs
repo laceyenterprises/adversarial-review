@@ -1091,6 +1091,7 @@ function requestReviewRereview({
   logger = console,
   expectedFailedHead = null,
   automaticMalformedRecovery = false,
+  automaticWithheldHeadRecovery = false,
   inTransaction = false,
 }) {
   const db = dbOverride || openReviewStateDb(rootDir);
@@ -1104,7 +1105,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, inTransaction: true,
       })).immediate();
     }
 
@@ -1113,7 +1114,7 @@ function requestReviewRereview({
     // resetting it here would let that pass overwrite the terminal verdict.
     // Read the captured pass body, not the mutable row's reviewer label.
     const currentRow = getReviewRow(db, { repo, prNumber });
-    const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(reason);
+    const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(reason) || automaticWithheldHeadRecovery;
     const targetHead = normalizedTargetRevisionRef;
     if (targetHead && !explicitOperatorRetrigger) {
       const settledBodies = db.prepare(
@@ -1138,7 +1139,7 @@ function requestReviewRereview({
     }
     if (targetHead && !explicitOperatorRetrigger &&
         hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
-      logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: unproven comment-only final-round head is held for the operator`);
+
       return buildBlockedRereviewResult('comment-only-final-round-push-unproven', currentRow);
     }
 
@@ -1255,7 +1256,7 @@ function requestReviewRereview({
     }
     if (reviewRow.review_status === 'pending') {
       const normalizedReason = reason || 'Re-review requested from remediation reply.';
-      const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason);
+      const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason) || automaticWithheldHeadRecovery;
       const currentRevisionRef = String(reviewRow.revision_ref || reviewRow.reviewer_head_sha || '');
       const pendingRevisionRefMoved =
         normalizedTargetRevisionRef &&

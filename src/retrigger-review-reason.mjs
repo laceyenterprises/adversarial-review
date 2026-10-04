@@ -16,3 +16,7 @@ export function isExplicitOperatorRetriggerReason(reason) {
     .toLowerCase()
     .startsWith(`${RETRIGGER_REVIEW_REASON_MARKER}:`);
 }
+
+export function isExactHeadReviewRecoveryReason(reason) {
+  return isExplicitOperatorRetriggerReason(reason) || String(reason || '').startsWith('system-held-head-review:');
+}

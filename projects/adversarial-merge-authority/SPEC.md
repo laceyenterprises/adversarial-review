@@ -317,12 +317,13 @@ owns the docs, are exempt, but the HAM audit comment must record any skipped
 superproject-doc obligation.
 
 Terminal-remediation eligibility and primary-change reversal authorization share
-`src/ama/ham-provenance.mjs::hamCommitIdentityMatches`. A linked HAM author is
-accepted; a linked HAM committer is accepted only with the full terminal
-provenance: HAM worker class, exact `HAM` / `AMA-PR-<n>` worker ticket, and
+`src/ama/ham-provenance.mjs::hamCommitIdentityMatches`. Any linked non-HAM
+author or committer is rejected. Otherwise, a linked HAM author is accepted; an unlinked author may
+fall back to a linked HAM committer only with the full terminal provenance:
+HAM worker class, exact `HAM` / `AMA-PR-<n>` worker ticket, and
 `Closed-By: hammer (adversarial-pipe-mode)`. This supports the captured real
-HAM commit shape with an unlinked author and HAM committer, while a foreign
-committer stamp without those trailers fails the identity safety check.
+HAM commit shape with an unlinked author and HAM committer. A linked foreign
+author or committer fails the identity safety check even with those trailers.
 Eligibility separately requires exact `Worker-Class: hammer`; reversal also
 accepts the existing `hammer-corp` / `hammer-claude` classes. Both identity
 fields are linked from email headers and remain forgeable without signature

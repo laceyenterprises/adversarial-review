@@ -1206,11 +1206,14 @@ the first hammer commit in the rebased PR history; a hammer-authored `Reviewed-H
 head. Both primary and final diffs are compared against the current PR base,
 using the same merge base so rebased upstream changes are excluded. Hammer closure detection
 uses the terminal commit trailer block. Reversal authorization additionally
-requires the live GitHub author to match the existing trusted HAM login set
-(`hamAuditCommentAuthorMatches`), independently of the committer. Rebases may
-stamp a HAM committer onto a worker-authored commit, so missing or non-HAM
-authors cannot authorize reversals, even with valid trailers. Binary and omitted-patch
-files can pass only with an identical GitHub blob SHA and change status;
+uses `hamCommitIdentityMatches` with the trusted HAM login set
+(`hamAuditCommentAuthorMatches`): reject any linked non-HAM author or committer;
+otherwise accept a linked HAM author, or an unlinked author with a linked HAM
+committer and all three terminal trailers (`Worker-Class: hammer`, including
+`hammer-corp` / `hammer-claude`, `Worker-Ticket: HAM` / `AMA-PR-<n>`, and
+`Closed-By: hammer (adversarial-pipe-mode)`). A HAM committer stamped onto a
+linked foreign author cannot authorize reversals, even with valid trailers.
+Binary and omitted-patch files can pass only with an identical GitHub blob SHA and change status;
 otherwise their preservation remains unknown. Structural hammer merge refusals
 are audited immediately with their primary-change reason, while read failures
 retry within the bounded gate window. Every

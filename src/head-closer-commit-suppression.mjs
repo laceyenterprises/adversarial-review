@@ -335,16 +335,14 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
     };
   }
 
-  const candidates = [
-    commit?.author?.login,
-    commit?.committer?.login,
-  ].map(normalizeIdentityPart).filter(Boolean);
-  const closerIdentity = candidates.find((candidate) => TERMINAL_CLOSER_BOT_IDENTITIES.has(candidate));
-  // Rebase may stamp a foreign committer from shared config. The shared
-  // helper requires a closer author or full terminal HAM committer provenance.
-  // Closed-By remains the explicit terminal marker above (including unlinked bots).
+  const closerIdentity = normalizeIdentityPart(typeof commit?.author === 'object'
+    ? commit?.author?.login : commit?.author);
+  // The identity branch requires a linked closer author and rejects a linked
+  // foreign committer through the shared helper. Its unlinked-author fallback
+  // cannot reach this branch: the required Closed-By is handled above, including
+  // local Git reads without linked identities.
   const workerTicket = normalizedTrailers['worker-ticket'] || '';
-  if (closerIdentity && isHamWorkerTicket(workerTicket) && hamCommitIdentityMatches(commit, {
+  if (TERMINAL_CLOSER_BOT_IDENTITIES.has(closerIdentity) && isHamWorkerTicket(workerTicket) && hamCommitIdentityMatches(commit, {
     trailers: normalizedTrailers,
     loginMatches: (login) => TERMINAL_CLOSER_BOT_IDENTITIES.has(normalizeIdentityPart(login)),
   })) {
@@ -533,7 +531,7 @@ export async function getHeadCloserCommitSuppression({
         'api',
         `repos/${repoPath}/commits/${sha}`,
         '--jq',
-        '{sha:.sha,message:.commit.message,authorLogin:.author.login}',
+        '{sha:.sha,message:.commit.message,authorLogin:.author.login,committerLogin:.committer.login}',
       ],
       retries: retryDelays.length,
       backoffMs: Number(retryDelays[0]) || 500,
@@ -544,6 +542,7 @@ export async function getHeadCloserCommitSuppression({
       sha: raw.sha || sha,
       message: raw.message || '',
       author: { login: raw.authorLogin || null },
+      committer: { login: raw.committerLogin || null },
     };
     return isTerminalCloserCommitIdentity(commit);
   } catch (err) {

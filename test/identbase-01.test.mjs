@@ -4,9 +4,9 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isHamWorkerTicket } from '../src/ama/ham-provenance.mjs';
+import { hamCommitIdentityMatches, isHamWorkerTicket } from '../src/ama/ham-provenance.mjs';
 import { prepareWorkspaceForJob } from '../src/follow-up-remediation.mjs';
-import { isTerminalCloserCommitIdentity, getHeadCloserCommitSuppression } from '../src/head-closer-commit-suppression.mjs';
+import { isTerminalCloserCommitIdentity, getHeadCloserCommitSuppression, normalizeVerifiedCloserCommit } from '../src/head-closer-commit-suppression.mjs';
 
 test('IDENTBASE-01: foreign closer committer never suppresses a worker author', () => {
   for (const message of ['worker fix', 'worker fix\n\nWorker-Ticket: HAM-123']) {
@@ -28,24 +28,63 @@ test('IDENTBASE-01: closer author needs HAM provenance; explicit closure trailer
   assert.equal(isTerminalCloserCommitIdentity({ message: 'repair\n\nClosed-By: hammer' }).suppressed, true);
 });
 
-test('IDENTBASE-01: watcher remote probe reads author plus HAM trailer, ignoring committer', async () => {
-  for (const [authorLogin, message, expected] of [
-    ['lacey-codex-agent[bot]', 'worker fix', false],
-    ['lacey-codex-agent[bot]', 'worker fix\n\nWorker-Ticket: HAM', false],
-    ['the-hammer-lacey[bot]', 'repair\n\nWorker-Ticket: HAM', true],
-    ['the-hammer-lacey[bot]', 'repair\n\nWorker-Ticket: HAM-123', false],
-    ['the-hammer-lacey[bot]', 'repair\n\nWorker-Ticket: AMA-PR-42', true],
+test('IDENTBASE-01: watcher remote probe checks both linked identities', async () => {
+  for (const [authorLogin, committerLogin, message, expected] of [
+    ['lacey-codex-agent[bot]', 'the-hammer-lacey[bot]', 'worker fix', false],
+    ['lacey-codex-agent[bot]', 'the-hammer-lacey[bot]', 'worker fix\n\nWorker-Ticket: HAM', false],
+    ['the-hammer-lacey[bot]', 'the-hammer-lacey[bot]', 'repair\n\nWorker-Ticket: HAM', true],
+    ['the-hammer-lacey[bot]', 'some-human-contributor', 'repair\n\nWorker-Ticket: HAM', false],
+    ['the-hammer-lacey[bot]', null, 'repair\n\nWorker-Ticket: HAM', true],
+    [null, 'the-hammer-lacey[bot]', 'repair\n\nWorker-Ticket: HAM', false],
+    ['the-hammer-lacey[bot]', 'the-hammer-lacey[bot]', 'repair\n\nWorker-Ticket: HAM-123', false],
+    ['the-hammer-lacey[bot]', 'the-hammer-lacey[bot]', 'repair\n\nWorker-Ticket: AMA-PR-42', true],
   ]) {
     const result = await getHeadCloserCommitSuppression({
       repoPath: 'fixture/repo', headSha: 'a'.repeat(40),
       fetchVerifiedCommitFromLocalGitImpl: async () => null,
       execGhWithRetryImpl: async ({ args }) => {
         assert.match(args.at(-1), /authorLogin:\.author\.login/);
-        return { stdout: JSON.stringify({ authorLogin, message, committerLogin: 'the-hammer-lacey[bot]' }) };
+        assert.match(args.at(-1), /committerLogin:\.committer\.login/);
+        return { stdout: JSON.stringify({ authorLogin, message, committerLogin }) };
       },
     });
     assert.equal(result.suppressed, expected);
   }
+});
+
+test('HAM identity rejects linked foreign identities even with full terminal trailers', () => {
+  const message = 'repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)';
+  for (const [author, committer, expected] of [
+    ['the-hammer-lacey[bot]', 'some-human-contributor', false],
+    ['codex-worker-bot', 'the-hammer-lacey[bot]', false],
+    ['the-hammer-lacey[bot]', 'merge-agent-lacey', true],
+    ['the-hammer-lacey[bot]', null, true],
+    [null, 'the-hammer-lacey[bot]', true],
+    [null, null, false],
+  ]) {
+    for (const wrap of [value => value, value => ({ login: value })]) {
+      assert.equal(hamCommitIdentityMatches({ author: wrap(author), committer: wrap(committer), message }), expected);
+    }
+  }
+  for (const trailer of ['Worker-Class: hammer', 'Worker-Ticket: HAM', 'Closed-By: hammer (adversarial-pipe-mode)']) {
+    assert.equal(hamCommitIdentityMatches({ author: null, committer: 'the-hammer-lacey[bot]',
+      message: message.replace(trailer, '') }), false, trailer);
+  }
+});
+
+test('closer identity accepts normalized strings and rejects foreign committers', () => {
+  for (const [committer, expected] of [['the-hammer-lacey[bot]', true], [null, true], ['some-human-contributor', false]]) {
+    const raw = { author: { login: 'the-hammer-lacey[bot]' }, committer: { login: committer },
+      commit: { message: 'repair\n\nWorker-Ticket: HAM' } };
+    assert.equal(isTerminalCloserCommitIdentity(raw).suppressed, expected);
+    assert.equal(isTerminalCloserCommitIdentity(normalizeVerifiedCloserCommit(raw)).suppressed, expected);
+  }
+});
+
+test('merge-agent finalize commits with production PR tickets remain reviewable', () => {
+  const commit = { author: { login: 'merge-agent-lacey' }, committer: { login: 'merge-agent-lacey' },
+    message: 'Finalize PR\n\nWorker-Class: merge-agent\nWorker-Ticket: PR-1223' };
+  assert.deepEqual(isTerminalCloserCommitIdentity(commit), { suppressed: false, reason: null });
 });
 
 // This deliberately injects unsupported metadata to exercise the defensive guard;

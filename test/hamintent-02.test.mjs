@@ -382,20 +382,19 @@ test('context includes every reserved finding, only its latest comment, with a t
   assert.ok(bounded.length > 240000);
 });
 
-test('reversal accepts linked HAM author or a committer with full terminal provenance in collector and predicate', async () => {
+test('reversal rejects either linked foreign identity in collector and predicate', async () => {
   const compare = { merge_base_commit: { sha: base }, status: 'ahead', files: [file] };
-  for (const identity of [
-    { committer: { login: 'pr-author' }, author: { login: 'the-hammer-lacey[bot]' } },
-    { committer: null, author: { login: 'pr-author' } },
-    { committer: null, author: null },
-    { committer: { login: 'the-hammer-lacey[bot]' }, author: null },
-    { committer: null, author: { login: 'the-hammer-lacey[bot]' } },
-    { committer: { login: 'merge-agent-lacey' }, author: { login: 'pr-author' } },
+  for (const [identity, allowed] of [
+    [{ committer: { login: 'pr-author' }, author: { login: 'the-hammer-lacey[bot]' } }, false],
+    [{ committer: null, author: { login: 'pr-author' } }, false],
+    [{ committer: null, author: null }, false],
+    [{ committer: { login: 'the-hammer-lacey[bot]' }, author: null }, true],
+    [{ committer: null, author: { login: 'the-hammer-lacey[bot]' } }, true],
+    [{ committer: { login: 'merge-agent-lacey' }, author: { login: 'pr-author' } }, false],
+    [{ committer: { login: 'merge-agent-lacey' }, author: { login: 'the-hammer-lacey[bot]' } }, true],
   ]) {
     const liveCommit = { ...commit, ...identity };
     const e = structuredClone(evidence()); e.reversalAuthorizations[0].commit = liveCommit;
-    const allowed = identity.author?.login === 'the-hammer-lacey[bot]'
-      || ['the-hammer-lacey[bot]', 'merge-agent-lacey'].includes(identity.committer?.login);
     assert.equal(checkPrimaryChange(e, head).ok, Boolean(allowed));
     const collected = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
       get: async (url) => {

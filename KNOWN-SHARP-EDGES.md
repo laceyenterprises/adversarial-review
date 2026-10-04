@@ -214,8 +214,9 @@ HAM-ticket identity branch does not eliminate this older trailer-only risk.
 
 GitHub links both `author.login` and `committer.login` from commit email
 headers. A pusher can forge either by setting the corresponding Git email to
-an allowlisted bot's address. A linked author plus HAM ticket, or a linked
-committer plus the full HAM trailers, prevents accidental committer stamping
+an allowlisted bot's address. Rejecting either linked foreign identity, then
+requiring a linked HAM author or an unlinked author with a HAM committer and
+the full HAM trailers, prevents accidental committer stamping
 from being sufficient but does not authenticate a deliberate forger. Signed
 commit verification or verified push-actor evidence would be needed for that.
 

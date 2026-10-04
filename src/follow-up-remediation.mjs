@@ -1142,32 +1142,39 @@ async function prepareWorkspaceForJob({
     prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
     return prBranchMetadataPromise;
   };
-  // Refuse genuinely shared metadata before inspection can reset a workspace.
-  // A standalone clone with leftover worktree registrations is recoverable,
-  // but preserve its contents and require the expected remote before recloning.
+  // Check the workspace itself before any Git command can touch its target.
+  if (lstatSync(workspaceDir, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error(`Cannot safely prepare symlinked remediation workspace: ${workspaceDir}`);
+  }
+  // Preserve redirected metadata without running Git against the shared gitdir.
+  // A standalone clone with leftover registrations additionally needs the
+  // expected remote before we can move it aside without stranding foreign work.
   const existingGitDir = join(workspaceDir, '.git');
   const existingGitMetadata = lstatSync(existingGitDir, { throwIfNoEntry: false });
-  let preservedWorktreeRegistrations = false;
+  let preservedMetadataReason = null;
   if (existingGitMetadata) {
     if (!existingGitMetadata.isDirectory() || existsSync(join(existingGitDir, 'commondir'))) {
-      throw new Error(`Remediation workspace requires standalone Git metadata: ${workspaceDir}`);
-    }
-    if (existsSync(join(existingGitDir, 'worktrees'))) {
+      preservedMetadataReason = 'redirected-git-metadata';
+    } else if (existsSync(join(existingGitDir, 'worktrees'))) {
       const state = await inspectWorkspaceState({ workspaceDir, expectedRepo: repo, allowDirty: true, execFileImpl });
-      if (state.actualRepo !== repo || lstatSync(workspaceDir).isSymbolicLink()) {
-        throw new Error(`Cannot safely preserve remediation workspace with worktree registrations: ${workspaceDir}`);
+      if (state.actualRepo !== repo) {
+        const refusal = `Cannot safely preserve remediation workspace with worktree registrations: ${workspaceDir}; expected repo=${repo}, actual repo=${state.actualRepo || 'unknown'}`;
+        log.error?.(`[follow-up-remediation] ${refusal}`);
+        throw new Error(refusal);
       }
+      preservedMetadataReason = 'leftover-worktree-registrations';
+    }
+    if (preservedMetadataReason) {
       preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId: job.jobId,
-        reason: 'leftover-worktree-registrations', log });
-      preservedWorktreeRegistrations = true;
+        reason: preservedMetadataReason, log });
     }
   }
   const { workspaceState, resumeEligible } = await inspectWorkspaceForRetry({
     workspaceDir, workspaceRootDir, jobId: job.jobId, expectedRepo: repo, retryHistory, execFileImpl, log,
   });
-  if (preservedWorktreeRegistrations) {
+  if (preservedMetadataReason) {
     workspaceState.reset = true;
-    workspaceState.reason = 'leftover-worktree-registrations';
+    workspaceState.reason = preservedMetadataReason;
   }
 
   if (!existsSync(join(workspaceDir, '.git'))) {

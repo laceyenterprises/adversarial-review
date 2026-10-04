@@ -2328,16 +2328,19 @@ accept exactly `HAM` or `AMA-PR-<n>` (decimal digits), case-insensitively.
 `HAM-<suffix>`, `HAM anything`, and other prefix lookalikes do not qualify.
 Closer identity suppression, fast-merge changed-head verification, primary-change
 reversal authorization, and AMA terminal-remediation eligibility use this ticket
-predicate. `hamCommitIdentityMatches` shares the linked-login rule: accept a
-HAM author, or a HAM committer only with `Worker-Class: hammer` (including
+predicate. `hamCommitIdentityMatches` rejects any linked non-HAM author or
+committer. Otherwise, it accepts a HAM author, or an unlinked author with a
+HAM committer only with `Worker-Class: hammer` (including
 `hammer-corp` / `hammer-claude` for reversal authorization), a valid
 `Worker-Ticket`, and `Closed-By: hammer (adversarial-pipe-mode)`. This preserves
-legacy HAM commits whose GitHub author is unlinked while rejecting a foreign
-HAM committer stamped by a rebase without that provenance. Eligibility still
-requires its exact `Worker-Class: hammer` safety check. Closer suppression uses
+legacy HAM commits whose GitHub author is unlinked while rejecting a HAM
+committer stamped onto a linked foreign author, even with those trailers.
+Eligibility still requires its exact `Worker-Class: hammer` safety check. Closer suppression uses
 its narrower closer-login allowlist and requires a HAM ticket in its identity
-branch. Explicit `Closed-By` / `Closer` suppression remains a separate
-trailer-only path, including local Git reads without linked GitHub identity.
+branch, with no linked foreign committer. Merge-agent finalize/remediation
+commits with `Worker-Ticket: PR-<n>` and no recognized terminal trailer remain
+reviewable even when authored by `merge-agent-lacey`. Explicit `Closed-By` /
+`Closer` suppression remains a separate trailer-only path, including local Git reads without linked GitHub identity.
 Linked author and committer logins are email-based signals, not proof of the
 push actor; see the limitation in
 [`KNOWN-SHARP-EDGES.md`](../KNOWN-SHARP-EDGES.md#terminal-closer-trailers-are-not-identity-proof).

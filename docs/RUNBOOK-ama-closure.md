@@ -1213,17 +1213,32 @@ JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
 `primary-change-read-failed` rather than a proven reversal. The hammer prompt's
 90-second process limit still bounds the complete collection.
 
-A blocking finding may authorize a specific reversal. The HAM commit must carry
-`Reversal-Authorized-By: <review node id or URL> finding=<n>`, `Worker-Ticket: HAM`,
+A blocking finding may authorize a specific reversal. A non-blocking finding may
+also authorize one only when the effective `strict_non_blocking_remediation` policy
+is enabled; advisory findings in non-strict mode cannot waive preservation.
+All three evaluators pass the effective policy to the primary-change predicate:
+closure eligibility (`bin/ama-check.mjs`), the daemon's pre-lease and in-lease
+merge checks, and the hammer's in-lease GitHub gate (`bin/hammer-merge.sh`).
+The hammer gate resolves `loadConfigCached().getMergeAuthorityConfig()` on each
+live gate read, just as `ama-check` does, with strict remediation enabled unless
+`strictNonBlockingRemediation` is explicitly `false`. The HAM commit must carry
+`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=<blocking|non-blocking>]`, `Worker-Ticket: HAM`,
 and `Reviewed-Head` naming that review's head. The finding number is its one-based
-position in the Blocking issues section. The collector verifies authoritative
+position in the indicated section (blocking by default for legacy trailers).
+Emit one trailer per finding whose fix edits primary-change lines. Multiple
+trailers may cite the latest review from each authoritative reviewer family on
+the Reviewed-Head; another model does not supersede that family’s final review.
+Choose one literal kind (`kind=blocking` or `kind=non-blocking`). If cited reviews
+have different heads, split HAM commits by reviewed head, with one `Reviewed-Head`
+and its matching citations per commit.
+The collector verifies authoritative
 reviewer identity, review/commit ancestry inside the protected closure, live HAM
 commit patches, and File/Lines coverage of each reverted base line. Base coordinates
 are projected into the reviewed and commit-parent heads, accounting for line shifts.
 Equal-length replacements map by line position; unequal-length replacements and
 insertions require the finding to cover the entire projected span. A one-line
 finding cannot waive the uncited remainder of a contiguous author hunk.
-Non-blocking findings, unrelated regions, missing trailers and old reviews outside
+Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
@@ -1715,3 +1730,5 @@ The fresh verdict feeds normal AMA/hammer closure. A moved head stays held for
 that recovery, and a failed bounded review pages once through operator-blocked.
 Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
 `reported-pending`. The proven-head CI wait remains unchanged.
+
+HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.

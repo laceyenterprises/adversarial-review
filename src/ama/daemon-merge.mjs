@@ -251,6 +251,7 @@ function normalizeGateState(live = {}) {
   return {
     primaryChange: live.primaryChange,
     requirePrimaryChange: live.requirePrimaryChange,
+    strictNonBlockingRemediation: live.strictNonBlockingRemediation,
     candidateHead: String(live.candidateHead ?? live.headSha ?? live.headRefOid ?? '').trim(),
     requiredChecks: Array.isArray(live.requiredChecks)
       ? live.requiredChecks
@@ -542,6 +543,7 @@ export async function attemptDaemonCleanMerge({
   const preEligibility = evaluateEligibilityImpl({
     primaryChange: preLease.primaryChange,
     requirePrimaryChange: preLease.requirePrimaryChange,
+    strictNonBlockingRemediation: preLease.strictNonBlockingRemediation,
     verdict,
     operatorApprovedEvidence,
     operatorLogins,
@@ -737,6 +739,7 @@ export async function attemptDaemonCleanMerge({
     const elig = evaluateEligibilityImpl({
       primaryChange: live.primaryChange,
       requirePrimaryChange: live.requirePrimaryChange,
+      strictNonBlockingRemediation: live.strictNonBlockingRemediation,
       verdict,
       operatorApprovedEvidence,
       operatorLogins,

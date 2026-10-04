@@ -1237,6 +1237,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
   assert.deepEqual(observedLiveGate, {
     primaryChange: primaryChangeFixture(REVIEWED_HEAD),
     requirePrimaryChange: true,
+    strictNonBlockingRemediation: true,
     candidateHead: REVIEWED_HEAD,
     requiredChecks: [
       { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },

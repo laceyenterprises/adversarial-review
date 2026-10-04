@@ -21,6 +21,12 @@ export function amaAuthoritativeReviewerLoginsForModel(reviewerModel) {
   return AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL[route?.reviewerModel] || [];
 }
 
+export function amaReviewerFamilyForLogin(login) {
+  const normalized = String(login ?? '').replace(/\[bot\]$/, '');
+  return Object.entries(AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL)
+    .find(([, logins]) => logins.includes(normalized))?.[0] || null;
+}
+
 export function amaAllAuthoritativeReviewerLogins() {
   return [...new Set(Object.values(AMA_AUTHORITATIVE_REVIEWER_LOGINS_BY_MODEL).flat())];
 }
@@ -39,4 +45,27 @@ export async function latestAuthoritativeReviewInAncestry(reviews, headSha, comp
     }
     return entry;
   }
+}
+
+// Families may stack findings on one head, but no citation survives a newer
+// authoritative head in the parent ancestry, even from another family.
+export async function isCurrentAuthoritativeFamilyReview(review, reviews, headSha, compare) {
+  const family = amaReviewerFamilyForLogin(review?.user?.login);
+  if (!family) return false;
+  const latest = await latestAuthoritativeReviewInAncestry(reviews.filter((entry) =>
+    amaReviewerFamilyForLogin(entry.user?.login) === family), headSha, compare);
+  if (latest !== review) return false;
+  for (const entry of reviews) {
+    if (!amaReviewerFamilyForLogin(entry.user?.login)
+      || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
+      || entry.commit_id === review.commit_id) continue;
+    if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
+    const ancestry = await compare(entry.commit_id, headSha);
+    if (['behind', 'diverged'].includes(ancestry.status)) continue;
+    if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('cannot verify review ancestry');
+    const newer = await compare(review.commit_id, entry.commit_id);
+    if (newer.status === 'ahead') return false;
+    if (!['behind', 'diverged', 'identical'].includes(newer.status)) throw new Error('cannot verify review supersession');
+  }
+  return true;
 }

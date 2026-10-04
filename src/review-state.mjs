@@ -1093,7 +1093,9 @@ function requestReviewRereview({
   automaticMalformedRecovery = false,
   automaticWithheldHeadRecovery = false,
   inTransaction = false,
+  reviewerFamily = null,
 }) {
+  if (reviewerFamily !== null && !['claude', 'codex', 'gemini'].includes(reviewerFamily)) throw new Error('invalid reviewer family');
   const db = dbOverride || openReviewStateDb(rootDir);
   const normalizedTargetRevisionRef = String(targetRevisionRef || '').trim() || null;
 
@@ -1105,7 +1107,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, reviewerFamily, inTransaction: true,
       })).immediate();
     }
 
@@ -1173,6 +1175,7 @@ function requestReviewRereview({
     if (normalizedTargetRevisionRef) {
       resetParams.push(normalizedTargetRevisionRef);
     }
+    if (reviewerFamily) resetParams.push(reviewerFamily);
     resetParams.push(
       requestedAt,
       reason || 'Re-review requested from remediation reply.',
@@ -1184,6 +1187,7 @@ function requestReviewRereview({
       `UPDATE reviewed_prs
          SET pr_state = 'open',
              ${normalizedTargetRevisionRef ? 'revision_ref = ?,' : ''}
+             ${reviewerFamily ? 'reviewer = ?,' : ''}
              ${buildReviewStateResetAssignments({
                overrides: {
                  review_attempts: expectedFailedHead ? '0' : 'review_attempts',

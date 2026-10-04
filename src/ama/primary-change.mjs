@@ -1,11 +1,11 @@
-import { amaAllAuthoritativeReviewerLogins, latestAuthoritativeReviewInAncestry } from './reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
+import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
-import { hamAuditCommentAuthorMatches, parseCommitTrailers } from './ham-provenance.mjs';
+import { hamAuditCommentAuthorMatches, parseCommitTrailers, parseCommitTrailerValues } from './ham-provenance.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
@@ -189,35 +189,56 @@ function regionUnits(region) {
     }));
 }
 
-function reversalAuthorized(evidence, path, region, cache) {
+function reversalCitations(message) {
+  return (parseCommitTrailerValues(message)['reversal-authorized-by'] || [])
+    .map((value) => /^(\S+) finding=([1-9]\d*)(?: kind=(blocking|non-blocking))?$/.exec(value))
+    .filter(Boolean);
+}
+
+function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     try {
       const { commit, review, reviewedFiles, parentFiles } = authorization;
+      if (!cache.has(review)) cache.set(review, {
+        verdict: normalizeEffectiveReviewVerdict(review.body),
+        findings: { blocking: parseBlockingFindingsSection(review.body),
+          'non-blocking': parseNonBlockingFindingsSection(review.body) },
+      });
+      const parsedReview = cache.get(review);
       if (!isHammer(commit) || !trustedHammerCommit(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
         || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
-        || normalizeEffectiveReviewVerdict(review.body) !== 'request-changes'
+        || !['request-changes', 'approved', 'comment-only'].includes(parsedReview.verdict)
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
-      const trailers = parseCommitTrailers(commit.commit.message);
+      if (!cache.has(commit)) cache.set(commit, {
+        trailers: parseCommitTrailers(commit.commit.message), citations: reversalCitations(commit.commit.message),
+      });
+      const { trailers, citations } = cache.get(commit);
       if (trailers['worker-ticket'] !== 'HAM' || trailers['reviewed-head'] !== review.commit_id) return false;
-      const cite = /^(\S+) finding=([1-9]\d*)$/.exec(trailers['reversal-authorized-by'] || '');
-      if (!cite || ![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
-      const finding = parseBlockingFindingsSection(review.body)?.[Number(cite[2]) - 1];
-      if (!finding) return false;
-      const lines = /^`?(\d+)(?:\s*[-–]\s*(\d+))?`?$/.exec(finding.lines || '');
-      if (!lines) return false;
-      const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
-      if (cited.start < 1 || cited.end < cited.start) return false;
-      const reviewed = projectRegion(reviewedFiles, path, region, cache);
-      if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) return false;
-      const parent = projectRegion(parentFiles, path, region, cache);
-      if (!cache.has(commit.files)) cache.set(commit.files, { changes: changes(commit.files), paths: new Map() });
-      const touched = cache.get(commit.files).changes.get(parent.filename);
-      return Boolean(touched?.regions.some((other) => overlaps({ start: other.start, end: Math.max(other.start, other.end - 1) }, parent)));
+      return citations.some((cite) => {
+        if (![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
+        // Unqualified legacy citations retain their blocking-section meaning.
+        const kind = cite[3] || 'blocking';
+        if (kind === 'non-blocking' ? strictNonBlockingRemediation !== true
+          : parsedReview.verdict !== 'request-changes') return false;
+        const finding = parsedReview.findings[kind]?.[Number(cite[2]) - 1];
+        if (!finding) return false;
+        const lines = /^`?(\d+)(?:\s*[-–]\s*(\d+))?`?$/.exec(finding.lines || '');
+        if (!lines) return false;
+        const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
+        if (cited.start < 1 || cited.end < cited.start) return false;
+        const reviewed = projectRegion(reviewedFiles, path, region, cache);
+        if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) return false;
+        const parent = projectRegion(parentFiles, path, region, cache);
+        if (!cache.has(commit.files)) cache.set(commit.files, { changes: changes(commit.files), paths: new Map() });
+        const touched = cache.get(commit.files).changes.get(parent.filename);
+        return Boolean(touched?.regions.some((other) => overlaps({ start: other.start, end: Math.max(other.start, other.end - 1) }, parent)));
+      });
     } catch { return false; }
   });
 }
 
-export function checkPrimaryChange(evidence, headSha) {
+// Non-blocking waivers require an explicit effective strict-mode policy.
+export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemediation = false } = {}) {
   if (!evidence) return { ok: false, reason: 'primary-change-unknown' };
   if (evidence.headSha !== headSha || evidence.headMismatch) return { ok: false, reason: 'primary-change-read-failed' };
   if (evidence.readFailed === true) return { ok: false, reason: 'primary-change-read-failed' };
@@ -239,7 +260,7 @@ export function checkPrimaryChange(evidence, headSha) {
         && (!actual || isTestPath(actual.filename))) continue;
       if ((change.renamed && actual?.filename === path) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
-          && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache)))))) {
+          && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)))))) {
         return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
       }
       if (!actual) continue;
@@ -257,7 +278,7 @@ export function checkPrimaryChange(evidence, headSha) {
       const authorizedByText = new Map();
       for (const entry of change.regions.flatMap((region) => region.removedLines)) {
         if (!actualPositionsByText.get(entry.text)?.has(entry.position)
-          && reversalAuthorized(evidence, path, { start: entry.position, end: entry.position + 1 }, authorizationCache)) {
+          && reversalAuthorized(evidence, path, { start: entry.position, end: entry.position + 1 }, authorizationCache, strictNonBlockingRemediation)) {
           authorizedByText.set(entry.text, (authorizedByText.get(entry.text) || 0) + 1);
         }
       }
@@ -272,7 +293,7 @@ export function checkPrimaryChange(evidence, headSha) {
           if (!actual.regions.some((other) => unit.start === unit.end
             ? other.start <= unit.start && other.end >= unit.start
             : other.start < unit.end && other.end > unit.start)
-            && !reversalAuthorized(evidence, path, unit, authorizationCache)) {
+            && !reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)) {
             return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
           }
         }
@@ -339,6 +360,7 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     const mergeBase = primary.merge_base_commit?.sha;
     if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown;
     const reversalAuthorizations = [];
+    const authorizedPairs = new Set();
     const closure = history.commits.slice(history.commits.findIndex((commit) => commit.sha === primaryHead) + 1);
     const candidates = closure.filter((candidate) => isHammer(candidate)
       && parseCommitTrailers(candidate.commit.message)['reversal-authorized-by']);
@@ -349,34 +371,37 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     // If primaryHead is not listed (compare excludes its base), verify each
     // candidate's parent is descended from the protected author head.
     for (const candidate of candidates) {
-      try {
-        const trailers = parseCommitTrailers(candidate.commit.message);
-        const cite = /^(\S+) finding=([1-9]\d*)$/.exec(trailers['reversal-authorized-by']);
-        const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
-        if (!review || review.commit_id !== trailers['reviewed-head']) continue;
-        const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
-        if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
-          || !trustedHammerCommit(commit)
-          || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
-        const parentSha = commit.parents[0].sha;
-        const latest = await latestAuthoritativeReviewInAncestry(reviews, parentSha,
-          (from, to) => read(`repos/${repo}/compare/${from}...${to}`));
-        if (latest !== review) continue;
-        const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
-        const reviewInClosure = await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`);
-        const reviewAncestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
-        if (![inClosure, reviewInClosure, reviewAncestry].every((entry) => ['ahead', 'identical'].includes(entry.status))) continue;
-        const reviewed = await read(`repos/${repo}/compare/${mergeBase}...${review.commit_id}`);
-        const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
-        if (reviewed.merge_base_commit?.sha !== mergeBase || parent.merge_base_commit?.sha !== mergeBase) continue;
-        if (!Array.isArray(reviewed.files) || reviewed.files.length >= 300
-          || !Array.isArray(parent.files) || parent.files.length >= 300) continue;
-        reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
-      } catch (error) {
-        if (error?.primaryChangeReadFailed === true || error?.authOutage === true
-          || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
-        // A stale/deleted citation refuses only this waiver, never the whole
-        // protected author diff. Later candidates can still be evaluated.
+      const trailers = parseCommitTrailers(candidate.commit.message);
+      for (const cite of reversalCitations(candidate.commit.message)) {
+        try {
+          const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
+          if (!review || review.commit_id !== trailers['reviewed-head']) continue;
+          const pair = `${candidate.sha}:${review.node_id || review.html_url}`;
+          if (authorizedPairs.has(pair)) continue;
+          authorizedPairs.add(pair);
+          const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
+          if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
+            || !trustedHammerCommit(commit)
+            || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
+          const parentSha = commit.parents[0].sha;
+          if (!await isCurrentAuthoritativeFamilyReview(review, reviews, parentSha,
+            (from, to) => read(`repos/${repo}/compare/${from}...${to}`))) continue;
+          const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
+          const reviewInClosure = await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`);
+          const reviewAncestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
+          if (![inClosure, reviewInClosure, reviewAncestry].every((entry) => ['ahead', 'identical'].includes(entry.status))) continue;
+          const reviewed = await read(`repos/${repo}/compare/${mergeBase}...${review.commit_id}`);
+          const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
+          if (reviewed.merge_base_commit?.sha !== mergeBase || parent.merge_base_commit?.sha !== mergeBase) continue;
+          if (!Array.isArray(reviewed.files) || reviewed.files.length >= 300
+            || !Array.isArray(parent.files) || parent.files.length >= 300) continue;
+          reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
+        } catch (error) {
+          if (error?.primaryChangeReadFailed === true || error?.authOutage === true
+            || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
+          // A stale/deleted citation refuses only this waiver, never the whole
+          // protected author diff. Later candidates can still be evaluated.
+        }
       }
     }
     let testChanges = null;

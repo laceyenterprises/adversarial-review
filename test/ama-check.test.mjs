@@ -189,7 +189,7 @@ function hamCommitFixture({
 }
 
 function writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation = true }) {
-  const configPath = join(tmp, 'config.yaml');
+  const configPath = join(tmp, 'global.yaml');
   writeFileSync(configPath, `\
 version: 1
 roles:
@@ -336,7 +336,7 @@ function runAmaCheck(tmp, {
       '--reviewer', reviewer,
       '--risk-class', riskClass,
       '--repo', REPO,
-      ...(rootDir ? ['--root-dir', rootDir] : []),
+      '--root-dir', rootDir || tmp,
       ...extraArgs,
     ],
     {

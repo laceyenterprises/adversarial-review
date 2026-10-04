@@ -64,6 +64,7 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  *
  * Plain snapshot of already-fetched values. No field triggers I/O.
  *
+ * @property {boolean=} strictNonBlockingRemediation Effective policy for non-blocking reversal waivers.
  * @property {string=}  verdict         Normalized verdict token. Eligible when it is
  *                                      one of {@link ELIGIBLE_MERGE_VERDICTS}; else
  *                                      `verdict-not-eligible`.
@@ -242,7 +243,9 @@ function headMatches(state) {
 export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
   if (state.primaryChange || state.requirePrimaryChange === true) {
-    const intent = checkPrimaryChange(state.primaryChange, state.candidateHead);
+    const intent = checkPrimaryChange(state.primaryChange, state.candidateHead, {
+      strictNonBlockingRemediation: state.strictNonBlockingRemediation,
+    });
     if (!intent.ok) reasons.push(intent.reason);
   }
   const operatorOverride = hasOperatorApprovedOverride({

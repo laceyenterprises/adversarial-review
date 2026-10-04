@@ -3638,6 +3638,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL',
     aliases: [['HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL', identity]],
   },
+  'deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds': {
+    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+    aliases: [['HQ_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS', identity]],
+  },
   'deploy.post_merge_activation.hold_alert_budget_seconds': {
     canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS',
     aliases: [['HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS', identity]],

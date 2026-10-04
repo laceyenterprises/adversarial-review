@@ -2823,6 +2823,39 @@ test('post-merge activation rollout controls load through strict Node schema and
   }
 });
 
+test('post-merge activation boot resolve budget enforces bounds and environment overrides', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const key = 'deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds';
+    const writeBudget = (value) => writeFile(top, `version: 1
+deploy:
+  post_merge_activation:
+    baseline_worker_boot_resolve_budget_seconds: ${value}
+`);
+    for (const value of [1, 60]) {
+      writeBudget(value);
+      assert.equal(loadConfig({ topPath: top, env: {} }).get(key), value);
+    }
+    for (const value of [0, 61, 1.5]) {
+      writeBudget(value);
+      assert.throws(() => loadConfig({ topPath: top, env: {} }), AgentOSConfigError);
+    }
+    writeBudget(25);
+    for (const alias of [
+      'AGENT_OS_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+      'HQ_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+    ]) {
+      const cfg = loadConfig({ topPath: top, env: { [alias]: '30' } });
+      assert.equal(cfg.get(key), 30);
+      assert.equal(cfg.resolutionTrace(key).at(-1).source, `env:${alias}`);
+      assert.throws(() => loadConfig({ topPath: top, env: { [alias]: '61' } }), AgentOSConfigError);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates unknown nested post_deploy_verify keys and reads mirrored ones', () => {
   const tmp = freshTmp();
   try {

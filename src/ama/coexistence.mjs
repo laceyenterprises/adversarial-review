@@ -55,7 +55,7 @@ export const MERGE_AGENT_OPERATOR_FALLBACK_ENV_VALUE = 'true';
  *                                     Re-emitted here only for symmetry; the
  *                                     watcher returns immediately on it.
  *   ama-closer-pending                AMA dispatch is in-flight (lease held
- *                                     or pending status probe); watcher
+ *                                     for the exact head); watcher
  *                                     should NOT also dispatch merge-agent.
  *   merge-agent-operator-fallback     cfg.enabled=true AND a current-head
  *                                     non-author merge-agent-requested
@@ -117,7 +117,8 @@ export function isMergeAgentRequestedScoped(event, prMetadata) {
  * Decision precedence:
  *
  *   1. AMA fired → AMA-CLOSER (no merge-agent on this tick).
- *   2. AMA pending (lease/dispatch in-flight) → AMA-CLOSER-PENDING.
+ *   2. Scoped operator request preempts pending probes/background work.
+ *      A live exact-head closer lease retains AMA ownership.
  *   3. cfg.enabled=false → MERGE-AGENT-DEFAULT (current behavior).
  *   4. cfg.enabled=true + current-head non-author `merge-agent-requested`
  *      → MERGE-AGENT-OPERATOR-FALLBACK (with override env).
@@ -129,6 +130,7 @@ export function isMergeAgentRequestedScoped(event, prMetadata) {
  * @param {Object} args
  * @param {boolean} args.amaEnabled
  * @param {boolean} args.amaClosureDispatched
+ * @param {boolean=} args.amaCloserLeaseHeld Live closer lease for the exact head.
  * @param {boolean=} args.amaClosurePending
  * @param {boolean=} args.amaClosureEligibilityMiss
  * @param {boolean=} args.amaClosureRecoverableFailure
@@ -139,6 +141,7 @@ export function decideMergeAgentCoexistence({
   amaEnabled,
   amaClosureDispatched,
   amaClosurePending = false,
+  amaCloserLeaseHeld = false,
   amaClosureEligibilityMiss = false,
   amaClosureRecoverableFailure = false,
   mergeAgentRequestedScoped,
@@ -146,7 +149,10 @@ export function decideMergeAgentCoexistence({
   if (amaClosureDispatched) {
     return { action: COEXISTENCE_ACTION.AMA_CLOSER };
   }
-  if (amaClosurePending) {
+  if (amaEnabled && mergeAgentRequestedScoped && !amaCloserLeaseHeld) {
+    return { action: COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK };
+  }
+  if (amaClosurePending || amaCloserLeaseHeld) {
     return { action: COEXISTENCE_ACTION.AMA_CLOSER_PENDING };
   }
   if (!amaEnabled) {

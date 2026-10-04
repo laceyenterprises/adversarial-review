@@ -233,11 +233,12 @@ test('case 7: cfg.enabled=true + same-login current-head operator label → oper
 // dispatch is in-flight, the watcher must NOT also dispatch merge-agent.
 // ---------------------------------------------------------------------------
 
-test('amaClosurePending=true takes precedence over operator-fallback (no double dispatch)', () => {
+test('live exact-head closer lease takes precedence over operator-fallback (no double dispatch)', () => {
   const r = decideMergeAgentCoexistence({
     amaEnabled: true,
     amaClosureDispatched: false,
     amaClosurePending: true,
+    amaCloserLeaseHeld: true,
     mergeAgentRequestedScoped: true,
   });
   assert.equal(r.action, COEXISTENCE_ACTION.AMA_CLOSER_PENDING);
@@ -257,4 +258,11 @@ test('mergeAgentDispatchEnvForAction returns null for every non-fallback action'
   ]) {
     assert.equal(mergeAgentDispatchEnvForAction(action), null, `expected null for action=${action}`);
   }
+});
+
+test('scoped operator request preempts a background attempt or status probe', () => {
+  assert.equal(decideMergeAgentCoexistence({
+    amaEnabled: true, amaClosureDispatched: false, amaClosurePending: true,
+    mergeAgentRequestedScoped: true,
+  }).action, COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK);
 });

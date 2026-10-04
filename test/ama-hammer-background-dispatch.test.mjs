@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +13,7 @@ import {
   resetAmaHammerBackgroundQueueForTests,
   resolveAmaHammerDispatchMode,
 } from '../src/ama-hammer-background-dispatch.mjs';
-import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 
 function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
@@ -313,9 +314,9 @@ test('background mode: a slow hammer dispatch no longer holds the caller, and PR
   assert.equal(first.backgroundDispatch.key, `laceyenterprises/adversarial-review#265@${HEAD}`);
   assert.equal(calls, 1);
   assert.equal(
-    'signal' in seenPayloads[0],
+    seenPayloads[0].signal.aborted,
     false,
-    'background run is detached from the step deadline and passes no signal key (closer default applies)',
+    'background run uses its own cancellation signal, detached from the step deadline',
   );
 
   // Next tick, same PR@head, dispatch still running: no second `hq dispatch`.
@@ -499,4 +500,67 @@ test('background mode: a closer that throws is applied next tick as ama-dispatch
   const second = await maybeDispatchAmaClosureFor(args);
   assert.equal(second.dispatched, false);
   assert.equal(second.reason, 'ama-dispatch-failed');
+});
+
+test('#7681 replay: retained refusal dispatches operator fallback without another background run', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  const args = closureArgs();
+  const key = amaHammerBackgroundKey({ repo: args.repoPath, prNumber: args.prNumber, headSha: HEAD });
+  queue.submit({ key, run: async () => ({
+    dispatched: false, skipMergeAgent: true, needsOperator: true,
+    reason: 'primary-change-repair-required',
+  }) });
+  await queue.drain();
+  let calls = 0;
+  const run = (eventHead = HEAD) => resolveMergeAgentCoexistenceForWatcher({
+    ...args, labelNames: ['merge-agent-requested'],
+    mergeAgentRequestEvent: {
+      id: 'operator-event', actor: 'operator', headSha: eventHead,
+      createdAt: '2026-10-04T13:56:00Z',
+    },
+    maybeDispatchAmaClosureForImpl: (input) => maybeDispatchAmaClosureFor({
+      ...args, ...input,
+      resolveAmaHammerDispatchModeImpl: () => 'background',
+      amaHammerBackgroundQueueImpl: () => queue,
+      maybeDispatchAmaCloserImpl: async () => { calls += 1; throw new Error('must not dispatch'); },
+    }),
+    recoverAmaAutomationImpl: async ({ result }) => ({ outcome: 'await-operator', amaClosureResult: result }),
+  });
+  for (let walk = 0; walk < 3; walk += 1) {
+    const result = await run();
+    assert.equal(result.outcome, 'dispatch-merge-agent');
+    assert.deepEqual(result.dispatchEnv, { AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true' });
+  }
+  assert.equal((await run('stale-head')).outcome, 'await-operator');
+  assert.equal(calls, 0);
+  assert.deepEqual(queue.snapshot().keys, []);
+});
+
+test('a new head discards the retained refusal', async () => {
+  const queue = createAmaHammerBackgroundQueue();
+  queue.submit({ key: 'o/r#1@old', run: async () => ({
+    dispatched: false, needsOperator: true, reason: 'primary-change-repair-required',
+  }) });
+  await queue.drain();
+  assert.ok(queue.takeSettled('o/r#1@old'));
+  queue.submit({ key: 'o/r#1@new', run: async () => ({ dispatched: false }) });
+  await queue.drain();
+  assert.equal(queue.takeSettled('o/r#1@old'), null);
+});
+
+test('scoped request preserves live exact-head lease ownership', async () => {
+  const args = closureArgs();
+  acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repoPath,
+    prNumber: args.prNumber, headSha: HEAD, watcherPid: process.pid });
+  const result = await resolveMergeAgentCoexistenceForWatcher({
+    ...args, labelNames: ['merge-agent-requested'],
+    mergeAgentRequestEvent: { id: 'lease-event', actor: 'operator',
+      headSha: HEAD, createdAt: '2026-10-04T13:56:00Z' },
+    maybeDispatchAmaClosureForImpl: async () => ({
+      amaEnabled: true, dispatched: false, skipMergeAgent: true,
+      reason: AMA_HAMMER_BACKGROUND_REASON,
+    }),
+    recoverAmaAutomationImpl: async ({ result }) => ({ outcome: 'ama-pending', amaClosureResult: result }),
+  });
+  assert.equal(result.outcome, 'ama-pending');
 });

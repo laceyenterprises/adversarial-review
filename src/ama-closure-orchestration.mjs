@@ -38,7 +38,7 @@ import {
   protectivePredecessorMergeWindowFinding,
   resolveProtectivePredecessorDeclaration,
 } from './ama/protective-predecessor.mjs';
-import { recoverAmaAutomation } from './ama/automated-recovery.mjs';
+import { isSafetyRecoveryHold, recoverAmaAutomation } from './ama/automated-recovery.mjs';
 import { amaRetainLoopCapFor } from './kernel/convergence-budget.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
@@ -61,6 +61,7 @@ import {
 } from './daemon-route-disagreement.mjs';
 import {
   findLiveAmaCloserLease,
+  isHeldAmaCloserLease,
   rekeyAmaCloserLease,
 } from './ama/closer-lease.mjs';
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
@@ -1902,14 +1903,31 @@ export async function maybeDispatchAmaClosureFor({
       maxConcurrent: cfg.amaCloserMaxConcurrentLaunches,
     });
     backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
+    const scopedRequest = labelNames?.includes('merge-agent-requested')
+      && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
+        headSha: dispatchContext.targetRemediationSha,
+        prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+      });
+    if (scopedRequest) {
+      const held = isHeldAmaCloserLease(rootDir, {
+        repo: repoPath, prNumber, headSha: dispatchContext.targetRemediationSha,
+      });
+      if (held) return withAmaDispatchMetadata({
+        dispatched: false, skipMergeAgent: true, reason: 'lease-held',
+      }, { amaEnabled: true });
+      backgroundQueue.cancel?.(backgroundKey);
+      if (!backgroundSettled) return withAmaDispatchMetadata({
+        dispatched: false, skipMergeAgent: true, reason: AMA_HAMMER_BACKGROUND_REASON,
+      }, { amaEnabled: true });
+    }
     if (!backgroundSettled) {
       const submission = backgroundQueue.submit({
         key: backgroundKey,
         // Detached from this step's deadline on purpose: the whole point is that
         // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
-        // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). No `signal`
-        // key: the closer's default applies.
-        run: async () => {
+        // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). The
+        // cancellation signal belongs to this queue entry, not the step deadline.
+        run: async (backgroundSignal) => {
           // A saturated queue can hold this closure across several watcher
           // ticks. Recheck live state at launch, after it gets a queue slot.
           let live;
@@ -1940,7 +1958,10 @@ export async function maybeDispatchAmaClosureFor({
           if (liveMergeability !== 'MERGEABLE' && liveMergeability !== 'CONFLICTING') {
             return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
-          return maybeDispatchAmaCloserImpl({ ...closerArgs });
+          if (backgroundQueue.isCancelled?.(backgroundKey)) {
+            return { dispatched: false, reason: 'operator-fallback-requested' };
+          }
+          return maybeDispatchAmaCloserImpl({ ...closerArgs, signal: backgroundSignal });
         },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
           logger?.log?.(
@@ -2172,10 +2193,15 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
-  // Primary-change refusal requires an explicit operator adjudication. Honor
-  // the existing scoped fallback request, never a generic approval or outage.
-  if (['primary-change-needs-operator', 'primary-change-repair-required'].includes(amaClosureResult?.reason)
-    && amaClosureResult?.needsOperator === true
+  // Only explicit, scoped operator authority may preempt a safety refusal or
+  // a background/status attempt. Exact-head lease ownership still wins.
+  if (amaClosureResult?.amaEnabled
+    && (isSafetyRecoveryHold(amaClosureResult)
+      || [AMA_HAMMER_BACKGROUND_REASON, 'dispatch-status-unknown'].includes(amaClosureResult?.reason))
+    && !isHeldAmaCloserLease(rootDir, { repo: repoPath, prNumber,
+      headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha })
+    && !labelNames?.some((label) => ['merge-agent-skip', 'do-not-merge'].includes(label))
+    && !reviewStateRow?.remediation_pending
     && labelNames?.includes('merge-agent-requested')
     && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {
       headSha: currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null,

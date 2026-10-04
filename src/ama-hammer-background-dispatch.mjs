@@ -1,3 +1,4 @@
+import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
 import { effectiveCloserCap, warnCloserFloor } from './ama/closure-capacity.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
@@ -118,7 +119,7 @@ export function createAmaHammerBackgroundQueue({
     entry.startedAtMs = nowMs();
     let settled;
     try {
-      settled = Promise.resolve(entry.run());
+      settled = Promise.resolve(entry.run(entry.controller.signal));
     } catch (err) {
       settled = Promise.reject(err);
     }
@@ -152,6 +153,9 @@ export function createAmaHammerBackgroundQueue({
      * @returns {{state: 'started'|'queued'|'in-flight', key: string, queuedAtMs: number}}
      */
     submit({ key, run, onSettled = null }) {
+      for (const oldKey of settled.keys()) {
+        if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
+      }
       const existing = entries.get(key);
       if (existing) {
         // Report what the existing entry is actually doing: still waiting for a
@@ -162,7 +166,7 @@ export function createAmaHammerBackgroundQueue({
           queuedAtMs: existing.queuedAtMs,
         };
       }
-      const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null };
+      const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null, controller: new AbortController() };
       entries.set(key, entry);
       if (running < limit() && !runningPrKeys.has(entry.prKey)) {
         launch(entry);
@@ -172,17 +176,31 @@ export function createAmaHammerBackgroundQueue({
       return { state: 'queued', key, queuedAtMs: entry.queuedAtMs };
     },
     /**
-     * Remove and return the settled outcome for `key`
+     * Return the settled outcome for `key`, retaining safety refusals until
+     * the head changes (subject to the bounded map). Other outcomes are consumed.
+     * Return
      * (`{ ok, result | error, settledAtMs }`), or null when there is none or it
      * is older than `settledTtlMs`.
      */
     takeSettled(key) {
+      for (const oldKey of settled.keys()) {
+        if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
+      }
       const outcome = settled.get(key);
       if (!outcome) return null;
-      settled.delete(key);
-      if (nowMs() - outcome.settledAtMs > settledTtlMs) return null;
+      const refusal = outcome.ok && !outcome.result?.dispatched && isSafetyRecoveryHold(outcome.result);
+      if (!refusal) settled.delete(key);
+      if (!refusal && nowMs() - outcome.settledAtMs > settledTtlMs) return null;
       return outcome;
     },
+    cancel(key) {
+      const entry = entries.get(key);
+      if (entry) {
+        entry.cancelled = true;
+        entry.controller.abort();
+      }
+    },
+    isCancelled(key) { return entries.get(key)?.cancelled === true; },
     snapshot() {
       return {
         running,

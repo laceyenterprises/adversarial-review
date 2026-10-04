@@ -17,6 +17,7 @@
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
+import { observeOperatorLabelWakes } from './operator-label-wake.mjs';
 import { randomUUID } from 'node:crypto';
 import { resolveBuilderProvenanceRouting } from './builder-provenance-routing.mjs';
 import {
@@ -1100,6 +1101,15 @@ export async function processReviewSubject(entry, ctx) {
       // head, memoized in `argus_classified_head_sha`; a steady-state tick spends
       // no GitHub calls here at all.
       const argusOutcome = await routeSecuritySurfaceSafe(existing);
+
+      try {
+        await observeOperatorLabelWakes({
+          rootDir: ROOT, repo: repoPath, prNumber, subjectRef: subject.ref,
+          headSha: subject.headSha, labelNames: prLabelNames, operatorSurface,
+        });
+      } catch (err) {
+        console.warn(`[watcher] operator label wake failed for ${repoPath}#${prNumber}: ${err?.message || err}`);
+      }
 
       // PR-side `retrigger-remediation` label (post-2026-05-06):
       // mobile-friendly operator surface that mirrors

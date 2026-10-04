@@ -18,6 +18,8 @@
 // broadly across the monolith and remain defined there for its own callers;
 // the copies keep this leaf free of a circular import back into the monolith.
 
+import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
+
 import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, statSync } from 'node:fs';
@@ -1366,6 +1368,7 @@ async function processFastMergePR({
   }
 
   let mergeResult;
+  const mergeExecutedAt = isoNow();
   try {
     mergeResult = await mergeFastMergePr({
       ghClient,
@@ -1394,7 +1397,9 @@ async function processFastMergePR({
       }
       throw viewErr;
     }
-    if (postMergeView.state === 'MERGED' || postMergeView.mergedAt) {
+    if ((postMergeView.state === 'MERGED' || postMergeView.mergedAt) && postMergeView.headRefOid === exactHeadSha) {
+      // A refused request may race a human merge. Reconcile terminal state without
+      // claiming that this daemon executed the successful merge.
       const mergedAt = postMergeView.mergedAt || isoNow();
       let mergeSha = null;
       try {
@@ -1461,9 +1466,21 @@ async function processFastMergePR({
       currentHeadSha: preMergeView.headRefOid,
       refusalReason,
     }));
+    recordMergeActionBestEffort({ hqRoot: resolveHqRoot(env), repo, prNumber, headSha: exactHeadSha,
+      merged: false, reason: refusalReason, action: 'gh pr merge', executedAt: mergeExecutedAt }, logger);
     return { status: 'skipped_still_pending', reason: 'merge-refused', refusalReason };
   }
 
+  // A successful API response alone does not prove the exact head merged.
+  try {
+    const confirmed = await fetchFastMergePrView({ ghClient, repo, prNumber });
+    if ((confirmed.state === 'MERGED' || confirmed.mergedAt) && confirmed.headRefOid === exactHeadSha
+      && !mergeResult?.idempotent && !mergeResult?.data?.idempotent
+      && !/already merged/i.test(JSON.stringify(mergeResult))) {
+      recordMergeActionBestEffort({ hqRoot: resolveHqRoot(env), repo, prNumber, headSha: exactHeadSha,
+        merged: true, action: 'gh pr merge', executedAt: mergeExecutedAt }, logger);
+    }
+  } catch (error) { logger?.warn?.(`[merge-action] verification unavailable: ${error.message}`); }
   const mergedAt = isoNow();
   let mergeSha = null;
   try {

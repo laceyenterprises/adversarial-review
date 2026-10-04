@@ -551,7 +551,7 @@ test('transient gh pr merge failure then success → bounded retry, exactly one 
   assert.equal(result.attempts, 2);
   assert.equal(h.calls.merge, 2);
   assert.equal(h.calls.sleeps.length, 1, 'backed off exactly once');
-  assert.equal(h.calls.fetchLiveGate, 2, 're-read live head before each attempt');
+  assert.equal(h.calls.fetchLiveGate, 3, 're-read each attempt and verify the merge before writing a receipt');
 
   // Exactly ONE daemon-merge audit doc, with a single terminal succeeded entry.
   assert.equal(h.auditStore.size, 1);
@@ -963,4 +963,22 @@ test('strict non-blocking policy reaches both pre-lease and fresh in-lease prima
   }));
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
   assert.deepEqual(seen, [true, false]);
+});
+
+test('OPSEV1-03 daemon records only verified exact-head actions and executed refusals', async () => {
+  const receipts = [];
+  const h = makeHarness();
+  h.deps.fetchLiveGateImpl = async () => greenGate({ merged: h.calls.merge > 0 });
+  await attemptDaemonCleanMerge(baseArgs(h, { writeMergeActionImpl: (receipt) => receipts.push(receipt) }));
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].merged, true);
+  assert.equal(receipts[0].headSha, HEAD);
+  const refused = makeHarness({ mergeResults: [{ exitCode: 1, stderr: 'permission denied' }] });
+  await attemptDaemonCleanMerge(baseArgs(refused, { writeMergeActionImpl: (receipt) => receipts.push(receipt), receiptProducerClass: 'closer-hammer' }));
+  assert.equal(receipts.length, 2);
+  assert.equal(receipts[1].merged, false);
+  assert.equal(receipts[1].producerClass, 'closer-hammer');
+  const unknown = makeHarness();
+  await attemptDaemonCleanMerge(baseArgs(unknown, { writeMergeActionImpl: (receipt) => receipts.push(receipt) }));
+  assert.equal(receipts.length, 2);
 });

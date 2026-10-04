@@ -1,3 +1,4 @@
+import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -596,14 +597,36 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
   deleteBranch = true,
   admin = false,
 } = {}, options) {
-  return writeGitHubAdapter('pull-request-merge', {
-    repo,
-    prNumber,
-    matchHeadCommit,
-    mergeMethod,
-    deleteBranch,
-    admin,
-  }, options);
+  const env = options?.env || process.env;
+  const args = { hqRoot: env.HQ_ROOT, repo, prNumber, headSha: matchHeadCommit,
+    producerClass: 'ama-daemon', action: 'gh pr merge', executedAt: new Date().toISOString() };
+  let result;
+  try {
+    result = await writeGitHubAdapter('pull-request-merge', {
+      repo, prNumber, matchHeadCommit, mergeMethod, deleteBranch, admin,
+    }, options);
+  } catch (error) {
+    if (!adapterUnsupportedError(error)) {
+      recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' });
+    }
+    throw error;
+  }
+  if (result?.ran && (result.payload?.ok === true || result.payload?.merged === true || result.payload?.state === 'MERGED') && !result.payload?.idempotent
+    && !result.payload?.data?.idempotent && !/already merged/i.test(JSON.stringify(result.payload))) {
+    try {
+      // Read GitHub directly: the adapter's cached read is not terminal authority.
+      const live = await options.execFileImpl('gh', ['pr', 'view', String(prNumber), '--repo', repo,
+        '--json', 'state,headRefOid,mergedAt'], { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
+      const pr = JSON.parse(live.stdout);
+      if (pr.state === 'MERGED' && pr.headRefOid === matchHeadCommit && pr.mergedAt) {
+        recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: true });
+      }
+    } catch (error) { console.warn(`[merge-action] API post-merge verification unavailable: ${error.message}`); }
+  }
+  if (result?.ran && result.payload?.ok === false) {
+    recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' });
+  }
+  return result;
 }
 
 const __test__ = {

@@ -2,6 +2,7 @@
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_merge_phase() {
 HAM_PHASE_OUTCOME=merge-error
+HAM_OWN_MERGE_EXECUTED=0
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
   echo "AMG-04 hard-blocker: no hammer merge without holding the merge lease" >&2
   return 1
@@ -24,6 +25,17 @@ HAM_REMEDIATED_FINDINGS="${HAM_AUDIT_REMEDIATED_TOTAL:-} addressed (${HAM_AUDIT_
 ham_append_terminal_audit() {
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
+  # Record the exact executed decision before other bookkeeping can fail.
+  if [ "$ham_audit_outcome" = succeeded ]; then
+    ham_receipt_outcome=merged
+  else
+    ham_receipt_outcome=refused
+  fi
+  if [ "$ham_audit_outcome" != succeeded ] || [ "$HAM_OWN_MERGE_EXECUTED" -eq 1 ]; then
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-action-receipt.mjs \
+      <<HQ_ROOT>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" "$ham_receipt_outcome" "$ham_audit_reason" \
+      || echo "HAM warning: merge-action receipt unavailable; coverage remains pending" >&2
+  fi
   if [ "$ham_audit_outcome" != succeeded ]; then
     HAM_PHASE_OUTCOME="$ham_audit_reason"
   fi
@@ -681,6 +693,9 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?
   if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
+    if ! ham_merge_error_already_merged "$HAM_MERGE_STDOUT" && ! ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then
+      HAM_OWN_MERGE_EXECUTED=1
+    fi
     break
   fi
   if ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then

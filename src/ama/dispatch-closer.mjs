@@ -4788,6 +4788,7 @@ export async function maybeDispatchAmaCloser({
           sameHeadHamMergeReason = 'base-branch-missing';
         } else {
           sameHeadHamMerge = await attemptDaemonCleanMergeImpl({
+            receiptProducerClass: 'closer-hammer',
             repo,
             prNumber,
             base: baseBranch,

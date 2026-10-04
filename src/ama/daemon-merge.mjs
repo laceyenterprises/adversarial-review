@@ -46,6 +46,7 @@
  * @module ama/daemon-merge
  */
 
+import { recordMergeActionBestEffort } from './merge-action-receipt.mjs';
 import {
   appendAmaAuditAttempt,
   readAmaAuditEntry,
@@ -352,7 +353,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {number} [args.backoffBaseMs]
  * @returns {Promise<object>} `{ disposition, reason, permanent, merged, attempts, leaseAcquired, auditWritten, manualCloseRequired, reasons, liveGate }`.
  */
-export async function attemptDaemonCleanMerge({
+async function attemptDaemonCleanMergeInner({
   repo,
   prNumber,
   base,
@@ -1017,3 +1018,36 @@ export const __testables__ = Object.freeze({
   truncateDaemonMergeDiagnostic,
   PERMANENT_TERMINAL_REASONS,
 });
+
+// Verify live exact-head state before publishing success; exits without an attempt
+// (disabled authority, held leases, another merger) do not claim an automation action.
+export async function attemptDaemonCleanMerge(args = {}) {
+  let ownMergeExecuted = false;
+  let executedAt;
+  const result = await attemptDaemonCleanMergeInner({ ...args,
+    runMergeImpl: async (target) => {
+      const response = await args.runMergeImpl(target);
+      if (Number(response?.exitCode) === 0 && !/already merged/i.test(`${response?.stdout || ''} ${response?.stderr || ''}`)) {
+        ownMergeExecuted = true;
+        executedAt = new Date().toISOString();
+      }
+      return response;
+    },
+  });
+  const writer = args.writeMergeActionImpl || recordMergeActionBestEffort;
+  if (result.merged && ownMergeExecuted) {
+    try {
+      const live = normalizeGateState(await args.fetchLiveGateImpl());
+      if (live.merged && live.candidateHead === args.validatedHead) {
+        writer({ hqRoot: args.hqRoot, repo: args.repo, prNumber: args.prNumber,
+          headSha: args.validatedHead, merged: true, executedAt,
+          producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
+      }
+    } catch (error) { args.logger?.warn?.(`[merge-action] post-merge verification unavailable: ${error.message}`); }
+  } else if (!result.merged && result.leaseAcquired && result.reason !== 'gate-read-failed') {
+    writer({ hqRoot: args.hqRoot, repo: args.repo, prNumber: args.prNumber,
+      headSha: args.validatedHead, merged: false, reason: result.reason,
+      producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
+  }
+  return result;
+}

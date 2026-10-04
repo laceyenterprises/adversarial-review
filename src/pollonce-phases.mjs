@@ -1,3 +1,4 @@
+// HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
 // ARC-18: extracted per-PR processing phase of pollOnce (watcher.mjs).
 //
 // `processReviewSubject` is the body of the per-PR loop that pollOnce runs for
@@ -13,6 +14,8 @@
 // helpers/constants). Leaf helpers and prepared statements are imported directly
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
+import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
+import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { randomUUID } from 'node:crypto';
 import { resolveBuilderProvenanceRouting } from './builder-provenance-routing.mjs';
@@ -1264,27 +1267,72 @@ export async function processReviewSubject(entry, ctx) {
         execFileImpl: execFileAsync,
         logger: console,
       });
-      const stalePostedReviewSuppression = postedReviewHeadMoved
-        ? await getStalePostedReviewAutoRereviewSuppression({
-          rootDir: ROOT,
-          repoPath,
-          prNumber,
-          subjectRef: subject.ref,
-          currentRevisionRef: subject.ref.revisionRef,
-          currentHeadSha: subject.headSha,
-          labelNames: prLabelNames,
-          operatorSurface,
-          domainId,
-          execFileImpl: execFileAsync,
-          logger: console,
-        })
-        : { suppressed: false, reason: null };
-      const stalePostedReviewCloserSuppression =
-        postedReviewHeadMoved && !stalePostedReviewSuppression.suppressed
-          ? await resolveHeadCloserCommitSuppression()
+      let stalePostedReviewSuppression = { suppressed: false, reason: null };
+      let stalePostedReviewCloserSuppression = { suppressed: false, reason: null };
+      try {
+        const recoveryMatches = !subject.terminal ? withheldHeadRecoveryCandidates(ROOT, {
+          repo: repoPath, prNumber, headSha: subject.headSha, reviewRow: existing,
+        }) : [];
+        const withheldHeadRecovery = recoveryMatches.length > 0;
+        const recoveryArmed = recoveryMatches.some(({ job }) => {
+          const intent = job.completion?.withheldHeadReReview;
+          return intent && ((existing?.rereview_requested_at === intent.requestedAt && existing?.revision_ref === subject.headSha) ||
+            existing?.reviewer_head_sha === subject.headSha);
+        });
+        const needsRecoveryProbes = withheldHeadRecovery && !recoveryArmed;
+        stalePostedReviewSuppression = postedReviewHeadMoved || needsRecoveryProbes
+          ? await getStalePostedReviewAutoRereviewSuppression({
+            rootDir: ROOT,
+            repoPath,
+            prNumber,
+            subjectRef: subject.ref,
+            currentRevisionRef: subject.ref.revisionRef,
+            currentHeadSha: subject.headSha,
+            labelNames: prLabelNames,
+            operatorSurface,
+            domainId,
+            execFileImpl: execFileAsync,
+            logger: console,
+          })
           : { suppressed: false, reason: null };
+        stalePostedReviewCloserSuppression =
+          (postedReviewHeadMoved || needsRecoveryProbes) && !stalePostedReviewSuppression.suppressed
+            ? await resolveHeadCloserCommitSuppression()
+            : { suppressed: false, reason: null };
+        if (withheldHeadRecovery && !subject.terminal && !stalePostedReviewSuppression.suppressed &&
+            !stalePostedReviewCloserSuppression.suppressed) {
+          const recovered = db.transaction(() => recoverWithheldFinalRoundHead({
+            rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+            reviewRow: stmtGetReviewRow.get(repoPath, prNumber), matches: recoveryMatches,
+            terminalFailure: reviewRowInTerminalFailureState(existing, subject.headSha) &&
+              !infraRecoverableFailureClass(existing) &&
+              !(unknownReviewerCommandFailureClass(existing) && Number(existing?.review_attempts || 0) < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES) &&
+              !['wait', 'retry'].includes(reviewPopulationRetryDecision(existing, {
+                config: normalizeReviewPopulationRetryConfig(resolveReviewPopulationRetryConfig()), headSha: subject.headSha,
+              }).action),
+            request: (options) => requestReviewRereview({ ...options, db, inTransaction: true }),
+          })).immediate();
+          if (recovered?.page) {
+            const identity = { repo: repoPath, prNumber };
+            const fingerprint = `withheld-head-review:${subject.headSha}`;
+            recordNoProgressLaneRun(ROOT, identity, {
+              headSha: subject.headSha, fingerprint,
+              progressClass: 'operator-decision-required',
+              operatorReason: 'withheld-head-review-failed',
+            });
+            await maybeFireOperatorDecisionRequiredAlert({
+              rootDir: ROOT, identity, headSha: subject.headSha, fingerprint,
+              operatorReason: 'withheld-head-review-failed', noProgressTicks: 1,
+              thresholdTicks: 1, deliverAlertFn,
+            });
+          }
+          if (recovered?.triggered) existing = stmtGetReviewRow.get(repoPath, prNumber);
+        }
+      } catch (error) {
+        console.warn(`[watcher] Withheld-head recovery deferred for ${repoPath}#${prNumber}@${subject.headSha}: ${error?.message || error}`);
+      }
       const stalePostedReviewBudgetSuppression =
-        postedReviewHeadMoved &&
+        postedReviewHeadMoved && existing?.review_status === 'posted' &&
           !stalePostedReviewSuppression.suppressed &&
           !stalePostedReviewCloserSuppression.suppressed
           ? getStalePostedReviewBudgetSuppression({
@@ -1326,7 +1374,7 @@ export async function processReviewSubject(entry, ctx) {
         );
       } else if (postedReviewHeadMoved && finalRoundInProgress) {
         console.log(`[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: comment-only final round is in progress`);
-      } else if (postedReviewHeadMoved) {
+      } else if (postedReviewHeadMoved && existing?.review_status === 'posted') {
         try {
           const refreshResult = requestReviewRereview({
             rootDir: ROOT,

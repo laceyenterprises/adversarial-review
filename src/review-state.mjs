@@ -1091,6 +1091,7 @@ function requestReviewRereview({
   logger = console,
   expectedFailedHead = null,
   automaticMalformedRecovery = false,
+  automaticWithheldHeadRecovery = false,
   inTransaction = false,
 }) {
   const db = dbOverride || openReviewStateDb(rootDir);
@@ -1104,7 +1105,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, inTransaction: true,
       })).immediate();
     }
 
@@ -1113,9 +1114,9 @@ function requestReviewRereview({
     // resetting it here would let that pass overwrite the terminal verdict.
     // Read the captured pass body, not the mutable row's reviewer label.
     const currentRow = getReviewRow(db, { repo, prNumber });
-    const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(reason);
+    const operatorRequestedRereview = isExplicitOperatorRetriggerReason(reason);
     const targetHead = normalizedTargetRevisionRef;
-    if (targetHead && !explicitOperatorRetrigger) {
+    if (targetHead && !operatorRequestedRereview) {
       const settledBodies = db.prepare(
         `SELECT verdict, body_md FROM reviewer_passes
           WHERE repo = ? AND pr_number = ? AND head_sha = ?
@@ -1131,14 +1132,14 @@ function requestReviewRereview({
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }
     }
-    if (targetHead && !explicitOperatorRetrigger &&
+    if (targetHead && !operatorRequestedRereview &&
         hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }
-    if (targetHead && !explicitOperatorRetrigger &&
+    if (targetHead && !operatorRequestedRereview && !automaticWithheldHeadRecovery &&
         hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
-      logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}@${targetHead}: unproven comment-only final-round head is held for the operator`);
+      logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: unproven comment-only final-round push`);
       return buildBlockedRereviewResult('comment-only-final-round-push-unproven', currentRow);
     }
 
@@ -1255,12 +1256,13 @@ function requestReviewRereview({
     }
     if (reviewRow.review_status === 'pending') {
       const normalizedReason = reason || 'Re-review requested from remediation reply.';
-      const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason);
+      // Reuse the genuine operator classification above; automatic recovery can
+      // record a moved-head request but cannot reset an already pending head.
       const currentRevisionRef = String(reviewRow.revision_ref || reviewRow.reviewer_head_sha || '');
       const pendingRevisionRefMoved =
         normalizedTargetRevisionRef &&
         currentRevisionRef !== normalizedTargetRevisionRef;
-      if (explicitOperatorRetrigger || pendingRevisionRefMoved) {
+      if (operatorRequestedRereview || pendingRevisionRefMoved) {
         const pendingAssignments = [
           // RCA 2026-08-17: a lease-released row whose head/revision moved is
           // a legitimate fresh review and must not inherit the poisoned attempt
@@ -1287,7 +1289,7 @@ function requestReviewRereview({
           pendingAssignments.push('revision_ref = ?');
           pendingParams.push(normalizedTargetRevisionRef);
         }
-        if (explicitOperatorRetrigger) {
+        if (operatorRequestedRereview || automaticWithheldHeadRecovery) {
           pendingAssignments.push('rereview_requested_at = ?');
           pendingAssignments.push('rereview_reason = ?');
           pendingParams.push(requestedAt, normalizedReason);

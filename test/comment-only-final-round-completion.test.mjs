@@ -4,7 +4,7 @@ import {
   classifyFinalRoundOperationalBlockers,
   resolveCommentOnlyFinalRoundCompletion,
 } from '../src/comment-only-final-round-completion.mjs';
-import { validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
+import { normalizeCiPendingOnlyReply, validateRemediationReply } from '../src/kernel/remediation-reply.mjs';
 
 const reviewedHead = '1'.repeat(40);
 const pushedHead = '2'.repeat(40);
@@ -185,7 +185,7 @@ test('non-final jobs are untouched', async () => {
   assert.equal(probes.length, 0);
 });
 
-test('a completed final round whose moved head cannot be proven alerts and records the held head', async () => {
+test('a completed final round whose moved head cannot be proven records the head for automatic review', async () => {
   const foreignHead = '3'.repeat(40);
   const { result, alerts, warnings } = await resolve({
     reply: { outcome: 'completed', blockers: [], operationalBlockers: [] },
@@ -195,17 +195,14 @@ test('a completed final round whose moved head cannot be proven alerts and recor
       : pushedWorkspaceExec()(command, args)),
   });
   assert.equal(result.workerPushedHeadSha, null);
-  assert.equal(result.completed, true, 'the worker outcome stands; the head is held, not re-reviewed');
+  assert.equal(result.completed, true, 'the worker outcome stands; the head requires automatic review');
   assert.equal(result.completionFields.withheldPushHeadSha, foreignHead);
   assert.match(result.completionFields.finalRoundOutcome.push, /^live-head-mismatch/);
-  assert.equal(alerts.length, 1);
-  assert.equal(alerts[0].event, 'adversarial_review.comment_only_final_round_push_unproven');
-  assert.equal(alerts[0].payload.liveHeadSha, foreignHead);
-  assert.match(alerts[0].text, /could not be proven \(live-head-mismatch/);
+  assert.equal(alerts.length, 0);
   assert.match(warnings.join('\n'), /Withholding final-round push proof for example\/repo#42: live-head-mismatch/);
 });
 
-test('a contamination-audit failure withholds the proof, names the reason, and alerts on a moved head', async () => {
+test('a contamination-audit failure withholds the proof, names the reason for automatic review', async () => {
   const { result, alerts } = await resolve({
     reply: { outcome: 'completed', blockers: [], operationalBlockers: [] },
     audit: { suspect: [{ sha: 'abc', subject: 'dup' }], error: null },
@@ -213,7 +210,7 @@ test('a contamination-audit failure withholds the proof, names the reason, and a
   assert.equal(result.workerPushedHeadSha, null);
   assert.equal(result.completionFields.finalRoundOutcome.push, 'branch-contamination-audit-failed');
   assert.equal(result.completionFields.withheldPushHeadSha, pushedHead);
-  assert.equal(alerts.length, 1);
+  assert.equal(alerts.length, 0);
 });
 
 const completedReply = { outcome: 'completed', blockers: [], operationalBlockers: [] };
@@ -285,7 +282,7 @@ test('a transient failure that outlasts the in-process retries leaves the job re
   assert.equal(expired.result.retryLater, undefined);
   assert.equal(expired.result.completionFields.finalRoundOutcome.push, 'branch-contamination-audit-failed');
   assert.equal(expired.result.completionFields.withheldPushHeadSha, pushedHead);
-  assert.equal(expired.alerts.length, 1);
+  assert.equal(expired.alerts.length, 0);
 });
 
 test('a non-transient audit error withholds at once, without retrying', async () => {
@@ -297,5 +294,22 @@ test('a non-transient audit error withholds at once, without retrying', async ()
   });
   assert.equal(sleeps, 0);
   assert.equal(result.completionFields.finalRoundOutcome.push, 'branch-contamination-audit-failed');
-  assert.equal(alerts.length, 1);
+  assert.equal(alerts.length, 0);
+});
+
+
+test('HELDHEAD-01 pending-only CI reply is work-complete even when replay proof is withheld', async () => {
+  const reply = normalizeCiPendingOnlyReply({
+    outcome: 'blocked', summary: `Pushed ${pushedHead}; findings fixed.`, validation: [],
+    blockers: [], operationalBlockers: [{ kind: 'pending-ci', title: 'Repo Guards',
+      finding: 'PR-head CI remains pending.', needsHumanInput: 'Human intervention required' }],
+    reReview: { requested: false },
+  }, { expectedJob: finalRoundJob() });
+  const { result } = await resolve({ reply, execFileImpl: async (command, args) =>
+    command === 'git' && args.includes('cherry')
+      ? { stdout: `+ ${reviewedHead}\n` } : pushedWorkspaceExec()(command, args) });
+  assert.equal(result.completed, true);
+  assert.equal(result.completionFields.finalRoundOutcome.ciState, 'reported-pending');
+  assert.equal(result.completionFields.withheldPushHeadSha, pushedHead);
+  assert.equal(result.workerPushedHeadSha, null);
 });

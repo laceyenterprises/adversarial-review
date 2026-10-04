@@ -1569,6 +1569,7 @@ test('REMCIPENDING-01 normalizes pending titles and finding text after a reporte
   for (const blocker of [
     ...fixture.operationalBlockers,
     { title: 'pending-ci', finding: 'Checks queued.' },
+    { kind: 'pending-ci', title: 'Repo Guards', finding: 'PR-head CI remains pending.', needsHumanInput: 'Human intervention required' },
     { title: 'pr-head-ci-pending', finding: 'Checks pending.' },
     { finding: 'The check remained pending.' },
     { finding: 'CI was in progress after the bounded CI wait.' },

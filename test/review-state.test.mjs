@@ -1,6 +1,7 @@
+import { recoverWithheldFinalRoundHead } from '../src/comment-only-final-round.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -1274,3 +1275,132 @@ for (const [name, body, status, expected] of [
     } finally { db.close(); }
   });
 }
+
+
+function withheldHeadFixture(t, { status = 'posted', archived = false } = {}) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'heldhead-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const head = '5'.repeat(40);
+  const repo = 'example/repo';
+  const jobId = 'example__repo-pr-7689-final';
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', archived ? 'stopped-archived/2026-10' : 'stopped');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = path.join(dir, `${jobId}.json`);
+  writeFileSync(jobPath, JSON.stringify({
+    jobId, repo, prNumber: 7689, status: 'stopped', finalRound: 'comment-only',
+    revisionRef: 'e'.repeat(40), reReview: { suppressed: 'comment-only-final-round' },
+    completion: { withheldPushHeadSha: head,
+      finalRoundOutcome: { completed: false, push: 'reviewed-commit-not-replayed e97991190cc6' } },
+  }));
+  insertReviewRow(rootDir, { repo, prNumber: 7689, reviewStatus: status, reviewerHeadSha: 'e'.repeat(40), revisionRef: 'e'.repeat(40) });
+  const db = openReviewStateDb(rootDir);
+  t.after(() => db.close());
+  const tick = (overrides = {}) => db.transaction(() => recoverWithheldFinalRoundHead({
+    rootDir, repo, prNumber: 7689, headSha: head,
+    reviewRow: db.prepare('SELECT * FROM reviewed_prs').get(),
+    request: (options) => requestReviewRereview({ ...options, db, inTransaction: true }),
+    ...overrides,
+  })).immediate();
+  return { rootDir, repo, head, jobPath, db, tick };
+}
+
+test('HELDHEAD-01 #7689 replay resets exactly one withheld exact head and pages once on failure', (t) => {
+  const { head, db, tick } = withheldHeadFixture(t);
+  assert.equal(tick({ headSha: '6'.repeat(40) }), null);
+  assert.equal(tick({ owned: true }), null);
+  assert.equal(tick({ terminal: true }), null);
+  assert.equal(tick().triggered, true);
+  assert.equal(db.prepare('SELECT revision_ref FROM reviewed_prs').get().revision_ref, head);
+  assert.equal(tick().triggered, false);
+  db.prepare("UPDATE reviewed_prs SET review_status = 'failed', reviewer_head_sha = ?").run(head);
+  assert.equal(tick().page, undefined, 'normal failed-review retry may still recover');
+  assert.equal(tick({ terminalFailure: true }).page, true);
+  assert.equal(tick({ terminalFailure: true }).page, true, 'delivery failure remains retryable');
+});
+
+for (const status of ['posted', 'pending']) {
+  for (const failure of ['request-before-reset', 'request-after-reset', 'commit']) {
+    test(`HELDHEAD-01 retries the same intent after ${failure} rolls back a ${status} row`, (t) => {
+      const { db, tick, head, jobPath } = withheldHeadFixture(t, { status });
+      const before = db.prepare('SELECT * FROM reviewed_prs').get();
+      const requestedAt = '2026-10-04T14:00:00.000Z';
+      if (failure === 'commit') {
+        db.pragma('foreign_keys = ON');
+        db.exec(`CREATE TABLE commit_parent (id INTEGER PRIMARY KEY);
+          CREATE TABLE commit_child (parent_id INTEGER REFERENCES commit_parent(id)
+            DEFERRABLE INITIALLY DEFERRED)`);
+      }
+      assert.throws(() => tick({ requestedAt, request: (options) => {
+        if (failure === 'request-before-reset') throw new Error('transient request failure');
+        const result = requestReviewRereview({ ...options, db, inTransaction: true });
+        if (failure === 'request-after-reset') throw new Error('transient request failure');
+        // Deferred constraints fail at COMMIT, after recovery has returned.
+        db.prepare('INSERT INTO commit_child (parent_id) VALUES (1)').run();
+        return result;
+      } }), failure === 'commit' ? /FOREIGN KEY constraint failed/ : /transient request failure/);
+      assert.deepEqual(db.prepare('SELECT * FROM reviewed_prs').get(), before);
+      const intent = JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview;
+      assert.equal(intent.requestedAt, requestedAt);
+      assert.equal(intent.alertedAt, undefined);
+
+      const recovered = tick({ requestedAt: '2026-10-04T14:02:00.000Z' });
+      assert.equal(recovered.page, undefined);
+      const row = db.prepare('SELECT * FROM reviewed_prs').get();
+      assert.equal(row.review_status, 'pending');
+      assert.equal(row.revision_ref, head);
+      assert.equal(row.rereview_requested_at, requestedAt);
+      assert.deepEqual(JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview, intent);
+      assert.equal(tick({ request: () => assert.fail('committed recovery must not reset again') }).triggered, false);
+      db.prepare("UPDATE reviewed_prs SET review_status = 'failed', reviewer_head_sha = ?").run(head);
+      assert.equal(tick({ requestedAt: '2026-10-04T14:03:00.000Z', terminalFailure: true }).page, true);
+      const paged = JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview;
+      assert.equal(paged.requestedAt, requestedAt);
+      assert.equal(paged.alertedAt, undefined, 'no delivery acknowledgment has happened');
+      assert.equal(tick().page, undefined);
+    });
+  }
+}
+
+test('HELDHEAD-01 missing job and absent archive defer recovery without crashing or resetting', (t) => {
+  const { rootDir, tick, jobPath, db } = withheldHeadFixture(t);
+  const contents = readFileSync(jobPath, 'utf8');
+  const target = path.join(rootDir, 'terminal-job.json');
+  writeFileSync(target, contents);
+  rmSync(jobPath);
+  symlinkSync(target, jobPath);
+  // Warm the real scan cache. Removing the symlink target leaves the directory
+  // metadata unchanged, reproducing a job disappearing after the scan.
+  assert.equal(tick({ headSha: '6'.repeat(40) }), null);
+  rmSync(target);
+  assert.deepEqual(tick({ request: () => assert.fail('missing job must not reset') }), {
+    triggered: false, reason: 'terminal-job-missing',
+  });
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  writeFileSync(target, contents);
+  assert.equal(tick().triggered, true);
+});
+
+test('HELDHEAD-01 recovery locates and updates an archived stopped job', (t) => {
+  const { tick, jobPath } = withheldHeadFixture(t, { archived: true });
+  assert.equal(tick().triggered, true);
+  assert.ok(JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview);
+  assert.equal(tick().triggered, false);
+});
+
+for (const status of ['posted', 'pending']) {
+  test(`HELDHEAD legacy ${status} exact-head review is preserved without an intent`, (t) => {
+    const { head, db, tick, jobPath } = withheldHeadFixture(t, { status });
+    db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = ?').run(head);
+    assert.equal(tick({ request: () => assert.fail('exact-head review must not reset') }).reason, 'already-reviewed');
+    assert.equal(JSON.parse(readFileSync(jobPath, 'utf8')).completion.withheldHeadReReview, undefined);
+  });
+}
+
+test('HELDHEAD automatic request retains settled comment-only verdict guard', (t) => {
+  const { rootDir, repo, head, db } = withheldHeadFixture(t);
+  db.prepare(`INSERT INTO reviewer_passes (repo, pr_number, head_sha, reviewer_class, attempt_number, started_at, metadata_json, pass_kind, status, verdict)
+    VALUES (?, 7689, ?, 'claude', 1, '2026-10-04T00:00:00Z', '{}', 'first-pass', 'completed', 'comment-only')`).run(repo, head);
+  const result = requestReviewRereview({ rootDir, repo, prNumber: 7689, targetRevisionRef: head,
+    reason: 'system-held-head-review: recovery', automaticWithheldHeadRecovery: true, db });
+  assert.equal(result.reason, 'comment-only-verdict-settled');
+});

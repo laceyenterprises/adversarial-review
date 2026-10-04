@@ -737,7 +737,7 @@ function normalizeCiPendingOnlyReply(reply, { expectedJob = null } = {}) {
     const title = String(entry.title || '').trim().toLowerCase();
     if (OPERATIONAL_BLOCKER_TITLES.has(title)) return false;
     if (/contamination|stale.{0,15}head|lease.{0,15}reject|auth.{0,15}(?:fail|missing)|(?:fetch|rebase|push).{0,15}(?:fail|reject|conflict)/i.test(entry.finding)) return false;
-    return ['ci-pending', 'pending-ci', 'pr-head-ci-pending'].includes(title)
+    return entry.kind === OPERATIONAL_BLOCKER_KIND_PENDING_CI || ['ci-pending', 'pending-ci', 'pr-head-ci-pending'].includes(title)
       || /\b(?:checks?|ci|repo-guards)\b[^.]*\b(?:pending|queued|in[ -]progress)\b/i.test(entry.finding)
       || /\bin[ -]progress after (?:the )?bounded CI wait\b/i.test(entry.finding);
   };

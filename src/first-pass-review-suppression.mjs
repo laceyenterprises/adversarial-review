@@ -10,7 +10,7 @@ import {
 } from './review-ceiling-metrics.mjs';
 import { REVIEWER_CYCLE_CAP_REACHED_LABEL } from './review-cycle-cap.mjs';
 import { isAutomaticReviewCycleCapPause, normalizeLabelNames } from './review-cycle-cap-actions.mjs';
-import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
+import { isExplicitOperatorRetriggerReason, isExactHeadReviewRecoveryReason } from './retrigger-review-reason.mjs';
 import {
   stmtMarkFailed,
   stmtReleaseReviewLease,
@@ -224,7 +224,7 @@ export function resolveFirstPassReviewBudgetSuppression({
     hasPostedReviewEvidence &&
     !hasExpiredOrMissingReviewLease &&
     !hasUnresolvedFailure;
-  if (currentHeadAlreadyReviewed && !isExplicitOperatorReviewRetrigger(reviewRow)) {
+  if (currentHeadAlreadyReviewed && !isExactHeadReviewRecoveryRequested(reviewRow)) {
     return {
       suppressed: true,
       reason: 'same-head-already-reviewed',
@@ -292,8 +292,14 @@ export function resolveFirstPassReviewBudgetSuppression({
 export const getStalePostedReviewBudgetSuppression = resolveFirstPassReviewBudgetSuppression;
 
 export function isExplicitOperatorReviewRetrigger(reviewRow = null) {
+  return isExactHeadReviewRecoveryRequested(reviewRow)
+    && isExplicitOperatorRetriggerReason(reviewRow?.rereview_reason);
+}
+
+// System recovery still opens the exact-head budget lane, with no closer override.
+export function isExactHeadReviewRecoveryRequested(reviewRow = null) {
   return Boolean(
     reviewRow?.rereview_requested_at
-    && isExplicitOperatorRetriggerReason(reviewRow.rereview_reason)
+    && isExactHeadReviewRecoveryReason(reviewRow.rereview_reason)
   );
 }

@@ -46,7 +46,7 @@
  * @module ama/daemon-merge
  */
 
-import { recordMergeActionBestEffort } from './merge-action-receipt.mjs';
+import { isExecutedMergeRefusal, recordMergeActionBestEffort } from './merge-action-receipt.mjs';
 import {
   appendAmaAuditAttempt,
   readAmaAuditEntry,
@@ -1044,7 +1044,8 @@ export async function attemptDaemonCleanMerge(args = {}) {
           producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);
       }
     } catch (error) { args.logger?.warn?.(`[merge-action] post-merge verification unavailable: ${error.message}`); }
-  } else if (!result.merged && result.leaseAcquired && result.reason !== 'gate-read-failed') {
+  } else if (!result.merged && !ownMergeExecuted && result.leaseAcquired && result.permanent
+    && isExecutedMergeRefusal(result.reason)) {
     writer({ hqRoot: args.hqRoot, repo: args.repo, prNumber: args.prNumber,
       headSha: args.validatedHead, merged: false, reason: result.reason,
       producerClass: args.receiptProducerClass || 'ama-daemon' }, args.logger);

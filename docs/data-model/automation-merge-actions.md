@@ -4,7 +4,7 @@
 **Store:** `$HQ_ROOT/dispatch/audit/automation-merge-actions/`
 **Source of truth:** `src/ama/merge-action-receipt.mjs`
 **Runtime surface:** `bin/merge-action-receipt.mjs`, `src/github-adapter-client.mjs`,
-`src/ama/daemon-merge.mjs`, `src/fast-merge-processing.mjs`
+`src/ama/daemon-merge.mjs`, `src/fast-merge-processing.mjs`, `bin/hammer-merge.sh`
 
 ## Purpose and identity
 
@@ -29,6 +29,38 @@ PR/head tuple alone. There is no in-place update or deletion by the writer.
 | `merged` | boolean | Whether this producer executed a verified merge. |
 | `reason` | string or null | Required and non-empty for refusal; defaults to null for success. |
 | `executedAt` | timestamp string | Parseable date; defaults to the writer's current ISO timestamp. |
+
+## Receipt ownership and executed refusals
+
+A merge operation has one receipt owner. Direct adapter callers use the adapter
+seam by default. `writeAdapterPullRequestMerge` accepts `recordReceipt: false`
+in its options to delegate all receipt writing and confirmation to the caller.
+Fast-merge uses this option: `processFastMergePR` alone records the final outcome
+across adapter, admin fallback and transport retries. A successful adapter merge
+or a successful admin fallback therefore publishes one success receipt, with no
+intermediate adapter refusals. Reconciliation of a manual merge at any head
+updates terminal state without claiming automation execution.
+
+An executed refusal is an explicit negative merge decision, not an unknown
+outcome. The shared `isExecutedMergeRefusal` helper admits these closure reasons:
+`permanent-merge-rejection`, `builder-token-merge-refused`,
+`predicate-not-eligible`, `gate-not-eligible`, `github-gate-red`,
+`github-gate-not-green`, and `primary-change-reverted`. These include deliberate
+policy/eligibility decisions under a held lease, even before calling GitHub.
+The daemon additionally requires a permanent decision and no accepted merge.
+The hammer CLI filters all other refusal reasons. Superseded and deferred
+hammer outcomes, gate-read failures, gate timeouts, transient retry exhaustion,
+unknown primary-change state, unclassified errors and failed confirmation reads
+supply no refusal receipt. A zero merge exit status or accepted-merge marker
+prevents the hammer from writing a refusal even if confirmation later fails;
+the closure audit still records the deferred outcome.
+
+At the adapter seam, a returned `ok: false` is refusal evidence only when it is
+neither transient nor an already-merged/idempotent response. Thrown errors must
+contain a parsed JSON payload with `ok: false` and `failureClass: "permanent"`,
+with the same exclusions. Unstructured, timeout and transport errors supply no
+receipt. Callers can pass `producerClass`, `hqRoot` and `logger` in the adapter
+options; defaults remain `ama-daemon`, `env.HQ_ROOT` and `console`.
 
 ## Publication and failure behavior
 

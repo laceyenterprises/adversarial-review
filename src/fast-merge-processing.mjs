@@ -696,9 +696,14 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, roo
           deleteBranch: true,
           admin: true,
         },
-        { execFileImpl, env: process.env, rootDir }
+        { execFileImpl, env: process.env, rootDir, recordReceipt: false }
       );
-      if (adapterResult?.ran === true) return adapterResult.payload;
+      if (adapterResult?.ran === true) {
+        if (adapterResult.payload?.ok === false) {
+          throw Object.assign(new Error('Adapter refused fast-merge'), { stdout: JSON.stringify(adapterResult.payload) });
+        }
+        return adapterResult.payload;
+      }
     } catch (err) {
       logger?.warn?.(
         `[follow-up-merge-agent] fast-merge adapter merge failed for ${repo}#${prNumber}; falling back to gh --admin: ${err?.message || err}`
@@ -1397,7 +1402,7 @@ async function processFastMergePR({
       }
       throw viewErr;
     }
-    if ((postMergeView.state === 'MERGED' || postMergeView.mergedAt) && postMergeView.headRefOid === exactHeadSha) {
+    if (postMergeView.state === 'MERGED' || postMergeView.mergedAt) {
       // A refused request may race a human merge. Reconcile terminal state without
       // claiming that this daemon executed the successful merge.
       const mergedAt = postMergeView.mergedAt || isoNow();

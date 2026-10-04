@@ -92,7 +92,9 @@ test('API merge seam records verified merges and refused exact-head writes', asy
     const options = { env: { HQ_ROOT: root, GHA_ADAPTER_BIN: '/fixture/github-adapter' },
       execFileImpl: async (bin) => {
         if (bin === 'gh') return { stdout: JSON.stringify({ state: 'MERGED', headRefOid: 'a'.repeat(40), mergedAt: new Date().toISOString() }) };
-        if (refuse) throw new Error('head mismatch');
+        if (refuse) throw Object.assign(new Error('head mismatch'), {
+          stderr: JSON.stringify({ ok: false, failureClass: 'permanent', error: 'head mismatch' }),
+        });
         return { stdout: JSON.stringify({ ok: true }) };
       } };
     await writeAdapterPullRequestMerge('test/repo', 7, { matchHeadCommit: 'a'.repeat(40) }, options);
@@ -172,6 +174,72 @@ for (const scenario of [
       assert.equal(viewCalls, scenario.attempts);
       const directory = join(root, 'dispatch/audit/automation-merge-actions');
       assert.equal(fs.existsSync(directory) ? readdirSync(directory).length : 0, scenario.receipts);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const scenario of [
+  { name: 'unstructured merge error', error: new Error('head mismatch'), receipts: 0 },
+  { name: 'transport timeout', error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }), receipts: 0 },
+  { name: 'structured transient error', error: Object.assign(new Error('adapter failed'), { stderr: JSON.stringify({ ok: false, failureClass: 'transient', error: 'HTTP 503' }) }), receipts: 0 },
+  { name: 'already merged at revision', error: Object.assign(new Error('adapter failed'), { stderr: JSON.stringify({ ok: false, failureClass: 'permanent', error: 'already merged', matchHeadCommit: 'a'.repeat(40) }) }), receipts: 0, finalization: true },
+  { name: 'returned permanent refusal', payload: { ok: false, reason: 'head mismatch' }, receipts: 1 },
+  { name: 'returned transient failure', payload: { ok: false, error: 'HTTP 503' }, receipts: 0 },
+  { name: 'returned transient class without prose', payload: { ok: false, failureClass: 'transient' }, receipts: 0 },
+  { name: 'returned transport code without prose', payload: { ok: false, code: 'ECONNRESET' }, receipts: 0 },
+  { name: 'returned unsupported operation', payload: { ok: false, failureClass: 'unsupported', code: 'unsupported_command' }, receipts: 0 },
+  { name: 'returned idempotent refusal', payload: { ok: false, idempotent: true }, receipts: 0 },
+  { name: 'returned already merged', payload: { ok: false, reason: 'already merged' }, receipts: 0 },
+  { name: 'caller owns permanent refusal', payload: { ok: false }, receipts: 0, recordReceipt: false },
+  { name: 'caller owns thrown permanent refusal', error: Object.assign(new Error('head mismatch'), { stderr: JSON.stringify({ ok: false, failureClass: 'permanent' }) }), receipts: 0, recordReceipt: false },
+]) {
+  test(`adapter receipt: ${scenario.name}`, async () => {
+    const { writeAdapterPullRequestMerge } = await import('../src/github-adapter-client.mjs');
+    const root = mkdtempSync(join(tmpdir(), 'adapter-refusal-'));
+    try {
+      mkdirSync(join(root, '.hq'));
+      writeFileSync(join(root, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
+      const execFileImpl = async () => {
+        if (scenario.error) throw scenario.error;
+        return { stdout: JSON.stringify(scenario.payload) };
+      };
+      const options = { hqRoot: root, producerClass: 'closer-hammer',
+        logger: { warn() {} }, env: { HQ_ROOT: scenario.finalization ? root : undefined, GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+        execFileImpl, recordReceipt: scenario.recordReceipt };
+      if (scenario.finalization) {
+        const { createGithubAdapterMergeSurface } = await import('../src/finalization/execution-surfaces.mjs');
+        const result = await createGithubAdapterMergeSurface(options).merge({
+          subjectExternalId: 'test/repo#7', revisionRef: 'a'.repeat(40),
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.payload.idempotent, true);
+      } else {
+        const result = writeAdapterPullRequestMerge('test/repo', 7, { matchHeadCommit: 'a'.repeat(40) }, options);
+        if (scenario.error) await assert.rejects(result, error => error === scenario.error);
+        else await result;
+      }
+      const directory = join(root, 'dispatch/audit/automation-merge-actions');
+      const receipts = fs.existsSync(directory) ? readdirSync(directory) : [];
+      assert.equal(receipts.length, scenario.receipts);
+      if (receipts.length) {
+        const receipt = JSON.parse(readFileSync(join(directory, receipts[0])));
+        assert.equal(receipt.merged, false);
+        assert.equal(receipt.producerClass, 'closer-hammer');
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const reason of ['github-gate-read-failed', 'github-gate-timeout', 'merge-retry-budget-exhausted',
+  'primary-change-unknown', 'unclassified-merge-failure', 'merge-confirmation-read-failed-after-merge-accepted']) {
+  test(`hammer receipt CLI excludes ${reason}`, async () => {
+    const { spawnSync } = await import('node:child_process');
+    const root = mkdtempSync(join(tmpdir(), 'hammer-no-refusal-'));
+    try {
+      const result = spawnSync(process.execPath, [new URL('../bin/merge-action-receipt.mjs', import.meta.url).pathname,
+        root, 'test/repo', '7', 'a'.repeat(40), 'refused', reason], { timeout: 5000 });
+      assert.equal(result.status, 0, String(result.stderr));
+      assert.deepEqual(readdirSync(root), []);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 }

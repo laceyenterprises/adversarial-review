@@ -4,6 +4,16 @@ import { closeSync, fchmodSync, fchownSync, fsyncSync, linkSync, lstatSync, mkdi
 import { join } from 'node:path';
 import { userInfo } from 'node:os';
 
+// Positive decision evidence only. Unknown outcomes, read failures and stale
+// heads remain in the closure audit, never in the executed-refusal store.
+export function isExecutedMergeRefusal(reason) {
+  return [
+    'permanent-merge-rejection', 'builder-token-merge-refused',
+    'predicate-not-eligible', 'gate-not-eligible',
+    'github-gate-red', 'github-gate-not-green', 'primary-change-reverted',
+  ].includes(reason);
+}
+
 function trusted(path, uid, directory = false) {
   const info = lstatSync(path);
   if (info.uid !== uid || (info.mode & 0o022) || !(directory ? info.isDirectory() : info.isFile())) {

@@ -1,5 +1,5 @@
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -592,6 +592,15 @@ async function writeAdapterPullRequestLabel(repo, prNumber, { action, labelName 
   return writeGitHubAdapter('pull-request-label', { repo, prNumber, action, labelName }, options);
 }
 
+function adapterMergeRefused(payload) {
+  return payload?.ok === false && !payload.merged && payload.state !== 'MERGED'
+    && !payload.idempotent && !payload.data?.idempotent
+    && !isUnsupportedOperationPayload(payload)
+    && !['transient', 'retryable'].includes(payload.failureClass)
+    && !/already merged/i.test(JSON.stringify(payload))
+    && !isTransientGhError({ code: payload.code, stderr: JSON.stringify(payload) });
+}
+
 async function writeAdapterPullRequestMerge(repo, prNumber, {
   matchHeadCommit,
   mergeMethod = 'squash',
@@ -599,19 +608,31 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
   admin = false,
 } = {}, options) {
   const env = options?.env || process.env;
-  const args = { hqRoot: env.HQ_ROOT, repo, prNumber, headSha: matchHeadCommit,
-    producerClass: 'ama-daemon', action: 'gh pr merge', executedAt: new Date().toISOString() };
+  const logger = options?.logger || console;
+  const args = { hqRoot: options?.hqRoot ?? env.HQ_ROOT, repo, prNumber, headSha: matchHeadCommit,
+    producerClass: options?.producerClass || 'ama-daemon', action: 'gh pr merge', executedAt: new Date().toISOString() };
   let result;
   try {
     result = await writeGitHubAdapter('pull-request-merge', {
       repo, prNumber, matchHeadCommit, mergeMethod, deleteBranch, admin,
     }, options);
   } catch (error) {
-    if (!adapterUnsupportedError(error)) {
-      recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' });
+    if (options?.recordReceipt !== false && !adapterUnsupportedError(error) && !isTransientGhError(error)) {
+      // A failed subprocess is not a refusal. Require a permanent structured
+      // adapter decision; timeouts and already-merged replies prove no refusal.
+      for (const output of [error.stdout, error.stderr]) {
+        let payload;
+        try { payload = JSON.parse(String(output)); } catch { continue; }
+        if (payload?.failureClass === 'permanent' && adapterMergeRefused(payload)) {
+          recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' }, logger);
+          break;
+        }
+      }
     }
     throw error;
   }
+  // Callers with fallback/retry paths own the final receipt for the operation.
+  if (options?.recordReceipt === false) return result;
   if (result?.ran && (result.payload?.ok === true || result.payload?.merged === true || result.payload?.state === 'MERGED') && !result.payload?.idempotent
     && !result.payload?.data?.idempotent && !/already merged/i.test(JSON.stringify(result.payload))) {
     try {
@@ -624,12 +645,12 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
       });
       const pr = JSON.parse(live.stdout);
       if (pr.state === 'MERGED' && pr.headRefOid === matchHeadCommit && pr.mergedAt) {
-        recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: true });
+        recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: true }, logger);
       }
-    } catch (error) { console.warn(`[merge-action] API post-merge verification unavailable: ${error.message}`); }
+    } catch (error) { logger?.warn?.(`[merge-action] API post-merge verification unavailable: ${error.message}`); }
   }
-  if (result?.ran && result.payload?.ok === false) {
-    recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' });
+  if (result?.ran && adapterMergeRefused(result.payload)) {
+    recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: false, reason: 'adapter-merge-refused' }, logger);
   }
   return result;
 }

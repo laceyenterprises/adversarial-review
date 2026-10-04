@@ -40,7 +40,12 @@ dispatcher debugging), see
 
 Merge execution evidence (OPSEV1-03) is appended under
 `$HQ_ROOT/dispatch/audit/automation-merge-actions/` by the daemon, fast-merge
-adapter paths and hammer. Success receipts require live confirmation of the
+adapter paths and hammer. Fast-merge owns its receipt across the adapter and
+admin fallback, disabling publication at the adapter seam. Refusal receipts
+require an explicit permanent rejection or eligibility/policy decision under a
+held lease; read failures, transient exhaustion, superseded/deferred outcomes
+and accepted-but-unconfirmed merges remain closure-audit evidence only.
+Success receipts require live confirmation of the
 producer's exact PR head; an already-merged response does not represent another
 execution. The hammer CLI and adapter confirmation retry transient `gh pr view`
 failures up to three times with 500/1000ms backoff and a 15-second timeout per

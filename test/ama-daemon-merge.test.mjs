@@ -982,3 +982,16 @@ test('OPSEV1-03 daemon records only verified exact-head actions and executed ref
   await attemptDaemonCleanMerge(baseArgs(unknown, { writeMergeActionImpl: (receipt) => receipts.push(receipt) }));
   assert.equal(receipts.length, 2);
 });
+
+for (const failure of ['TLS handshake timeout', 'unrecognized merge error']) {
+  test(`daemon does not turn ${failure} into refusal evidence`, async () => {
+    const h = makeHarness({ mergeResults: [{ exitCode: 1, stderr: failure }] });
+    const receipts = [];
+    const result = await attemptDaemonCleanMerge(baseArgs(h, {
+      retryCap: 1, writeMergeActionImpl: receipt => receipts.push(receipt),
+    }));
+    assert.equal(result.merged, false);
+    assert.equal(h.calls.merge, 1);
+    assert.equal(receipts.length, 0);
+  });
+}

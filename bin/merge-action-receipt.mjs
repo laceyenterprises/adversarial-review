@@ -3,11 +3,12 @@
 import { chmodSync, chownSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
+import { isExecutedMergeRefusal, writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 
 const [hqRoot, repo, number, headSha, outcome, reason = ''] = process.argv.slice(2);
 if (!['merged', 'refused'].includes(outcome)) throw new Error('Invalid receipt outcome');
+if (outcome === 'refused' && !isExecutedMergeRefusal(reason)) process.exit(0);
 const record = { repo, prNumber: Number(number), headSha, merged: outcome === 'merged',
   reason: reason || null, executedAt: new Date().toISOString(), producerClass: 'closer-hammer',
   actor: 'hammer', action: 'gh pr merge', receiptProtocol: 'OPSEV1-03' };

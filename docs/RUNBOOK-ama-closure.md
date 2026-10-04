@@ -38,6 +38,17 @@ dispatcher debugging), see
 
 ## 1. Prerequisites
 
+Merge execution evidence (OPSEV1-03) is appended under
+`$HQ_ROOT/dispatch/audit/automation-merge-actions/` by the daemon, fast-merge
+adapter paths and hammer. Success receipts require live confirmation of the
+producer's exact PR head; an already-merged response does not represent another
+execution. The hammer CLI and adapter confirmation retry transient `gh pr view`
+failures up to three times with 500/1000ms backoff and a 15-second timeout per
+attempt. After exhaustion, the adapter warns and retains its merge result; the
+CLI exits non-zero. Receipt publication failures do not grant or revoke merge
+authority. For schema, ownership, append-only publication and isolated-worker
+handoff, see [Automation Merge Actions](data-model/automation-merge-actions.md).
+
 - **AMA-01..AMA-07 + AMA-06A + AMA-06N merged** and main-catchup floated
   to the deploy checkout. Verify the runtime code is live by
   checking that the deploy checkout's

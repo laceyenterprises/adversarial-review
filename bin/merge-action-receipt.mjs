@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Workers append requests in their own sandbox. Only HQ-owner teardown publishes.
-import { execFileSync } from 'node:child_process';
 import { chmodSync, chownSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { writeMergeActionReceipt } from '../src/ama/merge-action-receipt.mjs';
+import { execGhWithRetry } from '../src/gh-cli.mjs';
 
 const [hqRoot, repo, number, headSha, outcome, reason = ''] = process.argv.slice(2);
 if (!['merged', 'refused'].includes(outcome)) throw new Error('Invalid receipt outcome');
@@ -12,8 +12,11 @@ const record = { repo, prNumber: Number(number), headSha, merged: outcome === 'm
   reason: reason || null, executedAt: new Date().toISOString(), producerClass: 'closer-hammer',
   actor: 'hammer', action: 'gh pr merge', receiptProtocol: 'OPSEV1-03' };
 if (record.merged) {
-  const live = JSON.parse(execFileSync('gh', ['pr', 'view', number, '--repo', repo, '--json', 'state,headRefOid,mergedAt'],
-    { encoding: 'utf8', timeout: 15_000 }));
+  const { stdout } = await execGhWithRetry({
+    args: ['pr', 'view', number, '--repo', repo, '--json', 'state,headRefOid,mergedAt'],
+    timeoutMs: 15_000,
+  });
+  const live = JSON.parse(stdout);
   if (live.state !== 'MERGED' || live.headRefOid !== headSha || !live.mergedAt
     || Math.abs(Date.parse(live.mergedAt) - Date.parse(record.executedAt)) > 120_000) {
     throw new Error('Merge-action requires a verified recent exact-head merge');

@@ -2,6 +2,20 @@
   "version": 1,
   "entries": [
     {
+      "id": "automation-merge-actions",
+      "title": "Automation Merge Actions",
+      "path": "docs/data-model/automation-merge-actions.md",
+      "store": "$HQ_ROOT/dispatch/audit/automation-merge-actions/",
+      "schemaSurface": "src/ama/merge-action-receipt.mjs",
+      "relatedSchemaSurfaces": [
+        "bin/merge-action-receipt.mjs",
+        "src/github-adapter-client.mjs",
+        "src/ama/daemon-merge.mjs",
+        "src/fast-merge-processing.mjs"
+      ],
+      "owner": "AMA merge execution evidence (OPSEV1-03)"
+    },
+    {
       "id": "ama-closure-lag",
       "title": "AMA Closure Lag",
       "path": "docs/data-model/ama-closure-lag.md",

@@ -64,10 +64,11 @@ function isTransientGhError(err) {
   if (!err) return false;
   if (err.killed === true && (err.signal === 'SIGTERM' || err.signal === 'SIGKILL')) return true;
   const code = String(err.code || '');
-  if (code === 'ETIMEDOUT' || code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ENOTFOUND') return true;
+  if (code === 'EIO' || code === 'ETIMEDOUT' || code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'ENOTFOUND') return true;
   const stderr = String(err.stderr || err.message || '');
   if (/timeout/i.test(stderr)) return true;
   if (/TLS handshake/i.test(stderr)) return true;
+  if (/connection reset|socket hang up|unexpected EOF|network is unreachable/i.test(stderr)) return true;
   if (/HTTP\s+5\d\d/i.test(stderr)) return true;
   if (/HTTP\s+429/i.test(stderr)) return true;
   if (/rate limit|secondary rate limit|too many requests|resource unavailable/i.test(stderr)) return true;

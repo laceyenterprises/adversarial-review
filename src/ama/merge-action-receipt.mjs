@@ -36,11 +36,14 @@ export function writeMergeActionReceipt({ hqRoot, repo, prNumber, headSha, produ
   const target = join(directory, `${repo.replace('/', '-')}-pr-${prNumber}-${headSha}-${randomUUID()}.json`);
   const fd = openSync(temporary, 'wx', 0o640);
   try {
-    fchmodSync(fd, 0o640);
-    fchownSync(fd, identity.uid, lstatSync(hqRoot).gid);
-    writeFileSync(fd, `${JSON.stringify(record)}\n`);
-    fsyncSync(fd);
-    closeSync(fd);
+    try {
+      fchmodSync(fd, 0o640);
+      fchownSync(fd, identity.uid, lstatSync(hqRoot).gid);
+      writeFileSync(fd, `${JSON.stringify(record)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     linkSync(temporary, target);
     trusted(target, identity.uid);
     const dirFd = openSync(directory, 'r');

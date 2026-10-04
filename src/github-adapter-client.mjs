@@ -1,4 +1,5 @@
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -615,8 +616,12 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
     && !result.payload?.data?.idempotent && !/already merged/i.test(JSON.stringify(result.payload))) {
     try {
       // Read GitHub directly: the adapter's cached read is not terminal authority.
-      const live = await options.execFileImpl('gh', ['pr', 'view', String(prNumber), '--repo', repo,
-        '--json', 'state,headRefOid,mergedAt'], { env, timeout: 15_000, maxBuffer: 1024 * 1024 });
+      const live = await execGhWithRetry({
+        execFileImpl: options?.execFileImpl,
+        args: ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid,mergedAt'],
+        env,
+        timeoutMs: 15_000,
+      });
       const pr = JSON.parse(live.stdout);
       if (pr.state === 'MERGED' && pr.headRefOid === matchHeadCommit && pr.mergedAt) {
         recordMergeActionBestEffort({ ...args, executedAt: new Date().toISOString(), merged: true });

@@ -2789,6 +2789,7 @@ test('post-merge activation rollout controls load through strict Node schema and
           enforce: false
           dispatch_on_fail: false
           baseline_worker_boot_probe_interval_seconds: 1200
+          baseline_worker_boot_resolve_budget_seconds: 25
           hold_alert_budget_seconds: 6000
           hold_alert_consecutive_passes: 4
     `);
@@ -2806,6 +2807,7 @@ test('post-merge activation rollout controls load through strict Node schema and
     assert.equal(cfg.get('deploy.post_merge_activation.enforce'), true);
     assert.equal(cfg.get('deploy.post_merge_activation.dispatch_on_fail'), true);
     assert.equal(cfg.get('deploy.post_merge_activation.baseline_worker_boot_probe_interval_seconds'), 1200);
+    assert.equal(cfg.get('deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds'), 25);
     assert.equal(cfg.get('deploy.post_merge_activation.hold_alert_budget_seconds'), 7200);
     assert.equal(cfg.get('deploy.post_merge_activation.hold_alert_consecutive_passes'), 5);
     assert.equal(
@@ -2816,6 +2818,39 @@ test('post-merge activation rollout controls load through strict Node schema and
       cfg.resolutionTrace('deploy.post_merge_activation.hold_alert_consecutive_passes').at(-1).source,
       'env:HQ_POST_MERGE_ACTIVATION_HOLD_ALERT_CONSECUTIVE_PASSES',
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('post-merge activation boot resolve budget enforces bounds and environment overrides', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const key = 'deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds';
+    const writeBudget = (value) => writeFile(top, `version: 1
+deploy:
+  post_merge_activation:
+    baseline_worker_boot_resolve_budget_seconds: ${value}
+`);
+    for (const value of [1, 60]) {
+      writeBudget(value);
+      assert.equal(loadConfig({ topPath: top, env: {} }).get(key), value);
+    }
+    for (const value of [0, 61, 1.5]) {
+      writeBudget(value);
+      assert.throws(() => loadConfig({ topPath: top, env: {} }), AgentOSConfigError);
+    }
+    writeBudget(25);
+    for (const alias of [
+      'AGENT_OS_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+      'HQ_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+    ]) {
+      const cfg = loadConfig({ topPath: top, env: { [alias]: '30' } });
+      assert.equal(cfg.get(key), 30);
+      assert.equal(cfg.resolutionTrace(key).at(-1).source, `env:${alias}`);
+      assert.throws(() => loadConfig({ topPath: top, env: { [alias]: '61' } }), AgentOSConfigError);
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

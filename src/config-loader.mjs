@@ -527,6 +527,12 @@ function schemaV1() {
                 __type: TYPE_BOOL,
                 __default: false,
               },
+              baseline_worker_boot_resolve_budget_seconds: {
+                __type: TYPE_INT,
+                __default: 20,
+                __min: 1,
+                __max: 60,
+              },
               baseline_worker_boot_probe_interval_seconds: {
                 __type: TYPE_INT,
                 __default: 1800,
@@ -3631,6 +3637,10 @@ export const ENV_ALIASES = {
   'deploy.post_merge_activation.dispatch_on_fail': {
     canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL',
     aliases: [['HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL', identity]],
+  },
+  'deploy.post_merge_activation.baseline_worker_boot_resolve_budget_seconds': {
+    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS',
+    aliases: [['HQ_POST_MERGE_ACTIVATION_BASELINE_WORKER_BOOT_RESOLVE_BUDGET_SECONDS', identity]],
   },
   'deploy.post_merge_activation.hold_alert_budget_seconds': {
     canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_HOLD_ALERT_BUDGET_SECONDS',

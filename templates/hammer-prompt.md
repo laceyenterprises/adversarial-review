@@ -164,10 +164,18 @@ proof) to a temporary file. Run the existing exact-head re-review path through:
 
 ```bash
 DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
+if /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
   --root-dir <<ROOT_DIR>> --repo <<REPO>> --pr <<PR_NUMBER>> \
   --head-sha "$DISPUTED_HEAD" --review '<review node id or URL>' \
-  --finding '<n>' --evidence-file "$HAM_DISPUTE_EVIDENCE_FILE"
+  --finding '<n>' --evidence-file "$HAM_DISPUTE_EVIDENCE_FILE"; then
+  :
+else
+  DISPUTE_RC=$?
+  if [ "$DISPUTE_RC" = 78 ] || [ "$DISPUTE_RC" = 79 ]; then
+    echo 'Finding dispute refused its daemon-owner or HAM-identity preflight. Preserve the evidence file, record no-merge status and hand off to the canonical owner with the existing HAM identity.' >&2
+  fi
+  exit "$DISPUTE_RC"
+fi
 ```
 
 The helper posts the evidence comment tied to the finding before requesting

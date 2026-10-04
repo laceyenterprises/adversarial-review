@@ -11,7 +11,12 @@ import { loadConfigRuntime } from '../src/config-loader.mjs';
 const { values } = parseArgs({ options: Object.fromEntries(
   ['root-dir', 'repo', 'pr', 'head-sha', 'review', 'finding', 'evidence-file'].map((key) => [key, { type: 'string' }])) });
 const rootDir = primaryChangeRoot({ rootDir: values['root-dir'] });
-assertFindingDisputeOwner(rootDir);
+try {
+  assertFindingDisputeOwner(rootDir);
+} catch (error) {
+  process.stderr.write(`${JSON.stringify({ event: 'ama_finding_dispute_owner_refused', reason: error.message, exitCode: 78 })}\n`);
+  process.exit(78);
+}
 const db = openReviewStateDb(rootDir);
 try {
   ensureReviewStateSchema(db);
@@ -26,4 +31,8 @@ try {
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (!result.triggered && result.status !== 'pending') process.exitCode = 1;
+} catch (error) {
+  if (!error.message.includes('trusted HAM provenance')) throw error;
+  process.stderr.write(`${JSON.stringify({ event: 'ama_finding_dispute_identity_refused', reason: error.message, exitCode: 79 })}\n`);
+  process.exitCode = 79;
 } finally { db.close(); }

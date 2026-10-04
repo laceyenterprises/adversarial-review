@@ -15,8 +15,9 @@ timeout. At `count >= 3`, the transaction changes `paged` from zero to one and
 only that winner emits `ama_primary_change_refusal_exhausted` and sends a SEV1
 page. The guard survives process restarts and is scoped to one PR head.
 
-`paged` records a reserved delivery attempt, not an acknowledged page: a pager
-failure after the commit does not retry the page. Store and pager exceptions are
+`paged` reserves an in-flight durable enqueue. A successful enqueue retains the
+guard; a failed enqueue releases it before rethrowing, so the next observation
+retries without resetting the count. It does not claim transport delivery. Store and pager exceptions are
 logged by the closer and cannot release `skipMergeAgent: true`. The daemon parks
 before the closer and never writes this store. Recovery is described in
 [the AMA runbook](../RUNBOOK-ama-closure.md#primary-change-evidence-authorization-and-disputes-hamintent-02--lac-1833).

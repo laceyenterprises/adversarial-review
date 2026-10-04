@@ -917,3 +917,11 @@ Check in this order:
 5. worker log
 
 That order usually gets you to the truth fastest.
+
+HAMINTENT-02 final-review clarification: refusal page enqueue failure releases
+its guard for a later observation; transport delivery is independent. Reversal
+authority uses the parsed blocking verdict and latest authoritative review in
+parent ancestry. Non-triggered dispute requests preserve previous admitted
+provenance, and thrown requests also refund their reservation. Owner refusal (CLI 78) occurs before SQLite opens. Untrusted posted HAM
+provenance (CLI 79) refunds its reservation before closing. Both produce a
+no-merge handoff.

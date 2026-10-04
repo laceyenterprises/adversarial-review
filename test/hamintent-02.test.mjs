@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -326,7 +326,8 @@ test('CLI refuses a different effective uid before schema or sidecar writes', (t
     '--import', `data:text/javascript,process.geteuid=()=>${process.geteuid() + 1}`,
     new URL('../bin/dispute-finding.mjs', import.meta.url).pathname, '--root-dir', rootDir,
   ], { encoding: 'utf8', timeout: 10000 });
-  assert.notEqual(result.status, 0);
+  assert.equal(result.status, 78);
+  assert.match(result.stderr, /ama_finding_dispute_owner_refused/);
   assert.match(result.stderr, /refusing cross-user write.*canonical daemon owner/);
   const dbPath = join(rootDir, 'data', 'reviews.db');
   assert.equal(existsSync(`${dbPath}-wal`), false);
@@ -430,4 +431,123 @@ test('newer dismissed, untrusted or non-ancestor reviews do not supersede a live
       : url.includes('/compare/') ? { status: 'diverged' } : { state: 'open', head: { sha: head } };
     assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
   }
+});
+
+
+test('closer refusal retries failed enqueue and retains guard after success', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamintent-retry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head, reasons: ['primary-change-reverted'] };
+  let fail = true, pages = 0;
+  const deps = { logger: { error() {} }, page: async () => {
+    if (fail) throw new Error('enqueue unavailable');
+    pages += 1;
+  } };
+  await recordPrimaryChangeRefusal(args, deps); await recordPrimaryChangeRefusal(args, deps);
+  await assert.rejects(recordPrimaryChangeRefusal(args, deps), /enqueue unavailable/);
+  fail = false;
+  await recordPrimaryChangeRefusal(args, deps); await recordPrimaryChangeRefusal(args, deps);
+  assert.equal(pages, 1);
+});
+
+test('reversal verdict survives mutable REST posting and dismissal state', () => {
+  for (const state of ['COMMENTED', 'DISMISSED']) {
+    const e = structuredClone(evidence()); e.reversalAuthorizations[0].review.state = state;
+    assert.equal(checkPrimaryChange(e, head).ok, true);
+  }
+});
+
+function collectorFixture(reviews, failure = null) {
+  const compare = { merge_base_commit: { sha: base }, status: 'ahead', files: [file] };
+  return async (url) => {
+    if (failure?.(url)) throw new Error('404 Not Found');
+    if (url.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: base } };
+    if (url.includes('/reviews?')) return reviews;
+    if (url.includes('/commits/')) return commit;
+    if (url.endsWith(`${base}...${head}`)) return { ...compare, files: [], total_commits: 2,
+      commits: [{ sha: author, commit: { message: 'author' } }, commit] };
+    return compare;
+  };
+}
+
+test('withdrawn finding cannot authorize a later HAM reversion', async () => {
+  const later = { ...review, node_id: 'PRR_withdrawn', html_url: 'https://fixture/withdrawn', state: 'COMMENTED',
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' };
+  const e = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    get: collectorFixture([review, later]) });
+  assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+});
+
+test('unreadable or capped citation refuses its waiver without poisoning author evidence', async () => {
+  for (const get of [collectorFixture([review], (url) => url.includes('/commits/')),
+    collectorFixture(Array.from({ length: 100 }, () => review))]) {
+    const e = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get });
+    assert.equal(e.hasHammerCommits, true);
+    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+  }
+});
+
+test('refused or thrown re-review restores previously admitted evidence', async (t) => {
+  for (const mode of ['refused', 'pending', 'throw']) {
+    const h = disputeHarness(t);
+    await disputeFinding(h.args, h.deps);
+    const before = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
+    h.deps.request = () => {
+      if (mode === 'throw') throw new Error('request unavailable');
+      return { triggered: false, status: mode === 'pending' ? 'pending' : undefined, reason: 'blocked' };
+    };
+    if (mode === 'throw') await assert.rejects(disputeFinding(h.args, h.deps), /request unavailable/);
+    else await disputeFinding(h.args, h.deps);
+    const after = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
+    for (const key of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256']) assert.equal(after[key], before[key]);
+    assert.equal(after.requests, mode === 'throw' ? before.requests : before.requests + 1);
+  }
+});
+
+
+test('CLI refuses non-HAM comment provenance and refunds its reservation', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ham-dispute-identity-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db);
+  db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, reviewer, review_status, pr_state, reviewed_at, revision_ref)
+    VALUES ('fixture/repo', 1, 'codex', 'posted', 'open', '2026-10-03T00:00:00Z', ?)`).run(head);
+  db.close();
+  writeFileSync(join(rootDir, 'evidence.txt'), 'fixture evidence');
+  const fakeGh = `#!${process.execPath}
+const args=process.argv.slice(2);
+let response;
+if(args.includes('POST')) response={node_id:'IC_bad',user:{login:'operator'},body:args.find(x=>x.startsWith('body=')).slice(5)};
+else if(args.some(x=>x.includes('/reviews?'))) response=${JSON.stringify([{ ...review, commit_id: head }])};
+else response={state:'open',head:{sha:'${head}'}};
+console.log(JSON.stringify(response));
+`;
+  writeFileSync(join(rootDir, 'gh'), fakeGh, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [
+    new URL('../bin/dispute-finding.mjs', import.meta.url).pathname, '--root-dir', rootDir,
+    '--repo', 'fixture/repo', '--pr', '1', '--head-sha', head,
+    '--review', review.node_id, '--finding', '1', '--evidence-file', join(rootDir, 'evidence.txt'),
+  ], { encoding: 'utf8', timeout: 10000, env: { ...process.env, PATH: rootDir + ':' + process.env.PATH } });
+  assert.equal(result.status, 79, result.stderr);
+  assert.match(result.stderr, /ama_finding_dispute_identity_refused/);
+  const check = new Database(join(rootDir, 'data', 'reviews.db'), { readonly: true });
+  try {
+    const row = check.prepare('SELECT requests, comment_id FROM ham_finding_disputes').get();
+    assert.equal(row.requests, 0); assert.equal(row.comment_id, null);
+    assert.equal(check.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  } finally { check.close(); }
+});
+
+test('pending and malformed REST review states never grant reversal authority', () => {
+  for (const state of ['PENDING', '', undefined]) {
+    const e = structuredClone(evidence()); e.reversalAuthorizations[0].review.state = state;
+    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+  }
+});
+
+
+test('malformed newer authoritative review refuses an older reversal waiver', async () => {
+  const e = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    get: collectorFixture([review, { ...review, node_id: 'PRR_bad', commit_id: '' }]) });
+  assert.equal(e.hasHammerCommits, true);
+  assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
 });

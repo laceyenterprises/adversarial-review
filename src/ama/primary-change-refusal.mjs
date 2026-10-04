@@ -23,9 +23,14 @@ export async function recordPrimaryChangeRefusal({ rootDir, repo, prNumber, head
     if (shouldPage) {
       const payload = { severity: 'SEV1', repo, prNumber, headSha, reasons };
       logger.error?.(JSON.stringify({ event: 'ama_primary_change_refusal_exhausted', ...payload }));
-      await page(`SEV1: repeated primary-change refusal for ${repo}#${prNumber}`, {
-        event: 'ama_primary_change_refusal_exhausted', payload,
-      });
+      try {
+        await page(`SEV1: repeated primary-change refusal for ${repo}#${prNumber}`, {
+          event: 'ama_primary_change_refusal_exhausted', payload,
+        });
+      } catch (error) {
+        db.prepare('UPDATE refusals SET paged=0 WHERE repo=? AND pr=? AND head=?').run(...key);
+        throw error;
+      }
     }
   } finally { db.close(); }
 }

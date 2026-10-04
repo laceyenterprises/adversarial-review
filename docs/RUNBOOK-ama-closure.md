@@ -1237,7 +1237,10 @@ directory and any WAL/SHM sidecars, and the configured alert sink owner boundary
 `AGENT_OS_ALERT_DELIVERY_STATE_DIR`, with the pager's normal default). Missing
 databases and cross-user writes fail before mutation. Run the helper as the
 canonical daemon owner (for example `sudo -A -H -u <owner>` with that owner's
-pager environment); do not run it directly from a different user's hammer shell.
+pager environment and the existing HAM GitHub identity). A different-user
+hammer shell refuses with exit 78; a non-HAM GitHub identity refuses with exit 79.
+Preserve evidence and record a no-merge handoff rather than switching accounts
+or credentials in the worker.
 The helper verifies the live head and the latest submitted authoritative review
 in its ancestry; a superseded blocking review cannot spend the dispute budget.
 It posts a finding-linked evidence comment, rechecks the head, and calls the existing
@@ -1657,3 +1660,20 @@ No cap default or shared CFG schema changes are included in this single-repo fix
 HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The scan admits ledger queries for at most one second (an already-started query retains the adapter timeout); subsequent records retain the existing age/lease liveness rules. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
 
 HAM closure diagnostics hardening: explicit ineligibility or a new head resets the eligible wait and removes stale PR pages; reopened candidates start fresh. Unchanged observations skip durable writes, redundant recovery observations are omitted, and recovery reuses the first daemon result unless deferred. SEV1 payloads keep the five longest pending and completed waits with omitted counts; page text is capped at 3500 characters. Process startup warns when the configured max acts as a floor below the adaptive ceiling.
+
+### HAMINTENT-02 final-review recovery contracts
+
+Reversal authority follows the parsed blocking verdict, including COMMENTED or
+DISMISSED REST reviews with an unchanged blocking body. The cited review must
+remain the latest authoritative review in the HAM parent ancestry; a later
+withdrawal revokes it. Reviews are read once per evaluation. An unreadable or
+capped citation refuses only its waiver; transient reads defer the entire check.
+
+The dispute CLI refuses an owner mismatch with exit 78 before SQLite opens.
+Non-HAM posted comment provenance exits 79 after refunding its reservation.
+The prompt preserves
+evidence and records no-merge handoff to the canonical owner for these refusals.
+It does not automatically switch accounts or tokens. A non-triggered re-review
+restores previous admitted provenance; a thrown request also refunds its budget.
+Refusal paging releases its reserved guard after failed enqueue and retries on
+the next observation. Successful enqueue keeps the guard across restarts.

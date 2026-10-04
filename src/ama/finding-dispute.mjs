@@ -54,7 +54,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     const total = db.prepare('SELECT COALESCE(SUM(requests), 0) AS count FROM ham_finding_disputes WHERE repo=? AND pr_number=?').get(repo, prNumber).count;
     if (cap.escalate || total >= cap.cap || row.requests >= 2 || row.refusals >= 2) return false;
     db.prepare('UPDATE ham_finding_disputes SET requests=requests+1 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
-    return true;
+    return row;
   }).immediate();
   const exhaust = async (reason) => {
     const changed = db.prepare('UPDATE ham_finding_disputes SET paged=1 WHERE repo=? AND pr_number=? AND identity=? AND paged=0 AND NOT EXISTS (SELECT 1 FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND paged=1)').run(...params, repo, prNumber);
@@ -74,6 +74,11 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     return { triggered: false, exhausted: true, reason };
   };
   if (!reservation) return exhaust('re-review-cap-or-repeated-refusal');
+  const restoreProvenance = () => db.prepare(`UPDATE ham_finding_disputes
+    SET head_sha=?, comment_id=?, comment_author=?, comment_sha256=?
+    WHERE repo=? AND pr_number=? AND identity=? AND comment_id=?`).run(
+    reservation.head_sha, reservation.comment_id, reservation.comment_author,
+    reservation.comment_sha256, ...params, commentId);
   let commentId = null;
   let result;
   try {
@@ -94,11 +99,12 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
       reason: `HAM finding dispute: ${reviewRef} finding=${findingNumber}; confirm or withdraw using PR evidence` });
   } catch (error) {
     // A failed post or head race is not a delivered re-review request.
-    db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1),
-      comment_id=CASE WHEN comment_id=? THEN NULL ELSE comment_id END
-      WHERE repo=? AND pr_number=? AND identity=?`).run(commentId, ...params);
+    restoreProvenance();
+    db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1)
+      WHERE repo=? AND pr_number=? AND identity=?`).run(...params);
     throw error;
   }
+  if (!result.triggered) restoreProvenance();
   if (!result.triggered && result.status !== 'pending' && result.reason !== 'review-in-flight') {
     db.prepare('UPDATE ham_finding_disputes SET refusals=refusals+1 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
     const row = db.prepare('SELECT refusals FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);

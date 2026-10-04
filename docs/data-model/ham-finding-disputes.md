@@ -32,7 +32,8 @@ posting. Failed posts, head rechecks and thrown review requests refund that
 reservation; those comments cannot enter dispute context. Successful post
 provenance is recorded before `requestReviewRereview` so an immediately claimed
 review sees it. Structured CAS refusals count toward the refusal budget.
-The latest comment replaces prior provenance for that identity.
+Only an admitted triggered request retains its new provenance; structured
+refusals restore the prior admission for that identity.
 
 The reviewer reads this table without writes, scoped by `(repo, PR, head)`.
 Only comments matching the recorded node ID, trusted HAM author and body digest
@@ -58,3 +59,16 @@ maintenance action, not a budget reset. `ensureReviewStateSchema` creates the
 table and adds nullable provenance columns to legacy helper-created tables,
 preserving existing request/refusal/page counts. Legacy rows without provenance
 cannot authorize prompt context.
+
+A structured re-review refusal restores the previous admitted comment provenance,
+including when a review is already pending. A thrown request also restores it
+and refunds the request reservation. Restoration compares the new comment ID
+so a concurrent newer admission cannot be overwritten. Refused comments remain
+on GitHub but never enter reserved reviewer context.
+
+The CLI exits 78 with `ama_finding_dispute_owner_refused` before opening SQLite
+when the daemon owner check fails, and exits 79 with
+`ama_finding_dispute_identity_refused` when the posted comment lacks authoritative
+HAM provenance; its reservation is refunded and no re-review is admitted.
+The hammer preserves evidence and records no-merge
+status for canonical-owner handoff; it never changes user or credentials itself.

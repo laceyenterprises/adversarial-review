@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
+import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { hamAuditCommentAuthorMatches, parseCommitTrailers } from './ham-provenance.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
@@ -186,7 +187,8 @@ function reversalAuthorized(evidence, path, region) {
     try {
       const { commit, review, reviewedFiles, parentFiles } = authorization;
       if (!isHammer(commit) || !trustedHammerCommit(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
-        || review.state !== 'CHANGES_REQUESTED'
+        || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(review.state)
+        || normalizeEffectiveReviewVerdict(review.body) !== 'request-changes'
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
       const trailers = parseCommitTrailers(commit.commit.message);
       if (trailers['worker-ticket'] !== 'HAM' || trailers['reviewed-head'] !== review.commit_id) return false;
@@ -321,29 +323,51 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown;
     const reversalAuthorizations = [];
     const closure = history.commits.slice(history.commits.findIndex((commit) => commit.sha === primaryHead) + 1);
+    const candidates = closure.filter((candidate) => isHammer(candidate)
+      && parseCommitTrailers(candidate.commit.message)['reversal-authorized-by']);
+    const reviewList = candidates.length ? await read(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`) : [];
+    // An incomplete list cannot prove a citation is current. Refuse its waiver,
+    // while retaining the independently readable primary-change evidence.
+    const reviews = Array.isArray(reviewList) && reviewList.length < 100 ? reviewList : [];
     // If primaryHead is not listed (compare excludes its base), verify each
     // candidate's parent is descended from the protected author head.
-    for (const candidate of closure.filter(isHammer)) {
-      const trailers = parseCommitTrailers(candidate.commit.message);
-      if (!trailers['reversal-authorized-by']) continue;
-      const reviews = await read(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
-      if (!Array.isArray(reviews) || reviews.length >= 100) throw new Error('capped reviews');
-      const cite = /^(\S+) finding=([1-9]\d*)$/.exec(trailers['reversal-authorized-by']);
-      const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
-      if (!review || review.commit_id !== trailers['reviewed-head']) continue;
-      const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
-      if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
-        || !trustedHammerCommit(commit)
-        || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
-      const parentSha = commit.parents[0].sha;
-      const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
-      const reviewInClosure = await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`);
-      const reviewAncestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
-      if (![inClosure, reviewInClosure, reviewAncestry].every((entry) => ['ahead', 'identical'].includes(entry.status))) continue;
-      const reviewed = await read(`repos/${repo}/compare/${mergeBase}...${review.commit_id}`);
-      const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
-      if (reviewed.merge_base_commit?.sha !== mergeBase || parent.merge_base_commit?.sha !== mergeBase) continue;
-      reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
+    for (const candidate of candidates) {
+      try {
+        const trailers = parseCommitTrailers(candidate.commit.message);
+        const cite = /^(\S+) finding=([1-9]\d*)$/.exec(trailers['reversal-authorized-by']);
+        const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
+        if (!review || review.commit_id !== trailers['reviewed-head']) continue;
+        const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
+        if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
+          || !trustedHammerCommit(commit)
+          || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
+        const parentSha = commit.parents[0].sha;
+        let latest;
+        for (const entry of [...reviews].reverse()) {
+          if (!['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)
+            || !amaAllAuthoritativeReviewerLogins().includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) continue;
+          if (!SHA.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
+          const ancestry = await read(`repos/${repo}/compare/${entry.commit_id}...${parentSha}`);
+          if (['behind', 'diverged'].includes(ancestry.status)) continue;
+          if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('unknown review ancestry');
+          latest = entry;
+          break;
+        }
+        if (latest !== review) continue;
+        const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
+        const reviewInClosure = await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`);
+        const reviewAncestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
+        if (![inClosure, reviewInClosure, reviewAncestry].every((entry) => ['ahead', 'identical'].includes(entry.status))) continue;
+        const reviewed = await read(`repos/${repo}/compare/${mergeBase}...${review.commit_id}`);
+        const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
+        if (reviewed.merge_base_commit?.sha !== mergeBase || parent.merge_base_commit?.sha !== mergeBase) continue;
+        reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
+      } catch (error) {
+        if (error?.primaryChangeReadFailed === true || error?.authOutage === true
+          || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
+        // A stale/deleted citation refuses only this waiver, never the whole
+        // protected author diff. Later candidates can still be evaluated.
+      }
     }
     let testChanges = null;
     try {

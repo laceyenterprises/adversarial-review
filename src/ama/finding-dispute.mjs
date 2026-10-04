@@ -26,10 +26,22 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) {
     throw new Error('dispute requires authoritative blocking review');
   }
-  if (review.commit_id !== headSha) {
-    const ancestry = await get(`repos/${repo}/compare/${review.commit_id}...${headSha}`);
-    if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('disputed review is outside live head ancestry');
+  // REST reviews are ordered oldest first. Only the latest submitted,
+  // authoritative review in the live head's ancestry can be disputed.
+  let latest;
+  for (const entry of [...reviews].reverse()) {
+    if (!['CHANGES_REQUESTED', 'APPROVED', 'COMMENTED'].includes(entry.state)
+      || !amaAllAuthoritativeReviewerLogins().includes(String(entry.user?.login || '').replace(/\[bot\]$/, ''))) continue;
+    if (!/^[a-f0-9]{40}$/i.test(entry.commit_id || '')) throw new Error('authoritative review has no valid head');
+    if (entry.commit_id !== headSha) {
+      const ancestry = await get(`repos/${repo}/compare/${entry.commit_id}...${headSha}`);
+      if (['behind', 'diverged'].includes(ancestry.status)) continue;
+      if (!['ahead', 'identical'].includes(ancestry.status)) throw new Error('cannot verify disputed review ancestry');
+    }
+    latest = entry;
+    break;
   }
+  if (latest !== review) throw new Error('dispute requires the latest authoritative review in live head ancestry');
   const finding = parseBlockingFindingsSection(review.body)?.[findingNumber - 1];
   if (!finding) throw new Error('blocking finding not found');
   const identity = createHash('sha256').update(JSON.stringify([finding.title, finding.file])).digest('hex');
@@ -49,9 +61,15 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     if (changed.changes) {
       const payload = { severity: 'SEV1', repo, prNumber, headSha, reviewRef, findingNumber, reason };
       logger.error?.(JSON.stringify({ event: 'ama_finding_dispute_exhausted', ...payload }));
-      await page(`SEV1: finding dispute exhausted for ${repo}#${prNumber}: ${reason}`, {
-        event: 'ama_finding_dispute_exhausted', payload,
-      });
+      try {
+        await page(`SEV1: finding dispute exhausted for ${repo}#${prNumber}: ${reason}`, {
+          event: 'ama_finding_dispute_exhausted', payload,
+        });
+      } catch (error) {
+        // Keep the PR-wide CAS during enqueue, but refund it if no page queued.
+        db.prepare('UPDATE ham_finding_disputes SET paged=0 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
+        throw error;
+      }
     }
     return { triggered: false, exhausted: true, reason };
   };

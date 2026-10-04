@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { disputeFinding } from '../src/ama/finding-dispute.mjs';
+import { assertFindingDisputeOwner } from '../src/ama/finding-dispute-owner.mjs';
 import { primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
@@ -10,6 +11,7 @@ import { loadConfigRuntime } from '../src/config-loader.mjs';
 const { values } = parseArgs({ options: Object.fromEntries(
   ['root-dir', 'repo', 'pr', 'head-sha', 'review', 'finding', 'evidence-file'].map((key) => [key, { type: 'string' }])) });
 const rootDir = primaryChangeRoot({ rootDir: values['root-dir'] });
+assertFindingDisputeOwner(rootDir);
 const db = openReviewStateDb(rootDir);
 try {
   ensureReviewStateSchema(db);

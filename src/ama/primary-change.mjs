@@ -4,11 +4,15 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
-import { parseCommitTrailers } from './ham-provenance.mjs';
+import { hamAuditCommentAuthorMatches, parseCommitTrailers } from './ham-provenance.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
   parseCommitTrailers(commit?.commit?.message || '')['worker-class'] || '');
+// Match the existing eligibility identity contract: committer takes precedence,
+// with linked author as fallback only when GitHub has no linked committer.
+const trustedHammerCommit = (commit) => hamAuditCommentAuthorMatches(
+  commit?.committer?.login || commit?.author?.login);
 
 export function primaryChangeRoot({ rootDir, env = process.env } = {}) {
   return resolve(rootDir || env.HAM_ROOT_DIR || fileURLToPath(new URL('../../', import.meta.url)));
@@ -181,7 +185,7 @@ function reversalAuthorized(evidence, path, region) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     try {
       const { commit, review, reviewedFiles, parentFiles } = authorization;
-      if (!isHammer(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
+      if (!isHammer(commit) || !trustedHammerCommit(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
         || review.state !== 'CHANGES_REQUESTED'
         || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
       const trailers = parseCommitTrailers(commit.commit.message);
@@ -329,6 +333,7 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
       if (!review || review.commit_id !== trailers['reviewed-head']) continue;
       const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
       if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
+        || !trustedHammerCommit(commit)
         || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
       const parentSha = commit.parents[0].sha;
       const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);

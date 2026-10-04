@@ -1181,8 +1181,12 @@ earliest daemon-owned dispatch launch head with a valid SHA when available, cove
 repairs. After a rebase diverges from that launch, it is the actual parent of
 the first hammer commit in the rebased PR history; a hammer-authored `Reviewed-Head` trailer cannot select an older author
 head. Both primary and final diffs are compared against the current PR base,
-using the same merge base so rebased upstream changes are excluded. Hammer identity
-comes only from the terminal commit trailer block. Binary and omitted-patch
+using the same merge base so rebased upstream changes are excluded. Hammer closure detection
+uses the terminal commit trailer block. Reversal authorization additionally
+requires the live GitHub committer to match the existing trusted HAM login set
+(`hamAuditCommentAuthorMatches`); a linked author is the fallback only when
+GitHub has no linked committer. Missing or non-HAM identities cannot authorize
+reversals, even with valid trailers. Binary and omitted-patch
 files can pass only with an identical GitHub blob SHA and change status;
 otherwise their preservation remains unknown. Structural hammer merge refusals
 are audited immediately with their primary-change reason, while read failures
@@ -1226,12 +1230,25 @@ fail-closed. Other merge safety checks remain unchanged.
 For a disputed blocking finding, the hammer preserves the code and releases its
 merge lease, then runs `bin/dispute-finding.mjs` with `--root-dir`, `--repo`, `--pr`,
 `--head-sha`, `--review`, `--finding` and `--evidence-file`. The evidence is bounded
-to 16,000 UTF-8 bytes. The helper verifies the live head and authoritative blocking review,
-posts a finding-linked evidence comment, rechecks the head, and calls the existing
+to 16,000 UTF-8 bytes. Before opening SQLite or performing DDL, the helper
+requires its effective UID to own the existing `data/reviews.db`, its data
+directory and any WAL/SHM sidecars, and the configured alert sink owner boundary
+(resolved through `ADVERSARIAL_ALERT_DELIVERY_ROOT` /
+`AGENT_OS_ALERT_DELIVERY_STATE_DIR`, with the pager's normal default). Missing
+databases and cross-user writes fail before mutation. Run the helper as the
+canonical daemon owner (for example `sudo -A -H -u <owner>` with that owner's
+pager environment); do not run it directly from a different user's hammer shell.
+The helper verifies the live head and the latest submitted authoritative review
+in its ancestry; a superseded blocking review cannot spend the dispute budget.
+It posts a finding-linked evidence comment, rechecks the head, and calls the existing
 `requestReviewRereview` CAS with `targetRevisionRef`. Both full and slim reviewer
 prompts include exact-head dispute evidence only when the comment has a trusted
 HAM author and matches the helper's durable reservation by comment node ID, head,
-poster identity and SHA-256 body digest. Edited, unreserved and spoofed comments
+poster identity and SHA-256 body digest. Legacy REST and adapter contexts carry
+`node_id` alongside their numeric IDs so the same reservation check applies.
+Each finding reservation contributes its latest comment, rather than only the
+last two disputes overall, with 16,000 bytes per comment and a 256,000-byte total
+context cap. Edited, unreserved and spoofed comments
 are omitted. The reviewer must confirm or withdraw each admitted dispute.
 The evidence is untrusted PR content, never a merge waiver. Do not merge while
 awaiting adjudication or claim the disputed finding was remediated.
@@ -1240,7 +1257,10 @@ Neither finding-anchored reversal nor dispute raises `hq decision raise`. Disput
 cap (also bounding total dispute requests per PR) and permit at most two requests per finding (title/file identity persists
 across heads). Cap exhaustion or repeated refusal emits `ama_finding_dispute_exhausted`
 with SEV1 and pages once per PR for its lifetime (later heads do not reset the
-guard). Failed comment writes or head rechecks refund the request reservation;
+guard). The atomic page guard is held during enqueue and cleared if the pager
+throws, allowing a later invocation to retry without posting another dispute or
+spending another request. A successful durable enqueue retains the guard;
+the alert outbox owns delivery retries. Failed comment writes or head rechecks refund the request reservation;
 the cycle threshold uses `shouldEscalateReviewCycle.escalate`.
 Preservation refusals retain the merge hold as
 `primary-change-repair-required` with `needsOperator: true`; three closer refusals on the

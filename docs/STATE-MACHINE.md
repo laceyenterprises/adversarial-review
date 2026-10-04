@@ -592,17 +592,24 @@ Key control points:
   A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
   blocking finding on its reviewed head, with File/Lines covering each reverted
   base line (the uncited remainder stays protected) and verified
-  closure ancestry. Missing, non-blocking and unrelated citations remain refused.
+  closure ancestry and live GitHub HAM committer identity (linked author fallback
+  only when no committer is linked). Missing, non-blocking and unrelated citations
+  remain refused.
   A disputed blocking finding posts evidence and requests exact-head re-review
-  through `bin/dispute-finding.mjs`; the reviewer confirms or withdraws it.
+  through `bin/dispute-finding.mjs`; the reviewer confirms or withdraws it. Before
+  opening the existing database, the helper checks effective UID ownership of
+  daemon state and the configured pager sink. Only the latest authoritative
+  review in live-head ancestry may be disputed.
   Neither reversal authorization nor dispute raises `hq decision raise`. Predicate
   refusals hold merge with `needsOperator: true`; an attributable current-head
   `merge-agent-requested` event can dispatch the existing operator recovery lane.
   The closer returns `primary-change-repair-required` and pages once per head
   after three observations; the daemon returns `primary-change-needs-operator`
   before the closer and does not increment that counter. Dispute exhaustion pages
-  once per PR. Trusted HAM author plus durable comment reservation/digest is
-  required for dispute prompt context. Failed reads defer as `gate-read-failed`.
+  once per PR; failed page enqueue releases the guard for a later retry.
+  Each finding's latest reserved comment is included, up to the context byte cap,
+  with REST node IDs preserved. Trusted HAM author plus durable comment
+  reservation/digest is required for dispute prompt context. Failed reads defer as `gate-read-failed`.
 - **`strict_mode`** (default `true`): the ordinary daemon lane requires a
   zero-finding review. Explicitly setting it `false` permits daemon merge
   over *known non-blocking* findings. A current-head `operator-approved`

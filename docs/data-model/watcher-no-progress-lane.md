@@ -3,7 +3,7 @@
 **Owner:** watcher posted-review dispatch fairness
 **Store:** `data/watcher-no-progress-lane/`
 **Source of truth:** `src/watcher-no-progress-lane.mjs`
-**Runtime surface:** `src/posted-review-row.mjs`, `src/watcher-no-progress-lane.mjs`, `src/review-retry-exhaustion.mjs`, `src/pollonce-phases.mjs`
+**Runtime surface:** `src/posted-review-row.mjs`, `src/watcher-no-progress-lane.mjs`, `src/review-retry-exhaustion.mjs`, `src/pollonce-phases.mjs`, `src/operator-label-wake.mjs`
 
 ## Purpose
 
@@ -79,6 +79,17 @@ Optional `stalledEvent` field:
   decision-reset cap. Once the cap is spent, later decision changes keep the
   current no-progress series and are logged instead of resetting the lane
   again.
+- A fresh, attributable, current-head operator control-label event clears the
+  whole per-PR ledger and operator-decision alert debounce state outside that
+  decision-reset cap, even when the cap is spent. Discovery observes these
+  events before label consumption and lane admission. This re-arms the alert:
+  if the same head and fingerprint re-enter `operator-blocked`, the operator
+  can receive the same decision alert again. A completed event receipt
+  suppresses further resets for that event. See
+  [Operator Label Wakes](operator-label-wakes.md) for the five accepted labels,
+  receipt lifecycle, the 30-minute bound for new resets, and retention.
+  `clearNoProgressLane` returns false if clearing alert debounce fails and
+  preserves the lane ledger in that case.
 - Stalled-event delivery is prepare-and-acknowledge. The watcher may persist
   `stalledEvent.emitted=false` before calling the event sink, but it flips the
   value to `true` only after the sink resolves successfully. A transient sink

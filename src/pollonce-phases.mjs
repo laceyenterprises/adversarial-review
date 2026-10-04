@@ -17,6 +17,7 @@
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
+import { createLabelControlObservationCache, observeOperatorLabelWakes } from './operator-label-wake.mjs';
 import { randomUUID } from 'node:crypto';
 import { resolveBuilderProvenanceRouting } from './builder-provenance-routing.mjs';
 import {
@@ -1101,6 +1102,17 @@ export async function processReviewSubject(entry, ctx) {
       // no GitHub calls here at all.
       const argusOutcome = await routeSecuritySurfaceSafe(existing);
 
+      const observeLabelControl = createLabelControlObservationCache(operatorSurface);
+      try {
+        await observeOperatorLabelWakes({
+          rootDir: ROOT, repo: repoPath, prNumber, subjectRef: subject.ref,
+          headSha: subject.headSha, labelNames: prLabelNames, operatorSurface,
+          observeLabelControlImpl: observeLabelControl,
+        });
+      } catch (err) {
+        console.warn(`[watcher] operator label wake failed for ${repoPath}#${prNumber}: ${err?.message || err}`);
+      }
+
       // PR-side `retrigger-remediation` label (post-2026-05-06):
       // mobile-friendly operator surface that mirrors
       // `npm run retrigger-remediation`. Operator applies the label
@@ -1109,7 +1121,7 @@ export async function processReviewSubject(entry, ctx) {
       // Active jobs leave the label in place for the next tick.
       if (prLabelNames.includes(RETRIGGER_REMEDIATION_LABEL)) {
         try {
-          const labelControl = await operatorSurface.observeLabelControl(
+          const labelControl = await observeLabelControl(
             subject.ref,
             subject.ref.revisionRef,
             RETRIGGER_REMEDIATION_LABEL
@@ -1156,7 +1168,7 @@ export async function processReviewSubject(entry, ctx) {
       // bug observed 2026-05-16T18Z.
       if (prLabelNames.includes(RETRIGGER_REVIEW_LABEL)) {
         try {
-          const labelControl = await operatorSurface.observeLabelControl(
+          const labelControl = await observeLabelControl(
             subject.ref,
             subject.ref.revisionRef,
             RETRIGGER_REVIEW_LABEL

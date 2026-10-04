@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
+import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
-import { amaAllAuthoritativeReviewerLogins, amaAuthoritativeReviewerLoginsForModel, amaReviewerFamilyForLogin } from '../src/ama/reviewer-authority.mjs';
+import { isCurrentAuthoritativeFamilyReview, amaAllAuthoritativeReviewerLogins, amaAuthoritativeReviewerLoginsForModel, amaReviewerFamilyForLogin } from '../src/ama/reviewer-authority.mjs';
 import { parseCommitTrailerValues, parseCommitTrailers } from '../src/ama/ham-provenance.mjs';
 const head = 'c'.repeat(40), author = 'a'.repeat(40), base = 'b'.repeat(40);
 const card = (line) => `- **Finding**\n  - **File:** \`run.py\`\n  - **Lines:** \`${line}\`\n  - **Problem:** Must repair.\n  - **Recommended fix:** Revert.`;
@@ -179,13 +181,13 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
     '--primary-change', json('primary-change', evidence), '--reviewed-sha', head,
     '--reviewer', 'claude', '--risk-class', 'low', '--repo', 'fixture/repo', '--root-dir', directory];
   for (const policy of [true, false, undefined]) {
-    const config = join(directory, 'config.yaml');
+    const config = join(directory, 'global.yaml');
     writeFileSync(config, `version: 1\nroles:\n  adversarial:\n    merge_authority:\n      enabled: true\n` +
       (policy === undefined ? '' : `      strict_non_blocking_remediation: ${policy}\n`) +
       '      eligibility:\n        risk_classes: [low]\n      branch_protection:\n        required: false\n');
     const options = { env: { ...env, AGENT_OS_CONFIG_PATH: config } };
     const closure = JSON.parse(run(cliArgs, options));
-    const merge = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { ...options, input: gate }));
+    const merge = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { ...options, input: gate.replaceAll(`rootDir: '${root}'`, `rootDir: '${directory}'`) }));
     const expected = policy !== false;
     assert.equal(closure.eligible, expected, JSON.stringify(closure));
     assert.equal(merge.ok, closure.eligible, JSON.stringify(merge));
@@ -242,7 +244,7 @@ test('reviews on different heads require separate HAM commits with matching Revi
       } });
     const result = checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true });
     assert.equal(result.ok, split);
-    assert.equal(evidence.reversalAuthorizations.length, split ? 2 : 1);
+    assert.equal(evidence.reversalAuthorizations?.length || 0, split ? 2 : 0);
   }
 });
 
@@ -262,4 +264,36 @@ test('review bodies are parsed once per evaluation and refreshed on the next eva
   const cited = evidence.reversalAuthorizations[1].review;
   Object.defineProperty(cited, 'body', { value: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved' });
   assert.equal(checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }).reason, 'primary-change-reverted');
+});
+
+test('cross-family reviews stack only on the same head and supersede older-head citations', async () => {
+  const cited = reviews[0];
+  const newer = { ...reviews[1], commit_id: 'd'.repeat(40) };
+  const compare = async (from, to) => ({ status: from === to ? 'identical' : 'ahead' });
+  assert.equal(await isCurrentAuthoritativeFamilyReview(cited, reviews, author, compare), true);
+  assert.equal(await isCurrentAuthoritativeFamilyReview(cited, [...reviews, newer], head, compare), false);
+  assert.equal(await isCurrentAuthoritativeFamilyReview(cited, [...reviews, { ...newer, user: { login: 'author' } }], head, compare), true);
+});
+
+test('effective merge policy uses module path, domain override and operator precedence', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ham-policy-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(join(rootDir, 'domains'));
+  writeFileSync(join(rootDir, 'domains/code-pr.json'), JSON.stringify({
+    mergeAuthority: { strictNonBlockingRemediation: false },
+  }));
+  const key = 'roles.adversarial.merge_authority.strict_non_blocking_remediation';
+  for (const source of ['module:config.yaml', 'env:TEST_POLICY']) {
+    const cfg = loadEffectiveMergeAuthorityConfig({ rootDir, loadConfigImpl: ({ modulePaths }) => {
+      assert.deepEqual(modulePaths, [join(rootDir, 'config.yaml')]);
+      return { sources: { [key]: source }, getMergeAuthorityConfig: () => ({ strictNonBlockingRemediation: true }) };
+    } });
+    assert.equal(cfg.strictNonBlockingRemediation, source.startsWith('env:'));
+  }
+});
+test('hammer prompt renders both effective strict policy values', () => {
+  for (const strictNonBlockingRemediation of [true, false]) {
+    assert.equal(composeCloserPrompt({ templateBody: 'policy=<<STRICT_NON_BLOCKING_REMEDIATION>>',
+      strictNonBlockingRemediation }), `policy=${strictNonBlockingRemediation}`);
+  }
 });

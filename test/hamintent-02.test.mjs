@@ -588,3 +588,15 @@ test('uncertain exhaustion enqueue is retried after a killed caller', async (t) 
   assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
   assert.equal(h.db.prepare('SELECT paged FROM ham_finding_disputes').get().paged, 2);
 });
+
+test('same-head cross-family dispute routes back to the cited family', async (t) => {
+  const h = disputeHarness(t);
+  h.db.prepare("UPDATE reviewed_prs SET reviewer='claude'").run();
+  const cited = { ...review, commit_id: head };
+  h.deps.get = async (url) => url.includes('/reviews?') ? [cited,
+    { ...cited, node_id: 'PRR_other_family', user: { login: 'lacey-gemini-reviewer[bot]' } }]
+    : { state: 'open', head: { sha: head } };
+  assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
+  assert.equal(h.calls[1][1].reviewerFamily, 'codex');
+  assert.equal(h.db.prepare('SELECT reviewer FROM reviewed_prs').get().reviewer, 'codex');
+});

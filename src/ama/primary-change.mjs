@@ -1,4 +1,4 @@
-import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, latestAuthoritativeReviewInAncestry } from './reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -371,27 +371,21 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     // If primaryHead is not listed (compare excludes its base), verify each
     // candidate's parent is descended from the protected author head.
     for (const candidate of candidates) {
+      const trailers = parseCommitTrailers(candidate.commit.message);
       for (const cite of reversalCitations(candidate.commit.message)) {
         try {
-          const trailers = parseCommitTrailers(candidate.commit.message);
           const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
           if (!review || review.commit_id !== trailers['reviewed-head']) continue;
           const pair = `${candidate.sha}:${review.node_id || review.html_url}`;
           if (authorizedPairs.has(pair)) continue;
+          authorizedPairs.add(pair);
           const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
             || !trustedHammerCommit(commit)
             || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
           const parentSha = commit.parents[0].sha;
-          const login = String(review.user?.login || '').replace(/\[bot\]$/, '');
-          const family = amaReviewerFamilyForLogin(login);
-          if (!family) continue;
-          // Each reviewer family has its own final verdict; another model's
-          // review cannot supersede this model's finding authority.
-          const latest = await latestAuthoritativeReviewInAncestry(reviews.filter((entry) =>
-            amaReviewerFamilyForLogin(entry.user?.login) === family), parentSha,
-            (from, to) => read(`repos/${repo}/compare/${from}...${to}`));
-          if (latest !== review) continue;
+          if (!await isCurrentAuthoritativeFamilyReview(review, reviews, parentSha,
+            (from, to) => read(`repos/${repo}/compare/${from}...${to}`))) continue;
           const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
           const reviewInClosure = await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`);
           const reviewAncestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
@@ -402,7 +396,6 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
           if (!Array.isArray(reviewed.files) || reviewed.files.length >= 300
             || !Array.isArray(parent.files) || parent.files.length >= 300) continue;
           reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
-          authorizedPairs.add(pair);
         } catch (error) {
           if (error?.primaryChangeReadFailed === true || error?.authOutage === true
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;

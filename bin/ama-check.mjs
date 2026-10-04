@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
-import { loadConfigCached } from '../src/config-loader.mjs';
+import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
@@ -480,7 +480,7 @@ function main(argv = process.argv.slice(2)) {
       return 1;
     }
   }
-  const cfg = loadConfigCached().getMergeAuthorityConfig();
+  const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: args['root-dir'] });
   let prJson, reviewsJson, protectionJson, timelineJson;
   try {
     prJson = loadJson(args.pr);

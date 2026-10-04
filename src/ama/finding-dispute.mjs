@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
 import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
-import { amaAllAuthoritativeReviewerLogins, latestAuthoritativeReviewInAncestry } from './reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview, amaReviewerFamilyForLogin } from './reviewer-authority.mjs';
 import { requestReviewRereview } from '../review-state.mjs';
 import { shouldEscalateReviewCycle, resolveReviewCycleCapConfig } from '../review-cycle-cap.mjs';
 
@@ -28,11 +28,11 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) {
     throw new Error('dispute requires authoritative blocking review');
   }
-  // REST reviews are ordered oldest first. Only the latest submitted,
-  // authoritative review in the live head's ancestry can be disputed.
-  const latest = await latestAuthoritativeReviewInAncestry(reviews, headSha,
-    (from, to) => get(`repos/${repo}/compare/${from}...${to}`));
-  if (latest !== review) throw new Error('dispute requires the latest authoritative review in live head ancestry');
+  if (!await isCurrentAuthoritativeFamilyReview(review, reviews, headSha,
+    (from, to) => get(`repos/${repo}/compare/${from}...${to}`))) {
+    throw new Error('dispute requires the latest authoritative review in live head ancestry for its family, without a newer reviewed head');
+  }
+  const reviewerFamily = amaReviewerFamilyForLogin(review.user.login);
   const finding = parseBlockingFindingsSection(review.body)?.[findingNumber - 1];
   if (!finding) throw new Error('blocking finding not found');
   const identity = createHash('sha256').update(JSON.stringify([finding.title, finding.file])).digest('hex');
@@ -92,7 +92,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     db.prepare(`UPDATE ham_finding_disputes SET head_sha=?, comment_id=?, comment_author=?, comment_sha256=?
       WHERE repo=? AND pr_number=? AND identity=?`).run(headSha, commentId, comment.user.login,
       createHash('sha256').update(commentBody).digest('hex'), ...params);
-    result = request({ rootDir, repo, prNumber, targetRevisionRef: headSha, db, logger,
+    result = request({ rootDir, repo, prNumber, targetRevisionRef: headSha, db, logger, reviewerFamily,
       reason: `HAM finding dispute: ${reviewRef} finding=${findingNumber}; confirm or withdraw using PR evidence` });
   } catch (error) {
     // A failed post or head race is not a delivered re-review request.

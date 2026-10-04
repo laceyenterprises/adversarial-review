@@ -3742,6 +3742,7 @@ export function composeCloserPrompt({
   amaTrailers,
   templateBody,
   reviewCycleExhausted = false,
+  strictNonBlockingRemediation = true,
 }) {
   return substituteTemplate(templateBody, {
     PR_URL: prUrl,
@@ -3749,6 +3750,7 @@ export function composeCloserPrompt({
     PR_NUMBER: prNumber,
     REVIEWED_SHA: reviewedSha,
     TARGET_REMEDIATION_SHA: targetRemediationSha || reviewedSha,
+    STRICT_NON_BLOCKING_REMEDIATION: strictNonBlockingRemediation !== false ? 'true' : 'false',
     RISK_CLASS: riskClass,
     MERGE_METHOD: mergeMethod,
     REQUIRED_GATE_CONTEXT: requiredGateContext,
@@ -4308,6 +4310,7 @@ export async function maybeDispatchAmaCloser({
     dispatchedAt: dispatchContext.dispatchedAt,
     amaTrailers,
     templateBody,
+    strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     // Forward the dispatch-time final-hammer observation only as context; the
     // closer's ama-check invocation recomputes exhaustion from the current
     // follow-up ledger before it honors any waiver.

@@ -948,3 +948,5 @@ parent ancestry. Non-triggered dispute requests preserve previous admitted
 provenance, and thrown requests also refund their reservation. Owner refusal (CLI 78) occurs before SQLite opens. Untrusted posted HAM
 provenance (CLI 79) refunds its reservation before closing. Both produce a
 no-merge handoff.
+
+HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.

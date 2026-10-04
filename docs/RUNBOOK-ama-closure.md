@@ -1730,3 +1730,5 @@ The fresh verdict feeds normal AMA/hammer closure. A moved head stays held for
 that recovery, and a failed bounded review pages once through operator-blocked.
 Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
 `reported-pending`. The proven-head CI wait remains unchanged.
+
+HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.

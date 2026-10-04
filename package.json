@@ -55,5 +55,9 @@
     "eslint": "^10.8.1",
     "globals": "^17.11.0",
     "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "fs-ext@2.1.1": true,
+    "better-sqlite3@13.0.3": true
   }
 }

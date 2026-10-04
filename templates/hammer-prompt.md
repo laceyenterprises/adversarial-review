@@ -120,6 +120,8 @@ held and fail closed otherwise. Use the scripts directly from this checkout;
 the context and bounded-runner helpers work without an Agent OS
 installation; the merge phase retains its existing HQ merge-signal integration.
 
+Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. When true, required non-blocking findings may authorize specifically cited reversions. When false, advisory non-blocking findings never authorize reverting protected author code; preserve it and record the conflict rationale. The live predicate independently resolves policy.
+
 ## Preserve the PR primary change (HAMINTENT-02 / LAC-1833)
 
 The primary change is the actual author head immediately before the first hammer

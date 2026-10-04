@@ -1,3 +1,4 @@
+import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -204,12 +205,19 @@ test('AMA disabled audit eligibility reads required check contexts from merge-au
   }
 });
 
-test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', async () => {
+test('eligible daemon merge during recovery bypasses full closer capacity', async () => {
   const rootDir = tempRoot();
   try {
+    for (let prNumber = 900; prNumber < 932; prNumber++) {
+      const identity = { repo: 'acme/repo', prNumber, headSha: baseArgs(rootDir).candidate.headSha };
+      updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+        state: 'dispatched', launchRequestId: `live-${prNumber}`, lastObservedStatus: 'running',
+        lastAttemptedAt: new Date().toISOString() }));
+    }
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
+      automatedRecovery: true,
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.MERGED,
         reason: 'merged',
@@ -218,7 +226,7 @@ test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', 
       }),
       maybeDispatchAmaCloserImpl: async () => {
         closerCalls += 1;
-        return { dispatched: true };
+        return { dispatched: false, reason: 'ama-closer-launch-in-progress' };
       },
     });
 
@@ -3774,3 +3782,18 @@ test('in-lease unknown evidence keeps the daemon retryable without an operator p
     assert.equal(result.reason, 'gate-read-failed');
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISPOSITION.DEFERRED]) {
+  test(`recovery reuses daemon result except when deferred: ${disposition}`, async () => {
+    const rootDir = tempRoot();
+    try {
+      let calls = 0;
+      await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir), automatedRecovery: true,
+        priorDaemonCleanMerge: { disposition, reason: 'not-eligible' },
+        runDaemonCleanMergeAttemptImpl: async () => { calls++; return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'not-eligible' }; },
+        maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'not-eligible' }),
+      });
+      assert.equal(calls, disposition === DAEMON_MERGE_DISPOSITION.DEFERRED ? 1 : 0);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  });
+}

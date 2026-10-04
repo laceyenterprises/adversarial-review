@@ -11,6 +11,7 @@ import {
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import {
   findMalformedProtectivePredecessorLines,
@@ -250,7 +251,7 @@ test('LCR: hq dispatch preserves an already stricter worker provision timeout', 
   assert.equal(deps.calls[0].options.env.HQ_PROVISION_SUBPROCESS_TIMEOUT_SECONDS, '30');
 });
 
-test('LCR: three closer launches occupy the bound and a fourth waits', async (t) => {
+test('LCR: configured ceiling of three dispatching launches holds a fourth', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-active-launch-defers-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   for (const prNumber of [997, 998, 999]) {
@@ -276,6 +277,7 @@ test('LCR: three closer launches occupy the bound and a fourth waits', async (t)
 
   const result = await maybeDispatchAmaCloser({
     ...findingsRemediationArgs(rootDir, {
+      cfg: { amaCloserConcurrentLaunchCeiling: 3 },
       dispatchContext: {
         dispatchedAt: '2026-07-20T12:04:00Z',
       },
@@ -355,7 +357,7 @@ test('LCR: blocked record cannot consume another PR launch slot', async (t) => {
     headSha: 'b'.repeat(40) }), 'another PR admission must leave the blocked holder lease intact');
 });
 
-test('LCR: three accepted closer workers fill capacity for a fourth PR', async (t) => {
+test('AMASCALE: observed backlog holds at the floor, then scales below the ceiling', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-three-accepted-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   for (const prNumber of [997, 998, 999]) {
@@ -369,12 +371,30 @@ test('LCR: three accepted closer workers fill capacity for a fourth PR', async (
       now: '2026-07-20T12:00:00Z' });
   }
   const deps = testDeps();
-  const result = await maybeDispatchAmaCloser({
-    ...findingsRemediationArgs(rootDir, { dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
+  const events = [];
+  const args = {
+    ...findingsRemediationArgs(rootDir, { cfg: { amaCloserConcurrentLaunchCeiling: 32 }, dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
     ...deps,
-  });
+    logger: { ...deps.logger, info: (text) => events.push(JSON.parse(text)) },
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
+  };
+  const result = await maybeDispatchAmaCloser(args);
   assert.equal(result.reason, 'ama-closer-launch-in-progress');
   assert.equal(deps.calls.length, 0);
+  assert.deepEqual(events.find(({ event }) => event === 'ama.closer_queue_depth'), {
+    event: 'ama.closer_queue_depth', eligibleBacklog: 1, liveLaunches: 3, effectiveCap: 3,
+  });
+
+  // Current eligible observations, rather than the active count plus one,
+  // increase the dispatch limit. Reobserving this candidate does not double-count it.
+  for (const prNumber of [997, 998, 999]) {
+    await observeCloserBacklog({ rootDir, repo: 'acme/repo', prNumber });
+  }
+  assert.equal((await maybeDispatchAmaCloser(args)).dispatched, true);
+  assert.equal(deps.calls.length, 1);
+  assert.deepEqual(events.filter(({ event }) => event === 'ama.closer_queue_depth').at(-1), {
+    event: 'ama.closer_queue_depth', eligibleBacklog: 4, liveLaunches: 3, effectiveCap: 4,
+  });
 });
 
 test('LCR: dead no-LRQ AMA launch lease does not globally hold hammer dispatch', async (t) => {
@@ -920,4 +940,39 @@ test('watcher never exhausts a real pre-grace comment-only closer across ticks',
   age = 10 * 60_000;
   assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'ama-dispatched');
   assert.equal(deps.calls.length, 1, 'ordinary hammer admission resumes after grace');
+});
+
+
+test('AMASCALE: five blocked decision launches leave all other-PR capacity available', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'amascale-parked-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (const prNumber of [991, 992, 993, 994, 995]) {
+    const identity = { repo: 'acme/repo', prNumber, headSha: 'b'.repeat(40) };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'dispatched', launchRequestId: `lrq_${prNumber}`, lastObservedStatus: 'running',
+      lastAttemptedAt: '2026-07-20T12:00:00Z', lastObservedAt: '2026-07-20T12:00:00Z' }));
+  }
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { cfg: { amaCloserConcurrentLaunchCeiling: 3 },
+      dispatchContext: { dispatchedAt: '2026-07-20T12:01:00Z' } }),
+    ...deps,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'blocked_needs_decision' } }),
+  });
+  assert.equal(result.dispatched, true);
+});
+
+
+test('AMASCALE: ten eligible closer dispatches are admitted with floor three and ceiling 32', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'amascale-ten-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const results = await Promise.all(Array.from({ length: 10 }, (_, index) => maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { prMetadata: { prNumber: 100 + index },
+      cfg: { amaCloserMaxConcurrentLaunches: 3, amaCloserConcurrentLaunchCeiling: 32 } }),
+    ...deps,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
+  })));
+  assert.equal(results.filter((result) => result.dispatched).length, 10, JSON.stringify(results));
+  assert.equal(deps.calls.length, 10);
 });

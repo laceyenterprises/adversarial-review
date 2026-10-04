@@ -382,6 +382,7 @@ export async function attemptDaemonCleanMerge({
   allowHeadCloserCertifiedNonBlocking = false,
   fetchLiveGateImpl,
   acquireLeaseImpl,
+  onEligibleImpl = null,
   releaseLeaseImpl,
   runMergeImpl,
   dismissStaleRequestChangesImpl = null,
@@ -568,6 +569,13 @@ export async function attemptDaemonCleanMerge({
   // ── Gate 3: don't re-loop a head that already failed permanently. ──────────
   if (priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, validatedHead })) {
     return notTaken('prior-daemon-terminal-failure');
+  }
+
+  // Observability sees the live, head-bound eligibility decision before lease
+  // contention can defer it. Observer failures never change merge authority.
+  if (typeof onEligibleImpl === 'function') {
+    try { await onEligibleImpl({ repo, prNumber, headSha: validatedHead }); }
+    catch (error) { logger?.warn?.(`[daemon-merge] eligibility observation failed: ${error.message}`); }
   }
 
   // ── Acquire the merge lease for the head. Contention defers cleanly. ───────

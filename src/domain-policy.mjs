@@ -151,6 +151,8 @@ export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg 
   };
   return {
     ...fallbackCfg,
+    amaCloserConcurrentLaunchCeiling: policy.amaCloserConcurrentLaunchCeiling ?? fallbackCfg.amaCloserConcurrentLaunchCeiling ?? 32,
+    closureLagSloMs: policy.closureLagSloMs ?? fallbackCfg.closureLagSloMs ?? 1800000,
     enabled: preferredScalar(fallbackCfg.enabled, policy.enabled, MERGE_AUTHORITY_KEYS.enabled, options),
     workerClass: preferredScalar(
       fallbackCfg.workerClass,

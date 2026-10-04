@@ -1,3 +1,4 @@
+import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
 // ARC-18: extracted from watcher.mjs. The AMA (autonomous-merge-authority)
@@ -720,6 +721,7 @@ export function writeAutonomousMergeDisabledAudit({
 
 export async function maybeDispatchAmaClosureFor({
   automatedRecovery = false,
+  priorDaemonCleanMerge = null,
   rootDir = ROOT,
   reviewStateRow,
   dispatchJob,
@@ -1533,9 +1535,13 @@ export async function maybeDispatchAmaClosureFor({
   //   - deferred      → lease contention / audit bootstrap failure; retry next
   //                     tick with no double-merge.
   throwIfAborted(signal);
-  const daemonCleanMerge = automatedRecovery
-    ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'automated-hammer-recovery' }
-    : await runCoexistenceOperation(
+  try {
+    if (!priorDaemonCleanMerge && !wouldUseDaemonPath) await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      eligible: !wouldUseDaemonPath && isEligibleForAmaClosure(reviewState, prMetadata, cfg).eligible,
+      sloMs: cfg.closureLagSloMs, logger });
+  } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
+  const daemonCleanMerge = priorDaemonCleanMerge && priorDaemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.DEFERRED
+    ? priorDaemonCleanMerge : await runCoexistenceOperation(
     'daemon-clean-merge-attempt',
     ({ signal: operationSignal }) => runDaemonCleanMergeAttemptImpl({
       rootDir,
@@ -1572,6 +1578,11 @@ export async function maybeDispatchAmaClosureFor({
     },
   );
   throwIfAborted(signal);
+  if (!priorDaemonCleanMerge && daemonCleanMerge?.reason === 'not-eligible') {
+    try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      eligible: false, reason: daemonCleanMerge.reason, logger }); }
+    catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
+  }
   if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
     recordDaemonMergePark({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha || null,
@@ -1595,6 +1606,8 @@ export async function maybeDispatchAmaClosureFor({
     // the one that applied (foundry#35, 8.8h on `worker-identity-unresolved`).
     // Diagnostics only — nothing reads these records to decide a merge.
     if (daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
+      try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, merged: true, logger }); }
+      catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
       clearDaemonRouteDisagreement(rootDir, { repo: repoPath, prNumber });
     } else {
@@ -2100,6 +2113,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   const liveMerged =
     candidate?.merged === true || String(candidate?.prState || '').toLowerCase() === 'merged';
   if (liveMerged || String(candidate?.prState || '').toLowerCase() === 'closed') {
+    try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, merged: liveMerged,
+      closed: !liveMerged, mergedAt: candidate?.mergedAt, logger }); }
+    catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
     return { outcome: 'pr-terminal', terminalReason: liveMerged ? 'merged' : 'closed' };
   }
   let amaClosureResult;
@@ -2150,6 +2166,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     };
   }
   throwIfAborted(signal);
+  logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
+    reason: amaClosureResult?.dispatched ? 'hammer-running'
+      : amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending' }));
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
@@ -2189,6 +2208,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
         operatorApprovalEvent, mergeAgentRequestEvent, adversarialMergeRequestedEvent,
         repoPath, prNumber, currentRevisionRef, domainId, logger, signal,
         operationTimeoutMs, operationTracker, automatedRecovery: true,
+        priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
       }),
       ...recoveryOptions,
     });

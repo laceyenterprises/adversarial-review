@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../bin/reconcile-ama-closer-dispatches.mjs';
@@ -36,7 +38,8 @@ test('missing ledger launch expires; unreadable ledger retains only fresh capaci
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const now = '2026-10-03T00:00:00Z';
   updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: 1, headSha: 'abc', state: 'dispatched', launchRequestId: 'missing', lastAttemptedAt: now }));
-  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 1);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) }))[0].holdsCapacity, true);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) }))[0].holdsCapacity, true);
   const expiredNow = new Date(Date.parse(now) + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS).toISOString();
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 0);
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) })).length, 0);
@@ -79,6 +82,75 @@ test('shared ledger adapter reads terminal and running SQLite launches offline',
   db.close();
   const active = await findActiveAmaCloserLaunches(root, { now: '2026-10-03T00:00:00Z', ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' } });
   assert.deepEqual(active.map(record => record.launchRequestId), ['lrq-1']);
+});
+
+test('default ledger reader merges worker PID and process status into fleet capacity evidence', async (t) => {
+  const { createRequire } = await import('node:module');
+  const Database = createRequire(import.meta.url)('better-sqlite3');
+  const root = fixture(t, 'process-capacity');
+  const ledgerDbPath = join(root, 'ledger.sqlite');
+  const db = new Database(ledgerDbPath);
+  try {
+    db.exec(`
+      CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT);
+      CREATE TABLE worker_runs (run_id TEXT, launch_request_id TEXT, status TEXT, updated_at TEXT, ended_at TEXT, started_at TEXT);
+      CREATE TABLE worker_processes (worker_process_id INTEGER PRIMARY KEY, launch_request_id TEXT, pid INTEGER,
+        process_status TEXT, updated_at TEXT, exited_at TEXT, started_at TEXT, created_at TEXT);
+    `);
+    for (const [i, processStatus] of ['running', 'running', 'exited'].entries()) {
+      const prNumber = i + 1;
+      const lrq = `lrq-${prNumber}`;
+      db.prepare('INSERT INTO launch_requests VALUES (?, ?, NULL, NULL, NULL)').run(lrq, 'running');
+      db.prepare('INSERT INTO worker_runs VALUES (?, ?, ?, NULL, NULL, NULL)').run(`wr-${prNumber}`, lrq, 'running');
+      db.prepare('INSERT INTO worker_processes VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)').run(prNumber, lrq, 4200 + prNumber, processStatus);
+      dispatchRecord(root, prNumber);
+    }
+  } finally { db.close(); }
+  const checkedPids = [];
+  const active = await findActiveAmaCloserLaunches(root, {
+    now: NOW, ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
+    processKillImpl: (pid, signal) => {
+      checkedPids.push(pid);
+      assert.equal(signal, 0);
+      if (pid === 4202) throw Object.assign(new Error('dead fixture worker'), { code: 'ESRCH' });
+    },
+  });
+  assert.deepEqual(checkedPids.sort(), [4201, 4202]);
+  assert.deepEqual(active.sort((a, b) => a.prNumber - b.prNumber).map(({ prNumber, holdsCapacity }) =>
+    [prNumber, holdsCapacity]), [[1, true], [2, true], [3, false]]);
+
+  // Exercise the same default reader with promise-returning adapter exports.
+  // The loader wraps the real offline SQLite adapter, so both awaits are
+  // necessary to retain the worker PID and process status.
+  const loaderPath = join(root, 'async-ledger-loader.mjs');
+  writeFileSync(loaderPath, `
+    export async function load(url, context, nextLoad) {
+      const result = await nextLoad(url, context);
+      if (!url.endsWith('/src/session-ledger-read-adapter.mjs')) return result;
+      return { ...result, source: String(result.source)
+        .replace('export function readLaunchRequestStatusFromLedger(', 'export async function readLaunchRequestStatusFromLedger(')
+        .replace('export function readLatestWorkerRunStatusFromLedger(', 'export async function readLatestWorkerRunStatusFromLedger(') };
+    }
+  `);
+  execFileSync(process.execPath, ['--input-type=module', '--eval', `
+    import { register } from 'node:module';
+    import assert from 'node:assert/strict';
+    register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
+    const { findActiveAmaCloserLaunches } = await import(${JSON.stringify(new URL('../src/ama/dispatch-closer.mjs', import.meta.url).href)});
+    const checkedPids = [];
+    const active = await findActiveAmaCloserLaunches(${JSON.stringify(root)}, {
+      now: ${JSON.stringify(NOW)}, ledgerDbPath: ${JSON.stringify(ledgerDbPath)},
+      env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' },
+      processKillImpl: (pid, signal) => {
+        checkedPids.push(pid);
+        assert.equal(signal, 0);
+        if (pid === 4202) throw Object.assign(new Error('dead fixture worker'), { code: 'ESRCH' });
+      },
+    });
+    assert.deepEqual(checkedPids.sort(), [4201, 4202]);
+    assert.deepEqual(active.sort((a, b) => a.prNumber - b.prNumber)
+      .map(({ prNumber, holdsCapacity }) => [prNumber, holdsCapacity]), [[1, true], [2, true], [3, false]]);
+  `], { encoding: 'utf8', timeout: 10000, stdio: 'pipe' });
 });
 
 function fixture(t, label) {

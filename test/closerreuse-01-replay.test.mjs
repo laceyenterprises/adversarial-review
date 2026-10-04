@@ -119,6 +119,7 @@ function closerArgs(rootDir, { dispatchedAt, prNumber = PR_NUMBER, head = HEAD }
       eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false },
       branchProtection: { required: false },
       amaCloserMaxConcurrentLaunches: 1,
+      amaCloserConcurrentLaunchCeiling: 1, // Pin the replay's deliberately saturated capacity.
     },
     dispatchContext: {
       rootDir,
@@ -531,3 +532,18 @@ for (const [label, launchRow, stdout] of [
     assert.equal(ledger.attemptCount, 2);
   });
 }
+
+test('failed backlog census defers when the configured floor is saturated', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-census-failure-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedDeadHammer(rootDir, { retryCount: 1 });
+  seedOtherPrLaunch(rootDir);
+  const deps = closerDeps({ launchRows: { [DEAD_LRQ]: deadLaunchRow(DEAD_LRQ), [OTHER_LRQ]: { status: 'running' } } });
+  const args = closerArgs(rootDir, { dispatchedAt: '2026-09-29T09:18:23Z' });
+  args.cfg.amaCloserConcurrentLaunchCeiling = 32;
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    observeCloserBacklogImpl: async () => { throw new Error('census unavailable'); },
+  });
+  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(deps.launches.length, 0);
+});

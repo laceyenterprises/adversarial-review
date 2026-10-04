@@ -1,3 +1,4 @@
+import { observeClosureLag } from './ama/closure-lag.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -834,6 +835,8 @@ export async function runDaemonCleanMergeAttempt({
       ? hamAuditHead
       : validatedHead;
   const daemonResult = await attemptDaemonCleanMergeImpl({
+    onEligibleImpl: ({ headSha }) => observeClosureLag({ rootDir, repo: repoPath, prNumber,
+      headSha, eligible: true, sloMs: cfg.closureLagSloMs, logger }),
     repo: repoPath,
     prNumber,
     base,

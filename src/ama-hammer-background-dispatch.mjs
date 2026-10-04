@@ -1,3 +1,4 @@
+import { effectiveCloserCap, warnCloserFloor } from './ama/closure-capacity.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
 //
@@ -32,6 +33,7 @@ export const AMA_HAMMER_DISPATCH_MODES = Object.freeze(['inline', 'background'])
 export const DEFAULT_AMA_HAMMER_DISPATCH_MODE = 'inline';
 // Keep the background queue aligned with the closer's default capacity.
 export const DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT = 3;
+export const AMA_HAMMER_BACKGROUND_PROCESS_CEILING = 32;
 export const AMA_HAMMER_BACKGROUND_REASON = 'ama-closer-dispatch-backgrounded';
 // A settled outcome is only meaningful to the next tick or two for that PR@head.
 // Past this age the PR has moved on (new head, closed) and the outcome is dropped.
@@ -74,11 +76,12 @@ export function amaHammerBackgroundKey({ repo, prNumber, headSha }) {
  */
 export function createAmaHammerBackgroundQueue({
   maxConcurrent = DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT,
+  ceiling = maxConcurrent,
   nowMs = () => Date.now(),
   settledTtlMs = DEFAULT_AMA_HAMMER_SETTLED_TTL_MS,
   settledMaxEntries = DEFAULT_AMA_HAMMER_SETTLED_MAX_ENTRIES,
 } = {}) {
-  const limit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 1);
+  const limit = () => effectiveCloserCap(entries.size, maxConcurrent, ceiling);
   const entries = new Map();
   const settled = new Map();
   const waiting = [];
@@ -91,7 +94,7 @@ export function createAmaHammerBackgroundQueue({
   }
 
   function launchWaiting() {
-    while (running < limit) {
+    while (running < limit()) {
       const nextIndex = waiting.findIndex((entry) => !runningPrKeys.has(entry.prKey));
       if (nextIndex < 0) return;
       const [next] = waiting.splice(nextIndex, 1);
@@ -161,7 +164,7 @@ export function createAmaHammerBackgroundQueue({
       }
       const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null };
       entries.set(key, entry);
-      if (running < limit && !runningPrKeys.has(entry.prKey)) {
+      if (running < limit() && !runningPrKeys.has(entry.prKey)) {
         launch(entry);
         return { state: 'started', key, queuedAtMs: entry.queuedAtMs };
       }
@@ -184,7 +187,7 @@ export function createAmaHammerBackgroundQueue({
       return {
         running,
         waiting: waiting.length,
-        limit,
+        limit: limit(),
         keys: [...entries.keys()],
         settledKeys: [...settled.keys()],
       };
@@ -205,9 +208,14 @@ export function createAmaHammerBackgroundQueue({
 
 // One queue per watcher process. The watcher is a long-lived single process, so
 // module scope is the natural lifetime; tests construct their own queues.
+// The shared queue uses a process bound. Each run's maybeDispatchAmaCloser
+// enforces its domain ceiling; the first domain must not configure this queue.
 let processQueue = null;
 export function amaHammerBackgroundQueue({ maxConcurrent } = {}) {
-  if (!processQueue) processQueue = createAmaHammerBackgroundQueue({ maxConcurrent });
+  if (!processQueue) warnCloserFloor(maxConcurrent ?? DEFAULT_AMA_HAMMER_BACKGROUND_MAX_CONCURRENT, AMA_HAMMER_BACKGROUND_PROCESS_CEILING);
+  if (!processQueue) processQueue = createAmaHammerBackgroundQueue({
+    maxConcurrent, ceiling: AMA_HAMMER_BACKGROUND_PROCESS_CEILING,
+  });
   return processQueue;
 }
 

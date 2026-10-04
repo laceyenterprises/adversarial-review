@@ -19,13 +19,15 @@ An explicit helper invocation creates SQLite table `refusals` on first use. Its
 composite primary key is `(repo, pr, head)`; `repo` and `head` are text, `pr` is an integer.
 `count` and `paged` are integers defaulting to zero. Each explicit refusal helper
 invocation increments `count` in an immediate transaction with a 5,000 ms busy
-timeout. At `count >= 3`, the transaction changes `paged` from zero to one and
-only that winner emits `ama_primary_change_refusal_exhausted` and sends a SEV1
-page. The guard survives process restarts and is scoped to one PR head.
+timeout. At `count >= 3`, the transaction reserves the page with `paged=1`
+while `paged<2`, emits `ama_primary_change_refusal_exhausted` and sends a SEV1
+page. `paged=2` records confirmed durable enqueue and prevents later sends.
+The guard survives process restarts and is scoped to one PR head.
 
-`paged` reserves an in-flight durable enqueue. A successful enqueue retains the
-guard; a failed enqueue releases it before rethrowing, so the next observation
-retries without resetting the count. It does not claim transport delivery.
+An interrupted `paged=1` reservation retries on the next helper invocation.
+A successful enqueue changes the guard to two; a failed enqueue releases it
+to zero before rethrowing, so the next observation retries without resetting
+the count. It does not claim transport delivery.
 Explicit callers own error handling. The closer retains its merge refusal
 independently of this legacy store; neither daemon nor closer currently writes
 it. Recovery is described in
@@ -37,5 +39,3 @@ There is no automatic expiry or deletion. AMA owns these rows until an operator
 archives closed-PR diagnostics; do not delete an open head's page guard to reset
 its counter. A new head gets a new row. Schema convergence is idempotent
 `CREATE TABLE IF NOT EXISTS`; no existing columns are rewritten.
-
-Paging uses `paged=1` for uncertain enqueue and `paged=2` for confirmed durable enqueue. State 1 is retried after restart using a deterministic outbox identity, including terminal outbox entries.

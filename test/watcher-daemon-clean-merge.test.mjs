@@ -3685,7 +3685,7 @@ test('primary-change operator park records the concrete reason and remains attri
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-test('primary-change operator recovery requires a live label and fresh attributable exact-head request', async () => {
+test('primary-change operator fallback requires scoped evidence; ownerless heads enter watchdog recovery', async () => {
   const rootDir = tempRoot();
   try {
     const event = { id: 'operator-intent', actor: 'operator', headSha: 'head-live',
@@ -3697,19 +3697,19 @@ test('primary-change operator recovery requires a live label and fresh attributa
         mergeAgentRequestEvent, maybeDispatchAmaClosureForImpl: async () => result });
     const closerRefusal = { ...refusal, reason: 'primary-change-repair-required' };
     assert.equal((await run(event, ['merge-agent-requested'], closerRefusal)).outcome, 'dispatch-merge-agent');
-    assert.equal((await run(null, ['merge-agent-requested'], closerRefusal)).outcome, 'await-operator');
-    assert.equal((await run({ ...event, headSha: 'old-head' }, ['merge-agent-requested'], closerRefusal)).outcome, 'await-operator');
-    assert.equal((await run(event, ['operator-approved'], closerRefusal)).outcome, 'await-operator');
+    assert.equal((await run(null, ['merge-agent-requested'], closerRefusal)).outcome, 'ama-pending');
+    assert.equal((await run({ ...event, headSha: 'old-head' }, ['merge-agent-requested'], closerRefusal)).outcome, 'ama-pending');
+    assert.equal((await run(event, ['operator-approved'], closerRefusal)).outcome, 'ama-pending');
     const recovered = await run(event);
     assert.equal(recovered.outcome, 'dispatch-merge-agent');
     assert.equal(recovered.coexistence.action, 'merge-agent-operator-fallback');
     assert.equal(recovered.dispatchEnv.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
     for (const invalid of [null, { ...event, headSha: 'old-head' }, { ...event, actor: '' },
       { ...event, id: null }, { ...event, prUpdatedAt: '2026-10-03T13:00:00Z' }]) {
-      assert.equal((await run(invalid)).outcome, 'await-operator');
+      assert.equal((await run(invalid)).outcome, 'ama-pending');
     }
-    assert.equal((await run(event, [])).outcome, 'await-operator');
-    assert.equal((await run(event, ['operator-approved'])).outcome, 'await-operator');
+    assert.equal((await run(event, [])).outcome, 'ama-pending');
+    assert.equal((await run(event, ['operator-approved'])).outcome, 'ama-pending');
     const outage = { amaEnabled: true, dispatched: false, skipMergeAgent: true, reason: 'gate-read-failed' };
     assert.equal((await run(event, ['merge-agent-requested'], outage)).outcome, 'ama-pending');
   } finally { rmSync(rootDir, { recursive: true, force: true }); }

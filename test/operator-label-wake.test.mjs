@@ -209,6 +209,12 @@ test('LABELWAKE-01: debounce clear failure keeps receipt reserved and lane intac
     assert.equal(JSON.parse(readFileSync(join(dir, readdirSync(dir)[0]), 'utf8')).outcome, 'reserved');
     rmSync(operatorDecisionAlertStateDir(rootDir));
     assert.equal((await observeOperatorLabelWakes(args)).length, 1);
+    assert.equal(readNoProgressLane(rootDir, identity), null);
+    assert.equal(JSON.parse(readFileSync(join(dir, readdirSync(dir)[0]), 'utf8')).outcome, 'requested');
+    // Completed recovery must deduplicate even when the PR parks again.
+    park(rootDir);
+    assert.deepEqual(await observeOperatorLabelWakes(args), []);
+    assert.equal(readNoProgressLane(rootDir, identity).noProgressTicks, 7);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 

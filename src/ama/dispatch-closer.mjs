@@ -1,6 +1,7 @@
 import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
+import { recordPrimaryChangeRefusal } from './primary-change-refusal.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
@@ -4074,8 +4075,11 @@ export async function maybeDispatchAmaCloser({
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
   if (verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
+    await recordPrimaryChangeRefusal({ rootDir: dispatchContext?.rootDir,
+      repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha, reasons: verdict.reasons },
+    { page: deliverAlertImpl, logger });
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      reason: 'primary-change-needs-operator', reasons: verdict.reasons, needsOperator: true });
+      reason: 'primary-change-repair-required', reasons: verdict.reasons });
   }
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;

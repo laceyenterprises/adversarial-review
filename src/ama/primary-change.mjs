@@ -1,7 +1,9 @@
+import { amaAllAuthoritativeReviewerLogins } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
 import { parseCommitTrailers } from './ham-provenance.mjs';
 // HAMINTENT-01: trusted GitHub history, never the hammer's claimed intent.
 const SHA = /^[0-9a-f]{40}$/i;
@@ -58,8 +60,8 @@ function testRegionsChanged(primary, final) {
     .filter((path) => isTestPath(path)
       && (!primary.has(path) || isTestPath(primary.get(path).filename))
       && (!final.has(path) || isTestPath(final.get(path).filename)))
-    .map((path) => ({ path, primaryRegions: primary.get(path)?.regions || [],
-      finalRegions: final.get(path)?.regions || [] }));
+    .map((path) => ({ path, primaryRegions: (primary.get(path)?.regions || []).map(({ start, end }) => ({ start, end })),
+      finalRegions: (final.get(path)?.regions || []).map(({ start, end }) => ({ start, end })) }));
 }
 
 // Compare changed regions in merge-base coordinates, rather than requiring the
@@ -101,11 +103,13 @@ function changes(files, paths = null, aliases = new Map()) {
       }
       if (line.startsWith('+') || line.startsWith('-')) {
         if (oldLine === null) throw new Error('missing hunk header');
-        if (!region) { region = { start: oldLine, end: oldLine }; regions.push(region); }
+        if (!region) { region = { start: oldLine, end: oldLine, removed: new Map(), removedLines: [] }; regions.push(region); }
         if (line.startsWith('+')) additions += 1;
         else {
           const normalized = line.slice(1).trim().replace(/\s+/g, ' ');
           removed.set(normalized, (removed.get(normalized) || 0) + 1);
+          region.removedLines.push({ text: normalized, position: oldLine });
+          region.removed.set(normalized, (region.removed.get(normalized) || 0) + 1);
           deletions += 1;
           oldLine += 1;
           region.end = oldLine;
@@ -117,6 +121,73 @@ function changes(files, paths = null, aliases = new Map()) {
       renamed: file.status === 'renamed', regions, removed });
   }
   return result;
+}
+
+// Project a base-coordinate region into a reviewed/parent head. Missing or
+// truncated diffs cannot authorize anything. Findings use inclusive head lines.
+function projectRegion(files, path, region) {
+  changes(files); // validate patch completeness before using hunk coordinates
+  const file = files.find((entry) => (entry.previous_filename || entry.filename) === path);
+  if (!file) return { ...region, filename: path };
+  if (typeof file.patch !== 'string') throw new Error('opaque authorization');
+  const segments = [];
+  let old = 0;
+  let next = 0;
+  let segment = null;
+  for (const line of file.patch.split('\n')) {
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (hunk) {
+      old = Number(hunk[1]) + (hunk[2] === '0' ? 1 : 0);
+      next = Number(hunk[3]) + (hunk[4] === '0' ? 1 : 0);
+      segment = null;
+    } else if (line.startsWith('-') || line.startsWith('+')) {
+      if (!segment) { segment = { old, next, oldEnd: old, nextEnd: next }; segments.push(segment); }
+      if (line.startsWith('-')) old += 1;
+      else next += 1;
+      segment.oldEnd = old;
+      segment.nextEnd = next;
+    } else if (line.startsWith(' ')) { old += 1; next += 1; segment = null; }
+  }
+  const project = (line, end) => {
+    let offset = 0;
+    for (const segment of segments) {
+      if (line < segment.old) break;
+      if (line < segment.oldEnd || segment.old === segment.oldEnd && line === segment.old) {
+        return end ? Math.max(segment.next, segment.nextEnd - 1) : segment.next;
+      }
+      offset = segment.nextEnd - segment.oldEnd;
+    }
+    return line + offset;
+  };
+  return { start: project(region.start, false), end: project(Math.max(region.start, region.end - 1), true), filename: file.filename };
+}
+
+const overlaps = (a, b) => a.start <= b.end && b.start <= a.end;
+
+function reversalAuthorized(evidence, path, region) {
+  return (evidence.reversalAuthorizations || []).some((authorization) => {
+    try {
+      const { commit, review, reviewedFiles, parentFiles } = authorization;
+      if (!isHammer(commit) || !SHA.test(commit.sha || '') || !SHA.test(review.commit_id || '')
+        || review.state !== 'CHANGES_REQUESTED'
+        || !amaAllAuthoritativeReviewerLogins().includes(String(review.user?.login || '').replace(/\[bot\]$/, ''))) return false;
+      const trailers = parseCommitTrailers(commit.commit.message);
+      if (trailers['worker-ticket'] !== 'HAM' || trailers['reviewed-head'] !== review.commit_id) return false;
+      const cite = /^(\S+) finding=([1-9]\d*)$/.exec(trailers['reversal-authorized-by'] || '');
+      if (!cite || ![review.node_id, review.html_url].filter(Boolean).includes(cite[1])) return false;
+      const finding = parseBlockingFindingsSection(review.body)?.[Number(cite[2]) - 1];
+      if (!finding) return false;
+      const lines = /^`?(\d+)(?:\s*[-–]\s*(\d+))?`?$/.exec(finding.lines || '');
+      if (!lines) return false;
+      const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
+      if (cited.start < 1 || cited.end < cited.start) return false;
+      const reviewed = projectRegion(reviewedFiles, path, region);
+      if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !overlaps(cited, reviewed)) return false;
+      const parent = projectRegion(parentFiles, path, region);
+      const touched = changes(commit.files).get(parent.filename);
+      return Boolean(touched?.regions.some((other) => overlaps({ start: other.start, end: Math.max(other.start, other.end - 1) }, parent)));
+    } catch { return false; }
+  });
 }
 
 export function checkPrimaryChange(evidence, headSha) {
@@ -138,9 +209,12 @@ export function checkPrimaryChange(evidence, headSha) {
       const actual = final.get(path);
       if (isTestPath(path) && isTestPath(change.filename)
         && (!actual || isTestPath(actual.filename))) continue;
-      if (!actual || (change.renamed && actual.filename === path)) {
+      if ((change.renamed && actual?.filename === path) || (!actual
+        && !(change.regions.length > 0 && !change.opaque && !change.renamed
+          && change.regions.every((region) => reversalAuthorized(evidence, path, region))))) {
         return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
       }
+      if (!actual) continue;
       if (change.opaque) {
         if (actual.sha !== change.sha || actual.status !== change.status) {
           return { ok: false, reason: 'primary-change-unknown', path, testRegionsChanged: testChanges };
@@ -148,12 +222,21 @@ export function checkPrimaryChange(evidence, headSha) {
         continue;
       }
       for (const [line, count] of change.removed) {
-        if ((actual.removed.get(line) || 0) < count) return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
+        const actualPositions = new Set(actual.regions.flatMap((region) => region.removedLines)
+          .filter((entry) => entry.text === line).map((entry) => entry.position));
+        const authorizedCount = change.regions.reduce((total, region) => total
+          + (reversalAuthorized(evidence, path, region)
+            ? region.removedLines.filter((entry) => entry.text === line && !actualPositions.has(entry.position)).length
+            : 0), 0);
+        if ((actual.removed.get(line) || 0) + authorizedCount < count) {
+          return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
+        }
       }
       for (const region of change.regions) {
         if (!actual.regions.some((other) => region.start === region.end
           ? other.start <= region.start && other.end >= region.start
-          : other.start < region.end && other.end > region.start)) {
+          : other.start < region.end && other.end > region.start)
+          && !reversalAuthorized(evidence, path, region)) {
           return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
         }
       }
@@ -218,6 +301,31 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     }
     const mergeBase = primary.merge_base_commit?.sha;
     if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown;
+    const reversalAuthorizations = [];
+    const closure = history.commits.slice(history.commits.findIndex((commit) => commit.sha === primaryHead) + 1);
+    // If primaryHead is not listed (compare excludes its base), verify each
+    // candidate's parent is descended from the protected author head.
+    for (const candidate of closure.filter(isHammer)) {
+      const trailers = parseCommitTrailers(candidate.commit.message);
+      if (!trailers['reversal-authorized-by']) continue;
+      const reviews = await read(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
+      if (!Array.isArray(reviews) || reviews.length >= 100) throw new Error('capped reviews');
+      const cite = /^(\S+) finding=([1-9]\d*)$/.exec(trailers['reversal-authorized-by']);
+      const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
+      if (!review || review.commit_id !== trailers['reviewed-head']) continue;
+      const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
+      if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
+        || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
+      const parentSha = commit.parents[0].sha;
+      const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
+      const reviewInClosure = await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`);
+      const reviewAncestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
+      if (![inClosure, reviewInClosure, reviewAncestry].every((entry) => ['ahead', 'identical'].includes(entry.status))) continue;
+      const reviewed = await read(`repos/${repo}/compare/${mergeBase}...${review.commit_id}`);
+      const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
+      if (reviewed.merge_base_commit?.sha !== mergeBase || parent.merge_base_commit?.sha !== mergeBase) continue;
+      reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
+    }
     let testChanges = null;
     try {
       const primaryChanges = changes(primary.files);
@@ -227,6 +335,7 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
     } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
       testRegionsChanged: testChanges,
+      ...(reversalAuthorizations.length ? { reversalAuthorizations } : {}),
       primaryFiles: primary.files, finalFiles: final.files };
   } catch (error) { return error?.primaryChangeReadFailed === true || error?.authOutage === true || error?.name === 'AbortError'
     || error?.code === 'ABORT_ERR' || isTransientGhError(error)

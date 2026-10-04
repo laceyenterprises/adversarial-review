@@ -1,0 +1,175 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
+import { disputeFinding } from '../src/ama/finding-dispute.mjs';
+import { recordPrimaryChangeRefusal } from '../src/ama/primary-change-refusal.mjs';
+import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
+import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
+import { formatFindingDisputeContext } from '../src/prompt-context.mjs';
+const head = 'c'.repeat(40), author = 'a'.repeat(40), base = 'b'.repeat(40);
+const path = 'scripts/ci-mirror/checks.agent-os.json';
+const file = { filename: path, status: 'modified', additions: 1, deletions: 1,
+  patch: '@@ -10 +10 @@\n-enforcement: false\n+enforcement: true' };
+const body = `## Blocking issues\n- **Narrow push enforcement**\n  - **File:** \`${path}\`\n  - **Lines:** \`10\`\n  - **Problem:** Push ratchet blocks unrelated work.\n  - **Recommended fix:** Revert this push enforcement.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes`;
+const review = { node_id: 'PRR_fixture', html_url: 'https://github.com/fixture/repo/pull/1#pullrequestreview-1',
+  commit_id: author, state: 'CHANGES_REQUESTED', user: { login: 'lacey-codex-reviewer[bot]' }, body };
+const commit = { sha: head, parents: [{ sha: author }],
+  commit: { message: `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${author}\nReversal-Authorized-By: PRR_fixture finding=1` },
+  files: [{ ...file, patch: '@@ -10 +10 @@\n-enforcement: true\n+enforcement: false' }] };
+function evidence() {
+  return { headSha: head, hasHammerCommits: true, primaryHead: author, mergeBase: base,
+    primaryFiles: [file], finalFiles: [], reversalAuthorizations: [{ commit, review, reviewedFiles: [file], parentFiles: [file] }] };
+}
+test('blocking finding authorizes the overlapping HAM reversion; #1207 and invalid citations still refuse', () => {
+  assert.equal(checkPrimaryChange(evidence(), head).ok, true);
+  for (const mutate of [
+    (e) => { e.reversalAuthorizations = []; },
+    (e) => { e.reversalAuthorizations[0].commit.commit.message = 'HAM\n\nWorker-Class: hammer'; },
+    (e) => { e.reversalAuthorizations[0].review.body = body.replace('## Blocking issues', '## Non-blocking issues'); },
+    (e) => { e.reversalAuthorizations[0].review.body = body.replace('`10`', '`40`'); },
+    (e) => { e.reversalAuthorizations[0].review.body = body.replace(path, 'other.json'); },
+    (e) => { e.reversalAuthorizations[0].review.user.login = 'author'; },
+    (e) => { e.reversalAuthorizations[0].review.commit_id = head; },
+    (e) => { e.reversalAuthorizations[0].commit.files[0].patch = '@@ -9 +9 @@\n-enforcement: true\n+enforcement: false'; },
+    (e) => { e.reversalAuthorizations[0].commit.commit.message = commit.commit.message.replace('Worker-Ticket: HAM', 'Worker-Ticket: AUTHOR'); },
+  ]) {
+    const e = structuredClone(evidence()); mutate(e);
+    assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+  }
+});
+test('collector binds authorization to closure history, review ancestry and live commit patch', async () => {
+  const compare = { merge_base_commit: { sha: base }, status: 'ahead', files: [file] };
+  const get = async (url) => {
+    if (url.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: base } };
+    if (url.includes('/reviews?')) return [review];
+    if (url.includes('/commits/')) return commit;
+    if (url.endsWith(`${base}...${head}`)) return { ...compare, files: [], total_commits: 2,
+      commits: [{ sha: author, commit: { message: 'author' } }, commit] };
+    return compare;
+  };
+  const e = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get });
+  assert.equal(e.reversalAuthorizations.length, 1);
+  assert.equal(checkPrimaryChange(e, head).ok, true);
+  const outside = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    get: async (url) => url.endsWith(`${author}...${author}`) ? { status: 'diverged' } : get(url) });
+  assert.equal(checkPrimaryChange(outside, head).reason, 'primary-change-reverted');
+});
+test('a contextual hunk cannot authorize another region, and line shifts are mapped', () => {
+  const e = evidence();
+  const mapped = { ...file, additions: 2, deletions: 1,
+    patch: '@@ -1,11 +1,12 @@\n+insert\n one\n two\n three\n four\n five\n six\n seven\n eight\n nine\n-enforcement: false\n+enforcement: true\n eleven' };
+  e.reversalAuthorizations[0] = structuredClone(e.reversalAuthorizations[0]);
+  e.reversalAuthorizations[0].reviewedFiles = [mapped];
+  e.reversalAuthorizations[0].parentFiles = [mapped];
+  e.reversalAuthorizations[0].review.body = body.replace('`10`', '`11`');
+  e.reversalAuthorizations[0].commit.files[0].patch = '@@ -11 +11 @@\n-enforcement: true\n+enforcement: false';
+  assert.equal(checkPrimaryChange(e, head).ok, true);
+  e.reversalAuthorizations[0].review.body = body.replace('`10`', '`2`');
+  assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+});
+function disputeHarness(t, overrides = {}) {
+  const db = new Database(':memory:'); ensureReviewStateSchema(db); t.after(() => db.close());
+  db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, reviewer, review_status, pr_state, reviewed_at, revision_ref)
+    VALUES ('fixture/repo', 1, 'codex', 'posted', 'open', '2026-10-03T00:00:00Z', ?)`).run(head);
+  const calls = [];
+  const args = { rootDir: '/fixture', repo: 'fixture/repo', prNumber: 1, headSha: head,
+    reviewRef: review.node_id, findingNumber: 1, evidence: 'Generated destination is JSONB; TEXT assignment fails.' };
+  const deps = { db, get: async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head }]
+    : { state: 'open', head: { sha: head } },
+  postComment: async (text) => calls.push(['comment', text]),
+  request: (input) => { calls.push(['rereview', input]); return requestReviewRereview(input); },
+  page: async (...input) => calls.push(['page', ...input]), logger: { error: (text) => calls.push(['event', text]), warn() {} }, ...overrides };
+  return { db, calls, args, deps };
+}
+test('dispute posts finding evidence then uses exact-head review CAS, with no operator decision', async (t) => {
+  const h = disputeHarness(t);
+  const result = await disputeFinding(h.args, h.deps);
+  assert.equal(result.triggered, true);
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['comment', 'rereview']);
+  assert.match(h.calls[0][1], /finding=1/);
+  assert.match(h.calls[0][1], /JSONB/);
+  assert.equal(h.calls[1][1].targetRevisionRef, head);
+  assert.equal(h.db.prepare('SELECT revision_ref, review_status FROM reviewed_prs').get().review_status, 'pending');
+  const context = formatFindingDisputeContext({ headRefOid: head, comments: [{ body: h.calls[0][1] }] });
+  assert.match(context, /confirm or withdraw/); assert.match(context, /JSONB/);
+  assert.equal(formatFindingDisputeContext({ headRefOid: author, comments: [{ body: h.calls[0][1] }] }), '');
+});
+test('repeated dispute refusal pages and emits SEV1 once without requesting again', async (t) => {
+  const h = disputeHarness(t, { request: () => ({ triggered: false, reason: 'blocked' }) });
+  for (let i = 0; i < 4; i++) await disputeFinding(h.args, h.deps);
+  assert.equal(h.calls.filter(([kind]) => kind === 'comment').length, 2);
+  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
+  assert.match(h.calls.find(([kind]) => kind === 'event')[1], /SEV1/);
+});
+test('review cap exhaustion pages once without posting or rearming', async (t) => {
+  const h = disputeHarness(t);
+  h.db.prepare(`INSERT INTO review_cycle_verdicts(pr_url, head_sha, verdict_count, verdict_at)
+    VALUES ('https://github.com/fixture/repo/pull/1', ?, 10, ?)`).run(head, new Date().toISOString());
+  await disputeFinding(h.args, h.deps); await disputeFinding(h.args, h.deps);
+  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
+  assert.equal(h.calls.filter(([kind]) => kind === 'comment' || kind === 'rereview').length, 0);
+});
+test('head movement never re-arms a dispute', async (t) => {
+  const h = disputeHarness(t); let reads = 0;
+  h.deps.get = async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head }]
+    : { state: 'open', head: { sha: ++reads === 1 ? head : author } };
+  await assert.rejects(disputeFinding(h.args, h.deps), /head moved/);
+  assert.equal(h.calls.filter(([kind]) => kind === 'rereview').length, 0);
+});
+test('repeated preservation refusals retain the hold and page once across restarts', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamintent-refusal-')); t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pages = [], events = [];
+  for (let i = 0; i < 5; i++) await recordPrimaryChangeRefusal({ rootDir, repo: 'fixture/repo', prNumber: 1,
+    headSha: head, reasons: ['primary-change-reverted'] }, { page: async (...args) => pages.push(args), logger: { error: (text) => events.push(text) } });
+  assert.equal(pages.length, 1); assert.equal(events.length, 1); assert.match(events[0], /SEV1/);
+});
+
+test('exhaustion events use the real pager presentation', () => {
+  for (const event of ['ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted']) {
+    assert.equal(alertPresentationForDoc({ event, payload: { repo: 'fixture/repo', prNumber: 1 } }).severity, 'SEV1');
+  }
+});
+
+test('a dispute after other repairs binds the re-review to live head and verifies finding ancestry', async (t) => {
+  const h = disputeHarness(t);
+  h.deps.get = async (url) => url.includes('/reviews?') ? [review]
+    : url.includes('/compare/') ? { status: 'ahead' } : { state: 'open', head: { sha: head } };
+  assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
+  assert.equal(h.calls[1][1].targetRevisionRef, head);
+  assert.match(h.calls[0][1], new RegExp(`Finding-Reviewed-Head: ${author}`));
+});
+
+test('partial authorization permits one repeated removal while preserving the other region', () => {
+  const e = evidence();
+  e.primaryFiles = [{ ...file, additions: 2, deletions: 2,
+    patch: '@@ -10 +10 @@\n-enforcement: false\n+enforcement: true\n@@ -40 +40 @@\n-enforcement: false\n+enforcement: true' }];
+  e.finalFiles = [{ ...file, patch: '@@ -40 +40 @@\n-enforcement: false\n+enforcement: true' }];
+  assert.equal(checkPrimaryChange(e, head).ok, true);
+  e.finalFiles = [];
+  assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+});
+
+test('reviewer includes dispute evidence in both full and slim prompt paths', async () => {
+  const { __test__ } = await import('../src/reviewer.mjs');
+  for (const slim of [false, true]) {
+    const context = await __test__.buildReviewerExtraContext({ repo: 'fixture/repo', prNumber: 1,
+      prContext: { headRefOid: head, comments: [{ body: `HAM finding dispute — PRR_fixture finding=1\nReviewed-Head: ${head}\nJSONB proof` }] },
+      reviewModeDecision: { slim, lowRiskClasses: [], reasons: [], files: [], stats: { files: 1, added: 1, removed: 0 } },
+      fetchLinkedSpecContentsImpl: async () => '', buildHardeningReviewContextImpl: async () => '', log: { error() {} } });
+    assert.match(context, /JSONB proof/); assert.match(context, /confirm or withdraw/);
+  }
+});
+
+test('PR-wide exhaustion cannot page again when a reviewer changes the finding title', async (t) => {
+  const h = disputeHarness(t, { loadedConfig: { get: (key, fallback) => key === 'review_cycle_cap' ? 1 : fallback } });
+  await disputeFinding(h.args, h.deps);
+  h.deps.get = async (url) => url.includes('/reviews?')
+    ? [{ ...review, commit_id: head, body: body.replace('Narrow push enforcement', 'Renamed finding') }]
+    : { state: 'open', head: { sha: head } };
+  await disputeFinding(h.args, h.deps);
+  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
+});

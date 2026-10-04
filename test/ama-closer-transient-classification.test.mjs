@@ -439,7 +439,7 @@ test('maybeDispatchAmaCloser refuses invalid PR numbers before dispatch setup', 
 });
 
 
-test('HAMINTENT: the closer escalates an intent reversal instead of dispatching or merging', async (t) => {
+test('HAMINTENT: the closer holds an intent reversal without operator hand-off', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-intent-escalation-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const inputs = eligibleInputs(rootDir);
@@ -447,8 +447,8 @@ test('HAMINTENT: the closer escalates an intent reversal instead of dispatching 
   const result = await maybeDispatchAmaCloser({ ...inputs, options: { primaryChange },
     execFileImpl: async () => { assert.fail('intent reversal must not dispatch or merge'); },
   });
-  assert.equal(result.reason, 'primary-change-needs-operator');
-  assert.equal(result.needsOperator, true);
+  assert.equal(result.reason, 'primary-change-repair-required');
+  assert.equal(result.needsOperator === true, false);
   assert.equal(result.dispatched, false);
   assert.ok(result.reasons.includes('primary-change-reverted'));
 });

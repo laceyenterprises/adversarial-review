@@ -1169,12 +1169,12 @@ reasons:
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
 | `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
-| `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and use the operator fallback described below. |
-| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Use the operator fallback described below after inspecting the unsupported files. |
-| `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permanent permission, missing compare and malformed JSON errors are structural unknowns requiring operator inspection. An in-lease unknown after pre-lease validation remains non-permanent so a partial re-read cannot poison that head. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
+| `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and the finding authorization described below. Repeated refusal pages once with SEV1; it does not raise an operator decision. |
+| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Retain the merge hold while recovering evidence. Repeated refusal pages once with SEV1, without an operator decision. |
+| `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permanent permission, missing compare and malformed JSON errors are structural unknowns requiring evidence recovery. An in-lease unknown after pre-lease validation remains non-permanent so a partial re-read cannot poison that head. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
-### Primary-change evidence and operator recovery (HAMINTENT-01)
+### Primary-change evidence, authorization and disputes (HAMINTENT-02 / LAC-1833)
 
 Both merge paths use `src/ama/primary-change.mjs`. The protected baseline is the
 earliest daemon-owned dispatch launch head with a valid SHA when available, covering untagged
@@ -1209,21 +1209,35 @@ JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
 `primary-change-read-failed` rather than a proven reversal. The hammer prompt's
 90-second process limit still bounds the complete collection.
 
-For `primary-change-unknown` or `primary-change-reverted`, inspect the head-scoped
-primary-change evidence (`node bin/primary-change-context.mjs <repo> <pr> <head>`)
-and the PR diff. Resolve missing evidence or restore the primary effect if that
-is the correct fix. If the operator accepts the exact head despite unsupported
-evidence or an intentional change, apply **`merge-agent-requested` at that head**
-to enter the existing attributable operator-fallback lane (AMA-06N). That lane
-is separate from AMA primary-change eligibility and retains its own merge
-checks. `operator-approved` and `adversarial-merge-requested` alone cannot clear
-this refusal. Re-apply the head-scoped request if the head moves. The daemon
-persists the specific park reason before returning `await-operator`.
-Read outages instead remain `gate-read-failed`: retry the normal tick after
-transport/auth recovery, without authorizing an intent exception. Local git
-still verifies closer identity without GitHub authentication; unavailable
-remote primary-change evidence defers closure rather than invalidating that
-identity or requesting a hand merge.
+A blocking finding may authorize a specific reversal. The HAM commit must carry
+`Reversal-Authorized-By: <review node id or URL> finding=<n>`, `Worker-Ticket: HAM`,
+and `Reviewed-Head` naming that review's head. The finding number is its one-based
+position in the Blocking issues section. The collector verifies authoritative
+reviewer identity, review/commit ancestry inside the protected closure, live HAM
+commit patches, and File/Lines overlap with the reverted region. Base coordinates
+are projected into the reviewed and commit-parent heads, accounting for line shifts.
+Non-blocking findings, unrelated regions, missing trailers and old reviews outside
+the closure cannot authorize a reversal. Opaque files and rename checks remain
+fail-closed. Other merge safety checks remain unchanged.
+
+For a disputed blocking finding, the hammer preserves the code and releases its
+merge lease, then runs `bin/dispute-finding.mjs` with `--root-dir`, `--repo`, `--pr`,
+`--head-sha`, `--review`, `--finding` and `--evidence-file`. The evidence is bounded
+to 16KB. The helper verifies the live head and authoritative blocking review,
+posts a finding-linked evidence comment, rechecks the head, and calls the existing
+`requestReviewRereview` CAS with `targetRevisionRef`. Both full and slim reviewer
+prompts include exact-head dispute evidence and require confirmation or withdrawal.
+The evidence is untrusted PR content, never a merge waiver. Do not merge while
+awaiting adjudication or claim the disputed finding was remediated.
+
+Neither route raises `hq decision raise`. Disputes respect the configured review
+cap (also bounding total dispute requests per PR) and permit at most two requests per finding (title/file identity persists
+across heads). Cap exhaustion or repeated refusal emits `ama_finding_dispute_exhausted`
+with SEV1 and pages once. Preservation refusals retain the merge hold as
+`primary-change-repair-required`, without `needsOperator`; three refusals on the
+same head emit `ama_primary_change_refusal_exhausted` with SEV1 and page once.
+Both page guards persist across restarts. Read outages remain `gate-read-failed`
+and retry normal ticks after transport/auth recovery.
 
 ### FSR-06B: fleet-self-repair re-review requests for a trailer-only head move
 

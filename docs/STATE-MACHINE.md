@@ -587,14 +587,15 @@ Key control points:
   recent hammer rebase/validation exists, the PR is not `MERGEABLE`, or the
   newer base touches files changed by this PR. Only the hammer's documented
   no-strict up-to-date lane may merge a `BEHIND` head after those guards pass.
-- **Primary-change gate (HAMINTENT-01).** Both paths preserve changed regions
-  from the actual first hammer parent against the current PR base. Repairs to
-  added author lines are allowed. Proven reversals and unsupported evidence
-  park with a recorded reason; `operator-approved` does not waive them. An
-  attributable current-head `merge-agent-requested` invokes the existing
-  operator-fallback lane after inspection (see RUNBOOK-ama-closure). Failed
-  reads defer as `gate-read-failed`, without a permanent head marker or operator
-  escalation; the next tick retries.
+- **Primary-change gate (HAMINTENT-02 / LAC-1833).** Both paths preserve changed
+  regions from the protected author baseline against the current PR base.
+  A HAM reversal requires a `Reversal-Authorized-By` trailer citing an authoritative
+  blocking finding on its reviewed head, with overlapping File/Lines and verified
+  closure ancestry. Missing, non-blocking and unrelated citations remain refused.
+  A disputed blocking finding posts evidence and requests exact-head re-review
+  through `bin/dispute-finding.mjs`; the reviewer confirms or withdraws it.
+  Neither route raises an operator decision. Bounded exhaustion pages once and
+  emits SEV1 while retaining the merge hold. Failed reads defer as `gate-read-failed`.
 - **`strict_mode`** (default `true`): the ordinary daemon lane requires a
   zero-finding review. Explicitly setting it `false` permits daemon merge
   over *known non-blocking* findings. A current-head `operator-approved`

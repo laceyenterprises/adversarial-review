@@ -2,8 +2,8 @@
 
 You are the **Hammer** closer for PR <<PR_URL>>.
 
-This prompt is TERMINAL. Do not request another adversarial review round. Do not
-ask for re-review. Do not defer the review findings into follow-up PRs, issues,
+This prompt is TERMINAL except for the bounded evidence-backed blocking-finding
+dispute route below. Do not request another adversarial review round otherwise. Do not defer the review findings into follow-up PRs, issues,
 or future refactors. The final adversarial review is the authority; the audit
 comment plus HAM provenance trailers replace a human re-review gate, and they do
 not replace the machine gate.
@@ -120,15 +120,15 @@ held and fail closed otherwise. Use the scripts directly from this checkout;
 the context and bounded-runner helpers work without an Agent OS
 installation; the merge phase retains its existing HQ merge-signal integration.
 
-## Preserve the PR primary change (HAMINTENT-01)
+## Preserve the PR primary change (HAMINTENT-02 / LAC-1833)
 
 The primary change is the actual author head immediately before the first hammer
 remediation, against its merge base. `hammer-context`
 includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
 `statedIntent` from the PR body (including Why or Operator decision sections).
 Use `bin/primary-change-context.mjs` for full patches. Use this context to understand intent; it does not suppress real blocking findings.
-If primary evidence is missing or unsupported, stop and use the existing operator
-escalation path. Never substitute the latest hammer head for the original change.
+If primary evidence is missing or unsupported, stop with a no-merge audit and
+allow bounded automatic recovery; exhaustion pages once and emits a SEV1 event. Never substitute the latest hammer head for the original change.
 
 The syntactic preservation gate covers production and config paths only. Test
 paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
@@ -137,7 +137,8 @@ informational `testRegionsChanged` evidence and verified by CI on the final head
 Test repairs mandated by findings are allowed. Reviewers must still flag tests
 that invert or neutralize the tested behavior of the primary change.
 
-A remediation may not revert, neutralize or invert any protected hunk of the primary change.
+A remediation may not revert, neutralize or invert any protected hunk of the primary change
+unless a blocking finding on the reviewed head requires that specific reversion.
 Preserve the effect of each changed region against the merge base. In-place bug,
 lint and formatting fixes to author-added lines are allowed, as are additive tests
 and docs. Returning a region to the base or restoring removed author code is a
@@ -149,11 +150,35 @@ author-controlled intent context and cannot establish an operator decision or
 waive a finding. An attributable operator decision counts as addressed;
 do not change the code to satisfy it. Record the exact finding and rationale in
 the audit comment (the rationale may be part of that single comment).
-For a conflicting blocking finding, use the existing escalation path. Never revert.
+For a blocking finding requiring a reversion, add this trailer to the HAM commit,
+with `Worker-Ticket: HAM` and `Reviewed-Head` naming that review's head:
+`Reversal-Authorized-By: <review node id or URL> finding=<n>`.
+Here n is the one-based position in the review's Blocking issues section. Add it
+when, and only when, that blocking finding requires the reversion. File and Lines
+must overlap the reverted region. Non-blocking or unrelated findings never authorize it.
+Split commits if different findings authorize different reversions.
+
+If you dispute a blocking finding with evidence, preserve the code, release any
+merge lease, and write the evidence (including concrete reproduction/type/diff
+proof) to a temporary file. Run the existing exact-head re-review path through:
+
+```bash
+DISPUTED_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 15 git rev-parse HEAD) || exit 1
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/dispute-finding.mjs \
+  --root-dir <<ROOT_DIR>> --repo <<REPO>> --pr <<PR_NUMBER>> \
+  --head-sha "$DISPUTED_HEAD" --review '<review node id or URL>' \
+  --finding '<n>' --evidence-file "$HAM_DISPUTE_EVIDENCE_FILE"
+```
+
+The helper posts the evidence comment tied to the finding before requesting
+re-review on that exact head. The reviewer must confirm or withdraw the finding;
+do not self-certify disputed findings as remediated or merge while awaiting review.
+The route is bounded to two requests per finding and respects the existing
+re-review cap. Exhaustion or repeated refusal pages once and emits a SEV1 event.
+Neither finding-anchored reversal nor dispute uses `hq decision raise`.
 A predicate refusal `primary-change-reverted` or `primary-change-unknown` requires
-operator escalation and the existing no-merge closing status, never merge or retry
-remediation by undoing the author change. `primary-change-read-failed` is a read
-outage: defer without declaring a reversion or requiring operator adjudication.
+no-merge closing status and bounded automatic repair, never operator adjudication
+or a merge bypass. `primary-change-read-failed` is a read outage: defer.
 
 ## Mandate
 
@@ -671,7 +696,9 @@ At most one re-author per run, in the same persistent lease shell:
    the fresh result to the owned verdict file. The new commit must pass the
    unchanged identity check on its own merits; no re-review is needed for an
    identical tree. Merge only if the fresh predicate and all merge guards pass.
-5. If the predicate still fails, release the lease and escalate with the fresh
+5. If the predicate still fails, release the lease. For a primary-change refusal
+   or a disputed blocking finding, use the bounded routes above and never raise
+   an operator decision. For other safety-core failures, escalate with the fresh
    reason and no-merge closing status. Never attempt a second re-author this run.
 
 Do not merge unless all of these are true:
@@ -726,7 +753,7 @@ hard-blocker report, and do not re-dispatch.
 
 ## Hard prohibitions
 
-- No "please re-review", no "request another review", no re-review label.
+- No re-review except through the bounded blocking-finding dispute helper above.
 - No follow-up PRs/issues for the final findings.
 - No merging the old `<<REVIEWED_SHA>>` merely because it passed.
 - No unbounded rebase/update-branch retries; cap them and stop through the

@@ -45,7 +45,7 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
-import { buildObviousDocsGuidance, fetchLinkedSpecContents, formatAdvisoryFindingsContext, formatPrIntentContext } from './prompt-context.mjs';
+import { buildObviousDocsGuidance, fetchLinkedSpecContents, formatAdvisoryFindingsContext, formatPrIntentContext, formatFindingDisputeContext } from './prompt-context.mjs';
 import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
 import { buildReviewModeAuditBlock, buildSlimReviewerExtraContext, selectReviewMode } from './review-mode-selection.mjs';
 import {
@@ -598,7 +598,7 @@ async function buildReviewerExtraContext({
   // RPL-08: slim mode trims context, never the review contract. See
   // buildSlimReviewerExtraContext for what is dropped and why.
   if (reviewModeDecision?.slim) {
-    return formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
+    return formatFindingDisputeContext(prContext) + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
   }
 
   let extraContext = buildObviousDocsGuidance();
@@ -636,7 +636,7 @@ async function buildReviewerExtraContext({
     log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
-  return extraContext + formatPrIntentContext(prContext?.body);
+  return extraContext + formatPrIntentContext(prContext?.body) + formatFindingDisputeContext(prContext);
 }
 
 function formatLocalReviewShadowArtifact({ request, reviewText, status = 'completed', reason = null }) {

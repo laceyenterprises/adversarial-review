@@ -10797,10 +10797,10 @@ test('a stopped final round still suppresses re-review of its pushed head', asyn
   assert.equal(refused.reason, 'comment-only-final-round-completed');
 });
 
-test('a completed final round whose moved head has no push proof alerts and holds that head from re-review', async () => {
+test('a completed final round whose moved head has no push proof wakes recovery without paging and holds ordinary re-review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const liveHead = 'c'.repeat(40);
-  const { result, alerts, job } = await reconcileFinalRoundWithReply(rootDir, {
+  const { result, alerts, wakes, job } = await reconcileFinalRoundWithReply(rootDir, {
     prNumber: 186,
     replyOverrides: { outcome: 'completed' },
     ciGate: { state: 'green', failedChecks: [], pendingChecks: [] },
@@ -10810,8 +10810,11 @@ test('a completed final round whose moved head has no push proof alerts and hold
   assert.equal(result.job.completion.workerPushedHeadSha, undefined);
   assert.equal(result.job.completion.withheldPushHeadSha, liveHead);
   assert.match(result.job.completion.finalRoundOutcome.push, /^live-head-mismatch/);
-  assert.equal(alerts.length, 1);
-  assert.equal(alerts[0].event, 'adversarial_review.comment_only_final_round_push_unproven');
+  assert.equal(alerts.length, 0, 'watcher recovery must get a chance before an operator page');
+  assert.equal(result.job.completion.withheldHeadReReview, undefined, 'watcher admission owns the recovery intent');
+  assert.equal(JSON.parse(readFileSync(result.jobPath, 'utf8')).completion.withheldPushHeadSha, liveHead);
+  assert.equal(wakes.length, 1);
+  assert.equal(wakes[0].reason, 'comment-only-final-round-completed');
   const held = requestReviewRereview({
     rootDir, repo: job.repo, prNumber: job.prNumber, reason: 'auto-refresh: posted review on stale head',
     targetRevisionRef: liveHead, logger: { warn: () => {} },

@@ -4003,6 +4003,7 @@ export async function maybeDispatchAmaCloser({
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
+  recordPrimaryChangeRefusalImpl = recordPrimaryChangeRefusal,
   emitProtectivePredecessorFindingImpl = null,
   logGate = dispatchCloserLogGate,
   logger = console,
@@ -4075,11 +4076,15 @@ export async function maybeDispatchAmaCloser({
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
   if (verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
-    await recordPrimaryChangeRefusal({ rootDir: dispatchContext?.rootDir,
-      repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha, reasons: verdict.reasons },
-    { page: deliverAlertImpl, logger });
+    try {
+      await recordPrimaryChangeRefusalImpl({ rootDir: dispatchContext?.rootDir,
+        repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha, reasons: verdict.reasons },
+      { page: deliverAlertImpl, logger });
+    } catch (error) {
+      logger?.warn?.(`[ama-closer] primary-change refusal recording failed; retaining merge hold: ${error?.message || error}`);
+    }
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      reason: 'primary-change-repair-required', reasons: verdict.reasons });
+      reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true });
   }
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;

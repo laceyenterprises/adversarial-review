@@ -2,7 +2,8 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Refusals retain the merge hold. They do not create an operator decision.
+// Refusals retain the merge hold. The closer owns scoped recovery; this store
+// only counts observations and deduplicates its SEV1 page.
 export async function recordPrimaryChangeRefusal({ rootDir, repo, prNumber, headSha, reasons }, {
   page, logger = console,
 }) {

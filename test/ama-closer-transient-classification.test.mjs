@@ -439,7 +439,7 @@ test('maybeDispatchAmaCloser refuses invalid PR numbers before dispatch setup', 
 });
 
 
-test('HAMINTENT: the closer holds an intent reversal without operator hand-off', async (t) => {
+test('HAMINTENT: the closer holds an intent reversal with scoped operator recovery', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-intent-escalation-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const inputs = eligibleInputs(rootDir);
@@ -448,7 +448,26 @@ test('HAMINTENT: the closer holds an intent reversal without operator hand-off',
     execFileImpl: async () => { assert.fail('intent reversal must not dispatch or merge'); },
   });
   assert.equal(result.reason, 'primary-change-repair-required');
-  assert.equal(result.needsOperator === true, false);
+  assert.equal(result.needsOperator, true);
   assert.equal(result.dispatched, false);
   assert.ok(result.reasons.includes('primary-change-reverted'));
 });
+
+for (const failure of ['SQLITE_BUSY', 'EACCES', 'ENOSPC', 'corrupt database', 'pager write failed']) {
+  test(`primary refusal retains skipMergeAgent when recording throws: ${failure}`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'ama-refusal-failure-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const inputs = eligibleInputs(rootDir);
+    const warnings = [];
+    const result = await maybeDispatchAmaCloser({ ...inputs,
+      options: { primaryChange: { ...primaryChangeFixture(inputs.prMetadata.headSha), finalFiles: [] } },
+      recordPrimaryChangeRefusalImpl: async () => { throw new Error(failure); },
+      logger: { warn: (message) => warnings.push(message) },
+      execFileImpl: async () => assert.fail('must retain the merge hold'),
+    });
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'primary-change-repair-required');
+    assert.equal(result.dispatched, false);
+    assert.match(warnings[0], new RegExp(failure));
+  });
+}

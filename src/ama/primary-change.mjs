@@ -153,6 +153,12 @@ function projectRegion(files, path, region) {
     for (const segment of segments) {
       if (line < segment.old) break;
       if (line < segment.oldEnd || segment.old === segment.oldEnd && line === segment.old) {
+        // Equal-length replacements have a positional line mapping. Unequal
+        // replacements remain ambiguous: each base line maps to the full span,
+        // which must be cited in full before any of it can be waived.
+        if (segment.oldEnd - segment.old === segment.nextEnd - segment.next) {
+          return segment.next + line - segment.old;
+        }
         return end ? Math.max(segment.next, segment.nextEnd - 1) : segment.next;
       }
       offset = segment.nextEnd - segment.oldEnd;
@@ -163,6 +169,13 @@ function projectRegion(files, path, region) {
 }
 
 const overlaps = (a, b) => a.start <= b.end && b.start <= a.end;
+
+function regionUnits(region) {
+  return region.start === region.end ? [region]
+    : Array.from({ length: region.end - region.start }, (_, index) => ({
+      start: region.start + index, end: region.start + index + 1,
+    }));
+}
 
 function reversalAuthorized(evidence, path, region) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
@@ -182,7 +195,7 @@ function reversalAuthorized(evidence, path, region) {
       const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
       if (cited.start < 1 || cited.end < cited.start) return false;
       const reviewed = projectRegion(reviewedFiles, path, region);
-      if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !overlaps(cited, reviewed)) return false;
+      if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) return false;
       const parent = projectRegion(parentFiles, path, region);
       const touched = changes(commit.files).get(parent.filename);
       return Boolean(touched?.regions.some((other) => overlaps({ start: other.start, end: Math.max(other.start, other.end - 1) }, parent)));
@@ -211,7 +224,7 @@ export function checkPrimaryChange(evidence, headSha) {
         && (!actual || isTestPath(actual.filename))) continue;
       if ((change.renamed && actual?.filename === path) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
-          && change.regions.every((region) => reversalAuthorized(evidence, path, region))))) {
+          && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit)))))) {
         return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
       }
       if (!actual) continue;
@@ -225,19 +238,20 @@ export function checkPrimaryChange(evidence, headSha) {
         const actualPositions = new Set(actual.regions.flatMap((region) => region.removedLines)
           .filter((entry) => entry.text === line).map((entry) => entry.position));
         const authorizedCount = change.regions.reduce((total, region) => total
-          + (reversalAuthorized(evidence, path, region)
-            ? region.removedLines.filter((entry) => entry.text === line && !actualPositions.has(entry.position)).length
-            : 0), 0);
+          + region.removedLines.filter((entry) => entry.text === line && !actualPositions.has(entry.position)
+            && reversalAuthorized(evidence, path, { start: entry.position, end: entry.position + 1 })).length, 0);
         if ((actual.removed.get(line) || 0) + authorizedCount < count) {
           return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
         }
       }
       for (const region of change.regions) {
-        if (!actual.regions.some((other) => region.start === region.end
-          ? other.start <= region.start && other.end >= region.start
-          : other.start < region.end && other.end > region.start)
-          && !reversalAuthorized(evidence, path, region)) {
-          return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
+        for (const unit of regionUnits(region)) {
+          if (!actual.regions.some((other) => unit.start === unit.end
+            ? other.start <= unit.start && other.end >= unit.start
+            : other.start < unit.end && other.end > unit.start)
+            && !reversalAuthorized(evidence, path, unit)) {
+            return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
+          }
         }
       }
     }

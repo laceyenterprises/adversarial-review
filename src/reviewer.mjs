@@ -20,6 +20,7 @@
  * process.
  * ────────────────────────────────────────────────────────────────────────────
  */
+import { readFindingDisputeReservations } from './ama/finding-dispute-context.mjs';
 import { reviewerPostFailureExitCode } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
 import {
@@ -589,16 +590,21 @@ async function buildReviewerExtraContext({
   advisoryFindings = [],
   reviewModeDecision = null,
   repoRoot = join(ROOT, '..', '..'),
+  rootDir = ROOT,
+  readFindingDisputeReservationsImpl = readFindingDisputeReservations,
   fetchLinkedSpecContentsImpl = fetchLinkedSpecContents,
   buildHardeningReviewContextImpl = buildHardeningReviewContext,
   fetchPRContextImpl = fetchPRContext,
   execFileImpl = execFileAsync,
   log = console,
 } = {}) {
+  const disputeContext = formatFindingDisputeContext(prContext, readFindingDisputeReservationsImpl({
+    rootDir, repo, prNumber, headSha: prContext?.headRefOid || prContext?.head?.sha, logger: log,
+  }));
   // RPL-08: slim mode trims context, never the review contract. See
   // buildSlimReviewerExtraContext for what is dropped and why.
   if (reviewModeDecision?.slim) {
-    return formatFindingDisputeContext(prContext) + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
+    return disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
   }
 
   let extraContext = buildObviousDocsGuidance();
@@ -636,7 +642,7 @@ async function buildReviewerExtraContext({
     log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
-  return extraContext + formatPrIntentContext(prContext?.body) + formatFindingDisputeContext(prContext);
+  return extraContext + formatPrIntentContext(prContext?.body) + disputeContext;
 }
 
 function formatLocalReviewShadowArtifact({ request, reviewText, status = 'completed', reason = null }) {

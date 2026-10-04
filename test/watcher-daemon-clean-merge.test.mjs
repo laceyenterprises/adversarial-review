@@ -3692,6 +3692,11 @@ test('primary-change operator recovery requires a live label and fresh attributa
     const run = (mergeAgentRequestEvent, labelNames = ['merge-agent-requested'], result = refusal) =>
       resolveMergeAgentCoexistenceForWatcher({ ...baseArgs(rootDir), labelNames,
         mergeAgentRequestEvent, maybeDispatchAmaClosureForImpl: async () => result });
+    const closerRefusal = { ...refusal, reason: 'primary-change-repair-required' };
+    assert.equal((await run(event, ['merge-agent-requested'], closerRefusal)).outcome, 'dispatch-merge-agent');
+    assert.equal((await run(null, ['merge-agent-requested'], closerRefusal)).outcome, 'await-operator');
+    assert.equal((await run({ ...event, headSha: 'old-head' }, ['merge-agent-requested'], closerRefusal)).outcome, 'await-operator');
+    assert.equal((await run(event, ['operator-approved'], closerRefusal)).outcome, 'await-operator');
     const recovered = await run(event);
     assert.equal(recovered.outcome, 'dispatch-merge-agent');
     assert.equal(recovered.coexistence.action, 'merge-agent-operator-fallback');

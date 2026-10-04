@@ -174,7 +174,7 @@ test('insertion coordinates agree with and without surrounding diff context', ()
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
-test('closer dispatch holds failed or unsupported evidence without an operator decision', async () => {
+test('closer dispatch defers failed reads and exposes scoped recovery for unsupported evidence', async () => {
   const { maybeDispatchAmaCloser } = await import('../src/ama/dispatch-closer.mjs');
   for (const readFailed of [true, false]) {
     const result = await maybeDispatchAmaCloser({
@@ -189,7 +189,7 @@ test('closer dispatch holds failed or unsupported evidence without an operator d
     });
     assert.equal(result.skipMergeAgent, true);
     assert.equal(result.reason, readFailed ? 'gate-read-failed' : 'primary-change-repair-required');
-    assert.equal(result.needsOperator === true, false);
+    assert.equal(result.needsOperator === true, !readFailed);
   }
 });
 

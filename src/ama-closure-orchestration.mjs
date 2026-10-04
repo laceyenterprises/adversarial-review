@@ -2174,7 +2174,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   }
   // Primary-change refusal requires an explicit operator adjudication. Honor
   // the existing scoped fallback request, never a generic approval or outage.
-  if (amaClosureResult?.reason === 'primary-change-needs-operator'
+  if (['primary-change-needs-operator', 'primary-change-repair-required'].includes(amaClosureResult?.reason)
     && amaClosureResult?.needsOperator === true
     && labelNames?.includes('merge-agent-requested')
     && isMergeAgentRequestedScoped(mergeAgentRequestEvent, {

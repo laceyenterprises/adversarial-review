@@ -161,6 +161,15 @@ function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } 
 }
 
 function ensureReviewStateSchema(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS ham_finding_disputes (
+    repo TEXT NOT NULL, pr_number INTEGER NOT NULL, identity TEXT NOT NULL,
+    requests INTEGER NOT NULL DEFAULT 0, refusals INTEGER NOT NULL DEFAULT 0,
+    paged INTEGER NOT NULL DEFAULT 0, head_sha TEXT, comment_id TEXT,
+    comment_author TEXT, comment_sha256 TEXT, PRIMARY KEY(repo, pr_number, identity))`);
+  // Upgrade helper-created HAMINTENT-02 stores without resetting their budgets.
+  for (const column of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256']) {
+    addColumnIfMissing(db, `ALTER TABLE ham_finding_disputes ADD COLUMN ${column} TEXT`);
+  }
   db.exec(`CREATE TABLE IF NOT EXISTS review_failure_archive (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo TEXT NOT NULL, pr_number INTEGER NOT NULL,

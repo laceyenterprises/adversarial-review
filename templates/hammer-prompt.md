@@ -128,7 +128,7 @@ includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk sum
 `statedIntent` from the PR body (including Why or Operator decision sections).
 Use `bin/primary-change-context.mjs` for full patches. Use this context to understand intent; it does not suppress real blocking findings.
 If primary evidence is missing or unsupported, stop with a no-merge audit and
-allow bounded automatic recovery; exhaustion pages once and emits a SEV1 event. Never substitute the latest hammer head for the original change.
+retain the hold for evidence recovery; repeated closer refusals page once per head with SEV1. Never substitute the latest hammer head for the original change.
 
 The syntactic preservation gate covers production and config paths only. Test
 paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
@@ -155,7 +155,7 @@ with `Worker-Ticket: HAM` and `Reviewed-Head` naming that review's head:
 `Reversal-Authorized-By: <review node id or URL> finding=<n>`.
 Here n is the one-based position in the review's Blocking issues section. Add it
 when, and only when, that blocking finding requires the reversion. File and Lines
-must overlap the reverted region. Non-blocking or unrelated findings never authorize it.
+must cover each reverted base line; uncited lines in the same hunk remain protected. Non-blocking or unrelated findings never authorize it.
 Split commits if different findings authorize different reversions.
 
 If you dispute a blocking finding with evidence, preserve the code, release any
@@ -177,8 +177,9 @@ The route is bounded to two requests per finding and respects the existing
 re-review cap. Exhaustion or repeated refusal pages once and emits a SEV1 event.
 Neither finding-anchored reversal nor dispute uses `hq decision raise`.
 A predicate refusal `primary-change-reverted` or `primary-change-unknown` requires
-no-merge closing status and bounded automatic repair, never operator adjudication
-or a merge bypass. `primary-change-read-failed` is a read outage: defer.
+no-merge closing status. Repair the branch or recover the evidence; a scoped
+operator `merge-agent-requested` can dispatch the recovery lane, without waiving
+this predicate. The refusal branch does not automatically dispatch another hammer. `primary-change-read-failed` is a read outage: defer.
 
 ## Mandate
 
@@ -697,8 +698,8 @@ At most one re-author per run, in the same persistent lease shell:
    unchanged identity check on its own merits; no re-review is needed for an
    identical tree. Merge only if the fresh predicate and all merge guards pass.
 5. If the predicate still fails, release the lease. For a primary-change refusal
-   or a disputed blocking finding, use the bounded routes above and never raise
-   an operator decision. For other safety-core failures, escalate with the fresh
+   or a disputed blocking finding, use the recovery/dispute routes above and
+   never invoke `hq decision raise`. For other safety-core failures, escalate with the fresh
    reason and no-merge closing status. Never attempt a second re-author this run.
 
 Do not merge unless all of these are true:

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 import { parseBlockingFindingsSection } from '../kernel/remediation-reply.mjs';
 import { amaAllAuthoritativeReviewerLogins } from './reviewer-authority.mjs';
 import { requestReviewRereview } from '../review-state.mjs';
@@ -31,10 +32,6 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   }
   const finding = parseBlockingFindingsSection(review.body)?.[findingNumber - 1];
   if (!finding) throw new Error('blocking finding not found');
-  db.exec(`CREATE TABLE IF NOT EXISTS ham_finding_disputes (
-    repo TEXT NOT NULL, pr_number INTEGER NOT NULL, identity TEXT NOT NULL,
-    requests INTEGER NOT NULL DEFAULT 0, refusals INTEGER NOT NULL DEFAULT 0,
-    paged INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(repo, pr_number, identity))`);
   const identity = createHash('sha256').update(JSON.stringify([finding.title, finding.file])).digest('hex');
   const params = [repo, prNumber, identity];
   db.prepare('INSERT OR IGNORE INTO ham_finding_disputes(repo, pr_number, identity) VALUES (?, ?, ?)').run(...params);
@@ -43,7 +40,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   const reservation = db.transaction(() => {
     const row = db.prepare('SELECT * FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);
     const total = db.prepare('SELECT COALESCE(SUM(requests), 0) AS count FROM ham_finding_disputes WHERE repo=? AND pr_number=?').get(repo, prNumber).count;
-    if (cap.count >= cap.cap || total >= cap.cap || row.requests >= 2 || row.refusals >= 2) return false;
+    if (cap.escalate || total >= cap.cap || row.requests >= 2 || row.refusals >= 2) return false;
     db.prepare('UPDATE ham_finding_disputes SET requests=requests+1 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
     return true;
   }).immediate();
@@ -59,14 +56,31 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     return { triggered: false, exhausted: true, reason };
   };
   if (!reservation) return exhaust('re-review-cap-or-repeated-refusal');
-  await postComment(`HAM finding dispute — ${review.html_url || review.node_id} finding=${findingNumber}\n`
-    + `Reviewed-Head: ${headSha}\nFinding-Reviewed-Head: ${review.commit_id}\n\n${evidence.trim()}\n\n`
-    + 'Reviewer: evaluate this evidence on the exact head and explicitly confirm or withdraw the blocking finding. '
-    + 'Merge remains blocked pending adjudication.');
-  const live = await get(`repos/${repo}/pulls/${prNumber}`);
-  if (live.state !== 'open' || live.head?.sha !== headSha) throw new Error('head moved before dispute re-review');
-  const result = request({ rootDir, repo, prNumber, targetRevisionRef: headSha, db, logger,
-    reason: `HAM finding dispute: ${reviewRef} finding=${findingNumber}; confirm or withdraw using PR evidence` });
+  let commentId = null;
+  let result;
+  try {
+    const commentBody = `HAM finding dispute — ${review.html_url || review.node_id} finding=${findingNumber}\n`
+      + `Reviewed-Head: ${headSha}\nFinding-Reviewed-Head: ${review.commit_id}\n\n${evidence.trim()}\n\n`
+      + 'Reviewer: evaluate this evidence on the exact head and explicitly confirm or withdraw the blocking finding. '
+      + 'Merge remains blocked pending adjudication.';
+    const comment = await postComment(commentBody);
+    if (!comment?.node_id || !hamAuditCommentAuthorMatches(comment.user?.login)
+      || comment.body !== commentBody) throw new Error('dispute comment lacks trusted HAM provenance');
+    commentId = comment.node_id;
+    const live = await get(`repos/${repo}/pulls/${prNumber}`);
+    if (live.state !== 'open' || live.head?.sha !== headSha) throw new Error('head moved before dispute re-review');
+    db.prepare(`UPDATE ham_finding_disputes SET head_sha=?, comment_id=?, comment_author=?, comment_sha256=?
+      WHERE repo=? AND pr_number=? AND identity=?`).run(headSha, commentId, comment.user.login,
+      createHash('sha256').update(commentBody).digest('hex'), ...params);
+    result = request({ rootDir, repo, prNumber, targetRevisionRef: headSha, db, logger,
+      reason: `HAM finding dispute: ${reviewRef} finding=${findingNumber}; confirm or withdraw using PR evidence` });
+  } catch (error) {
+    // A failed post or head race is not a delivered re-review request.
+    db.prepare(`UPDATE ham_finding_disputes SET requests=MAX(0, requests-1),
+      comment_id=CASE WHEN comment_id=? THEN NULL ELSE comment_id END
+      WHERE repo=? AND pr_number=? AND identity=?`).run(commentId, ...params);
+    throw error;
+  }
   if (!result.triggered && result.status !== 'pending' && result.reason !== 'review-in-flight') {
     db.prepare('UPDATE ham_finding_disputes SET refusals=refusals+1 WHERE repo=? AND pr_number=? AND identity=?').run(...params);
     const row = db.prepare('SELECT refusals FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);

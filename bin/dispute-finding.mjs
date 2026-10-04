@@ -18,8 +18,8 @@ try {
     evidence: readFileSync(values['evidence-file'], 'utf8') }, {
     db, loadedConfig: loadConfigRuntime(),
     get: async (path) => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout),
-    postComment: async (body) => execGhWithRetry({ args: ['api', '--method', 'POST',
-      `repos/${values.repo}/issues/${values.pr}/comments`, '-f', `body=${body}`], timeoutMs: 15000 }),
+    postComment: async (body) => JSON.parse((await execGhWithRetry({ args: ['api', '--method', 'POST',
+      `repos/${values.repo}/issues/${values.pr}/comments`, '-f', `body=${body}`], timeoutMs: 15000 })).stdout),
     page: deliverAlert,
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);

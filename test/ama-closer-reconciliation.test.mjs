@@ -207,3 +207,58 @@ test('CLI pins ledger and HQ roots and reports backend/source without credential
   assert.equal(JSON.stringify(result).includes('secret'), false);
   assert.equal(result.changed, 1);
 });
+
+test('concurrent terminal evidence survives the ledger probe', async (t) => {
+  const root = fixture(t, 'concurrent');
+  const path = dispatchRecord(root, 1);
+  await reconcileAmaCloserDispatches(root, { now: NOW, readLaunchRequestStatusImpl() {
+    updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' }, doc => ({ ...doc, lastObservedStatus: 'succeeded' }));
+    return { ok: true, row: { status: 'succeeded' } };
+  } });
+  assert.equal(JSON.parse(readFileSync(path)).lastObservedStatus, 'succeeded');
+});
+
+test('all-missing ledger cannot terminalize records; recent observations remain held', async (t) => {
+  const root = fixture(t, 'all-missing');
+  const path = dispatchRecord(root, 1, { lastAttemptedAt: '2020-01-01T00:00:00Z', lastObservedAt: NOW });
+  const before = readFileSync(path, 'utf8');
+  const result = await reconcileAmaCloserDispatches(root, { now: NOW, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) });
+  assert.equal(result.allMissing, true);
+  assert.equal(result.changed, 0);
+  assert.equal(result.active.length, 1);
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
+
+test('scan budget stops additional queries and reconciliation logs safe metadata', async (t) => {
+  const root = fixture(t, 'budget');
+  dispatchRecord(root, 1);
+  dispatchRecord(root, 2);
+  let probes = 0;
+  await reconcileAmaCloserDispatches(root, { now: NOW, scanBudgetMs: 0, readLaunchRequestStatusImpl() { probes += 1; } });
+  assert.equal(probes, 0);
+  const events = [];
+  await reconcileAmaCloserDispatches(root, { now: NOW, log: { info: event => events.push(JSON.parse(event)) }, ledgerTarget: { backend: 'postgres', source: 'fixture', dsn: 'secret' }, readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }) });
+  assert.equal(events.length, 2);
+  assert.equal(events[0].event, 'ama_closer.launch_capacity_reconciled');
+  assert.equal(JSON.stringify(events).includes('secret'), false);
+});
+
+test('CLI apply refuses a foreign directory owner while dry-run remains available', async (t) => {
+  const root = fixture(t, 'owner');
+  dispatchRecord(root, 1);
+  const options = { ledgerTarget: join(root, 'fixture.sqlite'), print() {}, statSyncImpl: () => ({ uid: process.getuid() + 1 }), readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }) };
+  await assert.rejects(main(['--root-dir', root], options), /directory owner uid/);
+  assert.equal((await main(['--root-dir', root, '--dry-run'], options)).dryRun, true);
+});
+
+test('mixed ledger results expire only genuinely stale missing records', async (t) => {
+  const root = fixture(t, 'mixed-missing');
+  const old = dispatchRecord(root, 1, { lastAttemptedAt: '2020-01-01T00:00:00Z' });
+  const fresh = dispatchRecord(root, 2, { lastAttemptedAt: '2020-01-01T00:00:00Z', lastObservedAt: NOW });
+  dispatchRecord(root, 3);
+  const result = await reconcileAmaCloserDispatches(root, { now: NOW, readLaunchRequestStatusImpl: ({ launchRequestId }) => launchRequestId === 'lrq-3' ? { ok: true, row: { status: 'running' } } : { ok: false, reason: 'missing-launch-request-row' } });
+  assert.equal(result.allMissing, false);
+  assert.equal(result.changed, 1);
+  assert.equal(JSON.parse(readFileSync(old)).state, 'launch-terminal');
+  assert.equal(JSON.parse(readFileSync(fresh)).state, 'dispatched');
+});

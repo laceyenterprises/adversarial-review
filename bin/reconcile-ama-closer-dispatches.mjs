@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { statSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
-import { reconcileAmaCloserDispatches } from '../src/ama/dispatch-closer.mjs';
+import { amaCloserDispatchDir, reconcileAmaCloserDispatches } from '../src/ama/dispatch-closer.mjs';
 
 export async function main(args = process.argv.slice(2), options = {}) {
   let rootDir = process.cwd();
@@ -15,6 +16,11 @@ export async function main(args = process.argv.slice(2), options = {}) {
     else if (args[i] === '--hq-root' && args[i + 1]) hqRoot = resolve(args[++i]);
     else if (args[i] === '--ledger-target' && args[i + 1]) ledgerTarget = args[++i];
     else throw new Error(`Unknown or incomplete argument: ${args[i]}`);
+  }
+  const dir = amaCloserDispatchDir(rootDir);
+  if (!dryRun && existsSync(dir) && typeof process.getuid === 'function') {
+    const owner = (options.statSyncImpl || statSync)(dir).uid;
+    if (owner !== process.getuid()) throw new Error(`Apply requires dispatch directory owner uid ${owner}`);
   }
   const resolution = resolveSessionLedgerReadTarget({
     rootDir, hqRoot, ledgerTarget, ledgerDbPath: options.ledgerDbPath,

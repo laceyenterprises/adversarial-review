@@ -1572,7 +1572,7 @@ function finalizeAmaCloserLeaseBestEffort({
  * merge path for this tick even though no fresh launch occurred.
  */
 
-function amaCloserDispatchDir(rootDir) {
+export function amaCloserDispatchDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
 }
 
@@ -1808,6 +1808,29 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
   const counts = { scanned: 0, terminal: 0, missing: 0, unreadable: 0, changed: 0 };
   const active = [];
   let ledgerUnreadable = false;
+  const scanStarted = Date.now();
+  const missingCandidates = [];
+  let probes = 0;
+  let missingProbes = 0;
+  const applyTerminal = (record, dispatchPath, terminalStatus, probe = {}) => {
+    const current = readJsonFile(dispatchPath);
+    if (current?.launchRequestId !== record.launchRequestId || current?.state !== record.state
+      || current?.lastObservedAt !== record.lastObservedAt) return false;
+    counts.changed += 1;
+    if (options.dryRun) return true;
+    const preserve = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus));
+    writeFileAtomic(dispatchPath, `${JSON.stringify({
+      ...current, state: 'launch-terminal',
+      lastObservedStatus: preserve ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
+      terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
+    }, null, 2)}\n`);
+    logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_capacity_reconciled', {
+      repo: record.repo, prNumber: record.prNumber, launchRequestId: record.launchRequestId,
+      terminalStatus, backend: probe.target?.backend || options.ledgerTarget?.backend || null,
+      source: probe.target?.source || options.ledgerTarget?.source || null,
+    });
+    return true;
+  };
   for (const name of listSettledJsonNames(amaCloserDispatchDir(rootDir))) {
     throwIfAborted(options.signal);
     const dispatchPath = join(amaCloserDispatchDir(rootDir), name);
@@ -1837,56 +1860,52 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     const observedTerminal = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(observedStatus);
     let terminalStatus = observedTerminal ? observedStatus : null;
     if (observedTerminal) counts.terminal += 1;
-    let ledgerActive;
+    let probe;
     if (!observedTerminal && record.launchRequestId) {
       throwIfAborted(options.signal);
-      const probe = ledgerUnreadable ? { ok: false, reason: 'scan-ledger-unreadable' } : await readStatus({
+      if (Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000)) ledgerUnreadable = true;
+      probe = ledgerUnreadable ? { ok: false, reason: 'scan-ledger-unreadable' } : await readStatus({
         launchRequestId: record.launchRequestId,
         rootDir, hqRoot: options.hqRoot,
         ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
         env: options.env || process.env,
       });
+      if (!ledgerUnreadable) probes += 1;
       throwIfAborted(options.signal);
       const status = String(probe?.row?.status || '').trim().toLowerCase();
       if (probe?.ok && status) {
         terminalStatus = AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status) ? status : null;
-        ledgerActive = !terminalStatus;
         if (terminalStatus) counts.terminal += 1;
       } else if (probe?.reason === 'missing-launch-request-row') {
         counts.missing += 1;
-        const attemptedAt = parseTimeMs(record.lastAttemptedAt) ?? parseTimeMs(record.dispatchedAt);
-        const age = attemptedAt === null ? null : parseTimeMs(now) - attemptedAt;
-        ledgerActive = age === null || !Number.isFinite(age) || age < amaCloserPendingLeaseReclaimAgeMs(record);
-        if (!ledgerActive) terminalStatus = 'not-found';
+        missingProbes += 1;
+        const age = amaCloserRecordAgeMs(record, { now });
+        if (age !== null && Number.isFinite(age) && age >= amaCloserPendingLeaseReclaimAgeMs(record)) {
+          missingCandidates.push({ record, dispatchPath, prNumber, probe });
+          continue;
+        }
       } else {
         counts.unreadable += 1;
         ledgerUnreadable = true;
-        ledgerActive = true; // A failed read is not evidence that a worker ended.
       }
     } else if (!observedTerminal && record.state === 'dispatched' && isAmaCloserMissingLrqTimedOut(record, { now })) {
       terminalStatus = 'not-found';
       counts.missing += 1;
     }
+    progressOptions.ledgerActive = terminalStatus ? false : undefined;
+    const launchInProgress = isAmaCloserLaunchInProgress(record, progressOptions);
     if (terminalStatus) {
-      counts.changed += 1;
-      if (!options.dryRun) {
-        // Re-read after the ledger probe so a concurrently advanced record is
-        // never replaced by our stale snapshot.
-        const current = readJsonFile(dispatchPath);
-        if (current?.launchRequestId === record.launchRequestId && current?.state === record.state) {
-          writeFileAtomic(dispatchPath, `${JSON.stringify({
-            ...current, state: 'launch-terminal',
-            lastObservedStatus: observedTerminal ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
-            terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
-          }, null, 2)}\n`);
-        }
-      }
+      applyTerminal(record, dispatchPath, terminalStatus, probe);
       continue;
     }
-    if (ledgerActive !== undefined) progressOptions.ledgerActive = ledgerActive;
-    if (isAmaCloserLaunchInProgress(record, progressOptions)) active.push({ ...record, prNumber, dispatchPath });
+    if (launchInProgress) active.push({ ...record, prNumber, dispatchPath });
   }
-  return { ...counts, active };
+  const allMissing = probes > 0 && missingProbes === probes;
+  for (const candidate of missingCandidates) {
+    if (!allMissing && !ledgerUnreadable) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
+    else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath });
+  }
+  return { ...counts, allMissing, active };
 }
 
 export async function findActiveAmaCloserLaunches(rootDir, options = {}) {

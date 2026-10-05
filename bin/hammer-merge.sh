@@ -449,7 +449,7 @@ while :; do
       ham_append_terminal_audit deferred required-checks-pending || {
         ham_mark_merge_lease_retryable_abort required-checks-pending
         ham_release_merge_lease
-        return 1
+        return 20
       }
       echo "hammer-ci-pending-resume-owed head=$POST_REMEDIATION_SHA" >&2
       ham_mark_merge_lease_retryable_abort required-checks-pending

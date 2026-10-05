@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
-import { getHeadCloserCommitSuppression } from '../head-closer-commit-suppression.mjs';
+import { proveCloserOnlyHeadDelta } from '../head-closer-commit-suppression.mjs';
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { amaCloserLeaseFilePath, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
@@ -184,7 +184,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   result, reviewStateRow, dispatchJob, dispatchHammer, ticks = 6, maxAttempts = 2,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = 5000,
-  closerHeadImpl = getHeadCloserCommitSuppression, logger = console, signal = null,
+  closerHeadImpl = proveCloserOnlyHeadDelta, logger = console, signal = null,
   fsImpl = { existsSync, mkdirSync, openSync, closeSync }, DatabaseImpl = Database, flockSyncImpl = fsExt.flockSync }) {
   if (!headSha) return null;
   // A queued/running background gate has no settled observation yet.
@@ -204,10 +204,12 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     && !candidate?.isDraft && !labels.some(label => ['do-not-merge', 'no-merge-hold', 'merge-agent-skip'].includes(label))
     && result?.amaEnabled && stopAllowed);
   let closerHead = false;
+  let closerProofChecked = false;
   if (candidateAllowed && stale && reasons.includes('blocking-findings-unknown')) {
     try {
-      const proof = await closerHeadImpl({ repoPath: repo, prNumber, headSha, logger });
-      closerHead = proof?.suppressed === true && proof.reason === 'closer-commit-trailer';
+      closerProofChecked = true;
+      closerHead = await closerHeadImpl({ repoPath: repo, prNumber,
+        reviewedHead: reviewStateRow?.reviewer_head_sha, currentHead: headSha, logger, signal }) === true;
     } catch (error) {
       if (signal?.aborted) throw error;
       logger?.warn?.(`Orphan identity probe failed: ${text(error.message || error)}`);
@@ -249,9 +251,13 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     };
     if (stale && !closerHead) {
       let proof;
-      try { proof = await closerHeadImpl({ repoPath: repo, prNumber, headSha, logger }); }
+      try {
+        proof = closerProofChecked ? closerHead : await closerHeadImpl({ repoPath: repo, prNumber,
+          reviewedHead: reviewStateRow?.reviewer_head_sha, currentHead: headSha, logger, signal });
+        closerProofChecked = true;
+      }
       catch (error) { return holdExternalError(error, 'identity-probe'); }
-      closerHead = proof?.suppressed === true && proof?.reason === 'closer-commit-trailer';
+      closerHead = proof === true;
       if (!closerHead && !primary && !blocking) return reset();
     }
     let ownership;

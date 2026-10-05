@@ -2122,9 +2122,13 @@ and logs `hammer-ci-pending-resume-owed`; no runtime consumer reads these fields
 The watcher independently proves ancestry and reads live CI each tick. Pending-only
 CI returns an ordinary recovery wait without a hammer retry or recovery charge;
 red CI still enters the capped hammer repair lane. A pending deferral marks the
-lease retryable before release even if the audit append fails (exit 1 still
+lease retryable before release even if the audit append fails (hard-block exit 20
 reports that write failure). The CI-green wake resumes the normal leased
 verify-and-merge lane without minting a review. Each new closer head has its own
 dispatch budget; the lifetime ceiling bounds repeated closer pushes across heads. The
 orphan watchdog covers `blocking-findings-unknown` only beside `stale-review-head`
-and a proven closer head; all other refusal reasons retain their existing rules.
+and the same bounded, complete closer ancestry proof; all other refusal reasons retain their existing rules.
+Local Git provenance retains its trailer fallback because it has no GitHub-linked
+identity. Remote commit probes require linked closer identity. This existing
+local trust boundary is tracked by LAC-1848; a trailer alone never grants merge
+authority, and the downstream hammer repeats live gates.

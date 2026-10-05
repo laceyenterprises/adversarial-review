@@ -569,7 +569,7 @@ test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent'
   assert.match(HAMMER_PROMPT, /resumeOwed: \(\$reason == "required-checks-pending"\)/);
   assert.match(HAMMER_PROMPT, /resumeHead:.*\$validatedHead/);
   assert.match(HAMMER_PROMPT, /hammer-ci-pending-resume-owed head=\$POST_REMEDIATION_SHA/);
-  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| \{\s*ham_mark_merge_lease_retryable_abort required-checks-pending\s*ham_release_merge_lease\s*return 1\s*\}/);
+  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| \{\s*ham_mark_merge_lease_retryable_abort required-checks-pending\s*ham_release_merge_lease\s*return 20\s*\}/);
 });
 
 for (const auditFails of [false, true]) {
@@ -600,7 +600,7 @@ for (const auditFails of [false, true]) {
     `;
     const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 5000 });
     assert.ifError(result.error);
-    assert.equal(result.status, auditFails ? 1 : 20, result.stderr);
+    assert.equal(result.status, 20, result.stderr);
     assert.deepEqual(result.stdout.trim().split('\n'), [
       'audit:deferred:required-checks-pending',
       'marker:required-checks-pending',

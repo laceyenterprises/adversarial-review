@@ -610,6 +610,9 @@ export async function getHeadCloserCommitSuppressionWithBoundedRetry({
 // HAMCIWAKE-01: head identity alone does not cover an intervening worker push.
 // Walk a bounded chain, proving every delta commit with the same suppression
 // primitive used by review-spawn. Failure leaves the ordinary stale-head gate.
+// LAC-1848: local Git has no linked identity and retains the historical
+// trailer fallback. Remote probes bind closer trailers to linked identities;
+// this chain is dispatch evidence, never standalone merge authorization.
 export async function proveCloserOnlyHeadDelta({ reviewedHead, currentHead,
   maxCommits = 8, suppressionImpl = getHeadCloserCommitSuppression,
   fetchCommitImpl = fetchHeadCloserVerifiedCommit, ...options } = {}) {

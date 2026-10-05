@@ -966,6 +966,20 @@ export async function maybeDispatchAmaClosureFor({
   // HAMCIWAKE-01: resolve review evidence at its original identity only when
   // every intervening commit is the closer's own. All PR/CI inputs stay live.
   const originalReviewedHead = reviewStateRow?.reviewer_head_sha;
+  // Cache immutable commit evidence only within this evaluation. The ancestry
+  // walk and stale-head resume must not issue duplicate probes for the tip.
+  const suppressionCache = new Map();
+  const commitCache = new Map();
+  const cachedSuppression = options => {
+    if (!suppressionCache.has(options.headSha)) suppressionCache.set(options.headSha,
+      (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)(options));
+    return suppressionCache.get(options.headSha);
+  };
+  const cachedCommit = options => {
+    if (!commitCache.has(options.headSha)) commitCache.set(options.headSha,
+      fetchHeadCloserVerifiedCommitImpl(options));
+    return commitCache.get(options.headSha);
+  };
   let closerOnlyHeadDelta = false;
   if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha) {
     try {
@@ -974,8 +988,8 @@ export async function maybeDispatchAmaClosureFor({
         ({ signal: operationSignal }) => proveCloserOnlyHeadDelta({
           reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha,
           repoPath, prNumber, env, logger, signal: operationSignal,
-          suppressionImpl: resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression,
-          fetchCommitImpl: fetchHeadCloserVerifiedCommitImpl,
+          suppressionImpl: cachedSuppression,
+          fetchCommitImpl: cachedCommit,
         }),
         { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
       );
@@ -1395,20 +1409,9 @@ export async function maybeDispatchAmaClosureFor({
       throwIfAborted(signal);
       const closerCommitSuppression = await runCoexistenceOperation(
         'stale-head-suppression-proof',
-        ({ signal: operationSignal }) => (typeof resolveHeadCloserCommitSuppressionImpl === 'function'
-          ? resolveHeadCloserCommitSuppressionImpl({
-            repoPath,
-            prNumber,
-            headSha: currentPrHeadSha,
-            signal: operationSignal,
-          })
-          : getHeadCloserCommitSuppression({
-            repoPath,
-            prNumber,
-            headSha: currentPrHeadSha,
-            logger,
-            signal: operationSignal,
-          })),
+        ({ signal: operationSignal }) => cachedSuppression({
+          repoPath, prNumber, headSha: currentPrHeadSha, logger, signal: operationSignal,
+        }),
         {
           timeoutMs: operationTimeoutMs,
           parentSignal: signal,
@@ -1428,7 +1431,7 @@ export async function maybeDispatchAmaClosureFor({
       ) {
         const verifiedCommit = await runCoexistenceOperation(
           'head-closer-verified-commit',
-          ({ signal: operationSignal }) => fetchHeadCloserVerifiedCommitImpl({
+          ({ signal: operationSignal }) => cachedCommit({
             repoPath,
             prNumber,
             headSha: currentPrHeadSha,

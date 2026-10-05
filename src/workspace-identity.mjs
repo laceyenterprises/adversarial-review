@@ -1,18 +1,21 @@
-import { existsSync, lstatSync } from 'node:fs';
+import { existsSync, lstatSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { inspectWorkspaceState, preserveInvalidResumeWorkspace } from './remediation-git-pr-io.mjs';
 
-// Reject workspace symlinks and preserve unsafe metadata before Git touches it.
+// Preserve workspace symlinks and unsafe metadata before Git touches them.
 export async function preserveUnsafeWorkspaceMetadata({
   workspaceDir, workspaceRootDir, jobId, repo, execFileImpl, log,
 }) {
   // Check the workspace itself before any Git command can touch its target.
   if (lstatSync(workspaceDir, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    throw new Error(`Cannot safely prepare symlinked remediation workspace: ${workspaceDir}`);
+    const backupDir = join(workspaceRootDir, `${jobId}.resume-backup-${Date.now()}-${process.pid}`);
+    renameSync(workspaceDir, backupDir);
+    log.warn?.(`[follow-up-remediation] preserved workspace symlink at ${backupDir}; preparing a fresh checkout`);
+    return 'workspace-symlink';
   }
   // Preserve redirected metadata without running Git against the shared gitdir.
-  // A standalone clone with leftover registrations additionally needs the
-  // expected remote before we can move it aside without stranding foreign work.
+  // For a standalone clone with leftover registrations, refuse a positively
+  // foreign remote; preserve unknown daemon-owned metadata.
   const existingGitDir = join(workspaceDir, '.git');
   const existingGitMetadata = lstatSync(existingGitDir, { throwIfNoEntry: false });
   let preservedMetadataReason = null;
@@ -21,7 +24,7 @@ export async function preserveUnsafeWorkspaceMetadata({
       preservedMetadataReason = 'redirected-git-metadata';
     } else if (existsSync(join(existingGitDir, 'worktrees'))) {
       const state = await inspectWorkspaceState({ workspaceDir, expectedRepo: repo, allowDirty: true, execFileImpl });
-      if (state.actualRepo !== repo) {
+      if (state.actualRepo && state.actualRepo !== repo) {
         const refusal = `Cannot safely preserve remediation workspace with worktree registrations: ${workspaceDir}; expected repo=${repo}, actual repo=${state.actualRepo || 'unknown'}`;
         log.error?.(`[follow-up-remediation] ${refusal}`);
         throw new Error(refusal);

@@ -1905,3 +1905,9 @@ live base, rather than the older parallel-phase validation base. This recomputes
 the incorporated base even when the earlier validation base is unavailable. Base
 changes overlapping PR files require rebase and revalidation even without a
 strict branch-protection rule; disjoint movement may proceed under that rule.
+
+IDENTBASE-01 merge-agent rebases with a worker author remain reviewable. Do not
+assume a per-head review ceiling bounds repeated new rebase heads: the combined
+lifetime accounting needs the offline cycle regression tracked in LAC-1849.
+Local-first trailer suppression still lacks authenticated linked identity;
+source-aware stale-head resume verification is tracked in LAC-1848.

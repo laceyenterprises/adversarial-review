@@ -292,6 +292,10 @@ const TERMINAL_CLOSER_BOT_IDENTITIES = new Set([
   'merge-agent-lacey',
   'the-hammer-lacey[bot]',
 ]);
+const TERMINAL_CLOSER_LINKED_LOGINS = new Set([
+  'merge-agent-lacey',
+  'the-hammer-lacey[bot]',
+]);
 const NON_REVIEWABLE_HEAD_DELTA_REASONS = new Set([
   'closer-commit-trailer',
 ]);
@@ -329,7 +333,7 @@ export function isTerminalCloserCommitIdentity(commit = {}, { requireLinkedIdent
   const hasLinkedIdentity = Boolean(linkedLogin(commit?.author) || linkedLogin(commit?.committer));
   const identityMatches = hamCommitIdentityMatches(commit, {
     trailers: normalizedTrailers,
-    loginMatches: (login) => TERMINAL_CLOSER_BOT_IDENTITIES.has(normalizeIdentityPart(login)),
+    loginMatches: (login) => TERMINAL_CLOSER_LINKED_LOGINS.has(normalizeIdentityPart(login)),
   });
   // Remote probes must bind terminal markers to linked closer provenance.
   // Local Git has no linked logins and retains the offline trailer fallback.
@@ -352,7 +356,7 @@ export function isTerminalCloserCommitIdentity(commit = {}, { requireLinkedIdent
   // foreign committer through the shared helper. Its unlinked-author fallback
   // cannot reach this branch: the required Closed-By is handled above.
   const workerTicket = normalizedTrailers['worker-ticket'] || '';
-  if (TERMINAL_CLOSER_BOT_IDENTITIES.has(closerIdentity) && isHamWorkerTicket(workerTicket) && identityMatches) {
+  if (TERMINAL_CLOSER_LINKED_LOGINS.has(closerIdentity) && isHamWorkerTicket(workerTicket) && identityMatches) {
     return {
       suppressed: true,
       reason: 'closer-commit-identity',

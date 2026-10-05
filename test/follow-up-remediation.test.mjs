@@ -12808,7 +12808,7 @@ for (const resume of [false, true]) {
   }
 }
 
-for (const metadata of ['workspace-symlink', 'foreign-remote']) {
+for (const metadata of ['foreign-remote']) {
   test(`prepareWorkspaceForJob refuses unsafe metadata before mutations: ${metadata}`, async (t) => {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'remediation-shared-metadata-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));

@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, readdirSync, lstatSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { preserveUnsafeWorkspaceMetadata } from '../src/workspace-identity.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket } from '../src/ama/ham-provenance.mjs';
 import { prepareWorkspaceForJob } from '../src/follow-up-remediation.mjs';
 import { isTerminalCloserCommitIdentity, getHeadCloserCommitSuppression, normalizeVerifiedCloserCommit } from '../src/head-closer-commit-suppression.mjs';
@@ -223,4 +224,52 @@ test('IDENTBASE-01: production standalone clone receives worktree-scoped remedia
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test('generic hammer trailer is not a linked GitHub closer login', () => {
+  for (const author of ['hammer', 'HAMMER']) {
+    assert.equal(isTerminalCloserCommitIdentity({ author: { login: author },
+      message: 'repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)',
+    }).suppressed, false);
+  }
+  assert.equal(isTerminalCloserCommitIdentity({ message: 'repair\n\nClosed-By: hammer' }).suppressed, true);
+});
+
+test('every reversal-authorizing split commit is instructed to carry verifier provenance', () => {
+  const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+  const block = prompt.match(/Every commit carrying `Reversal-Authorized-By`,[\s\S]*?```text\n([\s\S]*?)```/);
+  assert.ok(block);
+  assert.match(block[0], /including each split commit/);
+  assert.equal(hamCommitIdentityMatches({ committer: { login: 'the-hammer-lacey[bot]' }, message: `repair\n\n${block[1].trim()}` }), true);
+});
+
+test('workspace symlink is preserved without Git touching its target, even when broken', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'identbase-symlink-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const broken of [false, true]) {
+    const target = join(root, broken ? 'absent' : 'target');
+    if (!broken) mkdirSync(target);
+    const jobId = broken ? 'broken' : 'existing';
+    const workspaceDir = join(root, jobId);
+    symlinkSync(target, workspaceDir);
+    assert.equal(await preserveUnsafeWorkspaceMetadata({ workspaceDir, workspaceRootDir: root,
+      jobId, repo: 'fixture/repo', execFileImpl: async () => { throw new Error('must not call git'); }, log: { warn() {} },
+    }), 'workspace-symlink');
+    assert.equal(lstatSync(workspaceDir, { throwIfNoEntry: false }), undefined);
+    assert.ok(lstatSync(join(root, readdirSync(root).find(name => name.startsWith(`${jobId}.resume-backup-`)))).isSymbolicLink());
+    assert.equal(existsSync(target), !broken);
+  }
+});
+
+test('unknown remote with leftover registrations is preserved for daemon recovery', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'identbase-unknown-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workspaceDir = join(root, 'job');
+  mkdirSync(join(workspaceDir, '.git', 'worktrees'), { recursive: true });
+  assert.equal(await preserveUnsafeWorkspaceMetadata({ workspaceDir, workspaceRootDir: root,
+    jobId: 'job', repo: 'fixture/repo', execFileImpl: async () => { throw new Error('missing origin'); }, log: { warn() {} },
+  }), 'leftover-worktree-registrations');
+  assert.equal(existsSync(workspaceDir), false);
+  assert.ok(readdirSync(root).some(name => name.startsWith('job.resume-backup-')));
 });

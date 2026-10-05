@@ -95,3 +95,10 @@ An operator may archive closed-PR diagnostics. Do not delete an open head's stor
 to reset its budget or guards. Returning to an old head retains its budget.
 This replaces automatic observation writes to the legacy
 [HAM primary-change refusal store](ham-primary-change-refusals.md).
+
+
+Reservation `evidence` also records `recordHeadSha`, the expected closer dispatch
+head (which may differ from the live closer-authored head). Together with the
+reservation timestamp, this reconciles a launch receipt without refunding an
+already spent attempt. Legacy reservations without this field continue to match
+the live head and fail closed on uncertain evidence.

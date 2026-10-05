@@ -1833,3 +1833,18 @@ Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
 `reported-pending`. The proven-head CI wait remains unchanged.
 
 HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
+
+
+### Orphan watchdog evidence boundaries
+
+Stale-only observations prove closer-authored identity before probing ownership;
+ordinary externally pushed stale heads fall through to exact-head review recovery.
+Unreadable queue files hold only the PR identified by their filename prefix;
+repository matching is case-insensitive. Historical missing ledger rows expire
+at the closer pending-lease reclaim age, except while reconciling a reservation.
+Ledger probes use the dispatch record's HQ root and cache immutable terminal
+results (up to 1,000 entries). Identity and re-review request errors retain a
+pending hold without consuming the store-error alert slot. Uncovered or persistently
+owned primary-change refusals page after six observations, without authorizing
+HAM dispatch. Reservations persist the expected dispatch-record head so reviewed
+head receipts cannot refund an already launched attempt.

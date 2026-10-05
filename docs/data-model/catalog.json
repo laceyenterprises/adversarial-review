@@ -505,7 +505,8 @@
         "src/ama/dispatch-closer.mjs",
         "src/alert-delivery.mjs"
       ],
-      "owner": "AMA owner-of-last-resort recovery"
+      "owner": "AMA owner-of-last-resort recovery",
+      "reservationEvidenceFields": ["reservationStartedAt", "recordHeadSha", "reason"]
     },
     {
       "id": "ham-primary-change-refusals",

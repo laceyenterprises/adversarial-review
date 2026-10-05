@@ -498,3 +498,80 @@ test('store error plus pager failure remains held and logs both failures', async
   assert.equal(output.amaClosureResult.skipMergeAgent, true);
   assert.equal(warnings.length, 2);
 });
+
+
+test('external stale head bypasses uncertain historical ownership and reaches ordinary recovery', async t => {
+  const { resolveMergeAgentCoexistenceForWatcher } = await import('../src/ama-closure-orchestration.mjs');
+  const { args, calls } = setup(t, 7704);
+  let ordinary = 0;
+  const output = await resolveMergeAgentCoexistenceForWatcher({ rootDir: args.rootDir, repoPath: args.repo,
+    prNumber: args.prNumber, candidate: args.candidate, currentRevisionRef: args.headSha,
+    reviewStateRow: args.reviewStateRow, dispatchJob: args.dispatchJob,
+    maybeDispatchAmaClosureForImpl: async () => args.result,
+    orphanOptions: { closerHeadImpl: async () => ({ suppressed: false }),
+      hasOwnerImpl: () => { throw new Error('inadmissible head must not probe historical ledger'); }, pageImpl: args.pageImpl },
+    recoverAmaAutomationImpl: async () => { ordinary++; return { outcome: 'ordinary-recovery' }; },
+    logger: { info() {}, warn() {} } });
+  assert.equal(ordinary, 1);
+  assert.equal(output.outcome, 'ordinary-recovery');
+  assert.equal(calls.pages.length, 0);
+});
+test('foreign corrupt queues are skipped; matching corrupt queues hold and repo casing retains owners', async t => {
+  const { args } = setup(t);
+  const dir = join(args.rootDir, 'data/follow-up-jobs/pending');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'foreign__repo-pr-1-job.json'), '{bad');
+  const options = { ...args, logger: { warn() {} } };
+  assert.equal((await probeOrphanOwnership(options)).uncertain, false);
+  writeFileSync(join(dir, 'example__repo-pr-7707-job.json'), '{bad');
+  assert.equal((await probeOrphanOwnership(options)).uncertain, true);
+  writeFileSync(join(dir, 'example__repo-pr-7707-job.json'), JSON.stringify({ repo: 'EXAMPLE/REPO', prNumber: 7707 }));
+  assert.equal((await probeOrphanOwnership(options)).owned, true);
+});
+test('historical missing ledger rows expire only after bounded age and use their recorded HQ', async t => {
+  const { args } = setup(t);
+  dispatchRecord(args, { headSha: 'old-head', hqRoot: '/fixture/owner-hq', lastAttemptedAt: '2020-01-01T00:00:00Z' });
+  const ownership = await probeOrphanOwnership({ ...args, readStatusImpl: async options => {
+    assert.equal(options.hqRoot, '/fixture/owner-hq');
+    return { ok: false, reason: 'missing-launch-request-row' };
+  } });
+  assert.equal(ownership.uncertain, false);
+  assert.equal(ownership.owned, false);
+});
+test('terminal historical launch is probed only once across ticks', async t => {
+  const { args } = setup(t);
+  dispatchRecord(args, { headSha: 'old-head' });
+  let probes = 0;
+  const options = { ...args, readStatusImpl: async () => { probes++; return { ok: true, row: { status: 'completed' } }; } };
+  for (let i = 0; i < 8; i++) assert.equal((await probeOrphanOwnership(options)).owned, false);
+  assert.equal(probes, 1);
+});
+for (const operation of ['identity', 'rereview']) test(`transient ${operation} failure holds without store-error paging`, async t => {
+  const { tick, calls } = setup(t, 7704);
+  const failure = async () => { throw new Error('TLS handshake timeout'); };
+  const overrides = { logger: { warn() {} }, ...(operation === 'identity' ? { closerHeadImpl: failure }
+    : { dispatchHammer: async () => ({ dispatched: false, reason: 'cannot-recertify' }), requestRereviewImpl: failure }) };
+  for (let i = 0; i < 7; i++) assert.equal((await tick(overrides)).outcome, 'ama-pending');
+  assert.equal(calls.pages.length, 0);
+});
+for (const owned of [false, true]) test(`uncovered primary refusal pages once even when owned=${owned}`, async t => {
+  const { args, tick, calls } = setup(t, 7716);
+  for (let i = 0; i < 8; i++) await tick({ result: { ...args.result, reasons: ['primary-change-reverted', 'pr-mergeability-unknown'] },
+    hasOwnerImpl: async () => owned });
+  assert.equal(calls.pages.length, 1);
+  assert.equal(calls.dispatch.length, 0);
+});
+test('reservation records the reviewed dispatch head and never refunds a proven terminal launch', async t => {
+  const { args, tick } = setup(t, 7704);
+  await tick();
+  const db = new Database(watchdogPath(args));
+  db.prepare('UPDATE heads SET attempts=1,reserved=1,evidence=? WHERE head=?').run(JSON.stringify({
+    reservationStartedAt: '2026-10-04T00:00:00.789Z', recordHeadSha: 'reviewed-head',
+  }), args.headSha);
+  db.close();
+  dispatchRecord(args, { headSha: 'reviewed-head', targetRemediationSha: 'reviewed-head', dispatchedAt: '2026-10-04T00:00:00Z' });
+  await tick({ hasOwnerImpl: options => probeOrphanOwnership({ ...options,
+    readStatusImpl: async () => ({ ok: true, row: { status: 'completed' } }) }) });
+  assert.equal(readWatchdog(args).reserved, 0);
+  assert.equal(readWatchdog(args).attempts, 1);
+});

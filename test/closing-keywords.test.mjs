@@ -8,6 +8,19 @@ import { composeAmaTrailers } from '../src/ama/audit.mjs';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 import { buildMergeCommitBody, neutralizeClosingKeywords } from '../src/ama/closing-keywords.mjs';
 
+function renderCommitMessageSnippet(endMarker) {
+  const source = readFileSync('bin/hammer-merge.sh', 'utf8');
+  const snippet = composeCloserPrompt({
+    templateBody: source.slice(source.indexOf('  ham_commit_message_abort()'), source.indexOf(endMarker)),
+    rootDir: process.cwd(), repo: 'o/r', prNumber: 7,
+    prUrl: 'https://github.com/o/r/pull/7', mergeMethod: 'squash',
+  });
+  assert.doesNotMatch(snippet, /<<[A-Z_]+>>/, 'shell fixture must render every placeholder');
+  const syntax = spawnSync('bash', ['-n'], { input: `run() {\n${snippet}\n}`, encoding: 'utf8' });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  return snippet;
+}
+
 for (const keyword of ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved']) {
   for (const gap of [' ', ': ', ':\n\n', '\n\n']) {
     test(`${keyword} with ${JSON.stringify(gap)}`, () => {
@@ -45,11 +58,7 @@ test('hammer shell merge runner receives the neutralized body', (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const stdoutPath = join(dir, 'merge.stdout');
   const stderrPath = join(dir, 'merge.stderr');
-  const source = readFileSync('bin/hammer-merge.sh', 'utf8');
-  const snippet = source.slice(source.indexOf('  ham_commit_message_abort()'), source.indexOf('  HAM_MERGE_EXIT=$?'))
-    .replaceAll('<<ROOT_DIR>>', process.cwd()).replaceAll('<<REPO>>', 'o/r')
-    .replaceAll('<<PR_NUMBER>>', '7').replaceAll('<<PR_URL>>', 'https://github.com/o/r/pull/7')
-    .replaceAll('<<MERGE_METHOD>>', 'squash');
+  const snippet = renderCommitMessageSnippet('  HAM_MERGE_EXIT=$?');
   const stub = `ham_read_protective_predecessor_value() { printf -v "$2" '%s' 'Fix #7732 regression'; }
 gh() { while [ "$#" -gt 0 ]; do if [ "$1" = --subject ]; then printf '%s\\n' "$2"; fi; if [ "$1" = --body ]; then printf '%s' "$2"; return; fi; shift; done; return 1; }\n`;
   const result = spawnSync('bash', ['-c', stub + snippet], { encoding: 'utf8', env: {
@@ -108,9 +117,7 @@ test('dispatched hammer export carries canonical provenance byte for byte', () =
 
 for (const failure of ['sanitizer', 'body', 'subject', 'rewrites', 'title']) {
   test(`hammer ${failure} failure records audit and retryable lease abort`, () => {
-    const source = readFileSync('bin/hammer-merge.sh', 'utf8');
-    const snippet = source.slice(source.indexOf('  ham_commit_message_abort()'), source.indexOf('  HAM_MERGE_EXECUTED_AT='))
-      .replaceAll('<<ROOT_DIR>>', process.cwd()).replaceAll('<<REPO>>', 'o/r').replaceAll('<<PR_NUMBER>>', '7').replaceAll('<<PR_URL>>', 'https://github.com/o/r/pull/7');
+    const snippet = renderCommitMessageSnippet('  HAM_MERGE_EXECUTED_AT=');
     const stubs = `ham_append_terminal_audit() { echo "audit:$2"; }
 ham_mark_merge_lease_retryable_abort() { echo "retry:$1"; }
 ham_release_merge_lease() { echo release; }
@@ -127,9 +134,7 @@ run() {
 
 for (const failure of ['permanent', 'empty']) {
   test(`hammer ${failure} title prevents a merge with the correct lease outcome`, () => {
-    const source = readFileSync('bin/hammer-merge.sh', 'utf8');
-    const snippet = source.slice(source.indexOf('  ham_commit_message_abort()'), source.indexOf('  HAM_MERGE_EXECUTED_AT='))
-      .replaceAll('<<PR_URL>>', 'https://github.com/o/r/pull/7');
+    const snippet = renderCommitMessageSnippet('  HAM_MERGE_EXECUTED_AT=');
     const stubs = `ham_append_terminal_audit() { echo "audit:$2"; }
 ham_mark_merge_lease_retryable_abort() { echo "retry:$1"; }
 ham_release_merge_lease() { echo release; }

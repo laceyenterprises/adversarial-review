@@ -2858,11 +2858,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   const { stdout } = await execFileImpl(
     'gh',
     [
-      'pr',
-      'view',
-      String(prNumber),
-      '--repo',
-      repo,
+      'pr', 'view', String(prNumber), '--repo', repo,
       '--json',
       'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,title,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
     ],

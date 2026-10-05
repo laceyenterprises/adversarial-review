@@ -34,7 +34,8 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
-import { readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
+import { normalizeTokenUsage, readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
+import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
   resolveAgyPrintTimeoutMs,
@@ -3008,7 +3009,7 @@ function reviewerPromptBudget(model, env = process.env, runtime = 'antigravity')
     const value = Number(env[key]);
     return Number.isFinite(value) && value > 0 ? value : fallback;
   };
-  const tokens = positive(`ADVERSARIAL_REVIEW_${model.toUpperCase()}_CONTEXT_TOKENS`, 600000);
+  const tokens = positive(`ADVERSARIAL_REVIEW_${model.toUpperCase()}_CONTEXT_TOKENS`, 150000);
   const bytesPerToken = positive('ADVERSARIAL_REVIEW_BYTES_PER_TOKEN', 2);
   const deliveryBytes = model === 'gemini' && runtime === 'antigravity'
     ? resolveAgyArgvMaxBytes(env)
@@ -3017,9 +3018,9 @@ function reviewerPromptBudget(model, env = process.env, runtime = 'antigravity')
 }
 
 function resolveAgyOversizedReviewRoute({
-  reviewerModel, botTokenEnv, builderTag, diff, extraContext = '',
-  promptStage = 'first', geminiRuntime = 'cli', maxBytes = resolveAgyArgvMaxBytes(),
   env = process.env,
+  reviewerModel, botTokenEnv, builderTag, diff, extraContext = '',
+  promptStage = 'first', geminiRuntime = 'cli', maxBytes = resolveAgyArgvMaxBytes(env),
 } = {}) {
   const model = String(reviewerModel || '').trim().toLowerCase();
   const isAgy = model === 'gemini' && geminiRuntime === 'antigravity';
@@ -3282,14 +3283,12 @@ function extractMarkdownIssueList(markdown, heading) {
 }
 
 function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {
+  if (truncated) throw new ReviewerPromptTooLargeError('cannot merge an incomplete chunk review');
   const texts = chunkReviews.map((chunk) => sanitizeReviewPayloadBestEffort(chunk.reviewText)).filter(Boolean);
   const parts = [
     '## Summary',
     `Reviewed an oversized diff through ${chunkReviews.length} bounded reviewer chunks because the full prompt exceeded its delivery or context budget${promptBytes ? ` (${promptBytes} bytes > ${maxBytes} bytes)` : ''}.`,
   ];
-  if (truncated) {
-    parts.push('', '> Operator note: the chunk hard cap was hit; this merged review covers the reviewed chunks only.');
-  }
   parts.push('', '## Blocking issues');
   const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
   parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
@@ -3355,20 +3354,22 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
 }
 
 async function reviewAgyOversizedInChunks(diff, extraContext, {
+  env = process.env,
   reviewerModel = 'gemini',
   dispatchReviewerModelImpl = dispatchReviewerModel,
   promptStage = 'first',
   reviewerSubprocessCwd = process.cwd(),
   promptBytes = null,
-  maxBytes = resolveAgyArgvMaxBytes(),
+  maxBytes = resolveAgyArgvMaxBytes(env),
   reviewWithGeminiImpl = reviewWithGemini,
-  maxChunks = resolveAgyChunkMaxChunks(),
+  maxChunks = resolveAgyChunkMaxChunks(env),
+  onRejectedCodexOutput = null,
 } = {}) {
-  const configuredHardMaxBytes = Number(process.env.ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES);
+  const configuredHardMaxBytes = Number(env.ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES);
   const hardMaxBytes = Number.isFinite(configuredHardMaxBytes) && configuredHardMaxBytes > 0
     ? configuredHardMaxBytes : 8 * 1024 * 1024;
   if (agyPromptBytes(diff) + agyPromptBytes(extraContext) > hardMaxBytes) {
-    throw new Error(`[reviewer-prompt-too-large] hard ceiling exceeded: size=${agyPromptBytes(diff) + agyPromptBytes(extraContext)} hardMaxBytes=${hardMaxBytes}`);
+    throw new ReviewerPromptTooLargeError(`hard ceiling exceeded: size=${agyPromptBytes(diff) + agyPromptBytes(extraContext)} hardMaxBytes=${hardMaxBytes}`);
   }
   const split = splitDiffForAgyChunks(diff, {
     reviewerModel,
@@ -3379,12 +3380,13 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     maxChunks,
   });
   if (!split.ok || split.truncated) {
-    throw new Error(
-      `[reviewer-prompt-too-large] oversized diff chunking unavailable: ${split.reason}; `
+    throw new ReviewerPromptTooLargeError(
+      `oversized diff chunking unavailable: ${split.reason}; `
       + `repo prompt size=${promptBytes ?? 'unknown'} maxBytes=${maxBytes} chunks=${split.chunks.length}`
     );
   }
   const chunkReviews = [];
+  const chunkUsages = [];
   let execution = null;
   for (let index = 0; index < split.chunks.length; index += 1) {
     const chunk = split.chunks[index];
@@ -3392,7 +3394,20 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     const result = reviewerModel === 'gemini'
       ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd })
       : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd });
-    if (result.needsSanitize) result.reviewText = sanitizeCodexReviewPayload(result.rawReviewText);
+    if (result.needsSanitize) {
+      try {
+        result.reviewText = sanitizeCodexReviewPayload(result.rawReviewText);
+      } catch (error) {
+        try {
+          await onRejectedCodexOutput?.({ rawReviewText: result.rawReviewText,
+            rejectionReason: error.message, chunkIndex: index + 1 });
+        } catch (persistError) {
+          console.error(`[reviewer] WARN: failed to persist rejected codex chunk output: ${persistError.message}`);
+        }
+        throw error;
+      }
+    }
+    chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
     execution ||= result.execution || null;
     chunkReviews.push({
       index: index + 1,
@@ -3408,13 +3423,25 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   return {
     rawReviewText: mergedReviewText,
     reviewText: mergedReviewText,
-    tokenUsage: null,
+    tokenUsage: sumChunkTokenUsage(chunkUsages),
     execution,
     needsSanitize: false,
     chunked: true,
     chunks: split.chunks,
     truncated: split.truncated,
   };
+}
+
+function sumChunkTokenUsage(chunkUsages) {
+  const usages = chunkUsages.filter(Boolean);
+  if (usages.length === 0) return null;
+  const total = { source: usages[0].source, model: usages[0].model, usageTag: usages[0].usageTag };
+  for (const field of ['input', 'output', 'reasoning', 'cacheRead', 'cacheWrite', 'toolContext', 'total', 'guardrail', 'costUSD']) {
+    const values = usages.map((usage) => usage[field]).filter((value) => value != null);
+    total[field] = values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+  }
+  if (usages.length !== chunkUsages.length || usages.some((usage) => usage.partial)) total.partial = true;
+  return total;
 }
 
 const __test__ = {

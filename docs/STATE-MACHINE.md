@@ -171,6 +171,13 @@ new PR
   retry transient connection failures for at most three total attempts with 100/200ms backoff;
   permanent query failures defer immediately.
 - `malformed` is intentionally sticky.
+- A reviewer size preflight refusal exits with reserved CLI code 76 and settles
+  as terminal `reviewer-prompt-too-large` on that head, without lease recovery.
+  Only the typed preflight error selects this exit code and queues the
+  `reviewer.oversized_agy_prompt` operator alert. Marker text in model-output
+  previews cannot select it; transient chunk errors retain their usual recovery
+  path. A new head or operator retrigger re-arms a real size refusal. See the
+  [prompt budgets](../README.md#oversized-reviewer-prompts) for override knobs.
 - A `failed` row is not reset by a standalone sweep. When the watcher
   rediscovers an open PR whose head differs from `reviewer_head_sha`,
   `requestReviewRereview` atomically archives the entire failed row in

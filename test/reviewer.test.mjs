@@ -1,3 +1,4 @@
+import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -4514,6 +4515,7 @@ test('oversized agy alert goes through the alert bus, never a hardcoded hook', a
     promptBytes: 300_000,
     maxBytes: 262_144,
     reason: 'chunking-disabled',
+    error: new ReviewerPromptTooLargeError('chunking-disabled'),
   }, {
     deliverAlertImpl: async (text, opts) => {
       delivered.push({ text, opts });
@@ -4558,7 +4560,7 @@ test('a failing alert bus does not throw out of the reviewer alert paths', async
   assert.equal(await alertClioOAuthFailure('gemini', 'r', 1, 'why', { deliverAlertImpl: boom }), null);
   assert.equal(
     await alertClioOversizedAgyFailure(
-      { repo: 'r', prNumber: 1, promptBytes: 1, maxBytes: 1, reason: 'x' },
+      { repo: 'r', prNumber: 1, promptBytes: 1, maxBytes: 1, reason: 'x', error: new ReviewerPromptTooLargeError('x') },
       { deliverAlertImpl: boom },
     ),
     null,

@@ -683,12 +683,19 @@ reviewer and is split into bounded chunks if no alternate route fits.
 Every chunk must fit and the entire diff must be covered; a hard ceiling or
 chunk-cap failure records terminal `reviewer-prompt-too-large` evidence and
 queues the existing `reviewer.oversized_agy_prompt` operator alert.
+The size preflight throws `ReviewerPromptTooLargeError`; `reviewer.mjs` exits
+with reserved code 76, which the CLI runtime classifies as terminal. Quoting
+`[reviewer-prompt-too-large]` in model output or stderr does not select this
+class. Transient chunk failures retain their normal retry classification and
+do not send the terminal size alert. Chunked reviews sum available provider
+usage (marked partial when some chunks omit usage), and rejected Codex chunks
+use the same forensic writer as single-shot reviews.
 
 Environment overrides follow the existing `ADVERSARIAL_REVIEW_AGY_ARGV_MAX_BYTES`
 mechanism (no shared configuration-schema keys):
 
 - `ADVERSARIAL_REVIEW_<CLAUDE|CODEX|GEMINI>_CONTEXT_TOKENS`: prompt context
-  allocation, default 600000 tokens, with 64 KiB reserved for runtime instructions.
+  allocation, default 150000 tokens, with 64 KiB reserved for runtime instructions.
 - `ADVERSARIAL_REVIEW_BYTES_PER_TOKEN`: conservative code estimate, default 2.
 - `ADVERSARIAL_REVIEW_<CLAUDE|CODEX|GEMINI>_DELIVERY_MAX_BYTES`: off-argv
   delivery limit, default 16 MiB. Antigravity keeps its existing argv budget.
@@ -697,5 +704,7 @@ mechanism (no shared configuration-schema keys):
   bounds all chunked reviews (default 20).
 
 Set context allocations to the deployed model's supported input budget after
-reserving space for tools and output. A new PR head or operator retrigger is
+reserving space for tools and output. Every `hosted-reviewer-selection` event
+logs the checked model, full prompt bytes, and resolved budget, including
+prompts that fit. A new PR head or operator retrigger is
 required after a terminal size failure; lease recovery does not retry it.

@@ -4,6 +4,7 @@
 // are self-contained: their only dependency is the shared alert bus.
 
 import { deliverAlert } from './alert-delivery.mjs';
+import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
 
 /**
  * Alert the operator when OAuth credentials are unavailable.
@@ -42,9 +43,11 @@ async function alertClioOversizedAgyFailure({
   promptBytes,
   maxBytes,
   reason,
+  error,
 }, {
   deliverAlertImpl = deliverAlert,
 } = {}) {
+  if (!(error instanceof ReviewerPromptTooLargeError)) return null;
   const msg = `Adversarial reviewer oversized prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nReviewer prompt budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nTerminal size failure: operator action is required because a full review could not fit and bounded chunk review was unavailable.`;
   console.error(`[reviewer] ALERT: ${msg}`);
   try {

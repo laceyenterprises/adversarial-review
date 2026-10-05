@@ -228,6 +228,8 @@ def analyze(before, after):
     ):
         reasons.append("push no longer restricted to main")
     for event in old_events.keys() & events.keys():
+        if not isinstance(old_events[event], dict) or not isinstance(events[event], dict):
+            continue
         for key in ("paths", "paths-ignore", "branches", "branches-ignore"):
             a, b = old_events[event].get(key), events[event].get(key)
             if a and (not b or a != b):

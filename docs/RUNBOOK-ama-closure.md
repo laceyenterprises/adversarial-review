@@ -1384,11 +1384,25 @@ the predicate. If evidence recovery needs another worker, an attributable operat
 can apply `merge-agent-requested` scoped to the current head and latest PR update.
 The existing operator-fallback lane accepts both the closer's
 `primary-change-repair-required` and the daemon's `primary-change-needs-operator`,
-with `needsOperator: true`. This exception does not include other safety holds:
+with `needsOperator: true`. The orchestrator promotes the daemon refusal to
+the top-level result before the closer runs. A nested daemon refusal is accepted
+only under that promoted `primary-change-needs-operator` result or the daemon's
+own `daemon-failed-closed` wrapper; wrapper support is defensive compatibility,
+not a shape the current primary-change producer emits. `manualCloseRequired`
+is a paging signal and does not authorize this recovery lane.
+Co-occurring non-primary-change safety reasons in either the top-level or nested
+daemon result, including `operatorReason`, prevent fallback using the shared
+recovery safety classifier. This exception does not include other safety holds:
 risk/two-key policy, security, destructive-change holds, hard-stop labels
 (including `no-merge-hold`) and hammer-cap suppression retain adjudication.
 An unresolved `dispatch-status-unknown` probe retains AMA ownership even after
 its dispatched lease expires: lease age cannot prove the hammer has stopped.
+A nested primary-change refusal cannot override that top-level ownership result
+or hammer-cap suppression. The checked-in #7716 fixture has the already-supported
+closer shape (`primary-change-repair-required`, `needsOperator: true`); it does
+not establish the cause of that PR's production hold. Diagnose a live recurrence
+from its watcher result, label event, review row and closer lease state before
+attributing recovery to nested-result handling.
 Before taking over a settled primary-change refusal, the watcher checks for a
 live closer lease at any head, including a lease keyed to the previous head.
 Both inline and background modes evaluate the closer first; newly queued/running

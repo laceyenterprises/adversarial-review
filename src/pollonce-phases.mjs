@@ -1701,109 +1701,134 @@ export async function processReviewSubject(entry, ctx) {
       });
       if (route.quotaBlocked) return;
       let depthSpillReserved = false;
-      const depthPassKind = reviewerDispatchPassKind({
-        current: existing,
-        hasPriorPostedReview: entry.hasPriorPostedReview,
-      });
+      let dispatchHasPriorPostedReview;
+      let depthPassKind;
+      const getDispatchHasPriorPostedReview = () => {
+        dispatchHasPriorPostedReview ??=
+          entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
+        return dispatchHasPriorPostedReview;
+      };
+      const getDepthPassKind = () => {
+        depthPassKind ??= reviewerDispatchPassKind({
+          current: existing,
+          hasPriorPostedReview: getDispatchHasPriorPostedReview(),
+        });
+        return depthPassKind;
+      };
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
       // RSP-01: plus the queue-depth trigger, when the break-glass lever is
-      // armed and this tick still has spill budget. `depthPressure()` is
+      // armed and this tick still has spill budget. Depth routing is deferred
+      // until pool admission confirms Gemini saturation in its live lane order.
+      // `depthPressure()` is
       // `{ engaged: false }` on every host that has not armed it, which makes
       // the resolver take its pre-RSP-01 path unchanged.
       // RPL-07: plus the operator burst lease, scoped to this subject's repo and
       // (optionally) its pack. `pressure()` is `{ engaged: false }` whenever no
       // lease is active or this subject is out of its scope, which is every
       // subject on a host with no lease.
-      const reviewerAuthorClass = subject.builderClass || route.builderClass;
-      const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
-      const rwfDecision = await resolveReviewerWorkerClassWithFallback({
-        authorClass: reviewerAuthorClass,
-        primary: primaryReviewerWorkerClass,
-        fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
-        depthPressure: firstPassSpilloverController?.depthPressure?.(depthPassKind) ?? null,
-        burstPressure: reviewerBurstController?.pressure?.({
-          repo: repoPath,
-          // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
-          packTokens: () => packTokensForSubject({
-            labels: prLabelNames,
-            linearTicketId,
-            title: prTitle,
-            branch: subject.headRefName || '',
-          }),
-        }) ?? null,
-        execFileImpl: execFileAsync,
-        ...(reviewerFleetQuotaStatusCache
-          ? {
-              fleetQuotaStatusCache: reviewerFleetQuotaStatusCache,
-              fleetQuotaStatusCacheTtlMs: FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
-            }
-          : {}),
-      });
-
-      if (rwfDecision.reason === 'fleet-quota-status-unavailable') {
-        console.warn(
-          `[watcher] review-worker-class-fallback-fail-open repo=${repoPath} pr=${prNumber} ` +
-          `source=quota-status error=${JSON.stringify(rwfDecision.error || '')}`
+      async function applyWorkerFallback(depthPressure = null) {
+        const reviewerAuthorClass = subject.builderClass || route.builderClass;
+        const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
+        const discoveryDepthEngaged = ['first-pass', 'rereview'].some(
+          (kind) => firstPassSpilloverController?.depthPressure?.(kind)?.engaged,
         );
-      }
-
-      if (rwfDecision.fellBack) {
-        const appliedFallback = applyReviewerWorkerClassFallbackToRoute({
-          route,
-          decision: rwfDecision,
-          reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+        const rwfDecision = await resolveReviewerWorkerClassWithFallback({
           authorClass: reviewerAuthorClass,
+          primary: primaryReviewerWorkerClass,
+          fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
+          depthPressure,
+          // Discovery must leave an engaged depth lane on its preferred route
+          // until the pool checks saturation. Spending burst here would bypass
+          // that check and charge the wrong lever before depth can run.
+          burstPressure: depthPressure
+            || (discoveryDepthEngaged
+              && firstPassSpilloverController?.depthPressure?.(getDepthPassKind())?.engaged)
+            ? null : reviewerBurstController?.pressure?.({
+            repo: repoPath,
+            // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
+            packTokens: () => packTokensForSubject({
+              labels: prLabelNames,
+              linearTicketId,
+              title: prTitle,
+              branch: subject.headRefName || '',
+            }),
+          }) ?? null,
+          execFileImpl: execFileAsync,
+          ...(reviewerFleetQuotaStatusCache
+            ? {
+                fleetQuotaStatusCache: reviewerFleetQuotaStatusCache,
+                fleetQuotaStatusCacheTtlMs: FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
+              }
+            : {}),
         });
-        if (appliedFallback.applied) {
-          // Pressure is only a snapshot. Another PR in this poll can consume
-          // the last unit before this one commits its fallback route.
-          const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
-            || reviewerBurstController?.recordBurstAdmission?.({
-              repo: repoPath,
-              prNumber,
-              headSha: subject.headSha || subject.ref?.revisionRef || null,
-              fromWorkerClass: rwfDecision.from,
-              toWorkerClass: rwfDecision.to,
-            }) === true;
-          if (!burstAdmitted) {
-            console.warn(
-              `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
-              'reason=burst-review-cap-exhausted'
-            );
-          } else {
-            route = appliedFallback.route;
-            // Charge the depth lever's budget/cost ledger only for a spill that
-            // really landed on a route — the operator is owed the number of
-            // non-primary reviews the lever BOUGHT, not the number it attempted.
-            if (rwfDecision.reason === 'queue-depth-pressure') {
-              depthSpillReserved = firstPassSpilloverController?.recordSpill?.({
-                repo: repoPath,
-                prNumber,
-                fromWorkerClass: rwfDecision.from,
-                toWorkerClass: rwfDecision.to,
-                passKind: depthPassKind,
-              }) === true;
-            }
-            console.warn(
-              `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
-              `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
-              `primaryState=${rwfDecision.primaryState}` +
-              (rwfDecision.queueDepth === undefined
-                ? ''
-                : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`) +
-              (rwfDecision.burstLeaseId === undefined
-                ? ''
-                : ` burstLeaseId=${rwfDecision.burstLeaseId} burstSlots=${rwfDecision.burstSlots}`)
-            );
-          }
-        } else {
+
+        if (rwfDecision.reason === 'fleet-quota-status-unavailable') {
           console.warn(
-            `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
-            `workerClass=${rwfDecision.workerClass} reason=${appliedFallback.reason}`
+            `[watcher] review-worker-class-fallback-fail-open repo=${repoPath} pr=${prNumber} ` +
+            `source=quota-status error=${JSON.stringify(rwfDecision.error || '')}`
           );
         }
+
+        if (rwfDecision.fellBack) {
+          const appliedFallback = applyReviewerWorkerClassFallbackToRoute({
+            route,
+            decision: rwfDecision,
+            reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL,
+            authorClass: reviewerAuthorClass,
+          });
+          if (appliedFallback.applied) {
+            // Pressure is only a snapshot. Another PR in this poll can consume
+            // the last unit before this one commits its fallback route.
+            const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
+              || reviewerBurstController?.recordBurstAdmission?.({
+                repo: repoPath,
+                prNumber,
+                headSha: subject.headSha || subject.ref?.revisionRef || null,
+                fromWorkerClass: rwfDecision.from,
+                toWorkerClass: rwfDecision.to,
+              }) === true;
+            if (!burstAdmitted) {
+              console.warn(
+                `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
+                'reason=burst-review-cap-exhausted'
+              );
+            } else {
+              route = appliedFallback.route;
+              // Charge the depth lever's budget/cost ledger only for a spill that
+              // really landed on a route — the operator is owed the number of
+              // non-primary reviews the lever BOUGHT, not the number it attempted.
+              if (rwfDecision.reason === 'queue-depth-pressure') {
+                depthSpillReserved = firstPassSpilloverController?.recordSpill?.({
+                  repo: repoPath,
+                  prNumber,
+                  fromWorkerClass: rwfDecision.from,
+                  toWorkerClass: rwfDecision.to,
+                  passKind: getDepthPassKind(),
+                }) === true;
+              }
+              console.warn(
+                `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
+                `from=${rwfDecision.from} to=${rwfDecision.to} reason=${rwfDecision.reason} ` +
+                `primaryState=${rwfDecision.primaryState}` +
+                (rwfDecision.queueDepth === undefined
+                  ? ''
+                  : ` queueDepth=${rwfDecision.queueDepth} queueDepthThreshold=${rwfDecision.queueDepthThreshold}`) +
+                (rwfDecision.burstLeaseId === undefined
+                  ? ''
+                  : ` burstLeaseId=${rwfDecision.burstLeaseId} burstSlots=${rwfDecision.burstSlots}`)
+              );
+            }
+          } else {
+            console.warn(
+              `[watcher] review-worker-class-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
+              `workerClass=${rwfDecision.workerClass} reason=${appliedFallback.reason}`
+            );
+          }
+        }
+
       }
+      await applyWorkerFallback();
 
       if (route.reviewerModelFallback) {
         console.warn(
@@ -1832,40 +1857,44 @@ export async function processReviewSubject(entry, ctx) {
         );
       }
 
-      crossModelWaiverReason = route.afhReviewerFallback?.lastResort
-        ? (
-            `AFH last-resort reviewer fallback switched reviewer=${route.afhReviewerFallback.fromReviewerModel} ` +
-            `to reviewer=${route.afhReviewerFallback.toReviewerModel} because every cross-model reviewer ` +
-            `(including gemini) is grounded (${route.afhReviewerFallback.reason}); ` +
-            `reviewer=${route.afhReviewerFallback.toReviewerModel} matches builder=${route.builderClass}, ` +
-            'so the cross-model guarantee is waived until a provider recovers.'
-          )
-        : route.timeoutFallback
-        ? (
-            `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
-            `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +
-            `${route.timeoutFallback.timeoutFailures} timeout failures; ` +
-            (route.timeoutFallback.sameModelAsBuilder
-              ? `reviewer=${route.timeoutFallback.toReviewerModel} matches builder=${route.timeoutFallback.builderClass}, so cross-model guarantee is waived for this recovery pass.`
-              : 'cross-model guarantee remains intact for this recovery pass.')
-          )
-        : route.reviewWorkerClassFallback?.lastResort
-        ? (
-            `review-worker-class fallback switched worker=${route.reviewWorkerClassFallback.fromWorkerClass} ` +
-            `to worker=${route.reviewWorkerClassFallback.toWorkerClass} because the selected reviewer was ` +
-            `grounded (${route.reviewWorkerClassFallback.reason}); reviewer=${route.reviewerModel} ` +
-            `matches builder=${route.builderClass}, so the cross-model guarantee is waived for this recovery pass.`
-          )
-        : describeCrossModelReviewWaiver(
-            route.builderClass,
-            route.reviewerModel,
-            process.env
+      function updateCrossModelWaiverReason() {
+        crossModelWaiverReason = route.afhReviewerFallback?.lastResort
+          && route.afhReviewerFallback.toReviewerModel === route.reviewerModel
+          ? (
+              `AFH last-resort reviewer fallback switched reviewer=${route.afhReviewerFallback.fromReviewerModel} ` +
+              `to reviewer=${route.afhReviewerFallback.toReviewerModel} because every cross-model reviewer ` +
+              `(including gemini) is grounded (${route.afhReviewerFallback.reason}); ` +
+              `reviewer=${route.afhReviewerFallback.toReviewerModel} matches builder=${route.builderClass}, ` +
+              'so the cross-model guarantee is waived until a provider recovers.'
+            )
+          : route.timeoutFallback?.toReviewerModel === route.reviewerModel
+          ? (
+              `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
+              `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +
+              `${route.timeoutFallback.timeoutFailures} timeout failures; ` +
+              (route.timeoutFallback.sameModelAsBuilder
+                ? `reviewer=${route.timeoutFallback.toReviewerModel} matches builder=${route.timeoutFallback.builderClass}, so cross-model guarantee is waived for this recovery pass.`
+                : 'cross-model guarantee remains intact for this recovery pass.')
+            )
+          : route.reviewWorkerClassFallback?.lastResort
+          ? (
+              `review-worker-class fallback switched worker=${route.reviewWorkerClassFallback.fromWorkerClass} ` +
+              `to worker=${route.reviewWorkerClassFallback.toWorkerClass} because the selected reviewer was ` +
+              `grounded (${route.reviewWorkerClassFallback.reason}); reviewer=${route.reviewerModel} ` +
+              `matches builder=${route.builderClass}, so the cross-model guarantee is waived for this recovery pass.`
+            )
+          : describeCrossModelReviewWaiver(
+              route.builderClass,
+              route.reviewerModel,
+              process.env
+            );
+        if (crossModelWaiverReason) {
+          console.warn(
+            `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
           );
-      if (crossModelWaiverReason) {
-        console.warn(
-          `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
-        );
+        }
       }
+      updateCrossModelWaiverReason();
 
       // (stale-drift check already ran at the top of the per-PR loop;
       // duplicate block removed — caused SyntaxError on import per LAC-439.)
@@ -2740,8 +2769,6 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
-      const dispatchHasPriorPostedReview =
-        entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
       const dispatchCandidate = {
         repoPath,
         prNumber,
@@ -2754,7 +2781,8 @@ export async function processReviewSubject(entry, ctx) {
         pipelineGeminiSeats: domainPipelineGeminiSeatCount(domainAdapterSet?.domainConfig),
         subject,
         current,
-        hasPriorPostedReview: dispatchHasPriorPostedReview,
+        hasPriorPostedReview: getDispatchHasPriorPostedReview(),
+        depthPassKind: getDepthPassKind(),
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2762,6 +2790,29 @@ export async function processReviewSubject(entry, ctx) {
         }),
         pendingSince: current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
         enqueuedAtMs: Date.now(),
+        preferredRoute: route,
+        refundDepthSpill() {
+          if (!depthSpillReserved) return;
+          firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason: 'pool-admission-deferred' });
+          depthSpillReserved = false;
+          route = this.preferredRoute;
+          this.syncDepthSpillRoute('pool-admission-deferred');
+        },
+        syncDepthSpillRoute(reason) {
+          const from = this.reviewerModel;
+          this.reviewerModel = route.reviewerModel;
+          updateCrossModelWaiverReason();
+          if (from !== this.reviewerModel) console.log(
+            `[watcher] review-queue-depth-route repo=${repoPath} pr=${prNumber} `
+            + `from=${from} to=${this.reviewerModel} reason=${reason}`
+          );
+        },
+        async reevaluateDepthSpill() {
+          if (depthSpillReserved) return;
+          await applyWorkerFallback(firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) ?? null);
+          this.syncDepthSpillRoute('queue-depth-pressure');
+          if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
+        },
         async run() {
           const releaseAdmissionCapacity = this.admissionReleaseCapacity || null;
           // REVIEW-DEDUP (idempotency lease): one (pr, head) dispatch per
@@ -2778,6 +2829,7 @@ export async function processReviewSubject(entry, ctx) {
                 `(pr, head) dispatch lease already held this window (${dispatchLeaseKey}); ` +
                 `another pool worker owns this head`
             );
+            this.refundDepthSpill();
             return { dispatched: false, reason: 'head-dispatch-lease-held' };
           }
 

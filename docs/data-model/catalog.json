@@ -147,7 +147,7 @@
         "bin/review-queue-depth.mjs",
         "src/review-state-statements.mjs"
       ],
-      "owner": "RSP-01 / RSPREREVIEW queue-depth spillover"
+      "owner": "RSP-01 / RSPREREVIEW queue-depth spillover and live net engagement summary"
     },
     {
       "id": "reviewer-passes",

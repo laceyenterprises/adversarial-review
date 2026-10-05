@@ -108,7 +108,7 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.ok(drainBeforePostedHandlers < maintenanceLoop, 'reviewer dispatch does not wait for merge-side maintenance');
   assert.match(
     watcher,
-    /activeReviewerCounts: detachedReviewerDispatchTracker\.activeCounts\(\),[\s\S]*onCandidateStarted: detachedReviewerDispatchTracker\.track,/,
+    /activeReviewerCounts: detachedReviewerDispatchTracker\.activeCounts\(\),[\s\S]*onCandidateStarted: \(started\) => \{[\s\S]*startedCandidates\.add\(started\.candidate\);[\s\S]*detachedReviewerDispatchTracker\.track\(started\);/,
     'reviewer drains include detached pre-registration launch reservations in model caps',
   );
 });

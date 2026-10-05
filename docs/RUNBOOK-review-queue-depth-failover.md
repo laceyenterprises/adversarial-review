@@ -17,7 +17,32 @@ not a tracked quota harness at all (`QUOTA_HARNESS_PROVIDER` covers openai and
 anthropic), so that path returned `primary-provider-untracked` and did nothing —
 a healthy-but-saturated gemini never yielded no matter how deep the backlog.
 
-This lever adds the missing trigger: **queue depth**.
+This lever adds the missing trigger: **queue depth**. Depth spills are decided
+at pool admission in every drain, including the discovery launch wave and later
+waves for deferred candidates. An engaged lane spills only when the pool's
+Gemini seats are saturated and the overall reviewer pool still has room.
+The pool keeps its wake priority, oldest-first ordering within each tier, and
+re-review lane floor; spill routing does not predict a separate admission order.
+Pipeline Gemini seats count even when the candidate's main route is not Gemini.
+Unknown broker capacity uses the same conservative single-Gemini cap as normal
+admission, so candidates beyond that slot can still spill.
+
+Discovery launches remain enabled while the lever is engaged; no full repository
+census or lifecycle sweep is required before admitting the first wave. Each lane
+shares its graded per-tick budget across drains. While a subject's lane has
+engaged depth pressure and unspent depth budget, discovery suppresses the
+separate burst-pressure trigger and leaves depth routing to pool admission.
+Depth re-evaluation also suppresses burst, so a depth spill spends only depth
+budget. Burst discovery remains available when that lane is disengaged or its
+depth budget is exhausted. Quota fallback remains available independently.
+Candidates whose pipeline still requires Gemini seats cannot spill their main
+route, because that would not release Gemini capacity.
+A candidate refused by a later gate, or deferred by pool admission, refunds its
+reservation. A pool deferral uses reason `pool-admission-deferred`, restores the
+preferred route, and can be re-evaluated in a later drain. Spill and refund route
+changes refresh cross-model waiver metadata before spawn. A failed drain also
+refunds reservations for every candidate it did not start; started candidates
+settle their own reservations at spawn or refusal.
 
 ## This is a cost lever, not a parallelism knob
 
@@ -134,7 +159,9 @@ Prints live depth, threshold, armed/engaged state, graded spill slots, and the
 cost ledger. The durable report is `data/review-queue-depth-failover.json`; it
 keeps independent `lanes["first-pass"]` and `lanes.rereview` engagement state,
 transitions, and current-engagement cost, with top-level fields retained as a
-compatibility summary.
+compatibility summary. Top-level `engagementSpilloverReviews` is the live
+net engagement count across lanes (spill admissions minus refunds), unlike the
+historical snapshots of the same name in `transitions[]`.
 
 Log lines (stable, greppable prefixes):
 
@@ -143,11 +170,19 @@ Log lines (stable, greppable prefixes):
 [watcher] review-queue-depth-failover disengage pass_kind=… depth=… threshold=… spill_slots=… engagement_spillover_reviews=…
 [watcher] review-queue-depth-failover rereview threshold inherited from first-pass=…; both lanes may spend separate spill slots
 [watcher] review-queue-depth-spillover repo=… pr=… from=gemini to=codex pass_kind=… depth=… slot=1/2 total_spillover_reviews=…
+[watcher] review-queue-depth-wait oldest_first_pass_age_ms=… first_pass_waiting=…
+[watcher] review-queue-depth-spillover-refund repo=… pr=… pass_kind=… reason=pool-admission-deferred remaining=…
+[watcher] review-queue-depth-route repo=… pr=… from=… to=… reason=…
 [watcher] review-worker-class-fallback repo=… pr=… from=… to=… reason=queue-depth-pressure queueDepth=… queueDepthThreshold=…
 [watcher] review-worker-class-fallback quota-status timing duration_ms=… attempts=… outcome=…
 [watcher] review-worker-class-fallback-fail-open repo=… pr=… source=quota-status error=…
 [watcher] poll-cycle timing source="…" ok=… timed_out=… duration_ms=…
 ```
+
+`oldest_first_pass_age_ms` measures time since creation of the oldest queued
+first-pass candidate in that drain (zero when none is present), rather than time
+since its last enqueue. Compare the live engagement count with spills minus
+refunds when verifying cost accounting.
 
 ## Disarming it
 
@@ -175,3 +210,5 @@ recovery already returns review to `agy` on its own.
 - **The pool ceiling is untouched.** More concurrent `gemini` reviewers contend
   for the same provider capacity; that is the ceiling this lever escapes, not one
   to raise.
+
+Discovery defers the posted-review SQL lookup until an engaged depth lane needs classification or the subject reaches pool admission. Early held/skipped subjects with no engaged depth lever do not pay that query cost.

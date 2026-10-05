@@ -353,6 +353,8 @@ function summarizeReport(report) {
     updatedAt,
     lastTransition,
     transitions,
+    // Live net admitted cost; transition entries remain historical snapshots.
+    engagementSpilloverReviews: aggregateCost(lanes).currentEngagementSpilloverReviews,
     cost: aggregateCost(lanes),
   };
 }
@@ -637,4 +639,33 @@ export function createFirstPassSpilloverController({
       return granted;
     },
   };
+}
+
+/** Prepare every drain, including candidates deferred by an earlier wave.
+ * The pool calls the spill hook only when its actual Gemini seats are full.
+ * Repeated drains reuse the controller's unspent/refunded per-tick budget.
+ */
+export async function prepareQueueDepthSpillover(candidates, {
+  controller, compareCandidates, nowMs = Date.now(), logger = console,
+} = {}) {
+  const ordered = [...candidates].sort(compareCandidates);
+  const passKind = (candidate) => candidate.depthPassKind ?? (
+    candidate.hasPriorPostedReview === false
+      || (candidate.hasPriorPostedReview !== true && !candidate.current?.posted_at
+        && !candidate.current?.rereview_requested_at) ? 'first-pass' : 'rereview'
+  );
+  const firstPass = ordered.filter((candidate) => passKind(candidate) === 'first-pass');
+  const oldestMs = Math.min(...firstPass.map((candidate) => Date.parse(candidate.subject?.createdAt)).filter(Number.isFinite));
+  logger.log?.(`[watcher] review-queue-depth-wait oldest_first_pass_age_ms=${Number.isFinite(oldestMs) ? Math.max(0, nowMs - oldestMs) : 0} first_pass_waiting=${firstPass.length}`);
+  for (const candidate of ordered) {
+    candidate.prepareForGeminiSaturation = async () => {
+      if (candidate.reviewerModel === 'gemini'
+        // Changing the main route cannot release seats required by a pipeline.
+        && !(candidate.pipelineGeminiSeats > 0)
+        && controller?.depthPressure(passKind(candidate))?.engaged) {
+        await candidate.reevaluateDepthSpill?.();
+      }
+    };
+  }
+  return ordered;
 }

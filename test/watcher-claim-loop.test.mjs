@@ -459,6 +459,7 @@ try {
     reviewerSpawns: globalThis.__watcherClaimLoopReviewerSpawns || [],
     brokerRefreshes: globalThis.__watcherClaimLoopBrokerRefreshes || 0,
     pollError: pollError ? String(pollError.message || pollError) : null,
+    depthDiagnostics: globalThis.__watcherDepthDiagnostics || null,
   }));
 } catch (err) {
   console.error(err?.stack || err?.message || err);
@@ -2078,4 +2079,189 @@ for (const exact of [true, false]) test(`REMORPHAN exact-head recovery ${exact ?
     const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
     assert.equal(summary.reviewerSpawns.some(spawn => spawn.subjectContext?.reviewerHeadSha === 'sha-happy-101'), exact, output);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null } = {}) {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const routeUrl = fileUrl('src', 'reviewer-route-selection.mjs');
+    const fallbackUrl = fileUrl('src', 'review-worker-class-fallback.mjs');
+    const depthUrl = fileUrl('src', 'review-queue-depth.mjs');
+    const burstUrl = fileUrl('src', 'reviewer-burst-lease.mjs');
+    const poolUrl = fileUrl('src', 'watcher-reviewer-pool.mjs');
+    const sources = {
+      [routeUrl]: `
+        import * as actual from '${routeUrl}?actual';
+        import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
+        export * from '${routeUrl}?actual';
+        export function selectReviewerRouteForAttempt(args) {
+          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini,
+            timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: 'gemini',
+              timeoutFailures: 2, sameModelAsBuilder: false, builderClass: 'codex' } };
+        }
+      `,
+      // Keep the production resolver and precedence rules; stub only live quota I/O.
+      [fallbackUrl]: `
+        import * as actual from '${fallbackUrl}?actual';
+        export * from '${fallbackUrl}?actual';
+        export async function resolveReviewerWorkerClassWithFallback(args) {
+          return actual.resolveReviewerWorkerClassWithFallback({ ...args,
+            execFileImpl: async () => ({ stdout: JSON.stringify({ providerStatuses: [
+              { provider: 'google', authPath: 'oauth', state: 'ok' },
+              { provider: 'anthropic', authPath: 'oauth', state: 'ok' }
+            ] }) }) });
+        }
+      `,
+      [depthUrl]: `
+        import * as actual from '${depthUrl}?actual';
+        export * from '${depthUrl}?actual';
+        globalThis.__watcherDepthDiagnostics = {};
+        export function createFirstPassSpilloverController(args) {
+          return actual.createFirstPassSpilloverController({ ...args, rootDir: ${JSON.stringify(tmp)},
+            writeFileImpl: (_path, contents) => {
+              globalThis.__watcherDepthDiagnostics.report = JSON.parse(contents);
+            } });
+        }
+      `,
+      [burstUrl]: `
+        import * as actual from '${burstUrl}?actual';
+        export * from '${burstUrl}?actual';
+        export function createReviewerBurstController(args) {
+          const now = () => new Date('2026-10-05T03:00:00Z');
+          const rootDir = ${JSON.stringify(tmp)};
+          if (${burst}) actual.requestReviewerBurstLease({ rootDir,
+            repos: ['laceyenterprises/adversarial-review'], reason: 'fixture precedence',
+            requestedBy: 'fixture operator', slots: 1, ttlMs: 1800000, budgetUsd: 20,
+            now, safety: {
+              quota: { readable: true, availableClasses: ['claude-code'], groundedClasses: [] },
+              posting: { readable: true, attempts: 20, failures: 0, failureRatio: 0, outageActive: false },
+              reviewer: { readable: true, stuckSlots: 0, states: { active: 0, stale: 0, impossible: 0 } }
+            } });
+          const controller = actual.createReviewerBurstController({ ...args, rootDir, now, readSpendUsd: () => 0 });
+          return { ...controller, recordBurstAdmission(subject) {
+            const admitted = controller.recordBurstAdmission(subject);
+            globalThis.__watcherDepthDiagnostics.burstAdmissions =
+              (globalThis.__watcherDepthDiagnostics.burstAdmissions || 0) + Number(admitted);
+            return admitted;
+          } };
+        }
+      `,
+    };
+    if (drainOutcome) sources[poolUrl] = `
+      import * as actual from '${poolUrl}?actual';
+      export * from '${poolUrl}?actual';
+      let drains = 0;
+      export async function runBoundedReviewerDispatchQueue(candidates, options) {
+        if (++drains !== 1) {
+          globalThis.__watcherDepthDiagnostics.restoredModels = candidates.map(c => c.reviewerModel);
+          return actual.runBoundedReviewerDispatchQueue(candidates, options);
+        }
+        // Force admission to yield or fail after real production spill preparation.
+        // The closures that reserve, refund, restore and refresh waivers are untouched.
+        const deferred = candidates[1];
+        await deferred.prepareForGeminiSaturation();
+        globalThis.__watcherDepthDiagnostics.reservedModel = deferred.reviewerModel;
+        const result = await actual.runBoundedReviewerDispatchQueue([candidates[0]], options);
+        if (${JSON.stringify(drainOutcome)} === 'throw') throw new Error('fixture drain failed after spill');
+        return { ...result, deferred: 1, deferredCandidates: [deferred] };
+      }
+    `;
+    if (drainOutcome === 'lease-held') {
+      delete sources[poolUrl];
+      const gateUrl = fileUrl('src', 'reviewed-head-dispatch-gate.mjs');
+      sources[gateUrl] = `
+        import * as actual from '${gateUrl}?actual';
+        export * from '${gateUrl}?actual';
+        export function createHeadDispatchLease() {
+          const lease = actual.createHeadDispatchLease();
+          return { ...lease, tryAcquire(key) { return key.includes('#102@') ? false : lease.tryAcquire(key); } };
+        }
+      `;
+    }
+    const loader = buildLoaderSource().replace('  return nextLoad(url, context);', `
+      const source = new Map(${JSON.stringify(Object.entries(sources))}).get(url);
+      if (source) return { format: 'module', shortCircuit: true, source };
+      return nextLoad(url, context);
+    `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      expectPollError: drainOutcome === 'throw',
+      // Depth is memoized at discovery; model the already-queued production backlog.
+      prePollSetup: `db.prepare("INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, 101, ?, 'gemini', 'open', 'pending', 0)").run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00.000Z');`,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: fixtureEnv({ ...installGhFixture(tmp), GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
+          GH_CLAUDE_REVIEWER_TOKEN: 'fixture-claude',
+          ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code',
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: depthEngaged ? '1' : '100',
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: burst ? '1' : '2' }),
+      });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
+    assert.ok(line, output);
+    return { summary: JSON.parse(line.slice(SUMMARY_MARKER.length)), output };
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+}
+
+for (const burst of [false, true]) test(`engaged discovery depth keeps priority over burst=${burst} and refreshes spawn waivers`, () => {
+  const { summary, output } = runDepthDiscoveryScenario({ burst });
+  assert.match(output, /Draining 2 reviewer dispatch candidate\(s\) before continuing reviewer discovery/);
+  assert.match(output, /review-queue-depth-route .*from=gemini to=claude reason=queue-depth-pressure/);
+  const preferred = summary.reviewerSpawns.find((spawn) => spawn.subjectContext.reviewerModel === 'gemini');
+  const spill = summary.reviewerSpawns.find((spawn) => spawn.subjectContext.reviewerModel === 'claude');
+  assert.ok(preferred, output);
+  assert.ok(spill, output);
+  assert.match(preferred.subjectContext.crossModelReviewWaiverReason, /to reviewer=gemini/);
+  assert.equal(spill.subjectContext.crossModelReviewWaived, false);
+  assert.equal(spill.subjectContext.crossModelReviewWaiverReason, null);
+  assert.equal(summary.depthDiagnostics.burstAdmissions || 0, 0);
+  assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 1);
+  assert.equal(summary.depthDiagnostics.report.cost.byWorkerClass['claude-code'], 1);
+});
+
+test('disengaged depth still permits burst admission at discovery', () => {
+  const { summary } = runDepthDiscoveryScenario({ burst: true, depthEngaged: false });
+  assert.equal(summary.depthDiagnostics.burstAdmissions, 2);
+  assert.ok(summary.reviewerSpawns.every(spawn => spawn.subjectContext.reviewerModel === 'claude'));
+  assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews || 0, 0);
+});
+
+test('deferred production spill restores Gemini route and waiver before the next drain', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ drainOutcome: 'defer' });
+  assert.equal(summary.depthDiagnostics.reservedModel, 'claude');
+  assert.deepEqual(summary.depthDiagnostics.restoredModels, ['gemini']);
+  assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 0);
+  assert.match(output, /from=claude to=gemini reason=pool-admission-deferred/);
+  assert.equal(summary.reviewerSpawns.length, 2);
+  for (const spawn of summary.reviewerSpawns) {
+    assert.equal(spawn.subjectContext.reviewerModel, 'gemini');
+    assert.equal(spawn.subjectContext.crossModelReviewWaived, true);
+    assert.match(spawn.subjectContext.crossModelReviewWaiverReason, /to reviewer=gemini/);
+  }
+});
+
+test('failed drain refunds unstarted production spill reservations', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ drainOutcome: 'throw' });
+  assert.equal(summary.pollError, 'fixture drain failed after spill');
+  assert.equal(summary.depthDiagnostics.reservedModel, 'claude');
+  assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 0);
+  assert.equal(summary.depthDiagnostics.report.cost.spilloverReviewsTotal, 0);
+  assert.equal(summary.reviewerSpawns.length, 1);
+  assert.match(output, /review-queue-depth-spillover-refund .*pr=102/);
+});
+
+test('head dispatch lease refusal refunds the production spill and restores its route', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ drainOutcome: 'lease-held' });
+  assert.equal(summary.reviewerSpawns.length, 1);
+  assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 0);
+  assert.match(output, /dispatch lease already held/);
+  assert.match(output, /from=claude to=gemini reason=pool-admission-deferred/);
 });

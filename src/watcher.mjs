@@ -390,7 +390,8 @@ import {
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
 } from './reviewed-head-dispatch-gate.mjs';
-import { createFirstPassSpilloverController } from './review-queue-depth.mjs'; import { createReviewerBurstController } from './reviewer-burst-lease.mjs'; // RPL-07 rides on this line: watcher.mjs is AT its ARC-18 line ratchet, so new wiring must be net-zero lines.
+import { createFirstPassSpilloverController, prepareQueueDepthSpillover } from './review-queue-depth.mjs';
+import { createReviewerBurstController } from './reviewer-burst-lease.mjs';
 import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   inspectWatcherExitTimeout,
@@ -1262,19 +1263,17 @@ async function pollOnce(
       return { dispatched: 0, maxObservedConcurrency: 0 };
     }
     const candidates = reviewerDispatchCandidates.splice(0, reviewerDispatchCandidates.length);
+    const startedCandidates = new Set();
     const startedAt = process.hrtime.bigint();
     console.log(
       `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
     );
     try {
-      // Fire-and-return: the drain waits for admission/spawn bookkeeping only.
-      // Cap GEMINI at the live broker credential count so they don't over-dispatch and lose the
-      // checkout-lease race (the "no credential with remaining quota"
-      // misdiagnosis). Fail-open: a missing broker URL / secret / endpoint
-      // yields null => no gemini cap, so review dispatch never wedges on this.
+      // Unknown broker capacity uses the pool's conservative single-Gemini cap.
       const geminiCredentialConcurrency =
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
-      const drainResult = await runBoundedReviewerDispatchQueue(candidates, {
+      const orderedCandidates = await prepareQueueDepthSpillover(candidates, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
+      const drainResult = await runBoundedReviewerDispatchQueue(orderedCandidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
         activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
@@ -1282,7 +1281,10 @@ async function pollOnce(
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
         splitPostReviewSettlement: admissionSettlementSplitEnabled,
-        onCandidateStarted: detachedReviewerDispatchTracker.track,
+        onCandidateStarted: (started) => {
+          startedCandidates.add(started.candidate);
+          detachedReviewerDispatchTracker.track(started);
+        },
         logger: console,
       });
       if (drainResult.deferred > 0) {
@@ -1299,6 +1301,11 @@ async function pollOnce(
       }
       return drainResult;
     } finally {
+      // Also settle reservations when the drain throws before returning its
+      // deferred list. Started candidates own their spawn/refusal settlement.
+      for (const candidate of candidates) {
+        if (!startedCandidates.has(candidate)) candidate.refundDepthSpill?.();
+      }
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
         console.warn(

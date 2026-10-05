@@ -590,7 +590,7 @@ test('fallback: when local fetch cannot make the commit readable, getHeadCloserC
       stdout: JSON.stringify({
         sha: HEAD_SHA,
         message: HAMMER_MESSAGE,
-        authorLogin: null,
+        authorLogin: 'the-hammer-lacey[bot]',
       }),
     };
   };

@@ -207,10 +207,11 @@ What needs to happen next:
 ## Terminal closer trailers are not identity proof
 
 `src/head-closer-commit-suppression.mjs::isTerminalCloserCommitIdentity`
-still accepts `Closed-By: hammer` and recognized `Closer` markers regardless of
-linked author identity. A worker or contributor can copy those message trailers
-and suppress re-review or arm stale-head closer resume. The linked-author plus
-HAM-ticket identity branch does not eliminate this older trailer-only risk.
+binds recognized `Closed-By` / `Closer` markers to closer provenance when linked
+identity data is present. Either linked foreign identity rejects suppression,
+and the remote GitHub probe requires linked closer provenance even when both
+logins are absent. This prevents a copied trailer on a linked worker commit
+from suppressing the remote review path.
 
 GitHub links both `author.login` and `committer.login` from commit email
 headers. A pusher can forge either by setting the corresponding Git email to
@@ -221,8 +222,9 @@ from being sufficient but does not authenticate a deliberate forger. Signed
 commit verification or verified push-actor evidence would be needed for that.
 
 Local Git reads intentionally keep working without GitHub credentials and have
-no linked login data. Binding only the remote branch to a closer author would
-leave the local-first path able to bypass that binding. A follow-up must carry
+no linked login data. Their trailer-only fallback still allows copied trailers
+to suppress re-review or arm stale-head closer resume on the local-first path.
+A follow-up must carry
 source-aware identity evidence through the local/remote suppression callers and
 re-verify at downstream merge gates. Fast-merge already requires matching
 allowlisted HAM audit comments plus a trusted head-specific AMA audit and lease;

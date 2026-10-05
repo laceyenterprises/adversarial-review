@@ -315,7 +315,7 @@ function normalizeCommitTrailers(trailers) {
   return normalized;
 }
 
-export function isTerminalCloserCommitIdentity(commit = {}) {
+export function isTerminalCloserCommitIdentity(commit = {}, { requireLinkedIdentity = false } = {}) {
   const message = commit?.commit?.message || commit?.message || '';
   const trailers = {
     ...parseCommitTrailers(message),
@@ -324,6 +324,17 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
   const normalizedTrailers = {};
   for (const [key, value] of Object.entries(trailers)) {
     normalizedTrailers[normalizeIdentityPart(key)] = String(value || '').trim();
+  }
+  const linkedLogin = (identity) => normalizeIdentityPart(typeof identity === 'object' ? identity?.login : identity);
+  const hasLinkedIdentity = Boolean(linkedLogin(commit?.author) || linkedLogin(commit?.committer));
+  const identityMatches = hamCommitIdentityMatches(commit, {
+    trailers: normalizedTrailers,
+    loginMatches: (login) => TERMINAL_CLOSER_BOT_IDENTITIES.has(normalizeIdentityPart(login)),
+  });
+  // Remote probes must bind terminal markers to linked closer provenance.
+  // Local Git has no linked logins and retains the offline trailer fallback.
+  if ((requireLinkedIdentity || hasLinkedIdentity) && !identityMatches) {
+    return { suppressed: false, reason: null };
   }
   const trailerKey = normalizedTrailers['closed-by'] ? 'closed-by' : 'closer';
   const trailerIdentity = normalizeTrailerIdentity(normalizedTrailers[trailerKey]);
@@ -339,13 +350,9 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
     ? commit?.author?.login : commit?.author);
   // The identity branch requires a linked closer author and rejects a linked
   // foreign committer through the shared helper. Its unlinked-author fallback
-  // cannot reach this branch: the required Closed-By is handled above, including
-  // local Git reads without linked identities.
+  // cannot reach this branch: the required Closed-By is handled above.
   const workerTicket = normalizedTrailers['worker-ticket'] || '';
-  if (TERMINAL_CLOSER_BOT_IDENTITIES.has(closerIdentity) && isHamWorkerTicket(workerTicket) && hamCommitIdentityMatches(commit, {
-    trailers: normalizedTrailers,
-    loginMatches: (login) => TERMINAL_CLOSER_BOT_IDENTITIES.has(normalizeIdentityPart(login)),
-  })) {
+  if (TERMINAL_CLOSER_BOT_IDENTITIES.has(closerIdentity) && isHamWorkerTicket(workerTicket) && identityMatches) {
     return {
       suppressed: true,
       reason: 'closer-commit-identity',
@@ -544,7 +551,7 @@ export async function getHeadCloserCommitSuppression({
       author: { login: raw.authorLogin || null },
       committer: { login: raw.committerLogin || null },
     };
-    return isTerminalCloserCommitIdentity(commit);
+    return isTerminalCloserCommitIdentity(commit, { requireLinkedIdentity: true });
   } catch (err) {
     logger?.warn?.(
       `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +

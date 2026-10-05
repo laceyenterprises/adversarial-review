@@ -52,6 +52,47 @@ test('IDENTBASE-01: watcher remote probe checks both linked identities', async (
   }
 });
 
+test('remote closure trailers cannot suppress linked foreign or unidentified commits', async () => {
+  for (const trailer of ['Closed-By: hammer', 'Closer: merge-agent-lacey']) {
+    for (const [authorLogin, committerLogin, expected] of [
+      ['lacey-codex-agent[bot]', 'the-hammer-lacey[bot]', false],
+      ['the-hammer-lacey[bot]', 'some-human-contributor', false],
+      ['the-hammer-lacey[bot]', null, true],
+      [null, 'the-hammer-lacey[bot]', false],
+      [null, null, false],
+    ]) {
+      const message = `repair\n\n${trailer}`;
+      const result = await getHeadCloserCommitSuppression({
+        repoPath: 'fixture/repo', headSha: 'a'.repeat(40),
+        fetchVerifiedCommitFromLocalGitImpl: async () => null,
+        execGhWithRetryImpl: async () => ({ stdout: JSON.stringify({ authorLogin, committerLogin, message }) }),
+      });
+      assert.equal(result.suppressed, expected, `${trailer}: ${authorLogin}/${committerLogin}`);
+      // Normalized GitHub evidence must not lose a known foreign identity.
+      const normalized = normalizeVerifiedCloserCommit({
+        author: { login: authorLogin }, committer: { login: committerLogin }, message,
+      });
+      assert.equal(isTerminalCloserCommitIdentity(normalized, { requireLinkedIdentity: true }).suppressed, expected);
+    }
+  }
+});
+
+test('local terminal trailers retain offline suppression; remote legacy HAM needs full provenance', async () => {
+  const message = 'repair\n\nWorker-Class: hammer\nWorker-Ticket: AMA-PR-42\nClosed-By: hammer (adversarial-pipe-mode)';
+  const local = await getHeadCloserCommitSuppression({
+    repoPath: 'fixture/repo', headSha: 'a'.repeat(40),
+    fetchVerifiedCommitFromLocalGitImpl: async () => ({ message }),
+    execGhWithRetryImpl: async () => { throw new Error('local suppression must remain offline'); },
+  });
+  assert.equal(local.suppressed, true);
+  const remote = await getHeadCloserCommitSuppression({
+    repoPath: 'fixture/repo', headSha: 'a'.repeat(40),
+    fetchVerifiedCommitFromLocalGitImpl: async () => null,
+    execGhWithRetryImpl: async () => ({ stdout: JSON.stringify({ message, committerLogin: 'the-hammer-lacey[bot]' }) }),
+  });
+  assert.equal(remote.suppressed, true);
+});
+
 test('HAM identity rejects linked foreign identities even with full terminal trailers', () => {
   const message = 'repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)';
   for (const [author, committer, expected] of [

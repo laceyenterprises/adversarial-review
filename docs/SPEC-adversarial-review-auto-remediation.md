@@ -2340,7 +2340,13 @@ its narrower closer-login allowlist and requires a HAM ticket in its identity
 branch, with no linked foreign committer. Merge-agent finalize/remediation
 commits with `Worker-Ticket: PR-<n>` and no recognized terminal trailer remain
 reviewable even when authored by `merge-agent-lacey`. Explicit `Closed-By` /
-`Closer` suppression remains a separate trailer-only path, including local Git reads without linked GitHub identity.
+`Closer` markers also require the shared identity check whenever linked logins
+are present. The GitHub probe calls `isTerminalCloserCommitIdentity` with
+`requireLinkedIdentity: true`, so a remote commit with neither login linked
+cannot suppress review. An unlinked author with a linked HAM committer still
+requires the full terminal trailer set described above. Local Git reads retain
+trailer-only suppression without GitHub credentials; this local-first fallback
+does not authenticate the push actor or replace downstream AMA/fast-merge checks.
 Linked author and committer logins are email-based signals, not proof of the
 push actor; see the limitation in
 [`KNOWN-SHARP-EDGES.md`](../KNOWN-SHARP-EDGES.md#terminal-closer-trailers-are-not-identity-proof).

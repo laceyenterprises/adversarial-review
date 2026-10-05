@@ -543,6 +543,11 @@ commits with an unlinked author remain accepted by eligibility and reversal
 checks when their linked HAM committer carries the full terminal trailer set.
 Either linked non-HAM identity rejects terminal-remediation certification and
 reversal authorization, even when the trailers are present.
+Suppression also rejects terminal trailers with either linked foreign identity.
+The remote GitHub probe requires linked closer provenance; an unidentified remote
+commit cannot suppress review. Local Git retains the offline trailer-only
+fallback, so this guard does not eliminate deliberate trailer forgery on the
+local-first path. Downstream closure authority remains independently verified.
 
 Once a review settles on the current head, each watcher tick routes closure
 down exactly one of two paths:

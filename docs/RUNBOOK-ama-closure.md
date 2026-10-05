@@ -2023,3 +2023,27 @@ STANDUPCI-01). This repository only handles the existing zero-CI gap; provisioni
 is follow-up work in agent-os.
 
 HAM hardening: stale CI action reservations resume after 60 seconds using fresh workflow evidence and exclusive recovery claims. Bootstrap requires signed Ed25519 evidence in every hosting mode and empty exact-head commit-status/check-suite APIs. Empty rollups with configured workflows fall through to bounded HAM escalation. Candidate side effects require explicit clean-review and execution-switch authority; timeout handoffs cannot supply that authority. The bootstrap verifier retries GitHub reads; exit 75 permits bounded retry and exit 65 means missing evidence.
+
+### STANDUPGATE-02: audited closure when no CI is configured
+
+The strictly zero-finding, settled-success daemon route can close an empty
+check rollup only after live GitHub reads prove that neither the base nor the
+reviewed head contains workflow files and that the target branch has neither
+required-check rules nor required workflows. Classic branch protection is
+checked as well as effective ruleset rules. Unknown, truncated, or failed reads
+refuse the exception. Configured required contexts also refuse it.
+
+The proof is read before lease acquisition and again before every merge attempt;
+`ciConfiguration` records `reason: "no CI configured"`, repository, base, head,
+and base head in the daemon audit. Identity, attestation, primary-change,
+mergeability, matching-head, hold, lease, and kill-switch gates still apply.
+A successful daemon closure short-circuits hammer dispatch and operator escalation.
+The shared check classifier still rejects empty or pending rollups everywhere else.
+
+RCA: searchlight#2 had an empty rollup, so the daemon's shared eligibility
+predicate returned `ci-not-green`. The fallback hammer was dispatched (watcher
+log records `lrq_46c92584-a470-4014-9080-fd5c49d855c3`), but the terminal-remediation
+mandate requires a non-empty provenance commit (`dispatch-closer.mjs`,
+`composeCloserPrompt`), and zero findings authorized no remediation diff.
+This configuration exception removes that circular dependency without inventing
+findings or weakening the hammer's remediation contract.

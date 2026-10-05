@@ -1022,3 +1022,70 @@ test('missing title defers before acquiring the merge lease or writing a placeho
     assert.equal(harness.calls.acquire, 0);
   }
 });
+test('no CI configured: clean daemon closes inline and records live evidence', async () => {
+  const gate = greenGate({ requiredChecks: [] });
+  const h = makeHarness({ liveGate: gate });
+  let lookups = 0;
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    liveGate: gate,
+    verifyNoCiConfiguredImpl: async ({ head }) => {
+      lookups++;
+      return { reason: 'no CI configured', head };
+    },
+  }));
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(lookups, 2);
+  assert.equal(h.calls.merge, 1);
+  assert.equal(h.calls.auditAppends.at(-1).attempt.ciConfiguration.reason, 'no CI configured');
+});
+
+for (const [name, verify] of [
+  ['workflows or required checks exist', async () => null],
+  ['GitHub lookup fails', async () => { throw new Error('HTTP 403'); }],
+]) {
+  test(`no CI exception fails closed when ${name}`, async () => {
+    const gate = greenGate({ requiredChecks: [] });
+    const h = makeHarness({ liveGate: gate });
+    const result = await attemptDaemonCleanMerge(baseArgs(h, { liveGate: gate, verifyNoCiConfiguredImpl: verify }));
+    assert.ok(result.reasons.includes('ci-not-green'));
+    assert.equal(h.calls.merge, 0);
+  });
+}
+
+test('pending checks never use the no-CI exception', async () => {
+  const gate = greenGate({ requiredChecks: [{ name: 'test', status: 'IN_PROGRESS', conclusion: null }] });
+  const h = makeHarness({ liveGate: gate });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { liveGate: gate,
+    verifyNoCiConfiguredImpl: async () => { throw new Error('must not query'); },
+  }));
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.equal(h.calls.merge, 0);
+});
+
+test('no-CI configuration is rechecked under lease and revocation prevents merge', async () => {
+  const gate = greenGate({ requiredChecks: [] });
+  const h = makeHarness({ liveGate: gate });
+  let calls = 0;
+  await attemptDaemonCleanMerge(baseArgs(h, { liveGate: gate,
+    verifyNoCiConfiguredImpl: async () => ++calls === 1 ? { reason: 'no CI configured' } : null,
+  }));
+  assert.equal(calls, 2);
+  assert.equal(h.calls.merge, 0);
+});
+
+for (const [name, overrides] of [
+  ['configured required context', { requiredCheckContexts: ['ci'] }],
+  ['non-blocking finding', { reviewState: cleanReview({ nonBlockingFindingCount: 1 }), flags: { strictMode: false } }],
+  ['stale reviewed head', { validatedHead: OTHER_HEAD }],
+]) {
+  test(`no-CI exception cannot authorize ${name}`, async () => {
+    const gate = greenGate({ requiredChecks: [] });
+    const h = makeHarness({ liveGate: gate });
+    let lookups = 0;
+    await attemptDaemonCleanMerge(baseArgs(h, { liveGate: gate, ...overrides,
+      verifyNoCiConfiguredImpl: async () => { lookups++; return { reason: 'no CI configured' }; },
+    }));
+    assert.equal(lookups, 0);
+    assert.equal(h.calls.merge, 0);
+  });
+}

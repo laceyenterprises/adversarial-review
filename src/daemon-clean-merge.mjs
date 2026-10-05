@@ -1,3 +1,4 @@
+import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 import { inspectCiBootstrap, recoverCancelledChecks, emptyExternalRollup } from './ci-recovery.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
@@ -1027,6 +1028,14 @@ export async function runDaemonCleanMergeAttempt({
           env,
         })
       : null,
+    verifyNoCiConfiguredImpl: ({ head }) => verifyNoCiConfigured({
+      repo: repoPath, base, head,
+      get: async (path) => {
+        const { stdout } = await execGhWithRetryImpl({ execFileImpl,
+          args: ['api', path], timeoutMs: 15000, env, signal });
+        return JSON.parse(stdout);
+      },
+    }),
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });

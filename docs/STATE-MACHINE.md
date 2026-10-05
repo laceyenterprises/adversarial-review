@@ -983,3 +983,14 @@ provenance (CLI 79) refunds its reservation before closing. Both produce a
 no-merge handoff.
 
 HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
+
+STANDUPGATE-02 adds a daemon-only clean transition for an empty rollup when live
+GitHub configuration proves no workflow files at base or reviewed head and no
+required checks/workflows in classic protection or effective branch rules. The
+strictly zero-finding settled-success head still passes all identity, attestation,
+primary-change, mergeability, head, hold and lease gates. This proof substitutes
+only the CI and required-gate-context predicates and is re-read under the lease
+before each attempt; the audit records `ciConfiguration: { reason: "no CI configured", ... }`.
+Failed/unknown lookups or any configured CI preserve the original fail-closed
+transition. A merged daemon result remains terminal for dispatch and never sends
+this clean head to the hammer's non-empty-remediation contract.

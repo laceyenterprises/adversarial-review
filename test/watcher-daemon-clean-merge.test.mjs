@@ -17,6 +17,7 @@ import {
   resolveDaemonWorkerIdentityFromHeadAttestation,
 } from '../src/watcher.mjs';
 import {
+  attemptDaemonCleanMerge,
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
 } from '../src/ama/daemon-merge.mjs';
@@ -2520,8 +2521,8 @@ test('DCA-01: a live rollup with ZERO checks never merges (LAC-1559 empty-rollup
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
       }),
-      execFileImpl: async () => {
-        mergeCalls += 1;
+      execFileImpl: async (_file, args) => {
+        if (args[0] === 'pr' && args[1] === 'merge') mergeCalls += 1;
         return { stdout: '', stderr: '' };
       },
     });
@@ -3975,5 +3976,65 @@ test('daemon recovery/bootstrap errors degrade to original checks and execution 
       });
       assert.equal(calls, enabled ? 2 : 0);
     }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('audited zero-finding no-CI close skips hammer and operator escalation', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const head = 'a'.repeat(40);
+    const gate = { candidateHead: head, requiredChecks: [], mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN', prState: 'OPEN', labels: [] };
+    const audit = [];
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => attemptDaemonCleanMerge({
+        repo: 'acme/repo', prNumber: 7, base: 'main', validatedHead: head,
+        verdict: 'settled-success', reviewState: {
+          blockingFindingCount: 0, blockingFindingState: 'known',
+          nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+        },
+        liveGate: gate, fetchLiveGateImpl: async () => gate,
+        verifyNoCiConfiguredImpl: async () => ({ reason: 'no CI configured', head }),
+        acquireLeaseImpl: async () => ({ acquired: true, lease: { leaseId: 'fixture' } }),
+        releaseLeaseImpl: () => {}, runMergeImpl: async () => ({ exitCode: 0 }),
+        hqRoot: rootDir, readAuditImpl: () => null, writeAuditImpl: () => {},
+        appendAuditImpl: (entry) => audit.push(entry), logger: { log() {}, warn() {} },
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls++; throw new Error('hammer must not run'); },
+    });
+    assert.equal(result.daemonCleanMerge.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(closerCalls, 0);
+    assert.notEqual(result.needsOperator, true);
+    assert.equal(audit.at(-1).attempt.ciConfiguration.reason, 'no CI configured');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('production daemon wiring verifies GitHub configuration twice for no-CI closure', async () => {
+  const rootDir = tempRoot();
+  try {
+    const paths = [];
+    let merges = 0;
+    const result = await runDaemonCleanMergeAttempt({
+      ...realRollupHelpers({ rootDir, head: 'no-ci-head' }),
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'no-ci-head',
+        labels: [], checks: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+      execGhWithRetryImpl: async ({ args }) => {
+        if (args[0] === 'pr' && args[1] === 'merge') { merges++; return { stdout: '' }; }
+        assert.equal(args[0], 'api');
+        paths.push(args[1]);
+        const payload = args[1].includes('/git/trees/') ? { truncated: false, tree: [] }
+          : args[1].includes('/rules/') ? []
+          : { protected: false, commit: { sha: 'base-head' } };
+        return { stdout: JSON.stringify(payload) };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED, JSON.stringify(result));
+    assert.equal(merges, 1);
+    assert.equal(paths.filter((path) => path.includes('/rules/')).length, 2);
+    assert.equal(paths.filter((path) => path.includes('/git/trees/')).length, 4);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

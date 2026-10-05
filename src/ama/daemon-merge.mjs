@@ -386,6 +386,7 @@ async function attemptDaemonCleanMergeInner({
   allowHamTerminalRemediation = false,
   allowHeadCloserCertifiedNonBlocking = false,
   fetchLiveGateImpl,
+  verifyNoCiConfiguredImpl,
   acquireLeaseImpl,
   onEligibleImpl = null,
   releaseLeaseImpl,
@@ -544,6 +545,20 @@ async function attemptDaemonCleanMergeInner({
   // head-match) via the shared MSM-02 predicate. Evaluated BEFORE spending a
   // lease acquisition; `leaseHeld:true` isolates the non-lease gates. ─────────
   const preLease = normalizeGateState(liveGate);
+  let noCiEvidence = null;
+  // This is an audited configuration exception, not a green check rollup.
+  // Only the strictly zero-finding daemon route may supply it; all other
+  // callers continue through the unchanged fail-closed CI classifier.
+  const authorizeNoCi = async (gate) => {
+    if (!isFullyCleanSettledReview(reviewState) || verdict !== 'settled-success' ||
+        !Array.isArray(gate.requiredChecks) || gate.requiredChecks.length !== 0 ||
+        requiredCheckContexts.length !== 0 || gate.candidateHead !== validatedHead ||
+        typeof verifyNoCiConfiguredImpl !== 'function') return null;
+    try {
+      return await verifyNoCiConfiguredImpl({ head: gate.candidateHead });
+    } catch { return null; }
+  };
+  noCiEvidence = await authorizeNoCi(preLease);
   const preEligibility = evaluateEligibilityImpl({
     primaryChange: preLease.primaryChange,
     requirePrimaryChange: preLease.requirePrimaryChange,
@@ -553,11 +568,11 @@ async function attemptDaemonCleanMergeInner({
     operatorLogins,
     operatorLabelActorEnforcement,
     leaseHeld: true,
-    requiredChecks: preLease.requiredChecks,
+    requiredChecks: noCiEvidence ? true : preLease.requiredChecks,
     mergeable: preLease.mergeable,
     mergeStateStatus: preLease.mergeStateStatus,
     prState: preLease.prState,
-    branchProtectionRequired,
+    branchProtectionRequired: noCiEvidence ? false : branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts:
       preLease.branchProtectionRequiredContexts?.length > 0
@@ -643,6 +658,7 @@ async function attemptDaemonCleanMergeInner({
   const auditMetadataDoc = {
     ...auditMetadata,
     closingKeywordRewrites: commitBody.rewrites,
+    ...(noCiEvidence ? { ciConfiguration: noCiEvidence } : {}),
     closureAuthority,
     flagState,
   };
@@ -689,6 +705,7 @@ async function attemptDaemonCleanMergeInner({
     let live;
     try {
       live = normalizeGateState(await fetchLiveGateImpl());
+      noCiEvidence = await authorizeNoCi(live);
     } catch {
       // A gate read failure is transient by construction here (the network read
       // itself failed). Retry within the bounded budget; exhausting it is a
@@ -757,11 +774,11 @@ async function attemptDaemonCleanMergeInner({
       operatorLogins,
       operatorLabelActorEnforcement,
       leaseHeld: true,
-      requiredChecks: live.requiredChecks,
+      requiredChecks: noCiEvidence ? true : live.requiredChecks,
       mergeable: live.mergeable,
       mergeStateStatus: live.mergeStateStatus,
       prState: live.prState,
-      branchProtectionRequired,
+      branchProtectionRequired: noCiEvidence ? false : branchProtectionRequired,
       requiredGateContext,
       branchProtectionRequiredContexts:
         live.branchProtectionRequiredContexts?.length > 0
@@ -938,6 +955,7 @@ async function attemptDaemonCleanMergeInner({
           path: closureAuthority,
           attemptPhase: 'daemon-merged',
           reason: 'merged',
+          ...(noCiEvidence ? { ciConfiguration: noCiEvidence } : {}),
           validatedHead,
           mergeMethod,
           attempts,

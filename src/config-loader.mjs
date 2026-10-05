@@ -2227,6 +2227,7 @@ function schemaV1() {
       // worker_pool.dispatch.op_hammer_alerts.*,
       // worker_pool.dispatch.substrate.*,
       // worker_pool.hardening_ledger.*,
+      // worker_pool.quota.reserve_floor.* (Python schema_v1/worker_pool.py),
       // worker_pool.mcp.*, worker_pool.memory.dynamic.*,
       // worker_pool.memory_injection.*,
       // worker_pool.memory_retention.*, worker_pool.secrets.op_read_cache.*,
@@ -2264,7 +2265,7 @@ function schemaV1() {
                   __type: TYPE_DICT,
                   __strict: true,
                   __keys: {
-                    remaining_pct: { __type: TYPE_FLOAT, __default: 0.0, __min: 0, __max: 100, __enforce_max: true },
+                    remaining_pct: { __type: TYPE_FLOAT, __default: 0.0, __min: 0, __max: 100, __enforceMax: true },
                     protected_classes: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: [] },
                   },
                 }])),

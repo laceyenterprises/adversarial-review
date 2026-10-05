@@ -7708,3 +7708,28 @@ test('QUOTAFLOOR-01 reserve floor defaults disabled and validates per-auth-path 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('reserve floor mirrors every credential and rejects invalid strict policy', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'quota-reserve-strict-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    const cfg = loadConfig({ topPath, env: {} });
+    for (const credential of ['openai-oauth', 'openai-oauth-corp', 'anthropic-oauth']) {
+      assert.equal(cfg.get(`worker_pool.quota.reserve_floor.${credential}.remaining_pct`), 0);
+      assert.deepEqual(cfg.get(`worker_pool.quota.reserve_floor.${credential}.protected_classes`), []);
+    }
+    for (const policy of [
+      'openai-oauth: {remaining_pct: -1}',
+      'openai-api: {remaining_pct: 10}',
+      'openai-oauth: {enabled: true}',
+      'openai-oauth: {protected_classes: [1]}',
+    ]) {
+      writeFileSync(topPath, `version: 1\nworker_pool:\n  quota:\n    reserve_floor:\n      ${policy}\n`);
+      assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
+    }
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  quota:\n    reserve_floor:\n      openai-oauth: {remaining_pct: 100, protected_classes: ["", " ", "*"]}\n');
+    assert.deepEqual(loadConfig({ topPath, env: {} }).get('worker_pool.quota.reserve_floor.openai-oauth.protected_classes'), ['', ' ', '*']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

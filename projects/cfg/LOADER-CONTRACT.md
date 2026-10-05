@@ -68,6 +68,7 @@ adversarial-review watcher:
 - `worker_pool.dispatch.fleet_launch_health.*`
 - `worker_pool.dispatch.goal_lineage.*`
 - `worker_pool.dispatch.substrate.*`
+- `worker_pool.quota.reserve_floor.*`
 - `worker_pool.quota.fallback_reroute_horizon_seconds`
 - `worker_pool.memory.dynamic.*`
 - `worker_pool.oss_dispatch.*`
@@ -102,7 +103,7 @@ sets it.
 `worker_pool.quota.fallback_reroute_horizon_seconds` is an integer with default
 `21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
 reroute behavior; Node validates this shared field so checked-in configuration
-can carry the same policy. Unknown keys under `worker_pool.quota` still fail.
+can carry the same policy. Other unknown keys under `worker_pool.quota` still fail.
 
 `worker_pool.worker_process_niceness` is an integer with default `10` and
 range `0`–`19`. Its canonical environment override is
@@ -115,6 +116,14 @@ agent-os change sets this key in checked-in `config.yaml`. The companion must
 verify its Python default `10`, bounds `0`–`19`, and blank-env rejection against
 this contract, and exercise this leaf in `scripts/cfg-parity-gate.py` / the
 `CFG schema parity` CI job after the submodule revision is live.
+`worker_pool.quota.reserve_floor` mirrors the strict Python schema in
+`platform/agent-os-config/src/agent_os_config/schema_v1/worker_pool.py`:
+credentials `openai-oauth`, `openai-oauth-corp`, and `anthropic-oauth`, each with
+`remaining_pct` (float, default `0`, range `0`–`100`) and `protected_classes`
+(string list, default `[]`). There is no `enabled` leaf. Python owns admission;
+Node validates configuration only. Patterns remain unrestricted strings to
+match Python: empty or whitespace patterns protect no class; operators should
+use explicit nonempty class names or globs such as `remediator-*`.
 
 Checked-in `config.yaml` accepts only those mirrored `worker_pool` subtrees. Any
 other checked-in `worker_pool.*` key is an unknown nested key under a known
@@ -155,7 +164,7 @@ control surface that appears in the shared `config.yaml`:
 `worker_pool.quota.fallback_reroute_horizon_seconds` is an integer with default
 `21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
 reroute behavior; Node validates this shared field so checked-in configuration
-can carry the same policy. Unknown keys under `worker_pool.quota` still fail.
+can carry the same policy. Other unknown keys under `worker_pool.quota` still fail.
 
 Checked-in `config.yaml` accepts only those mirrored `main_catchup` keys. Any
 other checked-in `main_catchup.*` key is an unknown nested key under a known
@@ -220,7 +229,7 @@ these values, but the Node loader mirrors:
 `worker_pool.quota.fallback_reroute_horizon_seconds` is an integer with default
 `21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
 reroute behavior; Node validates this shared field so checked-in configuration
-can carry the same policy. Unknown keys under `worker_pool.quota` still fail.
+can carry the same policy. Other unknown keys under `worker_pool.quota` still fail.
 
 Checked-in `config.yaml` accepts only those mirrored `post_deploy_verify` keys.
 Any other checked-in `post_deploy_verify.*` key is an unknown nested key under a

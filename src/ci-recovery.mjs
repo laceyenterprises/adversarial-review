@@ -1,8 +1,12 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync, unlinkSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { loadConfigCached } from './config-loader.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
+import { maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
+import { deliverAlert } from './alert-delivery.mjs';
 import { checkItemState, latestCheckRollupItems } from './checks-summary.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -14,43 +18,66 @@ function reserve(rootDir, identity, record) {
   const path = join(dir, `${createHash('sha256').update(identity).digest('hex')}.json`);
   try {
     writeFileSync(path, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
-    return { created: true, record };
+    return { created: true, record, path };
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    return { created: false, record: JSON.parse(readFileSync(path, 'utf8')) };
+    return { created: false, record: JSON.parse(readFileSync(path, 'utf8')), path };
   }
 }
 
+// Keep the exclusive claim during delivery. A rejected action releases it so a
+// later tick can retry; only a successful action becomes a consumed budget.
+async function postReservation(claim, action) {
+  let result;
+  try {
+    result = await action();
+  } catch (error) {
+    unlinkSync(claim.path);
+    throw error;
+  }
+  // Preserve the reservation if persistence fails after the accepted action.
+  const temporaryPath = `${claim.path}.posted`;
+  writeFileSync(temporaryPath, JSON.stringify({ ...claim.record, state: 'posted' }), { mode: 0o600 });
+  renameSync(temporaryPath, claim.path);
+  return result;
+}
+
 export async function pageCiOnce({ rootDir, repo, prNumber, headSha, reason,
-  dedupeKey = reason, execFileImpl = execFileAsync, env = process.env, signal }) {
+  dedupeKey = reason, env = process.env, signal,
+  deliverAlertImpl = deliverAlert }) {
+  if (!rootDir) return false;
   signal?.throwIfAborted();
-  const claim = reserve(rootDir, `page:${repo}:${prNumber}:${headSha}:${dedupeKey}`, { reason });
+  const claim = reserve(rootDir, `page:${repo.toLowerCase()}:${prNumber}:${headSha}:${dedupeKey}`,
+    { reason, state: 'reserved' });
   if (!claim.created) return false;
-  await execFileImpl('hq', ['decision', 'raise', '--question',
-    `${repo}#${prNumber}@${headSha}: ${reason}`, '--option', 'Investigate CI',
-    '--option', 'Keep PR parked', '--recommended', 'Investigate CI'], { env, signal, timeout: 30_000 });
-  return true;
+  return postReservation(claim, () => maybeFireOperatorDecisionRequiredAlert({
+    rootDir, identity: { repo, prNumber }, headSha, fingerprint: `ci:${dedupeKey}`,
+    noProgressTicks: 1, thresholdTicks: 1,
+    deliverAlertFn: (_text, metadata) => deliverAlertImpl(
+      `${repo}#${prNumber}@${headSha}: ${reason}`, { ...metadata, env,
+        payload: { ...metadata.payload, reason } }),
+  }));
 }
 
 // Only an all-cancelled non-green set is recoverable. Missing contexts, pending
 // jobs and real failures remain with their existing admission/repair paths.
 export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
-  failedChecks = [], pendingChecks = [], execFileImpl = execFileAsync, env = process.env, signal }) {
+  failedChecks = [], pendingChecks = [], execFileImpl = execFileAsync, env = process.env, signal, deliverAlertImpl = deliverAlert }) {
   if (!headSha || !rootDir || !failedChecks.length || pendingChecks.length
     || failedChecks.some(check => check.state !== 'CANCELLED')) return false;
   for (const check of failedChecks) {
     const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)(?:\/|$)/.exec(check.detailsUrl || '');
     if (!match || match[1].toLowerCase() !== repo.toLowerCase()) return false;
   }
-  const { stdout: prJson } = await execFileImpl('gh', ['pr', 'view', String(prNumber),
-    '--repo', repo, '--json', 'state,headRefOid'], { env, signal, timeout: 30_000 });
+  const { stdout: prJson } = await execGhWithRetry({ execFileImpl, args: ['pr', 'view', String(prNumber),
+    '--repo', repo, '--json', 'state,headRefOid'], env, signal });
   const pr = JSON.parse(prJson);
   if (pr.state !== 'OPEN' || pr.headRefOid !== headSha) return false;
   // Snapshot each workflow before any POST. Multiple cancelled checks can belong
   // to one run, and the POST can immediately move that run back to queued.
   const runIds = [...new Set(failedChecks.map(check => /\/actions\/runs\/(\d+)/.exec(check.detailsUrl)[1]))];
   const snapshots = await Promise.allSettled(runIds.map(async runId => {
-    const { stdout } = await execFileImpl('gh', ['api', `repos/${repo}/actions/runs/${runId}`], { env, signal, timeout: 30_000 });
+    const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', `repos/${repo}/actions/runs/${runId}`], env, signal });
     return [runId, JSON.parse(stdout)];
   }));
   const errors = snapshots.filter(snapshot => snapshot.status === 'rejected');
@@ -68,19 +95,21 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
     const claim = reserve(rootDir, `rerun:${repo.toLowerCase()}:${headSha}:${check.name.trim().toLowerCase()}`, {
       runId, attempt: run.run_attempt, headSha, check: check.name, requestedAt: new Date().toISOString(),
     });
-    if (claim.created && reserve(rootDir, `workflow-rerun:${repo.toLowerCase()}:${headSha}:${runId}`, {
-      runId, attempt: run.run_attempt,
-    }).created) {
-      try {
-        await execFileImpl('gh', ['api', '--method', 'POST', `repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`], { env, signal, timeout: 30_000 });
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `cancelled check rerun failed: ${check.name}`, execFileImpl, env, signal });
-        throw error;
-      }
-    } else if (claim.record.runId !== runId || run.run_attempt > claim.record.attempt) {
+    if (claim.record.runId !== runId || run.run_attempt > claim.record.attempt) {
       await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `required check cancelled again: ${check.name}`,
-        dedupeKey: 'required-checks-cancelled-again', execFileImpl, env, signal });
+        dedupeKey: 'required-checks-cancelled-again', env, signal, deliverAlertImpl });
+      continue;
+    }
+    // The workflow claim controls the side effect, even when a check identity
+    // was recorded on an earlier failed tick or by another caller.
+    const workflow = reserve(rootDir, `workflow-rerun:${repo.toLowerCase()}:${headSha}:${runId}`, {
+      runId, attempt: run.run_attempt, state: 'reserved',
+    });
+    if (workflow.created) {
+      // Do not retry this POST in-call: a lost response may hide an accepted
+      // rerun. The next tick reads the workflow snapshot before retrying.
+      await postReservation(workflow, () => execFileImpl('gh', ['api', '--method', 'POST',
+        `repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`], { env, signal, timeout: 30_000 }));
     }
   }
   return true;
@@ -90,7 +119,7 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
 // and BOTH classic branch protection and effective ruleset rules on the base.
 export async function confirmNoCi({ repo, baseBranch, execFileImpl = execFileAsync, env = process.env, signal }) {
   if (!baseBranch) return false;
-  const api = async path => JSON.parse((await execFileImpl('gh', ['api', path], { env, signal, timeout: 30_000 })).stdout);
+  const api = async path => JSON.parse((await execGhWithRetry({ execFileImpl, args: ['api', path], env, signal })).stdout);
   try {
     const workflows = await api(`repos/${repo}/actions/workflows?per_page=1`);
     if (workflows.total_count !== 0 || !Array.isArray(workflows.workflows) || workflows.workflows.length) return false;
@@ -110,12 +139,21 @@ export async function confirmNoCi({ repo, baseBranch, execFileImpl = execFileAsy
   }
 }
 
+function compareCodePoints(a, b) {
+  const left = Array.from(a, char => char.codePointAt(0));
+  const right = Array.from(b, char => char.codePointAt(0));
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    if (left[i] !== right[i]) return left[i] - right[i];
+  }
+  return left.length - right.length;
+}
+
 function sortedJson(value) {
-  if (Array.isArray(value)) return value.map(sortedJson);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
-    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-    .map(([key, item]) => [key, sortedJson(item)]));
-  return value;
+  if (Array.isArray(value)) return `[${value.map(sortedJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.entries(value)
+    .sort(([a], [b]) => compareCodePoints(a, b))
+    .map(([key, item]) => `${JSON.stringify(key)}:${sortedJson(item)}`).join(',')}}`;
+  return JSON.stringify(value);
 }
 
 // CI runner Ed25519 sidecars use Python json.dumps(sort_keys=True,
@@ -126,7 +164,7 @@ export function verifyManagedCiRecord(record, publicKey, { repo, headSha }) {
     || !/^[0-9a-f]{128}$/i.test(record.signature || '')) return false;
   const payload = Object.fromEntries(Object.entries(record)
     .filter(([key]) => !['signature', 'signatureAlgorithm'].includes(key)));
-  const bytes = JSON.stringify(sortedJson(payload)).replace(/[\u007f-\uffff]/g,
+  const bytes = sortedJson(payload).replace(/[\u007f-\uffff]/g,
     char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
   try {
     const key = createPublicKey({ key: Buffer.concat([
@@ -139,6 +177,7 @@ export function verifyManagedCiRecord(record, publicKey, { repo, headSha }) {
 export function readGreenManagedCi({ repo, headSha, env = process.env }) {
   if (!/^[0-9a-f]{40}$/.test(headSha || '') || !env.HQ_ROOT) return false;
   try {
+    const hostingMode = loadConfigCached({ env }).get('ci.hosting.mode');
     const root = realpathSync(env.HQ_ROOT);
     const owner = statSync(root).uid;
     let key = null;
@@ -157,7 +196,7 @@ export function readGreenManagedCi({ repo, headSha, env = process.env }) {
           if (record.signature) return key && verifyManagedCiRecord(record, key, { repo, headSha });
           // Match the managed pre-push gate's cooperative GitHub hosting mode.
           // Full-mirror deployments always require the CI runner signature.
-          return (env.AGENT_OS_CI_HOSTING_MODE || 'github') === 'github'
+          return hostingMode === 'github'
             && record.mode === 'github' && record.schemaVersion === 1
             && record.headSha === headSha && record.repo?.toLowerCase() === repo.toLowerCase()
             && record.verdict === 'green' && /^sha256:[0-9a-f]{64}$/.test(record.manifestHash || '');
@@ -168,12 +207,13 @@ export function readGreenManagedCi({ repo, headSha, env = process.env }) {
 
 export async function inspectCiBootstrap({ rootDir, repo, prNumber, headSha,
   baseBranch, rollup, ownContext, requiredContexts = [], execFileImpl = execFileAsync,
-  env = process.env, readAttestationImpl = readGreenManagedCi, signal }) {
+  env = process.env, readAttestationImpl = readGreenManagedCi, signal,
+  deliverAlertImpl = deliverAlert }) {
   if (!/^[0-9a-f]{40}$/.test(headSha || '')) return { mode: null };
   if (requiredContexts.length || !emptyExternalRollup(rollup, ownContext)) return { mode: null };
   if (!await confirmNoCi({ repo, baseBranch, execFileImpl, env, signal })) return { mode: null };
   if (!await readAttestationImpl({ repo, headSha, env })) {
-    if (rootDir) await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: 'repo has no CI', execFileImpl, env, signal });
+    if (rootDir) await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: 'repo has no CI', env, signal, deliverAlertImpl });
     return { mode: null, noCi: true };
   }
   return { mode: 'no-ci-bootstrap', noCi: true, headSha };

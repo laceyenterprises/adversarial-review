@@ -2561,7 +2561,7 @@ test('Deliverable 2: daemon fail-closed on a REMEDIABLE gate (gate-not-eligible/
     const warns = [];
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
-      ...findingsArgs(rootDir),
+      ...baseArgs(rootDir),
       logger: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
@@ -3551,7 +3551,7 @@ test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to th
   try {
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
-      ...findingsArgs(rootDir),
+      ...baseArgs(rootDir),
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
         reason: 'gate-not-eligible', reasons: ['pr-not-mergeable'], merged: false, attempts: 1, manualCloseRequired: true,
@@ -3905,3 +3905,67 @@ for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISP
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   });
 }
+
+
+test('clean reviews retain capped HAM for failures, conflicts and stale heads in both daemon dispositions', async () => {
+  const rootDir = tempRoot();
+  try {
+    for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED]) {
+      for (const gate of ['ci-not-green', 'pr-not-mergeable', 'stale-head']) {
+        let hammers = 0;
+        const args = baseArgs(rootDir);
+        const result = await maybeDispatchAmaClosureFor({ ...args,
+          candidate: { ...args.candidate, mergeable: gate === 'pr-not-mergeable' ? 'CONFLICTING' : 'MERGEABLE',
+            statusCheckRollup: gate === 'ci-not-green' ? [{ name: 'ci', conclusion: 'FAILURE' }] : [] },
+          runDaemonCleanMergeAttemptImpl: async () => ({ disposition,
+            reason: gate === 'stale-head' ? gate : 'gate-not-eligible', reasons: [gate] }),
+          maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
+        });
+        assert.equal(result.dispatched, true, `${disposition}/${gate}`);
+        assert.equal(hammers, 1, `${disposition}/${gate}`);
+      }
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('fresh daemon failure overrides an empty candidate snapshot while cancelled recovery stays on merge path', async () => {
+  const rootDir = tempRoot();
+  try {
+    for (const ciMergePathPending of [false, true]) {
+      let hammers = 0;
+      const result = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir),
+        runDaemonCleanMergeAttemptImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+          reason: 'gate-not-eligible', reasons: ['ci-not-green'], ciMergePathPending }),
+        maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
+      });
+      assert.equal(hammers, ciMergePathPending ? 0 : 1);
+      if (ciMergePathPending) assert.equal(result.reason, 'clean-review-merge-path');
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('daemon recovery/bootstrap errors degrade to original checks and execution disable skips helpers', async () => {
+  const rootDir = tempRoot();
+  const head = 'f'.repeat(40);
+  try {
+    for (const enabled of [true, false]) {
+      let calls = 0;
+      const args = unattributedDaemonArgs({ rootDir, head });
+      await runDaemonCleanMergeAttemptReal({ ...args,
+        cfg: { ...args.cfg, autonomousMergeExecutionEnabled: enabled },
+        operatorApprovalEvent: operatorApprovedEventAt(head),
+        fetchPrimaryChangeImpl: async () => primaryChangeFixture(head),
+        fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+          checks: [{ name: 'ci', conclusion: 'FAILURE' }], labels: ['operator-approved'],
+          mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+        inspectCiBootstrapImpl: async () => { calls++; throw new Error('outbox unavailable'); },
+        recoverCancelledChecksImpl: async () => { calls++; throw new Error('HTTP 503'); },
+        attemptDaemonCleanMergeImpl: async options => {
+          assert.deepEqual(options.liveGate.requiredChecks, [{ name: 'ci', conclusion: 'FAILURE' }]);
+          return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'not-eligible', reasons: ['ci-not-green'] };
+        },
+      });
+      assert.equal(calls, enabled ? 2 : 0);
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

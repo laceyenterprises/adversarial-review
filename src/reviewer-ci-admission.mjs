@@ -81,6 +81,7 @@ async function guardRereviewCiBeforeReviewer({
   reviewerHeadSha = null,
   execFileImpl,
   env = process.env,
+  deliverAlertImpl,
   log = console,
   cfg = null,
   inspectCiImpl = inspectRemediationCiRegression,
@@ -116,10 +117,14 @@ async function guardRereviewCiBeforeReviewer({
   }
 
   if (state === 'failed') {
-    if (await recoverCancelledChecks({ rootDir, repo, prNumber, headSha: ciGate.headSha,
-      failedChecks: ciGate.failedChecks, pendingChecks: ciGate.pendingChecks, execFileImpl, env })) {
-      return { proceed: false, reason: 'ci-settlement-pending',
-        ciGate: { ...ciGate, state: 'pending', conclusion: 'PENDING' } };
+    try {
+      if (await recoverCancelledChecks({ rootDir, repo, prNumber, headSha: ciGate.headSha,
+        failedChecks: ciGate.failedChecks, pendingChecks: ciGate.pendingChecks, execFileImpl, env, deliverAlertImpl })) {
+        return { proceed: false, reason: 'ci-settlement-pending',
+          ciGate: { ...ciGate, state: 'pending', conclusion: 'PENDING' } };
+      }
+    } catch (error) {
+      log.warn?.(`[watcher] CI recovery unavailable for ${repo}#${prNumber}: ${error.message}`);
     }
     const latest = latestJobFinder(rootDir, { repo, prNumber });
     if (!latest?.jobPath) {

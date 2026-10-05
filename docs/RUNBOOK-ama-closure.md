@@ -1980,9 +1980,19 @@ source-aware stale-head resume verification is tracked in LAC-1848.
 
 When the current open head's only non-green external checks are cancelled, the
 watcher verifies the workflow run's head and requests `rerun-failed-jobs`. Durable
-reservations under `dispatch/ci-recovery/` cap each check/head at one request and
-deduplicate checks belonging to the same workflow. The original cancelled attempt
+reservations under the explicit watcher `rootDir` at `dispatch/ci-recovery/` cap
+each check/head at one request and deduplicate checks belonging to the same
+workflow. The original cancelled attempt
 is treated as pending; a later cancelled attempt raises one operator decision.
+Failed POSTs and failed alert delivery release their action reservation for a
+later tick, after fresh workflow reads. GitHub reads use bounded retries; the
+POST itself is not retried in-call. Paging uses the shared operator-decision
+alert path and its durable delivery bus. See
+[CI recovery reservations](data-model/ci-recovery-reservations.md) for identity,
+state, retention and ambiguous-crash handling. Recovery errors log and preserve
+the existing CI classification instead of aborting the candidate or daemon.
+The daemon performs no recovery POST or bootstrap paging with autonomous merge
+execution disabled.
 Failures and pending/missing checks never enter this recovery path.
 
 An empty rollup still means unknown. No-CI bootstrap additionally queries the
@@ -1990,13 +2000,17 @@ repository's workflow inventory, base branch, classic protection when applicable
 and effective ruleset rules. Unreadable APIs, configured required contexts, or a
 pending adversarial status cannot authorize bootstrap. Green managed pre-push
 evidence must match the repository and full head SHA: GitHub hosting accepts the
-owner-controlled local sidecar, while full-mirror hosting requires the deploy-owned
-CI runner public key and a valid Ed25519 signature. Budget-deferred evidence is
+owner-controlled local sidecar. Hosting mode resolves through `ci.hosting.mode`
+(config file plus env alias), and an unreadable configuration fails closed.
+Full-mirror hosting requires the deploy-owned CI runner public key and a valid Ed25519 signature. Budget-deferred evidence is
 never green for bootstrap. Without evidence, the watcher pages once with
 `repo has no CI`.
 
-A settled zero-finding review stays on the merge path, including when CI is
-unknown; it does not dispatch HAM. The daemon and merge-agent bootstrap paths
+A settled zero-finding review stays on the merge path only for a current,
+MERGEABLE head waiting on empty/no-CI evidence or cancelled-check recovery.
+Conflicts, real CI failures and stale heads still fall through to capped HAM
+repair, including the HMR-01 terminal-grace route. Fresh daemon failure evidence
+wins over the older candidate snapshot. The daemon and merge-agent bootstrap paths
 preserve current-head review or HAM certification, safety-core, protection,
 lease, and autonomous execution gates. Each merge attempt refreshes the proof;
 `bin/ci-bootstrap.mjs --repo OWNER/REPO --pr NUMBER --head SHA` provides the

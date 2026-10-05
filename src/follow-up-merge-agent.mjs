@@ -2864,7 +2864,10 @@ async function dispatchMergeAgentForPR({
 
 async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync, env = process.env,
-  rootDir = env.HQ_ROOT || null,
+  rootDir = null,
+  logger = console,
+  recoverCancelledChecksImpl = recoverCancelledChecks,
+  inspectCiBootstrapImpl = inspectCiBootstrap,
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined, signal = null,
   branchProtectionCache = null,
@@ -2912,15 +2915,21 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   }
   const checksCfg = loadConfigCached({ env });
   const checkSummary = summarizeExternalChecks(parsed.statusCheckRollup, { env, cfg: checksCfg });
-  const recovering = rootDir && String(parsed.state).toUpperCase() === 'OPEN'
-    && await recoverCancelledChecks({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
-      ...checkSummary, execFileImpl, env, signal });
-  const ciBootstrap = String(parsed.state).toUpperCase() === 'OPEN'
-    ? await inspectCiBootstrap({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
-      baseBranch: parsed.baseRefName, rollup: parsed.statusCheckRollup,
-      ownContext: resolveGateStatusContext(env), execFileImpl, env, signal,
-      requiredContexts: resolveRequiredCheckContextsFromCfg(checksCfg) })
-    : { mode: null };
+  let recovering = false;
+  let ciBootstrap = { mode: null };
+  if (rootDir && String(parsed.state).toUpperCase() === 'OPEN') {
+    try {
+      recovering = await recoverCancelledChecksImpl({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
+        ...checkSummary, execFileImpl, env, signal });
+      ciBootstrap = await inspectCiBootstrapImpl({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
+        baseBranch: parsed.baseRefName, rollup: parsed.statusCheckRollup,
+        ownContext: resolveGateStatusContext(env), execFileImpl, env, signal,
+        requiredContexts: resolveRequiredCheckContextsFromCfg(checksCfg) });
+    } catch (error) {
+      signal?.throwIfAborted();
+      logger?.warn?.(`[merge-agent] CI recovery unavailable for ${repo}#${prNumber}: ${error.message}`);
+    }
+  }
   return {
     repo,
     prNumber,

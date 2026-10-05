@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { recoverCancelledChecks, confirmNoCi, inspectCiBootstrap,
-  verifyManagedCiRecord, readGreenManagedCi } from '../src/ci-recovery.mjs';
+  verifyManagedCiRecord, readGreenManagedCi, pageCiOnce } from '../src/ci-recovery.mjs';
+import { fetchMergeAgentCandidate } from '../src/follow-up-merge-agent.mjs';
 import { guardRereviewCiBeforeReviewer } from '../src/reviewer-ci-admission.mjs';
 import { pickMergeAgentDispatchDetail } from '../src/merge-agent-dispatch-decision.mjs';
 import { buildMergeAgentPrompt } from '../src/merge-agent-prompt.mjs';
@@ -13,6 +14,7 @@ import { buildMergeAgentPrompt } from '../src/merge-agent-prompt.mjs';
 const repo = 'acme/searchlight';
 const headSha = '2f1c6edc'.padEnd(40, '0');
 const quiet = { log() {}, warn() {} };
+const delivered = calls => async (text, metadata) => { calls.push(['alert', text, metadata]); return { queued: true }; };
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'ciunknown-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -34,7 +36,7 @@ function signedCi() {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const record = { schemaVersion: 1, headSha, verdict: 'green', repo,
     mode: 'self-hosted-container', manifestHash: 'sha256:fixture', createdAt: '2026-10-04T00:00:00Z' };
-  const payload = Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b)));
+  const payload = Object.fromEntries(Object.entries(record).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
   record.signature = sign(null, Buffer.from(JSON.stringify(payload)), privateKey).toString('hex');
   return { record, key: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32) };
 }
@@ -51,17 +53,17 @@ test('#7723 replay: one rerun, original cancelled attempt stays pending, second 
     return { stdout: JSON.stringify({ head_sha: headSha, conclusion: 'cancelled', run_attempt: attempt }) };
   };
   const guard = () => guardRereviewCiBeforeReviewer({ rootDir, repo: 'acme/agent-os', prNumber: 7723,
-    passKind: 'rereview', reviewerHeadSha: headSha, execFileImpl, log: quiet,
+    passKind: 'rereview', reviewerHeadSha: headSha, execFileImpl, log: quiet, deliverAlertImpl: delivered(calls),
     inspectCiImpl: async () => ({ state: 'failed', headSha, failedChecks: [check], pendingChecks: [] }),
     latestJobFinder: () => { throw new Error('cancellation must not enter remediation'); } });
   assert.equal((await guard()).reason, 'ci-settlement-pending');
   assert.equal((await guard()).ciGate.state, 'pending');
   assert.equal(calls.filter(([cmd, args]) => cmd === 'gh' && args.includes('POST')).length, 1);
-  assert.equal(calls.filter(([cmd]) => cmd === 'hq').length, 0);
+  assert.equal(calls.filter(([cmd]) => cmd === 'alert').length, 0);
   attempt = 2;
   await guard();
   await guard();
-  assert.equal(calls.filter(([cmd]) => cmd === 'hq').length, 1);
+  assert.equal(calls.filter(([cmd]) => cmd === 'alert').length, 1);
   assert.equal(calls.filter(([cmd, args]) => cmd === 'gh' && args.includes('POST')).length, 1);
 });
 
@@ -100,7 +102,8 @@ test('rerun reservations survive concurrent ticks, deduplicate a workflow and re
       conclusion: status === 'completed' ? 'cancelled' : null, run_attempt: attempt }) };
   };
   const recover = (prNumber = 2) => recoverCancelledChecks({ rootDir, repo, prNumber,
-    headSha: currentHead, failedChecks: [check, { ...check, name: 'test' }], execFileImpl });
+    headSha: currentHead, failedChecks: [check, { ...check, name: 'test' }], execFileImpl,
+    deliverAlertImpl: async () => { pages++; } });
   await Promise.all([recover(), recover()]);
   await recover(3);
   assert.equal(posts, 1);
@@ -164,7 +167,7 @@ test('searchlight#2 replay: signed green evidence selects bootstrap merge; absen
   const rootDir = fixture(t);
   const calls = [];
   const args = { rootDir, repo, prNumber: 2, headSha, baseBranch: 'main', rollup: [],
-    ownContext: 'agent-os/adversarial-gate', execFileImpl: noCiApi(calls) };
+    ownContext: 'agent-os/adversarial-gate', execFileImpl: noCiApi(calls), deliverAlertImpl: delivered(calls) };
   for (const rollup of [null, [{ name: 'external-ci', conclusion: 'SUCCESS' }],
     [{ __typename: 'StatusContext', context: args.ownContext, state: 'PENDING' }],
     [{ __typename: 'CheckRun', name: args.ownContext, conclusion: 'SUCCESS' }]]) {
@@ -190,6 +193,100 @@ test('searchlight#2 replay: signed green evidence selects bootstrap merge; absen
     hamTerminalRemediationValidated: true }).decision, 'dispatch');
   await inspectCiBootstrap({ ...args, readAttestationImpl: () => false });
   await inspectCiBootstrap({ ...args, readAttestationImpl: () => false });
-  assert.equal(calls.filter(([cmd]) => cmd === 'hq').length, 1);
-  assert.match(calls.find(([cmd]) => cmd === 'hq')[1].join(' '), /repo has no CI/);
+  assert.equal(calls.filter(([cmd]) => cmd === 'alert').length, 1);
+  assert.match(calls.find(([cmd]) => cmd === 'alert')[1], /repo has no CI/);
+});
+
+
+test('configured full-mirror mode rejects unsigned sidecars without an env alias', t => {
+  const rootDir = fixture(t);
+  const dir = join(rootDir, 'workers', 'builder', 'logs', 'ci-attestations');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${headSha}.json`), JSON.stringify({ schemaVersion: 1,
+    repo, headSha, verdict: 'green', mode: 'github', manifestHash: `sha256:${'a'.repeat(64)}` }));
+  const configPath = join(rootDir, 'config.yaml');
+  writeFileSync(configPath, 'ci:\n  hosting:\n    mode: self-hosted-container\n');
+  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir,
+    AGENT_OS_CONFIG_PATH: configPath } }), false);
+  writeFileSync(configPath, 'ci:\n  hosting:\n    mode: invalid-mode\n');
+  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir,
+    AGENT_OS_CONFIG_PATH: configPath } }), false);
+});
+
+test('a rejected rerun releases its workflow budget and a later caller retries once', async t => {
+  const rootDir = fixture(t);
+  let posts = 0;
+  let prReads = 0;
+  const check = { name: 'ci', state: 'CANCELLED', detailsUrl: `https://github.com/${repo}/actions/runs/1` };
+  const execFileImpl = async (_cmd, args) => {
+    if (args[0] === 'pr') {
+      if (++prReads === 1) throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
+      return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
+    }
+    if (args.includes('POST')) {
+      if (++posts === 1) throw new Error('HTTP 503');
+      return { stdout: '' };
+    }
+    return { stdout: JSON.stringify({ head_sha: headSha, conclusion: 'cancelled', run_attempt: 1 }) };
+  };
+  const args = { rootDir, repo, prNumber: 2, headSha, failedChecks: [check], execFileImpl };
+  await assert.rejects(recoverCancelledChecks(args), /503/);
+  assert.equal(await recoverCancelledChecks(args), true);
+  assert.equal(await recoverCancelledChecks(args), true);
+  assert.equal(posts, 2, 'one rejected POST and one accepted POST');
+  assert.ok(prReads >= 4, 'transient reads retry before reserving');
+  const records = readdirSync(join(rootDir, 'dispatch', 'ci-recovery'))
+    .map(name => JSON.parse(readFileSync(join(rootDir, 'dispatch', 'ci-recovery', name))));
+  assert.equal(records.filter(record => record.state === 'posted').length, 1);
+});
+
+test('operator paging retries failed delivery and deduplicates concurrent callers', async t => {
+  const rootDir = fixture(t);
+  let pages = 0;
+  const args = { rootDir, repo, prNumber: 2, headSha, reason: 'repo has no CI',
+    deliverAlertImpl: async () => { if (++pages === 1) throw new Error('outbox unavailable'); } };
+  await assert.rejects(pageCiOnce(args), /outbox unavailable/);
+  assert.deepEqual(await Promise.all([pageCiOnce(args), pageCiOnce(args)]), [true, false]);
+  assert.equal(await pageCiOnce(args), false);
+  assert.equal(pages, 2);
+});
+
+test('candidate fetch requires the watcher root and shares its budget with reviewer admission', async t => {
+  const rootDir = fixture(t);
+  const hqRoot = join(rootDir, 'hq');
+  let posts = 0;
+  const check = { name: 'ci', state: 'CANCELLED', detailsUrl: `https://github.com/${repo}/actions/runs/1` };
+  const execFileImpl = async (_cmd, args) => {
+    if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha,
+      statusCheckRollup: [{ __typename: 'CheckRun', name: check.name, conclusion: 'CANCELLED', detailsUrl: check.detailsUrl }],
+      mergeable: 'MERGEABLE', labels: [] }) };
+    if (args.includes('POST')) { posts++; return { stdout: '' }; }
+    return { stdout: JSON.stringify({ head_sha: headSha, conclusion: 'cancelled', run_attempt: 1 }) };
+  };
+  const options = { env: { HQ_ROOT: hqRoot }, execFileImpl, logger: quiet };
+  await fetchMergeAgentCandidate(repo, 2, options);
+  assert.equal(posts, 0, 'HQ_ROOT never substitutes for watcher root');
+  await fetchMergeAgentCandidate(repo, 2, { ...options, rootDir });
+  await recoverCancelledChecks({ rootDir, repo, prNumber: 2, headSha, failedChecks: [check], execFileImpl });
+  assert.equal(posts, 1, 'candidate and admission use the same workflow budget');
+});
+
+test('candidate recovery failures retain existing failed CI classification', async t => {
+  const rootDir = fixture(t);
+  for (const helper of ['recoverCancelledChecksImpl', 'inspectCiBootstrapImpl']) {
+    const candidate = await fetchMergeAgentCandidate(repo, 2, { rootDir, logger: quiet,
+      env: {}, execFileImpl: async () => ({ stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha,
+        statusCheckRollup: [{ __typename: 'CheckRun', name: 'ci', conclusion: 'FAILURE' }], labels: [] }) }),
+      [helper]: async () => { throw new Error('HTTP 503'); } });
+    assert.equal(candidate.checksConclusion, 'FAILURE');
+    assert.equal(candidate.ciBootstrap.mode, null);
+  }
+});
+
+
+test('Python-generated canonical fixture verifies DEL, non-ASCII, code-point key order and numeric string keys', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/ci-recovery/python-signed.json', import.meta.url)));
+  assert.equal(verifyManagedCiRecord(fixture.record, Buffer.from(fixture.publicKeyHex, 'hex'), { repo, headSha }), true);
+  assert.equal(verifyManagedCiRecord({ ...fixture.record, checks: { ...fixture.record.checks, '2': 'tampered' } },
+    Buffer.from(fixture.publicKeyHex, 'hex'), { repo, headSha }), false);
 });

@@ -68,6 +68,7 @@ import {
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
+import { emptyExternalRollup } from './ci-recovery.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -1596,6 +1597,21 @@ export async function maybeDispatchAmaClosureFor({
       reason: daemonCleanMerge.reason, reasons: daemonCleanMerge.reasons,
       needsOperator: true, daemonCleanMerge }, { amaEnabled: true });
   }
+  const cleanReviewMergePath = () => {
+    const reasons = daemonCleanMerge?.reasons || [];
+    if (settledVerdict !== 'settled-success'
+      || !isDaemonMergeReviewAllowed(reviewState, { strictMode: true })
+      || daemonCleanMerge?.reason === 'stale-head'
+      || reasons.some(reason => reason !== 'ci-not-green')) return false;
+    if (typeof daemonCleanMerge?.ciMergePathPending === 'boolean') return daemonCleanMerge.ciMergePathPending;
+    // A failed-closed in-lease read must supply fresh evidence. Candidate
+    // snapshots cannot override a real failure observed by the daemon.
+    return daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN
+      && closureGateMergeability(mergeabilityForGate || {}) === 'MERGEABLE'
+      && gateSnapshot?.reviewedHeadSha === candidate?.headSha
+      && emptyExternalRollup(candidate?.statusCheckRollup, resolveGateStatusContext(env));
+  };
+
   if (!(orphanRecovery && daemonCleanMerge?.reason === 'primary-change-needs-operator') && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
@@ -1639,8 +1655,7 @@ export async function maybeDispatchAmaClosureFor({
       daemonFailedClosed && isDaemonFailClosedHammerRemediable(daemonCleanMerge);
     if (hammerRemediableFallback) {
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
-      if (settledVerdict === 'settled-success'
-        && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) {
+      if (cleanReviewMergePath()) {
         return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
           reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
       }
@@ -1714,9 +1729,9 @@ export async function maybeDispatchAmaClosureFor({
 
   const [owner, name] = repoPath.split('/');
   // Preserve all daemon protective holds above. Once the merge lane declined
-  // ordinary CI/mergeability work, a clean settled head has nothing for HAM.
-  if (settledVerdict === 'settled-success'
-    && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) {
+  // no-CI or cancelled-recovery work, a clean mergeable head can wait here.
+  // Conflicts, stale heads and real CI failures retain capped HAM repair.
+  if (cleanReviewMergePath()) {
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
       reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
   }

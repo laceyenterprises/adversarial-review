@@ -1,5 +1,5 @@
 import { observeClosureLag } from './ama/closure-lag.mjs';
-import { inspectCiBootstrap, recoverCancelledChecks } from './ci-recovery.mjs';
+import { inspectCiBootstrap, recoverCancelledChecks, emptyExternalRollup } from './ci-recovery.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
@@ -375,6 +375,7 @@ export async function runDaemonCleanMergeAttempt({
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   fetchRollupImpl = fetchPullRequestRollup,
   inspectCiBootstrapImpl = inspectCiBootstrap,
+  recoverCancelledChecksImpl = recoverCancelledChecks,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
@@ -814,21 +815,49 @@ export async function runDaemonCleanMergeAttempt({
     },
   });
   const primaryChange = await readPrimaryChange(liveHead);
+  let ciMergePathPending = false;
   const bootstrapFor = async (rollup) => {
     if ((!(settledVerdict === 'settled-success'
       && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) && !hamTerminalRemediationHead)
+      || cfg?.autonomousMergeExecutionEnabled === false
       || String(rollup?.state || '').toUpperCase() !== 'OPEN') return { mode: null };
-    return inspectCiBootstrapImpl({ rootDir, repo: repoPath, prNumber,
-      headSha: rollup?.headSha || rollup?.headRefOid, baseBranch: base,
-      rollup: resolveRollupRequiredChecks(rollup), ownContext: requiredGateContext,
-      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg), execFileImpl, env, signal });
+    try {
+      return await inspectCiBootstrapImpl({ rootDir, repo: repoPath, prNumber,
+        headSha: rollup?.headSha || rollup?.headRefOid, baseBranch: base,
+        rollup: resolveRollupRequiredChecks(rollup), ownContext: requiredGateContext,
+        requiredContexts: resolveRequiredCheckContextsFromCfg(cfg), execFileImpl, env, signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      logger?.warn?.(`[watcher] CI bootstrap unavailable for ${repoPath}#${prNumber}: ${error.message}`);
+      return { mode: null };
+    }
   };
   const ciBootstrap = await bootstrapFor(liveRollup);
   const checkSummary = summarizeExternalChecks(resolveRollupRequiredChecks(liveRollup), { cfg, env });
-  if (String(liveRollup?.state || '').toUpperCase() === 'OPEN') {
-    await recoverCancelledChecks({ rootDir, repo: repoPath, prNumber, headSha: liveHead,
-      ...checkSummary, execFileImpl, env, signal });
+  let recoveringCancelled = false;
+  if (cfg?.autonomousMergeExecutionEnabled !== false
+    && ((settledVerdict === 'settled-success' && isDaemonMergeReviewAllowed(reviewState, { strictMode: true }))
+      || hamTerminalRemediationHead)
+    && String(liveRollup?.state || '').toUpperCase() === 'OPEN') {
+    try {
+      recoveringCancelled = await recoverCancelledChecksImpl({ rootDir, repo: repoPath, prNumber, headSha: liveHead,
+        ...checkSummary, execFileImpl, env, signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      logger?.warn?.(`[watcher] CI recovery unavailable for ${repoPath}#${prNumber}: ${error.message}`);
+    }
   }
+  const mergePathPendingFor = (rollup) => {
+    const head = rollup?.headSha || rollup?.headRefOid;
+    const checks = resolveRollupRequiredChecks(rollup);
+    const summary = summarizeExternalChecks(checks, { cfg, env });
+    return head === liveHead && liveHead === validatedHead
+      && String(rollup?.mergeable).toUpperCase() === 'MERGEABLE'
+      && summary.pendingChecks.length === 0
+      && (emptyExternalRollup(checks, requiredGateContext)
+        || (recoveringCancelled && summary.failedChecks.every(check => check.state === 'CANCELLED')));
+  };
+  ciMergePathPending = mergePathPendingFor(liveRollup);
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
   const daemonVerdict = hamTerminalRemediationHead
@@ -1003,6 +1032,7 @@ export async function runDaemonCleanMergeAttempt({
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
       const state = String(rollup?.state || '');
       const freshBootstrap = await bootstrapFor(rollup);
+      ciMergePathPending = mergePathPendingFor(rollup);
       return {
         primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
         requirePrimaryChange: true,
@@ -1111,7 +1141,7 @@ export async function runDaemonCleanMergeAttempt({
       ...overrideApproval,
     }));
   }
-  return daemonResult;
+  return { ...daemonResult, ciMergePathPending };
 }
 
 // Internal helpers exposed for unit tests.

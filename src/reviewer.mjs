@@ -1990,16 +1990,16 @@ async function main() {
       effectiveModel = oversizedAgyRoute.route.reviewerModel;
       effectiveBotTokenEnv = oversizedAgyRoute.route.botTokenEnv;
       console.warn(
-        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=agy-argv-budget-exceeded ` +
+        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=${oversizedAgyRoute.reason} ` +
           `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
           `routed=${effectiveModel} original=gemini refs=#3074,#3122,#3124`
       );
     } else {
       useAgyChunkFallback = true;
       console.warn(
-        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=agy-argv-budget-exceeded ` +
+        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=${oversizedAgyRoute.reason} ` +
           `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
-          `routed=agy-chunks original=gemini refs=#3074,#3122,#3124`
+          `routed=${effectiveModel}-chunks original=${reviewerModel} refs=#3074,#3122,#3124`
       );
     }
   }
@@ -2070,6 +2070,7 @@ async function main() {
     try {
       dispatch = useAgyChunkFallback
         ? await reviewAgyOversizedInChunks(diff, extraContext, {
+            reviewerModel: effectiveModel,
             promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             promptBytes: oversizedAgyRoute?.promptBytes,

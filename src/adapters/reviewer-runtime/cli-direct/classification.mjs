@@ -54,6 +54,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
+  if (lower.includes('[reviewer-prompt-too-large]')) return 'reviewer-prompt-too-large';
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
   const mentionsReviewerTimeout =

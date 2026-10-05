@@ -45,7 +45,7 @@ async function alertClioOversizedAgyFailure({
 }, {
   deliverAlertImpl = deliverAlert,
 } = {}) {
-  const msg = `Adversarial reviewer oversized agy prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nAgy argv budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nThis is the #3074/#3122/#3124 no-review prevention guard; operator action is required because both cross-model routing and chunk fallback were unavailable.`;
+  const msg = `Adversarial reviewer oversized prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nReviewer prompt budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nTerminal size failure: operator action is required because a full review could not fit and bounded chunk review was unavailable.`;
   console.error(`[reviewer] ALERT: ${msg}`);
   try {
     // Same dead-hook fix as alertClioOAuthFailure above: this posted to the

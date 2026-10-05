@@ -3099,11 +3099,12 @@ test('parseClaudeJsonOutput yields no usage when the usage block is absent', () 
   assert.equal(tokenUsage, null);
 });
 
-test('Claude review invocation passes prompt as argv in cli-direct shape', async () => {
+test('Claude review invocation passes prompt off argv in cli-direct shape', async () => {
   const prompt = 'review this diff';
   const calls = [];
 
   await spawnClaude(buildClaudeReviewArgs(prompt), {
+    input: prompt,
     platform: 'linux',
     execFileImpl: async (command, args, options) => {
       calls.push({ command, args, options });
@@ -3115,8 +3116,9 @@ test('Claude review invocation passes prompt as argv in cli-direct shape', async
   assert.deepEqual(calls, [
     {
       command: CLAUDE_CLI,
-      args: ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions', prompt],
+      args: ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions'],
       options: {
+        input: prompt,
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
       },
     },

@@ -7691,3 +7691,20 @@ test('worker CPU niceness has the canonical default and validates 0–19', () =>
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('QUOTAFLOOR-01 reserve floor defaults disabled and validates per-auth-path policy', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'quota-reserve-config-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.quota.reserve_floor.openai-oauth.remaining_pct'), 0);
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  quota:\n    reserve_floor:\n      openai-oauth:\n        remaining_pct: 10\n        protected_classes: ["remediator-*", "hammer*", "*-responder"]\n');
+    const cfg = loadConfig({ topPath, env: {} });
+    assert.equal(cfg.get('worker_pool.quota.reserve_floor.openai-oauth.remaining_pct'), 10);
+    assert.deepEqual(cfg.get('worker_pool.quota.reserve_floor.openai-oauth.protected_classes'), ['remediator-*', 'hammer*', '*-responder']);
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  quota:\n    reserve_floor:\n      openai-oauth:\n        remaining_pct: 101\n');
+    assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

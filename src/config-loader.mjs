@@ -2257,6 +2257,18 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              reserve_floor: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: Object.fromEntries(['openai-oauth', 'openai-oauth-corp', 'anthropic-oauth'].map(credential => [credential, {
+                  __type: TYPE_DICT,
+                  __strict: true,
+                  __keys: {
+                    remaining_pct: { __type: TYPE_FLOAT, __default: 0.0, __min: 0, __max: 100, __enforce_max: true },
+                    protected_classes: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: [] },
+                  },
+                }])),
+              },
               fallback_reroute_horizon_seconds: { __type: TYPE_INT, __default: 21600, __min: 0 },
             },
           },

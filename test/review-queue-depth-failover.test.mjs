@@ -908,8 +908,8 @@ test('watcher REVSLOT gate uses the delivered-pass-aware first-pass depth counte
 
 test('pollonce-phases passes depth pressure in and charges the cost ledger back', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /applyWorkerFallback\(firstPassSpilloverController\?\.depthPressure\?\.\(depthPassKind\) \?\? null\)/);
-  assert.match(src, /passKind: depthPassKind/);
+  assert.match(src, /applyWorkerFallback\(firstPassSpilloverController\?\.depthPressure\?\.\(getDepthPassKind\(\)\) \?\? null\)/);
+  assert.match(src, /passKind: getDepthPassKind\(\)/);
   // Cost is charged only for a spill that actually landed on a route, and only
   // for the depth trigger — a quota fallback must not spend the depth budget.
   assert.match(
@@ -923,7 +923,7 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
 
 test('pollonce-phases keeps rereview safety independent from queue-depth admission', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /const depthPassKind = reviewerDispatchPassKind\(/);
+  assert.match(src, /depthPassKind \?\?= reviewerDispatchPassKind\(/);
   assert.match(src, /const passKind = reviewerSafetyPassKind\(\{[\s\S]*?hasPriorCompletedReview: Boolean\(stmtHasCompletedReview\.get\(repoPath, prNumber\)\)/);
   assert.match(src, /if \(passKind === 'rereview'\) \{[\s\S]*?getHeadCloserCommitSuppressionWithBoundedRetry\(/);
 });

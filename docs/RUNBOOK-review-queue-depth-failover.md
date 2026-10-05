@@ -210,3 +210,5 @@ recovery already returns review to `agy` on its own.
 - **The pool ceiling is untouched.** More concurrent `gemini` reviewers contend
   for the same provider capacity; that is the ceiling this lever escapes, not one
   to raise.
+
+Discovery defers the posted-review SQL lookup until an engaged depth lane needs classification or the subject reaches pool admission. Early held/skipped subjects with no engaged depth lever do not pay that query cost.

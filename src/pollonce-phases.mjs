@@ -1701,12 +1701,20 @@ export async function processReviewSubject(entry, ctx) {
       });
       if (route.quotaBlocked) return;
       let depthSpillReserved = false;
-      const dispatchHasPriorPostedReview =
-        entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
-      const depthPassKind = reviewerDispatchPassKind({
-        current: existing,
-        hasPriorPostedReview: dispatchHasPriorPostedReview,
-      });
+      let dispatchHasPriorPostedReview;
+      let depthPassKind;
+      const getDispatchHasPriorPostedReview = () => {
+        dispatchHasPriorPostedReview ??=
+          entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
+        return dispatchHasPriorPostedReview;
+      };
+      const getDepthPassKind = () => {
+        depthPassKind ??= reviewerDispatchPassKind({
+          current: existing,
+          hasPriorPostedReview: getDispatchHasPriorPostedReview(),
+        });
+        return depthPassKind;
+      };
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
       // RSP-01: plus the queue-depth trigger, when the break-glass lever is
@@ -1722,6 +1730,9 @@ export async function processReviewSubject(entry, ctx) {
       async function applyWorkerFallback(depthPressure = null) {
         const reviewerAuthorClass = subject.builderClass || route.builderClass;
         const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
+        const discoveryDepthEngaged = ['first-pass', 'follow-up'].some(
+          (kind) => firstPassSpilloverController?.depthPressure?.(kind)?.engaged,
+        );
         const rwfDecision = await resolveReviewerWorkerClassWithFallback({
           authorClass: reviewerAuthorClass,
           primary: primaryReviewerWorkerClass,
@@ -1731,7 +1742,8 @@ export async function processReviewSubject(entry, ctx) {
           // until the pool checks saturation. Spending burst here would bypass
           // that check and charge the wrong lever before depth can run.
           burstPressure: depthPressure
-            || firstPassSpilloverController?.depthPressure?.(depthPassKind)?.engaged
+            || (discoveryDepthEngaged
+              && firstPassSpilloverController?.depthPressure?.(getDepthPassKind())?.engaged)
             ? null : reviewerBurstController?.pressure?.({
             repo: repoPath,
             // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
@@ -1792,7 +1804,7 @@ export async function processReviewSubject(entry, ctx) {
                   prNumber,
                   fromWorkerClass: rwfDecision.from,
                   toWorkerClass: rwfDecision.to,
-                  passKind: depthPassKind,
+                  passKind: getDepthPassKind(),
                 }) === true;
               }
               console.warn(
@@ -2769,8 +2781,8 @@ export async function processReviewSubject(entry, ctx) {
         pipelineGeminiSeats: domainPipelineGeminiSeatCount(domainAdapterSet?.domainConfig),
         subject,
         current,
-        hasPriorPostedReview: dispatchHasPriorPostedReview,
-        depthPassKind,
+        hasPriorPostedReview: getDispatchHasPriorPostedReview(),
+        depthPassKind: getDepthPassKind(),
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2797,7 +2809,7 @@ export async function processReviewSubject(entry, ctx) {
         },
         async reevaluateDepthSpill() {
           if (depthSpillReserved) return;
-          await applyWorkerFallback(firstPassSpilloverController?.depthPressure?.(depthPassKind) ?? null);
+          await applyWorkerFallback(firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) ?? null);
           this.syncDepthSpillRoute('queue-depth-pressure');
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },

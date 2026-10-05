@@ -104,6 +104,7 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
           );
     }
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+      rootDir,
       execFileImpl,
       operatorApprovalEvent,
       mergeAgentRequestEvent,

@@ -1,4 +1,6 @@
 import { observeClosureLag } from './ama/closure-lag.mjs';
+import { inspectCiBootstrap, recoverCancelledChecks, emptyExternalRollup } from './ci-recovery.mjs';
+import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -372,6 +374,8 @@ export async function runDaemonCleanMergeAttempt({
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   fetchRollupImpl = fetchPullRequestRollup,
+  inspectCiBootstrapImpl = inspectCiBootstrap,
+  recoverCancelledChecksImpl = recoverCancelledChecks,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
@@ -811,6 +815,49 @@ export async function runDaemonCleanMergeAttempt({
     },
   });
   const primaryChange = await readPrimaryChange(liveHead);
+  let ciMergePathPending = false;
+  const bootstrapFor = async (rollup) => {
+    if ((!(settledVerdict === 'settled-success'
+      && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) && !hamTerminalRemediationHead)
+      || cfg?.autonomousMergeExecutionEnabled === false
+      || String(rollup?.state || '').toUpperCase() !== 'OPEN') return { mode: null };
+    try {
+      return await inspectCiBootstrapImpl({ rootDir, repo: repoPath, prNumber,
+        headSha: rollup?.headSha || rollup?.headRefOid, baseBranch: base,
+        rollup: resolveRollupRequiredChecks(rollup), ownContext: requiredGateContext,
+        requiredContexts: resolveRequiredCheckContextsFromCfg(cfg), execFileImpl, env, signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      logger?.warn?.(`[watcher] CI bootstrap unavailable for ${repoPath}#${prNumber}: ${error.message}`);
+      return { mode: null };
+    }
+  };
+  const ciBootstrap = await bootstrapFor(liveRollup);
+  const checkSummary = summarizeExternalChecks(resolveRollupRequiredChecks(liveRollup), { cfg, env });
+  let recoveringCancelled = false;
+  if (cfg?.autonomousMergeExecutionEnabled !== false
+    && ((settledVerdict === 'settled-success' && isDaemonMergeReviewAllowed(reviewState, { strictMode: true }))
+      || hamTerminalRemediationHead)
+    && String(liveRollup?.state || '').toUpperCase() === 'OPEN') {
+    try {
+      recoveringCancelled = await recoverCancelledChecksImpl({ rootDir, repo: repoPath, prNumber, headSha: liveHead,
+        ...checkSummary, execFileImpl, env, signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      logger?.warn?.(`[watcher] CI recovery unavailable for ${repoPath}#${prNumber}: ${error.message}`);
+    }
+  }
+  const mergePathPendingFor = (rollup) => {
+    const head = rollup?.headSha || rollup?.headRefOid;
+    const checks = resolveRollupRequiredChecks(rollup);
+    const summary = summarizeExternalChecks(checks, { cfg, env });
+    return head === liveHead && liveHead === validatedHead
+      && String(rollup?.mergeable).toUpperCase() === 'MERGEABLE'
+      && summary.pendingChecks.length === 0
+      && ((ciBootstrap.noCi === true && emptyExternalRollup(checks, requiredGateContext))
+        || (recoveringCancelled && summary.failedChecks.every(check => check.state === 'CANCELLED')));
+  };
+  ciMergePathPending = mergePathPendingFor(liveRollup);
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
   const daemonVerdict = hamTerminalRemediationHead
@@ -863,7 +910,7 @@ export async function runDaemonCleanMergeAttempt({
       requirePrimaryChange: true,
       strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
       candidateHead: liveHead,
-      requiredChecks: resolveRollupRequiredChecks(liveRollup)
+      requiredChecks: ciBootstrap.mode === 'no-ci-bootstrap' ? true : resolveRollupRequiredChecks(liveRollup)
         ?? (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
       mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
       mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
@@ -874,6 +921,7 @@ export async function runDaemonCleanMergeAttempt({
     mergeMethod,
     hqRoot,
     auditMetadata: {
+      ciMode: ciBootstrap.mode || 'github-checks',
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
       // Name the authority that cleared the review gate in the audit doc.
@@ -983,12 +1031,14 @@ export async function runDaemonCleanMergeAttempt({
     fetchLiveGateImpl: async () => {
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
       const state = String(rollup?.state || '');
+      const freshBootstrap = await bootstrapFor(rollup);
+      ciMergePathPending = mergePathPendingFor(rollup);
       return {
         primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
         requirePrimaryChange: true,
         strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
         candidateHead: rollup?.headSha || rollup?.headRefOid || '',
-        requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
+        requiredChecks: freshBootstrap.mode === 'no-ci-bootstrap' ? true : resolveRollupRequiredChecks(rollup) ?? [],
         mergeable: rollup?.mergeable,
         mergeStateStatus: rollup?.mergeStateStatus,
         prState: state,
@@ -1091,7 +1141,7 @@ export async function runDaemonCleanMergeAttempt({
       ...overrideApproval,
     }));
   }
-  return daemonResult;
+  return { ...daemonResult, ciMergePathPending };
 }
 
 // Internal helpers exposed for unit tests.

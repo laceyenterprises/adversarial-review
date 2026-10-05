@@ -1,5 +1,6 @@
 import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { inspectCiBootstrap } from '../src/ci-recovery.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -130,6 +131,99 @@ function baseArgs(rootDir) {
     logger: { warn() {}, log() {} },
   };
 }
+
+function findingsArgs(rootDir) {
+  const args = baseArgs(rootDir);
+  const body = CLEAN_COMMENT_ONLY_REVIEW_BODY.replace('## Non-blocking Issues\n\n- None.',
+    '## Non-blocking Issues\n\n- Improve the error message.');
+  return { ...args, reviewStateRow: { ...args.reviewStateRow, review_body: body },
+    dispatchJob: { ...args.dispatchJob, nonBlockingFindingCount: 1, nonBlockingFindingState: 'known' },
+    fetchLatestHeadReviewBodiesImpl: async () => [body] };
+}
+
+test('CIUNKNOWN-01 settled zero-finding review stays on merge path when CI is unknown', async () => {
+  const rootDir = tempRoot();
+  try {
+    let hammerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      dispatchJob: { blockingFindingCount: 0, blockingFindingState: 'known',
+        nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'not-eligible', reasons: ['ci-not-green'], ciMergePathPending: true,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { hammerCalls++; return { dispatched: true }; },
+    });
+    assert.equal(result.reason, 'clean-review-merge-path');
+    assert.equal(result.skipMergeAgent, false);
+    assert.equal(hammerCalls, 0);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof before merge', async () => {
+  const rootDir = tempRoot();
+  try {
+    const head = '2f1c6edc'.padEnd(40, '0');
+    const attestationDir = join(rootDir, 'workers', 'builder', 'logs', 'ci-attestations');
+    mkdirSync(attestationDir, { recursive: true });
+    const { generateKeyPairSync, sign } = await import('node:crypto');
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const record = { schemaVersion: 1, repo: 'acme/searchlight', headSha: head,
+      verdict: 'green', mode: 'github', manifestHash: `sha256:${'a'.repeat(64)}` };
+    const payload = Object.fromEntries(Object.entries(record).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+    record.signature = sign(null, Buffer.from(JSON.stringify(payload)), privateKey).toString('hex');
+    writeFileSync(join(attestationDir, `${head}.json`), JSON.stringify(record));
+    const keyPath = join(rootDir, 'runner.pub');
+    writeFileSync(keyPath, publicKey.export({ format: 'der', type: 'spki' }).subarray(-32));
+    let proofReads = 0;
+    let merged = false;
+    let attempted;
+    const result = await runDaemonCleanMergeAttempt({ rootDir,
+      cfg: { autonomousMergeExecutionEnabled: true, strictMode: true,
+        branchProtection: { required: false }, lha: { consumeAttestations: false } },
+      repoPath: 'acme/searchlight', prNumber: 2,
+      candidate: { baseBranch: 'main', headSha: head, prState: 'open', title: '[codex] bootstrap fixture' },
+      gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'settled-success' } },
+      reviewState: { blockingFindingCount: 0, blockingFindingState: 'known',
+        nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' },
+      reviewStateRow: { reviewer: 'gemini' }, currentPrHeadSha: head,
+      fetchRollupImpl: async () => ({ headSha: head, state: merged ? 'MERGED' : 'OPEN',
+        checks: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [] }),
+      inspectCiBootstrapImpl: async args => {
+        proofReads++; return inspectCiBootstrap(args);
+      },
+      readBuildCompletionSignalForPrImpl: () => ({ ok: true, row: {
+        launch_request_id: 'lrq_bootstrap', worker_class: 'codex', head_sha: head } }),
+      attemptDaemonCleanMergeImpl: async args => {
+        attempted = args;
+        const { attemptDaemonCleanMerge } = await import('../src/ama/daemon-merge.mjs');
+        return attemptDaemonCleanMerge(args);
+      },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        if (args[0] === 'api') {
+          const path = args.at(-1);
+          const result = path.includes('/actions/workflows') ? { total_count: 0, workflows: [] }
+            : path.endsWith('/rules/branches/main') ? []
+            : path.endsWith('/branches/main') ? { name: 'main', protected: false }
+            : path.endsWith('/status') ? { total_count: 0, statuses: [] }
+            : path.endsWith('/check-suites') ? { total_count: 0, check_suites: [] } : null;
+          assert.notEqual(result, null, path);
+          return { stdout: JSON.stringify(result) };
+        }
+        assert.ok(args.includes('--match-head-commit'));
+        merged = true;
+        return { stdout: '', stderr: '' };
+      },
+      env: { HQ_ROOT: rootDir, AGENT_OS_CI_ATTESTATION_PUBLIC_KEY_PATH: keyPath }, logger: { log() {}, warn() {} },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.ok(proofReads >= 2);
+    assert.equal(attempted.auditMetadata.ciMode, 'no-ci-bootstrap');
+    assert.equal(attempted.liveGate.requiredChecks, true);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
 
 test('AMA closure loads merge-authority policy for the supplied domain id', async () => {
   const rootDir = tempRoot();
@@ -373,7 +467,7 @@ test('AMA closure preserves local merge-authority overrides over domain defaults
     let daemonCfg = null;
     let closerCfg = null;
     const result = await maybeDispatchAmaClosureFor({
-      ...baseArgs(rootDir),
+      ...findingsArgs(rootDir),
       candidate: {
         ...baseArgs(rootDir).candidate,
         riskClass: 'medium',
@@ -631,7 +725,7 @@ test('daemon not-taken (findings present) → falls through to the closer/hammer
     let closerCalls = 0;
     let seenReviewState = null;
     const result = await maybeDispatchAmaClosureFor({
-      ...baseArgs(rootDir),
+      ...findingsArgs(rootDir),
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
         reason: 'blocking-findings-present',
@@ -2465,7 +2559,7 @@ test('resolveRollupRequiredChecks prefers `checks`, falls back to `statusCheckRo
 test('Deliverable 2: daemon fail-closed on a REMEDIABLE gate (gate-not-eligible/ci-not-green) routes to the capped hammer, not a manual-close park', async () => {
   // A `ci-not-green` daemon park used to emit the manual-close-required signal and
   // stop. Deliverable 2 re-routes a hammer-remediable daemon fail-closed on an
-  // attributed (identity-resolved) clean PR to the SAME capped
+  // attributed (identity-resolved) PR with findings to the SAME capped
   // `maybeDispatchAmaCloser` hammer the not-taken path uses. The daemon layer test
   // above still asserts the daemon itself fails closed with the surfaced reasons;
   // this asserts the ORCHESTRATION now hands it to the hammer instead of parking.
@@ -3276,7 +3370,7 @@ test('Deliverable 2: daemon fail-closed stale-head routes to the capped hammer (
   try {
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
-      ...baseArgs(rootDir),
+      ...findingsArgs(rootDir),
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
         reason: 'stale-head', merged: false, attempts: 1,
@@ -3297,7 +3391,7 @@ test('MERGEORDER-01: candidate title and body are threaded into closer metadata'
     let capturedTitle = null;
     const body = 'PR body fallback marker';
     const result = await maybeDispatchAmaClosureFor({
-      ...baseArgs(rootDir),
+      ...findingsArgs(rootDir),
       candidate: {
         ...baseArgs(rootDir).candidate,
         prBody: body,
@@ -3485,7 +3579,7 @@ test('daemon route disagreement hands off to the capped hammer and names failing
     const logs = [];
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
-      ...baseArgs(rootDir),
+      ...findingsArgs(rootDir),
       logger: { log: (m) => logs.push(String(m)), warn() {} },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
@@ -3591,7 +3685,7 @@ test('Deliverable 2: the hammer fallback is bounded by the SAME per-PR cap — a
   try {
     let closerCalls = 0;
     const result = await maybeDispatchAmaClosureFor({
-      ...baseArgs(rootDir),
+      ...findingsArgs(rootDir),
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
         reason: 'gate-not-eligible', reasons: ['ci-not-green'], merged: false, attempts: 1,
@@ -3675,6 +3769,7 @@ test('resolveOperatorMergeAccountability requires a head-scoped, attributable, p
 // Inject history evidence so these wiring fixtures remain offline.
 function runDaemonCleanMergeAttempt(args) {
   return runDaemonCleanMergeAttemptReal({
+    inspectCiBootstrapImpl: async () => ({ mode: null }),
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     ...args,
   });
@@ -3818,3 +3913,67 @@ for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISP
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   });
 }
+
+
+test('clean reviews retain capped HAM for failures, conflicts and stale heads in both daemon dispositions', async () => {
+  const rootDir = tempRoot();
+  try {
+    for (const disposition of [DAEMON_MERGE_DISPOSITION.NOT_TAKEN, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED]) {
+      for (const gate of ['ci-not-green', 'pr-not-mergeable', 'stale-head']) {
+        let hammers = 0;
+        const args = baseArgs(rootDir);
+        const result = await maybeDispatchAmaClosureFor({ ...args,
+          candidate: { ...args.candidate, mergeable: gate === 'pr-not-mergeable' ? 'CONFLICTING' : 'MERGEABLE',
+            statusCheckRollup: gate === 'ci-not-green' ? [{ name: 'ci', conclusion: 'FAILURE' }] : [] },
+          runDaemonCleanMergeAttemptImpl: async () => ({ disposition,
+            reason: gate === 'stale-head' ? gate : 'gate-not-eligible', reasons: [gate] }),
+          maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
+        });
+        assert.equal(result.dispatched, true, `${disposition}/${gate}`);
+        assert.equal(hammers, 1, `${disposition}/${gate}`);
+      }
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('fresh daemon failure overrides an empty candidate snapshot while cancelled recovery stays on merge path', async () => {
+  const rootDir = tempRoot();
+  try {
+    for (const ciMergePathPending of [undefined, false, true]) {
+      let hammers = 0;
+      const result = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir),
+        runDaemonCleanMergeAttemptImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+          reason: 'gate-not-eligible', reasons: ['ci-not-green'], ciMergePathPending }),
+        maybeDispatchAmaCloserImpl: async () => { hammers++; return { dispatched: true }; },
+      });
+      assert.equal(hammers, ciMergePathPending ? 0 : 1);
+      if (ciMergePathPending) assert.equal(result.reason, 'clean-review-merge-path');
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('daemon recovery/bootstrap errors degrade to original checks and execution disable skips helpers', async () => {
+  const rootDir = tempRoot();
+  const head = 'f'.repeat(40);
+  try {
+    for (const enabled of [true, false]) {
+      let calls = 0;
+      const args = unattributedDaemonArgs({ rootDir, head });
+      await runDaemonCleanMergeAttemptReal({ ...args,
+        cfg: { ...args.cfg, autonomousMergeExecutionEnabled: enabled },
+        operatorApprovalEvent: operatorApprovedEventAt(head),
+        fetchPrimaryChangeImpl: async () => primaryChangeFixture(head),
+        fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+          checks: [{ name: 'ci', conclusion: 'FAILURE' }], labels: ['operator-approved'],
+          mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+        inspectCiBootstrapImpl: async () => { calls++; throw new Error('outbox unavailable'); },
+        recoverCancelledChecksImpl: async () => { calls++; throw new Error('HTTP 503'); },
+        attemptDaemonCleanMergeImpl: async options => {
+          assert.deepEqual(options.liveGate.requiredChecks, [{ name: 'ci', conclusion: 'FAILURE' }]);
+          return { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'not-eligible', reasons: ['ci-not-green'] };
+        },
+      });
+      assert.equal(calls, enabled ? 2 : 0);
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

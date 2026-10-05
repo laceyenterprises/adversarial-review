@@ -468,7 +468,8 @@ function pickHamTerminalRemediationMergeGate(job) {
   if (String(job?.mergeable ?? '').trim().toUpperCase() !== 'MERGEABLE') {
     return { decision: 'skip-not-mergeable', trigger: HAM_TERMINAL_REMEDIATION_CERTIFIED_TRIGGER };
   }
-  const checksConclusion = job?.checksConclusion == null
+  const checksConclusion = job?.ciBootstrap?.mode === 'no-ci-bootstrap'
+    && job.ciBootstrap.headSha === job.headSha ? 'SUCCESS' : job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
   if (checksConclusion === null) {
@@ -520,7 +521,12 @@ function pickNormalMergeAgentDispatchDetail({
     return { decision: 'skip-not-mergeable', trigger: null };
   }
 
-  const checksConclusion = job?.checksConclusion == null
+  const bootstrapClean = job?.ciBootstrap?.mode === 'no-ci-bootstrap'
+    && job.ciBootstrap.headSha === job.headSha
+    && ['approved', 'comment-only'].includes(normalizedVerdict)
+    && job.blockingFindingState === 'known' && job.blockingFindingCount === 0
+    && job.nonBlockingFindingState === 'known' && job.nonBlockingFindingCount === 0;
+  const checksConclusion = bootstrapClean ? 'SUCCESS' : job?.checksConclusion == null
     ? null
     : String(job.checksConclusion).trim().toUpperCase();
   if (checksConclusion === null) {

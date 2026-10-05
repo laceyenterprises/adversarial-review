@@ -1976,3 +1976,50 @@ assume a per-head review ceiling bounds repeated new rebase heads: the combined
 lifetime accounting needs the offline cycle regression tracked in LAC-1849.
 Local-first trailer suppression still lacks authenticated linked identity;
 source-aware stale-head resume verification is tracked in LAC-1848.
+## CIUNKNOWN-01: cancelled checks and no-CI bootstrap
+
+When the current open head's only non-green external checks are cancelled, the
+watcher verifies the workflow run's head and requests `rerun-failed-jobs`. Durable
+reservations under the explicit watcher `rootDir` at `dispatch/ci-recovery/` cap
+each check/head at one request and deduplicate checks belonging to the same
+workflow. The original cancelled attempt
+is treated as pending; a later cancelled attempt raises one operator decision.
+Failed POSTs and failed alert delivery release their action reservation for a
+later tick, after fresh workflow reads. GitHub reads use bounded retries; the
+POST itself is not retried in-call. Paging uses the shared operator-decision
+alert path and its durable delivery bus. See
+[CI recovery reservations](data-model/ci-recovery-reservations.md) for identity,
+state, retention and ambiguous-crash handling. Recovery errors log and preserve
+the existing CI classification instead of aborting the candidate or daemon.
+The daemon performs no recovery POST or bootstrap paging with autonomous merge
+execution disabled.
+Failures and pending/missing checks never enter this recovery path.
+
+An empty rollup still means unknown. No-CI bootstrap additionally queries the
+repository's workflow inventory, base branch, classic protection when applicable,
+and effective ruleset rules. Unreadable APIs, configured required contexts, or a
+pending adversarial status cannot authorize bootstrap. Green managed pre-push
+evidence must match the repository and full head SHA and carry a valid Ed25519
+runner signature verified with the deploy-owned public key in every hosting mode.
+Exact-head commit statuses and check suites must also be empty. Budget-deferred evidence is
+never green for bootstrap. Without evidence, the watcher pages once with
+`repo has no CI`.
+
+A settled zero-finding review stays on the merge path only for a current,
+MERGEABLE head waiting on empty/no-CI evidence or cancelled-check recovery.
+Conflicts, real CI failures and stale heads still fall through to capped HAM
+repair, including the HMR-01 terminal-grace route. Only an explicit `ciMergePathPending: true` from the daemon
+authorizes this wait; an empty candidate snapshot alone cannot bypass the
+bounded closer/daemon disagreement fallback. Fresh daemon failure evidence
+wins over the older candidate snapshot. The daemon and merge-agent bootstrap paths
+preserve current-head review or HAM certification, safety-core, protection,
+lease, and autonomous execution gates. Each merge attempt refreshes the proof;
+`bin/ci-bootstrap.mjs --repo OWNER/REPO --pr NUMBER --head SHA` provides the
+merge-agent's immediate pre-merge verification. Audits flag
+`ciMode: no-ci-bootstrap`.
+
+Repository stand-up should provision a minimal CI workflow (agent-os
+STANDUPCI-01). This repository only handles the existing zero-CI gap; provisioning
+is follow-up work in agent-os.
+
+HAM hardening: stale CI action reservations resume after 60 seconds using fresh workflow evidence and exclusive recovery claims. Bootstrap requires signed Ed25519 evidence in every hosting mode and empty exact-head commit-status/check-suite APIs. Empty rollups with configured workflows fall through to bounded HAM escalation. Candidate side effects require explicit clean-review and execution-switch authority; timeout handoffs cannot supply that authority. The bootstrap verifier retries GitHub reads; exit 75 permits bounded retry and exit 65 means missing evidence.

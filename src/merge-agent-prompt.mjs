@@ -9,6 +9,8 @@
 // truth: buildMergeAgentPrompt branches on them, and follow-up-merge-agent.mjs
 // imports (and re-exports) them for its dispatch-decision logic.
 
+import { fileURLToPath } from 'node:url';
+
 const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER = 'final-pass-blocker-remediation';
 const REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER = 'reviewer-timeout-exhausted';
@@ -50,6 +52,14 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   }
   if (trigger) {
     lines.push(`- Dispatch trigger: ${trigger}`);
+  }
+  if (job.ciBootstrap?.mode === 'no-ci-bootstrap') {
+    const checker = shellSingleQuote(fileURLToPath(new URL('../bin/ci-bootstrap.mjs', import.meta.url)));
+    lines.push('', '## Explicit no-CI bootstrap',
+      'CI mode: no-ci-bootstrap. This head has API-confirmed absence of workflows and required-check rules, plus a green managed pre-push attestation verified under the deployment hosting mode.',
+      `Immediately before merge, run \`node ${checker} --repo ${mergeRepoLiteral} --pr ${mergePrLiteral} --head ${shellSingleQuote(job.headSha)}\`. Abort if this fails.`,
+      'For this exact verified head only, the bootstrap evidence satisfies the CI check. Preserve every other merge gate, including settled clean review or HAM certification, merge lease, safety-core, and autonomous execution kill switch.',
+      `Merge with \`--match-head-commit ${shellSingleQuote(job.headSha)}\`. Record \`ciMode: no-ci-bootstrap\` in the merge audit and closure comment. If you push another head, bootstrap authorization expires; revalidate the review and CI evidence before merging.`, '');
   }
   // Both automated-convergence triggers get the same triage-and-merge
   // contract: the budget-exhausted final pass (`Request changes` with the

@@ -1596,6 +1596,17 @@ export async function maybeDispatchAmaClosureFor({
       reason: daemonCleanMerge.reason, reasons: daemonCleanMerge.reasons,
       needsOperator: true, daemonCleanMerge }, { amaEnabled: true });
   }
+  const cleanReviewMergePath = () => {
+    const reasons = daemonCleanMerge?.reasons || [];
+    if (settledVerdict !== 'settled-success'
+      || !isDaemonMergeReviewAllowed(reviewState, { strictMode: true })
+      || daemonCleanMerge?.reason === 'stale-head'
+      || reasons.some(reason => reason !== 'ci-not-green')) return false;
+    // Only fresh daemon evidence can distinguish recovery from an empty
+    // candidate snapshot hiding a real failure or a route disagreement.
+    return daemonCleanMerge?.ciMergePathPending === true;
+  };
+
   if (!(orphanRecovery && daemonCleanMerge?.reason === 'primary-change-needs-operator') && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
@@ -1639,6 +1650,10 @@ export async function maybeDispatchAmaClosureFor({
       daemonFailedClosed && isDaemonFailClosedHammerRemediable(daemonCleanMerge);
     if (hammerRemediableFallback) {
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
+      if (cleanReviewMergePath()) {
+        return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
+          reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
+      }
       const fallbackReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
       logger?.log?.(JSON.stringify({
         schemaVersion: 1,
@@ -1708,6 +1723,13 @@ export async function maybeDispatchAmaClosureFor({
   }
 
   const [owner, name] = repoPath.split('/');
+  // Preserve all daemon protective holds above. Once the merge lane declined
+  // no-CI or cancelled-recovery work, a clean mergeable head can wait here.
+  // Conflicts, stale heads and real CI failures retain capped HAM repair.
+  if (cleanReviewMergePath()) {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
+      reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
+  }
   // HMR-01: how long has this PR been TERMINAL and still unmerged?
   //
   // A settled comment-only verdict may spawn one final non-blocking round, so

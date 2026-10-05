@@ -1,0 +1,22 @@
+{
+  "record": {
+    "schemaVersion": 1,
+    "repo": "acme/searchlight",
+    "headSha": "2f1c6edc00000000000000000000000000000000",
+    "verdict": "green",
+    "mode": "self-hosted-container",
+    "checks": {
+      "2": {
+        "verdict": "green"
+      },
+      "10": {
+        "verdict": "green"
+      },
+      "￿": "accent é",
+      "😀": "astral 😀"
+    },
+    "signature": "cb813ab27571e8a7b599e4adc107898eeffbfe275b77494d8d8fdc3a4f461a0b569f32fd0a57246b7bef09a3651db731d294394c99f60e53afb77bec7beae308"
+  },
+  "publicKeyHex": "f8b01a81ad468ff7c1ac61de45975f92c94828cc5a30b7f333c2a897af02a7d5",
+  "pythonCanonicalPayload": "{\"checks\":{\"10\":{\"verdict\":\"green\"},\"2\":{\"verdict\":\"green\"},\"\\uffff\":\"accent \\u00e9\\u007f\",\"\\ud83d\\ude00\":\"astral \\ud83d\\ude00\"},\"headSha\":\"2f1c6edc00000000000000000000000000000000\",\"mode\":\"self-hosted-container\",\"repo\":\"acme/searchlight\",\"schemaVersion\":1,\"verdict\":\"green\"}"
+}

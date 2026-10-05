@@ -3,6 +3,7 @@ import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import { formatCiCheckList } from './ci-check-format.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { recoverCancelledChecks } from './ci-recovery.mjs';
 
 const DEFAULT_CI_BLOCKED_REREVIEW_RECHECK_MS = 5 * 60 * 1000;
 const CI_BLOCKED_REREVIEW_RECHECK_ENV = 'ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS';
@@ -80,6 +81,7 @@ async function guardRereviewCiBeforeReviewer({
   reviewerHeadSha = null,
   execFileImpl,
   env = process.env,
+  deliverAlertImpl,
   log = console,
   cfg = null,
   inspectCiImpl = inspectRemediationCiRegression,
@@ -115,6 +117,15 @@ async function guardRereviewCiBeforeReviewer({
   }
 
   if (state === 'failed') {
+    try {
+      if (await recoverCancelledChecks({ rootDir, repo, prNumber, headSha: ciGate.headSha,
+        failedChecks: ciGate.failedChecks, pendingChecks: ciGate.pendingChecks, execFileImpl, env, deliverAlertImpl })) {
+        return { proceed: false, reason: 'ci-settlement-pending',
+          ciGate: { ...ciGate, state: 'pending', conclusion: 'PENDING' } };
+      }
+    } catch (error) {
+      log.warn?.(`[watcher] CI recovery unavailable for ${repo}#${prNumber}: ${error.message}`);
+    }
     const latest = latestJobFinder(rootDir, { repo, prNumber });
     if (!latest?.jobPath) {
       log.warn?.(

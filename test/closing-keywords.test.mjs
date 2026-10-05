@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { composeAmaTrailers } from '../src/ama/audit.mjs';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 import { buildMergeCommitBody, neutralizeClosingKeywords } from '../src/ama/closing-keywords.mjs';
@@ -38,7 +40,11 @@ test('hammer CLI uses the same sanitizer and shell forwards its body and rewrite
   assert.match(source, /closingKeywordRewrites: \$closingKeywordRewrites/);
 });
 
-test('hammer shell merge runner receives the neutralized body', () => {
+test('hammer shell merge runner receives the neutralized body', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-commit-message-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const stdoutPath = join(dir, 'merge.stdout');
+  const stderrPath = join(dir, 'merge.stderr');
   const source = readFileSync('bin/hammer-merge.sh', 'utf8');
   const snippet = source.slice(source.indexOf('  ham_commit_message_abort()'), source.indexOf('  HAM_MERGE_EXIT=$?'))
     .replaceAll('<<ROOT_DIR>>', process.cwd()).replaceAll('<<REPO>>', 'o/r')
@@ -49,10 +55,11 @@ gh() { while [ "$#" -gt 0 ]; do if [ "$1" = --subject ]; then printf '%s\\n' "$2
   const result = spawnSync('bash', ['-c', stub + snippet], { encoding: 'utf8', env: {
     ...process.env, HAM_NODE_BIN: process.execPath, HAM_AMA_TRAILERS: 'Closed-By: hammer',
     HAM_PROTECTIVE_PREDECESSOR_BODY: 'Fix:\n\n#7732; closes #7',
-    HAM_MERGE_STDOUT: '/dev/stdout', HAM_MERGE_STDERR: '/dev/stderr', POST_REMEDIATION_SHA: 'head',
+    HAM_MERGE_STDOUT: stdoutPath, HAM_MERGE_STDERR: stderrPath, POST_REMEDIATION_SHA: 'head',
   } });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, 'Fix PR #7732 regression (#7)\nFix:\n\nPR #7732; closes #7\n\nClosed-By: hammer');
+  assert.equal(readFileSync(stderrPath, 'utf8'), '');
+  assert.equal(readFileSync(stdoutPath, 'utf8'), 'Fix PR #7732 regression (#7)\nFix:\n\nPR #7732; closes #7\n\nClosed-By: hammer');
 });
 
 for (const scheme of ['http', 'https']) {

@@ -68,6 +68,7 @@ import {
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
+import { classifyCheckRollup } from './checks-summary.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -87,6 +88,7 @@ import {
   buildNonReviewableHeadDeltaEvidence,
   fetchHeadCloserVerifiedCommit,
   getHeadCloserCommitSuppression,
+  proveCloserOnlyHeadDelta,
 } from './head-closer-commit-suppression.mjs';
 import { isDismissStaleRequestChangesOnResolvedEnabled } from './merge-agent-dispatch-decision.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
@@ -961,11 +963,48 @@ export async function maybeDispatchAmaClosureFor({
     }
   }
   throwIfAborted(signal);
+  // HAMCIWAKE-01: resolve review evidence at its original identity only when
+  // every intervening commit is the closer's own. All PR/CI inputs stay live.
+  const originalReviewedHead = reviewStateRow?.reviewer_head_sha;
+  // Cache immutable commit evidence only within this evaluation. The ancestry
+  // walk and stale-head resume must not issue duplicate probes for the tip.
+  const suppressionCache = new Map();
+  const commitCache = new Map();
+  const cachedSuppression = options => {
+    if (!suppressionCache.has(options.headSha)) suppressionCache.set(options.headSha,
+      (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)(options));
+    return suppressionCache.get(options.headSha);
+  };
+  const cachedCommit = options => {
+    if (!commitCache.has(options.headSha)) commitCache.set(options.headSha,
+      fetchHeadCloserVerifiedCommitImpl(options));
+    return commitCache.get(options.headSha);
+  };
+  let closerOnlyHeadDelta = false;
+  if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha) {
+    try {
+      closerOnlyHeadDelta = await runCoexistenceOperation(
+        'closer-only-review-delta',
+        ({ signal: operationSignal }) => proveCloserOnlyHeadDelta({
+          reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha,
+          repoPath, prNumber, env, logger, signal: operationSignal,
+          suppressionImpl: cachedSuppression,
+          fetchCommitImpl: cachedCommit,
+        }),
+        { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
+      );
+    } catch (error) {
+      throwIfAborted(signal);
+      if (error?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw error;
+      logger?.warn?.(`Closer-only review delta proof failed: ${error.message || error}`);
+    }
+  }
+  let evidenceHeadSha = closerOnlyHeadDelta ? originalReviewedHead : settledReviewHeadSha;
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
-    headSha: settledReviewHeadSha,
+    headSha: evidenceHeadSha,
     mergeability: mergeabilityForGate,
     labels: labelNames,
     prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
@@ -986,7 +1025,7 @@ export async function maybeDispatchAmaClosureFor({
   const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
   // COMMENTCLOSE-01: a verdict resolved through a recorded final-round push came
   // from the REVIEWED head, so its live reconcile reads that head's reviews.
-  const liveReviewHeadSha = gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
+  let liveReviewHeadSha = closerOnlyHeadDelta || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
     ? gateSnapshot.reviewedHeadSha
     : settledReviewHeadSha;
   if (
@@ -1005,6 +1044,24 @@ export async function maybeDispatchAmaClosureFor({
     // the known naming discrepancy without mutating the globally-used
     // REVIEWER_BOT_LOGINS map (which review-body-capture / closeout-scraper rely on).
     try {
+      // A review on the live closer head supersedes historical evidence. Never
+      // substitute H0 over a fresh blocking review on H1 (or a failed lookup).
+      if (closerOnlyHeadDelta) {
+        const currentBodies = await runCoexistenceOperation(
+          'closer-head-live-review',
+          ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
+            repoPath, prNumber, headSha: settledReviewHeadSha,
+            authoritativeReviewerLogins, fetchLatestHeadReviewBodiesImpl,
+            retryDelaysMs: liveReviewRetryDelaysMs, logger, signal: operationSignal,
+          }),
+          { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
+        );
+        if (currentBodies.length > 0) {
+          closerOnlyHeadDelta = false;
+          evidenceHeadSha = settledReviewHeadSha;
+          liveReviewHeadSha = settledReviewHeadSha;
+        }
+      }
       const bodies = authoritativeReviewerLogins.length
         ? await runCoexistenceOperation(
             'live-review-reconcile',
@@ -1052,7 +1109,7 @@ export async function maybeDispatchAmaClosureFor({
       repo: repoPath,
       prNumber,
       reviewRow: reviewStateRow,
-      headSha: settledReviewHeadSha,
+      headSha: evidenceHeadSha,
       mergeability: mergeabilityForGate,
       labels: labelNames,
       prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
@@ -1118,10 +1175,10 @@ export async function maybeDispatchAmaClosureFor({
   throwIfAborted(signal);
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
-    // `headSha` is the head the adversarial reviewer actually reviewed. MSM-04
-    // keeps it as the stable hammer dispatch key; a stale live head may be the
-    // remediation target only when it proves to be an already-closer-authored
-    // HAM continuation, never an unreviewed human push.
+    // `headSha` remains the reviewed evidence identity. Ordinary MSM-04 dispatch
+    // uses it as the stable budget key; proven closer-only continuations use the
+    // live closer head's budget, with repeated pushes bounded by the lifetime cap.
+    // An unreviewed human push cannot inherit that continuation authority.
     headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
@@ -1214,7 +1271,8 @@ export async function maybeDispatchAmaClosureFor({
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     labels: Array.isArray(labelNames) ? labelNames : undefined,
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
-    validatedHead: reviewState.headSha,
+    validatedHead: closerOnlyHeadDelta && reviewState.blockingFindingState !== 'unknown' && reviewState.blockingFindingCount === 0
+      ? currentPrHeadSha : reviewState.headSha,
   });
   if (!autonomousMergeExecutionEnabled) {
     const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
@@ -1315,6 +1373,17 @@ export async function maybeDispatchAmaClosureFor({
     );
   }
 
+  // Pending-only CI on a closer's parked head is an ordinary watcher wait.
+  // Red or unknown CI still reaches the capped hammer repair lane.
+  if (closerOnlyHeadDelta && disabledEligibility.reasons.length === 1
+    && disabledEligibility.reasons.includes('ci-not-green')
+    && classifyCheckRollup(prMetadata.statusCheckRollup, {
+      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
+    }) === 'PENDING') {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      recoveryWait: true, reason: 'closer-head-ci-not-green', reasons: ['ci-not-green'] }, { amaEnabled: true });
+  }
+
   let allowStaleReviewHeadHammerResume = false;
   let hamTerminalRemediationEvidenceOptions = null;
   let hamTerminalRemediationValidated = false;
@@ -1340,20 +1409,9 @@ export async function maybeDispatchAmaClosureFor({
       throwIfAborted(signal);
       const closerCommitSuppression = await runCoexistenceOperation(
         'stale-head-suppression-proof',
-        ({ signal: operationSignal }) => (typeof resolveHeadCloserCommitSuppressionImpl === 'function'
-          ? resolveHeadCloserCommitSuppressionImpl({
-            repoPath,
-            prNumber,
-            headSha: currentPrHeadSha,
-            signal: operationSignal,
-          })
-          : getHeadCloserCommitSuppression({
-            repoPath,
-            prNumber,
-            headSha: currentPrHeadSha,
-            logger,
-            signal: operationSignal,
-          })),
+        ({ signal: operationSignal }) => cachedSuppression({
+          repoPath, prNumber, headSha: currentPrHeadSha, logger, signal: operationSignal,
+        }),
         {
           timeoutMs: operationTimeoutMs,
           parentSignal: signal,
@@ -1364,14 +1422,16 @@ export async function maybeDispatchAmaClosureFor({
         },
       );
       throwIfAborted(signal);
-      allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
+      allowStaleReviewHeadHammerResume = closerOnlyHeadDelta
+        && closerCommitSuppression?.suppressed === true
+        && closerCommitSuppression?.reason === 'closer-commit-trailer';
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
       ) {
         const verifiedCommit = await runCoexistenceOperation(
           'head-closer-verified-commit',
-          ({ signal: operationSignal }) => fetchHeadCloserVerifiedCommitImpl({
+          ({ signal: operationSignal }) => cachedCommit({
             repoPath,
             prNumber,
             headSha: currentPrHeadSha,
@@ -1862,7 +1922,7 @@ export async function maybeDispatchAmaClosureFor({
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
     reviewedSha: reviewState.headSha,
     targetRemediationSha: currentPrHeadSha || reviewState.headSha,
-    dispatchRecordHeadSha: reviewState.headSha,
+    dispatchRecordHeadSha: closerOnlyHeadDelta ? currentPrHeadSha : reviewState.headSha,
     dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
     allowStaleReviewHeadHammerResume,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,

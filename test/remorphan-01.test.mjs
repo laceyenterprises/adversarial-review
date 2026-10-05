@@ -16,7 +16,7 @@ function setup(t, pr = 7707) {
   const args = { ...fixture, rootDir, repo: 'example/repo', headSha: 'current-head',
     candidate: { prState: 'open', headSha: 'current-head' }, reviewStateRow: { review_status: 'posted' },
     hasOwnerImpl: async () => false,
-    closerHeadImpl: async () => ({ suppressed: true, reason: 'closer-commit-trailer' }),
+    closerHeadImpl: async () => true,
     dispatchHammer: async evidence => { calls.dispatch.push(evidence); return { dispatched: true }; },
     pageImpl: async (...page) => calls.pages.push(page),
     requestRereviewImpl: async request => { calls.reviews.push(request); return { triggered: true }; } };
@@ -61,7 +61,7 @@ test('uncertifiable closer head requests one exact-head review', async t => {
 });
 test('external stale head cannot enter orphan HAM route', async t => {
   const { tick, calls } = setup(t, 7704);
-  for (let i = 0; i < 8; i++) await tick({ closerHeadImpl: async () => ({ suppressed: false }) });
+  for (let i = 0; i < 8; i++) await tick({ closerHeadImpl: async () => false });
   assert.equal(calls.dispatch.length, 0);
 });
 for (const override of [{ candidate: { prState: 'closed' } }, { candidate: { prState: 'merged' } },
@@ -508,7 +508,7 @@ test('external stale head bypasses uncertain historical ownership and reaches or
     prNumber: args.prNumber, candidate: args.candidate, currentRevisionRef: args.headSha,
     reviewStateRow: args.reviewStateRow, dispatchJob: args.dispatchJob,
     maybeDispatchAmaClosureForImpl: async () => args.result,
-    orphanOptions: { closerHeadImpl: async () => ({ suppressed: false }),
+    orphanOptions: { closerHeadImpl: async () => false,
       hasOwnerImpl: () => { throw new Error('inadmissible head must not probe historical ledger'); }, pageImpl: args.pageImpl },
     recoverAmaAutomationImpl: async () => { ordinary++; return { outcome: 'ordinary-recovery' }; },
     logger: { info() {}, warn() {} } });
@@ -574,4 +574,14 @@ test('reservation records the reviewed dispatch head and never refunds a proven 
     readStatusImpl: async () => ({ ok: true, row: { status: 'completed' } }) }) });
   assert.equal(readWatchdog(args).reserved, 0);
   assert.equal(readWatchdog(args).attempts, 1);
+});
+
+for (const proven of [true, false]) test(`HAMCIWAKE-01 unknown findings require closer proof (${proven})`, async t => {
+  const { tick, calls } = setup(t, 7704);
+  const overrides = { result: { amaEnabled: true, reasons: ['stale-review-head',
+    'verdict-not-settled-success', 'blocking-findings-unknown', 'ci-not-green'] },
+    closerHeadImpl: async () => proven };
+  for (let i = 0; i < 6; i++) await tick(overrides);
+  assert.equal(calls.dispatch.length, proven ? 1 : 0);
+  assert.equal(calls.reviews.length, 0);
 });

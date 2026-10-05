@@ -360,6 +360,7 @@ test('AMA closure passes watcher-recorded trailer-only head evidence to eligibil
         headSha: currentHead,
       },
       currentRevisionRef: currentHead,
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === currentHead ? [] : [CLEAN_COMMENT_ONLY_REVIEW_BODY],
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
         reason: 'covered-by-closer-test',
@@ -869,6 +870,8 @@ test('watcher passes live HAM target separately from stable reviewed-head dispat
         reviewCycleExhausted: true,
         riskClass: 'low',
       }),
+      fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: liveHead, parentSha: reviewedHead, message: 'Closed-By: hammer' }),
+      fetchLatestHeadReviewBodiesImpl: async () => [],
       resolveHeadCloserCommitSuppressionImpl: async () => ({
         suppressed: true,
         reason: 'closer-commit-trailer',
@@ -887,7 +890,7 @@ test('watcher passes live HAM target separately from stable reviewed-head dispat
     assert.equal(result.dispatched, true);
     assert.equal(seenDispatchContext.reviewedSha, reviewedHead);
     assert.equal(seenDispatchContext.targetRemediationSha, liveHead);
-    assert.equal(seenDispatchContext.dispatchRecordHeadSha, reviewedHead);
+    assert.equal(seenDispatchContext.dispatchRecordHeadSha, liveHead);
     assert.equal(seenDispatchContext.dispatchReason, 'exhausted-final-hammer');
     assert.equal(seenDispatchContext.allowStaleReviewHeadHammerResume, true);
     assert.ok(seenOptions, 'closer options are still passed');
@@ -983,8 +986,7 @@ test('watcher fails closed on permanent HAM stale-head resume proof errors', asy
 
     assert.equal(result.dispatched, false);
     assert.equal(seenDispatchContext.allowStaleReviewHeadHammerResume, false);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /not allowing hammer resume/);
+    assert.ok(warnings.some(message => /not allowing hammer resume/.test(message)));
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

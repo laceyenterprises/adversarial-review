@@ -53,7 +53,9 @@
         "src/daemon-clean-merge.mjs"
       ],
       "owner": "AMA merge authority",
-      "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"]
+      "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
+      "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
+      "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI"
     },
     {
       "id": "fast-merge-audits",

@@ -26,6 +26,8 @@ at mode `0640`.
 | `reconciliation.lastVerifiedAt` | ISO timestamp | Latest append time. Present on records auto-created by append. |
 | `closingKeywordRewrites` | optional array | Title and body rewrites computed by the daemon; absent on older records. Each item is `{original, referencedNumber, referencedRepo, replacement}`. |
 | `attempts[].closingKeywordRewrites` | optional array | Per-attempt message rewrites, including hammer shell attempts. Same item shape as the top-level field. |
+| `attempts[].resumeOwed` | optional boolean | Hammer terminal attempts set this to `true` only for `reason: required-checks-pending`; other reasons write `false`. Audit-only evidence that the bounded worker deferred for pending CI. Older and non-hammer attempts may omit it. |
+| `attempts[].resumeHead` | optional string or null | The exact validated head SHA when `resumeOwed` is `true`; otherwise `null`. Diagnostic evidence for operators, not a dispatch trigger or merge authorization. |
 | `closureAuthority`, `reviewer`, `riskClass`, `flagState`, `ciMode` | optional provenance | Watcher-owned metadata, or caller-provided metadata when an append creates a missing record. `ciMode` is `github-checks` or `no-ci-bootstrap`. |
 | `ciConfigurationAdmission`, `attempts[].ciConfiguration` | optional `{ reason, repo, base, head, baseHead, checkedAt }` | Only the operator-authorized no-CI daemon route. Top-level admission metadata holds the pre-lease proof; the successful `daemon-merged` attempt holds its latest in-lease proof. All identity fields are strings; `checkedAt` is an ISO timestamp and `reason` is `no CI configured`. |
 
@@ -55,6 +57,12 @@ erDiagram
 includes the reconciliation block and any supplied provenance metadata. Later
 appends preserve existing metadata and update reconciliation. A successful
 record cannot be demoted by a later append.
+
+`resumeOwed` / `resumeHead` have no runtime consumer. The watcher independently
+proves the closer-only ancestry from the reviewed head on each tick and reads
+live exact-head CI. Pending-only checks hold without charging automated recovery;
+green checks permit the normal leased resume, and failed checks reach the capped
+hammer repair lane. Missing audit markers do not suppress those evaluations.
 
 For primary-change evidence, a post-lease `primary-change-read-failed` or
 `primary-change-unknown` gate

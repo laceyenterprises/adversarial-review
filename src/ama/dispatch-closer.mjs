@@ -441,7 +441,9 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     // DIRTYOWN-01: a transient `mergeable=UNKNOWN` read beside a real mechanical
     // miss must not strand it; the hammer re-reads mergeability at its own head.
     (hasMechanicalMiss && reason === 'pr-mergeability-unknown') ||
-    (closerStaleHeadResume && reason === 'verdict-not-settled-success') ||
+    (closerStaleHeadResume && !effectiveReasons.includes('ci-not-green') && (
+      reason === 'verdict-not-settled-success' || reason === 'non-blocking-findings-present'
+    )) ||
     // HMR-01: the settled comment-only resume covers exactly the strict
     // non-blocking refusal plus its paired verdict reason, or the zero-finding
     // bare verdict reason after the measured terminal-unmerged grace. A

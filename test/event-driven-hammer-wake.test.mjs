@@ -302,3 +302,25 @@ test('health surface parses only the newest hammer wake audit files', () => {
     [],
   );
 });
+
+// Regression: the same trusted ancestry must cover ALL delta commits.
+import { proveCloserOnlyHeadDelta } from '../src/head-closer-commit-suppression.mjs';
+import { isHammerRemediableEligibilityMiss } from '../src/ama/dispatch-closer.mjs';
+for (const scenario of ['own', 'worker', 'unrelated', 'budget']) {
+  test(`HAMCIWAKE-01 ancestry: ${scenario}`, async () => {
+    const parents = { H2: 'H1', H1: scenario === 'unrelated' ? 'other' : 'H0' };
+    const proven = await proveCloserOnlyHeadDelta({ reviewedHead: 'H0', currentHead: 'H2',
+      maxCommits: scenario === 'budget' ? 1 : 2,
+      suppressionImpl: async ({ headSha }) => ({ suppressed: !(scenario === 'worker' && headSha === 'H1'), reason: 'closer-commit-trailer' }),
+      fetchCommitImpl: async ({ headSha }) => ({ sha: headSha, parentSha: parents[headSha] }),
+    });
+    assert.equal(proven, scenario === 'own');
+  });
+}
+test('HAMCIWAKE-01 nonblocking closer resume retains blocking-finding refusal', () => {
+  const reasons = ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present'];
+  const options = { allowStaleReviewHeadHammerResume: true };
+  assert.equal(isHammerRemediableEligibilityMiss(reasons, options), true);
+  assert.equal(isHammerRemediableEligibilityMiss(reasons), false);
+  assert.equal(isHammerRemediableEligibilityMiss([...reasons, 'blocking-findings-present'], options), false);
+});

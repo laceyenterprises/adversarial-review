@@ -12,8 +12,10 @@ units by line. Only a diff content line that cannot fit with its file and active
 hunk headers is eligible for a bounded UTF-8 preview. Elided additions add a
 synthetic blocking finding even if all chunk reviewers are clean. Elided
 context and deletions add non-blocking evidence notes, since they introduce
-no new content. This store preserves the evidence; it is not
-merge authority. The raw diff plus context hard ceiling is checked before
+no new content. Synthetic findings use the standard File, Lines, Problem,
+Why it matters and Recommended fix fields so the kernel preserves their
+separate identities alongside model findings. This store preserves the evidence;
+it is not merge authority. The raw diff plus context hard ceiling is checked before
 elision to bound preprocessing work.
 
 Files are `<repo-slug>-<prNumber>-<headSha>.json`, where `/` becomes `--`:

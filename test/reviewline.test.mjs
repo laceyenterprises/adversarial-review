@@ -9,6 +9,7 @@ import { reviewAgyOversizedInChunks, elideLongDiffLines } from '../src/reviewer-
 import { buildPromptForReviewerModel } from '../src/reviewer-prompt.mjs';
 import { persistReviewElisions } from '../src/reviewer.mjs';
 import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
+import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../src/kernel/review-findings.mjs';
 import { clearNoProgressLane, maybeFireOperatorDecisionRequiredAlert } from '../src/watcher-no-progress-lane.mjs';
 import { deliverAlert, ensureAlertSinkDirs, drainPendingAlerts } from '../src/alert-delivery.mjs';
 import { parkExhaustedReview, readReviewFailureDecision } from '../src/review-retry-exhaustion.mjs';
@@ -108,16 +109,32 @@ test('gate snapshots show failure decisions only for the current failure observa
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-test('elided added content cannot produce a clean chunked verdict', async () => {
-  const result = await reviewAgyOversizedInChunks(
-    `diff --git a/payload.js b/payload.js\n--- a/payload.js\n+++ b/payload.js\n@@ -0,0 +1 @@\n+${'x'.repeat(300000)}\n`, '', {
-      env: {}, maxBytes: 234464,
-      reviewWithGeminiImpl: async () => ({ reviewText: '## Blocking issues\n- None.\n## Verdict\nComment only' }),
-    });
-  assert.equal(extractReviewVerdict(result.reviewText), 'Request changes');
-  assert.match(result.reviewText, /Unreviewed elided content at payload.js:1/);
-  assert.match(result.reviewText, new RegExp(result.elisions[0].sha256));
-  assert.equal(result.elisions[0].kind, '+');
+test('elided additions fail closed and remain distinct findings for every reviewer model', async () => {
+  const diff = `diff --git a/payload.js b/payload.js\n--- a/payload.js\n+++ b/payload.js\n@@ -0,0 +1,2 @@\n+${'x'.repeat(300000)}\n+${'y'.repeat(300000)}\n`;
+  for (const reviewerModel of ['gemini', 'claude', 'codex']) {
+    for (const hasReviewerFinding of [false, true]) {
+      const reviewText = hasReviewerFinding
+        ? '## Summary\nReviewed.\n## Blocking issues\n- **Existing issue**\n  - **File:** payload.js\n  - **Problem:** Existing reviewer finding.\n## Verdict\nRequest changes'
+        : '## Summary\nReviewed.\n## Blocking issues\n- None.\n## Verdict\nComment only';
+      const run = async () => ({ reviewText, rawReviewText: reviewText,
+        needsSanitize: reviewerModel === 'codex' });
+      const result = await reviewAgyOversizedInChunks(diff, '', {
+        env: {}, maxBytes: 234464, reviewerModel,
+        reviewWithGeminiImpl: run, dispatchReviewerModelImpl: run,
+      });
+      assert.equal(extractReviewVerdict(result.reviewText), 'Request changes');
+      const findings = parseBlockingFindingsSection(result.reviewText);
+      const elisionFindings = findings.filter((finding) => finding.title.startsWith('Unreviewed elided content'));
+      assert.equal(elisionFindings.length, 2);
+      assert.equal(findings.length, hasReviewerFinding ? result.chunks.length + 2 : 2);
+      for (const [index, finding] of elisionFindings.entries()) {
+        assert.equal(finding.file, 'payload.js');
+        assert.match(finding.lines, new RegExp(`^${index + 1} `));
+        assert.match(finding.problem, new RegExp(result.elisions[index].sha256));
+        assert.match(finding.recommendedFix, /reviewable diff/);
+      }
+    }
+  }
 });
 
 test('long additions that fit are reviewed in full, even within an oversized file', async () => {
@@ -170,6 +187,9 @@ test('long context and deletions do not create synthetic blockers', async () => 
         assert.match(result.reviewText, /## Blocking issues\n- None\./);
         assert.match(result.reviewText, new RegExp(`## Non-blocking issues\\n- \\*\\*Elided ${kind === '-' ? 'deleted' : 'context'} content`));
         assert.match(result.reviewText, new RegExp(result.elisions[0].sha256));
+        const [finding] = parseNonBlockingFindingsSection(result.reviewText);
+        assert.equal(finding.file, 'data.json');
+        assert.match(finding.problem, new RegExp(result.elisions[0].sha256));
       } else assert.deepEqual(result.elisions, []);
     }
   }

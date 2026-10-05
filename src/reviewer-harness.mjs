@@ -3321,14 +3321,22 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
   const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
   blocking.push(...elisions.filter((entry) => entry.kind === '+').map((entry) =>
     `- **Unreviewed elided content at ${entry.path}:${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})**\n`
-    + `  - ${entry.byteLength} bytes were partially withheld from the reviewer; sha256=${entry.sha256}. Provide a reviewable diff or obtain an explicit operator risk decision before merging.`));
+    + `  - **File:** ${entry.path}\n`
+    + `  - **Lines:** ${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})\n`
+    + `  - **Problem:** ${entry.byteLength} bytes were partially withheld from the reviewer; sha256=${entry.sha256}.\n`
+    + '  - **Why it matters:** Added content has not been fully reviewed.\n'
+    + '  - **Recommended fix:** Provide a reviewable diff or obtain an explicit operator risk decision before merging.'));
   parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
   const verdict = blocking.length > 0 ? 'Request changes' : 'Comment only';
   parts.push('', '## Non-blocking issues');
   const nonBlocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Non-blocking issues'));
   nonBlocking.push(...elisions.filter((entry) => entry.kind !== '+').map((entry) =>
     `- **Elided ${entry.kind === '-' ? 'deleted' : 'context'} content at ${entry.path}:${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})**\n`
-    + `  - ${entry.byteLength} bytes were partially withheld from the reviewer; sha256=${entry.sha256}. This line introduces no new content.`));
+    + `  - **File:** ${entry.path}\n`
+    + `  - **Lines:** ${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})\n`
+    + `  - **Problem:** ${entry.byteLength} bytes were partially withheld from the reviewer; sha256=${entry.sha256}.\n`
+    + '  - **Why it matters:** This line introduces no new content.\n'
+    + '  - **Recommended fix:** Retain the elision evidence for operator inspection.'));
   parts.push(nonBlocking.length > 0 ? nonBlocking.join('\n') : '- None.');
   parts.push('', '## Suggested fixes');
   const suggestedFixes = texts.flatMap((text) => extractMarkdownIssueList(text, 'Suggested fixes'));

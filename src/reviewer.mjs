@@ -297,6 +297,21 @@ function resolveVerdictModeForHead({
   return VERDICT_MODE_ENFORCE;
 }
 
+export function persistReviewElisions({ rootDir, repo, prNumber, headSha, elisions, logger = console }) {
+  if (!elisions?.length) return false;
+  try {
+    if (!headSha) throw new Error('snapshot head SHA unavailable');
+    const metadataDir = join(rootDir, 'data', 'review-elisions');
+    mkdirSync(metadataDir, { recursive: true });
+    writeFileAtomic(join(metadataDir, `${repo.replaceAll('/', '--')}-${prNumber}-${headSha}.json`),
+      JSON.stringify({ repo, prNumber, headSha, elisions }, null, 2));
+    return true;
+  } catch (error) {
+    logger.warn?.(`[reviewer] Failed to persist elision evidence for ${repo}#${prNumber}: ${error?.message || error}`);
+    return false;
+  }
+}
+
 async function fetchCurrentHeadVerdictMode({
   repo,
   prNumber,
@@ -2109,12 +2124,8 @@ async function main() {
         onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
       });
     }
-    if (dispatch.elisions?.length) {
-      const metadataDir = join(ROOT, 'data', 'review-elisions');
-      mkdirSync(metadataDir, { recursive: true });
-      writeFileAtomic(join(metadataDir, `${repo.replaceAll('/', '--')}-${prNumber}-${reviewerHeadSha}.json`),
-        JSON.stringify({ repo, prNumber, headSha: reviewerHeadSha, elisions: dispatch.elisions }, null, 2));
-    }
+    persistReviewElisions({ rootDir: ROOT, repo, prNumber,
+      headSha: reviewerHeadSha || reviewerWorkspaceHeadSha, elisions: dispatch.elisions });
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
     reviewerExecution = dispatch.execution || null;

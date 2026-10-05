@@ -61,6 +61,14 @@ Directory: `data/alert-delivery/`
   a deterministic event plus SHA-256 identity over `repo#prNumber@headSha`.
   Enqueue retries reuse pending, inflight, delivered and dead-letter documents,
   including a crash before the watchdog's SQLite page guard is updated.
+- Review-exhaustion `adversarial_review.operator_decision_required` pages use
+  `review-decision-<sha256(JSON.stringify([decisionId, decisionSeriesId]))>`.
+  The per-head record ID stays stable; the persisted blocker-series UUID changes
+  after the no-progress lane is cleared or replaced. Retries within one series
+  reuse pending, inflight, delivered and dead-letter documents, while a new
+  series can page again on the same head. If record persistence fails, no series
+  ID is supplied and the normal outbox identity applies; the lane debounce still
+  suppresses repeats. Legacy payloads without a series ID also use normal IDs.
 - The scheduled drain is best-effort fire-and-forget work. It must contain its
   own rejections so a drain failure cannot terminate the long-lived watcher
   daemon through Node's unhandled-rejection policy.

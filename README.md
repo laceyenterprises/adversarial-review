@@ -680,7 +680,8 @@ Claude print-mode prompts travel on stdin, with explicit `--model`/`--effort`
 flags. Before routing a full prompt, the reviewer checks both delivery and
 context budgets. An oversized prompt stays with the selected cross-model
 reviewer and is split into bounded chunks if no alternate route fits.
-Every chunk must fit and the entire diff must be covered; a hard ceiling or
+Every chunk must fit; elided bytes produce synthetic blocking findings, and
+only a fully reviewed diff can receive a clean verdict; a hard ceiling or
 chunk-cap failure records terminal `reviewer-prompt-too-large` evidence and
 queues the existing `reviewer.oversized_agy_prompt` operator alert.
 The size preflight throws `ReviewerPromptTooLargeError`; `reviewer.mjs` exits
@@ -702,11 +703,13 @@ mechanism (no shared configuration-schema keys):
 - `ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES`: elide individual diff lines before
   chunking, default 32 KiB (minimum configurable value 1024 bytes), capped at
   one quarter of the chunk budget. Markers retain up to 1024 bytes at each end,
-  original byte length, and SHA-256. Review bodies list affected paths/lines;
-  head-keyed metadata is saved under `data/review-elisions/`.
+  original byte length, and SHA-256. Review bodies block on affected paths/lines
+  with the original SHA-256; head-keyed metadata is saved under `data/review-elisions/`.
 - `ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES`: diff plus extra-context ceiling,
-  default 8 MiB. The existing `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS`
-  bounds all chunked reviews (default 20).
+  default 8 MiB, measured on the raw diff plus extra context before elision.
+  This bounds preprocessing work even for a single generated line; content
+  above it remains an operator-owned size refusal.
+  `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS` bounds all chunked reviews (default 20).
 
 Set context allocations to the deployed model's supported input budget after
 reserving space for tools and output. Every `hosted-reviewer-selection` event
@@ -714,8 +717,13 @@ logs the checked model, full prompt bytes, and resolved budget, including
 prompts that fit. A new PR head or operator retrigger is
 required after a terminal size failure; lease recovery does not retry it.
 Exhausted non-infrastructure failures create a durable, head-keyed decision in
-`data/review-failure-decisions/` with options to retrigger after a fix, accept
-partial review, or block. The existing operator-decision alert outbox carries
-that decision and deduplicates by its ID; the green fail-open gate displays the
-ID. These options require operator action and do not authorize automatic merge.
+`data/review-failure-decisions/`. This is an informational failure record; it
+does not consume choices or change the gate. Use the existing retrigger,
+operator risk approval, or hold/closure controls to act on the failure. The
+operator-decision alert outbox carries the record and deduplicates by its ID
+and blocker-series ID. Clearing the no-progress lane starts a fresh series
+and allows another page on the same head; the current failure reason is
+refreshed in the record. The green fail-open gate displays the record ID;
+this record does not authorize automatic merge. Record and elision-evidence
+writes are best-effort and cannot suppress a page or fail a completed review.
 A new head still re-arms review through the existing REVIEWSTALL-01 policy.

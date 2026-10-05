@@ -3283,7 +3283,7 @@ function extractMarkdownIssueList(markdown, heading) {
   return filtered;
 }
 
-function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {
+function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null, elisions = [] } = {}) {
   if (truncated) throw new ReviewerPromptTooLargeError('cannot merge an incomplete chunk review');
   const texts = chunkReviews.map((chunk) => sanitizeReviewPayloadBestEffort(chunk.reviewText)).filter(Boolean);
   const parts = [
@@ -3292,6 +3292,9 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
   ];
   parts.push('', '## Blocking issues');
   const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
+  blocking.push(...elisions.map((entry) =>
+    `- **Unreviewed elided content at ${entry.path}:${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})**\n`
+    + `  - ${entry.byteLength} bytes were partially withheld from the reviewer; sha256=${entry.sha256}. Provide a reviewable diff or obtain an explicit operator risk decision before merging.`));
   parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
   const verdict = blocking.length > 0 ? 'Request changes' : 'Comment only';
   parts.push('', '## Non-blocking issues');
@@ -3354,20 +3357,55 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   };
 }
 
+// Buffer cuts must not turn a valid UTF-8 preview into replacement characters.
+function utf8DiffPreview(bytes, edgeBytes, fromEnd = false) {
+  let start = fromEnd ? Math.max(0, bytes.length - edgeBytes) : 0;
+  let end = fromEnd ? bytes.length : Math.min(edgeBytes, bytes.length);
+  if (fromEnd) {
+    while (start < end && (bytes[start] & 0xc0) === 0x80) start += 1;
+  } else if (end < bytes.length) {
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  }
+  return bytes.subarray(start, end).toString('utf8');
+}
+
 export function elideLongDiffLines(diff, { thresholdBytes = 32 * 1024, edgeBytes = 1024 } = {}) {
   const elisions = [];
-  let path = '<unknown>';
-  let line = 0;
+  let oldPath = '<unknown>';
+  let newPath = '<unknown>';
+  let inHunk = false;
+  let oldLine = 0;
+  let newLine = 0;
   const text = String(diff || '').split('\n').map((value, index) => {
-    if (value.startsWith('+++ ')) path = value.slice(4).replace(/^b\//, '');
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(value);
-    if (hunk) line = Number(hunk[1]) - 1;
-    else if (value.startsWith('+') || value.startsWith(' ')) line += 1;
+    if (value.startsWith('diff --git ')) {
+      inHunk = false;
+      oldPath = newPath = '<unknown>';
+    }
+    if (!inHunk && value.startsWith('--- ')) oldPath = value.slice(4).replace(/^a\//, '');
+    if (!inHunk && value.startsWith('+++ ')) newPath = value.slice(4).replace(/^b\//, '');
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(value);
+    let line = null;
+    let side = 'new';
+    if (hunk) {
+      inHunk = true;
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+    } else if (inHunk) {
+      if (value.startsWith('-')) {
+        side = 'old';
+        line = oldLine++;
+      } else if (value.startsWith('+')) line = newLine++;
+      else if (value.startsWith(' ')) {
+        line = newLine++;
+        oldLine += 1;
+      }
+    }
+    const path = side === 'old' || newPath === '/dev/null' ? oldPath : newPath;
     const bytes = Buffer.from(value);
     if (bytes.length <= thresholdBytes) return value;
     const sha256 = createHash('sha256').update(bytes).digest('hex');
-    elisions.push({ path, line, diffLine: index + 1, byteLength: bytes.length, sha256 });
-    return `${bytes.subarray(0, edgeBytes).toString()} [elided long line (likely generated or embedded data); reviewer must flag if this content needs line-level review; bytes=${bytes.length}; sha256=${sha256}] ${bytes.subarray(-edgeBytes).toString()}`;
+    elisions.push({ path, line, side, diffLine: index + 1, byteLength: bytes.length, sha256 });
+    return `${utf8DiffPreview(bytes, edgeBytes)} [elided unreviewed content; bytes=${bytes.length}; sha256=${sha256}] ${utf8DiffPreview(bytes, edgeBytes, true)}`;
   }).join('\n');
   return { diff: text, elisions };
 }
@@ -3438,15 +3476,12 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
       reviewText: result.reviewText,
     });
   }
-  let mergedReviewText = mergeChunkedAgyReviews(chunkReviews, {
+  const mergedReviewText = mergeChunkedAgyReviews(chunkReviews, {
     truncated: split.truncated,
     promptBytes,
     maxBytes,
+    elisions: elided.elisions,
   });
-  if (elided.elisions.length) {
-    mergedReviewText += '\n\n## Elided diff lines\n' + elided.elisions.map((entry) =>
-      `- ${entry.path}:${entry.line} (diff line ${entry.diffLine}): ${entry.byteLength} bytes; sha256=${entry.sha256}. Elided long line (likely generated or embedded data); reviewer must flag if this content needs line-level review.`).join('\n');
-  }
   return {
     elisions: elided.elisions,
     rawReviewText: mergedReviewText,

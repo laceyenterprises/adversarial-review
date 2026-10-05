@@ -699,6 +699,11 @@ mechanism (no shared configuration-schema keys):
 - `ADVERSARIAL_REVIEW_BYTES_PER_TOKEN`: conservative code estimate, default 2.
 - `ADVERSARIAL_REVIEW_<CLAUDE|CODEX|GEMINI>_DELIVERY_MAX_BYTES`: off-argv
   delivery limit, default 16 MiB. Antigravity keeps its existing argv budget.
+- `ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES`: elide individual diff lines before
+  chunking, default 32 KiB (minimum configurable value 1024 bytes), capped at
+  one quarter of the chunk budget. Markers retain up to 1024 bytes at each end,
+  original byte length, and SHA-256. Review bodies list affected paths/lines;
+  head-keyed metadata is saved under `data/review-elisions/`.
 - `ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES`: diff plus extra-context ceiling,
   default 8 MiB. The existing `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS`
   bounds all chunked reviews (default 20).
@@ -708,3 +713,9 @@ reserving space for tools and output. Every `hosted-reviewer-selection` event
 logs the checked model, full prompt bytes, and resolved budget, including
 prompts that fit. A new PR head or operator retrigger is
 required after a terminal size failure; lease recovery does not retry it.
+Exhausted non-infrastructure failures create a durable, head-keyed decision in
+`data/review-failure-decisions/` with options to retrigger after a fix, accept
+partial review, or block. The existing operator-decision alert outbox carries
+that decision and deduplicates by its ID; the green fail-open gate displays the
+ID. These options require operator action and do not authorize automatic merge.
+A new head still re-arms review through the existing REVIEWSTALL-01 policy.

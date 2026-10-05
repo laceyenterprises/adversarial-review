@@ -1368,6 +1368,16 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
+  if (event === 'adversarial_review.operator_decision_required' && payload?.decisionId) {
+    doc.id = `review-decision-${crypto.createHash('sha256').update(payload.decisionId).digest('hex')}`;
+    for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
+      const existingPath = alertDocPath(rootDir, state, doc.id);
+      if (existsSync(existingPath)) {
+        if (state === 'pending' || state === 'inflight') scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
+        return { status: state, queued: false, id: doc.id, queuePath: existingPath };
+      }
+    }
+  }
   if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted', 'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain', 'ama.orphan_recovery.store-error'].includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.

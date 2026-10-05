@@ -1072,3 +1072,22 @@ test('HAM exhaustion pages reuse deterministic identities after uncertain enqueu
     }
   }
 });
+
+test('REVIEWLINE-01: decision page outbox identity survives a lost watcher debounce', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = {
+    event: 'adversarial_review.operator_decision_required',
+    payload: { decisionId: 'review-failure-head-a' }, env,
+    fsImpl: { readFileSync: () => 'hook-token', existsSync: () => true },
+    requestText: async () => { throw new Error('ECONNREFUSED'); },
+  };
+  const first = await deliverAlert('Review failed', options);
+  const second = await deliverAlert('Review failed', options);
+  assert.equal(first.id, second.id);
+  assert.equal(second.queued, false);
+  const nextHead = await deliverAlert('Review failed', {
+    ...options, payload: { decisionId: 'review-failure-head-b' },
+  });
+  assert.notEqual(first.id, nextHead.id);
+});

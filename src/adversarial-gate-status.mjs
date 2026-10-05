@@ -1,3 +1,4 @@
+import { readReviewFailureDecision } from './review-retry-exhaustion.mjs';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -911,6 +912,7 @@ function pickAdversarialGateStatus({
     // can read it on the PR; if they want to merge anyway it doesn't take
     // admin override. Real adversarial findings (`blocking-review` below)
     // still post `failure`.
+    if (reviewRow?.operator_decision_id) return decide('success', `review failed — operator decision raised (${reviewRow.operator_decision_id})`, 'review-failed');
     const failureClass = reviewerFailureClass(reviewRow);
     if (failureClass === 'reviewer-timeout') {
       return decide('success', 'Adversarial reviewer timed out before posting; operator decides.', 'reviewer-timeout');
@@ -1073,7 +1075,8 @@ async function buildAdversarialGateSnapshot(rootDir, {
   }
 
   return {
-    reviewRow: resolvedRow,
+    reviewRow: resolvedRow ? { ...resolvedRow, operator_decision_id:
+      readReviewFailureDecision(rootDir, repo, prNumber, headSha)?.id } : resolvedRow,
     latestJob,
     hasActiveSamePrRemediation,
     operatorApproval,

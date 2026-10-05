@@ -2109,6 +2109,12 @@ async function main() {
         onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
       });
     }
+    if (dispatch.elisions?.length) {
+      const metadataDir = join(ROOT, 'data', 'review-elisions');
+      mkdirSync(metadataDir, { recursive: true });
+      writeFileAtomic(join(metadataDir, `${repo.replaceAll('/', '--')}-${prNumber}-${reviewerHeadSha}.json`),
+        JSON.stringify({ repo, prNumber, headSha: reviewerHeadSha, elisions: dispatch.elisions }, null, 2));
+    }
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
     reviewerExecution = dispatch.execution || null;

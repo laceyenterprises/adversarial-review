@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // Reviewer model-execution harness.
 //
 // ARC-10: the bespoke per-harness spawn surface (Claude/Codex/Gemini/Antigravity
@@ -3353,6 +3354,24 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   };
 }
 
+export function elideLongDiffLines(diff, { thresholdBytes = 32 * 1024, edgeBytes = 1024 } = {}) {
+  const elisions = [];
+  let path = '<unknown>';
+  let line = 0;
+  const text = String(diff || '').split('\n').map((value, index) => {
+    if (value.startsWith('+++ ')) path = value.slice(4).replace(/^b\//, '');
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(value);
+    if (hunk) line = Number(hunk[1]) - 1;
+    else if (value.startsWith('+') || value.startsWith(' ')) line += 1;
+    const bytes = Buffer.from(value);
+    if (bytes.length <= thresholdBytes) return value;
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    elisions.push({ path, line, diffLine: index + 1, byteLength: bytes.length, sha256 });
+    return `${bytes.subarray(0, edgeBytes).toString()} [elided long line (likely generated or embedded data); reviewer must flag if this content needs line-level review; bytes=${bytes.length}; sha256=${sha256}] ${bytes.subarray(-edgeBytes).toString()}`;
+  }).join('\n');
+  return { diff: text, elisions };
+}
+
 async function reviewAgyOversizedInChunks(diff, extraContext, {
   env = process.env,
   reviewerModel = 'gemini',
@@ -3371,7 +3390,11 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   if (agyPromptBytes(diff) + agyPromptBytes(extraContext) > hardMaxBytes) {
     throw new ReviewerPromptTooLargeError(`hard ceiling exceeded: size=${agyPromptBytes(diff) + agyPromptBytes(extraContext)} hardMaxBytes=${hardMaxBytes}`);
   }
-  const split = splitDiffForAgyChunks(diff, {
+  const configuredThreshold = Number(env.ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES);
+  const thresholdBytes = Math.min(Number.isFinite(configuredThreshold) && configuredThreshold >= 1024
+    ? configuredThreshold : 32 * 1024, Math.floor(maxBytes / 4));
+  const elided = elideLongDiffLines(diff, { thresholdBytes, edgeBytes: Math.max(1, Math.min(1024, Math.floor(thresholdBytes / 8))) });
+  const split = splitDiffForAgyChunks(elided.diff, {
     reviewerModel,
     extraContext,
     chunkContextBudgetSuffix: agyOversizedChunkContextBudgetSuffix(maxChunks),
@@ -3415,12 +3438,17 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
       reviewText: result.reviewText,
     });
   }
-  const mergedReviewText = mergeChunkedAgyReviews(chunkReviews, {
+  let mergedReviewText = mergeChunkedAgyReviews(chunkReviews, {
     truncated: split.truncated,
     promptBytes,
     maxBytes,
   });
+  if (elided.elisions.length) {
+    mergedReviewText += '\n\n## Elided diff lines\n' + elided.elisions.map((entry) =>
+      `- ${entry.path}:${entry.line} (diff line ${entry.diffLine}): ${entry.byteLength} bytes; sha256=${entry.sha256}. Elided long line (likely generated or embedded data); reviewer must flag if this content needs line-level review.`).join('\n');
+  }
   return {
+    elisions: elided.elisions,
     rawReviewText: mergedReviewText,
     reviewText: mergedReviewText,
     tokenUsage: sumChunkTokenUsage(chunkUsages),

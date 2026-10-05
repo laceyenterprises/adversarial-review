@@ -2132,3 +2132,25 @@ Local Git provenance retains its trailer fallback because it has no GitHub-linke
 identity. Remote commit probes require linked closer identity. This existing
 local trust boundary is tracked by LAC-1848; a trailer alone never grants merge
 authority, and the downstream hammer repeats live gates.
+
+## CI-cost refusal (CIGUARD-01)
+
+Live primary-change collection also reads workflow blobs at the merge base and
+candidate head, all PR files, current labels and paginated label events, plus
+current-head cost check results. This operates for every repository, independent
+of branch protection. The offline cost engine is vendored at
+`scripts/ci-cost-guard.py` from agent-os; keep the copies identical when changing
+policy. JSON mode needs only Python's standard library, while Node owns YAML
+parsing through its existing js-yaml dependency. API truncation, malformed YAML,
+unresolved dynamic runners/matrices and unavailable Python fail closed.
+
+A flagged change requires `ci-cost-approved` last applied by a human listed in
+`roles.adversarial.operator_logins`. An empty list authorizes nobody. Neither
+`operator-approved` nor terminal HAM remediation can waive this check. A failed
+or pending cost check still blocks after authorization until CI reruns green.
+The closer CLI also rejects missing cost evidence; the merge-agent procedure
+runs `bin/ci-cost-check.mjs` immediately before its exact-head merge command.
+After the submodule floats into the deploy checkout, restart the watcher and
+follow-up daemons through the registered `scripts/os-restart.sh` operator path
+so long-running processes load the new predicate. Do not admin-merge this gate
+change or edit live service state to make the gate green.

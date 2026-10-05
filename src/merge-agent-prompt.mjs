@@ -27,6 +27,7 @@ function shellSingleQuote(value) {
 }
 
 function buildMergeAgentPrompt(job, { trigger = null } = {}) {
+  const ciCostChecker = shellSingleQuote(fileURLToPath(new URL('../bin/ci-cost-check.mjs', import.meta.url)));
   const mergeRepoLiteral = shellSingleQuote(job.repo);
   const mergeBaseLiteral = shellSingleQuote(job.baseBranch);
   const mergePrLiteral = shellSingleQuote(job.prNumber);
@@ -53,6 +54,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   if (trigger) {
     lines.push(`- Dispatch trigger: ${trigger}`);
   }
+  lines.push('', '## CI-cost hard gate (CIGUARD-01)',
+    `Before every merge, resolve the live head and run \`node ${ciCostChecker} ${mergeRepoLiteral} ${mergePrLiteral} HEAD_SHA\`. Refuse a failed check or unauthorized workflow cost growth. Only a live ci-cost-approved label applied by a configured human operator authorizes cost growth; operator-approved never waives this gate. On refusal, leave the PR open for authorization and a CI rerun.`, '');
   if (job.ciBootstrap?.mode === 'no-ci-bootstrap') {
     const checker = shellSingleQuote(fileURLToPath(new URL('../bin/ci-bootstrap.mjs', import.meta.url)));
     lines.push('', '## Explicit no-CI bootstrap',
@@ -372,7 +375,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('EOF_PROTECTIVE_PREDECESSORS');
         lines.push('fi');
         lines.push('');
-        lines.push('gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"');
+        lines.push(`node ${ciCostChecker} "$MERGE_REPO" "$MERGE_PR" "$POST_REMEDIATION_SHA" && gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"`);
         lines.push('```');
       }
     }

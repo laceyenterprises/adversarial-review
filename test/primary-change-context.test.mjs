@@ -20,6 +20,16 @@ const history = { merge_base_commit: { sha: evidence.mergeBase }, files: evidenc
 const compare = { merge_base_commit: { sha: evidence.mergeBase }, files: evidence.primaryFiles };
 
 function runCli(t, plan, argv = ['fixture/repo', '1208', head]) {
+  if (plan.some((entry) => entry.path === primaryPath && entry.data)) {
+    plan = [...plan,
+      { path: prPath, data: pr },
+      { path: comparePath, data: compare },
+      { path: 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', data: [] },
+      { path: `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, data: { check_runs: [] } },
+      { path: `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, data: [] },
+      { path: prPath, data: pr },
+    ];
+  }
   const root = mkdtempSync(join(tmpdir(), 'primary-change-context-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const callsFile = join(root, 'calls.json');
@@ -58,9 +68,13 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
   ]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, '');
-  assert.deepEqual(JSON.parse(result.stdout), { ...evidence, testRegionsChanged: [] });
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.ciCost.ok, true);
+  delete parsed.ciCost;
+  const { ciCost: _cost, ...historyEvidence } = evidence;
+  assert.deepEqual(parsed, { ...historyEvidence, testRegionsChanged: [] });
   assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath,
-    primaryPath, primaryPath].map(path => ['api', path]));
+    primaryPath, primaryPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, prPath].map(path => ['api', path]));
 });
 
 test('primary-change CLI exhausts transient reads after three attempts and fails closed', (t) => {

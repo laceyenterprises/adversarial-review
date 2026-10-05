@@ -101,12 +101,15 @@ const PERMANENT_TERMINAL_REASONS = Object.freeze([
 
 /**
  * Post-lease eligibility reasons that describe an incomplete or still-settling
- * GitHub read rather than a property of the head. A miss made ONLY of these
+ * GitHub read or authorization/CI that can change on the same head. A miss made ONLY of these
  * terminates as the non-permanent `gate-read-failed`, never `gate-not-eligible`.
  */
 export const TRANSIENT_GATE_READ_REASONS = new Set([
   'labels-unavailable',
   'primary-change-read-failed',
+  'ci-cost-read-failed',
+  'ci-cost-check-failed',
+  'ci-cost-unauthorized',
   'pr-mergeability-unknown',
 ]);
 

@@ -45,6 +45,9 @@ export const ELIGIBLE_MERGE_VERDICTS = Object.freeze([
  * do a stable `reasons[0]` "primary blocker" read.
  */
 export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
+  'ci-cost-read-failed',
+  'ci-cost-check-failed',
+  'ci-cost-unauthorized',
   'primary-change-reverted',
   'primary-change-unknown',
   'primary-change-read-failed',

@@ -59,3 +59,14 @@ only deliberate difference is scope: the closer excludes the pipeline's own
 adversarial-gate status context. Do not fork the classification rules again. A
 closer that reads green while the daemon reads red deadlocks the PR (SEV3
 2026-09-28, agent-os#7314).
+
+## CI cost authorization (CIGUARD-01)
+
+Do not add CI runners, matrix entries, triggers or long per-PR steps without
+operator authorization (`ci-cost-approved`). Specs state cadence and runner OS
+and justify any non-Linux per-PR job. Merge authorization is additive: a failed
+CI-cost check or flagged workflow diff requires a live operator-applied label.
+`roles.adversarial.operator_logins` is the trusted identity list; no worker,
+bot, `operator-approved` escape, or repository without branch protection waives
+this gate. `node bin/ci-cost-check.mjs OWNER/REPO PR HEAD` independently reads
+workflow cost and label provenance against the live head before merge.

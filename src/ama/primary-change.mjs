@@ -1,3 +1,4 @@
+import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -235,6 +236,10 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
 
 // Non-blocking waivers require an explicit effective strict-mode policy.
 export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemediation = false } = {}) {
+  if (evidence && [true, false].includes(evidence.hasHammerCommits)) {
+    const cost = checkCiCost(evidence.ciCost, headSha);
+    if (!cost.ok) return cost;
+  }
   if (!evidence) return { ok: false, reason: 'primary-change-unknown' };
   if (evidence.headSha !== headSha || evidence.headMismatch) return { ok: false, reason: 'primary-change-read-failed' };
   if (evidence.readFailed === true) return { ok: false, reason: 'primary-change-read-failed' };
@@ -302,7 +307,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
-export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatchedHead = null,
+async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, dispatchedHead = null,
   rootDir, env = process.env }) {
   rootDir = primaryChangeRoot({ rootDir, env });
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
@@ -414,4 +419,13 @@ export async function fetchPrimaryChange({ repo, prNumber, headSha, get, dispatc
   } catch (error) { return error?.primaryChangeReadFailed === true || error?.authOutage === true || error?.name === 'AbortError'
     || error?.code === 'ABORT_ERR' || isTransientGhError(error)
     ? { ...unknown, readFailed: true } : unknown; }
+}
+
+// Every production primary-change read also proves the independent cost gate.
+// Keep history failures distinct and retain the existing terminal-state handling.
+export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost } = {}) {
+  const history = await fetchPrimaryChangeHistory(args);
+  if (![true, false].includes(history.hasHammerCommits) || history.headMismatch) return history;
+  const ciCost = await fetchCiCostImpl(args);
+  return { ...history, ciCost };
 }

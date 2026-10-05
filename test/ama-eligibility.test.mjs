@@ -3319,7 +3319,7 @@ test('HAM identity agrees across reversal, terminal eligibility and closer suppr
     const commit = { sha: currentHead, author: { login: author },
       committer: { login: committer }, commit: { message: commitMessage },
       files: [{ ...primaryFile, patch: '@@ -10 +10 @@\n-new\n+old' }] };
-    const primaryChange = { headSha: currentHead, hasHammerCommits: true,
+    const primaryChange = { ciCost: { headSha: currentHead, ok: true, failedCheck: false }, headSha: currentHead, hasHammerCommits: true,
       primaryHead: reviewedHead, mergeBase: 'b'.repeat(40), primaryFiles: [primaryFile], finalFiles: [],
       reversalAuthorizations: [{ commit, review, reviewedFiles: [primaryFile], parentFiles: [primaryFile] }] };
     const ground = hamGroundTruth({ headSha: currentHead, parentSha: reviewedHead,

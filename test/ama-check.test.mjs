@@ -275,9 +275,10 @@ function runAmaCheck(tmp, {
   const extraArgs = [];
   if (primaryChangeEvidence !== null) {
     paths.primaryChange = join(tmp, 'primary-change.json');
-    writeJson(paths.primaryChange, primaryChangeEvidence || (hamTerminalRemediation
+    const primary = primaryChangeEvidence || (hamTerminalRemediation
       ? primaryChangeFixture(HAM_SHA)
-      : { headSha: loadJson(paths.pr).headRefOid, hasHammerCommits: false }));
+      : { headSha: loadJson(paths.pr).headRefOid, hasHammerCommits: false });
+    writeJson(paths.primaryChange, { ...primary, ciCost: { headSha: loadJson(paths.pr).headRefOid, ok: true } });
     extraArgs.push('--primary-change', paths.primaryChange);
   }
   if (hamTerminalRemediation) {
@@ -1789,5 +1790,5 @@ test('ama-check requires history evidence even when a caller omits the HAM claim
   assert.equal(result.status, 0, result.stderr);
   const verdict = JSON.parse(result.stdout);
   assert.equal(verdict.eligible, false);
-  assert.ok(verdict.reasons.includes('primary-change-unknown'));
+  assert.ok(verdict.reasons.includes('ci-cost-read-failed'));
 });

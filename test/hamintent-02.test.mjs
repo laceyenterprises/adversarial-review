@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import { readFindingDisputeReservations } from '../src/ama/finding-dispute-context.mjs';
-import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
+import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost } from '../src/ama/primary-change.mjs';
 import { disputeFinding } from '../src/ama/finding-dispute.mjs';
 import { assertFindingDisputeOwner } from '../src/ama/finding-dispute-owner.mjs';
 import { recordPrimaryChangeRefusal } from '../src/ama/primary-change-refusal.mjs';
@@ -16,6 +16,10 @@ import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-st
 import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
 import { formatFindingDisputeContext } from '../src/prompt-context.mjs';
 const head = 'c'.repeat(40), author = 'a'.repeat(40), base = 'b'.repeat(40);
+// Preservation fixtures model a separately successful, exact-head cost read.
+const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {
+  fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }),
+});
 const path = 'scripts/ci-mirror/checks.agent-os.json';
 const file = { filename: path, status: 'modified', additions: 1, deletions: 1,
   patch: '@@ -10 +10 @@\n-enforcement: false\n+enforcement: true' };
@@ -26,7 +30,7 @@ const commit = { sha: head, parents: [{ sha: author }], author: { login: null },
   commit: { message: `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${author}\nReversal-Authorized-By: PRR_fixture finding=1` },
   files: [{ ...file, patch: '@@ -10 +10 @@\n-enforcement: true\n+enforcement: false' }] };
 function evidence() {
-  return { headSha: head, hasHammerCommits: true, primaryHead: author, mergeBase: base,
+  return { ciCost: { headSha: head, ok: true, failedCheck: false }, headSha: head, hasHammerCommits: true, primaryHead: author, mergeBase: base,
     primaryFiles: [file], finalFiles: [], reversalAuthorizations: [{ commit, review, reviewedFiles: [file], parentFiles: [file] }] };
 }
 test('blocking finding authorizes the overlapping HAM reversion; #1207 and invalid citations still refuse', () => {

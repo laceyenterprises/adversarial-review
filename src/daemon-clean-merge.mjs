@@ -1035,7 +1035,7 @@ export async function runDaemonCleanMergeAttempt({
       get: async (path, { paginate = false } = {}) => {
         const { stdout } = await execGhWithRetryImpl({ execFileImpl,
           args: ['api', path, ...(paginate ? ['--paginate', '--slurp'] : [])],
-          timeoutMs: 1000, retries: 0, env, signal });
+          timeoutMs: 15000, retries: 0, env, signal });
         return JSON.parse(stdout);
       },
     }),

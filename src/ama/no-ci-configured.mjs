@@ -12,7 +12,7 @@ async function readNoCiConfiguration({ repo, base, head, get }) {
   const refs = [...new Set([branch.commit.sha, head])];
   const reads = await Promise.allSettled([
     ...refs.map((ref) => get(`repos/${repo}/git/trees/${encodeURIComponent(ref)}?recursive=1`)),
-    get(`repos/${repo}/commits/${encodeURIComponent(head)}/check-suites?per_page=1`),
+    get(`repos/${repo}/commits/${encodeURIComponent(head)}/check-suites?per_page=100`),
     get(`repos/${repo}/commits/${encodeURIComponent(head)}/status?per_page=1`),
     get(`repos/${repo}/rules/branches/${encodeURIComponent(base)}`, { paginate: true }),
     ...(branch.protected ? [get(`repos/${repo}/branches/${encodeURIComponent(base)}/protection`)] : []),
@@ -29,12 +29,18 @@ async function readNoCiConfiguration({ repo, base, head, get }) {
     if (tree.tree.some((entry) => entry.type === 'blob' && CI_CONFIG_PATH.test(entry.path))) return null;
   }
   const [suites, status, pages, protection] = values.slice(refs.length);
-  for (const [response, entries] of [[suites, suites?.check_suites], [status, status?.statuses]]) {
-    if (!Number.isInteger(response?.total_count) || response.total_count < 0 || !Array.isArray(entries)) {
-      throw new Error('CI activity unavailable');
-    }
-    if (response.total_count > 0 || entries.length > 0) return null;
+  if (!Number.isInteger(suites?.total_count) || suites.total_count < 0
+    || !Array.isArray(suites.check_suites) || suites.check_suites.length !== suites.total_count) {
+    throw new Error('complete check-suite activity unavailable');
   }
+  // Installed Apps create empty queued suites on push. They carry no CI
+  // evidence; any run, conclusion, or unknown shape still refuses this route.
+  if (suites.check_suites.some(suite => suite?.latest_check_runs_count !== 0
+    || suite.conclusion !== null || suite.status !== 'queued')) return null;
+  if (!Number.isInteger(status?.total_count) || status.total_count < 0 || !Array.isArray(status.statuses)) {
+    throw new Error('CI status activity unavailable');
+  }
+  if (status.total_count > 0 || status.statuses.length > 0) return null;
   if (!Array.isArray(pages) || pages.length === 0 || pages.some((page) => !Array.isArray(page))) {
     throw new Error('branch rule pages unavailable');
   }

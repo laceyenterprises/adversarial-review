@@ -1260,3 +1260,26 @@ test('CI appearing under the lease revokes no-CI without permanently locking the
   }));
   assert.equal(retry.merged, true);
 });
+
+test('newly concluded red CI after no-CI admission becomes a permanent refusal', async () => {
+  const gate = greenGate({ requiredChecks: [] });
+  const red = greenGate({ requiredChecks: [{ name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE' }] });
+  const h = makeHarness({ liveGate: red });
+  const result = await attemptDaemonCleanMerge(noCiArgs(h, { liveGate: gate,
+    verifyNoCiConfiguredImpl: async () => ({ reason: 'no CI configured' }),
+  }));
+  assert.equal(result.merged, false);
+  assert.equal(h.calls.merge, 0);
+  assert.equal(result.permanent, true);
+});
+test('ordinary green CI keeps pre-lease no-CI evidence explicitly labeled as admission', async () => {
+  const gate = greenGate({ requiredChecks: [] });
+  const h = makeHarness();
+  const result = await attemptDaemonCleanMerge(noCiArgs(h, { liveGate: gate,
+    verifyNoCiConfiguredImpl: async () => ({ reason: 'no CI configured' }),
+  }));
+  assert.equal(result.merged, true);
+  assert.equal(h.calls.auditWrites[0].metadata.ciConfigurationAdmission.reason, 'no CI configured');
+  assert.equal(h.calls.auditWrites[0].metadata.ciConfiguration, undefined);
+  assert.equal(h.calls.auditAppends.at(-1).attempt.ciConfiguration, undefined);
+});

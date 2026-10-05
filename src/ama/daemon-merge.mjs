@@ -683,7 +683,7 @@ async function attemptDaemonCleanMergeInner({
   const auditMetadataDoc = {
     ...auditMetadata,
     closingKeywordRewrites: commitBody.rewrites,
-    ...(noCiEvidence ? { ciConfiguration: noCiEvidence } : {}),
+    ...(noCiEvidence ? { ciConfigurationAdmission: noCiEvidence } : {}),
     closureAuthority,
     flagState,
   };
@@ -809,6 +809,7 @@ async function attemptDaemonCleanMergeInner({
     // A revoked proof or newly appearing CI is a changing gate, not a permanent
     // rejection of this head. The next tick must evaluate the real rollup.
     const noCiRevoked = admittedWithNoCi && !noCiEvidence && !elig.eligible &&
+      !live.requiredChecks?.some(check => ['FAILURE', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'ERROR'].includes(String(check.conclusion || check.state || '').toUpperCase())) &&
       elig.reasons.every((reason) =>
         reason === 'ci-not-green' || reason === 'branch-protection-missing-gate');
     if (!elig.eligible) {

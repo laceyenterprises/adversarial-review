@@ -4000,6 +4000,7 @@ test('audited zero-finding no-CI close skips hammer and operator escalation', as
       ...baseArgs(rootDir),
       runDaemonCleanMergeAttemptImpl: async () => attemptDaemonCleanMerge({
         repo: 'acme/repo', prNumber: 7, base: 'main', validatedHead: head,
+        prTitle: '[codex] fixture no-CI remediation',
         verdict: 'settled-success', reviewState: {
           blockingFindingCount: 0, blockingFindingState: 'known',
           nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
@@ -4040,7 +4041,7 @@ test('production daemon wiring verifies GitHub configuration twice for no-CI clo
         if (args[0] === 'pr' && args[1] === 'merge') { merges++; return { stdout: '' }; }
         assert.equal(args[0], 'api');
         paths.push(args[1]);
-        assert.equal(timeoutMs, 1000);
+        assert.equal(timeoutMs, 15000);
         assert.equal(retries, 0);
         const payload = args[1].includes('/git/trees/') ? { truncated: false, tree: [] }
           : args[1].includes('/rules/') ? (assert.deepEqual(args.slice(2), ['--paginate', '--slurp']), [[]])

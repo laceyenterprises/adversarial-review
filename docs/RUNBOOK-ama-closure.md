@@ -2041,8 +2041,8 @@ Live GitHub reads must corroborate the declaration: neither the base nor the
 reviewed head contains Actions workflows or known external-CI configs
 (CircleCI, Buildkite, Jenkins, Travis, Azure Pipelines, GitLab CI, Vercel,
 Netlify, Bitbucket Pipelines, Drone, AppVeyor, Cloud Build, Woodpecker,
-Semaphore, or Codemagic), the reviewed head has no check suites or commit
-statuses, and the target branch has neither required-check rules nor required
+Semaphore, or Codemagic), the reviewed head has no check runs, concluded suites or commit
+statuses (complete empty queued suites created by installed Apps are ignored), and the target branch has neither required-check rules nor required
 workflows. Config detection includes nested paths and is best-effort; the
 operator declaration remains necessary. Classic branch protection is checked
 along with every page of effective ruleset rules. Configured required contexts
@@ -2096,3 +2096,5 @@ mandate requires a non-empty provenance commit (`dispatch-closer.mjs`,
 `composeCloserPrompt`), and zero findings authorized no remediation diff.
 This configuration exception removes that circular dependency without inventing
 findings or weakening the hammer's remediation contract.
+
+STANDUPGATE-02 probes use 15-second subprocess timeouts without inner retries, bounded by the daemon operation and recovery caps. `gh api --paginate --slurp` requires [GitHub CLI 2.51.0](https://github.com/cli/cli/compare/e83e04930641e062249dc4aba2cba5b2d35d1278...v2.51.0) or newer; older versions refuse the proof and log the unsupported flag. Top-level `ciConfigurationAdmission` records pre-lease admission; `attempts[].ciConfiguration` records the proof actually used by a successful merge. Newly concluded red CI follows normal permanent gate refusal; only empty or pending rollups permit retry after proof revocation.

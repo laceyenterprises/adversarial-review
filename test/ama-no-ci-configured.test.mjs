@@ -105,3 +105,17 @@ test('independent no-CI reads run concurrently and all settle before refusal', a
   for (const resolve of pending) resolve();
   assert.equal((await verification).reason, 'no CI configured');
 });
+
+for (const [name, suite, expected] of [
+  ['empty App suite', { latest_check_runs_count: 0, conclusion: null, status: 'queued' }, true],
+  ['pending CI run', { latest_check_runs_count: 1, conclusion: null, status: 'queued' }, false],
+  ['concluded empty suite', { latest_check_runs_count: 0, conclusion: 'failure', status: 'completed' }, false],
+  ['unknown suite', {}, false],
+]) {
+  test(`check-suite evidence: ${name}`, async () => {
+    const get = fixture();
+    const proof = await verifyNoCiConfigured({ ...args, get: (path, options) =>
+      path.includes('/check-suites') ? { total_count: 1, check_suites: [suite] } : get(path, options) });
+    assert.equal(Boolean(proof), expected);
+  });
+}

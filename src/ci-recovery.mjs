@@ -1,9 +1,8 @@
-import { createHash, createPublicKey, verify } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync, unlinkSync, renameSync } from 'node:fs';
+import { createHash, createPublicKey, verify, randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { loadConfigCached } from './config-loader.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import { maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
@@ -16,13 +15,36 @@ function reserve(rootDir, identity, record) {
   const dir = join(rootDir, 'dispatch', 'ci-recovery');
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${createHash('sha256').update(identity).digest('hex')}.json`);
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const stamped = { ...record, reservedAt: new Date().toISOString() };
   try {
-    writeFileSync(path, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
-    return { created: true, record, path };
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    return { created: false, record: JSON.parse(readFileSync(path, 'utf8')), path };
+    writeFileSync(temporaryPath, JSON.stringify(stamped), { flag: 'wx', mode: 0o600 });
+    try {
+      linkSync(temporaryPath, path);
+      return { created: true, record: stamped, path };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      let existing;
+      try { existing = JSON.parse(readFileSync(path, 'utf8')); }
+      catch { existing = { ...record, state: 'reserved', reservedAt: statSync(path).mtime.toISOString() }; }
+      return { created: false, record: existing, path };
+    }
+  } finally { unlinkSync(temporaryPath); }
+}
+
+// A stale action is retried only after fresh remote evidence allows it. Each
+// minute has an exclusive recovery claim, including after another process crash.
+function resumeReservation(rootDir, identity, claim) {
+  if (claim.created || claim.record.state !== 'reserved') return claim;
+  const age = Date.now() - Date.parse(claim.record.reservedAt || 0);
+  if (Number.isFinite(age) && age < 60_000) return claim;
+  const retry = reserve(rootDir, `${identity}:resume:${Math.floor(Date.now() / 60_000)}`, claim.record);
+  if (retry.created) {
+    const temporaryPath = `${claim.path}.${randomUUID()}.reserved`;
+    writeFileSync(temporaryPath, JSON.stringify(retry.record), { flag: 'wx', mode: 0o600 });
+    renameSync(temporaryPath, claim.path);
   }
+  return { ...retry, path: claim.path };
 }
 
 // Keep the exclusive claim during delivery. A rejected action releases it so a
@@ -36,7 +58,7 @@ async function postReservation(claim, action) {
     throw error;
   }
   // Preserve the reservation if persistence fails after the accepted action.
-  const temporaryPath = `${claim.path}.posted`;
+  const temporaryPath = `${claim.path}.${randomUUID()}.posted`;
   writeFileSync(temporaryPath, JSON.stringify({ ...claim.record, state: 'posted' }), { mode: 0o600 });
   renameSync(temporaryPath, claim.path);
   return result;
@@ -47,8 +69,9 @@ export async function pageCiOnce({ rootDir, repo, prNumber, headSha, reason,
   deliverAlertImpl = deliverAlert }) {
   if (!rootDir) return false;
   signal?.throwIfAborted();
-  const claim = reserve(rootDir, `page:${repo.toLowerCase()}:${prNumber}:${headSha}:${dedupeKey}`,
-    { reason, state: 'reserved' });
+  const identity = `page:${repo.toLowerCase()}:${prNumber}:${headSha}:${dedupeKey}`;
+  const claim = resumeReservation(rootDir, identity, reserve(rootDir, identity,
+    { reason, state: 'reserved' }));
   if (!claim.created) return false;
   return postReservation(claim, () => maybeFireOperatorDecisionRequiredAlert({
     rootDir, identity: { repo, prNumber }, headSha, fingerprint: `ci:${dedupeKey}`,
@@ -92,7 +115,7 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
   for (const check of failedChecks) {
     const runId = /\/actions\/runs\/(\d+)/.exec(check.detailsUrl)[1];
     const run = runs.get(runId);
-    const claim = reserve(rootDir, `rerun:${repo.toLowerCase()}:${headSha}:${check.name.trim().toLowerCase()}`, {
+    const claim = reserve(rootDir, `rerun:${repo.toLowerCase()}:${headSha}:${runId}:${check.name.trim().toLowerCase()}`, {
       runId, attempt: run.run_attempt, headSha, check: check.name, requestedAt: new Date().toISOString(),
     });
     if (claim.record.runId !== runId || run.run_attempt > claim.record.attempt) {
@@ -102,9 +125,10 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
     }
     // The workflow claim controls the side effect, even when a check identity
     // was recorded on an earlier failed tick or by another caller.
-    const workflow = reserve(rootDir, `workflow-rerun:${repo.toLowerCase()}:${headSha}:${runId}`, {
+    const identity = `workflow-rerun:${repo.toLowerCase()}:${headSha}:${runId}`;
+    const workflow = resumeReservation(rootDir, identity, reserve(rootDir, identity, {
       runId, attempt: run.run_attempt, state: 'reserved',
-    });
+    }));
     if (workflow.created) {
       // Do not retry this POST in-call: a lost response may hide an accepted
       // rerun. The next tick reads the workflow snapshot before retrying.
@@ -117,8 +141,8 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
 
 // Empty rollups alone never authorize bootstrap. Inspect repository workflows
 // and BOTH classic branch protection and effective ruleset rules on the base.
-export async function confirmNoCi({ repo, baseBranch, execFileImpl = execFileAsync, env = process.env, signal }) {
-  if (!baseBranch) return false;
+export async function confirmNoCi({ repo, headSha, baseBranch, execFileImpl = execFileAsync, env = process.env, signal }) {
+  if (!baseBranch || !/^[0-9a-f]{40}$/.test(headSha || '')) return false;
   const api = async path => JSON.parse((await execGhWithRetry({ execFileImpl, args: ['api', path], env, signal })).stdout);
   try {
     const workflows = await api(`repos/${repo}/actions/workflows?per_page=1`);
@@ -132,6 +156,10 @@ export async function confirmNoCi({ repo, baseBranch, execFileImpl = execFileAsy
     }
     const rules = await api(`repos/${repo}/rules/branches/${encodeURIComponent(baseBranch)}`);
     if (!Array.isArray(rules) || rules.some(rule => !rule?.type || rule.type === 'required_status_checks' || rule.type === 'workflows')) return false;
+    const statuses = await api(`repos/${repo}/commits/${headSha}/status`);
+    const suites = await api(`repos/${repo}/commits/${headSha}/check-suites`);
+    if (statuses.total_count !== 0 || !Array.isArray(statuses.statuses) || statuses.statuses.length
+      || suites.total_count !== 0 || !Array.isArray(suites.check_suites) || suites.check_suites.length) return false;
     return true;
   } catch {
     signal?.throwIfAborted();
@@ -177,7 +205,6 @@ export function verifyManagedCiRecord(record, publicKey, { repo, headSha }) {
 export function readGreenManagedCi({ repo, headSha, env = process.env }) {
   if (!/^[0-9a-f]{40}$/.test(headSha || '') || !env.HQ_ROOT) return false;
   try {
-    const hostingMode = loadConfigCached({ env }).get('ci.hosting.mode');
     const root = realpathSync(env.HQ_ROOT);
     const owner = statSync(root).uid;
     let key = null;
@@ -194,12 +221,7 @@ export function readGreenManagedCi({ repo, headSha, env = process.env }) {
           if (realpathSync(path) !== path || statSync(path).uid !== owner) return false;
           const record = JSON.parse(readFileSync(path, 'utf8'));
           if (record.signature) return key && verifyManagedCiRecord(record, key, { repo, headSha });
-          // Match the managed pre-push gate's cooperative GitHub hosting mode.
-          // Full-mirror deployments always require the CI runner signature.
-          return hostingMode === 'github'
-            && record.mode === 'github' && record.schemaVersion === 1
-            && record.headSha === headSha && record.repo?.toLowerCase() === repo.toLowerCase()
-            && record.verdict === 'green' && /^sha256:[0-9a-f]{64}$/.test(record.manifestHash || '');
+          return false;
         } catch { return false; }
       });
   } catch { return false; }
@@ -211,7 +233,7 @@ export async function inspectCiBootstrap({ rootDir, repo, prNumber, headSha,
   deliverAlertImpl = deliverAlert }) {
   if (!/^[0-9a-f]{40}$/.test(headSha || '')) return { mode: null };
   if (requiredContexts.length || !emptyExternalRollup(rollup, ownContext)) return { mode: null };
-  if (!await confirmNoCi({ repo, baseBranch, execFileImpl, env, signal })) return { mode: null };
+  if (!await confirmNoCi({ repo, headSha, baseBranch, execFileImpl, env, signal })) return { mode: null };
   if (!await readAttestationImpl({ repo, headSha, env })) {
     if (rootDir) await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: 'repo has no CI', env, signal, deliverAlertImpl });
     return { mode: null, noCi: true };

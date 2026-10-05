@@ -8,30 +8,33 @@
 ## Identity and records
 
 Each filename is the SHA-256 hex digest of an identity string followed by
-`.json`. Exclusive creation (`wx`, mode `0600`) serializes callers and preserves
+`.json`. Atomic exclusive publication (temporary file plus hard link, mode `0600`) serializes callers and preserves
 budgets across process restarts. All callers must supply the same watcher
 `rootDir`; `HQ_ROOT` is only the managed attestation root, never a budget root.
 Without a watcher root, recovery and paging do nothing.
 
 | Identity | Fields | Contract |
 |---|---|---|
-| `rerun:<lowercase repo>:<headSha>:<trimmed lowercase check>` | `runId`, `attempt`, `headSha`, `check`, `requestedAt` | Records the first observed cancelled run/attempt for a check/head. This observation alone does not consume the POST budget. |
-| `workflow-rerun:<lowercase repo>:<headSha>:<runId>` | `runId`, `attempt`, `state` | Deduplicates cancelled checks in one workflow. `reserved` holds an in-flight request; `posted` means the POST succeeded. |
-| `page:<lowercase repo>:<prNumber>:<headSha>:<dedupeKey>` | `reason`, `state` | `reserved` holds delivery; `posted` means the shared operator-decision alert path accepted delivery. |
+| `rerun:<lowercase repo>:<headSha>:<runId>:<trimmed lowercase check>` | `runId`, `attempt`, `headSha`, `check`, `requestedAt` | Records the first observed cancelled run/attempt for a check/head. This observation alone does not consume the POST budget. |
+| `workflow-rerun:<lowercase repo>:<headSha>:<runId>` | `runId`, `attempt`, `state`, `reservedAt` | Deduplicates cancelled checks in one workflow. `reserved` holds an in-flight request; `posted` means the POST succeeded. |
+| `page:<lowercase repo>:<prNumber>:<headSha>:<dedupeKey>` | `reason`, `state`, `reservedAt` | `reserved` holds delivery; `posted` means the shared operator-decision alert path accepted delivery. |
 
 A rejected POST or alert delivery removes its exclusive action reservation.
 A later tick re-reads the PR head and workflow before retrying. Read calls use
 bounded GitHub retries; POST is attempted once per tick, because its response
 may be lost after GitHub accepts it. A queued/in-progress run prevents a second
-POST. A higher attempt or different workflow run for an existing check/head
+POST. A higher attempt on the same workflow run for an existing check/head
 pages once instead of requesting another rerun.
 
 Successful state updates use a sibling `.json.posted` temporary file and atomic
 rename. If persistence fails after an accepted action, the original reservation
 remains held. Legacy records with no `state` remain consumed for compatibility.
-A crash while an action is reserved has ambiguous delivery; there is no automatic
-expiry that could duplicate a successful request. Operators must inspect GitHub
-or alert delivery before removing such a reservation.
+Reserved actions older than 60 seconds are resumable. A workflow retry requires
+fresh exact-head evidence that the original attempt remains cancelled. Queued
+or higher attempts never receive a duplicate POST. Page retries use the shared
+durable, debounced alert path. Exclusive minute-scoped resume claims serialize
+concurrent ticks, including after interrupted recovery. Invalid legacy records
+use their file modification time as the grace-period origin.
 
 ## Retention and failure handling
 
@@ -53,5 +56,4 @@ Merge-agent dispatch records written by `src/follow-up-merge-agent.mjs` also
 carry `ciMode` and `ciBootstrap` (null, or `{mode, noCi?, headSha?}`). Only a
 `no-ci-bootstrap` mode bound to the exact current head can replace ordinary CI
 for an otherwise eligible clean or HAM-certified merge; every attempt refreshes
-repository and managed-attestation evidence. Hosting trust resolves through
-`ci.hosting.mode`, including config-file values and their environment alias.
+repository and managed-attestation evidence. Bootstrap always requires a valid Ed25519 runner signature and a configured public key, regardless of hosting mode. Exact-head statuses and check suites must also be empty.

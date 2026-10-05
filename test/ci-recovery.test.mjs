@@ -27,7 +27,9 @@ function noCiApi(calls, overrides = {}) {
     const path = args.at(-1);
     const result = path.includes('/actions/workflows') ? { total_count: 0, workflows: [] }
       : path.endsWith('/rules/branches/main') ? []
-      : path.endsWith('/branches/main') ? { name: 'main', protected: false } : undefined;
+      : path.endsWith('/branches/main') ? { name: 'main', protected: false }
+      : path.endsWith('/status') ? { total_count: 0, statuses: [] }
+      : path.endsWith('/check-suites') ? { total_count: 0, check_suites: [] } : undefined;
     if (result === undefined) throw new Error(`unexpected API: ${path}`);
     return { stdout: JSON.stringify(overrides[path] ?? result) };
   };
@@ -131,14 +133,14 @@ test('terminal and superseded PR heads cannot request recovery', async t => {
 });
 
 test('no-CI proof fails closed on workflows, required rules, protection and API errors', async () => {
-  assert.equal(await confirmNoCi({ repo, baseBranch: 'main', execFileImpl: noCiApi([]) }), true);
+  assert.equal(await confirmNoCi({ repo, headSha, baseBranch: 'main', execFileImpl: noCiApi([]) }), true);
   for (const overrides of [
     { [`repos/${repo}/actions/workflows?per_page=1`]: { total_count: 1, workflows: [{}] } },
     { [`repos/${repo}/rules/branches/main`]: [{ type: 'required_status_checks' }] },
     { [`repos/${repo}/branches/main`]: { name: 'main', protected: true } },
     { [`repos/${repo}/rules/branches/main`]: {} },
-  ]) assert.equal(await confirmNoCi({ repo, baseBranch: 'main', execFileImpl: noCiApi([], overrides) }), false);
-  assert.equal(await confirmNoCi({ repo, baseBranch: 'main', execFileImpl: async () => { throw new Error('403'); } }), false);
+  ]) assert.equal(await confirmNoCi({ repo, headSha, baseBranch: 'main', execFileImpl: noCiApi([], overrides) }), false);
+  assert.equal(await confirmNoCi({ repo, headSha, baseBranch: 'main', execFileImpl: async () => { throw new Error('403'); } }), false);
 });
 
 test('signed CI is bound to repo/head and tampering or missing keys fails closed', t => {
@@ -158,7 +160,7 @@ test('signed CI is bound to repo/head and tampering or missing keys fails closed
   assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir } }), false);
   const localRecord = { ...record, signature: undefined, mode: 'github', manifestHash: `sha256:${'a'.repeat(64)}` };
   writeFileSync(join(dir, `${headSha}.json`), JSON.stringify(localRecord));
-  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir, AGENT_OS_CI_HOSTING_MODE: 'github' } }), true);
+  assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir, AGENT_OS_CI_HOSTING_MODE: 'github' } }), false);
   assert.equal(readGreenManagedCi({ repo, headSha, env: { HQ_ROOT: rootDir,
     AGENT_OS_CI_HOSTING_MODE: 'self-hosted-container' } }), false);
 });
@@ -267,6 +269,8 @@ test('candidate fetch requires the watcher root and shares its budget with revie
   await fetchMergeAgentCandidate(repo, 2, options);
   assert.equal(posts, 0, 'HQ_ROOT never substitutes for watcher root');
   await fetchMergeAgentCandidate(repo, 2, { ...options, rootDir });
+  assert.equal(posts, 0, 'unverified review and switch cannot authorize side effects');
+  await fetchMergeAgentCandidate(repo, 2, { ...options, rootDir, reviewClean: true, autonomousMergeExecutionEnabled: true });
   await recoverCancelledChecks({ rootDir, repo, prNumber: 2, headSha, failedChecks: [check], execFileImpl });
   assert.equal(posts, 1, 'candidate and admission use the same workflow budget');
 });
@@ -289,4 +293,45 @@ test('Python-generated canonical fixture verifies DEL, non-ASCII, code-point key
   assert.equal(verifyManagedCiRecord(fixture.record, Buffer.from(fixture.publicKeyHex, 'hex'), { repo, headSha }), true);
   assert.equal(verifyManagedCiRecord({ ...fixture.record, checks: { ...fixture.record.checks, '2': 'tampered' } },
     Buffer.from(fixture.publicKeyHex, 'hex'), { repo, headSha }), false);
+});
+
+ test('stale reserved workflow resumes exactly once across concurrent ticks', async t => {
+  const rootDir = fixture(t);
+  let posts = 0;
+  const check = { name: 'ci', state: 'CANCELLED', detailsUrl: `https://github.com/${repo}/actions/runs/42` };
+  const execFileImpl = async (_cmd, args) => {
+    if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha }) };
+    if (args.includes('POST')) { posts++; return { stdout: '' }; }
+    return { stdout: JSON.stringify({ head_sha: headSha, status: 'completed', conclusion: 'cancelled', run_attempt: 1 }) };
+  };
+  const { createHash } = await import('node:crypto');
+  const dir = join(rootDir, 'dispatch', 'ci-recovery');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${createHash('sha256').update(`workflow-rerun:${repo}:${headSha}:42`).digest('hex')}.json`);
+  writeFileSync(path, JSON.stringify({ state: 'reserved', runId: '42', attempt: 1, reservedAt: '2020-01-01T00:00:00Z' }));
+  const args = { rootDir, repo, prNumber: 2, headSha, failedChecks: [check], execFileImpl };
+  await Promise.all([recoverCancelledChecks(args), recoverCancelledChecks(args)]);
+  assert.equal(posts, 1);
+  await recoverCancelledChecks(args);
+  assert.equal(posts, 1);
+ });
+ test('external CI statuses and suites prohibit bootstrap', async () => {
+  for (const overrides of [
+    { [`repos/${repo}/commits/${headSha}/status`]: { total_count: 1, statuses: [{}] } },
+    { [`repos/${repo}/commits/${headSha}/check-suites`]: { total_count: 1, check_suites: [{}] } },
+  ]) assert.equal(await confirmNoCi({ repo, headSha, baseBranch: 'main', execFileImpl: noCiApi([], overrides) }), false);
+ });
+
+test('stale and malformed page reservations recover through durable alert delivery', async t => {
+  const rootDir = fixture(t);
+  const { createHash } = await import('node:crypto');
+  const dir = join(rootDir, 'dispatch', 'ci-recovery');
+  mkdirSync(dir, { recursive: true });
+  const identity = `page:${repo}:2:${headSha}:repo has no CI`;
+  writeFileSync(join(dir, `${createHash('sha256').update(identity).digest('hex')}.json`),
+    JSON.stringify({ state: 'reserved', reservedAt: '2020-01-01T00:00:00Z' }));
+  let pages = 0;
+  const args = { rootDir, repo, prNumber: 2, headSha, reason: 'repo has no CI', deliverAlertImpl: async () => { pages++; } };
+  await Promise.all([pageCiOnce(args), pageCiOnce(args)]);
+  assert.equal(pages, 1);
 });

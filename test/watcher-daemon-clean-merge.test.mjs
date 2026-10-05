@@ -167,9 +167,15 @@ test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof
     const head = '2f1c6edc'.padEnd(40, '0');
     const attestationDir = join(rootDir, 'workers', 'builder', 'logs', 'ci-attestations');
     mkdirSync(attestationDir, { recursive: true });
-    writeFileSync(join(attestationDir, `${head}.json`), JSON.stringify({ schemaVersion: 1,
-      repo: 'acme/searchlight', headSha: head, verdict: 'green', mode: 'github',
-      manifestHash: `sha256:${'a'.repeat(64)}` }));
+    const { generateKeyPairSync, sign } = await import('node:crypto');
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const record = { schemaVersion: 1, repo: 'acme/searchlight', headSha: head,
+      verdict: 'green', mode: 'github', manifestHash: `sha256:${'a'.repeat(64)}` };
+    const payload = Object.fromEntries(Object.entries(record).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+    record.signature = sign(null, Buffer.from(JSON.stringify(payload)), privateKey).toString('hex');
+    writeFileSync(join(attestationDir, `${head}.json`), JSON.stringify(record));
+    const keyPath = join(rootDir, 'runner.pub');
+    writeFileSync(keyPath, publicKey.export({ format: 'der', type: 'spki' }).subarray(-32));
     let proofReads = 0;
     let merged = false;
     let attempted;
@@ -177,7 +183,7 @@ test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof
       cfg: { autonomousMergeExecutionEnabled: true, strictMode: true,
         branchProtection: { required: false }, lha: { consumeAttestations: false } },
       repoPath: 'acme/searchlight', prNumber: 2,
-      candidate: { baseBranch: 'main', headSha: head, prState: 'open' },
+      candidate: { baseBranch: 'main', headSha: head, prState: 'open', title: '[codex] bootstrap fixture' },
       gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'settled-success' } },
       reviewState: { blockingFindingCount: 0, blockingFindingState: 'known',
         nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' },
@@ -200,7 +206,9 @@ test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof
           const path = args.at(-1);
           const result = path.includes('/actions/workflows') ? { total_count: 0, workflows: [] }
             : path.endsWith('/rules/branches/main') ? []
-            : path.endsWith('/branches/main') ? { name: 'main', protected: false } : null;
+            : path.endsWith('/branches/main') ? { name: 'main', protected: false }
+            : path.endsWith('/status') ? { total_count: 0, statuses: [] }
+            : path.endsWith('/check-suites') ? { total_count: 0, check_suites: [] } : null;
           assert.notEqual(result, null, path);
           return { stdout: JSON.stringify(result) };
         }
@@ -208,7 +216,7 @@ test('CIUNKNOWN-01 bootstrap closes a clean head, audits mode and rechecks proof
         merged = true;
         return { stdout: '', stderr: '' };
       },
-      env: { HQ_ROOT: rootDir }, logger: { log() {}, warn() {} },
+      env: { HQ_ROOT: rootDir, AGENT_OS_CI_ATTESTATION_PUBLIC_KEY_PATH: keyPath }, logger: { log() {}, warn() {} },
     });
     assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
     assert.ok(proofReads >= 2);

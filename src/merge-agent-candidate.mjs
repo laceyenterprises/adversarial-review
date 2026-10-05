@@ -36,6 +36,7 @@ export function extractOperatorNotes(prBody) {
 export async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync, env = process.env,
   rootDir = null,
+  reviewClean = false, autonomousMergeExecutionEnabled = false,
   logger = console,
   recoverCancelledChecksImpl = recoverCancelledChecks,
   inspectCiBootstrapImpl = inspectCiBootstrap,
@@ -92,7 +93,7 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
   const checkSummary = summarizeExternalChecks(parsed.statusCheckRollup, { env, cfg: checksCfg });
   let recovering = false;
   let ciBootstrap = { mode: null };
-  if (rootDir && String(parsed.state).toUpperCase() === 'OPEN') {
+  if (reviewClean && autonomousMergeExecutionEnabled && rootDir && String(parsed.state).toUpperCase() === 'OPEN') {
     try {
       recovering = await recoverCancelledChecksImpl({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
         ...checkSummary, execFileImpl, env, signal });

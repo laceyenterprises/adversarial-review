@@ -8,7 +8,8 @@
       "store": "<watcher rootDir>/dispatch/ci-recovery/",
       "schemaSurface": "src/ci-recovery.mjs",
       "relatedSchemaSurfaces": ["src/daemon-clean-merge.mjs", "src/follow-up-merge-agent.mjs", "src/merge-agent-candidate.mjs", "src/reviewer-ci-admission.mjs", "src/reviewer-timeout-exhausted-dispatch.mjs"],
-      "owner": "adversarial-review watcher CI recovery"
+      "owner": "adversarial-review watcher CI recovery",
+      "reservationEvidenceFields": ["reservedAt", "state", "runId", "attempt"]
     },
     {
       "id": "automation-merge-actions",

@@ -854,7 +854,7 @@ export async function runDaemonCleanMergeAttempt({
     return head === liveHead && liveHead === validatedHead
       && String(rollup?.mergeable).toUpperCase() === 'MERGEABLE'
       && summary.pendingChecks.length === 0
-      && (emptyExternalRollup(checks, requiredGateContext)
+      && ((ciBootstrap.noCi === true && emptyExternalRollup(checks, requiredGateContext))
         || (recoveringCancelled && summary.failedChecks.every(check => check.state === 'CANCELLED')));
   };
   ciMergePathPending = mergePathPendingFor(liveRollup);

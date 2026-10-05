@@ -1999,10 +1999,9 @@ An empty rollup still means unknown. No-CI bootstrap additionally queries the
 repository's workflow inventory, base branch, classic protection when applicable,
 and effective ruleset rules. Unreadable APIs, configured required contexts, or a
 pending adversarial status cannot authorize bootstrap. Green managed pre-push
-evidence must match the repository and full head SHA: GitHub hosting accepts the
-owner-controlled local sidecar. Hosting mode resolves through `ci.hosting.mode`
-(config file plus env alias), and an unreadable configuration fails closed.
-Full-mirror hosting requires the deploy-owned CI runner public key and a valid Ed25519 signature. Budget-deferred evidence is
+evidence must match the repository and full head SHA and carry a valid Ed25519
+runner signature verified with the deploy-owned public key in every hosting mode.
+Exact-head commit statuses and check suites must also be empty. Budget-deferred evidence is
 never green for bootstrap. Without evidence, the watcher pages once with
 `repo has no CI`.
 
@@ -2022,3 +2021,5 @@ merge-agent's immediate pre-merge verification. Audits flag
 Repository stand-up should provision a minimal CI workflow (agent-os
 STANDUPCI-01). This repository only handles the existing zero-CI gap; provisioning
 is follow-up work in agent-os.
+
+HAM hardening: stale CI action reservations resume after 60 seconds using fresh workflow evidence and exclusive recovery claims. Bootstrap requires signed Ed25519 evidence in every hosting mode and empty exact-head commit-status/check-suite APIs. Empty rollups with configured workflows fall through to bounded HAM escalation. Candidate side effects require explicit clean-review and execution-switch authority; timeout handoffs cannot supply that authority. The bootstrap verifier retries GitHub reads; exit 75 permits bounded retry and exit 65 means missing evidence.

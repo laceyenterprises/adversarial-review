@@ -662,7 +662,9 @@ for (const reason of ['primary-change-needs-operator', 'primary-change-repair-re
         outcome: 'await-operator', amaClosureResult: result,
       }),
     });
-    assert.equal((await run(['merge-agent-requested'])).outcome, 'dispatch-merge-agent');
+    const result = await run(['merge-agent-requested']);
+    assert.equal(result.outcome, 'dispatch-merge-agent');
+    assert.deepEqual(result.dispatchEnv, { AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true' });
     assert.deepEqual(aborted, [`${args.repoPath}#${args.prNumber}@${HEAD}`]);
     for (const stop of ['no-merge-hold', 'do-not-merge', 'merge-agent-skip',
       'adversarial-merge-blocked', 'merge-agent-stuck', 'duplicate-family-hold']) {
@@ -670,6 +672,43 @@ for (const reason of ['primary-change-needs-operator', 'primary-change-repair-re
     }
     assert.notEqual((await run(['merge-agent-requested'], scopedEvent('old-head'))).outcome, 'dispatch-merge-agent');
     assert.equal(aborted.length, 1, 'blocked and stale requests do not abort work');
+  });
+}
+
+for (const marker of ['needsOperator', 'manualCloseRequired']) {
+  test(`MAFALLBACK-02: #7716 daemon hold with ${marker} uses scoped operator fallback`, async (t) => {
+    const args = closureArgs();
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    const logs = [];
+    const run = (labels, event = scopedEvent(), reason = 'primary-change-needs-operator', marked = true) =>
+      resolveMergeAgentCoexistenceForWatcher({
+        ...args, labelNames: labels, mergeAgentRequestEvent: event,
+        logger: { info() {}, log: (line) => logs.push(JSON.parse(line)) },
+        maybeDispatchAmaClosureForImpl: async () => ({
+          amaEnabled: true, dispatched: false, skipMergeAgent: true, reason: 'daemon-failed-closed',
+          daemonCleanMerge: { disposition: 'failed-closed', reason, [marker]: marked,
+            reasons: [reason === 'two-key' ? 'two-key' : 'primary-change-reverted'] },
+        }),
+        recoveryOptions: { pageImpl: async () => assert.fail('safety holds do not page recovery') },
+      });
+    const result = await run(['merge-agent-requested']);
+    assert.equal(result.outcome, 'dispatch-merge-agent');
+    assert.deepEqual(result.dispatchEnv, { AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true' });
+    const log = logs.find((entry) => entry.event === 'ama.primary_change.operator_fallback');
+    assert.equal(log.path, 'daemon-clean-merge');
+    assert.equal(log.reason, 'primary-change-needs-operator');
+    assert.deepEqual(log.reasons, ['primary-change-reverted']);
+    for (const [labels, event, reason, marked] of [
+      [[], scopedEvent()],
+      [['merge-agent-requested'], scopedEvent('old-head')],
+      [['merge-agent-requested', 'no-merge-hold'], scopedEvent()],
+      [['merge-agent-requested'], scopedEvent(), 'two-key'],
+      [['merge-agent-requested'], scopedEvent(), 'primary-change-needs-operator', false],
+    ]) {
+      const held = await run(labels, event, reason, marked);
+      assert.equal(held.outcome, 'await-operator');
+      assert.equal(held.dispatchEnv, undefined);
+    }
   });
 }
 

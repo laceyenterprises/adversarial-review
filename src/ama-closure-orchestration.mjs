@@ -2212,10 +2212,17 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   // A newly submitted background run has not evaluated its gates yet and
   // cannot be preempted. Unknown dispatch status retains ownership even after
   // lease expiry: age alone cannot prove that the hammer has stopped.
-  const amaClosureOperatorPreemptable = (
-    ['primary-change-needs-operator', 'primary-change-repair-required'].includes(amaClosureResult?.reason)
-      && amaClosureResult?.needsOperator === true
+  const primaryChangeOperatorHold = (result, daemon = false) => (
+    ['primary-change-needs-operator', 'primary-change-repair-required'].includes(result?.reason)
+      && (result?.needsOperator === true || (daemon && result?.manualCloseRequired === true))
   );
+  const operatorHoldPath = primaryChangeOperatorHold(amaClosureResult?.daemonCleanMerge, true)
+    ? 'daemon-clean-merge'
+    : primaryChangeOperatorHold(amaClosureResult)
+      ? 'closer' : null;
+  const operatorHold = operatorHoldPath === 'daemon-clean-merge'
+    ? amaClosureResult.daemonCleanMerge : amaClosureResult;
+  const amaClosureOperatorPreemptable = operatorHoldPath !== null;
   const mergeAgentRequestedScoped = !labelNames?.some((label) =>
     ['merge-agent-skip', 'do-not-merge', 'no-merge-hold', 'adversarial-merge-blocked',
       'merge-agent-stuck', 'duplicate-family-hold'].includes(label))
@@ -2253,7 +2260,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     logger?.log?.(JSON.stringify({ event: 'ama.primary_change.operator_fallback',
       repo: repoPath, pr: prNumber, headSha: currentRevisionRef || candidate?.headSha,
       actor: mergeAgentRequestEvent.actor, eventId: mergeAgentRequestEvent.id,
-      reasons: amaClosureResult.reasons }));
+      path: operatorHoldPath, reason: operatorHold.reason, reasons: operatorHold.reasons }));
     return { outcome: 'dispatch-merge-agent', amaClosureResult, coexistence,
       dispatchEnv: mergeAgentDispatchEnvForAction(coexistence.action) };
   }

@@ -2117,8 +2117,14 @@ HAMCIWAKE-01: `closer-commit-trailer` review-spawn suppression also supports
 CI-green resume. A bounded ancestry walk must prove that every commit since the
 reviewed head is a closer commit before the watcher reads that head's verdict
 and findings; CI and mergeability still refer to the exact live head. A pending-only
-hammer exit durably records `resumeOwed` and `resumeHead` in its deferred audit
-and logs `hammer-ci-pending-resume-owed`. The CI-green wake resumes the normal
-leased, per-head-budgeted verify-and-merge lane without minting a review. The
+hammer exit durably records audit-only `resumeOwed` and `resumeHead` diagnostics
+and logs `hammer-ci-pending-resume-owed`; no runtime consumer reads these fields.
+The watcher independently proves ancestry and reads live CI each tick. Pending-only
+CI returns an ordinary recovery wait without a hammer retry or recovery charge;
+red CI still enters the capped hammer repair lane. A pending deferral marks the
+lease retryable before release even if the audit append fails (exit 1 still
+reports that write failure). The CI-green wake resumes the normal leased
+verify-and-merge lane without minting a review. Each new closer head has its own
+dispatch budget; the lifetime ceiling bounds repeated closer pushes across heads. The
 orphan watchdog covers `blocking-findings-unknown` only beside `stale-review-head`
 and a proven closer head; all other refusal reasons retain their existing rules.

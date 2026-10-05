@@ -68,6 +68,7 @@ import {
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
+import { classifyCheckRollup } from './checks-summary.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -1010,7 +1011,7 @@ export async function maybeDispatchAmaClosureFor({
   const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
   // COMMENTCLOSE-01: a verdict resolved through a recorded final-round push came
   // from the REVIEWED head, so its live reconcile reads that head's reviews.
-  const liveReviewHeadSha = closerOnlyHeadDelta || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
+  let liveReviewHeadSha = closerOnlyHeadDelta || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
     ? gateSnapshot.reviewedHeadSha
     : settledReviewHeadSha;
   if (
@@ -1044,6 +1045,7 @@ export async function maybeDispatchAmaClosureFor({
         if (currentBodies.length > 0) {
           closerOnlyHeadDelta = false;
           evidenceHeadSha = settledReviewHeadSha;
+          liveReviewHeadSha = settledReviewHeadSha;
         }
       }
       const bodies = authoritativeReviewerLogins.length
@@ -1052,7 +1054,7 @@ export async function maybeDispatchAmaClosureFor({
             ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
               repoPath,
               prNumber,
-              headSha: evidenceHeadSha,
+              headSha: liveReviewHeadSha,
               authoritativeReviewerLogins,
               fetchLatestHeadReviewBodiesImpl,
               retryDelaysMs: liveReviewRetryDelaysMs,
@@ -1159,10 +1161,10 @@ export async function maybeDispatchAmaClosureFor({
   throwIfAborted(signal);
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
-    // `headSha` is the head the adversarial reviewer actually reviewed. MSM-04
-    // keeps it as the stable hammer dispatch key; a stale live head may be the
-    // remediation target only when it proves to be an already-closer-authored
-    // HAM continuation, never an unreviewed human push.
+    // `headSha` remains the reviewed evidence identity. Ordinary MSM-04 dispatch
+    // uses it as the stable budget key; proven closer-only continuations use the
+    // live closer head's budget, with repeated pushes bounded by the lifetime cap.
+    // An unreviewed human push cannot inherit that continuation authority.
     headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
@@ -1357,11 +1359,15 @@ export async function maybeDispatchAmaClosureFor({
     );
   }
 
-  // A closer's parked head resumes only after exact-head CI is green. Keep
-  // the bounded worker exited; the watcher and orphan watchdog own the wait.
-  if (closerOnlyHeadDelta && disabledEligibility.reasons.includes('ci-not-green')) {
+  // Pending-only CI on a closer's parked head is an ordinary watcher wait.
+  // Red or unknown CI still reaches the capped hammer repair lane.
+  if (closerOnlyHeadDelta && disabledEligibility.reasons.length === 1
+    && disabledEligibility.reasons.includes('ci-not-green')
+    && classifyCheckRollup(prMetadata.statusCheckRollup, {
+      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
+    }) === 'PENDING') {
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
-      reason: 'closer-head-ci-not-green', reasons: ['ci-not-green'] }, { amaEnabled: true });
+      recoveryWait: true, reason: 'closer-head-ci-not-green', reasons: ['ci-not-green'] }, { amaEnabled: true });
   }
 
   let allowStaleReviewHeadHammerResume = false;

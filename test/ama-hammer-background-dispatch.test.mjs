@@ -900,47 +900,105 @@ test('abort removes a queued task without launching it', async () => {
   assert.equal(launched, false);
 });
 
-for (const scenario of ['green', 'red', 'worker', 'blocking', 'live-blocking']) {
+function closerResumeFixture(scenario) {
+  const body = SETTLED_BODY.replace('- None.', scenario === 'blocking' ? '- Blocking defect.' : '- None.')
+    .replace('## Non-blocking Issues\n\n- None.', '## Non-blocking Issues\n\n- Measurement evidence needs clarification.');
+  const wakes = [];
+  const payloads = [];
+  const liveHeads = [];
+  const args = closureArgs({
+    resolveAmaHammerDispatchModeImpl: () => 'inline',
+    resolveReviewCycleExhaustionImpl: () => ({ riskClass: 'low', reviewCycleExhausted: false }),
+    fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => {
+      liveHeads.push(head);
+      return head === HEAD ? [body]
+        : scenario === 'live-blocking' ? ['## Verdict\nRequest changes\n## Blocking Issues\n- Live defect.']
+          : scenario === 'live-clean' ? [body] : [];
+    },
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: scenario !== 'worker', reason: 'closer-commit-trailer' }),
+    fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: 'H1', parentSha: HEAD, message: 'Closed-By: hammer' }),
+    resolveHamTerminalRemediationEvidenceImpl: async () => null,
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible', reasons: [] }),
+    fetchMergedProtectiveDependentsImpl: async () => [],
+    fetchProtectivePredecessorStateImpl: async () => null,
+    requestEligibleHammerWakeImpl: options => { wakes.push(options); },
+    maybeDispatchAmaCloserImpl: async payload => { payloads.push(payload); return { dispatched: true }; },
+  });
+  args.reviewStateRow.review_body = body;
+  args.candidate.headSha = 'H1';
+  args.currentRevisionRef = 'H1';
+  args.candidate.statusCheckRollup = scenario === 'unknown' ? [] : [{ __typename: 'CheckRun', name: 'test',
+    status: scenario.startsWith('pending') ? 'IN_PROGRESS' : 'COMPLETED',
+    conclusion: ['red', 'red-and-pending'].includes(scenario) ? 'FAILURE' : scenario.startsWith('pending') ? null : 'SUCCESS' }];
+  if (scenario === 'red-and-pending') args.candidate.statusCheckRollup.push({
+    __typename: 'CheckRun', name: 'other', status: 'IN_PROGRESS', conclusion: null,
+  });
+  args.candidate.branchProtection.requiredContexts = [];
+  if (scenario === 'pending-conflict') {
+    args.candidate.mergeable = 'CONFLICTING';
+    args.candidate.mergeStateStatus = 'DIRTY';
+  }
+  args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, branchProtection: { required: false } }) });
+  return { args, wakes, payloads, liveHeads };
+}
+
+for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-pending', 'unknown', 'worker', 'blocking', 'live-blocking', 'live-clean']) {
   test(`HAMCIWAKE-01 watcher reviewed H0 -> closer H1: ${scenario}`, async t => {
-    const body = SETTLED_BODY.replace('- None.', scenario === 'blocking' ? '- Blocking defect.' : '- None.')
-      .replace('## Non-blocking Issues\n\n- None.', '## Non-blocking Issues\n\n- Measurement evidence needs clarification.');
-    const wakes = [];
-    const payloads = [];
-    const args = closureArgs({
-      resolveAmaHammerDispatchModeImpl: () => 'inline',
-      resolveReviewCycleExhaustionImpl: () => ({ riskClass: 'low', reviewCycleExhausted: false }),
-      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === HEAD ? [body]
-        : scenario === 'live-blocking' ? ['## Verdict\nRequest changes\n## Blocking Issues\n- Live defect.'] : [],
-      resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: scenario !== 'worker', reason: 'closer-commit-trailer' }),
-      fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: 'H1', parentSha: HEAD, message: 'Closed-By: hammer' }),
-      resolveHamTerminalRemediationEvidenceImpl: async () => null,
-      runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible', reasons: [] }),
-      fetchMergedProtectiveDependentsImpl: async () => [],
-      fetchProtectivePredecessorStateImpl: async () => null,
-      requestEligibleHammerWakeImpl: options => { wakes.push(options); },
-      maybeDispatchAmaCloserImpl: async payload => { payloads.push(payload); return { dispatched: true }; },
-    });
+    const { args, wakes, payloads, liveHeads } = closerResumeFixture(scenario);
     t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
-    args.reviewStateRow.review_body = body;
-    args.candidate.headSha = 'H1';
-    args.currentRevisionRef = 'H1';
-    args.candidate.statusCheckRollup = [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED',
-      conclusion: scenario === 'red' ? 'FAILURE' : 'SUCCESS' }];
-    args.candidate.branchProtection.requiredContexts = [];
-    args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, branchProtection: { required: false } }) });
-    await maybeDispatchAmaClosureFor(args);
+    const result = await maybeDispatchAmaClosureFor(args);
     assert.equal(wakes.length, 1);
     assert.equal(wakes[0].headSha, 'H1');
     assert.equal(wakes[0].eligibility.eligible, scenario === 'green');
-    assert.equal(payloads.length, scenario === 'red' ? 0 : 1);
-    if (scenario === 'red') return;
+    assert.equal(payloads.length, scenario === 'pending' ? 0 : 1);
+    if (scenario === 'pending') {
+      assert.equal(result.reason, 'closer-head-ci-not-green');
+      assert.equal(result.recoveryWait, true);
+      return;
+    }
+    if (scenario.startsWith('live-')) assert.deepEqual(liveHeads, ['H1', 'H1'], 'live closer-head review supersedes H0');
     assert.equal(payloads[0].reviewState.headSha, HEAD);
     assert.equal(payloads[0].prMetadata.headSha, 'H1');
-    assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, !['worker', 'live-blocking'].includes(scenario));
+    assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, !['worker', 'live-blocking', 'live-clean'].includes(scenario));
     if (scenario === 'green') {
       assert.equal(payloads[0].reviewState.verdict, 'comment-only');
       assert.equal(payloads[0].reviewState.blockingFindingCount, 0);
       assert.equal(payloads[0].reviewState.nonBlockingFindingCount, 1);
     }
+    if (scenario === 'red') {
+      assert.equal(payloads[0].prMetadata.statusCheckRollup[0].conclusion, 'FAILURE');
+      assert.equal(payloads[0].dispatchContext.dispatchRecordHeadSha, 'H1');
+    }
   });
 }
+
+test('pending closer-head CI remains an ordinary coexistence wait beyond the recovery deadline', async t => {
+  const { args, payloads } = closerResumeFixture('pending');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  let evaluations = 0;
+  const pages = [];
+  const reviews = [];
+  for (const minutes of [0, 15, 31, 61]) {
+    const result = await resolveMergeAgentCoexistenceForWatcher({
+      ...args,
+      maybeDispatchAmaClosureForImpl: options => {
+        evaluations += 1;
+        return maybeDispatchAmaClosureFor({ ...args, ...options });
+      },
+      recoveryOptions: {
+        now: () => minutes * 60_000,
+        pageImpl: async page => pages.push(page),
+        requestRereviewImpl: async request => { reviews.push(request); return { triggered: true }; },
+      },
+    });
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(result.amaClosureResult.recoveryWait, true);
+    assert.equal(result.recovery.attempts, 0);
+    assert.equal(result.recovery.blockedSince, undefined);
+    assert.equal(result.recovery.event, undefined);
+  }
+  assert.equal(evaluations, 4, 'one closure evaluation per tick; no recovery hammer retry');
+  assert.deepEqual(payloads, []);
+  assert.deepEqual(pages, []);
+  assert.deepEqual(reviews, []);
+});

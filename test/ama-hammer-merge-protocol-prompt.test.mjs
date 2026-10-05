@@ -569,5 +569,42 @@ test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent'
   assert.match(HAMMER_PROMPT, /resumeOwed: \(\$reason == "required-checks-pending"\)/);
   assert.match(HAMMER_PROMPT, /resumeHead:.*\$validatedHead/);
   assert.match(HAMMER_PROMPT, /hammer-ci-pending-resume-owed head=\$POST_REMEDIATION_SHA/);
-  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| \{ ham_release_merge_lease; return 1; \}/);
+  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| \{\s*ham_mark_merge_lease_retryable_abort required-checks-pending\s*ham_release_merge_lease\s*return 1\s*\}/);
 });
+
+for (const auditFails of [false, true]) {
+  test(`pending CI marks the lease retryable before release when audit fails=${auditFails}`, () => {
+    const source = readFileSync(join(REPO_ROOT, 'bin', 'hammer-merge.sh'), 'utf8');
+    const start = source.indexOf('HAM_REMOTE_CI_GATE_READ_FAILURES=0\nHAM_ALREADY_MERGED_VALIDATED_HEAD=0');
+    const end = source.indexOf('\n  # Remote CI does not own', start);
+    assert.ok(start > 0 && end > start);
+    const script = `
+      ham_refresh_github_gate() { return 0; }
+      ham_already_merged_validated_head() { return 1; }
+      ham_live_head_moved() { return 1; }
+      ham_required_gate_ok() { return 1; }
+      ham_required_gate_red() { return 1; }
+      ham_required_gate_pending_only() { return 0; }
+      jq() { return 0; }
+      ham_append_terminal_audit() { echo audit:$1:$2; return ${auditFails ? 1 : 0}; }
+      ham_mark_merge_lease_retryable_abort() { marker="$1"; echo marker:$marker; }
+      ham_release_merge_lease() { echo release:$marker; }
+      HAM_REMOTE_CI_DEADLINE=0
+      HAM_GATE_JSON=/dev/null
+      POST_REMEDIATION_SHA=validated-head
+      run_pending_gate() {
+        ${source.slice(start, end)}
+        done
+      }
+      run_pending_gate
+    `;
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, auditFails ? 1 : 20, result.stderr);
+    assert.deepEqual(result.stdout.trim().split('\n'), [
+      'audit:deferred:required-checks-pending',
+      'marker:required-checks-pending',
+      'release:required-checks-pending',
+    ]);
+  });
+}

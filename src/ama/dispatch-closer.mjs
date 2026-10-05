@@ -3685,7 +3685,7 @@ export function substituteTemplate(body, substitutions) {
   let out = body;
   for (const [key, value] of Object.entries(substitutions)) {
     const placeholder = new RegExp(`<<${key}>>`, 'g');
-    out = out.replace(placeholder, String(value));
+    out = out.replace(placeholder, () => String(value));
   }
   return out;
 }
@@ -3753,6 +3753,7 @@ export function composeCloserPrompt({
     REVIEWER: reviewer,
     DISPATCHED_AT: dispatchedAt,
     AMA_TRAILERS: amaTrailers,
+    AMA_TRAILERS_SHELL: `'${String(amaTrailers).replaceAll("'", "'\\''")}'`,
     // Dispatch-time final-hammer observation forwarded only as audit context;
     // ama-check recomputes the durable ledger state before applying waivers.
     REVIEW_CYCLE_EXHAUSTED: reviewCycleExhausted === true ? 'true' : 'false',
@@ -4897,6 +4898,7 @@ export async function maybeDispatchAmaCloser({
               mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
             },
             mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
+            prTitle: String(prMetadata?.title ?? ''),
             prBody: String(prMetadata?.body ?? dispatchContext?.prBody ?? ''),
             fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
               const protector = await fetchPullRequestRollupImpl(repo, protectorPrNumber, { execFileImpl });
@@ -4968,7 +4970,7 @@ export async function maybeDispatchAmaCloser({
                 acquiredAt: lease.acquiredAt,
               });
             },
-            runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method }) => {
+            runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body, subject }) => {
               const methodFlag = method === 'merge' ? '--merge' : '--squash';
               const args = [
                 'pr',
@@ -4979,8 +4981,10 @@ export async function maybeDispatchAmaCloser({
                 methodFlag,
                 '--match-head-commit',
                 head,
+                '--subject',
+                subject,
                 '--body',
-                amaTrailers,
+                body,
               ];
               return runGhPrMergeWithTransientRetry({
                 execFileImpl,

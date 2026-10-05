@@ -2,6 +2,7 @@
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_merge_phase() {
 HAM_PHASE_OUTCOME=merge-error
+HAM_CLOSING_KEYWORD_REWRITES='[]'
 HAM_OWN_MERGE_EXECUTED=0
 HAM_MERGE_EXIT=1
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
@@ -57,6 +58,7 @@ ham_append_terminal_audit() {
     --arg failingTestsFixed "${HAM_FAILING_TESTS_FIXED:-}" \
     --arg mergeCommit "${HAM_MERGE_COMMIT:-}" \
     --arg mergedAt "${HAM_MERGED_AT:-}" \
+    --argjson closingKeywordRewrites "${HAM_CLOSING_KEYWORD_REWRITES:-[]}" \
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson preMergeEligible "${HAM_PRE_MERGE_ELIGIBLE:-0}" \
@@ -76,6 +78,7 @@ ham_append_terminal_audit() {
       failingTestsFixed: $failingTestsFixed,
       rebaseAttempts: $rebaseAttempts,
       mergeAttempts: $mergeAttempts,
+      closingKeywordRewrites: $closingKeywordRewrites,
       mergeCommitSha: $mergeCommit,
       mergedAt: $mergedAt,
       reason: $reason,
@@ -718,10 +721,59 @@ $HAM_PROTECTIVE_PREDECESSORS
 EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
 
+  ham_commit_message_abort() {
+    ham_append_terminal_audit failed-without-merge "$1" || true
+    ham_mark_merge_lease_retryable_abort "$1"
+    ham_release_merge_lease
+  }
+  HAM_PR_TITLE=""
+  ham_read_protective_predecessor_value title HAM_PR_TITLE \
+    gh pr view <<PR_URL>> --json title --jq '.title // ""'
+  HAM_TITLE_READ_STATUS=$?
+  if [ "$HAM_TITLE_READ_STATUS" -ne 0 ]; then
+    if [ "$HAM_TITLE_READ_STATUS" -eq 1 ]; then
+      ham_commit_message_abort commit-title-read-failed
+      return 1
+    fi
+    ham_append_terminal_audit failed-without-merge commit-title-read-failed || true
+    ham_release_merge_lease
+    return 20
+  fi
+  if [ -z "${HAM_PR_TITLE//[[:space:]]/}" ]; then
+    ham_commit_message_abort merge-title-missing
+    return 1
+  fi
+  export HAM_PR_TITLE
+  HAM_COMMIT_BODY_JSON=$(printf '%s' "$HAM_PROTECTIVE_PREDECESSOR_BODY" |
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>>) || {
+    HAM_SANITIZER_STATUS=$?
+    if [ "$HAM_SANITIZER_STATUS" -eq 64 ] || [ "$HAM_SANITIZER_STATUS" -eq 78 ]; then
+      ham_append_terminal_audit failed-without-merge commit-body-sanitization-failed || true
+      ham_release_merge_lease
+      return 20
+    fi
+    ham_commit_message_abort commit-body-sanitization-failed
+    return 1
+  }
+  HAM_COMMIT_BODY=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.text') || {
+    ham_commit_message_abort commit-body-decode-failed
+    return 1
+  }
+  HAM_COMMIT_SUBJECT=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.subject') || {
+    ham_commit_message_abort commit-subject-decode-failed
+    return 1
+  }
+  HAM_CLOSING_KEYWORD_REWRITES=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -ce '.rewrites | select(type == "array")') || {
+    ham_commit_message_abort commit-rewrites-decode-failed
+    return 1
+  }
+
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
+    --subject "$HAM_COMMIT_SUBJECT" \
+    --body "$HAM_COMMIT_BODY" \
     > "$HAM_MERGE_STDOUT" \
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?

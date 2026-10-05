@@ -483,7 +483,8 @@ export function appendAmaAuditAttempt({
 
 /**
  * Compose the SPEC §4.4 provenance trailers as a string the closer
- * worker pipes to `gh pr merge --body-from-stdin` (or its equivalent
+ * worker combines with the PR body and sanitizes via buildMergeCommitBody
+ * before passing an explicit `gh pr merge --body` (or its equivalent
  * for `merge_method: merge`).
  *
  * Trailers are byte-for-byte the SPEC §4.4 list:

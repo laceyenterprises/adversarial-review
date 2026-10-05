@@ -36,9 +36,24 @@
       "relatedSchemaSurfaces": [
         "bin/ama-audit.mjs",
         "templates/hammer-prompt.md",
-        "src/ama/daemon-merge.mjs"
+        "src/ama/daemon-merge.mjs",
+        "bin/hammer-merge.sh",
+        "src/ama/closing-keywords.mjs"
       ],
-      "owner": "AMA merge authority"
+      "owner": "AMA merge authority",
+      "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"]
+    },
+    {
+      "id": "fast-merge-audits",
+      "title": "Fast-Merge Audits",
+      "path": "docs/data-model/fast-merge-audits.md",
+      "store": "data/fast-merge-audits/",
+      "schemaSurface": "src/fast-merge-processing.mjs",
+      "relatedSchemaSurfaces": ["src/fast-merge-audit-storage.mjs", "src/fast-merge-audit-recovery.mjs", "src/ama/closing-keywords.mjs"],
+      "owner": "Fast-merge close processing",
+      "messageRewriteFields": ["closingKeywordRewrites"],
+      "mergeWritePathValues": ["gh-admin-explicit-message", null],
+      "mergeActor": "nullable ambient gh login for the attempted write"
     },
     {
       "id": "follow-up-jobs",

@@ -141,6 +141,7 @@ function baseArgs(harness, overrides = {}) {
   return {
     repo: 'o/r',
     prNumber: 7,
+    prTitle: 'Preserve author title',
     base: 'main',
     validatedHead: HEAD,
     verdict: 'settled-success',
@@ -995,3 +996,29 @@ for (const failure of ['TLS handshake timeout', 'unrecognized merge error']) {
     assert.equal(receipts.length, 0);
   });
 }
+
+for (const authority of ['daemon-merge', 'ham-terminal-remediation']) {
+  test(`${authority} supplies sanitized PR body plus trailers and audits rewrites`, async () => {
+    const harness = makeHarness();
+    const result = await attemptDaemonCleanMerge(baseArgs(harness, {
+      prTitle: 'Fix #7732 regression',
+      prBody: 'Fix: #7732\nResolves #7\nCloses https://github.com/o/r/pull/99',
+      auditMetadata: { closureAuthority: authority, closeTrailers: 'Closed-By: hammer' },
+    }));
+    assert.equal(result.disposition, 'merged');
+    assert.equal(harness.lastMergeCtx.body, 'Fix: PR #7732\nResolves #7\nCloses PR https://github.com/o/r/pull/99\n\nClosed-By: hammer');
+    assert.equal(harness.lastMergeCtx.subject, 'Fix PR #7732 regression (#7)');
+    assert.deepEqual(harness.calls.auditWrites[0].metadata.closingKeywordRewrites.map(r => r.referencedNumber), [7732, 7732, 99]);
+  });
+}
+
+test('missing title defers before acquiring the merge lease or writing a placeholder', async () => {
+  for (const prTitle of ['', '  \n']) {
+    const harness = makeHarness();
+    const result = await attemptDaemonCleanMerge(baseArgs(harness, { prTitle }));
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(result.reason, 'merge-title-missing');
+    assert.equal(harness.calls.merge, 0);
+    assert.equal(harness.calls.acquire, 0);
+  }
+});

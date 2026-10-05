@@ -1,3 +1,4 @@
+import { fetchMergeAgentCandidate } from '../src/follow-up-merge-agent.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import fs from 'node:fs';
@@ -69,6 +70,7 @@ function hammerDispatchArgs(rootDir, overrides = {}) {
     },
     prMetadata: {
       prNumber: PR_NUMBER,
+      title: 'Preserve author title',
       headSha: REVIEWED_HEAD,
       isOpen: true,
       isDraft: false,
@@ -1005,10 +1007,21 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   });
   assert.equal(first.dispatched, true);
   const mergeCalls = [];
+  const candidate = await fetchMergeAgentCandidate(REPO, PR_NUMBER, {
+    execFileImpl: async (_cmd, args) => {
+      const livePr = { title: 'Fix #7732 regression', body: 'Fix: #7732', headRefOid: REVIEWED_HEAD,
+        state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],
+        statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] };
+      // Model gh --json: unrequested fields never reach the production candidate.
+      const fields = args[args.indexOf('--json') + 1].split(',');
+      return { stdout: JSON.stringify(Object.fromEntries(fields.map(field => [field, livePr[field]]))) };
+    },
+  });
   const successProbe = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(successRoot, {
       reviewState: { reviewCycleExhausted: true },
       prMetadata: {
+        ...candidate,
         statusCheckRollup: [
           { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
         ],
@@ -1032,6 +1045,8 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
           const bodyIndex = args.indexOf('--body');
           assert.notEqual(bodyIndex, -1);
           assert.match(args[bodyIndex + 1], /Closed-By: hammer \(adversarial-pipe-mode\)/);
+          assert.match(args[bodyIndex + 1], /Fix: PR #7732/);
+          assert.equal(args[args.indexOf('--subject') + 1], `Fix PR #7732 regression (#${PR_NUMBER})`);
           assert.deepEqual(args.slice(0, 8), [
             'pr', 'merge', String(PR_NUMBER), '--repo', REPO, '--squash', '--match-head-commit', REVIEWED_HEAD,
           ]);

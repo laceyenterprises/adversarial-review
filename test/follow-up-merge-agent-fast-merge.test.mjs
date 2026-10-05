@@ -70,6 +70,7 @@ function openView(head = 'sha-A', labels = [{ name: 'fast-merge:docs' }]) {
     closedAt: null,
     headRefOid: head,
     labels,
+    title: 'Preserve author title',
     body: '',
   };
 }
@@ -327,7 +328,7 @@ test('fast-merge happy path merges authorized green head and writes audit', asyn
   assert.equal(audits.at(-1).authorized_head_sha, 'sha-A');
   assert.equal(audits.at(-1).merged_head_sha, 'sha-A');
   assert.equal(audits.at(-1).merge_sha, 'feedfacefeedfacefeedfacefeedfacefeedface');
-  assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-A', '--delete-branch']);
+  assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--body', 'Closed-By: fast-merge', '--delete-branch']);
 });
 
 test('fast-merge requeues instead of admin-merging while protective predecessor is open', async () => {
@@ -391,7 +392,7 @@ test('fast-merge distinguishes missing protective predecessor PRs from unreadabl
   assert.equal(audits.at(-1).failure_reason, 'protective-predecessor-not-found');
 });
 
-test('fast-merge uses adapter mutation after eligibility checks and still writes audit', async () => {
+test('fast-merge uses explicit gh body when discovered adapter cannot forward it', async () => {
   const db = makeDb();
   seedFastMerge(db, 802);
   const rootDir = mkdtempSync(path.join(tmpdir(), 'fast-merge-adapter-root-'));
@@ -427,28 +428,14 @@ test('fast-merge uses adapter mutation after eligibility checks and still writes
 
   assert.equal(result.status, 'merged');
   assert.equal(row(db, 802).pr_state, 'fast_merge_merged');
-  assert.equal(mergeCalls(gh).length, 0);
-  assert.deepEqual(calls.find((call) => call.cmd === adapterBin).args, [
-    'write',
-    '--kind',
-    'pull-request-merge',
-    '--json',
-    '--repo',
-    REPO,
-    '--pr-number',
-    '802',
-    '--match-head-commit',
-    'sha-A',
-    '--merge-method',
-    'squash',
-    '--delete-branch',
-    '--admin',
-  ]);
+  assert.equal(mergeCalls(gh).length, 1);
+  assert.equal(calls.some(call => call.cmd === adapterBin), false);
+  assert.equal(mergeCalls(gh)[0].args[mergeCalls(gh)[0].args.indexOf('--body') + 1], 'Closed-By: fast-merge');
   assert.equal(audits.at(-1).authorized_head_sha, 'sha-A');
   assert.equal(audits.at(-1).merged_head_sha, 'sha-A');
 });
 
-test('fast-merge falls back to gh admin merge when adapter merge fails', async () => {
+test('fast-merge bypasses configured body-incapable adapter and keeps gh admin policy', async () => {
   const db = makeDb();
   seedFastMerge(db, 803);
   const baseGh = makeGhStub({ views: [openView('sha-A'), openView('sha-A')], checks: [successChecks()] });
@@ -473,16 +460,18 @@ test('fast-merge falls back to gh admin merge when adapter merge fails', async (
       repo: REPO,
       prNumber: 803,
       authorizedHeadSha: 'sha-A',
+      mergeCredentialClass: 'merge-agent',
       auditWriter: () => {},
       logger: { warn: (msg) => warnings.push(msg) },
     });
   });
 
   assert.equal(result.status, 'merged');
-  assert.equal(calls.find((call) => call.cmd === '/fixture/github-adapter').args.includes('--admin'), true);
+  assert.equal(calls.some(call => call.cmd === '/fixture/github-adapter'), false);
   assert.equal(mergeCalls(gh).length, 1);
   assert.equal(mergeCalls(gh)[0].args.includes('--admin'), true);
-  assert.match(warnings.join('\n'), /fast-merge adapter merge failed.*falling back to gh --admin/);
+  assert.ok(warnings.some(message => /explicit merge message unsupported.*declining adapter/.test(message)));
+  assert.ok(warnings.some(message => /actor read unavailable/.test(message)));
 });
 
 test('fast-merge refuses builder token in enforce mode before adapter or gh merge', async () => {
@@ -624,7 +613,7 @@ test('fast-merge AMA dispatch ticket provenance head change is authorized and me
     assert.equal(row(db, 8021).pr_state, 'fast_merge_merged');
     assert.equal(row(db, 8021).review_status, 'fast_merge_merged');
     assert.equal(mergeCalls(gh).length, 1);
-    assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-HAM', '--delete-branch']);
+    assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--body', 'Closed-By: fast-merge', '--delete-branch']);
     assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
     assert.equal(audits.at(-1).merged_head_sha, 'sha-HAM');
     assert.equal(claimWithWatcherCas(db, 8021).changes, 0);
@@ -1403,8 +1392,8 @@ for (const scenario of ['adapter success', 'adapter error fallback', 'adapter re
       assert.equal(row(db, 9901).pr_state, 'fast_merge_merged');
       if (manualMerge) assert.equal(result.manualMergeDetected, true);
     });
-    assert.equal(adapterCalls, scenario.endsWith('retry') ? 2 : 1);
-    assert.equal(mergeCalls(baseGh).length, scenario === 'adapter success' ? 0 : scenario.endsWith('retry') ? 2 : 1);
+    assert.equal(adapterCalls, 0, 'adapter cannot forward explicit commit bodies');
+    assert.equal(mergeCalls(baseGh).length, scenario.endsWith('retry') ? 2 : 1);
     assert.equal(audits.at(-1).action, 'merged');
     const directory = path.join(hqRoot, 'dispatch/audit/automation-merge-actions');
     const receipts = existsSync(directory) ? readdirSync(directory).map(name => JSON.parse(readFileSync(path.join(directory, name)))) : [];
@@ -1435,3 +1424,32 @@ for (const message of ['Head sha did not match pull request head', 'unclassified
     assert.equal(existsSync(directory) ? readdirSync(directory).length : 0, 0);
   });
 }
+
+test('fast-merge passes neutralized author body and audits the rewrite', async (t) => {
+  const db = makeDb();
+  t.after(() => db.close());
+  seedFastMerge(db, 801);
+  const audits = [];
+  const view = { ...openView(), title: 'Fix #7732 regression', body: 'Fixed:\n\n#7732; closes #801' };
+  const gh = makeGhStub({ views: [view, view], checks: [successChecks()] });
+  await processFastMergePR({ db, ghClient: async (command, args, options) => args[0] === 'api' && args[1] === 'user' ? { stdout: 'merge-agent-bot\n' } : gh(command, args, options), repo: REPO, prNumber: 801,
+    authorizedHeadSha: 'sha-A', auditWriter: entry => audits.push(entry) });
+  const args = mergeCalls(gh)[0].args;
+  assert.equal(args[args.indexOf('--body') + 1], 'Fixed:\n\nPR #7732; closes #801\n\nClosed-By: fast-merge');
+  assert.equal(args[args.indexOf('--subject') + 1], 'Fix PR #7732 regression (#801)');
+  assert.equal(audits.at(-1).mergeWritePath, 'gh-admin-explicit-message');
+  assert.equal(audits.at(-1).mergeActor, 'merge-agent-bot');
+  assert.deepEqual(audits.at(-1).closingKeywordRewrites.map(r => r.referencedNumber), [7732, 7732]);
+});
+
+test('fast-merge defers a missing PR title and preserves its retryable row', async (t) => {
+  const db = makeDb();
+  t.after(() => db.close());
+  seedFastMerge(db, 802);
+  const view = { ...openView(), title: '' };
+  const gh = makeGhStub({ views: [view, view], checks: [successChecks()] });
+  const result = await processFastMergePR({ db, ghClient: gh, repo: REPO, prNumber: 802, authorizedHeadSha: 'sha-A' });
+  assert.equal(result.reason, 'merge-title-missing');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 802).pr_state, 'fast_merge_skipped');
+});

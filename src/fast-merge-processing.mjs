@@ -1,3 +1,4 @@
+import { buildMergeCommitBody } from './ama/closing-keywords.mjs';
 // Fast-merge processing / orchestration layer.
 //
 // The HAM (hammer) audit-trust verification chain, the PR-view/checks fetchers
@@ -176,6 +177,9 @@ function buildFastMergeCloseAuditEntry({
   requeueResult = null,
   mergeStdout = null,
   mergeStderr = null,
+  closingKeywordRewrites = [],
+  mergeWritePath = null,
+  mergeActor = null,
   at = isoNow(),
 } = {}) {
   const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
@@ -205,6 +209,9 @@ function buildFastMergeCloseAuditEntry({
     requeue_result: requeueResult,
     merge_stdout: mergeStdout,
     merge_stderr: mergeStderr,
+    closingKeywordRewrites,
+    mergeWritePath,
+    mergeActor,
     recorded_at: at,
   };
 }
@@ -532,6 +539,7 @@ function normalizePrView(parsed = {}) {
     closedAt: parsed.closedAt || null,
     headRefOid: parsed.headRefOid || null,
     labels,
+    title: String(parsed.title || ''),
     body: String(parsed.body || ''),
   };
 }
@@ -545,7 +553,7 @@ async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
     '--repo',
     repo,
     '--json',
-    'state,isDraft,mergedAt,closedAt,headRefOid,labels,body',
+    'state,isDraft,mergedAt,closedAt,headRefOid,labels,title,body',
   ], {
     maxBuffer: 5 * 1024 * 1024,
     timeout: FAST_MERGE_GH_TIMEOUT_MS,
@@ -683,7 +691,7 @@ function isNoChecksReportedGhError(err) {
   return detail.includes('no checks') && detail.includes('reported');
 }
 
-async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, rootDir = process.cwd(), logger = console }) {
+async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, body, subject, rootDir = process.cwd(), logger = console }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   return withGhRetry(async () => {
     try {
@@ -693,10 +701,11 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, roo
         {
           matchHeadCommit,
           mergeMethod: 'squash',
+          body,
           deleteBranch: true,
           admin: true,
         },
-        { execFileImpl, env: process.env, rootDir, recordReceipt: false }
+        { execFileImpl, env: process.env, rootDir, recordReceipt: false, logger }
       );
       if (adapterResult?.ran === true) {
         if (adapterResult.payload?.ok === false) {
@@ -708,10 +717,9 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, roo
       logger?.warn?.(
         `[follow-up-merge-agent] fast-merge adapter merge failed for ${repo}#${prNumber}; falling back to gh --admin: ${err?.message || err}`
       );
-      // Preserve the historical fast-merge contract: an enabled adapter is a
-      // preferred write path, but protected-branch/admin failures must still
-      // reach the existing gh --admin fallback. withGhRetry may re-run this
-      // callback after transient gh failure; GitHub treats an already-merged
+      // Explicit message calls currently decline the adapter seam; gh --admin
+      // preserves the sanitized subject and body until the adapter supports them.
+      // withGhRetry may re-run this callback after transient gh failure; GitHub treats an already-merged
       // PR/head as idempotently terminal, so the fallback remains retry-safe.
     }
     return execFileImpl('gh', [
@@ -724,6 +732,10 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, roo
       '--admin',
       '--match-head-commit',
       String(matchHeadCommit),
+      '--subject',
+      subject,
+      '--body',
+      body,
       '--delete-branch',
     ], {
       maxBuffer: 5 * 1024 * 1024,
@@ -1372,6 +1384,20 @@ async function processFastMergePR({
     return { status: 'blocked', reason: 'builder-token-merge-refused' };
   }
 
+  if (!preMergeView.title.trim()) {
+    logger?.warn?.(`[follow-up-merge-agent] missing PR title for ${repo}#${prNumber}; deferring fast-merge`);
+    return { status: 'skipped_still_pending', reason: 'merge-title-missing' };
+  }
+  const commitBody = buildMergeCommitBody({ prTitle: preMergeView.title, prBody: preMergeView.body, trailers: 'Closed-By: fast-merge', selfPrNumber: prNumber, repo });
+  let mergeActor = null;
+  try {
+    const { stdout } = await execFileFromGhClient(ghClient)('gh', ['api', 'user', '--jq', '.login'], { timeout: FAST_MERGE_GH_TIMEOUT_MS });
+    const login = stdout.trim();
+    if (/^[a-z0-9][a-z0-9-]*(?:\[bot\])?$/i.test(login)) mergeActor = login;
+  } catch (err) {
+    logger?.warn?.(`[follow-up-merge-agent] fast-merge actor read unavailable: ${err?.message || err}`);
+  }
+  logger?.info?.(`[follow-up-merge-agent] fast-merge gh-admin-explicit-message actor=${mergeActor || 'unknown'} credentialClass=${mergeCapability.tokenClass}`);
   let mergeResult;
   const mergeExecutedAt = isoNow();
   try {
@@ -1380,6 +1406,8 @@ async function processFastMergePR({
       repo,
       prNumber,
       matchHeadCommit: exactHeadSha,
+      body: commitBody.text,
+      subject: commitBody.subject,
       rootDir,
       logger,
     });
@@ -1423,6 +1451,9 @@ async function processFastMergePR({
         logger,
         entry: buildFastMergeCloseAuditEntry({
           action: 'merged',
+          closingKeywordRewrites: commitBody.rewrites,
+          mergeWritePath: 'gh-admin-explicit-message',
+        mergeActor,
           repo,
           prNumber,
           authorizedHeadSha: exactHeadSha,
@@ -1452,6 +1483,9 @@ async function processFastMergePR({
       logger,
       entry: buildFastMergeCloseAuditEntry({
         action: 'merge-refused-retryable',
+        closingKeywordRewrites: commitBody.rewrites,
+        mergeWritePath: 'gh-admin-explicit-message',
+        mergeActor,
         repo,
         prNumber,
         authorizedHeadSha: exactHeadSha,
@@ -1503,6 +1537,9 @@ async function processFastMergePR({
     logger,
     entry: buildFastMergeCloseAuditEntry({
       action: 'merged',
+      closingKeywordRewrites: commitBody.rewrites,
+      mergeWritePath: 'gh-admin-explicit-message',
+      mergeActor,
       repo,
       prNumber,
       authorizedHeadSha: exactHeadSha,

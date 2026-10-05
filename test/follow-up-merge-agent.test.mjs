@@ -6180,6 +6180,7 @@ test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dis
             headRefName: 'feature/pr-401',
             baseRefName: 'main',
             headRefOid: 'abc123',
+            title: 'Fix #7732 regression',
             body: prBody,
             labels: [],
             statusCheckRollup: [
@@ -6204,6 +6205,8 @@ test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dis
 
   assert.equal(candidate.mergeStateStatus, 'CLEAN');
   assert.equal(candidate.body, prBody);
+  assert.equal(candidate.title, 'Fix #7732 regression');
+  assert.ok(calls[0][calls[0].indexOf('--json') + 1].split(',').includes('title'));
   assert.equal(candidate.statusCheckRollup[0].name, 'lint');
   assert.deepEqual(candidate.branchProtection.requiredContexts, ['agent-os/adversarial-gate', 'ci/test']);
   assert.ok(calls.some((args) => args[0] === 'api' && String(args[1]).includes('/branches/main/protection')));

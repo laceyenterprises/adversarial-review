@@ -6,6 +6,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
+import { composeAmaTrailers } from '../src/ama/audit.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
@@ -334,8 +335,16 @@ for (const scenario of ['accepted confirmation timeout', 'accepted confirmation 
     writeFileSync(gh, `#!/bin/sh
 case "$*" in
   "pr view "*"--json body"*) exit 0 ;;
+  "pr view "*"--json title"*) echo 'Fix #7732 regression'; exit 0 ;;
   'pr merge '*)
     echo attempted > "$TMPDIR/merge-attempted"
+    while [ "$#" -gt 1 ]; do
+      case "$1" in
+        --subject) printf '%s' "$2" > "$TMPDIR/merge-subject" ;;
+        --body) printf '%s' "$2" > "$TMPDIR/merge-body" ;;
+      esac
+      shift
+    done
     if [ "$RECEIPT_SCENARIO" = 'permanent merge rejection' ]; then echo 'permission denied' >&2; exit 1; fi
     exit 0 ;;
   'pr view '*)
@@ -355,7 +364,7 @@ case "$1" in
       if [ -f "$TMPDIR/polled" ]; then cat "$TMPDIR/red.json";
       else touch "$TMPDIR/polled"; cat "$TMPDIR/pending.json"; fi
     else cat "$TMPDIR/gate.json"; fi ;;
-  */bin/merge-action-receipt.mjs) exec "$REAL_NODE" "$@" ;;
+  */bin/merge-action-receipt.mjs|*/bin/merge-commit-body.mjs) exec "$REAL_NODE" "$@" ;;
   */bin/ama-audit.mjs)
     echo "AUDIT $*"
     while [ "$#" -gt 1 ]; do
@@ -365,11 +374,14 @@ case "$1" in
   *) exit 0 ;;
 esac
 `, { mode: 0o755 });
+    const trailers = composeAmaTrailers({ workerClass: 'hammer', reviewerFamily: 'claude', riskClass: 'medium',
+      eligibilityReason: 'ham-terminal-remediation', auditRef: `ama-audit:acme/repo:pr-424244:head-${head}` });
     const env = {
       HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424244', HAM_REPO: 'acme/repo',
       HAM_PR_NUMBER: '424244', HAM_REVIEWED_SHA: head, HAM_TARGET_REMEDIATION_SHA: head,
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: userInfo().username,
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
+      HAM_AMA_TRAILERS: trailers,
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, RECEIPT_SCENARIO: scenario, REAL_NODE: process.execPath,
     };
     const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
@@ -386,6 +398,10 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     const result = run('/bin/bash', ['-c', shell, '_', script], env);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /HELD=0/);
+    if (scenario.startsWith('accepted') || scenario === 'permanent merge rejection') {
+      assert.equal(readFileSync(join(dir, 'merge-subject'), 'utf8'), 'Fix PR #7732 regression (#424244)');
+      assert.equal(readFileSync(join(dir, 'merge-body'), 'utf8'), trailers);
+    }
     if (scenario === 'red CI after pending') {
       assert.match(result.stdout, /github-gate-red/);
       assert.doesNotMatch(result.stdout, /REFUNDED/);

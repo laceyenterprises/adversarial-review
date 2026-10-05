@@ -603,13 +603,20 @@ function adapterMergeRefused(payload) {
 }
 
 async function writeAdapterPullRequestMerge(repo, prNumber, {
+  body,
   matchHeadCommit,
   mergeMethod = 'squash',
   deleteBranch = true,
   admin = false,
 } = {}, options) {
+  // The deployed adapter merge contract cannot forward an explicit commit body.
+  // Decline this seam so callers use gh with the sanitized body.
   const env = options?.env || process.env;
   const logger = options?.logger || console;
+  if (body !== undefined) {
+    logger?.warn?.(`[github-adapter] explicit merge message unsupported for ${repo}#${prNumber}; declining adapter, caller must use gh with explicit subject/body`);
+    return { ran: false };
+  }
   const args = { hqRoot: options?.hqRoot ?? env.HQ_ROOT, repo, prNumber, headSha: matchHeadCommit,
     producerClass: options?.producerClass || 'ama-daemon', action: 'gh pr merge', executedAt: new Date().toISOString() };
   let result;

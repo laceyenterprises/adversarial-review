@@ -1368,12 +1368,12 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
-  if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted', 'ama.orphan_recovery.exhausted'].includes(event)) {
+  if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted', 'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain', 'ama.orphan_recovery.store-error'].includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
     doc.id = event === 'ama.closure_lag.slo_breach' ? closureLagAlertId(payload)
       : `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
-    if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event === 'ama.orphan_recovery.exhausted') {
+    if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')) {
       doc.id = `${event}-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex')}`;
     }
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {

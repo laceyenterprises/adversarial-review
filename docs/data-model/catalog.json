@@ -266,6 +266,7 @@
       "path": "docs/data-model/alert-delivery-state.md",
       "store": "data/alert-delivery/",
       "schemaSurface": "src/alert-delivery.mjs",
+      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs"],
       "owner": "adversarial-review alert delivery"
     },
     {
@@ -499,7 +500,10 @@
       "schemaSurface": "src/ama/orphan-watchdog.mjs",
       "relatedSchemaSurfaces": [
         "src/ama-closure-orchestration.mjs",
-        "src/ama/launch-request-status.mjs"
+        "src/ama/launch-request-status.mjs",
+        "src/ama/closer-lease.mjs",
+        "src/ama/dispatch-closer.mjs",
+        "src/alert-delivery.mjs"
       ],
       "owner": "AMA owner-of-last-resort recovery"
     },

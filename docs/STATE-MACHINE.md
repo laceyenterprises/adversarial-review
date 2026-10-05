@@ -626,10 +626,15 @@ Key control points:
   Neither reversal authorization nor dispute raises `hq decision raise`. Predicate
   refusals hold merge with `needsOperator: true`; an attributable current-head
   `merge-agent-requested` event can dispatch the existing operator recovery lane.
-  The closer returns `primary-change-repair-required` and pages once per head
-  after three observations; the daemon returns `primary-change-needs-operator`
-  before the closer and does not increment that counter. Dispute exhaustion pages
-  once per PR; failed page enqueue releases the guard for a later retry.
+  The closer returns `primary-change-repair-required`; the daemon returns
+  `primary-change-needs-operator` before the closer. REMORPHAN-01 admits repair
+  after six eligible ownerless observations and pages after two settled attempts.
+  Unreadable primary-change evidence and stale interrupted closer intents use
+  the six-observation uncertainty lane. This watchdog precedes ordinary automated
+  recovery and comment-only CI handling while observing or exhausted; scoped
+  operator merge-agent fallback keeps precedence. Store failures retain a held
+  `ama-pending` result and page through the independent alert outbox. Dispute
+  exhaustion pages once per PR; failed page enqueue releases the guard for a later retry.
   Each finding's latest reserved comment is included, up to the context byte cap,
   with REST node IDs preserved. Trusted HAM author plus durable comment
   reservation/digest is required for dispute prompt context. Failed reads defer as `gate-read-failed`.

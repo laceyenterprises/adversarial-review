@@ -1292,7 +1292,7 @@ function readTerminalWorkspaceJobForId(
   // Active ledger ownership wins over stale terminal duplicates.
   for (const key of ['pending', 'inProgress']) {
     if (existsSync(join(getFollowUpJobDir(rootDir, key), `${jobId}.json`))) {
-      return { terminalJob: null, unreadableJobRecords: 0 };
+      return { terminalJob: null, unreadableJobRecords: 0, activeJob: true };
     }
   }
   const candidatePaths = [];
@@ -1344,7 +1344,7 @@ function readTerminalWorkspaceJobForId(
     }
   }
 
-  return { terminalJob, unreadableJobRecords };
+  return { terminalJob, unreadableJobRecords, activeJob: false };
 }
 
 function runtimeUsername(env = process.env) {
@@ -1473,6 +1473,7 @@ function reapTerminalFollowUpWorkspaces({
   logErrorImpl = console.error,
   env = process.env,
   budgetMs = resolveWorkspaceReapBudgetMs(env),
+  workspaceDecisionImpl = null,
 } = {}) {
   if (!workspaceRootDir || !existsSync(workspaceRootDir)) {
     return {
@@ -1485,6 +1486,7 @@ function reapTerminalFollowUpWorkspaces({
       recentTerminalJob: 0,
       unreadableJobRecords: 0,
       deferredForBudget: 0,
+      deferredForLock: 0,
       missingTerminalTimestampPaths: [],
       reapedPaths: [],
       anomalyPaths: [],
@@ -1503,6 +1505,7 @@ function reapTerminalFollowUpWorkspaces({
   const reapedPaths = [];
   const anomalyPaths = [];
   let deferredForBudget = 0;
+  let deferredForLock = 0;
   let trashDir = null;
   const inRootTrashDir = join(workspaceRootDir, '.reap-trash');
   let loggedInRootFallback = false;
@@ -1518,71 +1521,94 @@ function reapTerminalFollowUpWorkspaces({
     if (!entry.isDirectory() || entry.name === '.reap-trash') continue;
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
+    let lockAcquired = false;
     try {
-      const lookup = readTerminalWorkspaceJobForId(rootDir, entry.name.replace(/\.resume-backup-\d+-\d+$/, ''), {
-        readFollowUpJobImpl,
-        logErrorImpl,
-      });
-      unreadableJobRecords += lookup.unreadableJobRecords;
-      const { terminalJob } = lookup;
-      if (!terminalJob) {
-        skipped += 1;
-        missingTerminalJob += 1;
-        continue;
-      }
-
-      const terminalAt = terminalFollowUpJobTimestamp(terminalJob);
-      const terminalAtMs = terminalAt ? Date.parse(terminalAt) : NaN;
-      if (!Number.isFinite(terminalAtMs)) {
-        skipped += 1;
-        missingTerminalTimestamp += 1;
-        if (missingTerminalTimestampPaths.length < 5) {
-          missingTerminalTimestampPaths.push(workspacePath);
+      // Lock each ownership check + rename, not the full pass or trash launch.
+      withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
+        lockAcquired = true;
+        const lookup = readTerminalWorkspaceJobForId(rootDir, entry.name.replace(/\.resume-backup-\d+-\d+$/, ''), {
+          readFollowUpJobImpl,
+          logErrorImpl,
+        });
+        unreadableJobRecords += lookup.unreadableJobRecords;
+        if (lookup.activeJob) {
+          skipped += 1;
+          return;
         }
-        logErrorImpl(
-          `[follow-up-jobs] Skipping terminal workspace ${workspacePath}: ` +
-            `job ${terminalJob.jobId} is terminal but has no parseable completedAt/failedAt/stoppedAt timestamp`,
-        );
-        continue;
-      }
+        // Lifecycle/orphan decisions widen eligibility; failures must never
+        // disable the established offline terminal-record + TTL path.
+        let decision;
+        try { decision = workspaceDecisionImpl?.(workspacePath, lookup); }
+        catch (err) {
+          logErrorImpl(`[follow-up-jobs] Workspace eligibility probe failed ${workspacePath}: ${err?.message || err}; using terminal TTL rule`);
+        }
+        if (decision?.veto) { skipped += 1; return; }
+        const { terminalJob } = lookup;
+        if (!terminalJob && !decision?.reap) {
+          skipped += 1;
+          missingTerminalJob += 1;
+          return;
+        }
 
-      if ((nowMs - terminalAtMs) < ttlMs) {
-        skipped += 1;
-        recentTerminalJob += 1;
-        continue;
-      }
+        const terminalAt = terminalFollowUpJobTimestamp(terminalJob);
+        const terminalAtMs = terminalAt ? Date.parse(terminalAt) : NaN;
+        if (!Number.isFinite(terminalAtMs) && !decision?.reap) {
+          skipped += 1;
+          missingTerminalTimestamp += 1;
+          if (missingTerminalTimestampPaths.length < 5) {
+            missingTerminalTimestampPaths.push(workspacePath);
+          }
+          logErrorImpl(
+            `[follow-up-jobs] Skipping terminal workspace ${workspacePath}: ` +
+              `job ${terminalJob.jobId} is terminal but has no parseable completedAt/failedAt/stoppedAt timestamp`,
+          );
+          return;
+        }
 
-      if (clockImpl() - startedMs > budgetMs) {
-        skipped += 1;
-        deferredForBudget += 1;
-        continue;
-      }
-      if (rmSyncImpl !== rmSync) {
-        rmSyncImpl(workspacePath, { recursive: true, force: true });
-      } else {
-        let destination = trashDir;
-        if (!destination) {
-          try { destination = ensureWorkspaceTrashDir(workspaceRootDir); }
-          catch (trashErr) {
-            logInRootFallback(`sibling trash creation failed (${trashErr?.code || trashErr?.message || trashErr})`);
+        if ((nowMs - terminalAtMs) < ttlMs && !decision?.reap) {
+          skipped += 1;
+          recentTerminalJob += 1;
+          return;
+        }
+
+        if (clockImpl() - startedMs > budgetMs) {
+          skipped += 1;
+          deferredForBudget += 1;
+          return;
+        }
+        if (rmSyncImpl !== rmSync) {
+          rmSyncImpl(workspacePath, { recursive: true, force: true });
+        } else {
+          let destination = trashDir;
+          if (!destination) {
+            try { destination = ensureWorkspaceTrashDir(workspaceRootDir); }
+            catch (trashErr) {
+              logInRootFallback(`sibling trash creation failed (${trashErr?.code || trashErr?.message || trashErr})`);
+              destination = inRootTrashDir;
+              mkdirSync(destination, { recursive: true });
+            }
+          }
+          try {
+            renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
+          } catch (renameErr) {
+            if (renameErr?.code !== 'EXDEV') throw renameErr;
+            logInRootFallback('sibling trash rename failed (EXDEV)');
             destination = inRootTrashDir;
             mkdirSync(destination, { recursive: true });
+            renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
           }
+          trashDir = destination;
         }
-        try {
-          renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
-        } catch (renameErr) {
-          if (renameErr?.code !== 'EXDEV') throw renameErr;
-          logInRootFallback('sibling trash rename failed (EXDEV)');
-          destination = inRootTrashDir;
-          mkdirSync(destination, { recursive: true });
-          renameSyncImpl(workspacePath, join(destination, `${entry.name}-${randomUUID()}`));
-        }
-        trashDir = destination;
-      }
-      reaped += 1;
-      reapedPaths.push(workspacePath);
+        reaped += 1;
+        reapedPaths.push(workspacePath);
+      });
     } catch (err) {
+      if (!lockAcquired && (err?.code === 'EAGAIN' || err?.code === 'EWOULDBLOCK')) {
+        skipped += 1;
+        deferredForLock += 1;
+        logErrorImpl(`[follow-up-jobs] Deferring workspace ${workspacePath}: writer lock busy`);
+        continue;
+      }
       errors += 1;
       const permissionError = err?.code === 'EACCES' || err?.code === 'EPERM';
       const workspaceSnapshot = permissionError ? workspaceReapStatSnapshot(workspacePath) : null;
@@ -1624,6 +1650,7 @@ function reapTerminalFollowUpWorkspaces({
     recentTerminalJob,
     unreadableJobRecords,
     deferredForBudget,
+    deferredForLock,
     missingTerminalTimestampPaths,
     reapedPaths,
     anomalyPaths,
@@ -3439,6 +3466,8 @@ export {
   buildRemediationReplyArtifact,
   archiveStoppedFollowUpJobs,
   reapTerminalFollowUpWorkspaces,
+  readTerminalWorkspaceJobForId,
+  resolveWorkspaceReapBudgetMs,
   claimNextFollowUpJob,
   createFollowUpJob,
   detectPublicReplyNoiseSignal,

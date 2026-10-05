@@ -27,11 +27,15 @@ function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launch
     .replace(' acquire \\', ' acquire --root-dir "$TEST_ROOT" \\');
   const overlapHelper = render(verify.slice(verify.indexOf('ham_base_touches_pr_files()'), verify.indexOf('# Resolve whether')));
   const finalGate = merge.slice(merge.indexOf('  if ! ham_required_gate_ok; then', merge.indexOf('HAM_MERGE_ATTEMPTS=0')), merge.indexOf('\n  HAM_MERGE_CAPABILITY_ENFORCEMENT='));
+  writeFileSync(join(dir, 'gh'), `#!/bin/bash
+printf '{"headRefOid":"%s","statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"
+`, { mode: 0o755 });
   const script = `
+export PATH=${quote(dir)}:"$PATH"
 HAM_NODE_BIN=${quote(process.execPath)}
 TEST_ROOT=${quote(dir)}
 BASE_BRANCH=main
-POST_REMEDIATION_SHA=${fixture?.head || head}
+export POST_REMEDIATION_SHA=${fixture?.head || head}
 HAM_GATE_JSON="$TEST_ROOT/gate.json"
 HAM_MERGE_LEASE_RELEASE_RETRY_CAP=1
 HAM_REMOTE_CI_WAIT_SECONDS=${greenAfterSleep ? greenAfterPolls + 1 : 1}
@@ -78,19 +82,19 @@ done
     attempts: readMergeLeaseAttempts(dir, { repo: 'fixture/repo', base: 'main' }) };
 }
 
-test('six same-head pending CI launches release and refund without gate-cap parking', t => {
-  const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, launches: 6 });
-  assert.equal(result.audit.match(/deferred required-checks-pending/g).length, 6);
-  assert.equal(result.audit.match(/exit:20/g).length, 6);
-  assert.equal(result.attempts[0].attempts, 0);
-  assert.equal(result.attempts[0].retryable, 6);
+test('four same-head pending CI launches retain charges within the gate cap', t => {
+  const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, launches: 4 });
+  assert.equal(result.audit.match(/deferred required-checks-pending/g).length, 4);
+  assert.equal(result.audit.match(/exit:20/g).length, 4);
+  assert.equal(result.attempts[0].attempts, 4);
+  assert.equal(result.attempts[0].retryable, 0);
 });
 
-test('CI-green reacquisition charges only one net attempt for the launch', t => {
+test('CI-green reacquisition retains the pending attempt charge', t => {
   const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }, greenAfterSleep: true });
   assert.equal(result.audit, 'exit:0\n');
-  assert.equal(result.attempts[0].attempts, 1);
-  assert.equal(result.attempts[0].retryable, 1);
+  assert.equal(result.attempts[0].attempts, 2);
+  assert.equal(result.attempts[0].retryable, 0);
 });
 
 test('successful acquisition clears refund state inherited from a previous lease', t => {
@@ -105,8 +109,8 @@ for (const failAfterGreen of [false, true]) {
     const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
       greenAfterSleep: true, greenAfterPolls: 3, failAfterGreen });
     assert.match(result.audit, failAfterGreen ? /failed-without-merge github-gate-not-green\nexit:20/ : /^exit:0\n$/);
-    assert.equal(result.attempts[0].attempts, 1);
-    assert.equal(result.attempts[0].retryable, 1, 'only the pre-wait acquisition is refunded');
+    assert.equal(result.attempts[0].attempts, 2);
+    assert.equal(result.attempts[0].retryable, 0, 'pending waits retain the pre-wait charge');
   });
 }
 
@@ -166,8 +170,8 @@ for (const validationBase of ['old', '', 'malformed']) {
     const result = runWait(t, { gate: { ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] },
       greenAfterSleep: true, greenAfterPolls: 3, fixture });
     assert.equal(result.audit, 'exit:0\n', 'already incorporated base changes permit merge to proceed');
-    assert.equal(result.attempts[0].attempts, 1);
-    assert.equal(result.attempts[0].retryable, 1);
+    assert.equal(result.attempts[0].attempts, 2);
+    assert.equal(result.attempts[0].retryable, 0);
   });
 }
 
@@ -208,10 +212,14 @@ case "$*" in
   *ama-audit.mjs*) echo "$*" > "$AUDIT_ARGS"; exit ${auditExit} ;;
 esac
 `, { mode: 0o755 });
-    const acquire = render(verify.slice(verify.indexOf('ham_acquire_merge_lease()'), verify.indexOf('ham_update_branch_conflict()')))
+    writeFileSync(join(dir, 'gh'), `#!/bin/bash
+if [[ "$*" == *--jq* ]]; then echo ${state}; else echo '{"statusCheckRollup":[]}'; fi
+`, { mode: 0o755 });
+    const acquire = render(verify.slice(verify.indexOf('ham_lease_pr_view()'), verify.indexOf('ham_update_branch_conflict()')))
       .replaceAll('<<PR_URL>>', 'fixture-url').replaceAll('<<HQ_ROOT>>', quote(dir))
       .replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical');
     const result = spawnSync('/bin/bash', ['-c', `
+export PATH=${quote(dir)}:"$PATH"
 HAM_NODE_BIN=${quote(stub)}
 TEST_ROOT=${quote(dir)}
 POST_REMEDIATION_SHA=${head}

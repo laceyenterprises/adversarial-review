@@ -98,3 +98,5 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 
 Deferral fields are preserved on suppression writes within a series. A changed
 known job key clears only the series queue, including on suppression writes.
+
+Queue bounds and backoff are evaluated by `evaluateHammerDeferralQueue`; missing or invalid `deferralStartedAt` fails closed as expired.

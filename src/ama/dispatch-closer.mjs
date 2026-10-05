@@ -118,6 +118,7 @@ import {
   HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON,
   HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE,
   evaluateHammerRetryCap,
+  evaluateHammerDeferralQueue,
   normalizeHammerLifetimeDispatchCeiling,
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
@@ -4078,13 +4079,13 @@ export async function maybeDispatchAmaCloser({
   let forceHammerWorkerClass = false;
   const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
   let queuedParkAudit = null;
-  if (prMetadata?.headSha) {
+  if (prMetadata?.headSha && verdict.trace?.hamTerminalRemediation?.ok === true) {
     try {
       queuedParkAudit = readAmaAuditEntry(dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
         dispatchContext.repo, prNumber, prMetadata.headSha);
     } catch (error) {
       logger?.warn?.(`[ama-closer] park audit unreadable; retaining merge hold: ${error?.message || error}`);
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'park-audit-unreadable' });
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'park-audit-unreadable', needsOperator: true });
     }
   }
   const queuedParkReason = queuedParkAudit?.status === 'deferred'
@@ -4391,7 +4392,7 @@ export async function maybeDispatchAmaCloser({
     && ['merge-lease-timeout', 'required-checks-pending'].includes(parkReason)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const certifiedPark = resumeCertifiedPark && deferredPark;
-  if (certifiedContentionPark && !deferredPark) {
+  if (certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
   }
@@ -4407,10 +4408,8 @@ export async function maybeDispatchAmaCloser({
       reason: 'hammer-deferral-ledger-unavailable', needsOperator: true });
   }
   if (deferredPark && !certifiedPark && parkLedger) {
-    const nowMs = Date.parse(dispatchContext.dispatchedAt || new Date().toISOString());
-    const expired = parkLedger.deferralLaunches.length >= 12
-      || nowMs - Date.parse(parkLedger.deferralStartedAt) >= 6 * 3600_000;
-    if (expired || nowMs < Date.parse(parkLedger.deferralNextAt)) {
+    const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
+    if (expired || backoff) {
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-deferral-backoff',
         needsOperator: expired });
@@ -4643,6 +4642,11 @@ export async function maybeDispatchAmaCloser({
     throwIfAborted(signal);
     let status = statusProbe?.status || null;
     existingDispatchStatus = status;
+    if (certifiedContentionPark && !deferredPark &&
+        (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === 'failed')) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
+    }
     let phantomActiveWorkerRun = null;
     // The LRQ's ledger row, when the unknown-status path below read it.
     let launchRequestProbe = null;
@@ -4830,14 +4834,16 @@ export async function maybeDispatchAmaCloser({
         (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed'))
       ) {
         if (certifiedPark && parkLedger) {
-          const nowMs = Date.parse(dispatchContext.dispatchedAt || new Date().toISOString());
-          const expired = parkLedger.deferralLaunches.length >= 12
-            || nowMs - Date.parse(parkLedger.deferralStartedAt) >= 6 * 3600_000;
-          if (expired || nowMs < Date.parse(parkLedger.deferralNextAt)) {
+          const { expired, backoff } = evaluateHammerDeferralQueue(parkLedger, dispatchContext.dispatchedAt);
+          if (expired || backoff) {
             return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
               reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-merge-ready-backoff',
               needsOperator: expired });
           }
+        }
+        if (certifiedPark && verdict.trace?.ciGreen?.conclusion === 'PENDING') {
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: 'hammer-merge-ready-checks-pending' });
         }
         const mergeHead = certifiedPark ? queuedHead : reviewedSha;
         const reason = certifiedPark ? 'hammer-merge-ready-deferred' : 'current-head-hammer-already-ran-needs-operator';

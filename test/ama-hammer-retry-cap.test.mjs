@@ -3245,7 +3245,7 @@ test('LEASEPARK-01 certified lease park resumes daemon merge without remediation
   assert.equal(merges, 1);
 });
 
-for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI becomes conflicting', 'stale park timestamp', 'stale park pending CI', 'corrupt audit', 'missing head']) {
+for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI becomes conflicting', 'stale park timestamp', 'stale park pending CI', 'stale park active repair', 'pending CI remains pending', 'corrupt audit', 'missing head']) {
   test(`certified park preserves eligibility gates: ${scenario}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-policy-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -3267,14 +3267,14 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
         dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: ADVANCED_HEAD },
         prMetadata: { headSha: scenario === 'missing head' ? null : ADVANCED_HEAD,
           mergeableState: scenario === 'pending CI becomes conflicting' ? 'CONFLICTING' : 'MERGEABLE',
-          statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: scenario === 'stale park pending CI' ? 'IN_PROGRESS' : 'COMPLETED',
-            conclusion: scenario === 'stale park pending CI' ? null : scenario === 'pending CI turns red' ? 'FAILURE' : 'SUCCESS' }] },
+          statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? 'IN_PROGRESS' : 'COMPLETED',
+            conclusion: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? null : scenario === 'pending CI turns red' ? 'FAILURE' : 'SUCCESS' }] },
       }),
       options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
       ...hammerDispatchDeps({
         execFileImpl: async (_cmd, args) => {
           calls.push(args);
-          if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+          if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: scenario === 'stale park active repair' ? 'running' : 'failed' }), stderr: '' };
           return { stdout: JSON.stringify({ dispatchId: 'repair_dispatch', launchRequestId: 'repair_launch' }), stderr: '' };
         },
         attemptDaemonCleanMergeImpl: async () => { merges++; throw new Error('unsafe daemon merge'); },
@@ -3292,6 +3292,18 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
     } else if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
       assert.equal(result.dispatched, true, JSON.stringify(result));
       assert.ok(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'));
+    } else if (scenario === 'stale park active repair') {
+      assert.equal(result.dispatched, false);
+      assert.notEqual(result.needsOperator, true, JSON.stringify(result));
+      assert.notEqual(result.reason, 'current-head-ham-terminal-remediation-needs-operator');
+    } else if (scenario === 'pending CI remains pending') {
+      assert.equal(result.reason, 'hammer-merge-ready-backoff');
+      result = await run('2026-07-06T12:08:00Z');
+      assert.equal(result.reason, 'hammer-merge-ready-checks-pending');
+      assert.equal(merges, 0);
+    } else if (scenario === 'corrupt audit') {
+      assert.equal(result.reason, 'park-audit-unreadable');
+      assert.equal(result.needsOperator, true);
     } else if (scenario.startsWith('stale park')) {
       assert.equal(result.dispatched, false);
       assert.equal(result.needsOperator, true);
@@ -3371,3 +3383,15 @@ for (const scenario of ['missing ledger', 'corrupt ledger', 'wrong job key', 'mi
     }
   });
 }
+
+test('deferral queue fails closed on missing or invalid timestamps and shares exact bounds', async () => {
+  const { evaluateHammerDeferralQueue } = await import('../src/ama/hammer-retry-cap.mjs');
+  const now = '2026-07-06T12:00:00Z';
+  const ledger = { deferralLaunches: ['launch'], deferralStartedAt: now, deferralNextAt: now };
+  assert.deepEqual(evaluateHammerDeferralQueue(ledger, now), { expired: false, backoff: false });
+  for (const start of [null, undefined, 'invalid', '2026-07-06T06:00:00Z']) {
+    assert.equal(evaluateHammerDeferralQueue({ ...ledger, deferralStartedAt: start }, now).expired, true);
+  }
+  assert.equal(evaluateHammerDeferralQueue({ ...ledger, deferralLaunches: Array(12).fill('launch') }, now).expired, true);
+  assert.equal(evaluateHammerDeferralQueue({ ...ledger, deferralNextAt: '2026-07-06T12:02:00Z' }, now).backoff, true);
+});

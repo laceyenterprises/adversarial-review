@@ -64,10 +64,9 @@ Usage:
                       --head <sha> [--root-dir <path>]
 
 Safety:
-  --wait-for-holder-deadline extends a positive --wait to cover the current
-  holder's remaining deadline plus five seconds. The resulting window is capped
-  at 1800 seconds, including when the requested --wait exceeds that cap.
-  Without this flag --wait is unchanged; --wait 0 always returns immediately.
+  --wait-for-holder-deadline is accepted for compatibility, but never extends
+  the caller's explicit --wait command budget. FIFO acquisition retries within
+  that window; --wait 0 always returns immediately.
   needs-revalidation fetches origin/<base> in --repo-path. Run it only while
   holding the matching (repo, base) merge lease; it is not an unlocked probe.
 
@@ -331,14 +330,9 @@ async function runAcquire(argv, deps) {
   if (!deps.pidAliveFn(ownerPid)) {
     throw usageError('--owner-pid is not live on this host');
   }
-  let acquisitionSeconds = waitSeconds;
-  if (values['wait-for-holder-deadline'] && waitSeconds > 0) {
-    const initialHolder = inspectMergeLease({ rootDir, repo, base, now: deps.nowIso(),
-      host: deps.host, pidAliveFn: deps.pidAliveFn });
-    const holderRemaining = initialHolder.holder
-      ? Math.max(0, (initialHolder.deadlineSeconds || 0) - (initialHolder.ageSeconds || 0)) : 0;
-    acquisitionSeconds = Math.min(1800, Math.max(waitSeconds, holderRemaining > 0 ? holderRemaining + 5 : 0));
-  }
+  // The caller's wall-clock budget is authoritative, including holder-aware
+  // acquisition. FIFO waiters can outlive a holder; never extend this command.
+  const acquisitionSeconds = waitSeconds;
   const deadlineMs = startedMs + acquisitionSeconds * 1000;
 
   let gateAttempt = null;

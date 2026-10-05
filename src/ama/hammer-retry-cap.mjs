@@ -508,7 +508,19 @@ export function refundHammerRetryDispatch(rootDir, identity, {
 
 // LEASEPARK-01: lifetime refund budget survives fresh reviews, bounding the
 // total extra launches even if every launch pushes and changes the job key.
-const LIFETIME_DEFERRAL_REFUND_BUDGET = 12;
+const HAMMER_DEFERRAL_LAUNCH_LIMIT = 12;
+const HAMMER_DEFERRAL_WINDOW_MS = 6 * 3600_000;
+const LIFETIME_DEFERRAL_REFUND_BUDGET = HAMMER_DEFERRAL_LAUNCH_LIMIT;
+export function evaluateHammerDeferralQueue(ledger, now = new Date().toISOString()) {
+  const nowMs = Date.parse(now);
+  const started = Date.parse(ledger?.deferralStartedAt);
+  const next = Date.parse(ledger?.deferralNextAt);
+  const expired = !Number.isFinite(nowMs) || !Number.isFinite(started)
+    || !Array.isArray(ledger?.deferralLaunches)
+    || ledger.deferralLaunches.length >= HAMMER_DEFERRAL_LAUNCH_LIMIT
+    || nowMs - started >= HAMMER_DEFERRAL_WINDOW_MS;
+  return { expired, backoff: !Number.isFinite(next) || nowMs < next };
+}
 function deferralFieldsForSeries(existing, jobKeyChanged = false) {
   const launches = Array.isArray(existing?.deferralLaunches) ? existing.deferralLaunches : [];
   // Legacy ledgers cannot prove how many earlier series refunded lifetime
@@ -532,7 +544,7 @@ export function deferHammerRetryDispatch(rootDir, identity, { jobKey, launchRequ
   const launches = fields.deferralLaunches;
   if (launches.includes(launchRequestId)) return ledger;
   const alreadyRefunded = ledger.retryableLaunchRequestIds?.includes(launchRequestId) === true;
-  const refund = !alreadyRefunded && launches.length < 12 && ledger.attemptCount > 0;
+  const refund = !alreadyRefunded && launches.length < HAMMER_DEFERRAL_LAUNCH_LIMIT && ledger.attemptCount > 0;
   const lifetimeRefund = refund && fields.lifetimeDeferralRefundCount < LIFETIME_DEFERRAL_REFUND_BUDGET;
   const deferredAt = now || new Date().toISOString();
   const count = launches.length + 1;

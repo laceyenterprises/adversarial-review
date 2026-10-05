@@ -74,13 +74,43 @@ ham_release_merge_lease() {
   fi
 }
 
+# Read the full stderr on each bounded attempt; permanent failures stay fatal.
+ham_lease_pr_view() {
+  local attempt=1 err rc
+  HAM_LEASE_PROBE_TRANSIENT=0
+  err=$(mktemp "${TMPDIR:-/tmp}/ham-lease-probe.XXXXXX") || return 1
+  while true; do
+    if /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr view <<PR_URL>> "$@" 2>"$err"; then
+      HAM_LEASE_PROBE_TRANSIENT=0
+      rm -f "$err"
+      return 0
+    else
+      rc=$?
+    fi
+    cat "$err" >&2
+    if [ "$rc" -eq 142 ] || grep -Eiq 'timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]|502|503|504|bad gateway|service unavailable|gateway timeout' "$err"; then
+      HAM_LEASE_PROBE_TRANSIENT=1
+    else
+      HAM_LEASE_PROBE_TRANSIENT=0
+      rm -f "$err"
+      return "$rc"
+    fi
+    if [ "$attempt" -ge 3 ]; then
+      rm -f "$err"
+      return "$rc"
+    fi
+    sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
+}
+
 ham_acquire_merge_lease() {
   if ! [[ "$POST_REMEDIATION_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "AMG-04 hard-blocker: merge lease head is not a full SHA" >&2
     return 1
   fi
   local ham_required_checks_green_args=()
-  gh pr view <<PR_URL>> --json headRefOid,statusCheckRollup \
+  ham_lease_pr_view --json headRefOid,statusCheckRollup \
     > /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json || return 1
   if jq -e --arg head "$POST_REMEDIATION_SHA" '
     .headRefOid == $head and
@@ -219,7 +249,7 @@ $HAM_GATE_CAP_COMMENT"
     fi
     rm -f "$ham_park_json"
     if [ "$HAM_PARK_AUDIT_EXIT" -eq 65 ]; then
-      HAM_PARK_LIVE_STATE=$(gh pr view <<PR_URL>> --json state --jq '.state') || return 1
+      HAM_PARK_LIVE_STATE=$(ham_lease_pr_view --json state --jq '.state') || return 1
       [ "$HAM_PARK_LIVE_STATE" = "MERGED" ] || return 1
       HAM_PHASE_OUTCOME=already-merged
       return 20

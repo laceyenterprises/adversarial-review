@@ -1864,7 +1864,7 @@ remain mandatory, including the live read inside the lease. Moving the head
 invalidates the certification and removes the old audit from the active queue.
 The park must have a matching existing dispatch record and an audit timestamp
 at least as recent as that launch's `dispatchedAt`; stale or unanchored parks
-retain the operator hold and cannot launch another repair hammer. Certified
+retain the operator hold for terminal dispatches; an active repair hammer follows the normal retain path. Certified
 merge resumes also require a readable retry ledger for the reviewed-head series
 and a recorded launch ID; a missing launch ID retains the operator hold.
 Missing, corrupt or mismatched ledgers return
@@ -1882,15 +1882,19 @@ budget, contention does not trigger retry-cap paging; after it is spent, the
 normal lifetime ceiling remains enforced. An expired queue
 returns `hammer-deferral-budget-exhausted` for operator handling.
 
-The lease CLI already maintains FIFO waiters; its bounded acquisition window now
-optionally covers the holder's remaining deadline plus five seconds, capped at
-thirty minutes when `--wait-for-holder-deadline` is set. Ordinary `--wait` callers keep
-the requested window; zero-wait callers still return immediately. Hammer
-releases its lease through retryable-abort before sleeping on remote CI, refunding
-that acquisition so the post-CI reacquire charges only one net gate attempt.
-Only a held lease is marked for that refund; every successful acquire clears
-the previous acquisition's retryable-abort flag and reason. Subsequent real gate
-failures and successful merge releases retain the charged reacquired attempt.
+The lease CLI maintains FIFO waiters and respects the caller's explicit `--wait`
+window, including with `--wait-for-holder-deadline`; it never extends the worker's
+command budget. Zero-wait callers return immediately. Hammer releases its lease
+before sleeping on remote CI without refunding the acquisition, so a subsequent
+red-CI outcome remains charged to the gate-attempt cap. Pending-only terminal
+deferrals may still refund a held acquisition. Each successful acquire clears
+previous retryable-abort state. Pre-acquire and park-state GitHub reads retry
+transient failures three times using the full stderr; exhausted transient
+post-CI reads record a deferred lease-timeout audit. Permanent failures stay fatal.
+Certified parks with pending CI skip daemon merge until the metadata checks settle.
+Queue bounds and backoff use `evaluateHammerDeferralQueue`; missing or invalid
+start timestamps expire the queue. Park audits are read only on certified HAM
+routes; an unreadable audit explicitly requires operator recovery.
 After reacquisition it re-runs the fail-closed changed-file overlap guard from
 verify-head against the live base before the final fresh exact-head gate. The
 comparison starts at the merge-base of the exact CI-validated head and fetched

@@ -1041,7 +1041,7 @@ test('merge-lease acquire reclaims stale dead-owner-pid holder during wait', asy
   }
 });
 
-test('LEASEPARK-01 holder-aware FIFO wait outlives the short acquisition window', async () => {
+test('LEASEPARK-01 holder-aware FIFO wait respects the caller acquisition window', async () => {
   const rootDir = freshRoot();
   try {
     const holder = acquireFixture(rootDir, { deadlineSeconds: 10 });
@@ -1055,13 +1055,13 @@ test('LEASEPARK-01 holder-aware FIFO wait outlives the short acquisition window'
         }
       },
     });
-    assert.equal(code, 0);
-    assert.equal(jsonOutput(io).acquired, true);
-    assert.ok(jsonOutput(io).waited_s >= 3);
+    assert.equal(code, 75);
+    assert.equal(jsonOutput(io).timedOut, true);
+    assert.equal(jsonOutput(io).waited_s, 1);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-test('ordinary acquire preserves --wait 3600; holder-aware acquire caps at 1800', async () => {
+test('ordinary and holder-aware acquire preserve the explicit caller budget', async () => {
   for (const holderAware of [false, true]) {
     const rootDir = freshRoot();
     try {
@@ -1070,10 +1070,10 @@ test('ordinary acquire preserves --wait 3600; holder-aware acquire caps at 1800'
         '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '3600',
         ...(holderAware ? ['--wait-for-holder-deadline'] : [])], {
           onSleep: ({ nowMs, advance }) => advance(Date.parse('2026-06-20T18:00:00Z')
-            + (holderAware ? 1800 : 3600) * 1000 - nowMs),
+            + 3600 * 1000 - nowMs),
         });
       assert.equal(code, 75);
-      assert.equal(jsonOutput(io).waited_s, holderAware ? 1800 : 3600);
+      assert.equal(jsonOutput(io).waited_s, 3600);
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   }
 });

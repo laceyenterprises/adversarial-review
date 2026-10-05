@@ -452,16 +452,18 @@ while :; do
   # Remote CI does not own the serialized merge lane. Reacquisition below
   # repeats the live exact-head gate before any merge attempt. Refund this
   # acquisition so the later reacquire is the only charged gate attempt.
-  ham_mark_merge_lease_retryable_abort remote-ci-wait
-  ham_release_merge_lease || return 1
+  if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ]; then
+    ham_mark_merge_lease_retryable_abort remote-ci-wait
+    ham_release_merge_lease || return 1
+  fi
   echo "HAM remote CI: waiting for required checks on ${POST_REMEDIATION_SHA}" >&2
   sleep "$HAM_REMOTE_CI_POLL_SECONDS"
 done
 if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
   ham_acquire_merge_lease || return $?
-  # Base may have advanced while CI waited without the lease. Reuse verify-head's
-  # fail-closed overlap guard before accepting the validated head on that base.
-  if ham_base_touches_pr_files; then
+  # Only base changes not already contained in the exact CI-validated head can
+  # require another rebase; the parallel-phase validation base may be older.
+  if ham_base_touches_pr_files validated-head; then
     ham_append_terminal_audit failed-without-merge base-changed-file-overlap || true
     ham_release_merge_lease
     return 20

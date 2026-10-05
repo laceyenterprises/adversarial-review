@@ -1862,6 +1862,14 @@ primary-change, exact-head,
 protective predecessors, branch protection and the autonomous execution switch
 remain mandatory, including the live read inside the lease. Moving the head
 invalidates the certification and removes the old audit from the active queue.
+The park must have a matching existing dispatch record and an audit timestamp
+at least as recent as that launch's `dispatchedAt`; stale or unanchored parks
+retain the operator hold and cannot launch another repair hammer. Certified
+merge resumes also require a readable retry ledger for the reviewed-head series
+and a recorded launch ID; a missing launch ID retains the operator hold.
+Missing, corrupt or mismatched ledgers return
+`hammer-deferral-ledger-unavailable` with `needsOperator: true` before any merge
+attempt, so the bounded queue cannot silently turn into indefinite retries.
 
 Each observed deferred launch refunds the series and matching target failure
 counters exactly once, deduped against ordinary retry refunds. Lifetime refunds
@@ -1880,7 +1888,13 @@ thirty minutes when `--wait-for-holder-deadline` is set. Ordinary `--wait` calle
 the requested window; zero-wait callers still return immediately. Hammer
 releases its lease through retryable-abort before sleeping on remote CI, refunding
 that acquisition so the post-CI reacquire charges only one net gate attempt.
+Only a held lease is marked for that refund; every successful acquire clears
+the previous acquisition's retryable-abort flag and reason. Subsequent real gate
+failures and successful merge releases retain the charged reacquired attempt.
 After reacquisition it re-runs the fail-closed changed-file overlap guard from
-verify-head against the live base before the final fresh exact-head gate. Base
+verify-head against the live base before the final fresh exact-head gate. The
+comparison starts at the merge-base of the exact CI-validated head and fetched
+live base, rather than the older parallel-phase validation base. This recomputes
+the incorporated base even when the earlier validation base is unavailable. Base
 changes overlapping PR files require rebase and revalidation even without a
 strict branch-protection rule; disjoint movement may proceed under that rule.

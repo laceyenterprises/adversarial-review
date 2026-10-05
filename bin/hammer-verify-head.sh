@@ -241,6 +241,9 @@ $HAM_GATE_CAP_COMMENT"
     return 1
   fi
   HAM_MERGE_LEASE_HELD=1
+  # Retryable-abort state belongs to the released acquisition, never its successor.
+  HAM_MERGE_LEASE_RETRYABLE_ABORT=0
+  HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=""
   trap ham_release_merge_lease EXIT
 }
 
@@ -345,16 +348,25 @@ ham_update_branch_with_retries() {
 ham_base_touches_pr_files() {
   # Returns 0 (overlap → a rebase+revalidation is still required) when any file
   # this PR changes is also touched by base commits that landed SINCE the base we
-  # last validated against; returns 1 (disjoint → the validated head is safe to
+  # last validated against. In validated-head mode, compare only base commits
+  # not already contained in the exact CI-validated head, including when the
+  # parallel-phase validation base is missing; returns 1 (disjoint → safe to
   # merge without another rebase). Fail closed to 0 (overlap) on any fetch/diff
   # error so an undeterminable diff never lets us skip a rebase semantics needs.
   ham_bounded_git_sync "$BASE_BRANCH" >/dev/null 2>&1 || return 0
-  [ -n "$HAM_VALIDATION_BASE_SHA" ] || return 0
-  local current_base_sha pr_files base_files
+  local current_base_sha comparison_base pr_ref pr_files base_files
   current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
   ham_is_full_sha "$current_base_sha" || return 0
-  pr_files=$(git diff --name-only "$current_base_sha...HEAD" 2>/dev/null) || return 0
-  base_files=$(git diff --name-only "$HAM_VALIDATION_BASE_SHA..$current_base_sha" 2>/dev/null) || return 0
+  comparison_base="${HAM_VALIDATION_BASE_SHA:-}"
+  pr_ref=HEAD
+  if [ "${1:-}" = "validated-head" ]; then
+    pr_ref="$POST_REMEDIATION_SHA"
+    ham_is_full_sha "$pr_ref" || return 0
+    comparison_base=$(git merge-base "$pr_ref" "$current_base_sha" 2>/dev/null) || return 0
+  fi
+  ham_is_full_sha "$comparison_base" || return 0
+  pr_files=$(git diff --name-only "$current_base_sha...$pr_ref" 2>/dev/null) || return 0
+  base_files=$(git diff --name-only "$comparison_base..$current_base_sha" 2>/dev/null) || return 0
   [ -n "$pr_files" ] || return 1
   [ -n "$base_files" ] || return 1
   comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .

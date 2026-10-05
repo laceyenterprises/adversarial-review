@@ -48,6 +48,7 @@ Usage:
   merge-lease acquire --repo <owner/name> --base <branch> --pr <n> --head <sha>
                       --owner-pid <pid> [--owner-pgid <pgid>] --wait <seconds>
                       [--root-dir <path>] [--required-checks-green]
+                      [--wait-for-holder-deadline]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
                       --lease-id <id> [--retryable-abort <reason>]
                       [--root-dir <path>]
@@ -63,6 +64,10 @@ Usage:
                       --head <sha> [--root-dir <path>]
 
 Safety:
+  --wait-for-holder-deadline extends a positive --wait to cover the current
+  holder's remaining deadline plus five seconds. The resulting window is capped
+  at 1800 seconds, including when the requested --wait exceeds that cap.
+  Without this flag --wait is unchanged; --wait 0 always returns immediately.
   needs-revalidation fetches origin/<base> in --repo-path. Run it only while
   holding the matching (repo, base) merge lease; it is not an unlocked probe.
 

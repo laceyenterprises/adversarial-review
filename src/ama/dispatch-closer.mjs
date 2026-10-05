@@ -4391,12 +4391,20 @@ export async function maybeDispatchAmaCloser({
     && ['merge-lease-timeout', 'required-checks-pending'].includes(parkReason)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const certifiedPark = resumeCertifiedPark && deferredPark;
+  if (certifiedContentionPark && !deferredPark) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
+  }
   let parkLedger = null;
   if (deferredPark && existingRecord?.launchRequestId) {
     parkLedger = deferHammerRetryDispatch(rootDir, { repo, prNumber }, {
       jobKey: reviewedSha, headSha: existingRecord.headSha,
       launchRequestId: existingRecord.launchRequestId, now: dispatchContext.dispatchedAt,
     });
+  }
+  if (certifiedPark && !parkLedger) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: 'hammer-deferral-ledger-unavailable', needsOperator: true });
   }
   if (deferredPark && !certifiedPark && parkLedger) {
     const nowMs = Date.parse(dispatchContext.dispatchedAt || new Date().toISOString());

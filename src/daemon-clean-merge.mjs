@@ -927,7 +927,7 @@ export async function runDaemonCleanMergeAttempt({
     },
     mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
     mergeEnv: env,
-    prTitle: String(liveRollup?.title ?? candidate?.title ?? ''),
+    prTitle: String(liveRollup?.title || candidate?.title || ''),
     prBody: String(liveRollup?.body ?? candidate?.body ?? candidate?.prBody ?? ''),
     fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
       try {

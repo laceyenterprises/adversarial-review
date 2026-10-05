@@ -141,6 +141,7 @@ function baseArgs(harness, overrides = {}) {
   return {
     repo: 'o/r',
     prNumber: 7,
+    prTitle: 'Preserve author title',
     base: 'main',
     validatedHead: HEAD,
     verdict: 'settled-success',
@@ -1010,3 +1011,14 @@ for (const authority of ['daemon-merge', 'ham-terminal-remediation']) {
     assert.deepEqual(harness.calls.auditWrites[0].metadata.closingKeywordRewrites.map(r => r.referencedNumber), [7732, 7732, 99]);
   });
 }
+
+test('missing title defers before acquiring the merge lease or writing a placeholder', async () => {
+  for (const prTitle of ['', '  \n']) {
+    const harness = makeHarness();
+    const result = await attemptDaemonCleanMerge(baseArgs(harness, { prTitle }));
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(result.reason, 'merge-title-missing');
+    assert.equal(harness.calls.merge, 0);
+    assert.equal(harness.calls.acquire, 0);
+  }
+});

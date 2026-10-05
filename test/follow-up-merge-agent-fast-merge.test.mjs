@@ -70,6 +70,7 @@ function openView(head = 'sha-A', labels = [{ name: 'fast-merge:docs' }]) {
     closedAt: null,
     headRefOid: head,
     labels,
+    title: 'Preserve author title',
     body: '',
   };
 }
@@ -469,7 +470,8 @@ test('fast-merge bypasses configured body-incapable adapter and keeps gh admin p
   assert.equal(calls.some(call => call.cmd === '/fixture/github-adapter'), false);
   assert.equal(mergeCalls(gh).length, 1);
   assert.equal(mergeCalls(gh)[0].args.includes('--admin'), true);
-  assert.deepEqual(warnings, []);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /explicit merge message unsupported.*declining adapter/);
 });
 
 test('fast-merge refuses builder token in enforce mode before adapter or gh merge', async () => {
@@ -1435,5 +1437,18 @@ test('fast-merge passes neutralized author body and audits the rewrite', async (
   const args = mergeCalls(gh)[0].args;
   assert.equal(args[args.indexOf('--body') + 1], 'Fixed:\n\nPR #7732; closes #801\n\nClosed-By: fast-merge');
   assert.equal(args[args.indexOf('--subject') + 1], 'Fix PR #7732 regression (#801)');
+  assert.equal(audits.at(-1).mergeWritePath, 'gh-admin-explicit-message');
   assert.deepEqual(audits.at(-1).closingKeywordRewrites.map(r => r.referencedNumber), [7732, 7732]);
+});
+
+test('fast-merge defers a missing PR title and preserves its retryable row', async (t) => {
+  const db = makeDb();
+  t.after(() => db.close());
+  seedFastMerge(db, 802);
+  const view = { ...openView(), title: '' };
+  const gh = makeGhStub({ views: [view, view], checks: [successChecks()] });
+  const result = await processFastMergePR({ db, ghClient: gh, repo: REPO, prNumber: 802, authorizedHeadSha: 'sha-A' });
+  assert.equal(result.reason, 'merge-title-missing');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 802).pr_state, 'fast_merge_skipped');
 });

@@ -109,6 +109,7 @@ function baseArgs(rootDir) {
     dispatchJob: { blockingFindingCount: 0, blockingFindingState: 'known' },
     candidate: {
       headSha: 'head-live',
+      title: 'Preserve author title',
       baseBranch: 'main',
       prState: 'open',
       isDraft: false,
@@ -1015,6 +1016,7 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
       candidate: {
         baseBranch: 'main',
         headSha: 'head-after-remediation',
+        title: 'Preserve author title',
         statusCheckRollup: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' }],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
@@ -2295,6 +2297,7 @@ function realRollupHelpers({ rootDir, prNumber = 700, head = 'clean-head' }) {
     // gate cannot pass by falling back to a candidate green rollup — the fix
     // must resolve greenness from the live `checks` field itself.
     candidate: {
+      title: 'Preserve candidate title',
       baseBranch: 'main',
       headSha: head,
       statusCheckRollup: [],
@@ -2348,6 +2351,7 @@ test('DCA-01: clean PR with real-contract `checks` rollup now MERGES (was parked
       // NO `statusCheckRollup`, NO `headSha`. Pre-fix this read as zero checks.
       fetchRollupImpl: async () => ({
         state: 'OPEN',
+        title: '', // normalizeRollup also uses an empty string for an absent title.
         headRefOid: 'clean-head',
         labels: [],
         checks: [
@@ -2357,8 +2361,9 @@ test('DCA-01: clean PR with real-contract `checks` rollup now MERGES (was parked
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
       }),
-      execFileImpl: async () => {
+      execFileImpl: async (_cmd, args) => {
         mergeCalls += 1;
+        assert.equal(args[args.indexOf('--subject') + 1], 'Preserve candidate title (#700)');
         return { stdout: '', stderr: '' };
       },
     });

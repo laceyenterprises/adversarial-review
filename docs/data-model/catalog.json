@@ -51,7 +51,8 @@
       "schemaSurface": "src/fast-merge-processing.mjs",
       "relatedSchemaSurfaces": ["src/fast-merge-audit-storage.mjs", "src/fast-merge-audit-recovery.mjs", "src/ama/closing-keywords.mjs"],
       "owner": "Fast-merge close processing",
-      "messageRewriteFields": ["closingKeywordRewrites"]
+      "messageRewriteFields": ["closingKeywordRewrites"],
+      "mergeWritePathValues": ["gh-admin-explicit-message", null]
     },
     {
       "id": "follow-up-jobs",

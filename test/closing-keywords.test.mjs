@@ -29,7 +29,7 @@ test('ordinary text is unchanged and every adjacency is processed', () => {
 });
 test('hammer CLI uses the same sanitizer and shell forwards its body and rewrite audit', () => {
   const result = spawnSync(process.execPath, ['bin/merge-commit-body.mjs', 'o/r', '7'], {
-    input: 'Fix: #7732\ncloses #7', encoding: 'utf8', env: { ...process.env, HAM_AMA_TRAILERS: 'Closed-By: hammer' },
+    input: 'Fix: #7732\ncloses #7', encoding: 'utf8', env: { ...process.env, HAM_AMA_TRAILERS: 'Closed-By: hammer', HAM_PR_TITLE: 'Preserve author title' },
   });
   assert.equal(result.status, 0, result.stderr);
   const doc = JSON.parse(result.stdout);
@@ -53,7 +53,7 @@ test('hammer shell merge runner receives the neutralized body', (t) => {
   const stub = `ham_read_protective_predecessor_value() { printf -v "$2" '%s' 'Fix #7732 regression'; }
 gh() { while [ "$#" -gt 0 ]; do if [ "$1" = --subject ]; then printf '%s\\n' "$2"; fi; if [ "$1" = --body ]; then printf '%s' "$2"; return; fi; shift; done; return 1; }\n`;
   const result = spawnSync('bash', ['-c', stub + snippet], { encoding: 'utf8', env: {
-    ...process.env, HAM_NODE_BIN: process.execPath, HAM_AMA_TRAILERS: 'Closed-By: hammer',
+    ...process.env, HAM_NODE_BIN: process.execPath, HAM_AMA_TRAILERS: 'Closed-By: hammer', HAM_PR_TITLE: 'Preserve author title',
     HAM_PROTECTIVE_PREDECESSOR_BODY: 'Fix:\n\n#7732; closes #7',
     HAM_MERGE_STDOUT: stdoutPath, HAM_MERGE_STDERR: stderrPath, POST_REMEDIATION_SHA: 'head',
   } });
@@ -83,7 +83,9 @@ test('message builder combines title and body audits and neutralizes titles', ()
   assert.equal(result.subject, 'Fix PR #7732 regression (#7)');
   assert.equal(result.text, 'Closes PR https://github.com/o/r/pull/8');
   assert.deepEqual(result.rewrites.map(r => r.referencedNumber), [7732, 8]);
-  assert.equal(buildMergeCommitBody({ selfPrNumber: 7 }).subject, 'Pull request (#7)');
+  for (const prTitle of ['', '   ', null]) {
+    assert.throws(() => buildMergeCommitBody({ prTitle, selfPrNumber: 7 }), /merge-title-missing/);
+  }
 });
 
 test('hammer fails closed without canonical dispatch trailers', () => {
@@ -99,7 +101,7 @@ test('dispatched hammer export carries canonical provenance byte for byte', () =
   const exportLine = template.split('\n').find(line => line.startsWith('export HAM_AMA_TRAILERS='));
   assert.ok(exportLine);
   const prompt = composeCloserPrompt({ amaTrailers: trailers, templateBody: exportLine });
-  const result = spawnSync('bash', ['-c', prompt + `\nprintf '%s' 'Fix #7732' | "$HAM_NODE_BIN" bin/merge-commit-body.mjs o/r 7`], { encoding: 'utf8', env: { ...process.env, HAM_NODE_BIN: process.execPath } });
+  const result = spawnSync('bash', ['-c', prompt + `\nprintf '%s' 'Fix #7732' | "$HAM_NODE_BIN" bin/merge-commit-body.mjs o/r 7`], { encoding: 'utf8', env: { ...process.env, HAM_NODE_BIN: process.execPath, HAM_PR_TITLE: 'Preserve author title' } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).text, `Fix PR #7732\n\n${trailers}`);
 });
@@ -120,5 +122,25 @@ run() {
     assert.equal(result.status, 1, result.stderr);
     const reason = { sanitizer: 'commit-body-sanitization-failed', body: 'commit-body-decode-failed', subject: 'commit-subject-decode-failed', rewrites: 'commit-rewrites-decode-failed', title: 'commit-title-read-failed' }[failure];
     assert.equal(result.stdout, `audit:${reason}\nretry:${reason}\nrelease\n`);
+  });
+}
+
+for (const failure of ['permanent', 'empty']) {
+  test(`hammer ${failure} title prevents a merge with the correct lease outcome`, () => {
+    const source = readFileSync('bin/hammer-merge.sh', 'utf8');
+    const snippet = source.slice(source.indexOf('  ham_commit_message_abort()'), source.indexOf('  HAM_MERGE_EXECUTED_AT='))
+      .replaceAll('<<PR_URL>>', 'https://github.com/o/r/pull/7');
+    const stubs = `ham_append_terminal_audit() { echo "audit:$2"; }
+ham_mark_merge_lease_retryable_abort() { echo "retry:$1"; }
+ham_release_merge_lease() { echo release; }
+ham_read_protective_predecessor_value() { [ "$FAILURE" != permanent ] || return 2; printf -v "$2" '%s' '   '; }
+gh() { echo unexpected-merge; return 99; }
+run() {
+`;
+    const result = spawnSync('bash', ['-c', stubs + snippet + '\n}\nrun'], { encoding: 'utf8', env: { ...process.env, FAILURE: failure } });
+    assert.equal(result.status, failure === 'permanent' ? 20 : 1, result.stderr);
+    assert.equal(result.stdout, failure === 'permanent'
+      ? 'audit:commit-title-read-failed\nrelease\n'
+      : 'audit:merge-title-missing\nretry:merge-title-missing\nrelease\n');
   });
 }

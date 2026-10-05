@@ -41,8 +41,11 @@ dispatcher debugging), see
 Daemon clean merge, the closer's inline terminal-remediation merge, fast-merge,
 and the hammer shell supply explicit `--subject` and `--body` from the shared
 `buildMergeCommitBody` helper. The subject is the sanitized PR title plus
-`(#<PR number>)`; a missing title uses `Pull request`. The body contains the
-sanitized author PR body plus closure trailers. Closing keywords followed by
+`(#<PR number>)`; an empty or unavailable title defers the merge rather than
+writing a placeholder. The live merge-agent candidate fetch requests and
+returns `title`; the daemon prefers a non-empty live title, then the candidate
+title. The body contains the sanitized author PR body plus closure trailers.
+Closing keywords followed by
 `#N`, `owner/repo#N`, or `http(s)://github.com/<owner>/<repo>/(issues|pull)/N`
 are separated from the reference by `PR`; `GH-N` is covered conservatively too.
 Only a reference to this PR in this repository is exempt. Combined title/body
@@ -51,14 +54,27 @@ rewrites are recorded in `closingKeywordRewrites` (see the
 [fast-merge audit](data-model/fast-merge-audits.md) contracts).
 
 Hammer provenance comes from dispatch's canonical `composeAmaTrailers` output,
-exported as `HAM_AMA_TRAILERS`. The helper refuses a missing block; title read,
-sanitization and decode failures write a terminal audit and mark the lease attempt
-as a retryable abort before releasing it.
+exported as `HAM_AMA_TRAILERS`. The helper refuses a missing block;
+transient title-read exhaustion, missing titles, sanitization and decode
+failures write a terminal audit and mark the lease attempt as a retryable abort
+before releasing it. A permanent title-read error writes the audit, releases
+the lease and returns hard-block code 20, matching the body-read contract.
+
+Activation requirement: drain hammers dispatched with the older prompt before
+deploying merge-message protection. Those prompts lack `HAM_AMA_TRAILERS` and
+cannot recover by retrying the same merge procedure. Re-dispatch them with the
+current prompt after the drain; otherwise sanitization refusal spends lease
+attempts and retry-cap budget.
 
 Remaining scope: the operator-fallback merge-agent prompt and v2 finalization
 adapter still use default GitHub messages. Follow-up work must add explicit
 subject/body support to their adapter contract and route both through the
-shared sanitizer. Repositories configured with `merge_method: merge` retain
+shared sanitizer. For `merge_method: merge`, the generated merge commit also
+uses the explicit sanitized `<PR title> (#N)` subject and full PR body plus
+closure trailers, replacing GitHub's default `Merge pull request #N from
+owner/branch` subject. Consumers parsing that default must accept the explicit
+subject before activation. Repositories configured with `merge_method: merge`
+retain
 individual PR commits unchanged; closing keywords in those commit messages can
 still close work when they land. This protection covers the generated merge
 message only. PR-description linking performed directly by GitHub is also
@@ -72,7 +88,11 @@ paths and hammer. Fast-merge owns its receipt and currently executes through
 exact-head `gh --admin`: the deployed adapter cannot forward explicit commit
 messages, so the adapter seam declines sanitized-message calls. Adding explicit
 subject/body support to that adapter contract remains follow-up work; until then
-fast-merge's write identity and execution receipt come from the gh path.
+fast-merge's write identity and execution receipt come from the gh path. Each
+explicit-message adapter decline logs a warning; close audits record
+`mergeWritePath: gh-admin-explicit-message` for the attempted write (including
+a refusal or a race with a manual merge). Follow-up recorded 2026-10-05: add
+adapter subject/body support before returning fast-merge to service auth.
 Retryable or unclassified fast-merge refusals remain closure-audit evidence only. Refusal receipts
 require an explicit permanent rejection or eligibility/policy decision under a
 held lease; read failures, transient exhaustion, superseded/deferred outcomes

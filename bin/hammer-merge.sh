@@ -727,10 +727,21 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   }
   HAM_PR_TITLE=""
   ham_read_protective_predecessor_value title HAM_PR_TITLE \
-    gh pr view <<PR_URL>> --json title --jq '.title // ""' || {
-    ham_commit_message_abort commit-title-read-failed
+    gh pr view <<PR_URL>> --json title --jq '.title // ""'
+  HAM_TITLE_READ_STATUS=$?
+  if [ "$HAM_TITLE_READ_STATUS" -ne 0 ]; then
+    if [ "$HAM_TITLE_READ_STATUS" -eq 1 ]; then
+      ham_commit_message_abort commit-title-read-failed
+      return 1
+    fi
+    ham_append_terminal_audit failed-without-merge commit-title-read-failed || true
+    ham_release_merge_lease
+    return 20
+  fi
+  if [ -z "${HAM_PR_TITLE//[[:space:]]/}" ]; then
+    ham_commit_message_abort merge-title-missing
     return 1
-  }
+  fi
   export HAM_PR_TITLE
   HAM_COMMIT_BODY_JSON=$(printf '%s' "$HAM_PROTECTIVE_PREDECESSOR_BODY" |
     "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>>) || {

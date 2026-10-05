@@ -20,7 +20,8 @@ export function neutralizeClosingKeywords(text, { selfPrNumber, repo } = {}) {
 
 /** Build the explicit body and subject, with title rewrites first in the audit. */
 export function buildMergeCommitBody({ prTitle = '', prBody = '', trailers = '', selfPrNumber, repo }) {
-  const title = neutralizeClosingKeywords(prTitle || 'Pull request', { selfPrNumber, repo });
+  if (!String(prTitle ?? '').trim()) throw new Error('merge-title-missing');
+  const title = neutralizeClosingKeywords(prTitle, { selfPrNumber, repo });
   const body = neutralizeClosingKeywords([prBody, trailers].filter(Boolean).join('\n\n'), { selfPrNumber, repo });
   return { text: body.text, subject: `${title.text} (#${selfPrNumber})`, rewrites: [...title.rewrites, ...body.rewrites] };
 }

@@ -2864,7 +2864,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       '--repo',
       repo,
       '--json',
-      'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
+      'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,title,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
     ],
     { maxBuffer: 5 * 1024 * 1024, ...(signal ? { signal } : {}) }
   );
@@ -2912,6 +2912,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     statusCheckRollup: Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [],
     branchProtection,
     labels,
+    title: String(parsed.title || ''),
     body: String(parsed.body || ''),
     operatorNotes: extractOperatorNotes(parsed.body),
     prState: parsed.mergedAt ? 'merged' : String(parsed.state || 'unknown').trim().toLowerCase(),

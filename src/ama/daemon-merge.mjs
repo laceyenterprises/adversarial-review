@@ -577,6 +577,11 @@ async function attemptDaemonCleanMergeInner({
     return notTaken('prior-daemon-terminal-failure');
   }
 
+  // Never replace an unavailable author title with a permanent placeholder.
+  if (!String(prTitle ?? '').trim()) {
+    return { ...notTaken('merge-title-missing'), disposition: DAEMON_MERGE_DISPOSITION.DEFERRED };
+  }
+
   // Observability sees the live, head-bound eligibility decision before lease
   // contention can defer it. Observer failures never change merge authority.
   if (typeof onEligibleImpl === 'function') {

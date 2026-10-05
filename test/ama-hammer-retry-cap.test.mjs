@@ -1009,6 +1009,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
     ...hammerDispatchArgs(successRoot, {
       reviewState: { reviewCycleExhausted: true },
       prMetadata: {
+        body: 'Fix: #7732',
         statusCheckRollup: [
           { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
         ],
@@ -1032,6 +1033,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
           const bodyIndex = args.indexOf('--body');
           assert.notEqual(bodyIndex, -1);
           assert.match(args[bodyIndex + 1], /Closed-By: hammer \(adversarial-pipe-mode\)/);
+          assert.match(args[bodyIndex + 1], /Fix: PR #7732/);
           assert.deepEqual(args.slice(0, 8), [
             'pr', 'merge', String(PR_NUMBER), '--repo', REPO, '--squash', '--match-head-commit', REVIEWED_HEAD,
           ]);

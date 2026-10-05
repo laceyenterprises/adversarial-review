@@ -57,6 +57,7 @@ ham_append_terminal_audit() {
     --arg failingTestsFixed "${HAM_FAILING_TESTS_FIXED:-}" \
     --arg mergeCommit "${HAM_MERGE_COMMIT:-}" \
     --arg mergedAt "${HAM_MERGED_AT:-}" \
+    --argjson closingKeywordRewrites "${HAM_CLOSING_KEYWORD_REWRITES:-[]}" \
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson preMergeEligible "${HAM_PRE_MERGE_ELIGIBLE:-0}" \
@@ -76,6 +77,7 @@ ham_append_terminal_audit() {
       failingTestsFixed: $failingTestsFixed,
       rebaseAttempts: $rebaseAttempts,
       mergeAttempts: $mergeAttempts,
+      closingKeywordRewrites: $closingKeywordRewrites,
       mergeCommitSha: $mergeCommit,
       mergedAt: $mergedAt,
       reason: $reason,
@@ -718,10 +720,20 @@ $HAM_PROTECTIVE_PREDECESSORS
 EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
 
+  HAM_COMMIT_BODY_JSON=$(printf '%s' "$HAM_PROTECTIVE_PREDECESSOR_BODY" |
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>>) || {
+    ham_append_terminal_audit failed-without-merge commit-body-sanitization-failed || true
+    ham_release_merge_lease
+    return 1
+  }
+  HAM_COMMIT_BODY=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.text') || { ham_release_merge_lease; return 1; }
+  HAM_CLOSING_KEYWORD_REWRITES=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -c '.rewrites') || { ham_release_merge_lease; return 1; }
+
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
+    --body "$HAM_COMMIT_BODY" \
     > "$HAM_MERGE_STDOUT" \
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?

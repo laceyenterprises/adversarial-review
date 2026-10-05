@@ -995,3 +995,16 @@ for (const failure of ['TLS handshake timeout', 'unrecognized merge error']) {
     assert.equal(receipts.length, 0);
   });
 }
+
+for (const authority of ['daemon-merge', 'ham-terminal-remediation']) {
+  test(`${authority} supplies sanitized PR body plus trailers and audits rewrites`, async () => {
+    const harness = makeHarness();
+    const result = await attemptDaemonCleanMerge(baseArgs(harness, {
+      prBody: 'Fix: #7732\nResolves #7',
+      auditMetadata: { closureAuthority: authority, closeTrailers: 'Closed-By: hammer' },
+    }));
+    assert.equal(result.disposition, 'merged');
+    assert.equal(harness.lastMergeCtx.body, 'Fix: PR #7732\nResolves #7\n\nClosed-By: hammer');
+    assert.equal(harness.calls.auditWrites[0].metadata.closingKeywordRewrites[0].referencedNumber, 7732);
+  });
+}

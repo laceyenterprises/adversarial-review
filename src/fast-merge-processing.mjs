@@ -1,3 +1,4 @@
+import { buildMergeCommitBody } from './ama/closing-keywords.mjs';
 // Fast-merge processing / orchestration layer.
 //
 // The HAM (hammer) audit-trust verification chain, the PR-view/checks fetchers
@@ -176,6 +177,7 @@ function buildFastMergeCloseAuditEntry({
   requeueResult = null,
   mergeStdout = null,
   mergeStderr = null,
+  closingKeywordRewrites = [],
   at = isoNow(),
 } = {}) {
   const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
@@ -205,6 +207,7 @@ function buildFastMergeCloseAuditEntry({
     requeue_result: requeueResult,
     merge_stdout: mergeStdout,
     merge_stderr: mergeStderr,
+    closingKeywordRewrites,
     recorded_at: at,
   };
 }
@@ -683,7 +686,7 @@ function isNoChecksReportedGhError(err) {
   return detail.includes('no checks') && detail.includes('reported');
 }
 
-async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, rootDir = process.cwd(), logger = console }) {
+async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, body, rootDir = process.cwd(), logger = console }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   return withGhRetry(async () => {
     try {
@@ -693,6 +696,7 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, roo
         {
           matchHeadCommit,
           mergeMethod: 'squash',
+          body,
           deleteBranch: true,
           admin: true,
         },
@@ -724,6 +728,8 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, roo
       '--admin',
       '--match-head-commit',
       String(matchHeadCommit),
+      '--body',
+      body,
       '--delete-branch',
     ], {
       maxBuffer: 5 * 1024 * 1024,
@@ -1372,6 +1378,7 @@ async function processFastMergePR({
     return { status: 'blocked', reason: 'builder-token-merge-refused' };
   }
 
+  const commitBody = buildMergeCommitBody({ prBody: preMergeView.body, trailers: 'Closed-By: fast-merge', selfPrNumber: prNumber, repo });
   let mergeResult;
   const mergeExecutedAt = isoNow();
   try {
@@ -1380,6 +1387,7 @@ async function processFastMergePR({
       repo,
       prNumber,
       matchHeadCommit: exactHeadSha,
+      body: commitBody.text,
       rootDir,
       logger,
     });
@@ -1423,6 +1431,7 @@ async function processFastMergePR({
         logger,
         entry: buildFastMergeCloseAuditEntry({
           action: 'merged',
+      closingKeywordRewrites: commitBody.rewrites,
           repo,
           prNumber,
           authorizedHeadSha: exactHeadSha,
@@ -1452,6 +1461,7 @@ async function processFastMergePR({
       logger,
       entry: buildFastMergeCloseAuditEntry({
         action: 'merge-refused-retryable',
+        closingKeywordRewrites: commitBody.rewrites,
         repo,
         prNumber,
         authorizedHeadSha: exactHeadSha,
@@ -1503,6 +1513,7 @@ async function processFastMergePR({
     logger,
     entry: buildFastMergeCloseAuditEntry({
       action: 'merged',
+      closingKeywordRewrites: commitBody.rewrites,
       repo,
       prNumber,
       authorizedHeadSha: exactHeadSha,

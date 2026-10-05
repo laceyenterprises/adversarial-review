@@ -933,6 +933,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       currentPrHeadSha: 'head-live',
       execFileImpl: async (_command, _args, options) => {
         capturedOptions = options;
+        assert.equal(_args[_args.indexOf('--body') + 1], 'Fix: PR #7732');
         return { stdout: '', stderr: '' };
       },
       fetchRollupImpl: async () => ({
@@ -974,6 +975,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
         prNumber: 300,
         head: 'head-live',
         mergeMethod: 'squash',
+        body: 'Fix: PR #7732',
         });
       },
       logger: { warn() {}, log() {} },

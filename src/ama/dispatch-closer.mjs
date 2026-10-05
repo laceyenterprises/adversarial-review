@@ -4968,7 +4968,7 @@ export async function maybeDispatchAmaCloser({
                 acquiredAt: lease.acquiredAt,
               });
             },
-            runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method }) => {
+            runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body }) => {
               const methodFlag = method === 'merge' ? '--merge' : '--squash';
               const args = [
                 'pr',
@@ -4980,7 +4980,7 @@ export async function maybeDispatchAmaCloser({
                 '--match-head-commit',
                 head,
                 '--body',
-                amaTrailers,
+                body,
               ];
               return runGhPrMergeWithTransientRetry({
                 execFileImpl,

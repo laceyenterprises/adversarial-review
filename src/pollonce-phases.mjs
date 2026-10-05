@@ -1730,7 +1730,7 @@ export async function processReviewSubject(entry, ctx) {
       async function applyWorkerFallback(depthPressure = null) {
         const reviewerAuthorClass = subject.builderClass || route.builderClass;
         const primaryReviewerWorkerClass = reviewerWorkerClassForRoute(route);
-        const discoveryDepthEngaged = ['first-pass', 'follow-up'].some(
+        const discoveryDepthEngaged = ['first-pass', 'rereview'].some(
           (kind) => firstPassSpilloverController?.depthPressure?.(kind)?.engaged,
         );
         const rwfDecision = await resolveReviewerWorkerClassWithFallback({

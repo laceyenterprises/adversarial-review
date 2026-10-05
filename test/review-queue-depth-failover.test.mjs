@@ -921,6 +921,12 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
   assert.match(src, /firstPassSpilloverController\?\.refundSpill\?\.\(\{/);
 });
 
+test('discovery checks both canonical depth lanes before its lazy posted-review lookup', () => {
+  const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+  assert.match(src, /discoveryDepthEngaged = \['first-pass', 'rereview'\]\.some/);
+  assert.doesNotMatch(src, /discoveryDepthEngaged = \['first-pass', 'follow-up'\]/);
+});
+
 test('pollonce-phases keeps rereview safety independent from queue-depth admission', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   assert.match(src, /depthPassKind \?\?= reviewerDispatchPassKind\(/);

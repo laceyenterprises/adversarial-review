@@ -7648,3 +7648,24 @@ test('PMARCACLASS-01 RCA class defaults to codex and accepts an operator overrid
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('AMA no-CI repository declarations default off and round-trip explicit operator config', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    assert.deepEqual(loadConfig({ topPath: top, env: {} }).getMergeAuthorityConfig().noCiRepositories, []);
+    writeFile(top, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      no_ci_repositories: [acme/no-ci]\n');
+    const cfg = loadConfig({ topPath: top, env: {} });
+    const first = cfg.getMergeAuthorityConfig();
+    assert.deepEqual(first.noCiRepositories, ['acme/no-ci']);
+    first.noCiRepositories.push('other/repo');
+    assert.deepEqual(cfg.getMergeAuthorityConfig().noCiRepositories, ['acme/no-ci']);
+    const overridden = loadConfig({ topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_NO_CI_REPOSITORIES: 'acme/other' },
+    });
+    assert.deepEqual(overridden.getMergeAuthorityConfig().noCiRepositories, ['acme/other']);
+    writeFile(top, 'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      no_ci_repositories: true\n');
+    assert.throws(() => loadConfig({ topPath: top, env: {} }));
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

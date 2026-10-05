@@ -48,7 +48,9 @@
         "templates/hammer-prompt.md",
         "src/ama/daemon-merge.mjs",
         "bin/hammer-merge.sh",
-        "src/ama/closing-keywords.mjs"
+        "src/ama/closing-keywords.mjs",
+        "src/ama/no-ci-configured.mjs",
+        "src/daemon-clean-merge.mjs"
       ],
       "owner": "AMA merge authority",
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"]

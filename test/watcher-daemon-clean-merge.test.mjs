@@ -17,6 +17,7 @@ import {
   resolveDaemonWorkerIdentityFromHeadAttestation,
 } from '../src/watcher.mjs';
 import {
+  attemptDaemonCleanMerge,
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
 } from '../src/ama/daemon-merge.mjs';
@@ -2506,12 +2507,14 @@ test('DCA-01: a check that goes RED between pre-lease and the in-loop re-fetch p
   }
 });
 
-test('DCA-01: a live rollup with ZERO checks never merges (LAC-1559 empty-rollup invariant preserved)', async () => {
+test('DCA-01: an empty live rollup with configured workflows never merges', async () => {
   const rootDir = tempRoot();
   let mergeCalls = 0;
+  let workflowReads = 0;
   try {
     const result = await runDaemonCleanMergeAttempt({
       ...realRollupHelpers({ rootDir, prNumber: 702, head: 'nocheck-head' }),
+      cfg: { ...realRollupHelpers({ rootDir }).cfg, noCiRepositories: ['acme/repo'] },
       fetchRollupImpl: async () => ({
         state: 'OPEN',
         headRefOid: 'nocheck-head',
@@ -2520,12 +2523,19 @@ test('DCA-01: a live rollup with ZERO checks never merges (LAC-1559 empty-rollup
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
       }),
-      execFileImpl: async () => {
-        mergeCalls += 1;
+      execFileImpl: async (_file, args) => {
+        if (args[0] === 'pr' && args[1] === 'merge') mergeCalls += 1;
+        if (args[0] === 'api') {
+          const payload = args[1].includes('/git/trees/')
+            ? (workflowReads++, { truncated: false, tree: [{ path: '.github/workflows/ci.yml', type: 'blob' }] })
+            : { protected: false, commit: { sha: 'base-head' } };
+          return { stdout: JSON.stringify(payload) };
+        }
         return { stdout: '', stderr: '' };
       },
     });
     assert.equal(result.merged, false, 'no checks reported is not green — must not merge');
+    assert.equal(workflowReads, 2, 'base and head configuration reads run concurrently');
     assert.equal(mergeCalls, 0, 'the merge button is never clicked with zero checks');
     // Empty live checks are caught at the pre-lease gate (declines cleanly to the
     // hammer route) rather than reaching the in-loop park.
@@ -3975,5 +3985,124 @@ test('daemon recovery/bootstrap errors degrade to original checks and execution 
       });
       assert.equal(calls, enabled ? 2 : 0);
     }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('audited zero-finding no-CI close skips hammer and operator escalation', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const head = 'a'.repeat(40);
+    const gate = { candidateHead: head, requiredChecks: [], mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN', prState: 'OPEN', labels: [] };
+    const audit = [];
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => attemptDaemonCleanMerge({
+        repo: 'acme/repo', prNumber: 7, base: 'main', validatedHead: head,
+        prTitle: '[codex] fixture no-CI remediation',
+        verdict: 'settled-success', reviewState: {
+          blockingFindingCount: 0, blockingFindingState: 'known',
+          nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+        },
+        noCiRepositories: ['acme/repo'], branchProtectionRequired: true,
+        liveGate: gate, fetchLiveGateImpl: async () => gate,
+        verifyNoCiConfiguredImpl: async () => ({ reason: 'no CI configured', head }),
+        acquireLeaseImpl: async () => ({ acquired: true, lease: { leaseId: 'fixture' } }),
+        releaseLeaseImpl: () => {}, runMergeImpl: async () => ({ exitCode: 0 }),
+        hqRoot: rootDir, readAuditImpl: () => null, writeAuditImpl: () => {},
+        appendAuditImpl: (entry) => audit.push(entry), logger: { log() {}, warn() {} },
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls++; throw new Error('hammer must not run'); },
+    });
+    assert.equal(result.daemonCleanMerge.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(closerCalls, 0);
+    assert.notEqual(result.needsOperator, true);
+    assert.equal(audit.at(-1).attempt.ciConfiguration.reason, 'no CI configured');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('production daemon wiring verifies GitHub configuration twice for no-CI closure', async () => {
+  const rootDir = tempRoot();
+  try {
+    const paths = [];
+    let merges = 0;
+    const result = await runDaemonCleanMergeAttempt({
+      ...realRollupHelpers({ rootDir, head: 'no-ci-head' }),
+      cfg: { ...realRollupHelpers({ rootDir }).cfg, noCiRepositories: ['acme/repo'],
+        branchProtection: { required: true } },
+      candidate: { ...realRollupHelpers({ rootDir, head: 'no-ci-head' }).candidate,
+        branchProtection: { requiredContexts: [] } },
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'no-ci-head',
+        labels: [], checks: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+      execGhWithRetryImpl: async ({ args, timeoutMs, retries }) => {
+        if (args[0] === 'pr' && args[1] === 'merge') { merges++; return { stdout: '' }; }
+        assert.equal(args[0], 'api');
+        paths.push(args[1]);
+        assert.equal(timeoutMs, 15000);
+        assert.equal(retries, 0);
+        const payload = args[1].includes('/git/trees/') ? { truncated: false, tree: [] }
+          : args[1].includes('/rules/') ? (assert.deepEqual(args.slice(2), ['--paginate', '--slurp']), [[]])
+          : args[1].includes('/check-suites') ? { total_count: 0, check_suites: [] }
+          : args[1].includes('/status?') ? { total_count: 0, statuses: [] }
+          : { protected: false, commit: { sha: 'base-head' } };
+        return { stdout: JSON.stringify(payload) };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED, JSON.stringify(result));
+    assert.equal(merges, 1);
+    assert.equal(paths.filter((path) => path.includes('/rules/')).length, 2);
+    assert.equal(paths.filter((path) => path.includes('/git/trees/')).length, 4);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('production daemon never probes empty rollup without explicit repository opt-in', async () => {
+  const rootDir = tempRoot();
+  try {
+    const result = await runDaemonCleanMergeAttempt({
+      ...realRollupHelpers({ rootDir, head: 'no-ci-head' }),
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'no-ci-head',
+        labels: [], checks: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+      execGhWithRetryImpl: async () => assert.fail('no GitHub configuration probe or merge authorized'),
+    });
+    assert.equal(result.merged, false);
+    assert.deepEqual(result.reasons, ['ci-not-green']);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('production protection-read 403 refuses no-CI and preserves eligibility handoff', async () => {
+  const rootDir = tempRoot();
+  try {
+    let merges = 0;
+    const warnings = [];
+    const helpers = realRollupHelpers({ rootDir, head: 'no-ci-head' });
+    const result = await runDaemonCleanMergeAttempt({
+      ...helpers,
+      logger: { log() {}, warn: message => warnings.push(message) },
+      cfg: { ...helpers.cfg, noCiRepositories: ['acme/repo'], branchProtection: { required: true } },
+      candidate: { ...helpers.candidate, branchProtection: { requiredContexts: [] } },
+      fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'no-ci-head',
+        labels: [], checks: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
+      execGhWithRetryImpl: async ({ args }) => {
+        if (args[0] === 'pr') { merges++; assert.fail('no merge authorized'); }
+        if (args[1].endsWith('/protection')) {
+          throw Object.assign(new Error('protection forbidden'), { stderr: 'HTTP 403' });
+        }
+        const payload = args[1].includes('/git/trees/') ? { truncated: false, tree: [] }
+          : args[1].includes('/rules/') ? [[]]
+          : args[1].includes('/check-suites') ? { total_count: 0, check_suites: [] }
+          : args[1].includes('/status?') ? { total_count: 0, statuses: [] }
+          : { protected: true, commit: { sha: 'base-head' } };
+        return { stdout: JSON.stringify(payload) };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'not-eligible');
+    assert.deepEqual(result.reasons, ['ci-not-green', 'branch-protection-missing-gate']);
+    assert.equal(merges, 0);
+    assert.ok(warnings.some(message => message.includes('HTTP 403')));
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

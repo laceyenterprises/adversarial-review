@@ -54,6 +54,7 @@ import {
   writeAmaAuditEntry,
 } from './audit.mjs';
 import { evaluateMergeEligibility } from './merge-eligibility.mjs';
+import { isTransientGhError } from '../gh-cli.mjs';
 import { hasOperatorApprovedOverride } from './eligibility.mjs';
 import { evaluateMergeCapabilityEnforcement } from './merge-capability-enforcement.mjs';
 import {
@@ -330,6 +331,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {boolean=} [args.branchProtectionRequired]
  * @param {string=} [args.requiredGateContext]
  * @param {string[]=} [args.branchProtectionRequiredContexts]
+ * @param {string[]} [args.noCiRepositories] Operator-declared repositories without CI.
  * @param {string} [args.mergeMethod]    `squash` (default) | `merge`.
  * @param {string} args.hqRoot          HQ root for the audit doc.
  * @param {object} [args.auditMetadata] Extra top-level audit fields (reviewer, risk).
@@ -370,6 +372,7 @@ async function attemptDaemonCleanMergeInner({
   requiredGateContext = '',
   branchProtectionRequiredContexts = [],
   requiredCheckContexts = [],
+  noCiRepositories = [],
   mergeMethod = 'squash',
   flags = {},
   mergeCapabilityEnforcement = flags.mergeCapabilityEnforcement || 'observe',
@@ -386,6 +389,7 @@ async function attemptDaemonCleanMergeInner({
   allowHamTerminalRemediation = false,
   allowHeadCloserCertifiedNonBlocking = false,
   fetchLiveGateImpl,
+  verifyNoCiConfiguredImpl,
   acquireLeaseImpl,
   onEligibleImpl = null,
   releaseLeaseImpl,
@@ -540,39 +544,75 @@ async function attemptDaemonCleanMergeInner({
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }
 
-  // ── Gate 2: substantive eligibility (verdict + green CI + mergeable +
-  // head-match) via the shared MSM-02 predicate. Evaluated BEFORE spending a
-  // lease acquisition; `leaseHeld:true` isolates the non-lease gates. ─────────
+  // ── Gate 2: check the real rollup and all cheap eligibility gates first. ──
   const preLease = normalizeGateState(liveGate);
-  const preEligibility = evaluateEligibilityImpl({
-    primaryChange: preLease.primaryChange,
-    requirePrimaryChange: preLease.requirePrimaryChange,
-    strictNonBlockingRemediation: preLease.strictNonBlockingRemediation,
+  let noCiEvidence = null;
+  const evaluateGate = (gate, evidence = null) => evaluateEligibilityImpl({
+    primaryChange: gate.primaryChange,
+    requirePrimaryChange: gate.requirePrimaryChange,
+    strictNonBlockingRemediation: gate.strictNonBlockingRemediation,
     verdict,
     operatorApprovedEvidence,
     operatorLogins,
     operatorLabelActorEnforcement,
     leaseHeld: true,
-    requiredChecks: preLease.requiredChecks,
-    mergeable: preLease.mergeable,
-    mergeStateStatus: preLease.mergeStateStatus,
-    prState: preLease.prState,
-    branchProtectionRequired,
+    requiredChecks: evidence ? true : gate.requiredChecks,
+    mergeable: gate.mergeable,
+    mergeStateStatus: gate.mergeStateStatus,
+    prState: gate.prState,
+    // Only live proof for an opted-in repository authorizes this call's waiver.
+    branchProtectionRequired: evidence ? false : branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts:
-      preLease.branchProtectionRequiredContexts?.length > 0
-        ? preLease.branchProtectionRequiredContexts
+      gate.branchProtectionRequiredContexts?.length > 0
+        ? gate.branchProtectionRequiredContexts
         : branchProtectionRequiredContexts,
     requiredCheckContexts,
-    candidateHead: preLease.candidateHead,
+    candidateHead: gate.candidateHead,
     validatedHead,
-    labels: preLease.labels,
+    labels: gate.labels,
   });
+  const canProbeNoCi = (gate, eligibility) =>
+    Array.isArray(noCiRepositories) && noCiRepositories.some((entry) =>
+      typeof entry === 'string' && entry.toLowerCase() === repo.toLowerCase()) &&
+    isFullyCleanSettledReview(reviewState) && verdict === 'settled-success' &&
+    Array.isArray(gate.requiredChecks) && gate.requiredChecks.length === 0 &&
+    requiredCheckContexts.length === 0 &&
+    typeof verifyNoCiConfiguredImpl === 'function' &&
+    eligibility.reasons.includes('ci-not-green') &&
+    // Missing required gate protection is the only additional miss proof may
+    // waive. Conflicts, holds, stale heads, and unreadable gates never probe.
+    eligibility.reasons.every((reason) =>
+      reason === 'ci-not-green' || reason === 'branch-protection-missing-gate');
+  const authorizeNoCi = async (gate) => {
+    try {
+      return await verifyNoCiConfiguredImpl({ head: gate.candidateHead });
+    } catch (err) {
+      logger?.warn?.(`[daemon-merge] CI configuration read failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      if (isTransientGhError(err)) throw err;
+      // Permission, unsupported CLI, and malformed-data failures decline the
+      // exception and preserve the original eligibility/hammer route.
+      return null;
+    }
+  };
+  let preEligibility = evaluateGate(preLease);
+  if (canProbeNoCi(preLease, preEligibility)) {
+    // Gate 3 may short-circuit probe work, but not ordinary ineligible heads.
+    if (priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, validatedHead })) {
+      return notTaken('prior-daemon-terminal-failure');
+    }
+    try {
+      noCiEvidence = await authorizeNoCi(preLease);
+    } catch {
+      return { ...notTaken('gate-read-failed'), disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+        permanent: false };
+    }
+    preEligibility = evaluateGate(preLease, noCiEvidence);
+  }
   if (!preEligibility.eligible) {
     return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease });
   }
-
-  // ── Gate 3: don't re-loop a head that already failed permanently. ──────────
+  // ── Gate 3: preserve the original order for the general path. ─────────────
   if (priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, validatedHead })) {
     return notTaken('prior-daemon-terminal-failure');
   }
@@ -643,6 +683,7 @@ async function attemptDaemonCleanMergeInner({
   const auditMetadataDoc = {
     ...auditMetadata,
     closingKeywordRewrites: commitBody.rewrites,
+    ...(noCiEvidence ? { ciConfigurationAdmission: noCiEvidence } : {}),
     closureAuthority,
     flagState,
   };
@@ -678,6 +719,7 @@ async function attemptDaemonCleanMergeInner({
   }
 
   // ── Bounded merge loop under the held lease. ───────────────────────────────
+  const admittedWithNoCi = Boolean(noCiEvidence);
   let attempts = 0;
   let merged = false;
   let terminal = null; // { reason, permanent, reasons }
@@ -689,7 +731,8 @@ async function attemptDaemonCleanMergeInner({
     let live;
     try {
       live = normalizeGateState(await fetchLiveGateImpl());
-    } catch {
+    } catch (err) {
+      logger?.warn?.(`[daemon-merge] live gate/configuration read failed for ${repo}#${prNumber}: ${err?.message || err}`);
       // A gate read failure is transient by construction here (the network read
       // itself failed). Retry within the bounded budget; exhausting it is a
       // fail-closed, non-permanent terminal (next tick may re-attempt).
@@ -748,30 +791,27 @@ async function attemptDaemonCleanMergeInner({
     }
     // Re-verify the full gate on the fresh read (CI could have gone red, the PR
     // could have been closed, mergeable could have flipped).
-    const elig = evaluateEligibilityImpl({
-      primaryChange: live.primaryChange,
-      requirePrimaryChange: live.requirePrimaryChange,
-      strictNonBlockingRemediation: live.strictNonBlockingRemediation,
-      verdict,
-      operatorApprovedEvidence,
-      operatorLogins,
-      operatorLabelActorEnforcement,
-      leaseHeld: true,
-      requiredChecks: live.requiredChecks,
-      mergeable: live.mergeable,
-      mergeStateStatus: live.mergeStateStatus,
-      prState: live.prState,
-      branchProtectionRequired,
-      requiredGateContext,
-      branchProtectionRequiredContexts:
-        live.branchProtectionRequiredContexts?.length > 0
-          ? live.branchProtectionRequiredContexts
-          : branchProtectionRequiredContexts,
-      requiredCheckContexts,
-      candidateHead: live.candidateHead,
-      validatedHead,
-      labels: live.labels,
-    });
+    let elig = evaluateGate(live);
+    noCiEvidence = null;
+    if (canProbeNoCi(live, elig)) {
+      try {
+        noCiEvidence = await authorizeNoCi(live);
+      } catch {
+        if (attempts >= retryCap) {
+          terminal = { reason: 'gate-read-failed', permanent: false };
+          break;
+        }
+        await sleep(daemonMergeBackoffMs(attempts, { baseMs: backoffBaseMs, rng }));
+        continue;
+      }
+      elig = evaluateGate(live, noCiEvidence);
+    }
+    // A revoked proof or newly appearing CI is a changing gate, not a permanent
+    // rejection of this head. The next tick must evaluate the real rollup.
+    const noCiRevoked = admittedWithNoCi && !noCiEvidence && !elig.eligible &&
+      !live.requiredChecks?.some(check => ['FAILURE', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'ERROR'].includes(String(check.conclusion || check.state || '').toUpperCase())) &&
+      elig.reasons.every((reason) =>
+        reason === 'ci-not-green' || reason === 'branch-protection-missing-gate');
     if (!elig.eligible) {
       // Unreadable labels and GitHub's `mergeable=UNKNOWN` (recomputing after a
       // push or base move) say nothing permanent about THIS head. Re-sample an
@@ -790,7 +830,7 @@ async function attemptDaemonCleanMergeInner({
       }
       terminal = {
         reason: transientReadOnly ? 'gate-read-failed' : 'gate-not-eligible',
-        permanent: !hasTransientRead,
+        permanent: !hasTransientRead && !noCiRevoked,
         reasons: elig.reasons,
         liveGate: live,
       };
@@ -927,6 +967,7 @@ async function attemptDaemonCleanMergeInner({
   const terminalHasTransientRead = (terminal?.reasons || []).some((r) =>
     TRANSIENT_GATE_READ_REASONS.has(r) || r === 'primary-change-unknown');
   const cleanParkManualCloseRequired = !merged && terminal?.reason !== 'gate-read-failed' &&
+    !(terminal?.reason === 'gate-not-eligible' && terminal?.permanent === false) &&
     !terminalHasTransientRead && isFullyCleanSettledReview(reviewState);
   let auditWritten = false;
   try {
@@ -938,6 +979,7 @@ async function attemptDaemonCleanMergeInner({
           path: closureAuthority,
           attemptPhase: 'daemon-merged',
           reason: 'merged',
+          ...(noCiEvidence ? { ciConfiguration: noCiEvidence } : {}),
           validatedHead,
           mergeMethod,
           attempts,

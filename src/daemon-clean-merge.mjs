@@ -1,3 +1,4 @@
+import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 import { inspectCiBootstrap, recoverCancelledChecks, emptyExternalRollup } from './ci-recovery.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
@@ -170,9 +171,10 @@ export function resolveAutonomousCloserCommitAccountability({
  * Prefer the normalized `checks` field; fall back to `statusCheckRollup` for any
  * snapshot/mock source that still uses the raw name. Returns `null` only when
  * NEITHER field is present, so the caller can apply its own default (e.g. the
- * watcher candidate snapshot) — an EMPTY `checks` array is returned as-is so a
- * live head with no reported checks still reads NOT green (LAC-1559 invariant),
- * never masked by a stale candidate.
+ * watcher candidate snapshot). An EMPTY `checks` array is returned as-is,
+ * never masked by a stale candidate. The shared classifier rejects that empty
+ * rollup (LAC-1559); only an explicitly authorized no-CI configuration proof can
+ * substitute for the daemon's CI predicate.
  */
 function resolveRollupRequiredChecks(rollup) {
   if (Array.isArray(rollup?.checks)) return rollup.checks;
@@ -901,6 +903,7 @@ export async function runDaemonCleanMergeAttempt({
       nonBlockingFindingState: reviewState?.nonBlockingFindingState,
     },
     branchProtectionRequired,
+    noCiRepositories: cfg?.noCiRepositories,
     requiredGateContext,
     branchProtectionRequiredContexts,
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
@@ -1027,6 +1030,15 @@ export async function runDaemonCleanMergeAttempt({
           env,
         })
       : null,
+    verifyNoCiConfiguredImpl: ({ head }) => verifyNoCiConfigured({
+      repo: repoPath, base, head, logger,
+      get: async (path, { paginate = false } = {}) => {
+        const { stdout } = await execGhWithRetryImpl({ execFileImpl,
+          args: ['api', path, ...(paginate ? ['--paginate', '--slurp'] : [])],
+          timeoutMs: 15000, retries: 0, env, signal });
+        return JSON.parse(stdout);
+      },
+    }),
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });

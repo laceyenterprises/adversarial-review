@@ -323,7 +323,11 @@ matching `jobId` in `completed/`, `failed/`, `stopped/`, or `stopped-archived/`
 once its newest semantic terminal timestamp reaches
 `retention.ephemeral.follow_up_workspaces_keep_hours` (default 72 hours). It
 continues without GitHub access, a recognized repo/PR name, or a usable CWD
-probe, and tolerates unrelated corrupt ledger files.
+probe, and tolerates unrelated corrupt ledger files. Positive active-CWD
+evidence observed by the additive pass vetoes cleanup on every path; unknown
+visibility does not veto terminal TTL. Preserved `.resume-backup-*` directories
+use only the semantic terminal-TTL path, even after PR merge or closure, so
+closing a PR cannot immediately discard uncommitted recovery output.
 
 The additive paths use a live `gh pr view` lookup and an `inactive` CWD probe.
 They can reap a merged/closed PR's workspace inside the TTL, even without a
@@ -337,8 +341,9 @@ This supersedes the former rule that all record-less workspaces stay untouched.
 
 Pending/in-progress ownership by jobId, PR, or workspace reference retains
 candidates on the additive paths; the workspace's own pending/in-progress
-record is checked again unconditionally for every path. Stale PIDs in terminal
-records are ignored. Unreadable or vanished inventory records are logged and
+record is checked again unconditionally for every path. Relative workspace
+references resolve against `rootDir`, matching worker serialization. Stale
+PIDs in terminal records are ignored. Unreadable or vanished inventory records are logged and
 retain additive candidates for the jobId/PR identifiable from the filename;
 opaque filenames and unreadable directories retain all additive candidates.
 Auth/network failures, unknown/non-live PR state, lookup limits, and active or
@@ -346,16 +351,30 @@ unknown CWD visibility (including cross-UID visibility) likewise retain
 additive candidates without disabling terminal TTL cleanup.
 
 Lookups are cached per PR for the pass, capped at 256 distinct PRs, and bounded
-to two seconds including throttle waits. Set
+to two seconds including throttle waits. Expiry aborts a running `gh`
+subprocess; a lookup abandoned during throttle backoff does not launch `gh`
+after the backoff clears. Set
 `ADVERSARIAL_FOLLOW_UP_WORKSPACE_REAP_BUDGET_MS` to tune the lookup phase and the
 separate terminal rename phase (30000ms each by default). Capped passes rotate
-their starting workspace. Full archive parsing and async probes run outside
-the writer lock; final ownership checks and renames lock one workspace at a
-time, with only active-status scans and candidate terminal/archive reads under
-the lock. Trash deleter launch remains outside it.
+their starting workspace using an in-memory offset keyed by resolved workspace
+root; daemon restarts reset it. Inventory scanning shares the lookup-phase
+deadline, checking between directories and records; incomplete scans retain
+all additive candidates while terminal TTL remains available. Inventory and
+async probes run outside the writer lock; final ownership checks and renames
+lock one workspace at a time, with only active-status scans and candidate terminal/archive reads under
+the lock. Active-status scans under the lock share the rename-phase deadline.
+A busy
+writer lock (`EAGAIN`/`EWOULDBLOCK`) increments `deferredForLock` and logs a
+short deferral instead of a filesystem error. Trash deleter launch remains
+outside it.
 
 The tick logs `reapedPrDone`, `reapedOrphan`, and `keptOpenPr`; PR-done orphans
-count in both reap metrics. A `missingTerminalTimestamp > 0` means neither path
+count in both reap metrics. `keptCwdActive` counts positive live use, while
+`keptCwdUnknown` counts unavailable visibility, with `keptCwdCrossUid` and
+`keptCwdRunAsUser` exposing the cross-user cases. These are probe-outcome
+counts: unknown visibility can still allow terminal TTL cleanup. If these
+unknown counts are high and additive reaps stay at zero, check the daemon and
+worker UID configuration. A `missingTerminalTimestamp > 0` means neither path
 could reap the terminal workspace: re-stamp the record with its correct
 terminal timestamp or remove the workspace manually after inspection. The
 reaper logs per-workspace move failures and continues with later entries.

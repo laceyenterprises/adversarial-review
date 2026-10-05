@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { reapFollowUpWorkspaces, workspaceTarget } from '../src/follow-up-workspace-reaper.mjs';
 import { getFollowUpJobDir, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import { withFollowUpJobLock } from '../src/follow-up-job-write.mjs';
@@ -14,7 +15,7 @@ function fixture(t) {
   mkdirSync(workspaceRootDir);
   const logs = [];
   const deletes = [];
-  const options = { rootDir, workspaceRootDir, nowMs: Date.now(),
+  const options = { rootDir, workspaceRootDir, nowMs: Date.now(), passOffsetsImpl: new Map(),
     logImpl: (line) => logs.push(line), logErrorImpl: (line) => logs.push(line),
     probeDirectoryImpl: async () => ({ state: 'inactive' }),
     lookupPRImpl: async () => ({ source: 'live', prState: 'merged' }),
@@ -306,4 +307,143 @@ test('archive parsing and trash launch happen outside the writer lock', async (t
   };
   assert.equal((await reapFollowUpWorkspaces(options)).reaped, 1);
   assert.equal(reads, 1, 'terminal inventory is not parsed again under the lock');
+});
+
+
+test('observed active CWD vetoes expired terminal TTL but unknown visibility does not', async (t) => {
+  const { options, workspace } = fixture(t);
+  const active = workspace(1, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  const unknown = workspace(2, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  const runAs = workspace(3);
+  options.probeDirectoryImpl = async ({ workerDir }) => workerDir === active
+    ? { state: 'active' } : { state: 'unknown', reason: workerDir === runAs ? 'run-as-user-unobservable' : 'cross-uid-unobservable' };
+  const result = await reapFollowUpWorkspaces(options);
+  assert.equal(result.reaped, 1);
+  assert.equal(result.keptCwdActive, 1);
+  assert.equal(result.keptCwdUnknown, 2);
+  assert.equal(result.keptCwdCrossUid, 1);
+  assert.equal(result.keptCwdRunAsUser, 1);
+  assert.equal(existsSync(active), true);
+  assert.equal(existsSync(unknown), false);
+  assert.equal(existsSync(runAs), true);
+});
+
+test('writer lock contention defers terminal TTL without reporting a filesystem failure', (t) => {
+  const { options, workspace } = fixture(t);
+  const path = workspace(1, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  const script = `import { reapTerminalFollowUpWorkspaces } from './src/follow-up-jobs.mjs';
+    const result = reapTerminalFollowUpWorkspaces({ rootDir: process.argv[1], workspaceRootDir: process.argv[2],
+      logErrorImpl: () => {}, launchTrashDeleterImpl: () => {} });
+    console.log(JSON.stringify(result));`;
+  const child = withFollowUpJobLock(join(options.rootDir, 'data', 'follow-up-jobs'), () =>
+    spawnSync(process.execPath, ['--input-type=module', '-e', script, options.rootDir, options.workspaceRootDir],
+      { cwd: new URL('../', import.meta.url), encoding: 'utf8', timeout: 10000 }));
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.errors, 0);
+  assert.equal(result.deferredForLock, 1);
+  assert.equal(result.skipped, 1);
+  assert.equal(existsSync(path), true);
+});
+
+test('relative workspace references use rootDir both initially and under the rename lock', async (t) => {
+  for (const phase of ['inventory', 'lookup']) {
+    const { options, workspace } = fixture(t);
+    const path = workspace(1);
+    const record = () => {
+      const dir = getFollowUpJobDir(options.rootDir, 'pending');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'other.json'), JSON.stringify({ jobId: 'other', status: 'pending',
+        repo: 'other/repo', prNumber: 99, remediationWorker: { workspaceDir: relative(options.rootDir, path) } }));
+    };
+    if (phase === 'inventory') record();
+    else options.lookupPRImpl = async () => { record(); return { source: 'live', prState: 'merged' }; };
+    const result = await reapFollowUpWorkspaces(options);
+    assert.equal(result.reaped, 0);
+    assert.equal(result.prLookups, phase === 'inventory' ? 0 : 1);
+    assert.equal(existsSync(path), true);
+  }
+});
+
+test('inventory stops parsing at the pass deadline and fails additive paths closed', async (t) => {
+  const { options, workspace } = fixture(t);
+  const expired = workspace(1, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  const orphan = workspace(2);
+  const archive = join(getFollowUpJobDir(options.rootDir, 'stoppedArchived'), '2020-01');
+  mkdirSync(archive, { recursive: true });
+  for (let i = 0; i < 20; i += 1) writeFileSync(join(archive, `other-${i}.json`), JSON.stringify({ jobId: `other-${i}`, status: 'stopped' }));
+  let clock = 0;
+  let reads = 0;
+  options.budgetMs = 10;
+  options.clockImpl = () => clock;
+  options.readInventoryFileImpl = (path, encoding) => { reads += 1; clock += 10; return readFileSync(path, encoding); };
+  const result = await reapFollowUpWorkspaces(options);
+  assert.equal(reads, 1);
+  assert.equal(result.prLookups, 0);
+  assert.equal(result.reaped, 1);
+  assert.equal(existsSync(expired), false);
+  assert.equal(existsSync(orphan), true);
+});
+
+for (const prState of ['merged', 'closed']) {
+  test(`resume backups keep semantic TTL even when the PR is ${prState}`, async (t) => {
+    const { options, workspace } = fixture(t);
+    const recent = workspace(1, undefined, 'completed');
+    const expired = workspace(2, undefined, 'completed', options.nowMs - 73 * 3600_000);
+    const backups = [recent, expired].map((path) => {
+      const backup = `${path}.resume-backup-123-456`;
+      renameSync(path, backup);
+      return backup;
+    });
+    const orphan = workspace(3, '123.resume-backup-123-456');
+    options.lookupPRImpl = async () => ({ source: 'live', prState });
+    const result = await reapFollowUpWorkspaces(options);
+    assert.equal(result.prLookups, 0);
+    assert.equal(result.reapedPrDone, 0);
+    assert.equal(result.reaped, 1);
+    assert.equal(existsSync(backups[0]), true);
+    assert.equal(existsSync(backups[1]), false);
+    assert.equal(existsSync(orphan), true);
+  });
+}
+
+test('rotation is isolated by workspace root and advances capped passes', async (t) => {
+  const first = fixture(t);
+  const second = fixture(t);
+  const offsets = new Map();
+  const visited = [];
+  for (const { options, workspace } of [first, second]) {
+    workspace(1); workspace(2);
+    options.passOffsetsImpl = offsets;
+    options.maxPrLookups = 1;
+    options.lookupPRImpl = async ({ prNumber }) => { visited.push(prNumber); return { source: 'live', prState: 'open' }; };
+  }
+  await reapFollowUpWorkspaces(first.options);
+  await reapFollowUpWorkspaces(second.options);
+  await reapFollowUpWorkspaces(first.options);
+  assert.deepEqual(visited, [1, 1, 2]);
+  assert.equal(offsets.size, 2);
+});
+
+test('bounded lookup aborts a subprocess still running when its deadline expires', async (t) => {
+  const { options, workspace } = fixture(t);
+  workspace(1);
+  options.budgetMs = 10;
+  let aborted = false;
+  options.lookupPRImpl = ({ signal }) => new Promise((resolve) => {
+    signal.addEventListener('abort', () => { aborted = true; resolve(null); }, { once: true });
+  });
+  await reapFollowUpWorkspaces(options);
+  assert.equal(aborted, true);
+});
+
+
+test('EAGAIN during a rename remains an error rather than a lock deferral', (t) => {
+  const { options, workspace } = fixture(t);
+  const path = workspace(1, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  const result = reapTerminalFollowUpWorkspaces({ ...options,
+    renameSyncImpl: () => { throw Object.assign(new Error('rename temporarily unavailable'), { code: 'EAGAIN' }); } });
+  assert.equal(result.errors, 1);
+  assert.equal(result.deferredForLock, 0);
+  assert.equal(existsSync(path), true);
 });

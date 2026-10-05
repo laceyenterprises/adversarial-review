@@ -927,11 +927,16 @@ async function fetchLivePRLifecycle({
   prNumber,
   execFileImpl = execFileAsyncDefault,
   timeoutMs = DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS,
+  signal,
+  awaitThrottleImpl = awaitThrottleIfNeeded,
 } = {}) {
   if (!repo || !prNumber) return null;
   let stdout;
   try {
-    await awaitThrottleIfNeeded();
+    if (signal?.aborted) return null;
+    await awaitThrottleImpl();
+    // A bounded caller may abandon this lookup during shared backoff.
+    if (signal?.aborted) return null;
     const result = await execFileImpl(
       'gh',
       [
@@ -946,6 +951,7 @@ async function fetchLivePRLifecycle({
       {
         maxBuffer: 1 * 1024 * 1024,
         timeout: timeoutMs,
+        signal,
       }
     );
     stdout = result?.stdout;

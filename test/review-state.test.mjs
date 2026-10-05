@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   ensureReviewStateSchema,
+  fetchLivePRLifecycle,
   openReviewStateDb,
   persistPRStateToMirror,
   REVIEW_STATE_SCHEMA_VERSION,
@@ -1403,4 +1404,29 @@ test('HELDHEAD automatic request retains settled comment-only verdict guard', (t
   const result = requestReviewRereview({ rootDir, repo, prNumber: 7689, targetRevisionRef: head,
     reason: 'system-held-head-review: recovery', automaticWithheldHeadRecovery: true, db });
   assert.equal(result.reason, 'comment-only-verdict-settled');
+});
+
+
+test('fetchLivePRLifecycle never launches gh after cancellation during throttle backoff', async () => {
+  const controller = new AbortController();
+  let releaseThrottle;
+  let calls = 0;
+  const promise = fetchLivePRLifecycle({ repo: 'org/repo', prNumber: 1, signal: controller.signal,
+    awaitThrottleImpl: () => new Promise((resolve) => { releaseThrottle = resolve; }),
+    execFileImpl: async () => { calls += 1; return { stdout: '{"state":"MERGED"}' }; } });
+  controller.abort();
+  releaseThrottle();
+  assert.equal(await promise, null);
+  assert.equal(calls, 0);
+});
+
+test('fetchLivePRLifecycle forwards cancellation to a running gh subprocess', async () => {
+  const controller = new AbortController();
+  const result = await fetchLivePRLifecycle({ repo: 'org/repo', prNumber: 1, signal: controller.signal,
+    awaitThrottleImpl: async () => {}, execFileImpl: async (command, args, options) => {
+      assert.equal(options.signal, controller.signal);
+      controller.abort();
+      throw new Error('aborted');
+    } });
+  assert.equal(result, null);
 });

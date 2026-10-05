@@ -1486,6 +1486,7 @@ function reapTerminalFollowUpWorkspaces({
       recentTerminalJob: 0,
       unreadableJobRecords: 0,
       deferredForBudget: 0,
+      deferredForLock: 0,
       missingTerminalTimestampPaths: [],
       reapedPaths: [],
       anomalyPaths: [],
@@ -1504,6 +1505,7 @@ function reapTerminalFollowUpWorkspaces({
   const reapedPaths = [];
   const anomalyPaths = [];
   let deferredForBudget = 0;
+  let deferredForLock = 0;
   let trashDir = null;
   const inRootTrashDir = join(workspaceRootDir, '.reap-trash');
   let loggedInRootFallback = false;
@@ -1519,9 +1521,11 @@ function reapTerminalFollowUpWorkspaces({
     if (!entry.isDirectory() || entry.name === '.reap-trash') continue;
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
+    let lockAcquired = false;
     try {
       // Lock each ownership check + rename, not the full pass or trash launch.
       withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
+        lockAcquired = true;
         const lookup = readTerminalWorkspaceJobForId(rootDir, entry.name.replace(/\.resume-backup-\d+-\d+$/, ''), {
           readFollowUpJobImpl,
           logErrorImpl,
@@ -1538,6 +1542,7 @@ function reapTerminalFollowUpWorkspaces({
         catch (err) {
           logErrorImpl(`[follow-up-jobs] Workspace eligibility probe failed ${workspacePath}: ${err?.message || err}; using terminal TTL rule`);
         }
+        if (decision?.veto) { skipped += 1; return; }
         const { terminalJob } = lookup;
         if (!terminalJob && !decision?.reap) {
           skipped += 1;
@@ -1598,6 +1603,12 @@ function reapTerminalFollowUpWorkspaces({
         reapedPaths.push(workspacePath);
       });
     } catch (err) {
+      if (!lockAcquired && (err?.code === 'EAGAIN' || err?.code === 'EWOULDBLOCK')) {
+        skipped += 1;
+        deferredForLock += 1;
+        logErrorImpl(`[follow-up-jobs] Deferring workspace ${workspacePath}: writer lock busy`);
+        continue;
+      }
       errors += 1;
       const permissionError = err?.code === 'EACCES' || err?.code === 'EPERM';
       const workspaceSnapshot = permissionError ? workspaceReapStatSnapshot(workspacePath) : null;
@@ -1639,6 +1650,7 @@ function reapTerminalFollowUpWorkspaces({
     recentTerminalJob,
     unreadableJobRecords,
     deferredForBudget,
+    deferredForLock,
     missingTerminalTimestampPaths,
     reapedPaths,
     anomalyPaths,

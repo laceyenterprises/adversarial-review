@@ -562,6 +562,8 @@ async function runStoppedArchiveSweepIfDue({
         'reap-workspaces',
         `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
         `reapedPrDone=${result.reapedPrDone ?? 0} reapedOrphan=${result.reapedOrphan ?? 0} keptOpenPr=${result.keptOpenPr ?? 0} ` +
+        `keptCwdActive=${result.keptCwdActive ?? 0} keptCwdUnknown=${result.keptCwdUnknown ?? 0} ` +
+        `keptCwdCrossUid=${result.keptCwdCrossUid ?? 0} keptCwdRunAsUser=${result.keptCwdRunAsUser ?? 0} deferredForLock=${result.deferredForLock ?? 0} ` +
         `missingTerminalJob=${result.missingTerminalJob} ` +
         `missingTerminalTimestamp=${result.missingTerminalTimestamp} ` +
         `missingTerminalTimestampSamples=${JSON.stringify(result.missingTerminalTimestampPaths)} ` +

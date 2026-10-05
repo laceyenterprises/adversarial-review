@@ -7,12 +7,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
-import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
+import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost } from '../src/ama/primary-change.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
 import { isCurrentAuthoritativeFamilyReview, amaAllAuthoritativeReviewerLogins, amaAuthoritativeReviewerLoginsForModel, amaReviewerFamilyForLogin } from '../src/ama/reviewer-authority.mjs';
 import { parseCommitTrailerValues, parseCommitTrailers } from '../src/ama/ham-provenance.mjs';
 const head = 'c'.repeat(40), author = 'a'.repeat(40), base = 'b'.repeat(40);
+// Preservation fixtures model a separately successful, exact-head cost read.
+const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {
+  fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }),
+});
 const card = (line) => `- **Finding**\n  - **File:** \`run.py\`\n  - **Lines:** \`${line}\`\n  - **Problem:** Must repair.\n  - **Recommended fix:** Revert.`;
 const review = (id, model, blocking, nonblocking) => ({ node_id: id, html_url: `https://github.com/fixture/repo/pull/1#pullrequestreview-${id}`,
   commit_id: author, state: 'CHANGES_REQUESTED', user: { login: `lacey-${model}-reviewer[bot]` },
@@ -127,6 +131,9 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
   const responses = {
     'repos/fixture/repo/pulls/1': { head: { sha: head }, base: { sha: base } },
     'repos/fixture/repo/pulls/1/reviews?per_page=100': reviews,
+    'repos/fixture/repo/pulls/1/files?per_page=100&page=1': [file],
+    [`repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`]: { check_runs: [] },
+    [`repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`]: [],
     [`repos/fixture/repo/commits/${head}`]: commit,
     [`repos/fixture/repo/compare/${base}...${head}`]: { ...comparison, files: [], total_commits: 2,
       commits: [{ sha: author, commit: { message: 'author' } }, commit] },

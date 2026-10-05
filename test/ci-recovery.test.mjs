@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, readFileSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { recoverCancelledChecks, confirmNoCi, inspectCiBootstrap,
-  verifyManagedCiRecord, readGreenManagedCi, pageCiOnce } from '../src/ci-recovery.mjs';
+  verifyManagedCiRecord, readGreenManagedCi, pageCiOnce, ciRecoveryStateDir } from '../src/ci-recovery.mjs';
 import { fetchMergeAgentCandidate } from '../src/follow-up-merge-agent.mjs';
 import { guardRereviewCiBeforeReviewer } from '../src/reviewer-ci-admission.mjs';
 import { pickMergeAgentDispatchDetail } from '../src/merge-agent-dispatch-decision.mjs';
@@ -237,8 +237,8 @@ test('a rejected rerun releases its workflow budget and a later caller retries o
   assert.equal(await recoverCancelledChecks(args), true);
   assert.equal(posts, 2, 'one rejected POST and one accepted POST');
   assert.ok(prReads >= 4, 'transient reads retry before reserving');
-  const records = readdirSync(join(rootDir, 'dispatch', 'ci-recovery'))
-    .map(name => JSON.parse(readFileSync(join(rootDir, 'dispatch', 'ci-recovery', name))));
+  const records = readdirSync(ciRecoveryStateDir(rootDir))
+    .map(name => JSON.parse(readFileSync(join(ciRecoveryStateDir(rootDir), name))));
   assert.equal(records.filter(record => record.state === 'posted').length, 1);
 });
 
@@ -305,7 +305,7 @@ test('Python-generated canonical fixture verifies DEL, non-ASCII, code-point key
     return { stdout: JSON.stringify({ head_sha: headSha, status: 'completed', conclusion: 'cancelled', run_attempt: 1 }) };
   };
   const { createHash } = await import('node:crypto');
-  const dir = join(rootDir, 'dispatch', 'ci-recovery');
+  const dir = ciRecoveryStateDir(rootDir);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${createHash('sha256').update(`workflow-rerun:${repo}:${headSha}:42`).digest('hex')}.json`);
   writeFileSync(path, JSON.stringify({ state: 'reserved', runId: '42', attempt: 1, reservedAt: '2020-01-01T00:00:00Z' }));
@@ -325,7 +325,7 @@ test('Python-generated canonical fixture verifies DEL, non-ASCII, code-point key
 test('stale and malformed page reservations recover through durable alert delivery', async t => {
   const rootDir = fixture(t);
   const { createHash } = await import('node:crypto');
-  const dir = join(rootDir, 'dispatch', 'ci-recovery');
+  const dir = ciRecoveryStateDir(rootDir);
   mkdirSync(dir, { recursive: true });
   const identity = `page:${repo}:2:${headSha}:repo has no CI`;
   writeFileSync(join(dir, `${createHash('sha256').update(identity).digest('hex')}.json`),

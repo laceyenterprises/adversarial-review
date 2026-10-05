@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reapFollowUpWorkspaces, workspaceTarget } from '../src/follow-up-workspace-reaper.mjs';
-import { getFollowUpJobDir } from '../src/follow-up-jobs.mjs';
+import { getFollowUpJobDir, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
+import { withFollowUpJobLock } from '../src/follow-up-job-write.mjs';
 
 function fixture(t) {
   const rootDir = mkdtempSync(join(tmpdir(), 'workspace-reap-'));
@@ -18,7 +19,7 @@ function fixture(t) {
     probeDirectoryImpl: async () => ({ state: 'inactive' }),
     lookupPRImpl: async () => ({ source: 'live', prState: 'merged' }),
     launchTrashDeleterImpl: (args) => deletes.push(args) };
-  function workspace(pr, suffix = '2026-10-04T01-00-00-000Z', status = null) {
+  function workspace(pr, suffix = '2026-10-04T01-00-00-000Z', status = null, terminalAt = options.nowMs) {
     const id = `org__repo-pr-${pr}-${suffix}`;
     const path = join(workspaceRootDir, id);
     mkdirSync(path);
@@ -27,7 +28,7 @@ function fixture(t) {
       const dir = getFollowUpJobDir(rootDir, key);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, `${id}.json`), JSON.stringify({ jobId: id, repo: 'org/repo', prNumber: pr,
-        status, completedAt: new Date(options.nowMs).toISOString() }));
+        status, completedAt: new Date(terminalAt).toISOString() }));
     }
     return path;
   }
@@ -36,6 +37,7 @@ function fixture(t) {
 
 test('parses production timestamps and resume backups', () => {
   assert.deepEqual(workspaceTarget('org__some-repo-pr-123-2026-10-04T01-00-00-000Z.resume-backup-123-456'), { repo: 'org/some-repo', prNumber: 123 });
+  assert.deepEqual(workspaceTarget('org__some-repo-pr-123-2026-10-04T01-00-00-000Z-2.resume-backup-123-456'), { repo: 'org/some-repo', prNumber: 123 });
   assert.equal(workspaceTarget('not-a-workspace'), null);
 });
 
@@ -107,7 +109,25 @@ test('ownership acquired during async lookup is checked again before rename', as
   assert.equal(existsSync(path), true);
 });
 
-test('unreadable records fail closed and budget stops subsequent probes', async (t) => {
+test('an open orphan newly assigned a terminal record uses terminal age instead of directory mtime', async (t) => {
+  const { options, workspace } = fixture(t);
+  const path = workspace(1);
+  const id = path.split('/').at(-1);
+  utimesSync(path, new Date(options.nowMs - 73 * 3600_000), new Date(options.nowMs - 73 * 3600_000));
+  options.lookupPRImpl = async () => {
+    const dir = getFollowUpJobDir(options.rootDir, 'completed');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ jobId: id, status: 'completed',
+      completedAt: new Date(options.nowMs).toISOString() }));
+    return { source: 'live', prState: 'open' };
+  };
+  const result = await reapFollowUpWorkspaces(options);
+  assert.equal(result.reaped, 0);
+  assert.equal(result.recentTerminalJob, 1);
+  assert.equal(existsSync(path), true);
+});
+
+test('opaque unreadable records fail new paths closed and budget stops subsequent probes', async (t) => {
   const { options, workspace } = fixture(t);
   const path = workspace(1, undefined, 'completed');
   const dir = getFollowUpJobDir(options.rootDir, 'completed');
@@ -140,7 +160,7 @@ test('CWD snapshot is shared and held child directories protect workspaces', asy
   assert.equal(existsSync(unused), false);
 });
 
-test('archived records are not orphans and live terminal worker PIDs remain protected', async (t) => {
+test('archived records are not orphans and recycled terminal worker PIDs do not protect workspaces', async (t) => {
   const { options, workspace } = fixture(t);
   const archived = workspace(1, undefined, 'stopped');
   const live = workspace(2, undefined, 'completed');
@@ -152,7 +172,138 @@ test('archived records are not orphans and live terminal worker PIDs remain prot
   const liveId = live.split('/').at(-1);
   writeFileSync(join(getFollowUpJobDir(options.rootDir, 'completed'), `${liveId}.json`), JSON.stringify({ jobId: liveId, status: 'completed', remediationWorker: { processId: process.pid } }));
   const result = await reapFollowUpWorkspaces(options);
-  assert.equal(result.reapedPrDone, 1);
+  assert.equal(result.reapedPrDone, 2);
   assert.equal(result.reapedOrphan, 0);
-  assert.equal(existsSync(live), true);
+  assert.equal(existsSync(live), false);
+});
+
+for (const condition of ['corrupt archive + null lookup', 'null lookup', 'unknown CWD', 'collision suffix', 'unknown name', 'lookup cap', 'lookup budget']) {
+  test(`legacy terminal TTL remains eligible with ${condition}`, async (t) => {
+    const { options, workspace } = fixture(t);
+    const path = workspace(1, condition === 'collision suffix' ? '2026-10-04T01-00-00-000Z-2' : undefined,
+      'completed', options.nowMs - 73 * 3600_000);
+    if (condition === 'corrupt archive + null lookup') {
+      const archive = join(getFollowUpJobDir(options.rootDir, 'stoppedArchived'), '2020-01');
+      mkdirSync(archive, { recursive: true });
+      writeFileSync(join(archive, 'broken.json'), '{');
+      options.lookupPRImpl = async () => null;
+    }
+    if (condition === 'null lookup') options.lookupPRImpl = async () => null;
+    if (condition === 'unknown CWD') options.probeDirectoryImpl = async () => ({ state: 'unknown' });
+    if (condition === 'unknown name') {
+      renameSync(path, join(options.workspaceRootDir, 'legacy-name'));
+      const completed = getFollowUpJobDir(options.rootDir, 'completed');
+      const id = path.split('/').at(-1);
+      renameSync(join(completed, `${id}.json`), join(completed, 'legacy-name.json'));
+    }
+    if (condition === 'lookup cap') options.maxPrLookups = 0;
+    if (condition === 'lookup budget') {
+      let clock = 0;
+      options.budgetMs = 10;
+      options.clockImpl = () => { clock += 10; return clock; };
+    }
+    const result = await reapFollowUpWorkspaces(options);
+    assert.equal(result.reaped, 1);
+    assert.equal(existsSync(condition === 'unknown name' ? join(options.workspaceRootDir, 'legacy-name') : path), false);
+  });
+}
+
+test('corrupt archived ownership is scoped to its PR and never becomes an orphan', async (t) => {
+  const { options, workspace } = fixture(t);
+  const owned = workspace(1);
+  const unrelated = workspace(2);
+  const archive = join(getFollowUpJobDir(options.rootDir, 'stoppedArchived'), '2020-01');
+  mkdirSync(archive, { recursive: true });
+  writeFileSync(join(archive, 'org__repo-pr-1-123.json'), '{');
+  const result = await reapFollowUpWorkspaces(options);
+  assert.equal(result.reapedOrphan, 1);
+  assert.equal(existsSync(owned), true);
+  assert.equal(existsSync(unrelated), false);
+});
+
+test('a pending record moved during inventory does not blind unrelated workspaces', async (t) => {
+  const { options, workspace } = fixture(t);
+  const owned = workspace(1, undefined, 'pending');
+  const unrelated = workspace(2);
+  const id = owned.split('/').at(-1);
+  const pending = join(getFollowUpJobDir(options.rootDir, 'pending'), `${id}.json`);
+  const inProgress = getFollowUpJobDir(options.rootDir, 'inProgress');
+  mkdirSync(inProgress, { recursive: true });
+  options.readInventoryFileImpl = (path, encoding) => {
+    if (path === pending) {
+      renameSync(pending, join(inProgress, `${id}.json`));
+    }
+    return readFileSync(path, encoding);
+  };
+  const result = await reapFollowUpWorkspaces(options);
+  assert.equal(result.reapedOrphan, 1);
+  assert.equal(existsSync(owned), true);
+  assert.equal(existsSync(unrelated), false);
+});
+
+test('an additive decision cannot override the inner pending/in-progress guard', (t) => {
+  const { options, workspace } = fixture(t);
+  const paths = ['pending', 'in_progress'].map((status, i) => workspace(i + 1, undefined, status));
+  const result = reapTerminalFollowUpWorkspaces({ ...options, workspaceDecisionImpl: () => ({ reap: true }) });
+  assert.equal(result.reaped, 0);
+  assert.ok(paths.every(existsSync));
+});
+
+test('a throwing additive decision falls back to terminal TTL eligibility', (t) => {
+  const { options, workspace, logs } = fixture(t);
+  const expired = workspace(1, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  const recent = workspace(2, undefined, 'completed');
+  const result = reapTerminalFollowUpWorkspaces({ ...options,
+    workspaceDecisionImpl: () => { throw new Error('malformed ownership metadata'); } });
+  assert.equal(result.reaped, 1);
+  assert.equal(existsSync(expired), false);
+  assert.equal(existsSync(recent), true);
+  assert.ok(logs.some((line) => line.includes('using terminal TTL rule')));
+});
+
+test('a hung lookup is bounded through throttle wait and cannot prevent terminal TTL reaping', { timeout: 1000 }, async (t) => {
+  const { options, workspace } = fixture(t);
+  const path = workspace(1, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  options.budgetMs = 25;
+  options.lookupPRImpl = () => new Promise(() => {});
+  const result = await reapFollowUpWorkspaces(options);
+  assert.equal(result.prLookups, 1);
+  assert.equal(result.reaped, 1);
+  assert.equal(existsSync(path), false);
+});
+
+test('the env budget controls lookup admission and the terminal rename budget', async (t) => {
+  const { options, workspace } = fixture(t);
+  const orphan = workspace(1);
+  workspace(2, undefined, 'completed', options.nowMs - 73 * 3600_000);
+  options.env = { ADVERSARIAL_FOLLOW_UP_WORKSPACE_REAP_BUDGET_MS: '1' };
+  let clock = 0;
+  options.clockImpl = () => { clock += 2; return clock; };
+  const result = await reapFollowUpWorkspaces(options);
+  assert.equal(result.prLookups, 0);
+  assert.equal(result.reaped, 0);
+  assert.equal(result.deferredForBudget, 1);
+  assert.equal(existsSync(orphan), true);
+});
+
+test('archive parsing and trash launch happen outside the writer lock', async (t) => {
+  const { options, workspace } = fixture(t);
+  workspace(1, undefined, 'completed');
+  const script = `import fsExt from 'fs-ext'; import { openSync, closeSync } from 'node:fs';
+    const fd = openSync(process.argv[1], 'a');
+    fsExt.flockSync(fd, 'exnb'); fsExt.flockSync(fd, 'un'); closeSync(fd);`;
+  const { spawnSync } = await import('node:child_process');
+  const lockRoot = join(options.rootDir, 'data', 'follow-up-jobs');
+  withFollowUpJobLock(lockRoot, () => {});
+  let reads = 0;
+  options.readInventoryFileImpl = (path, encoding) => {
+    reads += 1;
+    assert.equal(spawnSync(process.execPath, ['--input-type=module', '-e', script, join(lockRoot, '.write.lock')], { cwd: new URL('../', import.meta.url) }).status, 0);
+    return readFileSync(path, encoding);
+  };
+  options.launchTrashDeleterImpl = () => {
+    assert.equal(spawnSync(process.execPath, ['--input-type=module', '-e', script, join(lockRoot, '.write.lock')], { cwd: new URL('../', import.meta.url) }).status, 0);
+  };
+  assert.equal((await reapFollowUpWorkspaces(options)).reaped, 1);
+  assert.equal(reads, 1, 'terminal inventory is not parsed again under the lock');
 });

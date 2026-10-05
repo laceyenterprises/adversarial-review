@@ -316,9 +316,52 @@ in the retained queue.
 
 The follow-up daemon runs a daily stopped-job archive sweep during its normal tick loop. Jobs remain in `stopped/` until their semantic `stoppedAt` age is at least 24 hours old (mtime is only a fallback for legacy or corrupt records), then move to `stopped-archived/YYYY-MM/`. Archive target collisions are not silently destructive: byte-identical sources may be deduplicated, divergent sources stay in `stopped/`, the daemon logs a separate `collisions` count, and a structured anomaly record is written under `data/archive-anomalies/`. The daemon stores archive and workspace-reap maintenance cursors separately in `data/follow-up-jobs/maintenance-sweeps.json`; a persistent failure in one step does not force the other successful step to rerun on every 120s tick, and failed steps retry after a short five-minute cooldown tunable with `STOPPED_ARCHIVE_FAILURE_RETRY_SECONDS`. The daemon loads the default maintenance cursor lazily and caches it after first use, so manual edits to `maintenance-sweeps.json` during a running daemon require a daemon bounce before the process observes them. On the first daemon tick after upgrading from the legacy single-cursor state, the workspace reaper inherits the legacy archive cursor, so the first workspace reap can be deferred by up to one hour instead of spiking immediately.
 
-Terminal workspace reaping is intentionally stricter than stopped-job archiving: it does not fall back to workspace or job-file mtime when a terminal record is missing a parseable terminal timestamp. If `missingTerminalTimestamp > 0` appears in the daemon log, re-stamp the terminal job record with the correct terminal timestamp or remove the workspace manually after inspection.
+Workspace reaping runs hourly, independently of the daily stopped-job archive,
+under `HQ_ROOT/adversarial-review/follow-up-workspaces/` (or the configured
+remediation workspace root). The offline terminal path reaps a workspace with a
+matching `jobId` in `completed/`, `failed/`, `stopped/`, or `stopped-archived/`
+once its newest semantic terminal timestamp reaches
+`retention.ephemeral.follow_up_workspaces_keep_hours` (default 72 hours). It
+continues without GitHub access, a recognized repo/PR name, or a usable CWD
+probe, and tolerates unrelated corrupt ledger files.
 
-The same daily archive sweep also reaps follow-up workspaces under `HQ_ROOT/adversarial-review/follow-up-workspaces/` (or the configured remediation workspace root) once their matching follow-up job is terminal and at least 24 hours old. Eligibility is keyed by the terminal job record for the same `jobId` in `completed/`, `failed/`, `stopped/`, or `stopped-archived/`; active workspaces without a matching terminal record are left untouched. The reaper resolves current workspace `jobId`s first, logs unreadable terminal job records instead of silently skipping them, treats missing terminal timestamps as an explicit skip class, and logs per-workspace move failures without aborting the rest of the sweep. Permission-denied workspace move failures write a structured `terminal-workspace-reap-permission-denied` anomaly under `data/archive-anomalies/` with the runtime user, `HQ_ROOT`, workspace path, ownership metadata when readable, and `left-workspace-in-place` as the action.
+The additive paths use a live `gh pr view` lookup and an `inactive` CWD probe.
+They can reap a merged/closed PR's workspace inside the TTL, even without a
+terminal record. They can also reap an open PR's orphan workspace after the
+same TTL measured from directory mtime. An orphan has no matching jobId or
+workspace reference across any job status or archive. Directory mtime is used
+only for this record-less case because there is no semantic terminal timestamp;
+live PR state, absence of active ownership, and inactive CWD are independent
+safety checks. It is never a substitute for a terminal record's timestamp.
+This supersedes the former rule that all record-less workspaces stay untouched.
+
+Pending/in-progress ownership by jobId, PR, or workspace reference retains
+candidates on the additive paths; the workspace's own pending/in-progress
+record is checked again unconditionally for every path. Stale PIDs in terminal
+records are ignored. Unreadable or vanished inventory records are logged and
+retain additive candidates for the jobId/PR identifiable from the filename;
+opaque filenames and unreadable directories retain all additive candidates.
+Auth/network failures, unknown/non-live PR state, lookup limits, and active or
+unknown CWD visibility (including cross-UID visibility) likewise retain
+additive candidates without disabling terminal TTL cleanup.
+
+Lookups are cached per PR for the pass, capped at 256 distinct PRs, and bounded
+to two seconds including throttle waits. Set
+`ADVERSARIAL_FOLLOW_UP_WORKSPACE_REAP_BUDGET_MS` to tune the lookup phase and the
+separate terminal rename phase (30000ms each by default). Capped passes rotate
+their starting workspace. Full archive parsing and async probes run outside
+the writer lock; final ownership checks and renames lock one workspace at a
+time, with only active-status scans and candidate terminal/archive reads under
+the lock. Trash deleter launch remains outside it.
+
+The tick logs `reapedPrDone`, `reapedOrphan`, and `keptOpenPr`; PR-done orphans
+count in both reap metrics. A `missingTerminalTimestamp > 0` means neither path
+could reap the terminal workspace: re-stamp the record with its correct
+terminal timestamp or remove the workspace manually after inspection. The
+reaper logs per-workspace move failures and continues with later entries.
+Permission-denied moves write a `terminal-workspace-reap-permission-denied`
+anomaly under `data/archive-anomalies/` with the runtime user, `HQ_ROOT`, path,
+ownership metadata when readable, and `left-workspace-in-place` as the action.
 
 Eligible workspaces are renamed into a sibling trash directory on the workspace root's physical volume and deleted by a detached low-priority process. If the sibling directory cannot be created, or rename reports `EXDEV` for a mount-point root, the reaper logs the reason, renames into the in-root `.reap-trash` directory, and starts its deleter there. It never recursively removes a workspace in the daemon tick. `.reap-trash` is an active fallback trash: its batches are skipped during workspace scanning and handed to its deleter, which holds `.reap-trash.delete.lock` while running. Failed recursive deletions leave the entry in trash for a later sweep and write an anomaly under `data/archive-anomalies/` with the original workspace path, trash path, error code, ownership metadata, and `left-workspace-in-trash` action. Permission failures retain the `terminal-workspace-reap-permission-denied` type; other delete failures use `terminal-workspace-trash-delete-failed`. If anomaly writing also fails, the deleter appends the record to the trash directory's `delete-failures.jsonl`. A deleter spawn failure is logged and releases its PID lock for a later retry. A held PID lock is logged; one older than six hours is retried only when process inspection rules out the active deleter for that trash directory, so PID reuse cannot block deletion indefinitely.
 

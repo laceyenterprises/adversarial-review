@@ -2254,16 +2254,58 @@ identity remain fail-closed/sticky operator states.
 
 Follow-up remediation workers use the same lifecycle shape through their job JSON: `remediationWorker.processGroupId`, `processId`, `spawnedAt`, and worker artifacts are the durable adoption/cancel handles. The follow-up daemon's ordinary SIGTERM path stops the daemon loop only; it does not stop spawned workers. Reconcile adopts by reading the in-progress job record and worker artifacts, and operator cancellation uses `src/follow-up-stop.mjs` / `src/follow-up-worker-cancel.mjs` with PGID plus start-time identity checks.
 
-The follow-up daemon also owns terminal workspace reaping for
+The follow-up daemon also owns workspace reaping for
 `HQ_ROOT/adversarial-review/follow-up-workspaces/` or the configured remediation
-workspace root. A workspace is eligible only when its `jobId` has a matching
-terminal follow-up job record in `completed/`, `failed/`, `stopped/`, or
-`stopped-archived/`, and that terminal record's semantic terminal timestamp is
-at least 24 hours old. The workspace reaper deliberately does not fall back to
-workspace directory mtime or job-file mtime when a terminal record is missing a
-parseable terminal timestamp; it must skip the workspace, increment
-`missingTerminalTimestamp`, and leave manual recovery to an operator who can
-re-stamp the terminal record or remove the workspace after inspection.
+workspace root, on a separate hourly maintenance cadence. Eligibility has an
+offline terminal path plus additive PR-lifecycle/orphan paths:
+
+- The established terminal path requires a matching `jobId` record in
+  `completed/`, `failed/`, `stopped/`, or `stopped-archived/` and a semantic
+  terminal timestamp at least `retention.ephemeral.follow_up_workspaces_keep_hours`
+  old (default 72 hours). It uses the latest parseable `completedAt`, `failedAt`,
+  or `stoppedAt` across matching records. This path requires neither `gh` nor a
+  CWD probe nor a parseable workspace name. An unreadable unrelated ledger
+  record, unavailable live PR state, a lookup cap, or an unknown CWD probe must
+  not disable it. It does not substitute workspace or job-file mtime for a
+  missing terminal timestamp.
+- The additive paths require a recognized repo/PR workspace name (including
+  collision suffixes after `Z` and resume backups), a live `gh pr view`
+  observation, no active job for that jobId, PR, or workspace reference, and a
+  CWD probe reporting `inactive`. A merged or closed PR permits reaping inside
+  the TTL, including record-less workspaces. An open PR permits orphan reaping
+  only after the same TTL measured from workspace directory mtime. An orphan
+  has no matching jobId or workspace reference in any ledger status/archive.
+  Directory mtime is acceptable solely as a conservative age marker for this
+  record-less case, with independent live PR, ledger-ownership, and CWD checks;
+  it never replaces a terminal record's semantic timestamp. This explicitly
+  supersedes the former blanket prohibition on directory mtime for orphans.
+
+Unreadable/vanished inventory files are logged and scoped to the jobId/PR
+encoded in their filename. An opaque filename or unreadable directory fails
+the additive paths closed; other PRs remain eligible when uncertainty can be
+scoped. Unknown/non-live PR state, auth/network failures, active or unknown CWD
+visibility (including cross-UID visibility), and exhausted lookup limits retain
+workspaces on the additive paths. Terminal records' stale PIDs are not liveness
+evidence; active ledger records and the CWD probe protect the additive paths.
+All paths retain an unconditional pending/in-progress check for the workspace's
+own jobId, even when an earlier lifecycle decision said to reap.
+
+Live lookups are cached per PR for one pass, capped at 256 distinct PRs, and
+bounded to two seconds including any shared throttle wait. The lookup phase
+and the terminal rename phase each use
+`ADVERSARIAL_FOLLOW_UP_WORKSPACE_REAP_BUDGET_MS` (default 30000ms); capped passes
+rotate their starting workspace so later entries are not starved. Full archive
+inventory and async probes run outside the writer lock. Each final candidate
+check and rename holds the lock separately, re-reading current active statuses
+and only that candidate's terminal/archive records; trash launch runs unlocked.
+
+The daemon logs `reapedPrDone` (live merged/closed eligibility), `reapedOrphan`
+(record-less eligibility), and `keptOpenPr` (open candidates inside TTL or
+without usable age evidence); the first two can overlap. It also retains
+`missingTerminalTimestamp`, `unreadableJobRecords`, and `deferredForBudget`.
+When neither path can reap a terminal record with no parseable timestamp,
+`missingTerminalTimestamp` increments; an operator can re-stamp the terminal
+record or remove the workspace after inspection.
 
 Archive and workspace-reap maintenance cursors are persisted separately in
 `data/follow-up-jobs/maintenance-sweeps.json`. A persistent failure in one step

@@ -5,33 +5,65 @@ import { join, resolve, sep } from 'node:path';
 import { getConfig } from './config-loader.mjs';
 import { fetchLivePRLifecycle } from './review-state.mjs';
 import { probeWorkerDirectoryUse } from './ama/closer-worktree-reaper.mjs';
-import { withFollowUpJobLock } from './follow-up-job-write.mjs';
-import { getFollowUpJobDir, readTerminalWorkspaceJobForId, reapTerminalFollowUpWorkspaces } from './follow-up-jobs.mjs';
+import { getFollowUpJobDir, readTerminalWorkspaceJobForId, reapTerminalFollowUpWorkspaces, resolveWorkspaceReapBudgetMs } from './follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
 let passOffset = 0;
 
 function workspaceTarget(name) {
-  const match = /^([^/]+)__([^/]+)-pr-(\d+)-(?:\d+|\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-\d+)?Z)(?:\.resume-backup-\d+-\d+)?$/u.exec(name);
+  const match = /^([^/]+)__([^/]+)-pr-(\d+)-(?:\d+|\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-\d+)?Z)(?:-\d+)?(?:\.resume-backup-\d+-\d+)?$/u.exec(name);
   return match ? { repo: `${match[1]}/${match[2]}`, prNumber: Number(match[3]) } : null;
 }
 
-// Read primary records in every status and archive month. A corrupt record can
-// conceal ownership, so fail the pass closed rather than calling it an orphan.
-function jobInventory(rootDir) {
+// Scope unreadable/vanished ownership by ledger filename. Opaque filenames or
+// directory errors block new eligibility only, never offline terminal reaping.
+function jobInventory(rootDir, {
+  keys = ['pending', 'inProgress', 'completed', 'failed', 'stopped', 'stoppedArchived'],
+  readFileImpl = readFileSync,
+  logErrorImpl = console.error,
+} = {}) {
   const jobs = [];
+  const unreadableIds = [];
+  let scanFailed = false;
   function scan(dir) {
-    if (!existsSync(dir)) return;
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); }
+    catch (err) {
+      if (err.code !== 'ENOENT') {
+        scanFailed = true;
+        logErrorImpl(`[follow-up-jobs] Workspace ownership directory unreadable ${dir}: ${err.message}`);
+      }
+      return;
+    }
+    for (const entry of entries) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) scan(path);
-      else if (entry.name.endsWith('.json')) jobs.push(JSON.parse(readFileSync(path, 'utf8')));
+      else if (entry.name.endsWith('.json')) {
+        try {
+          const job = JSON.parse(readFileImpl(path, 'utf8'));
+          if (!job?.jobId || !job.status) throw new Error('missing job identity/status');
+          jobs.push(job);
+        } catch (err) {
+          unreadableIds.push(entry.name.slice(0, -5));
+          logErrorImpl(`[follow-up-jobs] Workspace ownership record unreadable ${path}: ${err.message}`);
+        }
+      }
     }
   }
-  for (const key of ['pending', 'inProgress', 'completed', 'failed', 'stopped', 'stoppedArchived']) {
-    scan(getFollowUpJobDir(rootDir, key));
-  }
-  return jobs;
+  for (const key of keys) scan(getFollowUpJobDir(rootDir, key));
+  return { jobs, unreadableIds, scanFailed };
+}
+
+function ownershipUnknown(inventory, target, jobId) {
+  return inventory.scanFailed || inventory.unreadableIds.some((id) => {
+    const owner = workspaceTarget(id);
+    return id === jobId || !owner || samePR(owner, target);
+  });
+}
+
+function samePR(left, right) {
+  return left.repo?.toLowerCase() === right.repo?.toLowerCase()
+    && Number(left.prNumber) === Number(right.prNumber);
 }
 
 function referencesWorkspace(job, path) {
@@ -44,36 +76,40 @@ function referencesWorkspace(job, path) {
 }
 
 function activeReference(jobs, path, target, jobId) {
-  return jobs.some((job) => (['pending', 'in_progress'].includes(job.status) || liveWorker(job)) && (
+  return jobs.some((job) => ['pending', 'in_progress'].includes(job.status) && (
     job.jobId === jobId || referencesWorkspace(job, path)
-    || (job.repo === target.repo && Number(job.prNumber) === target.prNumber)
+    || samePR(job, target)
   ));
 }
 
-function liveWorker(job) {
-  const workers = [job.remediationWorker, ...(job.remediationPlan?.rounds || []).map((round) => round.worker)];
-  return workers.some((worker) => {
-    const pid = Number(worker?.processId);
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    try { process.kill(pid, 0); return true; }
-    catch (err) { return err.code !== 'ESRCH'; }
-  });
+async function boundedLookup(lookup, options) {
+  let timer;
+  try {
+    // The subprocess timeout in fetchLivePRLifecycle excludes its throttle wait.
+    return await Promise.race([
+      Promise.resolve().then(() => lookup(options)),
+      new Promise((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(null), options.timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
 // Keep live lookups and CWD probes asynchronous; the only deletion on the tick
 // is an atomic rename into trash. The shared writer lock protects the final
-// ownership check and rename from a concurrent resume/claim.
+// ownership check and rename from writers. Claims/requeues also get an
+// unconditional per-job active-ledger check in the inner reaper.
 async function reapFollowUpWorkspaces({
   rootDir,
   workspaceRootDir,
   nowMs = Date.now(),
   ttlMs = getConfig('retention.ephemeral.follow_up_workspaces_keep_hours', 72) * 3600_000,
   maxPrLookups = 256,
-  budgetMs = 30_000,
+  env = process.env,
+  budgetMs = resolveWorkspaceReapBudgetMs(env),
   clockImpl = Date.now,
   lookupPRImpl = fetchLivePRLifecycle,
   probeDirectoryImpl = null,
   execCwdImpl = execFileAsync,
+  readInventoryFileImpl = readFileSync,
   logImpl = console.log,
   logErrorImpl = console.error,
   ...trashOptions
@@ -84,9 +120,8 @@ async function reapFollowUpWorkspaces({
   const started = clockImpl();
   let visited = 0;
   if (workspaceRootDir && existsSync(workspaceRootDir)) {
-    let jobs;
-    try { jobs = jobInventory(rootDir); }
-    catch (err) { logErrorImpl(`[follow-up-jobs] Workspace ownership unreadable: ${err.message}`); }
+    const inventory = jobInventory(rootDir, { readFileImpl: readInventoryFileImpl, logErrorImpl });
+    const { jobs } = inventory;
     const entries = readdirSync(workspaceRootDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && entry.name !== '.reap-trash')
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -105,15 +140,15 @@ async function reapFollowUpWorkspaces({
       let orphan = false;
       let prDone = false;
       try {
-        if (!jobs) reason = 'unreadable-job-inventory';
-        else if (!target) reason = 'unknown-target';
+        if (!target) reason = 'unknown-target';
+        else if (ownershipUnknown(inventory, target, jobId)) reason = 'unreadable-job-inventory';
         else if (activeReference(jobs, path, target, jobId)) reason = 'active-job';
         else if (clockImpl() - started >= budgetMs) reason = 'pass-budget';
         else {
           const key = `${target.repo}#${target.prNumber}`;
           if (!cache.has(key) && metrics.prLookups < maxPrLookups) {
             metrics.prLookups += 1;
-            cache.set(key, await lookupPRImpl({ ...target, timeoutMs: Math.max(1, Math.min(2000, budgetMs - (clockImpl() - started))) }));
+            cache.set(key, await boundedLookup(lookupPRImpl, { ...target, timeoutMs: Math.max(1, Math.min(2000, budgetMs - (clockImpl() - started))) }));
           }
           const lifecycle = cache.get(key);
           if (!lifecycle || lifecycle.source !== 'live') reason = 'pr-state-unknown-or-capped';
@@ -157,26 +192,29 @@ async function reapFollowUpWorkspaces({
     logImpl(`[follow-up-jobs] workspace=${path} action=${decision.reap ? 'reap-candidate' : 'keep'} reason=${decision.reason}`);
   }
   passOffset += Math.max(1, visited);
-  return withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () => {
-    let currentJobs;
-    try { currentJobs = jobInventory(rootDir); }
-    catch (err) { logErrorImpl(`[follow-up-jobs] Workspace ownership recheck failed: ${err.message}`); }
-    const result = reapTerminalFollowUpWorkspaces({
-      ...trashOptions, rootDir, workspaceRootDir, nowMs, ttlMs, budgetMs, clockImpl, logErrorImpl,
-      workspaceDecisionImpl: (path) => {
-        const decision = decisions.get(resolve(path));
-        if (!decision?.reap || !currentJobs || activeReference(currentJobs, resolve(path), decision.target, decision.jobId)) return { reap: false };
-        return decision;
-      },
-    });
-    for (const path of result.reapedPaths) {
+  const appliedDecisions = new Map();
+  const result = reapTerminalFollowUpWorkspaces({
+    ...trashOptions, rootDir, workspaceRootDir, nowMs, ttlMs, budgetMs, env, clockImpl, logErrorImpl,
+    workspaceDecisionImpl: (path, lookup) => {
       const decision = decisions.get(resolve(path));
-      if (decision.prDone) metrics.reapedPrDone += 1;
-      if (decision.orphan) metrics.reapedOrphan += 1;
-      logImpl(`[follow-up-jobs] workspace=${path} action=reaped reason=${decision.reason}`);
-    }
-    return { ...result, ...metrics };
+      if (!decision?.reap) return { reap: false };
+      // Under the per-workspace lock, scan active statuses only. The inner
+      // reaper has already re-read this candidate's terminal/archive records.
+      const current = jobInventory(rootDir, { keys: ['pending', 'inProgress'], logErrorImpl });
+      if (ownershipUnknown(current, decision.target, decision.jobId)
+        || activeReference(current.jobs, resolve(path), decision.target, decision.jobId)
+        || (decision.orphan && !decision.prDone && (lookup.terminalJob || lookup.unreadableJobRecords))) return { reap: false };
+      appliedDecisions.set(resolve(path), decision);
+      return decision;
+    },
   });
+  for (const path of result.reapedPaths) {
+    const decision = appliedDecisions.get(resolve(path));
+    if (decision?.reap && decision.prDone) metrics.reapedPrDone += 1;
+    if (decision?.reap && decision.orphan) metrics.reapedOrphan += 1;
+    logImpl(`[follow-up-jobs] workspace=${path} action=reaped reason=${decision?.reap ? decision.reason : 'terminal-ttl'}`);
+  }
+  return { ...result, ...metrics };
 }
 
 export { reapFollowUpWorkspaces, workspaceTarget };

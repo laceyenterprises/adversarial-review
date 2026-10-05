@@ -326,9 +326,7 @@ async function runOrchestrationForSuppression(suppressed) {
     logger: { warn() {}, log() {} },
     // Keep the review STALE + offline: the live-head reconcile fails closed to
     // `resolved:false`, so the gate snapshot uses the reviewed (old) head.
-    fetchLatestHeadReviewBodiesImpl: async () => {
-      throw new Error('no live head review in fixture');
-    },
+    fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === CURRENT_HEAD ? [] : ['## Verdict\nComment only'],
     loadConfigImpl: () => ({
       getMergeAuthorityConfig() {
         return {
@@ -347,7 +345,9 @@ async function runOrchestrationForSuppression(suppressed) {
     // The own-commit suppression proof — injected so the test is deterministic and
     // offline. suppressed:true models the hammer's own remediation commit at the
     // live head; suppressed:false models an external push.
-    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed }),
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed, reason: 'closer-commit-trailer' }),
+    fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: CURRENT_HEAD, parentSha: REVIEWED_HEAD,
+      message: 'Closed-By: hammer' }),
     // Force the daemon clean-merge path to decline so the tick falls through to the
     // hammer dispatch, where the resume flag is threaded into dispatchContext.
     runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'fixture' }),

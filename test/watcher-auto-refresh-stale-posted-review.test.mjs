@@ -1706,6 +1706,7 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
         reviewCycleExhausted: true,
         ledgerRiskClass: 'medium',
       }),
+      fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: currentHead, parentSha: staleReviewedHead, message: 'Closed-By: hammer' }),
       resolveHeadCloserCommitSuppressionImpl: async ({ headSha }) => {
         closerProofCalls += 1;
         assert.equal(headSha, currentHead);
@@ -1713,7 +1714,7 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
       },
       fetchLatestHeadReviewBodiesImpl: async () => {
         liveReviewFetches += 1;
-        throw new Error('fresh review lookup must not run on exhausted stale head');
+        return [];
       },
       maybeDispatchAmaCloserImpl: async (args) => {
         captured.push(args);
@@ -1737,12 +1738,12 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
     assert.equal(captured[0].reviewState.headSha, staleReviewedHead);
     assert.equal(captured[0].dispatchContext.reviewedSha, staleReviewedHead);
     assert.equal(captured[0].dispatchContext.targetRemediationSha, currentHead);
-    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, staleReviewedHead);
+    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, currentHead);
     assert.equal(captured[0].dispatchContext.dispatchReason, 'exhausted-final-hammer');
     assert.equal(captured[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
     assert.equal(captured[0].prMetadata.headSha, currentHead);
     assert.equal(closerProofCalls, 1);
-    assert.equal(liveReviewFetches, 0, 'no fresh adversarial review lookup is requested on exhaustion');
+    assert.equal(liveReviewFetches, 0, 'exhausted non-settled gate does not fetch or spawn a fresh review');
     assert.equal(warnings.join('\n').includes('no fresh adversarial review'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

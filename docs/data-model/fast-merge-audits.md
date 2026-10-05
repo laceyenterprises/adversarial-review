@@ -20,6 +20,7 @@ write failures retain the row's pending retry marker for recovery. See
 | `manual_merge_detected`, `closed_without_merge`, `head_changed`, `veto_detected`, `label_removed` | booleans | Observed close/requeue conditions. |
 | `failure_reason`, `refusal_reason`, `check_conclusions`, `requeue_path`, `requeue_result`, `merge_stdout`, `merge_stderr` | nullable evidence | Caller-provided gate, requeue and CLI evidence. |
 | `mergeWritePath` | nullable string | `gh-admin-explicit-message` when the daemon attempts the explicit-message merge through ambient gh admin auth; `null` before an attempt, absent on older records. Describes the attempted write, including refusal/manual-merge races; does not attest the actor of a manual merge. |
+| `mergeActor` | nullable string | Ambient gh login read before the attempt; null if unavailable. Does not identify a racing manual merger. |
 | `closingKeywordRewrites` | array | Explicit message rewrites, title first then body. Defaults to `[]`; absent on older records. |
 
 Each rewrite is `{original, referencedNumber, referencedRepo, replacement}`.

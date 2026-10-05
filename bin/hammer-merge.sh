@@ -2,6 +2,7 @@
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
 ham_merge_phase() {
 HAM_PHASE_OUTCOME=merge-error
+HAM_CLOSING_KEYWORD_REWRITES='[]'
 HAM_OWN_MERGE_EXECUTED=0
 HAM_MERGE_EXIT=1
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
@@ -745,6 +746,12 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   export HAM_PR_TITLE
   HAM_COMMIT_BODY_JSON=$(printf '%s' "$HAM_PROTECTIVE_PREDECESSOR_BODY" |
     "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>>) || {
+    HAM_SANITIZER_STATUS=$?
+    if [ "$HAM_SANITIZER_STATUS" -eq 64 ] || [ "$HAM_SANITIZER_STATUS" -eq 78 ]; then
+      ham_append_terminal_audit failed-without-merge commit-body-sanitization-failed || true
+      ham_release_merge_lease
+      return 20
+    fi
     ham_commit_message_abort commit-body-sanitization-failed
     return 1
   }

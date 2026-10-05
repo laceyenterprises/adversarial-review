@@ -22,7 +22,7 @@ function renderCommitMessageSnippet(endMarker) {
 }
 
 for (const keyword of ['close', 'closes', 'closed', 'fix', 'fixes', 'fixed', 'resolve', 'resolves', 'resolved']) {
-  for (const gap of [' ', ': ', ':\n\n', '\n\n']) {
+  for (const gap of [' ', ':', ': ', ':\n\n', '\n\n']) {
     test(`${keyword} with ${JSON.stringify(gap)}`, () => {
       const original = `${keyword.toUpperCase()}${gap}#7732`;
       const result = neutralizeClosingKeywords(original, { selfPrNumber: 7, repo: 'o/r' });
@@ -126,9 +126,9 @@ jq() { case "$FAILURE:$*" in body:*.text*|subject:*.subject*|rewrites:*.rewrites
 run() {
 `;
     const result = spawnSync('bash', ['-c', stubs + snippet + '\n}\nrun'], { encoding: 'utf8', env: { ...process.env, FAILURE: failure, HAM_NODE_BIN: process.execPath, HAM_AMA_TRAILERS: failure === 'sanitizer' ? '' : 'Closed-By: hammer', HAM_PROTECTIVE_PREDECESSOR_BODY: 'body' } });
-    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.status, failure === 'sanitizer' ? 20 : 1, result.stderr);
     const reason = { sanitizer: 'commit-body-sanitization-failed', body: 'commit-body-decode-failed', subject: 'commit-subject-decode-failed', rewrites: 'commit-rewrites-decode-failed', title: 'commit-title-read-failed' }[failure];
-    assert.equal(result.stdout, `audit:${reason}\nretry:${reason}\nrelease\n`);
+    assert.equal(result.stdout, failure === 'sanitizer' ? `audit:${reason}\nrelease\n` : `audit:${reason}\nretry:${reason}\nrelease\n`);
   });
 }
 
@@ -149,3 +149,19 @@ run() {
       : 'audit:merge-title-missing\nretry:merge-title-missing\nrelease\n');
   });
 }
+
+ test('conservative URL and underscore forms preserve only self references', () => {
+  for (const host of ['github.com', 'www.github.com', 'https://www.github.com']) {
+    const input = `_fixes:${host}/o/r/issues/8; closes ${host}/o/r/pull/7; fixes ${host}/other/r/pull/7`;
+    const result = neutralizeClosingKeywords(input, { selfPrNumber: 7, repo: 'o/r' });
+    assert.equal(result.text, `_fixes:PR ${host}/o/r/issues/8; closes ${host}/o/r/pull/7; fixes PR ${host}/other/r/pull/7`);
+    assert.equal(result.rewrites.length, 2);
+  }
+  assert.equal(neutralizeClosingKeywords('prefixes#8; resolvesThing#9').rewrites.length, 0);
+});
+ test('merge phase clears inherited rewrite evidence before any refusal', () => {
+  const source = readFileSync('bin/hammer-merge.sh', 'utf8');
+  const prefix = source.slice(source.indexOf('HAM_PHASE_OUTCOME='), source.indexOf('if [ "${HAM_MERGE_LEASE_HELD'));
+  const result = spawnSync('bash', ['-c', prefix + `\nprintf '%s' "$HAM_CLOSING_KEYWORD_REWRITES"`], { encoding: 'utf8', env: { ...process.env, HAM_CLOSING_KEYWORD_REWRITES: 'invalid' } });
+  assert.equal(result.stdout, '[]');
+});

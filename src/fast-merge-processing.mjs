@@ -179,6 +179,7 @@ function buildFastMergeCloseAuditEntry({
   mergeStderr = null,
   closingKeywordRewrites = [],
   mergeWritePath = null,
+  mergeActor = null,
   at = isoNow(),
 } = {}) {
   const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
@@ -210,6 +211,7 @@ function buildFastMergeCloseAuditEntry({
     merge_stderr: mergeStderr,
     closingKeywordRewrites,
     mergeWritePath,
+    mergeActor,
     recorded_at: at,
   };
 }
@@ -1387,6 +1389,15 @@ async function processFastMergePR({
     return { status: 'skipped_still_pending', reason: 'merge-title-missing' };
   }
   const commitBody = buildMergeCommitBody({ prTitle: preMergeView.title, prBody: preMergeView.body, trailers: 'Closed-By: fast-merge', selfPrNumber: prNumber, repo });
+  let mergeActor = null;
+  try {
+    const { stdout } = await execFileFromGhClient(ghClient)('gh', ['api', 'user', '--jq', '.login'], { timeout: FAST_MERGE_GH_TIMEOUT_MS });
+    const login = stdout.trim();
+    if (/^[a-z0-9][a-z0-9-]*(?:\[bot\])?$/i.test(login)) mergeActor = login;
+  } catch (err) {
+    logger?.warn?.(`[follow-up-merge-agent] fast-merge actor read unavailable: ${err?.message || err}`);
+  }
+  logger?.info?.(`[follow-up-merge-agent] fast-merge gh-admin-explicit-message actor=${mergeActor || 'unknown'} credentialClass=${mergeCapability.tokenClass}`);
   let mergeResult;
   const mergeExecutedAt = isoNow();
   try {
@@ -1442,6 +1453,7 @@ async function processFastMergePR({
           action: 'merged',
           closingKeywordRewrites: commitBody.rewrites,
           mergeWritePath: 'gh-admin-explicit-message',
+        mergeActor,
           repo,
           prNumber,
           authorizedHeadSha: exactHeadSha,
@@ -1473,6 +1485,7 @@ async function processFastMergePR({
         action: 'merge-refused-retryable',
         closingKeywordRewrites: commitBody.rewrites,
         mergeWritePath: 'gh-admin-explicit-message',
+        mergeActor,
         repo,
         prNumber,
         authorizedHeadSha: exactHeadSha,
@@ -1526,6 +1539,7 @@ async function processFastMergePR({
       action: 'merged',
       closingKeywordRewrites: commitBody.rewrites,
       mergeWritePath: 'gh-admin-explicit-message',
+      mergeActor,
       repo,
       prNumber,
       authorizedHeadSha: exactHeadSha,

@@ -2,10 +2,10 @@
 export function neutralizeClosingKeywords(text, { selfPrNumber, repo } = {}) {
   const rewrites = [];
   const body = String(text ?? '').replace(
-    /\b(close[sd]?|fix(?:es|ed)?|resolve[sd]?)(:?\s+)((?:[a-z0-9_.-]+\/[a-z0-9_.-]+)?#[0-9]+|GH-[0-9]+|https?:\/\/github\.com\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(?:issues|pull)\/[0-9]+)/gi,
+    /(?<![a-z0-9])(close[sd]?|fix(?:es|ed)?|resolve[sd]?)(:?\s*)((?:[a-z0-9_.-]+\/[a-z0-9_.-]+)?#[0-9]+|GH-[0-9]+|(?:https?:\/\/)?(?:www\.)?github\.com\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(?:issues|pull)\/[0-9]+)/gi,
     (original, keyword, gap, reference) => {
       const number = Number(reference.match(/[0-9]+$/)[0]);
-      const urlRepo = reference.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\//i);
+      const urlRepo = reference.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/]+\/[^/]+)\//i);
       const referencedRepo = urlRepo ? urlRepo[1]
         : reference.includes('/') ? reference.slice(0, reference.indexOf('#')) : null;
       if (number === Number(selfPrNumber)

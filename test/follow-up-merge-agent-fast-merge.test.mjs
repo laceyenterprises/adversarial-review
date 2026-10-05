@@ -470,8 +470,8 @@ test('fast-merge bypasses configured body-incapable adapter and keeps gh admin p
   assert.equal(calls.some(call => call.cmd === '/fixture/github-adapter'), false);
   assert.equal(mergeCalls(gh).length, 1);
   assert.equal(mergeCalls(gh)[0].args.includes('--admin'), true);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /explicit merge message unsupported.*declining adapter/);
+  assert.ok(warnings.some(message => /explicit merge message unsupported.*declining adapter/.test(message)));
+  assert.ok(warnings.some(message => /actor read unavailable/.test(message)));
 });
 
 test('fast-merge refuses builder token in enforce mode before adapter or gh merge', async () => {
@@ -1432,12 +1432,13 @@ test('fast-merge passes neutralized author body and audits the rewrite', async (
   const audits = [];
   const view = { ...openView(), title: 'Fix #7732 regression', body: 'Fixed:\n\n#7732; closes #801' };
   const gh = makeGhStub({ views: [view, view], checks: [successChecks()] });
-  await processFastMergePR({ db, ghClient: gh, repo: REPO, prNumber: 801,
+  await processFastMergePR({ db, ghClient: async (command, args, options) => args[0] === 'api' && args[1] === 'user' ? { stdout: 'merge-agent-bot\n' } : gh(command, args, options), repo: REPO, prNumber: 801,
     authorizedHeadSha: 'sha-A', auditWriter: entry => audits.push(entry) });
   const args = mergeCalls(gh)[0].args;
   assert.equal(args[args.indexOf('--body') + 1], 'Fixed:\n\nPR #7732; closes #801\n\nClosed-By: fast-merge');
   assert.equal(args[args.indexOf('--subject') + 1], 'Fix PR #7732 regression (#801)');
   assert.equal(audits.at(-1).mergeWritePath, 'gh-admin-explicit-message');
+  assert.equal(audits.at(-1).mergeActor, 'merge-agent-bot');
   assert.deepEqual(audits.at(-1).closingKeywordRewrites.map(r => r.referencedNumber), [7732, 7732]);
 });
 

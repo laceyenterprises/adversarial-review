@@ -45,8 +45,9 @@ and the hammer shell supply explicit `--subject` and `--body` from the shared
 writing a placeholder. The live merge-agent candidate fetch requests and
 returns `title`; the daemon prefers a non-empty live title, then the candidate
 title. The body contains the sanitized author PR body plus closure trailers.
-Closing keywords followed by
+Closing keywords (including colon-without-space and underscore-prefixed forms) followed by
 `#N`, `owner/repo#N`, or `http(s)://github.com/<owner>/<repo>/(issues|pull)/N`
+also cover schemeless and `www.github.com` URL forms and
 are separated from the reference by `PR`; `GH-N` is covered conservatively too.
 Only a reference to this PR in this repository is exempt. Combined title/body
 rewrites are recorded in `closingKeywordRewrites` (see the
@@ -55,16 +56,29 @@ rewrites are recorded in `closingKeywordRewrites` (see the
 
 Hammer provenance comes from dispatch's canonical `composeAmaTrailers` output,
 exported as `HAM_AMA_TRAILERS`. The helper refuses a missing block;
-transient title-read exhaustion, missing titles, sanitization and decode
+transient title-read exhaustion, missing titles, unexpected sanitization and decode
 failures write a terminal audit and mark the lease attempt as a retryable abort
 before releasing it. A permanent title-read error writes the audit, releases
 the lease and returns hard-block code 20, matching the body-read contract.
+Sanitizer exits 64 (invalid arguments) and 78 (missing canonical trailers) also
+write a terminal audit, release the lease and return 20 without retryable abort.
+Each merge phase clears rewrite evidence before any refusal.
 
-Activation requirement: drain hammers dispatched with the older prompt before
+Activation checklist:
+
+1. Pause hammer dispatch and drain hammers dispatched with the older prompt before
 deploying merge-message protection. Those prompts lack `HAM_AMA_TRAILERS` and
 cannot recover by retrying the same merge procedure. Re-dispatch them with the
 current prompt after the drain; otherwise sanitization refusal spends lease
 attempts and retry-cap budget.
+2. Allow normal main-catchup float and restart the daemons through the documented path.
+3. Resume dispatch and re-dispatch drained hammers with the current prompt.
+
+Trailer contract: plain daemon and fast-merge commits carry only a `Closed-By`
+marker (`daemon-merge` or `fast-merge`). They do not attest the full SPEC §4.4
+Reviewed-By / Risk-Class / Eligibility-Reason / Eligibility-Trace block.
+Closer-dispatched daemon merges and hammer merges retain canonical dispatch
+trailers; use the structured audits for plain-daemon/fast-merge provenance.
 
 Remaining scope: the operator-fallback merge-agent prompt and v2 finalization
 adapter still use default GitHub messages. Follow-up work must add explicit
@@ -91,7 +105,9 @@ subject/body support to that adapter contract remains follow-up work; until then
 fast-merge's write identity and execution receipt come from the gh path. Each
 explicit-message adapter decline logs a warning; close audits record
 `mergeWritePath: gh-admin-explicit-message` for the attempted write (including
-a refusal or a race with a manual merge). Follow-up recorded 2026-10-05: add
+a refusal or a race with a manual merge), plus `mergeActor` from the ambient
+`gh api user` identity read (`null` if unavailable, with a warning). This is the
+attempting credential actor, not an attestation of a racing manual merge actor. Follow-up recorded 2026-10-05: add
 adapter subject/body support before returning fast-merge to service auth.
 Retryable or unclassified fast-merge refusals remain closure-audit evidence only. Refusal receipts
 require an explicit permanent rejection or eligibility/policy decision under a

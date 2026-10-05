@@ -52,7 +52,8 @@
       "relatedSchemaSurfaces": ["src/fast-merge-audit-storage.mjs", "src/fast-merge-audit-recovery.mjs", "src/ama/closing-keywords.mjs"],
       "owner": "Fast-merge close processing",
       "messageRewriteFields": ["closingKeywordRewrites"],
-      "mergeWritePathValues": ["gh-admin-explicit-message", null]
+      "mergeWritePathValues": ["gh-admin-explicit-message", null],
+      "mergeActor": "nullable ambient gh login for the attempted write"
     },
     {
       "id": "follow-up-jobs",

@@ -984,13 +984,23 @@ no-merge handoff.
 
 HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
 
-STANDUPGATE-02 adds a daemon-only clean transition for an empty rollup when live
-GitHub configuration proves no workflow files at base or reviewed head and no
-required checks/workflows in classic protection or effective branch rules. The
-strictly zero-finding settled-success head still passes all identity, attestation,
-primary-change, mergeability, head, hold and lease gates. This proof substitutes
-only the CI and required-gate-context predicates and is re-read under the lease
-before each attempt; the audit records `ciConfiguration: { reason: "no CI configured", ... }`.
-Failed/unknown lookups or any configured CI preserve the original fail-closed
-transition. A merged daemon result remains terminal for dispatch and never sends
-this clean head to the hammer's non-empty-remediation contract.
+STANDUPGATE-02 adds a daemon-only clean transition for an empty rollup only
+when the operator explicitly lists the repository in
+`roles.adversarial.merge_authority.no_ci_repositories` (default `[]`) and live
+GitHub configuration corroborates that declaration. Reads reject Actions and
+known external-CI config files at base or reviewed head, any head check suites
+or commit statuses, and required checks/workflows in classic protection or any
+page of effective branch rules. The proof substitutes only the CI predicate;
+`branchProtection.required` is preserved. An unprotected repository also needs
+an explicit `branch_protection.required: false` policy.
+
+The strictly zero-finding settled-success head still passes all identity,
+attestation, primary-change, mergeability, head, hold and lease gates. Terminal
+head refusal precedes probe calls. Evidence is re-read under the lease before
+each attempt and recorded as `ciConfiguration: { reason: "no CI configured", ... }`
+in pre-lease audit metadata and the successful attempt. Lookup errors log and
+defer before the lease; under the lease they retry within the bounded budget,
+exhaust as `gate-read-failed`, `permanent: false`, and permit a later same-head
+tick. Positive configured-CI evidence preserves the original fail-closed gate.
+A merged daemon result remains terminal for dispatch and never sends this clean
+head to the hammer's non-empty-remediation contract.

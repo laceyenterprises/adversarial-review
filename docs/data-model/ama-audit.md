@@ -3,7 +3,7 @@
 **Owner:** AMA merge authority
 **Store:** `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/`
 **Source of truth:** `src/ama/audit.mjs`
-**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`
+**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`
 
 ## Purpose
 
@@ -27,6 +27,8 @@ at mode `0640`.
 | `closingKeywordRewrites` | optional array | Title and body rewrites computed by the daemon; absent on older records. Each item is `{original, referencedNumber, referencedRepo, replacement}`. |
 | `attempts[].closingKeywordRewrites` | optional array | Per-attempt message rewrites, including hammer shell attempts. Same item shape as the top-level field. |
 | `closureAuthority`, `reviewer`, `riskClass`, `flagState`, `ciMode` | optional provenance | Watcher-owned metadata, or caller-provided metadata when an append creates a missing record. `ciMode` is `github-checks` or `no-ci-bootstrap`. |
+| `ciConfiguration`, `attempts[].ciConfiguration` | optional `{ reason, repo, base, head, baseHead, checkedAt }` | Only the operator-authorized no-CI daemon route. Top-level metadata holds the pre-lease proof; the successful `daemon-merged` attempt holds its latest in-lease proof. All identity fields are strings; `checkedAt` is an ISO timestamp and `reason` is `no CI configured`. |
+| `closureAuthority`, `reviewer`, `riskClass`, `flagState` | optional provenance | Watcher-owned metadata, or caller-provided metadata when an append creates a missing record. |
 
 ```mermaid
 erDiagram
@@ -76,3 +78,12 @@ The hammer exports `HAM_AMA_TRAILERS` from the canonical dispatch-time
 `composeAmaTrailers` block, preserving reviewer family, eligibility reason and
 `ama-audit:<repo>:pr-<number>:head-<sha>` trace identity. Its message helper fails
 closed when that block is missing; it never synthesizes substitute provenance.
+No-CI evidence corroborates the operator's explicit repository declaration in
+`roles.adversarial.merge_authority.no_ci_repositories`; it is not inferred from
+an empty rollup alone. Live reads cover base/head Actions and known external-CI
+configs, head check suites and commit statuses, all effective rule pages, and
+classic branch protection. The configured branch-protection policy still applies.
+Top-level evidence records admission intent, not proof of a successful merge;
+only the successful attempt records the proof used at closure. In-lease
+configuration lookup errors write `reason: gate-read-failed`, `permanent: false`
+and omit `manualCloseRequired`, permitting a later same-head retry.

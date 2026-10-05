@@ -2027,18 +2027,42 @@ HAM hardening: stale CI action reservations resume after 60 seconds using fresh 
 ### STANDUPGATE-02: audited closure when no CI is configured
 
 The strictly zero-finding, settled-success daemon route can close an empty
-check rollup only after live GitHub reads prove that neither the base nor the
-reviewed head contains workflow files and that the target branch has neither
-required-check rules nor required workflows. Classic branch protection is
-checked as well as effective ruleset rules. Unknown, truncated, or failed reads
-refuse the exception. Configured required contexts also refuse it.
+check rollup only for repositories explicitly declared by the operator in
+`roles.adversarial.merge_authority.no_ci_repositories` (a list of exact
+`owner/repo` names, case-insensitive; default `[]`). This declaration covers
+external CI that cannot be ruled out by a GitHub configuration lookup. Only the
+Node merge-authority reader consumes this key; align the parent Agent OS Python
+schema before putting it in shared cross-reader configuration.
 
-The proof is read before lease acquisition and again before every merge attempt;
+Live GitHub reads must corroborate the declaration: neither the base nor the
+reviewed head contains Actions workflows or known external-CI configs
+(`.circleci/`, `.buildkite/`, `Jenkinsfile`, `.travis.yml`, Azure Pipelines,
+GitLab CI, `vercel.json`, `netlify.toml`), the reviewed head has no check suites
+or commit statuses, and the target branch has neither required-check rules nor
+required workflows. Classic branch protection is checked along with every page
+of effective ruleset rules. Unknown, truncated, or failed reads refuse the
+exception. Configured required contexts also refuse it.
+
+The proof never waives `branchProtection.required`. An unprotected repository
+needs the operator to set `roles.adversarial.merge_authority.branch_protection.required`
+to `false` as well as declaring it in the no-CI list. The no-CI list alone does
+not authorize merging without the adversarial gate in branch protection.
+
+Permanently refused heads are checked before spending probe calls. The proof is
+read before lease acquisition and again before every merge attempt; failures are
+logged. A pre-lease lookup failure defers the tick. In-lease lookup failures retry
+within `retryCap` and exhaust as `gate-read-failed`, `permanent: false`, without a
+manual-close requirement; a later tick may retry the same head.
+
 `ciConfiguration` records `reason: "no CI configured"`, repository, base, head,
-and base head in the daemon audit. Identity, attestation, primary-change,
-mergeability, matching-head, hold, lease, and kill-switch gates still apply.
-A successful daemon closure short-circuits hammer dispatch and operator escalation.
-The shared check classifier still rejects empty or pending rollups everywhere else.
+base head, and check timestamp in top-level daemon audit metadata (pre-lease
+proof) and on the successful `daemon-merged` attempt (latest in-lease proof).
+The evidence corroborates an explicit operator declaration, rather than
+inferring absence of external CI from an empty rollup. Identity, attestation,
+primary-change, mergeability, matching-head, hold, lease, and kill-switch gates
+still apply. Successful daemon closure short-circuits hammer dispatch and
+operator escalation. The shared check classifier still rejects empty or pending
+rollups everywhere else.
 
 RCA: searchlight#2 had an empty rollup, so the daemon's shared eligibility
 predicate returned `ci-not-green`. The fallback hammer was dispatched (watcher

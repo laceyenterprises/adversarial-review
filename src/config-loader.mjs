@@ -2036,6 +2036,11 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: false,
                   },
+                  no_ci_repositories: {
+                    __type: TYPE_LIST,
+                    __item: { __type: TYPE_STRING },
+                    __default: [],
+                  },
                   required_check_contexts: {
                     __type: TYPE_LIST,
                     __item: { __type: TYPE_STRING },
@@ -3785,6 +3790,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING',
     aliases: [],
   },
+  'roles.adversarial.merge_authority.no_ci_repositories': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_NO_CI_REPOSITORIES',
+    aliases: [],
+  },
   'roles.adversarial.merge_authority.required_check_contexts': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_REQUIRED_CHECK_CONTEXTS',
     aliases: [],
@@ -5452,7 +5461,9 @@ export class AgentOSConfig {
       'roles.adversarial.merge_authority.required_check_contexts',
       [],
     );
+    const noCiRepositories = this.get('roles.adversarial.merge_authority.no_ci_repositories', []);
     return {
+      noCiRepositories: Array.isArray(noCiRepositories) ? [...noCiRepositories] : [],
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),
       operatorLogins: [...this.get(
         'roles.adversarial.operator_logins',

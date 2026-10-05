@@ -330,6 +330,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {boolean=} [args.branchProtectionRequired]
  * @param {string=} [args.requiredGateContext]
  * @param {string[]=} [args.branchProtectionRequiredContexts]
+ * @param {string[]} [args.noCiRepositories] Operator-declared repositories without CI.
  * @param {string} [args.mergeMethod]    `squash` (default) | `merge`.
  * @param {string} args.hqRoot          HQ root for the audit doc.
  * @param {object} [args.auditMetadata] Extra top-level audit fields (reviewer, risk).
@@ -370,6 +371,7 @@ async function attemptDaemonCleanMergeInner({
   requiredGateContext = '',
   branchProtectionRequiredContexts = [],
   requiredCheckContexts = [],
+  noCiRepositories = [],
   mergeMethod = 'squash',
   flags = {},
   mergeCapabilityEnforcement = flags.mergeCapabilityEnforcement || 'observe',
@@ -541,6 +543,11 @@ async function attemptDaemonCleanMergeInner({
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }
 
+  // Don't spend GitHub configuration reads on a permanently refused head.
+  if (priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, validatedHead })) {
+    return notTaken('prior-daemon-terminal-failure');
+  }
+
   // ── Gate 2: substantive eligibility (verdict + green CI + mergeable +
   // head-match) via the shared MSM-02 predicate. Evaluated BEFORE spending a
   // lease acquisition; `leaseHeld:true` isolates the non-lease gates. ─────────
@@ -550,15 +557,21 @@ async function attemptDaemonCleanMergeInner({
   // Only the strictly zero-finding daemon route may supply it; all other
   // callers continue through the unchanged fail-closed CI classifier.
   const authorizeNoCi = async (gate) => {
-    if (!isFullyCleanSettledReview(reviewState) || verdict !== 'settled-success' ||
+    if (!Array.isArray(noCiRepositories) || !noCiRepositories.some((entry) =>
+          typeof entry === 'string' && entry.toLowerCase() === repo.toLowerCase()) ||
+        !isFullyCleanSettledReview(reviewState) || verdict !== 'settled-success' ||
         !Array.isArray(gate.requiredChecks) || gate.requiredChecks.length !== 0 ||
         requiredCheckContexts.length !== 0 || gate.candidateHead !== validatedHead ||
         typeof verifyNoCiConfiguredImpl !== 'function') return null;
-    try {
-      return await verifyNoCiConfiguredImpl({ head: gate.candidateHead });
-    } catch { return null; }
+    return await verifyNoCiConfiguredImpl({ head: gate.candidateHead });
   };
-  noCiEvidence = await authorizeNoCi(preLease);
+  try {
+    noCiEvidence = await authorizeNoCi(preLease);
+  } catch (err) {
+    logger?.warn?.(`[daemon-merge] CI configuration read failed for ${repo}#${prNumber}: ${err?.message || err}`);
+    return { ...notTaken('gate-read-failed'), disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      permanent: false };
+  }
   const preEligibility = evaluateEligibilityImpl({
     primaryChange: preLease.primaryChange,
     requirePrimaryChange: preLease.requirePrimaryChange,
@@ -572,7 +585,7 @@ async function attemptDaemonCleanMergeInner({
     mergeable: preLease.mergeable,
     mergeStateStatus: preLease.mergeStateStatus,
     prState: preLease.prState,
-    branchProtectionRequired: noCiEvidence ? false : branchProtectionRequired,
+    branchProtectionRequired,
     requiredGateContext,
     branchProtectionRequiredContexts:
       preLease.branchProtectionRequiredContexts?.length > 0
@@ -585,11 +598,6 @@ async function attemptDaemonCleanMergeInner({
   });
   if (!preEligibility.eligible) {
     return notTaken('not-eligible', { reasons: preEligibility.reasons, liveGate: preLease });
-  }
-
-  // ── Gate 3: don't re-loop a head that already failed permanently. ──────────
-  if (priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, validatedHead })) {
-    return notTaken('prior-daemon-terminal-failure');
   }
 
   // Never replace an unavailable author title with a permanent placeholder.
@@ -706,7 +714,8 @@ async function attemptDaemonCleanMergeInner({
     try {
       live = normalizeGateState(await fetchLiveGateImpl());
       noCiEvidence = await authorizeNoCi(live);
-    } catch {
+    } catch (err) {
+      logger?.warn?.(`[daemon-merge] live gate/configuration read failed for ${repo}#${prNumber}: ${err?.message || err}`);
       // A gate read failure is transient by construction here (the network read
       // itself failed). Retry within the bounded budget; exhausting it is a
       // fail-closed, non-permanent terminal (next tick may re-attempt).
@@ -778,7 +787,7 @@ async function attemptDaemonCleanMergeInner({
       mergeable: live.mergeable,
       mergeStateStatus: live.mergeStateStatus,
       prState: live.prState,
-      branchProtectionRequired: noCiEvidence ? false : branchProtectionRequired,
+      branchProtectionRequired,
       requiredGateContext,
       branchProtectionRequiredContexts:
         live.branchProtectionRequiredContexts?.length > 0

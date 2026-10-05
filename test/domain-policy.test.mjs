@@ -212,3 +212,10 @@ test('domain merge-authority policy preserves explicit operator overrides', () =
     'domain arrays still win without an operator override source',
   );
 });
+
+test('domain merge policy preserves the operator no-CI repository list', () => {
+  const fallback = { noCiRepositories: ['acme/no-ci'] };
+  const cfg = resolveMergeAuthorityConfigFromDomain(loadDomainConfig(ROOT, 'code-pr'), fallback);
+  assert.deepEqual(cfg.noCiRepositories, ['acme/no-ci']);
+  assert.equal(cfg.branchProtection.required, true, 'no-CI opt-in never changes branch policy');
+});

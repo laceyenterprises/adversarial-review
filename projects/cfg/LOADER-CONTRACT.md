@@ -334,3 +334,16 @@ adversarial-review legacy alias is `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR`.
 When both environment names are set to different values, startup must fail loud
 with both env names in the diagnostic; when both are set to the same value, the
 canonical env source wins provenance.
+
+## Node AMA no-CI repository declaration
+
+The Node schema accepts `roles.adversarial.merge_authority.no_ci_repositories`
+as a list of repository names, default `[]`. `getMergeAuthorityConfig()` exposes
+an independent copy as `noCiRepositories`. The canonical environment override is
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_NO_CI_REPOSITORIES`. Repository matching
+is exact and case-insensitive. Entries authorize the daemon to corroborate an
+operator declaration of no CI; they never waive `branchProtection.required`.
+See `docs/RUNBOOK-ama-closure.md` for the live probes and retry/audit contract.
+This Node key needs alignment in the parent Agent OS Python schema before use
+in shared cross-reader config; it is not enabled in this repository's default
+module configuration.

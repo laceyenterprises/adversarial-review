@@ -310,7 +310,7 @@ else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${
 });
 
 for (const scenario of ['accepted confirmation timeout', 'accepted confirmation permanent read error',
-  'superseded head', 'gate read failed', 'gate timeout', 'permanent merge rejection']) {
+  'superseded head', 'gate read failed', 'gate timeout', 'red CI after pending', 'permanent merge rejection']) {
   test(`rendered hammer receipt classification: ${scenario}`, (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-receipt-decision-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -326,6 +326,8 @@ for (const scenario of ['accepted confirmation timeout', 'accepted confirmation 
     if (scenario === 'superseded head') gate.headMatches = false;
     if (scenario === 'gate timeout') { gate.ok = false; gate.checksConclusion = 'PENDING'; }
     writeFileSync(join(dir, 'gate.json'), JSON.stringify(gate));
+    writeFileSync(join(dir, 'pending.json'), JSON.stringify({ ...gate, ok: false, checksConclusion: 'PENDING', reasons: ['ci-not-green'] }));
+    writeFileSync(join(dir, 'red.json'), JSON.stringify({ ...gate, ok: false, checksConclusion: 'FAILURE', reasons: ['ci-not-green'] }));
     const bin = join(dir, 'bin');
     mkdirSync(bin);
     const gh = join(bin, 'gh');
@@ -349,7 +351,10 @@ case "$1" in
   --input-type=module)
     cat >/dev/null
     if [ "$RECEIPT_SCENARIO" = 'gate read failed' ]; then exit 1; fi
-    cat "$TMPDIR/gate.json" ;;
+    if [ "$RECEIPT_SCENARIO" = 'red CI after pending' ]; then
+      if [ -f "$TMPDIR/polled" ]; then cat "$TMPDIR/red.json";
+      else touch "$TMPDIR/polled"; cat "$TMPDIR/pending.json"; fi
+    else cat "$TMPDIR/gate.json"; fi ;;
   */bin/merge-action-receipt.mjs) exec "$REAL_NODE" "$@" ;;
   */bin/ama-audit.mjs)
     echo "AUDIT $*"
@@ -371,9 +376,9 @@ esac
     assert.equal(render.status, 0, render.stderr);
     const script = join(dir, 'merge.sh');
     writeFileSync(script, render.stdout);
-    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=0 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=1
+    const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=1
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
-ham_mark_merge_lease_retryable_abort() { :; }
+ham_mark_merge_lease_retryable_abort() { echo REFUNDED; }
 sleep() { :; }
 source "$1"
 echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM_MERGE_EXIT"
@@ -381,6 +386,10 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     const result = run('/bin/bash', ['-c', shell, '_', script], env);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /HELD=0/);
+    if (scenario === 'red CI after pending') {
+      assert.match(result.stdout, /github-gate-red/);
+      assert.doesNotMatch(result.stdout, /REFUNDED/);
+    }
     if (scenario.startsWith('accepted')) {
       assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim(), 'attempted');
       assert.match(result.stdout, /OWN=1 EXIT=0/);
@@ -391,11 +400,57 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     }
     const directory = join(dir, 'dispatch/audit/automation-merge-actions');
     const receipts = (() => { try { return readdirSync(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } })();
-    assert.equal(receipts.length, scenario === 'permanent merge rejection' ? 1 : 0, result.stderr);
+    assert.equal(receipts.length, ['permanent merge rejection', 'red CI after pending'].includes(scenario) ? 1 : 0, result.stderr);
     if (receipts.length) {
       const receipt = JSON.parse(readFileSync(join(directory, receipts[0])));
       assert.equal(receipt.merged, false);
-      assert.equal(receipt.reason, 'permanent-merge-rejection');
+      assert.equal(receipt.reason, scenario === 'red CI after pending' ? 'github-gate-red' : 'permanent-merge-rejection');
     }
+  });
+}
+
+for (const scenario of ['recover', 'exhaust', 'permanent']) {
+  test(`post-CI lease reacquire GitHub probe: ${scenario}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'ham-reacquire-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const gh = join(dir, 'gh');
+    writeFileSync(gh, `#!/bin/sh
+n=0; [ ! -f "$TMPDIR/calls" ] || n=$(cat "$TMPDIR/calls")
+n=$((n + 1)); echo "$n" > "$TMPDIR/calls"
+if [ "$SCENARIO" = permanent ]; then echo 'HTTP 403 forbidden' >&2; exit 1; fi
+if [ "$SCENARIO" = exhaust ] || [ "$n" = 1 ]; then
+  echo 'GitHub read failed' >&2; echo 'TLS handshake timeout' >&2; exit 1
+fi
+echo '{"headRefOid":"${'a'.repeat(40)}","statusCheckRollup":[]}'
+`);
+    chmodSync(gh, 0o755);
+    // Render the production procedures, then execute the reacquire block with
+    // only the lease CLI and audit sink replaced. The gh probe is real shell.
+    const env = { HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
+      HAM_PR_NUMBER: '424242', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
+      HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
+      HAM_ROOT_DIR: root, HAM_AUDIT_PATH: join(dir, 'audit'), HAM_REVIEWER: 'claude',
+      PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir, SCENARIO: scenario };
+    const verify = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-verify-head', '--render'], env);
+    const merge = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+    assert.equal(verify.status, 0, verify.stderr);
+    assert.equal(merge.status, 0, merge.stderr);
+    const helper = verify.stdout.slice(verify.stdout.indexOf('ham_lease_pr_view() {'), verify.stdout.indexOf('ham_acquire_merge_lease() {'));
+    const block = merge.stdout.slice(merge.stdout.indexOf('if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] &&'), merge.stdout.indexOf('HAM_PRE_MERGE_ELIGIBLE=1\n\nHAM_MERGE_ATTEMPTS'));
+    const result = run('/bin/bash', ['-c', `${helper}
+sleep() { :; }
+ham_acquire_merge_lease() { ham_lease_pr_view --json headRefOid,statusCheckRollup >/dev/null; }
+ham_base_touches_pr_files() { return 1; }
+ham_append_terminal_audit() { echo "AUDIT:$*"; }
+HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+HAM_MERGE_LEASE_HELD=0
+close() { ${block}
+ echo REACQUIRED; }
+close
+`], env);
+    assert.equal(result.status, scenario === 'recover' ? 0 : scenario === 'exhaust' ? 20 : 1, result.stderr);
+    assert.equal(readFileSync(join(dir, 'calls'), 'utf8').trim(), scenario === 'recover' ? '2' : scenario === 'exhaust' ? '3' : '1');
+    if (scenario === 'exhaust') assert.match(result.stdout, /AUDIT:deferred merge-lease-timeout/);
+    else assert.doesNotMatch(result.stdout, /AUDIT:/);
   });
 }

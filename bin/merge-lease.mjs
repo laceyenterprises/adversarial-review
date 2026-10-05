@@ -48,6 +48,7 @@ Usage:
   merge-lease acquire --repo <owner/name> --base <branch> --pr <n> --head <sha>
                       --owner-pid <pid> [--owner-pgid <pgid>] --wait <seconds>
                       [--root-dir <path>] [--required-checks-green]
+                      [--wait-for-holder-deadline]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
                       --lease-id <id> [--retryable-abort <reason>]
                       [--root-dir <path>]
@@ -63,6 +64,9 @@ Usage:
                       --head <sha> [--root-dir <path>]
 
 Safety:
+  --wait-for-holder-deadline is accepted for compatibility, but never extends
+  the caller's explicit --wait command budget. FIFO acquisition retries within
+  that window; --wait 0 always returns immediately.
   needs-revalidation fetches origin/<base> in --repo-path. Run it only while
   holding the matching (repo, base) merge lease; it is not an unlocked probe.
 
@@ -303,6 +307,7 @@ async function runAcquire(argv, deps) {
     'owner-pgid': { type: 'string' },
     wait: { type: 'string' },
     'required-checks-green': { type: 'boolean' },
+    'wait-for-holder-deadline': { type: 'boolean' },
   });
   if (values.help) {
     deps.stdout.write(USAGE);
@@ -319,14 +324,16 @@ async function runAcquire(argv, deps) {
     values['owner-pgid'] == null ? null : parsePositiveInteger(values['owner-pgid'], 'owner-pgid');
   const waitSeconds = parseNonNegativeNumber(values.wait, 'wait');
   const startedMs = deps.nowMs();
-  const deadlineMs = startedMs + (waitSeconds * 1000);
-
   if (ownerPid === deps.selfPid) {
     throw usageError('--owner-pid must identify the caller, not the merge-lease CLI process');
   }
   if (!deps.pidAliveFn(ownerPid)) {
     throw usageError('--owner-pid is not live on this host');
   }
+  // The caller's wall-clock budget is authoritative, including holder-aware
+  // acquisition. FIFO waiters can outlive a holder; never extend this command.
+  const acquisitionSeconds = waitSeconds;
+  const deadlineMs = startedMs + acquisitionSeconds * 1000;
 
   let gateAttempt = null;
   while (!gateAttempt) {

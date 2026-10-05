@@ -74,13 +74,43 @@ ham_release_merge_lease() {
   fi
 }
 
+# Read the full stderr on each bounded attempt; permanent failures stay fatal.
+ham_lease_pr_view() {
+  local attempt=1 err rc
+  HAM_LEASE_PROBE_TRANSIENT=0
+  err=$(mktemp "${TMPDIR:-/tmp}/ham-lease-probe.XXXXXX") || return 1
+  while true; do
+    if /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr view <<PR_URL>> "$@" 2>"$err"; then
+      HAM_LEASE_PROBE_TRANSIENT=0
+      rm -f "$err"
+      return 0
+    else
+      rc=$?
+    fi
+    cat "$err" >&2
+    if [ "$rc" -eq 142 ] || grep -Eiq 'timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]|502|503|504|bad gateway|service unavailable|gateway timeout' "$err"; then
+      HAM_LEASE_PROBE_TRANSIENT=1
+    else
+      HAM_LEASE_PROBE_TRANSIENT=0
+      rm -f "$err"
+      return "$rc"
+    fi
+    if [ "$attempt" -ge 3 ]; then
+      rm -f "$err"
+      return "$rc"
+    fi
+    sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
+}
+
 ham_acquire_merge_lease() {
   if ! [[ "$POST_REMEDIATION_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "AMG-04 hard-blocker: merge lease head is not a full SHA" >&2
     return 1
   fi
   local ham_required_checks_green_args=()
-  gh pr view <<PR_URL>> --json headRefOid,statusCheckRollup \
+  ham_lease_pr_view --json headRefOid,statusCheckRollup \
     > /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json || return 1
   if jq -e --arg head "$POST_REMEDIATION_SHA" '
     .headRefOid == $head and
@@ -98,7 +128,7 @@ ham_acquire_merge_lease() {
     --pr <<PR_NUMBER>> \
     --head "$POST_REMEDIATION_SHA" \
     --owner-pid "$$" \
-    --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" \
+    --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" --wait-for-holder-deadline \
     "${ham_required_checks_green_args[@]+"${ham_required_checks_green_args[@]}"}" \
     > /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json; then
     HAM_MERGE_LEASE_ACQUIRE_EXIT=0
@@ -207,6 +237,25 @@ $HAM_GATE_CAP_COMMENT"
     && [ "$(jq -r '.timedOut // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
     HAM_PARK_WAITED=$(jq -r '.waited_s // "unknown"' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
     echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s" >&2
+    ham_park_json=$(mktemp "${TMPDIR:-/tmp}/ham-lease-park.XXXXXX") || return 1
+    jq -n '{outcome:"deferred",reason:"merge-lease-timeout"}' > "$ham_park_json"
+    if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append --hq-root <<HQ_ROOT>> \
+      --repo <<REPO>> --pr <<PR_NUMBER>> --head "$POST_REMEDIATION_SHA" \
+      --outcome deferred --closure-authority ham-terminal-remediation \
+      --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> --attempt-json "$ham_park_json"; then
+      HAM_PARK_AUDIT_EXIT=0
+    else
+      HAM_PARK_AUDIT_EXIT=$?
+    fi
+    rm -f "$ham_park_json"
+    if [ "$HAM_PARK_AUDIT_EXIT" -eq 65 ]; then
+      HAM_PARK_LIVE_STATE=$(ham_lease_pr_view --json state --jq '.state') || return 1
+      [ "$HAM_PARK_LIVE_STATE" = "MERGED" ] || return 1
+      HAM_PHASE_OUTCOME=already-merged
+      return 20
+    elif [ "$HAM_PARK_AUDIT_EXIT" -ne 0 ]; then
+      echo "AMG-04 warning: lease-timeout park audit failed (exit ${HAM_PARK_AUDIT_EXIT}); retaining contention outcome" >&2
+    fi
     HAM_PHASE_OUTCOME=parked:merge-lease-timeout
     return 20
   fi
@@ -222,6 +271,9 @@ $HAM_GATE_CAP_COMMENT"
     return 1
   fi
   HAM_MERGE_LEASE_HELD=1
+  # Retryable-abort state belongs to the released acquisition, never its successor.
+  HAM_MERGE_LEASE_RETRYABLE_ABORT=0
+  HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=""
   trap ham_release_merge_lease EXIT
 }
 
@@ -326,16 +378,25 @@ ham_update_branch_with_retries() {
 ham_base_touches_pr_files() {
   # Returns 0 (overlap → a rebase+revalidation is still required) when any file
   # this PR changes is also touched by base commits that landed SINCE the base we
-  # last validated against; returns 1 (disjoint → the validated head is safe to
+  # last validated against. In validated-head mode, compare only base commits
+  # not already contained in the exact CI-validated head, including when the
+  # parallel-phase validation base is missing; returns 1 (disjoint → safe to
   # merge without another rebase). Fail closed to 0 (overlap) on any fetch/diff
   # error so an undeterminable diff never lets us skip a rebase semantics needs.
   ham_bounded_git_sync "$BASE_BRANCH" >/dev/null 2>&1 || return 0
-  [ -n "$HAM_VALIDATION_BASE_SHA" ] || return 0
-  local current_base_sha pr_files base_files
+  local current_base_sha comparison_base pr_ref pr_files base_files
   current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
   ham_is_full_sha "$current_base_sha" || return 0
-  pr_files=$(git diff --name-only "$current_base_sha...HEAD" 2>/dev/null) || return 0
-  base_files=$(git diff --name-only "$HAM_VALIDATION_BASE_SHA..$current_base_sha" 2>/dev/null) || return 0
+  comparison_base="${HAM_VALIDATION_BASE_SHA:-}"
+  pr_ref=HEAD
+  if [ "${1:-}" = "validated-head" ]; then
+    pr_ref="$POST_REMEDIATION_SHA"
+    ham_is_full_sha "$pr_ref" || return 0
+    comparison_base=$(git merge-base "$pr_ref" "$current_base_sha" 2>/dev/null) || return 0
+  fi
+  ham_is_full_sha "$comparison_base" || return 0
+  pr_files=$(git diff --name-only "$current_base_sha...$pr_ref" 2>/dev/null) || return 0
+  base_files=$(git diff --name-only "$comparison_base..$current_base_sha" 2>/dev/null) || return 0
   [ -n "$pr_files" ] || return 1
   [ -n "$base_files" ] || return 1
   comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .

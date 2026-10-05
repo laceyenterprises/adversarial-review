@@ -35,13 +35,17 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `schemaVersion` | number | Current value is `2`. Version `2` introduced the target-redrive fields: `targetRemediationSha`, `targetAttemptCount`, `targetSuppressed`, and `targetAlertedAt`. |
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. |
-| `jobKey` | string or null | Stable reviewed-head key for the current per-series counter. A changed known job key resets `attemptCount` and `dispatchHeads`. |
+| `jobKey` | string or null | Stable reviewed-head key for the current per-series counter. A changed known job key resets `attemptCount`, `dispatchHeads`, ordinary retry refunds, and the three per-series deferral fields below. Lifetime refund usage survives. |
 | `attemptCount` | non-negative integer | Confirmed hammer dispatches in the current reviewed-head series. Dispatches increment only after launch succeeds. |
-| `lifetimeAttemptCount` | non-negative integer | Confirmed hammer dispatches for the PR across all reviewed-head series. Missing legacy values are seeded from `attemptCount`; non-finite present values fail closed to the lifetime ceiling. |
+| `lifetimeAttemptCount` | non-negative integer | Confirmed hammer dispatches for the PR across all reviewed-head series, less bounded contention refunds (at most twelve for the entire PR). Missing legacy values are seeded from `attemptCount`; non-finite present values fail closed to the lifetime ceiling. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation. This may differ from `jobKey` when the review is stale and the exhausted-lane hammer runs against a newer head. |
 | `targetAttemptCount` | non-negative integer | Confirmed hammer dispatches against `targetRemediationSha` across job keys. A changed known target SHA resets the count; missing legacy values are backfilled from `attemptCount` on suppression writes and from the evaluated target count on dispatch writes. |
 | `retryable` | non-negative integer, optional | Dispatches refunded because the hammer exited `succeeded` without closing its PR (HAMBG-02), or its launch failed for an infrastructure reason and it pushed nothing (CLOSERREUSE-01). `attemptCount` and the matching `targetAttemptCount` go down by one, and `retryable` goes up by one. At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
 | `retryableLaunchRequestIds` | string array, optional | Launch request ids already refunded, so a launch observed on several ticks is refunded once. Last 10 kept; reset with `retryable`. |
+| `deferralLaunches` | string array | Launch IDs observed parked on merge-lease contention or pending required checks in this review series. Dedupes refunds across ticks and against `retryableLaunchRequestIds`. Resets on a changed known job key because the certified reviewed-head queue changed. At twelve deferrals the queue expires. |
+| `deferralStartedAt` | ISO-8601 string or null | First observed deferral in this series; anchors the six-hour queue deadline. Resets with the job key. |
+| `deferralNextAt` | ISO-8601 string or null | Earliest resume time after the latest newly observed deferral; two-minute exponential backoff capped at thirty minutes. Resets with the job key. |
+| `lifetimeDeferralRefundCount` | integer in 0..12 | Contention lifetime refunds consumed across all series. Never reset by a fresh review or suppression write. New ledgers start at zero. Missing or malformed legacy values are treated as twelve (refunds exhausted); only operator reconciliation can restore unproven refund capacity. |
 | `dispatchHeads` | string array | Unique dispatched head SHAs observed in the current reviewed-head series. Resets on a fresh-review job-key change. |
 | `lastDispatchedHeadSha` | string or null | Most recent head SHA used for a confirmed hammer dispatch. |
 | `suppressed` | boolean | `true` once any cap has blocked hammer dispatch for the ledger's current state. |
@@ -63,9 +67,15 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
   corrupt files must page the operator rather than silently resetting counts.
 - The ledger counts confirmed hammer launches only. Interrupted pre-launch work
   does not create phantom attempts that need reclaiming.
-- A refund never touches `lifetimeAttemptCount`, and is refused once the series
-  is suppressed or its budget is spent. Past the budget an exit stays charged,
-  so the per-series cap still suppresses and pages the operator.
+- Ordinary exited-without-close/infrastructure refunds never touch
+  `lifetimeAttemptCount`, and are refused once the series is suppressed or their
+  budget is spent. Contention deferrals separately refund `attemptCount` and the
+  matching `targetAttemptCount` once per charged launch, for up to twelve
+  deferrals per series. They reduce `lifetimeAttemptCount` only while the
+  PR-wide `lifetimeDeferralRefundCount` is below twelve, and increment that
+  durable usage counter. Fresh reviews cannot replenish lifetime refunds, so
+  the total launch ceiling is bounded by the normal lifetime ceiling plus twelve.
+  Both refund paths refuse a launch already refunded by the other path.
 - Per-series suppression can clear only when a known fresh reviewed-head job key
   arrives. Lifetime suppression survives fresh-review resets.
 - Target-redrive suppression is scoped to the live target SHA. When the target
@@ -85,3 +95,8 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
   next dispatch resolves to a different harness class; otherwise the death
   stays charged (`infra-cause-persists`), keeping the refund for an exit that a
   re-dispatch could help. A 429 death is refunded without that check.
+
+Deferral fields are preserved on suppression writes within a series. A changed
+known job key clears only the series queue, including on suppression writes.
+
+Queue bounds and backoff are evaluated by `evaluateHammerDeferralQueue`; missing or invalid `deferralStartedAt` fails closed as expired.

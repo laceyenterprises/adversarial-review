@@ -351,6 +351,11 @@ ham_required_gate_red() {
   jq -e '.checksConclusion != null and .checksConclusion != "SUCCESS" and .checksConclusion != "PENDING"' "$HAM_GATE_JSON" >/dev/null
 }
 
+ham_required_gate_pending_only() {
+  jq -e '.checksConclusion == "PENDING" and
+    (.reasons | type == "array" and length > 0 and all(.[]; . == "ci-not-green"))' "$HAM_GATE_JSON" >/dev/null
+}
+
 ham_live_head_moved() {
   jq -e '.headMatches == false' "$HAM_GATE_JSON" >/dev/null
 }
@@ -435,21 +440,44 @@ while :; do
     echo "HAM hard-blocker: timed out waiting for GitHub required gate to become green for validated head" >&2
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
-    ham_append_terminal_audit failed-without-merge github-gate-timeout || true
-    HAM_PENDING_CHECK_STATES=$(jq -r '.checksConclusion // empty' "$HAM_GATE_JSON")
-    if [ -n "$HAM_PENDING_CHECK_STATES" ] && ! ham_required_gate_red; then
-      HAM_PENDING_CHECK_CLASSIFICATION=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs classify \
-        --stage required-checks --state "$HAM_PENDING_CHECK_STATES") || return 1
-      if [ "$(printf '%s' "$HAM_PENDING_CHECK_CLASSIFICATION" | jq -r '.retryable')" = "true" ]; then
-        ham_mark_merge_lease_retryable_abort required-checks-pending
-      fi
+    if ham_required_gate_pending_only; then
+      ham_append_terminal_audit deferred required-checks-pending || true
+      ham_mark_merge_lease_retryable_abort required-checks-pending
+    else
+      ham_append_terminal_audit failed-without-merge github-gate-timeout || true
     fi
     ham_release_merge_lease
     return 20
   fi
+  # Remote CI does not own the serialized merge lane. Reacquisition below
+  # repeats the live exact-head gate before any merge attempt. Keep this
+  # attempt charged: a later red CI outcome must retain the gate-cap charge.
+  if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ]; then
+    ham_release_merge_lease || return 1
+  fi
   echo "HAM remote CI: waiting for required checks on ${POST_REMEDIATION_SHA}" >&2
   sleep "$HAM_REMOTE_CI_POLL_SECONDS"
 done
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
+  if ham_acquire_merge_lease; then
+    :
+  else
+    HAM_REACQUIRE_EXIT=$?
+    if [ "${HAM_LEASE_PROBE_TRANSIENT:-0}" -eq 1 ]; then
+      ham_append_terminal_audit deferred merge-lease-timeout || return 1
+      HAM_PHASE_OUTCOME=parked:merge-lease-timeout
+      return 20
+    fi
+    return "$HAM_REACQUIRE_EXIT"
+  fi
+  # Only base changes not already contained in the exact CI-validated head can
+  # require another rebase; the parallel-phase validation base may be older.
+  if ham_base_touches_pr_files validated-head; then
+    ham_append_terminal_audit failed-without-merge base-changed-file-overlap || true
+    ham_release_merge_lease
+    return 20
+  fi
+fi
 HAM_PRE_MERGE_ELIGIBLE=1
 
 HAM_MERGE_ATTEMPTS=0

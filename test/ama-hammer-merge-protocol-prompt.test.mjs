@@ -139,8 +139,8 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort required-checks-pending/);
-  assert.match(HAMMER_PROMPT, /--stage required-checks --state "\$HAM_PENDING_CHECK_STATES"/);
-  assert.match(HAMMER_PROMPT, /HAM_PENDING_CHECK_STATES=.*\.checksConclusion/);
+  assert.match(HAMMER_PROMPT, /ham_required_gate_pending_only\(\)/);
+  assert.match(HAMMER_PROMPT, /\.checksConclusion == "PENDING" and/);
   assert.match(HAMMER_PROMPT, /const checksConclusion = classifyCheckRollup\(checks\)/);
   assert.match(HAMMER_PROMPT, /classifyCheckRollup\(\[check\]\) !== 'SUCCESS'/);
   assert.match(HAMMER_PROMPT, /\.checksConclusion != "PENDING"/);
@@ -163,7 +163,7 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /--reason hammer-pr-eligible/);
   assert.match(HAMMER_PROMPT, /HAM_CAPTURED_BASE_SHA=\$\(git rev-parse FETCH_HEAD/);
   assert.match(HAMMER_PROMPT, /current_base_sha=\$\(git rev-parse FETCH_HEAD/);
-  assert.match(HAMMER_PROMPT, /base_files=\$\(git diff --name-only "\$HAM_VALIDATION_BASE_SHA\.\.\$current_base_sha"/);
+  assert.match(HAMMER_PROMPT, /base_files=\$\(git diff --name-only "\$comparison_base\.\.\$current_base_sha"/);
   assert.match(HAMMER_PROMPT, /Never use retryable-abort for red/);
   assert.match(HAMMER_PROMPT, /trap ham_release_merge_lease EXIT/);
   // SEV1: the hammer no longer runs a local test battery or the PPH pre-push CI
@@ -335,8 +335,8 @@ test('hammer refunds a pending-only remote CI timeout before releasing its lease
   const end = HAMMER_PROMPT.indexOf('echo "HAM remote CI: waiting', start);
   assert.ok(start > 0 && end > start);
   const timeoutBranch = HAMMER_PROMPT.slice(start, end);
-  assert.match(timeoutBranch, /ham_required_gate_red/);
-  assert.match(timeoutBranch, /merge-lease\.mjs classify[\s\S]*--stage required-checks/);
+  assert.match(timeoutBranch, /if ham_required_gate_pending_only/);
+  assert.match(timeoutBranch, /failed-without-merge github-gate-timeout/);
   assert.match(timeoutBranch, /ham_mark_merge_lease_retryable_abort required-checks-pending[\s\S]*ham_release_merge_lease/);
 });
 

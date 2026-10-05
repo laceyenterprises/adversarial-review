@@ -1848,3 +1848,57 @@ pending hold without consuming the store-error alert slot. Uncovered or persiste
 owned primary-change refusals page after six observations, without authorizing
 HAM dispatch. Reservations persist the expected dispatch-record head so reviewed
 head receipts cannot refund an already launched attempt.
+### LEASEPARK-01: certified-head contention queue
+
+Lease acquisition timeouts and pending-required-check deferrals are written as
+`deferred` AMA audit attempts, keyed by the full certified head. The closer
+resumes a validated HAM head through the existing daemon merge predicate rather
+than launching remediation again only while verdict misses are limited to pending
+CI. Structural policy holds and operator-required refusals remain authoritative;
+red CI or conflicts route back to hammer remediation. A pending-check timeout
+is deferred only when pending CI is the sole live gate miss; conflicts, strict
+BEHIND, closed PRs and labels retain a failed-without-merge audit. Required checks,
+primary-change, exact-head,
+protective predecessors, branch protection and the autonomous execution switch
+remain mandatory, including the live read inside the lease. Moving the head
+invalidates the certification and removes the old audit from the active queue.
+The park must have a matching existing dispatch record and an audit timestamp
+at least as recent as that launch's `dispatchedAt`; stale or unanchored parks
+retain the operator hold for terminal dispatches; an active repair hammer follows the normal retain path. Certified
+merge resumes also require a readable retry ledger for the reviewed-head series
+and a recorded launch ID; a missing launch ID retains the operator hold.
+Missing, corrupt or mismatched ledgers return
+`hammer-deferral-ledger-unavailable` with `needsOperator: true` before any merge
+attempt, so the bounded queue cannot silently turn into indefinite retries.
+
+Each observed deferred launch refunds the series and matching target failure
+counters exactly once, deduped against ordinary retry refunds. Lifetime refunds
+are limited to twelve across the entire PR by `lifetimeDeferralRefundCount`,
+which survives fresh reviews; legacy ledgers without proven refund usage get no
+new lifetime refunds until operator reconciliation. The separate series launch
+history expires at twelve deferrals or six hours, with exponential backoff
+starting at two minutes and capped at thirty minutes. Within the lifetime refund
+budget, contention does not trigger retry-cap paging; after it is spent, the
+normal lifetime ceiling remains enforced. An expired queue
+returns `hammer-deferral-budget-exhausted` for operator handling.
+
+The lease CLI maintains FIFO waiters and respects the caller's explicit `--wait`
+window, including with `--wait-for-holder-deadline`; it never extends the worker's
+command budget. Zero-wait callers return immediately. Hammer releases its lease
+before sleeping on remote CI without refunding the acquisition, so a subsequent
+red-CI outcome remains charged to the gate-attempt cap. Pending-only terminal
+deferrals may still refund a held acquisition. Each successful acquire clears
+previous retryable-abort state. Pre-acquire and park-state GitHub reads retry
+transient failures three times using the full stderr; exhausted transient
+post-CI reads record a deferred lease-timeout audit. Permanent failures stay fatal.
+Certified parks with pending CI skip daemon merge until the metadata checks settle.
+Queue bounds and backoff use `evaluateHammerDeferralQueue`; missing or invalid
+start timestamps expire the queue. Park audits are read only on certified HAM
+routes; an unreadable audit explicitly requires operator recovery.
+After reacquisition it re-runs the fail-closed changed-file overlap guard from
+verify-head against the live base before the final fresh exact-head gate. The
+comparison starts at the merge-base of the exact CI-validated head and fetched
+live base, rather than the older parallel-phase validation base. This recomputes
+the incorporated base even when the earlier validation base is unavailable. Base
+changes overlapping PR files require rebase and revalidation even without a
+strict branch-protection rule; disjoint movement may proceed under that rule.

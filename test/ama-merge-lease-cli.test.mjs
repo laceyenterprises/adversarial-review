@@ -1040,3 +1040,40 @@ test('merge-lease acquire reclaims stale dead-owner-pid holder during wait', asy
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('LEASEPARK-01 holder-aware FIFO wait respects the caller acquisition window', async () => {
+  const rootDir = freshRoot();
+  try {
+    const holder = acquireFixture(rootDir, { deadlineSeconds: 10 });
+    let released = false;
+    const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+      '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '1', '--wait-for-holder-deadline'], {
+      onSleep: ({ nowMs }) => {
+        if (!released && nowMs >= Date.parse('2026-06-20T18:00:03Z')) {
+          releaseMergeLease({ rootDir, repo: REPO, base: BASE, ...holder.lease });
+          released = true;
+        }
+      },
+    });
+    assert.equal(code, 75);
+    assert.equal(jsonOutput(io).timedOut, true);
+    assert.equal(jsonOutput(io).waited_s, 1);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('ordinary and holder-aware acquire preserve the explicit caller budget', async () => {
+  for (const holderAware of [false, true]) {
+    const rootDir = freshRoot();
+    try {
+      acquireFixture(rootDir, { deadlineSeconds: 7200 });
+      const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+        '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '3600',
+        ...(holderAware ? ['--wait-for-holder-deadline'] : [])], {
+          onSleep: ({ nowMs, advance }) => advance(Date.parse('2026-06-20T18:00:00Z')
+            + 3600 * 1000 - nowMs),
+        });
+      assert.equal(code, 75);
+      assert.equal(jsonOutput(io).waited_s, 3600);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  }
+});

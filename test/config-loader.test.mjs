@@ -7678,6 +7678,9 @@ test('worker CPU niceness has the canonical default and validates 0–19', () =>
     writeFileSync(topPath, 'version: 1\n');
     assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.worker_process_niceness'), 10);
     assert.equal(loadConfig({ topPath, env: { AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS: '7' } }).get('worker_pool.worker_process_niceness'), 7);
+    for (const value of ['-1', '20', '1.5', 'abc', '', '  ']) {
+      assert.throws(() => loadConfig({ topPath, env: { AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS: value } }), AgentOSConfigError);
+    }
     for (const value of [0, 10, 19]) {
       writeFileSync(topPath, `version: 1\nworker_pool:\n  worker_process_niceness: ${value}\n`);
       assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.worker_process_niceness'), value);

@@ -2244,6 +2244,7 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          worker_process_niceness: { __type: TYPE_INT, __default: 10, __min: 0, __max: 19 },
           post_merge_actions: {
             __type: TYPE_DICT,
             __strict: true,
@@ -3342,6 +3343,10 @@ function postgresRuntimeAlias(value) {
 const identity = (v) => v;
 
 export const ENV_ALIASES = {
+  'worker_pool.worker_process_niceness': {
+    canonical: 'AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS',
+    aliases: [],
+  },
   'update.channel': {
     canonical: 'AGENT_OS_UPDATE_CHANNEL',
     aliases: [],

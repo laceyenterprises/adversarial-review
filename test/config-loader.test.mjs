@@ -7669,3 +7669,22 @@ test('AMA no-CI repository declarations default off and round-trip explicit oper
     assert.throws(() => loadConfig({ topPath: top, env: {} }));
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+
+test('worker CPU niceness has the canonical default and validates 0–19', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'worker-niceness-config-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.worker_process_niceness'), 10);
+    assert.equal(loadConfig({ topPath, env: { AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS: '7' } }).get('worker_pool.worker_process_niceness'), 7);
+    for (const value of [0, 10, 19]) {
+      writeFileSync(topPath, `version: 1\nworker_pool:\n  worker_process_niceness: ${value}\n`);
+      assert.equal(loadConfig({ topPath, env: {} }).get('worker_pool.worker_process_niceness'), value);
+    }
+    for (const value of [-1, 20, true, 1.5]) {
+      writeFileSync(topPath, `version: 1\nworker_pool:\n  worker_process_niceness: ${value}\n`);
+      assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

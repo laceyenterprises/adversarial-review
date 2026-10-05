@@ -1,3 +1,4 @@
+import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { normalizeCiPendingOnlyReply } from './kernel/remediation-reply.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -1142,33 +1143,9 @@ async function prepareWorkspaceForJob({
     prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
     return prBranchMetadataPromise;
   };
-  // Check the workspace itself before any Git command can touch its target.
-  if (lstatSync(workspaceDir, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    throw new Error(`Cannot safely prepare symlinked remediation workspace: ${workspaceDir}`);
-  }
-  // Preserve redirected metadata without running Git against the shared gitdir.
-  // A standalone clone with leftover registrations additionally needs the
-  // expected remote before we can move it aside without stranding foreign work.
-  const existingGitDir = join(workspaceDir, '.git');
-  const existingGitMetadata = lstatSync(existingGitDir, { throwIfNoEntry: false });
-  let preservedMetadataReason = null;
-  if (existingGitMetadata) {
-    if (!existingGitMetadata.isDirectory() || existsSync(join(existingGitDir, 'commondir'))) {
-      preservedMetadataReason = 'redirected-git-metadata';
-    } else if (existsSync(join(existingGitDir, 'worktrees'))) {
-      const state = await inspectWorkspaceState({ workspaceDir, expectedRepo: repo, allowDirty: true, execFileImpl });
-      if (state.actualRepo !== repo) {
-        const refusal = `Cannot safely preserve remediation workspace with worktree registrations: ${workspaceDir}; expected repo=${repo}, actual repo=${state.actualRepo || 'unknown'}`;
-        log.error?.(`[follow-up-remediation] ${refusal}`);
-        throw new Error(refusal);
-      }
-      preservedMetadataReason = 'leftover-worktree-registrations';
-    }
-    if (preservedMetadataReason) {
-      preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId: job.jobId,
-        reason: preservedMetadataReason, log });
-    }
-  }
+  const preservedMetadataReason = await preserveUnsafeWorkspaceMetadata({
+    workspaceDir, workspaceRootDir, jobId: job.jobId, repo, execFileImpl, log,
+  });
   const { workspaceState, resumeEligible } = await inspectWorkspaceForRetry({
     workspaceDir, workspaceRootDir, jobId: job.jobId, expectedRepo: repo, retryHistory, execFileImpl, log,
   });

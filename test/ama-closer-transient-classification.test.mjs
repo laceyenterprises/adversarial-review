@@ -40,7 +40,7 @@ const VERIFIED_HAM_COMMIT = {
     'closed-by': 'hammer (adversarial-pipe-mode)',
     'remediated-findings': '1 addressed (1 blocking, 0 non-blocking)',
   },
-  author: 'hammer-worker',
+  author: 'the-hammer-lacey[bot]',
   committer: 'the-hammer-lacey[bot]',
   changedFiles: ['src/auth.js'],
 };
@@ -141,6 +141,23 @@ test('resolveHamTerminalRemediationEvidence does not build evidence for an exter
 
   assert.equal(result, null);
   assert.equal(fetchedRollup, false);
+});
+
+test('resolveHamTerminalRemediationEvidence rejects linked foreign provenance despite terminal trailers', async () => {
+  for (const field of ['author', 'committer']) {
+    const result = await resolveHamTerminalRemediationEvidence({
+      reviewState: { headSha: VERIFIED_HAM_COMMIT.parentSha },
+      prMetadata: { headSha: VERIFIED_HAM_COMMIT.sha },
+      repoPath: 'laceyenterprises/example',
+      prNumber: 5270,
+      fetchHeadCloserVerifiedCommitImpl: async () => ({
+        ...VERIFIED_HAM_COMMIT,
+        [field]: 'some-human-contributor',
+      }),
+      fetchPullRequestRollupImpl: async () => assert.fail('foreign provenance must not fetch audit evidence'),
+    });
+    assert.equal(result, null, field);
+  }
 });
 
 test('resolveHamTerminalRemediationEvidence propagates transient commit fetch errors', async () => {

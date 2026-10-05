@@ -768,7 +768,7 @@ for (const path of ['closer', 'daemon-clean-merge', 'daemon-failed-closed']) {
     t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
     for (const hold of ['two-key', 'security-hold', 'risk-class-not-permitted',
       'destructive-migration', 'label-no-merge-hold', 'branch-protection-missing-gate']) {
-      for (const location of ['top-level', 'nested', 'operatorReason']) {
+      for (const location of ['top-level', 'nested', 'operatorReason', 'nestedOperatorReason']) {
         const result = { amaEnabled: true, dispatched: false, skipMergeAgent: true,
           reason: path === 'closer' ? 'primary-change-repair-required'
             : path === 'daemon-clean-merge' ? 'primary-change-needs-operator' : 'daemon-failed-closed',
@@ -777,7 +777,8 @@ for (const path of ['closer', 'daemon-clean-merge', 'daemon-failed-closed']) {
             needsOperator: true, reasons: ['primary-change-reverted'] } };
         if (location === 'top-level') result.reasons.push(hold);
         else if (location === 'nested') result.daemonCleanMerge.reasons.push(hold);
-        else result.operatorReason = `not-eligible:${hold}`;
+        else if (location === 'operatorReason') result.operatorReason = `not-eligible:${hold}`;
+        else result.daemonCleanMerge.operatorReason = `not-eligible:${hold}`;
         const resolved = await resolveMergeAgentCoexistenceForWatcher({
           ...args, labelNames: ['merge-agent-requested'], mergeAgentRequestEvent: scopedEvent(),
           maybeDispatchAmaClosureForImpl: async () => result,

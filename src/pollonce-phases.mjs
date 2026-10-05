@@ -78,6 +78,7 @@ import {
   fetchReviewsForHeadForDedup,
   getStalePostedReviewBudgetSuppression,
   isExplicitOperatorReviewRetrigger,
+  isOrphanHeadReviewRequested,
   resolveFirstPassReviewBudgetSuppression,
 } from './first-pass-review-suppression.mjs';
 import {
@@ -2590,7 +2591,7 @@ export async function processReviewSubject(entry, ctx) {
         });
       };
 
-      if (!isExplicitOperatorReviewRetrigger(existing)) {
+      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)) {
         const closerSpawnSuppression = await resolveHeadCloserCommitSuppression();
         if (closerSpawnSuppression.suppressed) {
           console.log(
@@ -3225,13 +3226,14 @@ export async function processReviewSubject(entry, ctx) {
             let skipReviewerSpawnReason = null;
             if (passKind === 'rereview') {
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
+              const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
               const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
                 repoPath,
                 prNumber,
                 headSha: reviewerHeadSha,
                 logger: console,
               });
-              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger) {
+              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
@@ -3243,7 +3245,7 @@ export async function processReviewSubject(entry, ctx) {
                 console.log(
                   `[watcher] Allowing explicit re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
-                  `(${closerHead.reason}), but rereview_reason is an operator retrigger marker.`
+                  `(${closerHead.reason}), but an exact-head operator or orphan recovery request owns this pass.`
                 );
               }
 

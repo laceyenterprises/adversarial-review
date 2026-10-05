@@ -266,6 +266,7 @@
       "path": "docs/data-model/alert-delivery-state.md",
       "store": "data/alert-delivery/",
       "schemaSurface": "src/alert-delivery.mjs",
+      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs"],
       "owner": "adversarial-review alert delivery"
     },
     {
@@ -492,6 +493,22 @@
       "owner": "AMA watcher recovery router"
     },
     {
+      "id": "orphan-watchdog",
+      "title": "Orphan Watchdog",
+      "path": "docs/data-model/orphan-watchdog.md",
+      "store": "data/follow-up-jobs/orphan-watchdog/<sha256(repo#prNumber)>.db and .lock",
+      "schemaSurface": "src/ama/orphan-watchdog.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama-closure-orchestration.mjs",
+        "src/ama/launch-request-status.mjs",
+        "src/ama/closer-lease.mjs",
+        "src/ama/dispatch-closer.mjs",
+        "src/alert-delivery.mjs"
+      ],
+      "owner": "AMA owner-of-last-resort recovery",
+      "reservationEvidenceFields": ["reservationStartedAt", "recordHeadSha", "reason"]
+    },
+    {
       "id": "ham-primary-change-refusals",
       "title": "HAM Primary Change Refusals",
       "path": "docs/data-model/ham-primary-change-refusals.md",
@@ -500,7 +517,8 @@
       "relatedSchemaSurfaces": [
         "src/ama/dispatch-closer.mjs"
       ],
-      "owner": "AMA primary-change merge hold and closer refusal paging"
+      "owner": "AMA legacy primary-change refusal diagnostics",
+      "status": "legacy-no-runtime-writer"
     },
     {
       "id": "ham-finding-disputes",

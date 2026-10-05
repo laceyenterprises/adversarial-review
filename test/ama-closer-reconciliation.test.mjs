@@ -11,7 +11,7 @@ import { AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS, amaCloserDispatchFilePath, upd
 test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-reconcile-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const statuses = ['succeeded', 'failed', 'canceled', 'reaped'];
+  const statuses = ['succeeded', 'failed', 'canceled', 'reaped', 'completed', 'rejected'];
   const paths = statuses.map((status, i) => {
     const identity = { repo: 'fixture/repo', prNumber: i + 1, headSha: 'abc' };
     updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatched', launchRequestId: status, custom: 'preserved' }));
@@ -19,7 +19,7 @@ test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async
   });
   const before = paths.map(p => readFileSync(p, 'utf8'));
   const options = { ledgerTarget: join(root, 'fixture.sqlite'), now: '2026-10-03T00:00:00Z', print() {}, readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true, row: { status: launchRequestId } }) };
-  assert.equal((await main(['--root-dir', root, '--dry-run'], options)).changed, 4);
+  assert.equal((await main(['--root-dir', root, '--dry-run'], options)).changed, 6);
   assert.deepEqual(paths.map(p => readFileSync(p, 'utf8')), before);
   assert.equal((await findActiveAmaCloserLaunches(root, options)).length, 0);
   for (const path of paths) {

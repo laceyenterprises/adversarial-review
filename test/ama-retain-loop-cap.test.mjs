@@ -81,6 +81,9 @@ function coexistenceArgs(rootDir, headSha, amaResult) {
     currentRevisionRef: headSha,
     logger: { warn() {}, log() {}, info() {} },
     maybeDispatchAmaClosureForImpl: async () => amaResult,
+    // This suite exercises ordinary stale-head retain recovery, not a
+    // closer-authored head; the new watchdog identity read must stay offline.
+    orphanOptions: { closerHeadImpl: async () => ({ suppressed: false }) },
     recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {}, maxAttempts: AMA_RETAIN_LOOP_CAP, stuckDeadlineMs: 1000, now: () => 0 },
   };
 }

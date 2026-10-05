@@ -84,7 +84,7 @@ for (const ownershipReason of ['remediation-pending', 'remediation-state-unknown
     const { args, calls } = harness(t, result);
     assert.equal(automatedHammerReasonsCovered(reasons), false);
     const input = { rootDir: args.rootDir, repoPath: args.repo, prNumber: 1, currentRevisionRef: 'head',
-      reviewStateRow: { ...args.reviewStateRow, verdict: 'Request changes' },
+      reviewStateRow: { ...args.reviewStateRow, verdict: 'Request changes', remediation_pending: true },
       candidate: { prState: 'open' }, dispatchJob: {}, logger: args.logger,
       recoveryOptions: { pageImpl: args.pageImpl, requestRereviewImpl: args.requestRereviewImpl },
       maybeDispatchAmaClosureForImpl: async (options) => {

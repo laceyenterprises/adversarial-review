@@ -119,6 +119,9 @@ async function replay(rootDir, {
   };
   const outcome = await resolveMergeAgentCoexistenceForWatcher({
     rootDir, reviewStateRow, dispatchJob, candidate, labelNames,
+    // These fixtures predate the orphan lane and do not carry a closer trailer.
+    // Keep the new commit-identity seam offline alongside the existing gh stubs.
+    orphanOptions: { closerHeadImpl: async () => ({ suppressed: false }) },
     repoPath: 'laceyenterprises/agent-os', prNumber: reviewStateRow.pr_number,
     currentRevisionRef: candidate.headSha, logger,
     maybeDispatchAmaClosureForImpl: (args) => maybeDispatchAmaClosureFor({ ...args, ...allStubs }),

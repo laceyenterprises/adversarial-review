@@ -223,7 +223,7 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const guardIndex = source.indexOf("let skipReviewerSpawnReason = null;");
   const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
   const closerSuppressedUnlessOperatorIndex = source.indexOf(
-    "if (closerHead?.suppressed && !explicitOperatorReviewRetrigger) {",
+    "if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview) {",
     guardIndex
   );
   const closerSuppressedIndex = closerSuppressedUnlessOperatorIndex;

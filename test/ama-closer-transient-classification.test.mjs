@@ -454,27 +454,7 @@ test('HAMINTENT: the closer holds an intent reversal with scoped operator recove
   assert.ok(result.reasons.includes('primary-change-reverted'));
 });
 
-for (const failure of ['SQLITE_BUSY', 'EACCES', 'ENOSPC', 'corrupt database', 'pager write failed']) {
-  test(`primary refusal retains skipMergeAgent when recording throws: ${failure}`, async (t) => {
-    const rootDir = mkdtempSync(join(tmpdir(), 'ama-refusal-failure-'));
-    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-    const inputs = eligibleInputs(rootDir);
-    const warnings = [];
-    const result = await maybeDispatchAmaCloser({ ...inputs,
-      options: { primaryChange: { ...primaryChangeFixture(inputs.prMetadata.headSha), finalFiles: [] } },
-      recordPrimaryChangeRefusalImpl: async () => { throw new Error(failure); },
-      logger: { warn: (message) => warnings.push(message) },
-      execFileImpl: async () => assert.fail('must retain the merge hold'),
-    });
-    assert.equal(result.skipMergeAgent, true);
-    assert.equal(result.reason, 'primary-change-repair-required');
-    assert.equal(result.dispatched, false);
-    assert.match(warnings[0], new RegExp(failure));
-  });
-}
-
-
-test('three background primary-change closer refusals on one head page once', async (t) => {
+test('primary-change closer refusals do not page before orphan attempts exhaust', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-background-refusals-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const inputs = eligibleInputs(rootDir);
@@ -495,6 +475,46 @@ test('three background primary-change closer refusals on one head page once', as
     await queue.drain();
     assert.equal(queue.takeSettled(key).result.reason, 'primary-change-repair-required');
     assert.equal(queue.takeSettled(key), null, 'the next cycle must re-run the closer');
-    assert.equal(pages, observation < 3 ? 0 : 1);
+    assert.equal(pages, 0);
   }
+});
+
+test('REMORPHAN-01 primary repair reaches HAM dispatch with per-finding trailer contract', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-orphan-repair-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  let prompt;
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({ ...inputs,
+    options: { primaryChange: { ...primaryChangeFixture(inputs.headSha), finalFiles: [] } },
+    dispatchContext: { ...inputs.dispatchContext, orphanRecovery: { primaryRepair: true } },
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+    writeFileImpl: (_dir, _path, body) => { prompt = body; },
+    execFileImpl: async (_cmd, args) => { calls.push(args); throw new Error('test provisioning refusal'); },
+  });
+  assert.equal(result.reason, 'dispatch-failed');
+  assert.ok(calls.some(args => args.includes('dispatch')), 'repair must reach the existing leased HAM launcher');
+  assert.match(prompt, /REMORPHAN-01 owner-of-last-resort pass/);
+  assert.match(prompt, /Reversal-Authorized-By: <review node id or URL> finding=<n> kind=<blocking\|non-blocking>/);
+  assert.match(prompt, /never waive primary-change or CI gates/);
+});
+
+test('orphan admission retains the mechanical closer for pending-CI-only misses', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-orphan-mechanical-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  inputs.prMetadata.statusCheckRollup = [{ name: 'test', status: 'IN_PROGRESS' }];
+  let prompt;
+  const calls = [];
+  await maybeDispatchAmaCloser({ ...inputs,
+    options: { primaryChange: primaryChangeFixture(inputs.headSha) },
+    dispatchContext: { ...inputs.dispatchContext, orphanRecovery: { primaryRepair: true } },
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+    writeFileImpl: (_dir, _path, body) => { prompt = body; },
+    execFileImpl: async (_cmd, args) => { calls.push(args); throw new Error('test provisioning refusal'); },
+  });
+  assert.ok(calls.some(args => args.includes('dispatch')));
+  const dispatchArgs = calls.find(args => args.includes('dispatch'));
+  assert.equal(dispatchArgs[dispatchArgs.indexOf('--priority') + 1], 'critical');
+  assert.doesNotMatch(prompt, /REMORPHAN-01 owner-of-last-resort pass/);
 });

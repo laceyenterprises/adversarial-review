@@ -1,0 +1,1 @@
+{"prNumber":7707,"result":{"amaEnabled":true,"reason":"not-eligible","reasons":["pr-not-mergeable","verdict-not-settled-success","blocking-findings-present"]},"dispatchJob":{"remediationStopCode":"no-progress","remediationRound":1,"remediationPlan":{"maxRounds":2}}}

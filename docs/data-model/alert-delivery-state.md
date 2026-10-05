@@ -57,6 +57,10 @@ Directory: `data/alert-delivery/`
   are durable, callers receive `{ status: "queued" }`. Callers intentionally
   treat that durable enqueue as terminal for their own debounce; transport
   delivery authority belongs to the sink health/receipt state.
+- Orphan recovery `exhausted`, `ownership-uncertain` and `store-error` events use
+  a deterministic event plus SHA-256 identity over `repo#prNumber@headSha`.
+  Enqueue retries reuse pending, inflight, delivered and dead-letter documents,
+  including a crash before the watchdog's SQLite page guard is updated.
 - The scheduled drain is best-effort fire-and-forget work. It must contain its
   own rejections so a drain failure cannot terminate the long-lived watcher
   daemon through Node's unhandled-rejection policy.

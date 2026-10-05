@@ -1639,6 +1639,11 @@ export async function maybeDispatchAmaClosureFor({
       daemonFailedClosed && isDaemonFailClosedHammerRemediable(daemonCleanMerge);
     if (hammerRemediableFallback) {
       clearDaemonMergePark({ rootDir, repo: repoPath, prNumber });
+      if (settledVerdict === 'settled-success'
+        && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) {
+        return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
+          reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
+      }
       const fallbackReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
       logger?.log?.(JSON.stringify({
         schemaVersion: 1,
@@ -1708,6 +1713,13 @@ export async function maybeDispatchAmaClosureFor({
   }
 
   const [owner, name] = repoPath.split('/');
+  // Preserve all daemon protective holds above. Once the merge lane declined
+  // ordinary CI/mergeability work, a clean settled head has nothing for HAM.
+  if (settledVerdict === 'settled-success'
+    && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: false,
+      reason: 'clean-review-merge-path', daemonCleanMerge }, { amaEnabled: true });
+  }
   // HMR-01: how long has this PR been TERMINAL and still unmerged?
   //
   // A settled comment-only verdict may spawn one final non-blocking round, so

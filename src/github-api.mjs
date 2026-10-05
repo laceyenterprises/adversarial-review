@@ -125,6 +125,7 @@ query PullRequestRollup(
                   __typename
                   ... on CheckRun {
                     name
+                    detailsUrl
                     conclusion
                     completedAt
                     status
@@ -310,6 +311,7 @@ query PullRequestRollupChecks(
               __typename
               ... on CheckRun {
                 name
+                detailsUrl
                 conclusion
                 completedAt
                 status
@@ -512,13 +514,17 @@ function normalizeCheck(node) {
   if (!node) return null;
   if (node.__typename === 'StatusContext') {
     return {
+      __typename: 'StatusContext',
+      context: String(node.context || '').trim() || null,
       name: String(node.context || '').trim() || null,
-      conclusion: node.state || null,
-      completedAt: node.createdAt || null,
+      conclusion: node.state || node.conclusion || null,
+      completedAt: node.createdAt || node.completedAt || null,
     };
   }
   return {
     name: String(node.name || '').trim() || null,
+    ...(node.status && node.status !== 'COMPLETED' ? { status: node.status } : {}),
+    ...(node.detailsUrl ? { detailsUrl: node.detailsUrl } : {}),
     conclusion: node.conclusion || node.status || null,
     completedAt: node.completedAt || null,
   };

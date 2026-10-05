@@ -1357,6 +1357,22 @@ test('adapter-missing rollup path uses existing GraphQL implementation', async (
   assert.equal(calls[0].command, 'gh');
 });
 
+test('CIUNKNOWN-01 normalization preserves cancellation recovery URL and status-context identity', async () => {
+  const { __test__ } = await importGithubApiFresh();
+  const cancelled = __test__.normalizeCheck({ __typename: 'CheckRun', name: 'repo-guards',
+    conclusion: 'CANCELLED', status: 'COMPLETED',
+    detailsUrl: `https://github.com/${FIXTURE_REPO}/actions/runs/37237629227` });
+  assert.equal(cancelled.detailsUrl, `https://github.com/${FIXTURE_REPO}/actions/runs/37237629227`);
+  const pending = __test__.normalizeCheck({ __typename: 'CheckRun', name: 'repo-guards',
+    conclusion: 'CANCELLED', status: 'IN_PROGRESS' });
+  assert.equal(pending.status, 'IN_PROGRESS');
+  const ownGate = __test__.normalizeCheck({ __typename: 'StatusContext',
+    context: 'agent-os/adversarial-gate', state: 'SUCCESS' });
+  assert.equal(ownGate.context, 'agent-os/adversarial-gate');
+  assert.equal(ownGate.__typename, 'StatusContext');
+  assert.deepEqual(__test__.normalizeCheck(ownGate), ownGate);
+});
+
 test('adapter telemetry helper skips action and telemetry when adapter is unavailable', async () => {
   const mod = await importGithubApiFresh();
   const telemetry = makeTelemetrySink();

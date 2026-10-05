@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
-import { latestCheckRollupItems, summarizeChecksConclusion } from './checks-summary.mjs';
+import { checkItemState, latestCheckRollupItems, summarizeChecksConclusion } from './checks-summary.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -36,13 +36,7 @@ function isOwnGateItem(item, env = process.env) {
 }
 
 function normalizeCheckState(item) {
-  return String(
-    item?.conclusion
-    || item?.status
-    || item?.state
-    || item?.statusCheckRollup?.state
-    || ''
-  ).trim().toUpperCase();
+  return checkItemState(item);
 }
 
 function checkName(item) {

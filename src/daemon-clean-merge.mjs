@@ -1,4 +1,6 @@
 import { observeClosureLag } from './ama/closure-lag.mjs';
+import { inspectCiBootstrap, recoverCancelledChecks } from './ci-recovery.mjs';
+import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -372,6 +374,7 @@ export async function runDaemonCleanMergeAttempt({
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   fetchRollupImpl = fetchPullRequestRollup,
+  inspectCiBootstrapImpl = inspectCiBootstrap,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
@@ -811,6 +814,21 @@ export async function runDaemonCleanMergeAttempt({
     },
   });
   const primaryChange = await readPrimaryChange(liveHead);
+  const bootstrapFor = async (rollup) => {
+    if ((!(settledVerdict === 'settled-success'
+      && isDaemonMergeReviewAllowed(reviewState, { strictMode: true })) && !hamTerminalRemediationHead)
+      || String(rollup?.state || '').toUpperCase() !== 'OPEN') return { mode: null };
+    return inspectCiBootstrapImpl({ rootDir, repo: repoPath, prNumber,
+      headSha: rollup?.headSha || rollup?.headRefOid, baseBranch: base,
+      rollup: resolveRollupRequiredChecks(rollup), ownContext: requiredGateContext,
+      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg), execFileImpl, env });
+  };
+  const ciBootstrap = await bootstrapFor(liveRollup);
+  const checkSummary = summarizeExternalChecks(resolveRollupRequiredChecks(liveRollup), { cfg, env });
+  if (String(liveRollup?.state || '').toUpperCase() === 'OPEN') {
+    await recoverCancelledChecks({ rootDir, repo: repoPath, prNumber, headSha: liveHead,
+      ...checkSummary, execFileImpl, env });
+  }
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
   const daemonVerdict = hamTerminalRemediationHead
@@ -863,7 +881,7 @@ export async function runDaemonCleanMergeAttempt({
       requirePrimaryChange: true,
       strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
       candidateHead: liveHead,
-      requiredChecks: resolveRollupRequiredChecks(liveRollup)
+      requiredChecks: ciBootstrap.mode === 'no-ci-bootstrap' ? true : resolveRollupRequiredChecks(liveRollup)
         ?? (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
       mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
       mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
@@ -874,6 +892,7 @@ export async function runDaemonCleanMergeAttempt({
     mergeMethod,
     hqRoot,
     auditMetadata: {
+      ciMode: ciBootstrap.mode || 'github-checks',
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
       // Name the authority that cleared the review gate in the audit doc.
@@ -983,12 +1002,13 @@ export async function runDaemonCleanMergeAttempt({
     fetchLiveGateImpl: async () => {
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
       const state = String(rollup?.state || '');
+      const freshBootstrap = await bootstrapFor(rollup);
       return {
         primaryChange: await readPrimaryChange(rollup?.headSha || rollup?.headRefOid || ''),
         requirePrimaryChange: true,
         strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
         candidateHead: rollup?.headSha || rollup?.headRefOid || '',
-        requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
+        requiredChecks: freshBootstrap.mode === 'no-ci-bootstrap' ? true : resolveRollupRequiredChecks(rollup) ?? [],
         mergeable: rollup?.mergeable,
         mergeStateStatus: rollup?.mergeStateStatus,
         prState: state,

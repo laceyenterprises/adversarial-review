@@ -1976,3 +1976,33 @@ assume a per-head review ceiling bounds repeated new rebase heads: the combined
 lifetime accounting needs the offline cycle regression tracked in LAC-1849.
 Local-first trailer suppression still lacks authenticated linked identity;
 source-aware stale-head resume verification is tracked in LAC-1848.
+## CIUNKNOWN-01: cancelled checks and no-CI bootstrap
+
+When the current open head's only non-green external checks are cancelled, the
+watcher verifies the workflow run's head and requests `rerun-failed-jobs`. Durable
+reservations under `dispatch/ci-recovery/` cap each check/head at one request and
+deduplicate checks belonging to the same workflow. The original cancelled attempt
+is treated as pending; a later cancelled attempt raises one operator decision.
+Failures and pending/missing checks never enter this recovery path.
+
+An empty rollup still means unknown. No-CI bootstrap additionally queries the
+repository's workflow inventory, base branch, classic protection when applicable,
+and effective ruleset rules. Unreadable APIs, configured required contexts, or a
+pending adversarial status cannot authorize bootstrap. Green managed pre-push
+evidence must match the repository and full head SHA: GitHub hosting accepts the
+owner-controlled local sidecar, while full-mirror hosting requires the deploy-owned
+CI runner public key and a valid Ed25519 signature. Budget-deferred evidence is
+never green for bootstrap. Without evidence, the watcher pages once with
+`repo has no CI`.
+
+A settled zero-finding review stays on the merge path, including when CI is
+unknown; it does not dispatch HAM. The daemon and merge-agent bootstrap paths
+preserve current-head review or HAM certification, safety-core, protection,
+lease, and autonomous execution gates. Each merge attempt refreshes the proof;
+`bin/ci-bootstrap.mjs --repo OWNER/REPO --pr NUMBER --head SHA` provides the
+merge-agent's immediate pre-merge verification. Audits flag
+`ciMode: no-ci-bootstrap`.
+
+Repository stand-up should provision a minimal CI workflow (agent-os
+STANDUPCI-01). This repository only handles the existing zero-CI gap; provisioning
+is follow-up work in agent-os.

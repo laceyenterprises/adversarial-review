@@ -467,6 +467,7 @@ export async function handlePostedReviewRow({
       candidate = await timePostedReviewStep(
         'fetchMergeAgentCandidate', stepKey, logger, ({ signal }) =>
           fetchMergeAgentCandidateImpl(repoPath, prNumber, {
+            rootDir,
             execFileImpl,
             operatorApprovalEvent,
             mergeAgentRequestEvent,

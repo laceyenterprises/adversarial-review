@@ -1,4 +1,9 @@
 import { execFile, spawnSync } from 'node:child_process';
+import { inspectCiBootstrap, recoverCancelledChecks } from './ci-recovery.mjs';
+import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
+import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
+import { loadConfigCached } from './config-loader.mjs';
 import { randomUUID } from 'node:crypto';
 import {
   existsSync,
@@ -1306,6 +1311,8 @@ function recordMergeAgentDispatch(rootDir, job, {
     baseBranch: job.baseBranch,
     headSha: job.headSha || null,
     operatorApproval: job.operatorApproval || null,
+    ciMode: job.ciBootstrap?.mode || 'github-checks',
+    ciBootstrap: job.ciBootstrap || null,
     mergeAgentRequest: job.mergeAgentRequest || null,
     trigger,
     blockingFindingCount: Number(job?.blockingFindingCount) || 0,
@@ -2108,6 +2115,7 @@ async function dispatchMergeAgentForPR({
   headSha,
   mergeable,
   checksConclusion,
+  ciBootstrap = null,
   labels,
   operatorNotes,
   lastVerdict,
@@ -2120,6 +2128,8 @@ async function dispatchMergeAgentForPR({
   remediationMaxRounds = null,
   blockingFindingCount = 0,
   blockingFindingState = 'known', hamTerminalRemediationValidated = false,
+  nonBlockingFindingCount = null,
+  nonBlockingFindingState = 'unknown',
   reviewFailureClass = null,
   reviewFailureExhausted = false,
   prUpdatedAt = null,
@@ -2193,6 +2203,7 @@ async function dispatchMergeAgentForPR({
     headSha,
     mergeable,
     checksConclusion,
+    ciBootstrap,
     labels,
     operatorNotes,
     lastVerdict,
@@ -2205,6 +2216,8 @@ async function dispatchMergeAgentForPR({
     remediationMaxRounds,
     blockingFindingCount,
     blockingFindingState, hamTerminalRemediationValidated,
+    nonBlockingFindingCount,
+    nonBlockingFindingState,
     reviewFailureClass,
     reviewFailureExhausted,
     prUpdatedAt,
@@ -2851,6 +2864,7 @@ async function dispatchMergeAgentForPR({
 
 async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync, env = process.env,
+  rootDir = env.HQ_ROOT || null,
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined, signal = null,
   branchProtectionCache = null,
@@ -2896,6 +2910,16 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed', requiredContext: null };
     }
   }
+  const checkSummary = summarizeExternalChecks(parsed.statusCheckRollup);
+  const recovering = rootDir && String(parsed.state).toUpperCase() === 'OPEN'
+    && await recoverCancelledChecks({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
+      ...checkSummary, execFileImpl, env, signal });
+  const ciBootstrap = String(parsed.state).toUpperCase() === 'OPEN'
+    ? await inspectCiBootstrap({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
+      baseBranch: parsed.baseRefName, rollup: parsed.statusCheckRollup,
+      ownContext: resolveGateStatusContext(env), execFileImpl, env,
+      requiredContexts: resolveRequiredCheckContextsFromCfg(loadConfigCached({ env })) })
+    : { mode: null };
   return {
     repo,
     prNumber,
@@ -2904,7 +2928,8 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     headSha: parsed.headRefOid || null,
     mergeable: parsed.mergeable || 'UNKNOWN',
     mergeStateStatus: parsed.mergeStateStatus || null,
-    checksConclusion: summarizeChecksConclusion(parsed.statusCheckRollup),
+    checksConclusion: recovering ? 'PENDING' : summarizeChecksConclusion(parsed.statusCheckRollup),
+    ciBootstrap,
     statusCheckRollup: Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [],
     branchProtection,
     labels,

@@ -821,13 +821,13 @@ export async function runDaemonCleanMergeAttempt({
     return inspectCiBootstrapImpl({ rootDir, repo: repoPath, prNumber,
       headSha: rollup?.headSha || rollup?.headRefOid, baseBranch: base,
       rollup: resolveRollupRequiredChecks(rollup), ownContext: requiredGateContext,
-      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg), execFileImpl, env });
+      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg), execFileImpl, env, signal });
   };
   const ciBootstrap = await bootstrapFor(liveRollup);
   const checkSummary = summarizeExternalChecks(resolveRollupRequiredChecks(liveRollup), { cfg, env });
   if (String(liveRollup?.state || '').toUpperCase() === 'OPEN') {
     await recoverCancelledChecks({ rootDir, repo: repoPath, prNumber, headSha: liveHead,
-      ...checkSummary, execFileImpl, env });
+      ...checkSummary, execFileImpl, env, signal });
   }
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);

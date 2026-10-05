@@ -88,18 +88,28 @@ test('rerun reservations survive concurrent ticks, deduplicate a workflow and re
   const rootDir = fixture(t);
   let currentHead = headSha;
   let posts = 0;
+  let pages = 0;
+  let attempt = 1;
+  let status = 'completed';
   const check = { name: 'lint', state: 'CANCELLED', detailsUrl: `https://github.com/${repo}/actions/runs/1` };
   const execFileImpl = async (_cmd, args) => {
+    if (_cmd === 'hq') { pages++; return { stdout: '{}' }; }
     if (args[0] === 'pr') return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: currentHead }) };
-    if (args.includes('POST')) { posts++; return { stdout: '' }; }
-    return { stdout: JSON.stringify({ head_sha: currentHead, conclusion: 'cancelled', run_attempt: 1 }) };
+    if (args.includes('POST')) { posts++; status = 'queued'; return { stdout: '' }; }
+    return { stdout: JSON.stringify({ head_sha: currentHead, status,
+      conclusion: status === 'completed' ? 'cancelled' : null, run_attempt: attempt }) };
   };
   const recover = (prNumber = 2) => recoverCancelledChecks({ rootDir, repo, prNumber,
     headSha: currentHead, failedChecks: [check, { ...check, name: 'test' }], execFileImpl });
   await Promise.all([recover(), recover()]);
   await recover(3);
   assert.equal(posts, 1);
+  status = 'completed'; attempt = 2;
+  await recover(); await recover();
+  assert.equal(posts, 1);
+  assert.equal(pages, 1, 'one page per head even when two checks cancel together');
   currentHead = 'a'.repeat(40);
+  status = 'completed'; attempt = 1;
   await recover();
   assert.equal(posts, 2);
 });

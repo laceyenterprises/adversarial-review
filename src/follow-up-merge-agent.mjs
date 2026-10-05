@@ -2910,15 +2910,16 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed', requiredContext: null };
     }
   }
-  const checkSummary = summarizeExternalChecks(parsed.statusCheckRollup);
+  const checksCfg = loadConfigCached({ env });
+  const checkSummary = summarizeExternalChecks(parsed.statusCheckRollup, { env, cfg: checksCfg });
   const recovering = rootDir && String(parsed.state).toUpperCase() === 'OPEN'
     && await recoverCancelledChecks({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
       ...checkSummary, execFileImpl, env, signal });
   const ciBootstrap = String(parsed.state).toUpperCase() === 'OPEN'
     ? await inspectCiBootstrap({ rootDir, repo, prNumber, headSha: parsed.headRefOid,
       baseBranch: parsed.baseRefName, rollup: parsed.statusCheckRollup,
-      ownContext: resolveGateStatusContext(env), execFileImpl, env,
-      requiredContexts: resolveRequiredCheckContextsFromCfg(loadConfigCached({ env })) })
+      ownContext: resolveGateStatusContext(env), execFileImpl, env, signal,
+      requiredContexts: resolveRequiredCheckContextsFromCfg(checksCfg) })
     : { mode: null };
   return {
     repo,
@@ -2928,7 +2929,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     headSha: parsed.headRefOid || null,
     mergeable: parsed.mergeable || 'UNKNOWN',
     mergeStateStatus: parsed.mergeStateStatus || null,
-    checksConclusion: recovering ? 'PENDING' : summarizeChecksConclusion(parsed.statusCheckRollup),
+    checksConclusion: recovering ? 'PENDING' : summarizeChecksConclusion(parsed.statusCheckRollup, { env, cfg: checksCfg }),
     ciBootstrap,
     statusCheckRollup: Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [],
     branchProtection,

@@ -22,12 +22,13 @@ function reserve(rootDir, identity, record) {
 }
 
 export async function pageCiOnce({ rootDir, repo, prNumber, headSha, reason,
-  execFileImpl = execFileAsync, env = process.env }) {
-  const claim = reserve(rootDir, `page:${repo}:${prNumber}:${headSha}:${reason}`, { reason });
+  dedupeKey = reason, execFileImpl = execFileAsync, env = process.env, signal }) {
+  signal?.throwIfAborted();
+  const claim = reserve(rootDir, `page:${repo}:${prNumber}:${headSha}:${dedupeKey}`, { reason });
   if (!claim.created) return false;
   await execFileImpl('hq', ['decision', 'raise', '--question',
     `${repo}#${prNumber}@${headSha}: ${reason}`, '--option', 'Investigate CI',
-    '--option', 'Keep PR parked', '--recommended', 'Investigate CI'], { env, timeout: 30_000 });
+    '--option', 'Keep PR parked', '--recommended', 'Investigate CI'], { env, signal, timeout: 30_000 });
   return true;
 }
 
@@ -45,11 +46,25 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
     '--repo', repo, '--json', 'state,headRefOid'], { env, signal, timeout: 30_000 });
   const pr = JSON.parse(prJson);
   if (pr.state !== 'OPEN' || pr.headRefOid !== headSha) return false;
+  // Snapshot each workflow before any POST. Multiple cancelled checks can belong
+  // to one run, and the POST can immediately move that run back to queued.
+  const runIds = [...new Set(failedChecks.map(check => /\/actions\/runs\/(\d+)/.exec(check.detailsUrl)[1]))];
+  const snapshots = await Promise.allSettled(runIds.map(async runId => {
+    const { stdout } = await execFileImpl('gh', ['api', `repos/${repo}/actions/runs/${runId}`], { env, signal, timeout: 30_000 });
+    return [runId, JSON.parse(stdout)];
+  }));
+  const errors = snapshots.filter(snapshot => snapshot.status === 'rejected');
+  if (errors.length) throw errors[0].reason;
+  const runs = new Map(snapshots.map(snapshot => snapshot.value));
+  for (const run of runs.values()) {
+    if (run.head_sha !== headSha || !Number.isInteger(run.run_attempt) || run.run_attempt < 1) return false;
+    if (run.conclusion !== 'cancelled'
+      && !['queued', 'in_progress', 'waiting', 'requested', 'pending'].includes(run.status)) return false;
+  }
+  if ([...runs.values()].some(run => run.conclusion !== 'cancelled')) return true;
   for (const check of failedChecks) {
     const runId = /\/actions\/runs\/(\d+)/.exec(check.detailsUrl)[1];
-    const { stdout } = await execFileImpl('gh', ['api', `repos/${repo}/actions/runs/${runId}`], { env, signal, timeout: 30_000 });
-    const run = JSON.parse(stdout);
-    if (run.head_sha !== headSha || run.conclusion !== 'cancelled' || !Number.isInteger(run.run_attempt)) return false;
+    const run = runs.get(runId);
     const claim = reserve(rootDir, `rerun:${repo.toLowerCase()}:${headSha}:${check.name.trim().toLowerCase()}`, {
       runId, attempt: run.run_attempt, headSha, check: check.name, requestedAt: new Date().toISOString(),
     });
@@ -60,11 +75,12 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
         await execFileImpl('gh', ['api', '--method', 'POST', `repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`], { env, signal, timeout: 30_000 });
       } catch (error) {
         if (signal?.aborted) throw error;
-        await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `cancelled check rerun failed: ${check.name}`, execFileImpl, env });
+        await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `cancelled check rerun failed: ${check.name}`, execFileImpl, env, signal });
         throw error;
       }
     } else if (claim.record.runId !== runId || run.run_attempt > claim.record.attempt) {
-      await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `required check cancelled again: ${check.name}`, execFileImpl, env });
+      await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: `required check cancelled again: ${check.name}`,
+        dedupeKey: 'required-checks-cancelled-again', execFileImpl, env, signal });
     }
   }
   return true;
@@ -72,9 +88,9 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
 
 // Empty rollups alone never authorize bootstrap. Inspect repository workflows
 // and BOTH classic branch protection and effective ruleset rules on the base.
-export async function confirmNoCi({ repo, baseBranch, execFileImpl = execFileAsync, env = process.env }) {
+export async function confirmNoCi({ repo, baseBranch, execFileImpl = execFileAsync, env = process.env, signal }) {
   if (!baseBranch) return false;
-  const api = async path => JSON.parse((await execFileImpl('gh', ['api', path], { env, timeout: 30_000 })).stdout);
+  const api = async path => JSON.parse((await execFileImpl('gh', ['api', path], { env, signal, timeout: 30_000 })).stdout);
   try {
     const workflows = await api(`repos/${repo}/actions/workflows?per_page=1`);
     if (workflows.total_count !== 0 || !Array.isArray(workflows.workflows) || workflows.workflows.length) return false;
@@ -89,6 +105,7 @@ export async function confirmNoCi({ repo, baseBranch, execFileImpl = execFileAsy
     if (!Array.isArray(rules) || rules.some(rule => !rule?.type || rule.type === 'required_status_checks' || rule.type === 'workflows')) return false;
     return true;
   } catch {
+    signal?.throwIfAborted();
     return false;
   }
 }
@@ -151,12 +168,12 @@ export function readGreenManagedCi({ repo, headSha, env = process.env }) {
 
 export async function inspectCiBootstrap({ rootDir, repo, prNumber, headSha,
   baseBranch, rollup, ownContext, requiredContexts = [], execFileImpl = execFileAsync,
-  env = process.env, readAttestationImpl = readGreenManagedCi }) {
+  env = process.env, readAttestationImpl = readGreenManagedCi, signal }) {
   if (!/^[0-9a-f]{40}$/.test(headSha || '')) return { mode: null };
   if (requiredContexts.length || !emptyExternalRollup(rollup, ownContext)) return { mode: null };
-  if (!await confirmNoCi({ repo, baseBranch, execFileImpl, env })) return { mode: null };
+  if (!await confirmNoCi({ repo, baseBranch, execFileImpl, env, signal })) return { mode: null };
   if (!await readAttestationImpl({ repo, headSha, env })) {
-    if (rootDir) await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: 'repo has no CI', execFileImpl, env });
+    if (rootDir) await pageCiOnce({ rootDir, repo, prNumber, headSha, reason: 'repo has no CI', execFileImpl, env, signal });
     return { mode: null, noCi: true };
   }
   return { mode: 'no-ci-bootstrap', noCi: true, headSha };

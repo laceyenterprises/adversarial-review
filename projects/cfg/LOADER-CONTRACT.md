@@ -73,6 +73,7 @@ adversarial-review watcher:
 - `worker_pool.oss_dispatch.*`
 - `worker_pool.secrets.prewarm.*`
 - `worker_pool.secrets_bus.*`
+- `worker_pool.worker_process_niceness`
 
 `worker_pool.memory.dynamic` is strict and mirrors `enabled: false`,
 `shadow_only: false`, `admit_percentile: p95`, `pressure_margin_mb: 512`,
@@ -102,6 +103,18 @@ sets it.
 `21600` (six hours) and minimum `0`, with no maximum. Python owns the admission
 reroute behavior; Node validates this shared field so checked-in configuration
 can carry the same policy. Unknown keys under `worker_pool.quota` still fail.
+
+`worker_pool.worker_process_niceness` is an integer with default `10` and
+range `0`–`19`. Its canonical environment override is
+`AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS`; blank and whitespace-only
+overrides for this key are rejected. Python and worker-launch own scheduling
+behavior; Node only validates the shared value.
+
+Deployment order: land and deploy this Node mirror before the companion
+agent-os change sets this key in checked-in `config.yaml`. The companion must
+verify its Python default `10`, bounds `0`–`19`, and blank-env rejection against
+this contract, and exercise this leaf in `scripts/cfg-parity-gate.py` / the
+`CFG schema parity` CI job after the submodule revision is live.
 
 Checked-in `config.yaml` accepts only those mirrored `worker_pool` subtrees. Any
 other checked-in `worker_pool.*` key is an unknown nested key under a known

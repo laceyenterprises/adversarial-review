@@ -2231,7 +2231,7 @@ function schemaV1() {
       // worker_pool.memory_injection.*,
       // worker_pool.memory_retention.*, worker_pool.secrets.op_read_cache.*,
       // worker_pool.oss_dispatch.*, worker_pool.secrets_bus.*,
-      // and worker_pool.shr.* —
+      // worker_pool.worker_process_niceness, and worker_pool.shr.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -2244,6 +2244,7 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          worker_process_niceness: { __type: TYPE_INT, __default: 10, __min: 0, __max: 19 },
           post_merge_actions: {
             __type: TYPE_DICT,
             __strict: true,
@@ -3464,6 +3465,10 @@ export const ENV_ALIASES = {
   'reviewer.review_population_retry.backoff_seconds': {
     canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
     aliases: [['ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS', identity]],
+  },
+  'worker_pool.worker_process_niceness': {
+    canonical: 'AGENT_OS_WORKER_POOL_WORKER_PROCESS_NICENESS',
+    aliases: [],
   },
   'worker_pool.memory.dynamic.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_ENABLED',
@@ -5089,7 +5094,9 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
   }
   if (expected === TYPE_INT) {
     const n = Number(value);
-    if (!Number.isInteger(n)) {
+    // Niceness must not silently disable scheduling isolation on a blank env.
+    // Preserve legacy blank-to-zero handling for existing integer contracts.
+    if ((key === 'worker_pool.worker_process_niceness' && value.trim() === '') || !Number.isInteger(n)) {
       throw new AgentOSConfigError(
         `${key}: env value ${JSON.stringify(value)} is not an integer`,
         { key, expected: 'int', got: value, source },

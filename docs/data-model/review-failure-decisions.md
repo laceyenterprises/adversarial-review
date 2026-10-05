@@ -9,7 +9,10 @@
 
 An informational record identifies an exhausted review head for operator
 inspection. The filename is `<sha256(JSON.stringify([repo, prNumber, headSha]))>.json`.
-The gate reads the record ID for its description; this record does not consume
+The gate appends the record ID to terminal failure descriptions only when
+`updatedAt` is at or after the row's current `failed_at`; missing or invalid
+timestamps omit the ID. Failure-class reason codes remain intact, and an older
+record does not describe a later same-head attempt as parked. This record does not consume
 operator choices, resolve a failure, or authorize merge. Operators act through
 existing retrigger, risk approval, and hold/closure controls.
 

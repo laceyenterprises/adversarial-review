@@ -680,8 +680,10 @@ Claude print-mode prompts travel on stdin, with explicit `--model`/`--effort`
 flags. Before routing a full prompt, the reviewer checks both delivery and
 context budgets. An oversized prompt stays with the selected cross-model
 reviewer and is split into bounded chunks if no alternate route fits.
-Every chunk must fit; elided bytes produce synthetic blocking findings, and
-only a fully reviewed diff can receive a clean verdict; a hard ceiling or
+Every chunk must fit. File units that fit are reviewed intact; oversized files
+are split by line, with elision only for lines that cannot fit alongside their
+file and hunk headers. Elided additions produce synthetic blocking findings;
+elided context and deletions produce non-blocking evidence notes. A hard ceiling or
 chunk-cap failure records terminal `reviewer-prompt-too-large` evidence and
 queues the existing `reviewer.oversized_agy_prompt` operator alert.
 The size preflight throws `ReviewerPromptTooLargeError`; `reviewer.mjs` exits
@@ -700,11 +702,12 @@ mechanism (no shared configuration-schema keys):
 - `ADVERSARIAL_REVIEW_BYTES_PER_TOKEN`: conservative code estimate, default 2.
 - `ADVERSARIAL_REVIEW_<CLAUDE|CODEX|GEMINI>_DELIVERY_MAX_BYTES`: off-argv
   delivery limit, default 16 MiB. Antigravity keeps its existing argv budget.
-- `ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES`: elide individual diff lines before
-  chunking, default 32 KiB (minimum configurable value 1024 bytes), capped at
-  one quarter of the chunk budget. Markers retain up to 1024 bytes at each end,
-  original byte length, and SHA-256. Review bodies block on affected paths/lines
-  with the original SHA-256; head-keyed metadata is saved under `data/review-elisions/`.
+- `ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES`: minimum line size eligible for
+  elision, default 32 KiB (minimum configurable value 1024 bytes), capped at
+  one quarter of the chunk budget. A line that fits is always reviewed in full,
+  regardless of this threshold. Markers retain up to 1024 bytes at each end,
+  original byte length, and SHA-256. Review bodies block only on elided additions;
+  head-keyed metadata, including diff-line kind, is saved under `data/review-elisions/`.
 - `ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES`: diff plus extra-context ceiling,
   default 8 MiB, measured on the raw diff plus extra context before elision.
   This bounds preprocessing work even for a single generated line; content

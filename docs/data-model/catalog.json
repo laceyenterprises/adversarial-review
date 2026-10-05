@@ -571,7 +571,7 @@
     {
       "id": "review-failure-decisions",
       "title": "Review Failure Records",
-      "path": "docs/data-model/01-review-failure-decisions.md",
+      "path": "docs/data-model/review-failure-decisions.md",
       "store": "data/review-failure-decisions/",
       "schemaSurface": "src/review-retry-exhaustion.mjs",
       "relatedSchemaSurfaces": [
@@ -583,13 +583,14 @@
     {
       "id": "review-elisions",
       "title": "Review Elisions",
-      "path": "docs/data-model/02-review-elisions.md",
+      "path": "docs/data-model/review-elisions.md",
       "store": "data/review-elisions/",
       "schemaSurface": "src/reviewer.mjs",
       "relatedSchemaSurfaces": [
         "src/reviewer-harness.mjs"
       ],
-      "owner": "reviewer prompt-budget evidence"
+      "owner": "reviewer prompt-budget evidence",
+      "elisionKindValues": ["+", "-", " "]
     }
   ]
 }

@@ -912,18 +912,19 @@ function pickAdversarialGateStatus({
     // can read it on the PR; if they want to merge anyway it doesn't take
     // admin override. Real adversarial findings (`blocking-review` below)
     // still post `failure`.
-    if (reviewRow?.operator_decision_id) return decide('success', `review failed — operator decision raised (${reviewRow.operator_decision_id})`, 'review-failed');
+    const decisionSuffix = reviewRow?.operator_decision_id
+      ? ` — operator decision ${reviewRow.operator_decision_id}` : '';
     const failureClass = reviewerFailureClass(reviewRow);
     if (failureClass === 'reviewer-timeout') {
-      return decide('success', 'Adversarial reviewer timed out before posting; operator decides.', 'reviewer-timeout');
+      return decide('success', `Adversarial reviewer timed out before posting; operator decides.${decisionSuffix}`, 'reviewer-timeout');
     }
     if (failureClass === 'launchctl-bootstrap') {
-      return decide('success', 'Claude reviewer bootstrap failed before posting; operator decides.', 'reviewer-launchctl-bootstrap');
+      return decide('success', `Claude reviewer bootstrap failed before posting; operator decides.${decisionSuffix}`, 'reviewer-launchctl-bootstrap');
     }
     if (failureClass === 'cascade') {
-      return decide('success', 'Adversarial reviewer hit an upstream cascade before posting; operator decides.', 'reviewer-cascade');
+      return decide('success', `Adversarial reviewer hit an upstream cascade before posting; operator decides.${decisionSuffix}`, 'reviewer-cascade');
     }
-    return decide('success', 'Adversarial review failed before posting; operator decides.', 'review-failed');
+    return decide('success', `Adversarial review failed before posting; operator decides.${decisionSuffix}`, 'review-failed');
   }
   if (reviewStatus === 'failed-orphan') {
     return decide('success', 'Adversarial review needs operator verification (orphaned reviewer).', 'review-failed-orphan');
@@ -1074,9 +1075,14 @@ async function buildAdversarialGateSnapshot(rootDir, {
     );
   }
 
+  const failureDecision = readReviewFailureDecision(rootDir, repo, prNumber, headSha);
+  const decisionUpdatedMs = parseTimestampMs(failureDecision?.updatedAt);
+  const latestFailureMs = parseTimestampMs(resolvedRow?.failed_at);
+  const operatorDecisionId = decisionUpdatedMs !== null && latestFailureMs !== null
+    && decisionUpdatedMs >= latestFailureMs ? failureDecision?.id : undefined;
+
   return {
-    reviewRow: resolvedRow ? { ...resolvedRow, operator_decision_id:
-      readReviewFailureDecision(rootDir, repo, prNumber, headSha)?.id } : resolvedRow,
+    reviewRow: resolvedRow ? { ...resolvedRow, operator_decision_id: operatorDecisionId } : resolvedRow,
     latestJob,
     hasActiveSamePrRemediation,
     operatorApproval,

@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
+import { buildAdversarialGateSnapshot, pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reviewAgyOversizedInChunks, elideLongDiffLines } from '../src/reviewer-harness.mjs';
+import { buildPromptForReviewerModel } from '../src/reviewer-prompt.mjs';
 import { persistReviewElisions } from '../src/reviewer.mjs';
 import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
 import { clearNoProgressLane, maybeFireOperatorDecisionRequiredAlert } from '../src/watcher-no-progress-lane.mjs';
@@ -57,19 +58,121 @@ test('REVIEWLINE-01: failed gate shows its owner without changing success semant
     review_status: 'failed', operator_decision_id: 'review-failure-test',
   } });
   assert.equal(gate.state, 'success');
-  assert.equal(gate.description, 'review failed — operator decision raised (review-failure-test)');
+  assert.equal(gate.description, 'Adversarial review failed before posting; operator decides. — operator decision review-failure-test');
 });
 
+test('failure decision descriptions preserve the terminal failure class', () => {
+  for (const [failure_class, reason] of [
+    ['reviewer-timeout', 'reviewer-timeout'],
+    ['launchctl-bootstrap', 'reviewer-launchctl-bootstrap'],
+    ['cascade', 'reviewer-cascade'],
+  ]) {
+    const gate = pickAdversarialGateStatus({ reviewRow: {
+      review_status: 'failed', failure_class, operator_decision_id: 'review-failure-test',
+    } });
+    assert.equal(gate.reason, reason);
+    assert.equal(gate.state, 'success');
+    assert.match(gate.description, / — operator decision review-failure-test$/);
+  }
+});
 
-test('elided source content cannot produce a clean chunked verdict', async () => {
+test('gate snapshots show failure decisions only for the current failure observation', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewline-gate-'));
+  try {
+    const repo = 'example/repo';
+    const prNumber = 1;
+    const headSha = 'a'.repeat(40);
+    await parkExhaustedReview({ rootDir, repo, prNumber, headSha, reason: 'first failure', logger: { warn() {} } });
+    const decision = readReviewFailureDecision(rootDir, repo, prNumber, headSha);
+    const updatedMs = Date.parse(decision.updatedAt);
+    for (const [failed_at, expectedId] of [
+      [new Date(updatedMs - 1000).toISOString(), decision.id],
+      [decision.updatedAt, decision.id],
+      [new Date(updatedMs + 1000).toISOString(), undefined],
+      [null, undefined],
+      ['invalid', undefined],
+    ]) {
+      const snapshot = await buildAdversarialGateSnapshot(rootDir, { repo, prNumber, headSha,
+        reviewRow: { review_status: 'failed', failure_class: 'reviewer-timeout', failed_at,
+          operator_decision_id: 'stale-injected-id' },
+      });
+      assert.equal(snapshot.reviewRow.operator_decision_id, expectedId);
+      const gate = pickAdversarialGateStatus(snapshot);
+      assert.equal(gate.reason, 'reviewer-timeout');
+      assert.equal(gate.description.includes('operator decision review-failure-'), Boolean(expectedId));
+    }
+    const otherHead = await buildAdversarialGateSnapshot(rootDir, { repo, prNumber, headSha: 'b'.repeat(40),
+      reviewRow: { review_status: 'failed', failed_at: decision.updatedAt },
+    });
+    assert.equal(otherHead.reviewRow.operator_decision_id, undefined);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('elided added content cannot produce a clean chunked verdict', async () => {
   const result = await reviewAgyOversizedInChunks(
-    `diff --git a/payload.js b/payload.js\n--- a/payload.js\n+++ b/payload.js\n@@ -0,0 +1 @@\n+${'x'.repeat(40000)}\n`, '', {
+    `diff --git a/payload.js b/payload.js\n--- a/payload.js\n+++ b/payload.js\n@@ -0,0 +1 @@\n+${'x'.repeat(300000)}\n`, '', {
       env: {}, maxBytes: 234464,
       reviewWithGeminiImpl: async () => ({ reviewText: '## Blocking issues\n- None.\n## Verdict\nComment only' }),
     });
   assert.equal(extractReviewVerdict(result.reviewText), 'Request changes');
   assert.match(result.reviewText, /Unreviewed elided content at payload.js:1/);
   assert.match(result.reviewText, new RegExp(result.elisions[0].sha256));
+  assert.equal(result.elisions[0].kind, '+');
+});
+
+test('long additions that fit are reviewed in full, even within an oversized file', async () => {
+  for (const byteLength of [40 * 1024, 200 * 1024]) {
+    for (const lines of [1, 8]) {
+      const added = '+' + 'x'.repeat(byteLength);
+      const diff = `diff --git a/payload.js b/payload.js\n--- a/payload.js\n+++ b/payload.js\n@@ -0,0 +1,${lines} @@\n${Array(lines).fill(added).join('\n')}\n`;
+      for (const threshold of ['1024', '1000000']) {
+        let reviewedLines = 0;
+        const result = await reviewAgyOversizedInChunks(diff, '', {
+          env: { ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES: threshold }, maxBytes: 234464,
+          reviewWithGeminiImpl: async (chunk, context) => {
+            assert.doesNotMatch(chunk, /elided unreviewed content/);
+            reviewedLines += chunk.split('\n').filter((line) => line === added).length;
+            assert.ok(Buffer.byteLength(buildPromptForReviewerModel('gemini', chunk, context,
+              { promptStage: 'first', runtime: 'antigravity' })) <= 234464);
+            return { reviewText: '## Blocking issues\n- None.\n## Verdict\nComment only' };
+          },
+        });
+        assert.equal(reviewedLines, lines);
+        assert.deepEqual(result.elisions, []);
+        assert.equal(extractReviewVerdict(result.reviewText), 'Comment only');
+      }
+    }
+  }
+});
+
+test('long context and deletions do not create synthetic blockers', async () => {
+  for (const kind of [' ', '-']) {
+    for (const byteLength of [40 * 1024, 300000]) {
+      const diff = [
+        'diff --git a/small.js b/small.js', '--- a/small.js', '+++ b/small.js', '@@ -0,0 +1 @@', '+small',
+        'diff --git a/data.json b/data.json', '--- a/data.json',
+        kind === '-' ? '+++ /dev/null' : '+++ b/data.json',
+        kind === '-' ? '@@ -10 +0,0 @@' : '@@ -10,2 +20,2 @@',
+        kind + 'x'.repeat(byteLength),
+        ...(kind === ' ' ? ['-old', '+new'] : []),
+      ].join('\n');
+      const result = await reviewAgyOversizedInChunks(diff, '', {
+        env: {}, maxBytes: 234464,
+        reviewWithGeminiImpl: async () => ({ reviewText: '## Blocking issues\n- None.\n## Verdict\nComment only' }),
+      });
+      assert.equal(extractReviewVerdict(result.reviewText), 'Comment only');
+      if (byteLength === 300000) {
+        assert.equal(result.elisions.length, 1);
+        assert.equal(result.elisions[0].kind, kind);
+        assert.equal(result.elisions[0].diffLine, 10);
+        assert.equal(result.elisions[0].path, 'data.json');
+        assert.equal(result.elisions[0].line, kind === '-' ? 10 : 20);
+        assert.match(result.reviewText, /## Blocking issues\n- None\./);
+        assert.match(result.reviewText, new RegExp(`## Non-blocking issues\\n- \\*\\*Elided ${kind === '-' ? 'deleted' : 'context'} content`));
+        assert.match(result.reviewText, new RegExp(result.elisions[0].sha256));
+      } else assert.deepEqual(result.elisions, []);
+    }
+  }
 });
 
 test('elision evidence follows hunk sides and preserves UTF-8 boundaries', () => {

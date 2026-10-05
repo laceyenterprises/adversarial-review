@@ -36,7 +36,7 @@ test('additive test/doc and unrelated same-file line repairs pass', () => {
   assert.equal(predicate(evidence).eligible, true);
 });
 test('no hammer commits is not applicable and passes', () => {
-  assert.equal(predicate({ headSha: head, hasHammerCommits: false }).eligible, true);
+  assert.equal(predicate({ headSha: head, hasHammerCommits: false, ciCost: { headSha: head, ok: true } }).eligible, true);
 });
 test('unknown primary change, stale evidence, truncated patch and missing patch fail closed', () => {
   for (const evidence of [{ headSha: head, hasHammerCommits: null },

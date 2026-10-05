@@ -236,7 +236,7 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
 
 // Non-blocking waivers require an explicit effective strict-mode policy.
 export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemediation = false } = {}) {
-  if (evidence && [true, false].includes(evidence.hasHammerCommits) && Object.hasOwn(evidence, 'ciCost')) {
+  if (evidence && [true, false].includes(evidence.hasHammerCommits)) {
     const cost = checkCiCost(evidence.ciCost, headSha);
     if (!cost.ok) return cost;
   }

@@ -63,3 +63,7 @@ test('Linux path-filtered concurrency-preserving change remains clear', () => {
   after.jobs.lint.steps.push({ run: 'python check.py' });
   assert.equal(evaluateCiCost({ changes: [{ path: 'ci.yml', before: old, after }], operators: [] }).ok, true);
 });
+
+test('missing cost evidence cannot certify an otherwise eligible history snapshot', () => {
+  assert.equal(checkPrimaryChange({ headSha: head, hasHammerCommits: false }, head).reason, 'ci-cost-read-failed');
+});

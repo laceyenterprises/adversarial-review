@@ -10,11 +10,49 @@ import { checkItemState, latestCheckRollupItems } from './checks-summary.mjs';
 
 const execFileAsync = promisify(execFile);
 
+// Budgets are durable runtime state, so they live under the gitignored `data/`
+// tree beside reviews.db. The watcher root is the adversarial-review checkout,
+// which production deploys as an agent-os submodule: anything written outside
+// `data/` is an untracked file that makes main-catchup refuse to deploy
+// (CIRECOVERDIRT-01). The legacy `dispatch/` directory is only ever read.
+export function ciRecoveryStateDir(rootDir) {
+  return join(rootDir, 'data', 'ci-recovery');
+}
+
+function legacyCiRecoveryStateDir(rootDir) {
+  return join(rootDir, 'dispatch', 'ci-recovery');
+}
+
+// Carry a pre-CIRECOVERDIRT reservation forward once so its once-per-head
+// budget is not reset by the move. Linking never replaces a reservation that
+// already exists at the new path, and the legacy file is then removed so it
+// no longer dirties the checkout.
+function migrateLegacyReservation(rootDir, name, path) {
+  const legacyPath = join(legacyCiRecoveryStateDir(rootDir), name);
+  let contents;
+  try { contents = readFileSync(legacyPath); }
+  catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.migrating`;
+  writeFileSync(temporaryPath, contents, { flag: 'wx', mode: 0o600 });
+  try {
+    linkSync(temporaryPath, path);
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+  } finally { unlinkSync(temporaryPath); }
+  try { unlinkSync(legacyPath); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+
 // Exclusive creation makes recovery budgets durable across ticks and processes.
 function reserve(rootDir, identity, record) {
-  const dir = join(rootDir, 'dispatch', 'ci-recovery');
+  const dir = ciRecoveryStateDir(rootDir);
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${createHash('sha256').update(identity).digest('hex')}.json`);
+  const name = `${createHash('sha256').update(identity).digest('hex')}.json`;
+  const path = join(dir, name);
+  migrateLegacyReservation(rootDir, name, path);
   const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const stamped = { ...record, reservedAt: new Date().toISOString() };
   try {

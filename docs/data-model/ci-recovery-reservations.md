@@ -1,7 +1,7 @@
 # Data Model - CI Recovery Reservations
 
 **Owner:** adversarial-review watcher CI recovery
-**Store:** `<watcher rootDir>/dispatch/ci-recovery/`
+**Store:** `<watcher rootDir>/data/ci-recovery/`
 **Source of truth:** `src/ci-recovery.mjs`
 **Runtime surface:** `src/reviewer-ci-admission.mjs`, `src/daemon-clean-merge.mjs`, `src/merge-agent-candidate.mjs` (re-exported by `src/follow-up-merge-agent.mjs`), `src/reviewer-timeout-exhausted-dispatch.mjs`
 
@@ -35,6 +35,19 @@ or higher attempts never receive a duplicate POST. Page retries use the shared
 durable, debounced alert path. Exclusive minute-scoped resume claims serialize
 concurrent ticks, including after interrupted recovery. Invalid legacy records
 use their file modification time as the grace-period origin.
+
+## Legacy store migration
+
+Reservations formerly lived in `<watcher rootDir>/dispatch/ci-recovery/`.
+Before reserving an identity, the watcher lazily migrates its matching legacy
+`.json` file into `data/ci-recovery/`, preserving its contents and budget evidence.
+Exclusive hard-link publication never replaces an existing destination
+reservation; the destination wins when both stores contain the same identity.
+After publication succeeds or the destination already exists, the matching
+legacy file is removed. Other migration errors propagate without removing the
+legacy file. Unvisited identities remain in the legacy directory until accessed;
+there is no bulk startup migration. New reservations use only the gitignored
+`data/` tree so runtime state does not dirty the checkout or block deployment.
 
 ## Retention and failure handling
 

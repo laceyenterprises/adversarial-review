@@ -39,3 +39,8 @@ data/
 # running ARF's tests in the deployed checkout would leave untracked files, which
 # is the exact condition main-catchup refuses on.
 __pycache__/
+
+# Defense in depth for CIRECOVERDIRT-01: CI-recovery budgets were written to
+# <repo>/dispatch/ci-recovery/ and held main-catchup behind a dirty-submodule
+# refusal. They now live under data/ci-recovery/; nothing writes dispatch/.
+/dispatch/

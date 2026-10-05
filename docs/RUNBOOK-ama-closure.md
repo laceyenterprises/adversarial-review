@@ -1994,10 +1994,14 @@ source-aware stale-head resume verification is tracked in LAC-1848.
 
 When the current open head's only non-green external checks are cancelled, the
 watcher verifies the workflow run's head and requests `rerun-failed-jobs`. Durable
-reservations under the explicit watcher `rootDir` at `dispatch/ci-recovery/` cap
+reservations under the explicit watcher `rootDir` at `data/ci-recovery/` cap
 each check/head at one request and deduplicate checks belonging to the same
 workflow. The original cancelled attempt
 is treated as pending; a later cancelled attempt raises one operator decision.
+Legacy `dispatch/ci-recovery/` reservations migrate lazily when their identity is
+accessed, preserving budget evidence. An existing destination reservation wins;
+the matching legacy file is removed after successful migration. New reservations
+stay in the gitignored `data/` tree to keep the checkout clean for deployment.
 Failed POSTs and failed alert delivery release their action reservation for a
 later tick, after fresh workflow reads. GitHub reads use bounded retries; the
 POST itself is not retried in-call. Paging uses the shared operator-decision

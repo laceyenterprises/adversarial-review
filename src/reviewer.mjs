@@ -20,7 +20,7 @@
  * process.
  * ────────────────────────────────────────────────────────────────────────────
  */
-import { reviewerPostFailureExitCode } from './reviewer-outcomes.mjs';
+import { reviewerExecutionFailureExitCode, reviewerPostFailureExitCode } from './reviewer-outcomes.mjs';
 import { execFile } from 'node:child_process';
 import {
   accessSync,
@@ -1990,16 +1990,16 @@ async function main() {
       effectiveModel = oversizedAgyRoute.route.reviewerModel;
       effectiveBotTokenEnv = oversizedAgyRoute.route.botTokenEnv;
       console.warn(
-        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=agy-argv-budget-exceeded ` +
+        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=${oversizedAgyRoute.reason} ` +
           `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
           `routed=${effectiveModel} original=gemini refs=#3074,#3122,#3124`
       );
     } else {
       useAgyChunkFallback = true;
       console.warn(
-        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=agy-argv-budget-exceeded ` +
+        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=${oversizedAgyRoute.reason} ` +
           `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
-          `routed=agy-chunks original=gemini refs=#3074,#3122,#3124`
+          `routed=${effectiveModel}-chunks original=${reviewerModel} refs=#3074,#3122,#3124`
       );
     }
   }
@@ -2012,6 +2012,9 @@ async function main() {
     botTokenEnv: effectiveBotTokenEnv,
     builderTag: builderTag || null,
     label: hasLocalReviewShadowLabel(labels) ? LOCAL_REVIEW_SHADOW_LABEL : null,
+    reviewerPromptBytes: oversizedAgyRoute.promptBytes,
+    reviewerPromptBudgetBytes: oversizedAgyRoute.maxBytes,
+    promptBudgetReviewerModel: reviewerModel,
     oversizedAgyPromptBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.promptBytes : null,
     oversizedAgyBudgetBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.maxBytes : null,
   });
@@ -2070,10 +2073,12 @@ async function main() {
     try {
       dispatch = useAgyChunkFallback
         ? await reviewAgyOversizedInChunks(diff, extraContext, {
+            reviewerModel: effectiveModel,
             promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
             promptBytes: oversizedAgyRoute?.promptBytes,
             maxBytes: oversizedAgyRoute?.maxBytes,
+            onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
           })
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
             promptStage: reviewModeDecision.promptStage,
@@ -2101,6 +2106,7 @@ async function main() {
         reviewerSubprocessCwd,
         promptBytes: oversizedAgyRoute.promptBytes,
         maxBytes: oversizedAgyRoute.maxBytes,
+        onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
       });
     }
     rawReviewText = dispatch.rawReviewText;
@@ -2159,11 +2165,12 @@ async function main() {
         promptBytes: oversizedAgyRoute.promptBytes,
         maxBytes: oversizedAgyRoute.maxBytes,
         reason: err.message || String(err),
+        error: err,
       });
     }
     console.error(`[reviewer] AI review failed for ${repo}#${prNumber}:`, err.message);
     console.error(`[reviewer] ERROR STACK: ${err.stack}`);
-    process.exit(1);
+    process.exit(reviewerExecutionFailureExitCode(err));
   }
 
   if (!tokenUsage && effectiveModel === 'gemini') {

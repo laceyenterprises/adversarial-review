@@ -1,3 +1,4 @@
+import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -3099,11 +3100,12 @@ test('parseClaudeJsonOutput yields no usage when the usage block is absent', () 
   assert.equal(tokenUsage, null);
 });
 
-test('Claude review invocation passes prompt as argv in cli-direct shape', async () => {
+test('Claude review invocation passes prompt off argv in cli-direct shape', async () => {
   const prompt = 'review this diff';
   const calls = [];
 
   await spawnClaude(buildClaudeReviewArgs(prompt), {
+    input: prompt,
     platform: 'linux',
     execFileImpl: async (command, args, options) => {
       calls.push({ command, args, options });
@@ -3115,8 +3117,9 @@ test('Claude review invocation passes prompt as argv in cli-direct shape', async
   assert.deepEqual(calls, [
     {
       command: CLAUDE_CLI,
-      args: ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions', prompt],
+      args: ['--print', '--verbose', '--output-format', 'stream-json', '--include-partial-messages', '--permission-mode', 'bypassPermissions'],
       options: {
+        input: prompt,
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
       },
     },
@@ -4512,6 +4515,7 @@ test('oversized agy alert goes through the alert bus, never a hardcoded hook', a
     promptBytes: 300_000,
     maxBytes: 262_144,
     reason: 'chunking-disabled',
+    error: new ReviewerPromptTooLargeError('chunking-disabled'),
   }, {
     deliverAlertImpl: async (text, opts) => {
       delivered.push({ text, opts });
@@ -4556,7 +4560,7 @@ test('a failing alert bus does not throw out of the reviewer alert paths', async
   assert.equal(await alertClioOAuthFailure('gemini', 'r', 1, 'why', { deliverAlertImpl: boom }), null);
   assert.equal(
     await alertClioOversizedAgyFailure(
-      { repo: 'r', prNumber: 1, promptBytes: 1, maxBytes: 1, reason: 'x' },
+      { repo: 'r', prNumber: 1, promptBytes: 1, maxBytes: 1, reason: 'x', error: new ReviewerPromptTooLargeError('x') },
       { deliverAlertImpl: boom },
     ),
     null,

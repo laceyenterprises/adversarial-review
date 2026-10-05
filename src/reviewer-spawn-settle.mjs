@@ -1279,6 +1279,18 @@ function settleReviewerAttempt({
   const baseFailureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
   const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
+
+  // A size ceiling is deterministic for this head; never release it to pending,
+  // even during a coincident provider outage or with lease recovery enabled.
+  if (failureClass === 'reviewer-prompt-too-large') {
+    withSqliteBusyRetrySync(
+      () => statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
+      { label: `reviewer-size-terminal:${repoPath}#${prNumber}`, log },
+    );
+    log.warn(`[watcher] Terminal oversized review failure on ${repoPath} PR ${prNumber}: ${failureMessage}`);
+    return;
+  }
+
   let oauthCredentialState = null;
   if (failureClass === 'oauth-broken') {
     try {

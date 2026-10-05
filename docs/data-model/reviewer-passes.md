@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
@@ -61,6 +61,11 @@ transcript scan. If JSON usage is absent or the Claude reviewer fails, local
 fallback inspects only the project directory for that review's snapshot cwd
 and transcript files modified since the attempt began. Codex reviewer rollout
 capture remains inside its harness while the per-worker session home exists.
+For successful bounded chunk reviews, `src/reviewer-harness.mjs` normalizes
+each chunk's provider usage and sums the existing token and cost fields into
+one pass. Provider totals are summed without adding overlapping component
+buckets again. Missing usage on some chunks marks the aggregate partial;
+missing usage on every chunk leaves usage absent for the existing fallback.
 
 `token_total` preserves a provider-reported total when present. Without one,
 Codex uses input + output because reasoning is included in output; Claude uses

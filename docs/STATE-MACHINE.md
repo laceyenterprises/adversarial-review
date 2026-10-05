@@ -990,17 +990,26 @@ when the operator explicitly lists the repository in
 GitHub configuration corroborates that declaration. Reads reject Actions and
 known external-CI config files at base or reviewed head, any head check suites
 or commit statuses, and required checks/workflows in classic protection or any
-page of effective branch rules. The proof substitutes only the CI predicate;
-`branchProtection.required` is preserved. An unprotected repository also needs
-an explicit `branch_protection.required: false` policy.
+page of effective branch rules. The live proof substitutes CI and waives the
+required adversarial-gate protection predicate for this repository's daemon call
+only. Keep the domain's `branch_protection.required: true`; every other repo and
+every call without proof retains the protection gate. Until parent Python and
+shell loader parity ships, enable via the watcher environment override only;
+the new key is unsafe in shared `config.yaml`.
 
 The strictly zero-finding settled-success head still passes all identity,
-attestation, primary-change, mergeability, head, hold and lease gates. Terminal
-head refusal precedes probe calls. Evidence is re-read under the lease before
-each attempt and recorded as `ciConfiguration: { reason: "no CI configured", ... }`
-in pre-lease audit metadata and the successful attempt. Lookup errors log and
-defer before the lease; under the lease they retry within the bounded budget,
-exhaust as `gate-read-failed`, `permanent: false`, and permit a later same-head
-tick. Positive configured-CI evidence preserves the original fail-closed gate.
+attestation, primary-change, mergeability, head, hold and lease gates. The real
+rollup and cheap eligibility run first; only `ci-not-green` plus optional
+`branch-protection-missing-gate` may proceed to a probe. Terminal-head refusal
+keeps its original position for ordinary paths and short-circuits probe work.
+Under the lease, already-merged and head checks precede configuration reads.
+Evidence is recorded as `ciConfiguration: { reason: "no CI configured", ... }`
+in pre-lease audit metadata and the successful attempt. Permanent read errors
+(including permissions, malformed/truncated data and unsupported flags) log a
+refusal and retain the original reasons for hammer handoff. Only transient
+lookup errors defer/retry and exhaust as `gate-read-failed`, `permanent: false`.
+Independent reads run concurrently with 1-second subprocess timeouts and no
+inner transient retries. Revoked proof or new CI fails closed without permanently
+locking the head or requiring manual close; later ticks evaluate real CI again.
 A merged daemon result remains terminal for dispatch and never sends this clean
 head to the hammer's non-empty-remediation contract.

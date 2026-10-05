@@ -342,8 +342,14 @@ as a list of repository names, default `[]`. `getMergeAuthorityConfig()` exposes
 an independent copy as `noCiRepositories`. The canonical environment override is
 `AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_NO_CI_REPOSITORIES`. Repository matching
 is exact and case-insensitive. Entries authorize the daemon to corroborate an
-operator declaration of no CI; they never waive `branchProtection.required`.
+operator declaration of no CI. Only live proof authorizes substituting CI and
+waiving required adversarial-gate protection for that repository's daemon call.
+The domain-wide `branchProtection.required` remains enabled for other repos
+and all calls without proof.
 See `docs/RUNBOOK-ama-closure.md` for the live probes and retry/audit contract.
-This Node key needs alignment in the parent Agent OS Python schema before use
-in shared cross-reader config; it is not enabled in this repository's default
-module configuration.
+Until the parent Agent OS Python schema and shell loader register this key,
+**only the watcher environment override is safe**. Do not add it to shared
+`config.yaml`: strict non-Node readers reject the unknown key. Ship parent
+loader parity with the submodule bump before YAML enablement. This repository
+does not contain those parent loaders or their cfg-parity gate, and its default
+module configuration leaves the feature disabled.

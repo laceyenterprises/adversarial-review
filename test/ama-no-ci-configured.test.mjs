@@ -15,7 +15,7 @@ function fixture({ workflow = false, rules = [], protectedBranch = false, protec
     return { protected: protectedBranch, commit: { sha: 'base-head' } };
   };
 }
-const args = { repo: 'fixture/repo', base: 'main', head: 'reviewed-head' };
+const args = { logger: { warn() {} }, repo: 'fixture/repo', base: 'main', head: 'reviewed-head' };
 test('live no-workflow/no-required-check proof includes both refs', async () => {
   const paths = [];
   const get = fixture();
@@ -33,12 +33,12 @@ for (const config of [
     assert.equal(await verifyNoCiConfigured({ ...args, get: fixture(config) }), null);
   });
 }
-test('lookup failures and truncated trees fail closed', async () => {
-  await assert.rejects(verifyNoCiConfigured({ ...args, get: async () => { throw new Error('offline'); } }));
-  await assert.rejects(verifyNoCiConfigured({ ...args, get: fixture({ truncated: true }) }));
+test('permanent lookup failures and truncated trees refuse proof', async () => {
+  assert.equal(await verifyNoCiConfigured({ ...args, get: async () => { throw new Error('offline'); } }), null);
+  assert.equal(await verifyNoCiConfigured({ ...args, get: fixture({ truncated: true }) }), null);
 });
 test('protected branch without required status checks must return complete protection metadata', async () => {
-  await assert.rejects(verifyNoCiConfigured({ ...args, get: fixture({ protectedBranch: true }) }));
+  assert.equal(await verifyNoCiConfigured({ ...args, get: fixture({ protectedBranch: true }) }), null);
   const proof = await verifyNoCiConfigured({ ...args,
     get: fixture({ protectedBranch: true, protection: { url: 'fixture://protection', required_status_checks: null } }),
   });
@@ -46,7 +46,10 @@ test('protected branch without required status checks must return complete prote
 });
 
 for (const path of ['.circleci/config.yml', '.buildkite/pipeline.yml', 'Jenkinsfile', '.travis.yml',
-  'azure-pipelines.yml', '.gitlab-ci.yml', 'vercel.json', 'netlify.toml']) {
+  'azure-pipelines.yml', '.gitlab-ci.yml', 'vercel.json', 'netlify.toml',
+  'bitbucket-pipelines.yml', '.drone.yml', 'appveyor.yml', 'cloudbuild.yaml',
+  '.woodpecker.yml', '.woodpecker/build.yaml', '.semaphore/semaphore.yml', 'codemagic.yaml',
+  'packages/app/.github/workflows/ci.yml', 'packages/app/cloudbuild.yml']) {
   test(`external CI config refuses exception: ${path}`, async () => {
     assert.equal(await verifyNoCiConfigured({ ...args, get: fixture({ configPaths: [path] }) }), null);
   });
@@ -60,8 +63,45 @@ for (const config of [{ suites: 1 }, { statuses: 1 },
 test('malformed CI activity or paginated rules never authorize closure', async () => {
   for (const target of ['/check-suites', '/status?', '/rules/']) {
     const get = fixture();
-    await assert.rejects(verifyNoCiConfigured({ ...args,
+    assert.equal(await verifyNoCiConfigured({ ...args,
       get: async (path, options) => path.includes(target) ? {} : get(path, options),
-    }));
+    }), null);
   }
+});
+
+for (const detail of ['HTTP 403', 'HTTP 404', 'unknown flag: --slurp']) {
+  test(`protection read ${detail} refuses proof and logs loudly`, async () => {
+    const warnings = [];
+    const get = fixture({ protectedBranch: true });
+    const proof = await verifyNoCiConfigured({ ...args, logger: { warn: msg => warnings.push(msg) },
+      get: async (path, options) => {
+        if (path.endsWith('/protection')) throw Object.assign(new Error('gh failed'), { stderr: detail });
+        return get(path, options);
+      },
+    });
+    assert.equal(proof, null);
+    assert.ok(warnings.some(msg => msg.includes(detail)));
+  });
+}
+for (const detail of ['HTTP 503', 'TLS handshake timeout']) {
+  test(`transient ${detail} remains retryable`, async () => {
+    await assert.rejects(verifyNoCiConfigured({ ...args,
+      get: async () => { throw new Error(detail); },
+    }), { message: detail });
+  });
+}
+
+test('independent no-CI reads run concurrently and all settle before refusal', async () => {
+  const pending = [];
+  const get = fixture({ protectedBranch: true, protection: { url: 'fixture://protection' } });
+  const verification = verifyNoCiConfigured({ ...args, get: async (path, options) => {
+    if (path !== 'repos/fixture/repo/branches/main') {
+      await new Promise(resolve => pending.push(resolve));
+    }
+    return get(path, options);
+  } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 6, 'both trees, suites, statuses, rules, and protection start together');
+  for (const resolve of pending) resolve();
+  assert.equal((await verification).reason, 'no CI configured');
 });

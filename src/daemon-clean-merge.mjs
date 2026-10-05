@@ -1031,10 +1031,11 @@ export async function runDaemonCleanMergeAttempt({
         })
       : null,
     verifyNoCiConfiguredImpl: ({ head }) => verifyNoCiConfigured({
-      repo: repoPath, base, head,
+      repo: repoPath, base, head, logger,
       get: async (path, { paginate = false } = {}) => {
         const { stdout } = await execGhWithRetryImpl({ execFileImpl,
-          args: ['api', path, ...(paginate ? ['--paginate', '--slurp'] : [])], timeoutMs: 15000, env, signal });
+          args: ['api', path, ...(paginate ? ['--paginate', '--slurp'] : [])],
+          timeoutMs: 1000, retries: 0, env, signal });
         return JSON.parse(stdout);
       },
     }),

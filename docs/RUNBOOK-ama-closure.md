@@ -2030,29 +2030,54 @@ The strictly zero-finding, settled-success daemon route can close an empty
 check rollup only for repositories explicitly declared by the operator in
 `roles.adversarial.merge_authority.no_ci_repositories` (a list of exact
 `owner/repo` names, case-insensitive; default `[]`). This declaration covers
-external CI that cannot be ruled out by a GitHub configuration lookup. Only the
-Node merge-authority reader consumes this key; align the parent Agent OS Python
-schema before putting it in shared cross-reader configuration.
+external CI that cannot be ruled out by a GitHub configuration lookup. Until the
+parent Agent OS Python schema and shell loader register the key, **only the
+watcher environment override is safe**:
+`AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_NO_CI_REPOSITORIES`. Do not add
+`no_ci_repositories` to shared `config.yaml` yet; strict non-Node readers reject
+it. Parent loader parity must ship with the submodule bump before YAML enablement.
 
 Live GitHub reads must corroborate the declaration: neither the base nor the
 reviewed head contains Actions workflows or known external-CI configs
-(`.circleci/`, `.buildkite/`, `Jenkinsfile`, `.travis.yml`, Azure Pipelines,
-GitLab CI, `vercel.json`, `netlify.toml`), the reviewed head has no check suites
-or commit statuses, and the target branch has neither required-check rules nor
-required workflows. Classic branch protection is checked along with every page
-of effective ruleset rules. Unknown, truncated, or failed reads refuse the
-exception. Configured required contexts also refuse it.
+(CircleCI, Buildkite, Jenkins, Travis, Azure Pipelines, GitLab CI, Vercel,
+Netlify, Bitbucket Pipelines, Drone, AppVeyor, Cloud Build, Woodpecker,
+Semaphore, or Codemagic), the reviewed head has no check suites or commit
+statuses, and the target branch has neither required-check rules nor required
+workflows. Config detection includes nested paths and is best-effort; the
+operator declaration remains necessary. Classic branch protection is checked
+along with every page of effective ruleset rules. Configured required contexts
+also refuse the exception.
 
-The proof never waives `branchProtection.required`. An unprotected repository
-needs the operator to set `roles.adversarial.merge_authority.branch_protection.required`
-to `false` as well as declaring it in the no-CI list. The no-CI list alone does
-not authorize merging without the adversarial gate in branch protection.
+A live no-CI proof substitutes the CI predicate **and waives the required
+adversarial-gate branch-protection predicate for that repository's daemon call
+only**. Keep `roles.adversarial.merge_authority.branch_protection.required: true`:
+other repositories, configured-CI heads, and every call without proof retain
+`branch-protection-missing-gate`. Listing a repository alone never waives the
+gate. This is an explicit per-repository operator exception to required gate
+protection, necessary because required status checks themselves rule out no CI.
+GitHub's other branch rules continue to apply to the actual merge.
 
-Permanently refused heads are checked before spending probe calls. The proof is
-read before lease acquisition and again before every merge attempt; failures are
-logged. A pre-lease lookup failure defers the tick. In-lease lookup failures retry
-within `retryCap` and exhaust as `gate-read-failed`, `permanent: false`, without a
-manual-close requirement; a later tick may retry the same head.
+The daemon evaluates the real rollup and cheap eligibility gates first. It
+probes only an opted-in, strictly clean settled-success empty-rollup head whose
+only misses are `ci-not-green` and, optionally, `branch-protection-missing-gate`.
+Conflicts, closed PRs, holds, stale heads, and unreadable gates retain their
+original eligibility reasons and hammer routing without probe calls. Permanent
+head refusal follows ordinary eligibility, but short-circuits a would-be probe.
+
+Permission failures (including protection-read 403/404), unsupported CLI flags,
+malformed responses, and truncated trees log a refusal and preserve the original
+eligibility outcome. Only transient transport, timeout, 5xx, and rate-limit
+errors defer before the lease or retry under it; bounded exhaustion records
+`gate-read-failed`, `permanent: false`. After reading the base SHA, independent
+reads run concurrently and all settle before returning. Production probe calls
+use 1-second subprocess timeouts without inner transient retries; the daemon
+owns the retry budget, within the enclosing coexistence operation's abort signal.
+
+Under the lease, already-merged and moved/missing-head checks precede any probe.
+Fresh real CI is evaluated first on each attempt. If a previously admitted
+no-CI proof is revoked or CI appears, a failing gate records `gate-not-eligible`,
+`permanent: false`, without a manual-close requirement. Later ticks may retry
+the same head; genuinely green real CI can pass without a no-CI substitution.
 
 `ciConfiguration` records `reason: "no CI configured"`, repository, base, head,
 base head, and check timestamp in top-level daemon audit metadata (pre-lease

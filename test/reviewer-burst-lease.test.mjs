@@ -1181,7 +1181,7 @@ test('watcher.mjs stays at or under its ARC-18 line ratchet after the RPL-07 wir
 
 test('pollonce-phases passes burst pressure in and charges the lease back', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /burstPressure: reviewerBurstController\?\.pressure\?\.\(\{/);
+  assert.match(src, /burstPressure: depthPressure \? null : reviewerBurstController\?\.pressure\?\.\(\{/);
   assert.match(src, /packTokens: \(\) => packTokensForSubject\(\{/, 'derived lazily, not on every subject');
   assert.match(src, /const burstAdmitted = rwfDecision\.reason !== 'burst-lease-pressure'\s*\|\| reviewerBurstController\?\.recordBurstAdmission/s);
   assert.match(src, /recordBurstAdmission\?\.\(\{[^}]*headSha: subject\.headSha/s);

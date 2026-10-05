@@ -23,6 +23,7 @@ import {
   REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   createFirstPassSpilloverController,
   firstPassSpilloverPlan,
+  prepareQueueDepthSpillover,
   readFirstPassReviewQueueDepth,
   readReviewQueueDepthFailoverReport,
   resolveFirstPassReviewQueueDepthFailoverThreshold,
@@ -44,6 +45,7 @@ import {
   SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
 } from '../src/review-state-statements.mjs';
 import {
+  compareReviewerDispatchCandidates,
   reviewerDispatchPassKind,
   reviewerSafetyPassKind,
 } from '../src/watcher-reviewer-pool.mjs';
@@ -904,7 +906,7 @@ test('watcher REVSLOT gate uses the delivered-pass-aware first-pass depth counte
 
 test('pollonce-phases passes depth pressure in and charges the cost ledger back', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /depthPressure: firstPassSpilloverController\?\.depthPressure\?\.\(depthPassKind\) \?\? null/);
+  assert.match(src, /applyWorkerFallback\(firstPassSpilloverController\?\.depthPressure\?\.\(depthPassKind\) \?\? null\)/);
   assert.match(src, /passKind: depthPassKind/);
   // Cost is charged only for a spill that actually landed on a route, and only
   // for the depth trigger — a quota fallback must not spend the depth budget.
@@ -956,4 +958,131 @@ test('pollonce-phases uses a bounded per-tick quota cache TTL', () => {
   assert.match(pollonceSrc, /fleetQuotaStatusCache: reviewerFleetQuotaStatusCache/);
   assert.match(pollonceSrc, /fleetQuotaStatusCacheTtlMs: FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS/);
   assert.doesNotMatch(pollonceSrc, /fleetQuotaStatusCacheTtlMs: Number\.MAX_SAFE_INTEGER/);
+});
+
+// REVIEWFAILOVER-01: use the production drain preparation and fallback resolver.
+function spillCandidate(ctl, prNumber, createdAt, {
+  builderClass = 'codex', rereview = false, wakePriority = false,
+} = {}) {
+  return {
+    prNumber, repoPath: 'o/r', reviewerModel: 'gemini', wakePriority,
+    subject: { createdAt, builderClass }, hasPriorPostedReview: rereview,
+    current: { review_status: 'pending', reviewer_model: 'gemini' },
+    async reevaluateDepthSpill() {
+      const passKind = rereview ? 'rereview' : 'first-pass';
+      const decision = await resolveReviewerWorkerClassWithFallback({
+        primary: this.reviewerModel, authorClass: builderClass,
+        fallbackWorkerClasses: ['claude-code', 'codex'],
+        depthPressure: ctl.depthPressure(passKind), env: ENTITLED_ENV,
+        execFileImpl: fleetStatusStub(CODEX_OK_CLAUDE_OK),
+      });
+      if (decision.fellBack && ctl.recordSpill({ repo: 'o/r', prNumber,
+        fromWorkerClass: decision.from, toWorkerClass: decision.to, passKind })) {
+        this.reviewerModel = decision.workerClass;
+      }
+    },
+  };
+}
+
+function prepareSpills(ctl, candidates, options = {}) {
+  return prepareQueueDepthSpillover(candidates, {
+    controller: ctl, geminiCredentialConcurrency: 1, maxConcurrent: 6,
+    activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]),
+    compareCandidates: compareReviewerDispatchCandidates, logger: {}, ...options,
+  });
+}
+
+test('#7743 replay: sticky saturated-deferred Gemini beats newer discovery and wake priority', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 6, threshold: 6 });
+    const older = spillCandidate(ctl, 7743, '2026-10-05T01:55:00Z');
+    const newer = spillCandidate(ctl, 7750, '2026-10-05T02:30:00Z', { wakePriority: true });
+    const rereview = spillCandidate(ctl, 7702, '2026-10-04T01:00:00Z', { rereview: true });
+    const order = await prepareSpills(ctl, [newer, rereview, older]);
+    assert.deepEqual(order.map((c) => c.prNumber), [7743, 7750, 7702]);
+    assert.equal(older.reviewerModel, 'claude-code');
+    assert.equal(newer.reviewerModel, 'gemini', 'the single spill slot belongs to #7743');
+    const report = readReviewQueueDepthFailoverReport(root);
+    assert.equal(report.engagementSpilloverReviews, ctl.granted());
+    assert.equal(report.cost.currentEngagementSpilloverReviews, ctl.granted());
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('free Gemini slot keeps preferred reviewer; the next saturated PR spills', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 6, threshold: 2 });
+    const oldest = spillCandidate(ctl, 7743, '2026-10-05T01:55:00Z');
+    const newer = spillCandidate(ctl, 7750, '2026-10-05T02:30:00Z');
+    await prepareSpills(ctl, [newer, oldest], { activeReviewerCounts: new Map() });
+    assert.equal(oldest.reviewerModel, 'gemini');
+    assert.equal(newer.reviewerModel, 'claude-code');
+    assert.equal(ctl.granted(), 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('every drain re-evaluates sticky Gemini and skips builder-equals-fallback', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 6, threshold: 2 });
+    const candidate = spillCandidate(ctl, 7743, '2026-10-05T01:55:00Z', { builderClass: 'claude-code' });
+    await prepareSpills(ctl, [candidate], { activeReviewerCounts: new Map() });
+    assert.equal(candidate.reviewerModel, 'gemini');
+    await prepareSpills(ctl, [candidate]);
+    assert.equal(candidate.reviewerModel, 'codex');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('unknown preferred capacity does not spend fallback quota and logs oldest age', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 6, threshold: 2 });
+    const candidate = spillCandidate(ctl, 7743, '2026-10-05T01:55:00Z');
+    const logs = [];
+    await prepareSpills(ctl, [candidate], { geminiCredentialConcurrency: null,
+      nowMs: Date.parse('2026-10-05T02:55:00Z'), logger: { log: (line) => logs.push(line) } });
+    assert.equal(candidate.reviewerModel, 'gemini');
+    assert.match(logs[0], /oldest_first_pass_age_ms=3600000/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('per-tick spill budget drains a saturated backlog across consecutive ticks', async () => {
+  const root = tempRoot();
+  try {
+    let waiting = [1, 2, 3, 4, 5, 6];
+    for (let tick = 0; tick < 3 && waiting.length >= 2; tick += 1) {
+      const ctl = controller({ root, depth: waiting.length, threshold: 2 });
+      const candidates = waiting.map((number) => spillCandidate(ctl, number,
+        `2026-10-05T01:0${number}:00Z`));
+      await prepareSpills(ctl, candidates.reverse());
+      const admitted = candidates.filter((c) => c.reviewerModel !== 'gemini');
+      assert.ok(admitted.length > 0);
+      for (const candidate of admitted) ctl.commitSpill({ repo: 'o/r', prNumber: candidate.prNumber });
+      waiting = candidates.filter((c) => c.reviewerModel === 'gemini').map((c) => c.prNumber);
+    }
+    assert.deepEqual(waiting, [6], 'three ticks spill the oldest five; the preferred lane drains the tail');
+    const ctl = controller({ root, depth: 1, threshold: 2 });
+    const tail = spillCandidate(ctl, 6, '2026-10-05T01:06:00Z');
+    await prepareSpills(ctl, [tail], { activeReviewerCounts: new Map() });
+    assert.equal(tail.reviewerModel, 'gemini');
+    assert.equal(readReviewQueueDepthFailoverReport(root).cost.spilloverReviewsTotal, 5);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('refund corrects the live engagement report and frees a slot for the next drain', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 2, threshold: 2 });
+    const candidate = spillCandidate(ctl, 7743, '2026-10-05T01:55:00Z');
+    await prepareSpills(ctl, [candidate]);
+    assert.equal(readReviewQueueDepthFailoverReport(root).engagementSpilloverReviews, 1);
+    ctl.refundSpill({ repo: 'o/r', prNumber: 7743 });
+    candidate.reviewerModel = 'gemini';
+    assert.equal(readReviewQueueDepthFailoverReport(root).engagementSpilloverReviews, 0);
+    await prepareSpills(ctl, [candidate]);
+    assert.equal(candidate.reviewerModel, 'claude-code');
+    assert.equal(readReviewQueueDepthFailoverReport(root).engagementSpilloverReviews, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

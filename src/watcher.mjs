@@ -390,7 +390,7 @@ import {
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
 } from './reviewed-head-dispatch-gate.mjs';
-import { createFirstPassSpilloverController } from './review-queue-depth.mjs'; import { createReviewerBurstController } from './reviewer-burst-lease.mjs'; // RPL-07 rides on this line: watcher.mjs is AT its ARC-18 line ratchet, so new wiring must be net-zero lines.
+import { createFirstPassSpilloverController, prepareQueueDepthSpillover } from './review-queue-depth.mjs'; import { createReviewerBurstController } from './reviewer-burst-lease.mjs'; // RPL-07 rides on this line: watcher.mjs is AT its ARC-18 line ratchet, so new wiring must be net-zero lines.
 import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   inspectWatcherExitTimeout,
@@ -1245,8 +1245,7 @@ async function pollOnce(
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
-  const postedReviewHandlers = [];
-  const mergeAgentCandidateBranchProtectionCache = new Map();
+  const postedReviewHandlers = [], mergeAgentCandidateBranchProtectionCache = new Map();
   const postReviewMaintenanceHandlers = [], reviewerMemoryReservationState = { reservedMb: 0 }, reviewerTickCaches = { fleetQuotaStatus: new Map() };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
     logger: console,
@@ -1274,7 +1273,8 @@ async function pollOnce(
       // yields null => no gemini cap, so review dispatch never wedges on this.
       const geminiCredentialConcurrency =
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
-      const drainResult = await runBoundedReviewerDispatchQueue(candidates, {
+      const orderedCandidates = await prepareQueueDepthSpillover(candidates, { controller: firstPassSpilloverController, geminiCredentialConcurrency, activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(), maxConcurrent: reviewerPoolConfig.maxConcurrent, compareCandidates: compareReviewerDispatchCandidates });
+      const drainResult = await runBoundedReviewerDispatchQueue(orderedCandidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
         activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
@@ -1289,6 +1289,7 @@ async function pollOnce(
         const deferredCandidates = Array.isArray(drainResult.deferredCandidates)
           ? drainResult.deferredCandidates
           : [];
+        for (const candidate of deferredCandidates) candidate.refundDepthSpill?.();
         reviewerDispatchCandidates.unshift(...deferredCandidates);
         console.log(
           `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
@@ -1309,6 +1310,7 @@ async function pollOnce(
     }
   }
   async function drainReviewerDispatchCandidatesIfBatchReady(reason) {
+    if (firstPassSpilloverController.plan().engaged || firstPassSpilloverController.plan('rereview').engaged) return { dispatched: 0, deferred: 0 };
     if (reviewerDiscoveryDrainUsed) {
       return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     }
@@ -1369,10 +1371,8 @@ async function pollOnce(
       },
     });
 
-    let subjectRefs;
-    const activeMergeAgentPRs = [];
-    const currentRepoPRs = [];
-    try {
+    let subjectRefs; const activeMergeAgentPRs = [];
+    const currentRepoPRs = []; try {
       subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);

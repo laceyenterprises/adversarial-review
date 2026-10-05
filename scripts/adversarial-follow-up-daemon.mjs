@@ -57,7 +57,8 @@ import {
 import { reapCloserHammerWorktrees } from '../src/ama/closer-worktree-reaper.mjs';
 import { configSignatureStatus, loadConfigCached } from '../src/config-loader.mjs';
 import { DEFAULT_ROLE_TOP_PATH, MODULE_CONFIG_PATH, pruneBlankRoleEnvVars } from '../src/role-config.mjs';
-import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
+import { archiveStoppedFollowUpJobs } from '../src/follow-up-jobs.mjs';
+import { reapFollowUpWorkspaces as reapTerminalFollowUpWorkspaces } from '../src/follow-up-workspace-reaper.mjs';
 import {
   emitHeartbeatsForActiveJobs,
   reapFinishedPrFollowUpJobs,
@@ -550,9 +551,9 @@ async function runStoppedArchiveSweepIfDue({
   }
 
   if (reapDue) {
-    const reapOk = await runStep('reap-workspaces', () => {
+    const reapOk = await runStep('reap-workspaces', async () => {
       const workspaceRootDir = resolveRemediationWorkspaceRootImpl({ rootDir: ROOT });
-      const result = reapTerminalFollowUpWorkspacesImpl({
+      const result = await reapTerminalFollowUpWorkspacesImpl({
         rootDir: ROOT,
         workspaceRootDir,
         nowMs,
@@ -560,6 +561,7 @@ async function runStoppedArchiveSweepIfDue({
       logTick(
         'reap-workspaces',
         `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
+        `reapedPrDone=${result.reapedPrDone ?? 0} reapedOrphan=${result.reapedOrphan ?? 0} keptOpenPr=${result.keptOpenPr ?? 0} ` +
         `missingTerminalJob=${result.missingTerminalJob} ` +
         `missingTerminalTimestamp=${result.missingTerminalTimestamp} ` +
         `missingTerminalTimestampSamples=${JSON.stringify(result.missingTerminalTimestampPaths)} ` +

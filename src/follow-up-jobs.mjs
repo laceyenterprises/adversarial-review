@@ -1473,6 +1473,7 @@ function reapTerminalFollowUpWorkspaces({
   logErrorImpl = console.error,
   env = process.env,
   budgetMs = resolveWorkspaceReapBudgetMs(env),
+  workspaceDecisionImpl = null,
 } = {}) {
   if (!workspaceRootDir || !existsSync(workspaceRootDir)) {
     return {
@@ -1519,13 +1520,18 @@ function reapTerminalFollowUpWorkspaces({
     scanned += 1;
     const workspacePath = join(workspaceRootDir, entry.name);
     try {
+      const decision = workspaceDecisionImpl?.(workspacePath);
+      if (workspaceDecisionImpl && !decision?.reap) {
+        skipped += 1;
+        continue;
+      }
       const lookup = readTerminalWorkspaceJobForId(rootDir, entry.name.replace(/\.resume-backup-\d+-\d+$/, ''), {
         readFollowUpJobImpl,
         logErrorImpl,
       });
       unreadableJobRecords += lookup.unreadableJobRecords;
       const { terminalJob } = lookup;
-      if (!terminalJob) {
+      if (!terminalJob && !decision?.reap) {
         skipped += 1;
         missingTerminalJob += 1;
         continue;
@@ -1533,7 +1539,7 @@ function reapTerminalFollowUpWorkspaces({
 
       const terminalAt = terminalFollowUpJobTimestamp(terminalJob);
       const terminalAtMs = terminalAt ? Date.parse(terminalAt) : NaN;
-      if (!Number.isFinite(terminalAtMs)) {
+      if (!Number.isFinite(terminalAtMs) && !decision?.reap) {
         skipped += 1;
         missingTerminalTimestamp += 1;
         if (missingTerminalTimestampPaths.length < 5) {
@@ -1546,7 +1552,7 @@ function reapTerminalFollowUpWorkspaces({
         continue;
       }
 
-      if ((nowMs - terminalAtMs) < ttlMs) {
+      if ((nowMs - terminalAtMs) < ttlMs && !decision?.reap) {
         skipped += 1;
         recentTerminalJob += 1;
         continue;
@@ -3439,6 +3445,7 @@ export {
   buildRemediationReplyArtifact,
   archiveStoppedFollowUpJobs,
   reapTerminalFollowUpWorkspaces,
+  readTerminalWorkspaceJobForId,
   claimNextFollowUpJob,
   createFollowUpJob,
   detectPublicReplyNoiseSignal,

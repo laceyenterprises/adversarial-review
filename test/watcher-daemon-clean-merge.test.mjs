@@ -151,7 +151,7 @@ test('CIUNKNOWN-01 settled zero-finding review stays on merge path when CI is un
         nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
-        reason: 'not-eligible', reasons: ['ci-not-green'],
+        reason: 'not-eligible', reasons: ['ci-not-green'], ciMergePathPending: true,
       }),
       maybeDispatchAmaCloserImpl: async () => { hammerCalls++; return { dispatched: true }; },
     });
@@ -3931,7 +3931,7 @@ test('clean reviews retain capped HAM for failures, conflicts and stale heads in
 test('fresh daemon failure overrides an empty candidate snapshot while cancelled recovery stays on merge path', async () => {
   const rootDir = tempRoot();
   try {
-    for (const ciMergePathPending of [false, true]) {
+    for (const ciMergePathPending of [undefined, false, true]) {
       let hammers = 0;
       const result = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir),
         runDaemonCleanMergeAttemptImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,

@@ -2009,7 +2009,9 @@ never green for bootstrap. Without evidence, the watcher pages once with
 A settled zero-finding review stays on the merge path only for a current,
 MERGEABLE head waiting on empty/no-CI evidence or cancelled-check recovery.
 Conflicts, real CI failures and stale heads still fall through to capped HAM
-repair, including the HMR-01 terminal-grace route. Fresh daemon failure evidence
+repair, including the HMR-01 terminal-grace route. Only an explicit `ciMergePathPending: true` from the daemon
+authorizes this wait; an empty candidate snapshot alone cannot bypass the
+bounded closer/daemon disagreement fallback. Fresh daemon failure evidence
 wins over the older candidate snapshot. The daemon and merge-agent bootstrap paths
 preserve current-head review or HAM certification, safety-core, protection,
 lease, and autonomous execution gates. Each merge attempt refreshes the proof;

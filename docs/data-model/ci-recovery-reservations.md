@@ -3,7 +3,7 @@
 **Owner:** adversarial-review watcher CI recovery
 **Store:** `<watcher rootDir>/dispatch/ci-recovery/`
 **Source of truth:** `src/ci-recovery.mjs`
-**Runtime surface:** `src/reviewer-ci-admission.mjs`, `src/daemon-clean-merge.mjs`, `src/follow-up-merge-agent.mjs`, `src/reviewer-timeout-exhausted-dispatch.mjs`
+**Runtime surface:** `src/reviewer-ci-admission.mjs`, `src/daemon-clean-merge.mjs`, `src/merge-agent-candidate.mjs` (re-exported by `src/follow-up-merge-agent.mjs`), `src/reviewer-timeout-exhausted-dispatch.mjs`
 
 ## Identity and records
 

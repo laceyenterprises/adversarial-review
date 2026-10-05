@@ -211,7 +211,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // 3540 -> 3382: ARC-19 wave7 extract hq executable detection + exec-error classification to src/merge-agent-hq-exec.mjs.
   // 3382 -> 3088: ARC-19 wave9 extract original-worker teardown preflight to src/merge-agent-original-worker-teardown.mjs.
   // 3088 -> 3061: CLOSERREUSE-01 moves the merge-agent worker-class resolution to src/merge-agent-harness.mjs, which also grounds it.
-  'follow-up-merge-agent.mjs': 3061,
+  // 3061 -> 2973: CIUNKNOWN-01 moves candidate loading and recovery to src/merge-agent-candidate.mjs.
+  'follow-up-merge-agent.mjs': 2973,
 });
 
 for (const [name, ceiling] of Object.entries(MONOLITH_CEILINGS)) {

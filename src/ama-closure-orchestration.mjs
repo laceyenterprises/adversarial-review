@@ -68,7 +68,6 @@ import {
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
-import { emptyExternalRollup } from './ci-recovery.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -1603,13 +1602,9 @@ export async function maybeDispatchAmaClosureFor({
       || !isDaemonMergeReviewAllowed(reviewState, { strictMode: true })
       || daemonCleanMerge?.reason === 'stale-head'
       || reasons.some(reason => reason !== 'ci-not-green')) return false;
-    if (typeof daemonCleanMerge?.ciMergePathPending === 'boolean') return daemonCleanMerge.ciMergePathPending;
-    // A failed-closed in-lease read must supply fresh evidence. Candidate
-    // snapshots cannot override a real failure observed by the daemon.
-    return daemonCleanMerge?.disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN
-      && closureGateMergeability(mergeabilityForGate || {}) === 'MERGEABLE'
-      && gateSnapshot?.reviewedHeadSha === candidate?.headSha
-      && emptyExternalRollup(candidate?.statusCheckRollup, resolveGateStatusContext(env));
+    // Only fresh daemon evidence can distinguish recovery from an empty
+    // candidate snapshot hiding a real failure or a route disagreement.
+    return daemonCleanMerge?.ciMergePathPending === true;
   };
 
   if (!(orphanRecovery && daemonCleanMerge?.reason === 'primary-change-needs-operator') && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {

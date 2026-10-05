@@ -459,6 +459,7 @@ test('fast-merge bypasses configured body-incapable adapter and keeps gh admin p
       repo: REPO,
       prNumber: 803,
       authorizedHeadSha: 'sha-A',
+      mergeCredentialClass: 'merge-agent',
       auditWriter: () => {},
       logger: { warn: (msg) => warnings.push(msg) },
     });
@@ -1427,11 +1428,12 @@ test('fast-merge passes neutralized author body and audits the rewrite', async (
   t.after(() => db.close());
   seedFastMerge(db, 801);
   const audits = [];
-  const view = { ...openView(), body: 'Fixed:\n\n#7732; closes #801' };
+  const view = { ...openView(), title: 'Fix #7732 regression', body: 'Fixed:\n\n#7732; closes #801' };
   const gh = makeGhStub({ views: [view, view], checks: [successChecks()] });
   await processFastMergePR({ db, ghClient: gh, repo: REPO, prNumber: 801,
     authorizedHeadSha: 'sha-A', auditWriter: entry => audits.push(entry) });
   const args = mergeCalls(gh)[0].args;
   assert.equal(args[args.indexOf('--body') + 1], 'Fixed:\n\nPR #7732; closes #801\n\nClosed-By: fast-merge');
-  assert.equal(audits.at(-1).closingKeywordRewrites[0].referencedNumber, 7732);
+  assert.equal(args[args.indexOf('--subject') + 1], 'Fix PR #7732 regression (#801)');
+  assert.deepEqual(audits.at(-1).closingKeywordRewrites.map(r => r.referencedNumber), [7732, 7732]);
 });

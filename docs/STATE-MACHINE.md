@@ -768,7 +768,7 @@ for the bypass lane. The follow-up daemon now actively consumes
 - it re-checks the live PR head, the live fast-merge authorization label, and `fast-merge-veto`,
 - summarizes `gh pr checks --json name,state,bucket,workflow,link` output for pending/failed/successful CI,
 - re-summarizes checks in the immediate pre-merge window,
-- merges with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>`,
+- merges with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>` and explicit sanitized `--subject` / `--body` through gh (the deployed adapter cannot yet forward these message fields),
 - records `fast_merge_merged`, `fast_merge_closed`, or `fast_merge_blocked`,
 - leaves retryable GitHub merge refusals in `fast_merge_skipped` while writing
   the refusal reason to the row's failure fields for live operator visibility,
@@ -784,7 +784,8 @@ its failure fields carry the refusal reason. Fast-merge audit JSON is stored sep
 `data/reviewer-runs/` ledger. Skip and close records share the directory but
 carry distinct audit-type discriminators, and terminal close-path audit failures
 leave `fast_merge_audit_status='pending'` on the row so the watcher retry lane
-can re-emit the audit.
+can re-emit the audit. The close record's `closingKeywordRewrites` combines title
+and body rewrites; see [Fast-Merge Audits](data-model/fast-merge-audits.md).
 
 ---
 

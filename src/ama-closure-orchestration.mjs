@@ -1179,6 +1179,7 @@ export async function maybeDispatchAmaClosureFor({
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
+    title: String(candidate?.title ?? ''),
     body: String(candidate?.body ?? candidate?.prBody ?? ''),
   };
 

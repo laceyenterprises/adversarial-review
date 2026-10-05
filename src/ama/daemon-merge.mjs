@@ -333,6 +333,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {string} [args.mergeMethod]    `squash` (default) | `merge`.
  * @param {string} args.hqRoot          HQ root for the audit doc.
  * @param {object} [args.auditMetadata] Extra top-level audit fields (reviewer, risk).
+ * @param {string=} [args.prTitle]      PR title, used for the explicit commit subject.
  * @param {string=} [args.prBody]       PR body, used for the explicit commit body and
  *                                      protective-predecessor trailers.
  *
@@ -376,6 +377,7 @@ async function attemptDaemonCleanMergeInner({
   mergeEnv = process.env,
   hqRoot,
   auditMetadata = {},
+  prTitle = '',
   prBody = '',
   protectivePredecessor = null,
   fetchProtectivePredecessorStateImpl = null,
@@ -632,7 +634,7 @@ async function attemptDaemonCleanMergeInner({
     strictMode: strictMode !== false,
   };
   const closureAuthority = auditMetadata.closureAuthority || DAEMON_MERGE_CLOSURE_AUTHORITY;
-  const commitBody = buildMergeCommitBody({ prBody, trailers: auditMetadata.closeTrailers || `Closed-By: ${closureAuthority}`, selfPrNumber: prNumber, repo });
+  const commitBody = buildMergeCommitBody({ prTitle, prBody, trailers: auditMetadata.closeTrailers || `Closed-By: ${closureAuthority}`, selfPrNumber: prNumber, repo });
   const auditMetadataDoc = {
     ...auditMetadata,
     closingKeywordRewrites: commitBody.rewrites,
@@ -859,7 +861,7 @@ async function attemptDaemonCleanMergeInner({
     // Click the button.
     let mergeRes;
     try {
-      mergeRes = await runMergeImpl({ repo, prNumber, head: validatedHead, mergeMethod, base, body: commitBody.text });
+      mergeRes = await runMergeImpl({ repo, prNumber, head: validatedHead, mergeMethod, base, body: commitBody.text, subject: commitBody.subject });
     } catch (err) {
       mergeRes = { exitCode: 1, stdout: '', stderr: String(err?.stderr || err?.message || err) };
     }

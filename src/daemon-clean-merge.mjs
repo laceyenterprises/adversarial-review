@@ -927,6 +927,7 @@ export async function runDaemonCleanMergeAttempt({
     },
     mergeCapabilityEnforcement: cfg?.mergeCapabilityEnforcement || 'observe',
     mergeEnv: env,
+    prTitle: String(liveRollup?.title ?? candidate?.title ?? ''),
     prBody: String(liveRollup?.body ?? candidate?.body ?? candidate?.prBody ?? ''),
     fetchProtectivePredecessorStateImpl: async ({ prNumber: protectorPrNumber }) => {
       try {
@@ -1023,12 +1024,12 @@ export async function runDaemonCleanMergeAttempt({
       });
     },
     // Click the button: `gh pr merge --squash --match-head-commit <head>`.
-    runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method, body }) => {
+    runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method, body, subject }) => {
       const methodFlag = method === 'merge' ? '--merge' : '--squash';
       try {
         const { stdout, stderr } = await execGhWithRetryImpl({
           execFileImpl,
-          args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head, '--body', body],
+          args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head, '--subject', subject, '--body', body],
           timeoutMs: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
         });
         return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };

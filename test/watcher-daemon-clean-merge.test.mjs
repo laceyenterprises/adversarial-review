@@ -934,6 +934,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       execFileImpl: async (_command, _args, options) => {
         capturedOptions = options;
         assert.equal(_args[_args.indexOf('--body') + 1], 'Fix: PR #7732');
+        assert.equal(_args[_args.indexOf('--subject') + 1], 'Fix PR #7732 regression (#300)');
         return { stdout: '', stderr: '' };
       },
       fetchRollupImpl: async () => ({
@@ -976,6 +977,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
         head: 'head-live',
         mergeMethod: 'squash',
         body: 'Fix: PR #7732',
+        subject: 'Fix PR #7732 regression (#300)',
         });
       },
       logger: { warn() {}, log() {} },
@@ -3283,16 +3285,18 @@ test('Deliverable 2: daemon fail-closed stale-head routes to the capped hammer (
   }
 });
 
-test('MERGEORDER-01: candidate body is threaded into closer metadata', async () => {
+test('MERGEORDER-01: candidate title and body are threaded into closer metadata', async () => {
   const rootDir = tempRoot();
   try {
     let capturedBody = null;
+    let capturedTitle = null;
     const body = 'PR body fallback marker';
     const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
       candidate: {
         ...baseArgs(rootDir).candidate,
         prBody: body,
+        title: 'Fix #7732 regression',
       },
       runDaemonCleanMergeAttemptImpl: async () => ({
         disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
@@ -3302,12 +3306,14 @@ test('MERGEORDER-01: candidate body is threaded into closer metadata', async () 
       fetchMergedProtectiveDependentsImpl: async () => [],
       maybeDispatchAmaCloserImpl: async ({ prMetadata }) => {
         capturedBody = prMetadata.body;
+        capturedTitle = prMetadata.title;
         return { dispatched: true };
       },
     });
 
     assert.equal(result.dispatched, true);
     assert.equal(capturedBody, body);
+    assert.equal(capturedTitle, 'Fix #7732 regression');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

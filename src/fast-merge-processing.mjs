@@ -535,6 +535,7 @@ function normalizePrView(parsed = {}) {
     closedAt: parsed.closedAt || null,
     headRefOid: parsed.headRefOid || null,
     labels,
+    title: String(parsed.title || ''),
     body: String(parsed.body || ''),
   };
 }
@@ -548,7 +549,7 @@ async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
     '--repo',
     repo,
     '--json',
-    'state,isDraft,mergedAt,closedAt,headRefOid,labels,body',
+    'state,isDraft,mergedAt,closedAt,headRefOid,labels,title,body',
   ], {
     maxBuffer: 5 * 1024 * 1024,
     timeout: FAST_MERGE_GH_TIMEOUT_MS,
@@ -686,7 +687,7 @@ function isNoChecksReportedGhError(err) {
   return detail.includes('no checks') && detail.includes('reported');
 }
 
-async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, body, rootDir = process.cwd(), logger = console }) {
+async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, body, subject, rootDir = process.cwd(), logger = console }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   return withGhRetry(async () => {
     try {
@@ -712,10 +713,9 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, bod
       logger?.warn?.(
         `[follow-up-merge-agent] fast-merge adapter merge failed for ${repo}#${prNumber}; falling back to gh --admin: ${err?.message || err}`
       );
-      // Preserve the historical fast-merge contract: an enabled adapter is a
-      // preferred write path, but protected-branch/admin failures must still
-      // reach the existing gh --admin fallback. withGhRetry may re-run this
-      // callback after transient gh failure; GitHub treats an already-merged
+      // Explicit message calls currently decline the adapter seam; gh --admin
+      // preserves the sanitized subject and body until the adapter supports them.
+      // withGhRetry may re-run this callback after transient gh failure; GitHub treats an already-merged
       // PR/head as idempotently terminal, so the fallback remains retry-safe.
     }
     return execFileImpl('gh', [
@@ -728,6 +728,8 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, bod
       '--admin',
       '--match-head-commit',
       String(matchHeadCommit),
+      '--subject',
+      subject,
       '--body',
       body,
       '--delete-branch',
@@ -1378,7 +1380,7 @@ async function processFastMergePR({
     return { status: 'blocked', reason: 'builder-token-merge-refused' };
   }
 
-  const commitBody = buildMergeCommitBody({ prBody: preMergeView.body, trailers: 'Closed-By: fast-merge', selfPrNumber: prNumber, repo });
+  const commitBody = buildMergeCommitBody({ prTitle: preMergeView.title, prBody: preMergeView.body, trailers: 'Closed-By: fast-merge', selfPrNumber: prNumber, repo });
   let mergeResult;
   const mergeExecutedAt = isoNow();
   try {
@@ -1388,6 +1390,7 @@ async function processFastMergePR({
       prNumber,
       matchHeadCommit: exactHeadSha,
       body: commitBody.text,
+      subject: commitBody.subject,
       rootDir,
       logger,
     });
@@ -1431,7 +1434,7 @@ async function processFastMergePR({
         logger,
         entry: buildFastMergeCloseAuditEntry({
           action: 'merged',
-      closingKeywordRewrites: commitBody.rewrites,
+          closingKeywordRewrites: commitBody.rewrites,
           repo,
           prNumber,
           authorizedHeadSha: exactHeadSha,

@@ -1000,11 +1000,13 @@ for (const authority of ['daemon-merge', 'ham-terminal-remediation']) {
   test(`${authority} supplies sanitized PR body plus trailers and audits rewrites`, async () => {
     const harness = makeHarness();
     const result = await attemptDaemonCleanMerge(baseArgs(harness, {
-      prBody: 'Fix: #7732\nResolves #7',
+      prTitle: 'Fix #7732 regression',
+      prBody: 'Fix: #7732\nResolves #7\nCloses https://github.com/o/r/pull/99',
       auditMetadata: { closureAuthority: authority, closeTrailers: 'Closed-By: hammer' },
     }));
     assert.equal(result.disposition, 'merged');
-    assert.equal(harness.lastMergeCtx.body, 'Fix: PR #7732\nResolves #7\n\nClosed-By: hammer');
-    assert.equal(harness.calls.auditWrites[0].metadata.closingKeywordRewrites[0].referencedNumber, 7732);
+    assert.equal(harness.lastMergeCtx.body, 'Fix: PR #7732\nResolves #7\nCloses PR https://github.com/o/r/pull/99\n\nClosed-By: hammer');
+    assert.equal(harness.lastMergeCtx.subject, 'Fix PR #7732 regression (#7)');
+    assert.deepEqual(harness.calls.auditWrites[0].metadata.closingKeywordRewrites.map(r => r.referencedNumber), [7732, 7732, 99]);
   });
 }

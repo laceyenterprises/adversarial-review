@@ -720,19 +720,41 @@ $HAM_PROTECTIVE_PREDECESSORS
 EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
 
-  HAM_COMMIT_BODY_JSON=$(printf '%s' "$HAM_PROTECTIVE_PREDECESSOR_BODY" |
-    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>>) || {
-    ham_append_terminal_audit failed-without-merge commit-body-sanitization-failed || true
+  ham_commit_message_abort() {
+    ham_append_terminal_audit failed-without-merge "$1" || true
+    ham_mark_merge_lease_retryable_abort "$1"
     ham_release_merge_lease
+  }
+  HAM_PR_TITLE=""
+  ham_read_protective_predecessor_value title HAM_PR_TITLE \
+    gh pr view <<PR_URL>> --json title --jq '.title // ""' || {
+    ham_commit_message_abort commit-title-read-failed
     return 1
   }
-  HAM_COMMIT_BODY=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.text') || { ham_release_merge_lease; return 1; }
-  HAM_CLOSING_KEYWORD_REWRITES=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -c '.rewrites') || { ham_release_merge_lease; return 1; }
+  export HAM_PR_TITLE
+  HAM_COMMIT_BODY_JSON=$(printf '%s' "$HAM_PROTECTIVE_PREDECESSOR_BODY" |
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>>) || {
+    ham_commit_message_abort commit-body-sanitization-failed
+    return 1
+  }
+  HAM_COMMIT_BODY=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.text') || {
+    ham_commit_message_abort commit-body-decode-failed
+    return 1
+  }
+  HAM_COMMIT_SUBJECT=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -er '.subject') || {
+    ham_commit_message_abort commit-subject-decode-failed
+    return 1
+  }
+  HAM_CLOSING_KEYWORD_REWRITES=$(printf '%s' "$HAM_COMMIT_BODY_JSON" | jq -ce '.rewrites | select(type == "array")') || {
+    ham_commit_message_abort commit-rewrites-decode-failed
+    return 1
+  }
 
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
+    --subject "$HAM_COMMIT_SUBJECT" \
     --body "$HAM_COMMIT_BODY" \
     > "$HAM_MERGE_STDOUT" \
     2> "$HAM_MERGE_STDERR"

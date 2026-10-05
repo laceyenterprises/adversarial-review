@@ -1330,10 +1330,10 @@ export async function maybeDispatchAmaClosureFor({
   // was never self-certifiable, so the no-dispatch "retain" tick spun unbounded (a
   // live 50-min stall). Dropping the `reviewCycleExhausted &&` guard lets the
   // own-commit proof arm for that case too. The SAFETY INVARIANT is unchanged: an
-  // external push is authored by a non-closer committer, so
-  // `getHeadCloserCommitSuppression` returns `suppressed:false` and
-  // `allowStaleReviewHeadHammerResume` stays false -- an unreviewed human push can
-  // never self-certify past the stale-head block.
+  // head without closer trailers or linked closer/HAM author provenance stays
+  // reviewable. This includes merge-agent rebases of worker-authored commits:
+  // a closer committer stamp alone does not arm stale-head resume. Those heads
+  // must complete review on the new SHA before ordinary closure can proceed.
   if (reviewedHeadIsStale) {
     try {
       throwIfAborted(signal);

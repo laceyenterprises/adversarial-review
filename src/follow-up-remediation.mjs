@@ -1,3 +1,4 @@
+import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { normalizeCiPendingOnlyReply } from './kernel/remediation-reply.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -12,6 +13,7 @@ import {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   REMEDIATION_WORKER_TRAILER_CLASS,
   WORKER_PROVENANCE_HOOK_SRC,
+  configureRemediationWorkspaceIdentity,
   installWorkerProvenanceHook,
   remediationWorkerGitIdentity,
   remediationWorkerPushProvider,
@@ -1141,9 +1143,16 @@ async function prepareWorkspaceForJob({
     prBranchMetadataPromise ||= fetchPRBranchMetadata({ repo, prNumber: job.prNumber, execFileImpl });
     return prBranchMetadataPromise;
   };
+  const preservedMetadataReason = await preserveUnsafeWorkspaceMetadata({
+    workspaceDir, workspaceRootDir, jobId: job.jobId, repo, execFileImpl, log,
+  });
   const { workspaceState, resumeEligible } = await inspectWorkspaceForRetry({
     workspaceDir, workspaceRootDir, jobId: job.jobId, expectedRepo: repo, retryHistory, execFileImpl, log,
   });
+  if (preservedMetadataReason) {
+    workspaceState.reset = true;
+    workspaceState.reason = preservedMetadataReason;
+  }
 
   if (!existsSync(join(workspaceDir, '.git'))) {
     // Clone with plain `git` over HTTPS rather than `gh repo clone`. `gh repo
@@ -1166,21 +1175,7 @@ async function prepareWorkspaceForJob({
     });
   }
 
-  // Set local git identity *before* the PR checkout so the very first
-  // commits the remediation worker makes (including any in-process author
-  // hooks that read `git config user.*` at startup) see the correct values.
-  // Local config (no --global) is scoped to .git/config in this workspace
-  // alone — it cannot leak into the operator's other repos. Idempotent: a
-  // re-run against an existing workspace just overwrites the same values.
-  // The identity is keyed on workerClass so the soon-to-land claude-code
-  // remediation path doesn't need a separate code change here.
-  const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.name', gitIdentity.name], {
-    maxBuffer: 1 * 1024 * 1024,
-  });
-  await execFileImpl('git', ['-C', workspaceDir, 'config', 'user.email', gitIdentity.email], {
-    maxBuffer: 1 * 1024 * 1024,
-  });
+  await configureRemediationWorkspaceIdentity({ workspaceDir, workerClass, execFileImpl });
 
   // Install the worker-provenance commit-msg hook in this workspace's
   // .git/hooks. The hook reads worker-context env vars at commit time

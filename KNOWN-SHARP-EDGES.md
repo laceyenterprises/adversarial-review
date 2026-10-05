@@ -204,6 +204,32 @@ What needs to happen next:
 - Packaging (`brew tap` or `npm install -g`) so the on-ramp is one
   command instead of "clone, npm ci, install.sh."
 
+## Terminal closer trailers are not identity proof
+
+`src/head-closer-commit-suppression.mjs::isTerminalCloserCommitIdentity`
+binds recognized `Closed-By` / `Closer` markers to closer provenance when linked
+identity data is present. Either linked foreign identity rejects suppression,
+and the remote GitHub probe requires linked closer provenance even when both
+logins are absent. This prevents a copied trailer on a linked worker commit
+from suppressing the remote review path.
+
+GitHub links both `author.login` and `committer.login` from commit email
+headers. A pusher can forge either by setting the corresponding Git email to
+an allowlisted bot's address. Rejecting either linked foreign identity, then
+requiring a linked HAM author or an unlinked author with a HAM committer and
+the full HAM trailers, prevents accidental committer stamping
+from being sufficient but does not authenticate a deliberate forger. Signed
+commit verification or verified push-actor evidence would be needed for that.
+
+Local Git reads intentionally keep working without GitHub credentials and have
+no linked login data. Their trailer-only fallback still allows copied trailers
+to suppress re-review or arm stale-head closer resume on the local-first path.
+A follow-up must carry
+source-aware identity evidence through the local/remote suppression callers and
+re-verify at downstream merge gates. Fast-merge already requires matching
+allowlisted HAM audit comments plus a trusted head-specific AMA audit and lease;
+trailer suppression alone must not be presented as comparable merge authority.
+
 ---
 
 ## What this file is NOT

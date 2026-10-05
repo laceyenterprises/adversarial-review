@@ -1206,11 +1206,14 @@ the first hammer commit in the rebased PR history; a hammer-authored `Reviewed-H
 head. Both primary and final diffs are compared against the current PR base,
 using the same merge base so rebased upstream changes are excluded. Hammer closure detection
 uses the terminal commit trailer block. Reversal authorization additionally
-requires the live GitHub committer to match the existing trusted HAM login set
-(`hamAuditCommentAuthorMatches`); a linked author is the fallback only when
-GitHub has no linked committer. Missing or non-HAM identities cannot authorize
-reversals, even with valid trailers. Binary and omitted-patch
-files can pass only with an identical GitHub blob SHA and change status;
+uses `hamCommitIdentityMatches` with the trusted HAM login set
+(`hamAuditCommentAuthorMatches`): reject any linked non-HAM author or committer;
+otherwise accept a linked HAM author, or an unlinked author with a linked HAM
+committer and all three terminal trailers (`Worker-Class: hammer`, including
+`hammer-corp` / `hammer-claude`, `Worker-Ticket: HAM` / `AMA-PR-<n>`, and
+`Closed-By: hammer (adversarial-pipe-mode)`). A HAM committer stamped onto a
+linked foreign author cannot authorize reversals, even with valid trailers.
+Binary and omitted-patch files can pass only with an identical GitHub blob SHA and change status;
 otherwise their preservation remains unknown. Structural hammer merge refusals
 are audited immediately with their primary-change reason, while read failures
 retry within the bounded gate window. Every
@@ -1245,7 +1248,7 @@ merge checks, and the hammer's in-lease GitHub gate (`bin/hammer-merge.sh`).
 The hammer gate resolves `loadConfigCached().getMergeAuthorityConfig()` on each
 live gate read, just as `ama-check` does, with strict remediation enabled unless
 `strictNonBlockingRemediation` is explicitly `false`. The HAM commit must carry
-`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=<blocking|non-blocking>]`, `Worker-Ticket: HAM`,
+`Reversal-Authorized-By: <review node id or URL> finding=<n> [kind=<blocking|non-blocking>]`, `Worker-Ticket: HAM` (or `AMA-PR-<n>`),
 and `Reviewed-Head` naming that review's head. The finding number is its one-based
 position in the indicated section (blocking by default for legacy trailers).
 Emit one trailer per finding whose fix edits primary-change lines. Multiple
@@ -1902,3 +1905,9 @@ live base, rather than the older parallel-phase validation base. This recomputes
 the incorporated base even when the earlier validation base is unavailable. Base
 changes overlapping PR files require rebase and revalidation even without a
 strict branch-protection rule; disjoint movement may proceed under that rule.
+
+IDENTBASE-01 merge-agent rebases with a worker author remain reviewable. Do not
+assume a per-head review ceiling bounds repeated new rebase heads: the combined
+lifetime accounting needs the offline cycle regression tracked in LAC-1849.
+Local-first trailer suppression still lacks authenticated linked identity;
+source-aware stale-head resume verification is tracked in LAC-1848.

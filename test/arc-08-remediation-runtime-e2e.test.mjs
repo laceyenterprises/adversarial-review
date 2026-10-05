@@ -86,7 +86,8 @@ test('router local mode routes consume through the local self-spawn runtime', as
       resolvePRLifecycleImpl: async () => null,
       execFileImpl: async (command, args) => {
         if (command === 'git' && args[0] === 'clone') {
-          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+          // Clone options precede the source; the destination is always last.
+          mkdirSync(path.join(args.at(-1), '.git'), { recursive: true });
         }
         if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
           return {

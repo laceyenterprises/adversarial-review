@@ -18,8 +18,8 @@ import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 // `not-eligible` and the no-dispatch "retain" tick spun forever (a live 50-min
 // stall). The fix un-gates the own-commit suppression proof from review-cycle
 // exhaustion so a comment-only / non-blocking review's moved head can resume — but
-// ONLY when the live head commit is the terminal closer's own commit. An EXTERNAL
-// push (a non-closer committer) can never forge that identity, so it stays blocked.
+// The identity path requires a linked closer author and HAM worker ticket.
+// Closure trailers remain a separate local-git fallback; they are not identity proof.
 //
 // This is the safety invariant. The stash-and-fail evidence in the PR body reverts
 // ONLY the Fix-A source hunks and shows the self-cert assertions below FLIP to
@@ -29,18 +29,15 @@ import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 const REVIEWED_HEAD = 'head-a-reviewed-00000000000000000000000';
 const CURRENT_HEAD = 'head-b-current-000000000000000000000000';
 
-// The un-forgeable primitive: a committer login is set by GitHub, not by the
-// pusher. Only the terminal-closer bot identities self-certify.
-test('primitive: the terminal closer own commit self-certifies; an external committer never does', () => {
-  const closer = isTerminalCloserCommitIdentity({ committer: { login: 'the-hammer-lacey[bot]' } });
+// The identity path ignores foreign committer stamps and requires HAM provenance.
+test('primitive: linked closer author with HAM provenance self-certifies; a foreign committer never does', () => {
+  const closer = isTerminalCloserCommitIdentity({ author: { login: 'the-hammer-lacey[bot]' }, message: 'repair\n\nWorker-Ticket: HAM' });
   assert.equal(closer.suppressed, true);
 
   const external = isTerminalCloserCommitIdentity({ committer: { login: 'some-human-contributor' } });
   assert.equal(external.suppressed, false);
 
-  // A forged trailer on an external-authored commit does NOT help: identity is read
-  // from the committer login / closer trailer the platform stamps, and a plain
-  // human push carries neither.
+  // Approved-By is not a recognized closure trailer and cannot suppress review.
   const forgedBody = isTerminalCloserCommitIdentity({
     committer: { login: 'attacker' },
     message: 'sneaky\n\nApproved-By: hammer\n',
@@ -379,4 +376,19 @@ test('orchestration: an external push at a stale head NEVER arms hammer resume (
   assert.equal(payload.prMetadata.headSha, CURRENT_HEAD);
   // EXTERNAL PUSH → resume NEVER armed. This is the safety invariant.
   assert.equal(payload.dispatchContext.allowStaleReviewHeadHammerResume, false);
+});
+
+
+test('watcher orchestration: merge-agent rebase of worker-authored head stays reviewable and cannot resume', async () => {
+  const commit = { author: { login: 'codex-worker-bot' },
+    committer: { login: 'merge-agent-lacey' },
+    message: 'worker change\n\nWorker-Class: codex\nWorker-Ticket: LAC-1223' };
+  const suppression = isTerminalCloserCommitIdentity(commit);
+  assert.equal(suppression.suppressed, false);
+  const payload = await runOrchestrationForSuppression(suppression.suppressed);
+  assert.equal(payload.dispatchContext.allowStaleReviewHeadHammerResume, false);
+  assert.equal(isHammerRemediableEligibilityMiss(['stale-review-head'], {
+    reviewCycleExhausted: false,
+    allowStaleReviewHeadHammerResume: payload.dispatchContext.allowStaleReviewHeadHammerResume,
+  }), false);
 });

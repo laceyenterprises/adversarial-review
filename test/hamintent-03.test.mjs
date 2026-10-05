@@ -23,8 +23,8 @@ const file = { filename: 'run.py', status: 'modified', additions: 3, deletions: 
   patch: [10, 20, 30].map((n) => `@@ -${n} +${n} @@\n-old ${n}\n+new ${n}`).join('\n') };
 const citations = ['PRR_gemini finding=2', 'PRR_gemini finding=3 kind=blocking', 'PRR_claude finding=1 kind=non-blocking'];
 async function collect({ cites = citations, worker = 'hammer', list = reviews, touched = file } = {}) {
-  const message = `HAM repair\n\nWorker-Class: ${worker}\nWorker-Ticket: HAM\nReviewed-Head: ${author}\n${cites.map((c) => `Reversal-Authorized-By: ${c}`).join('\n')}`;
-  const commit = { sha: head, parents: [{ sha: author }], committer: { login: 'the-hammer-lacey[bot]' }, commit: { message }, files: [touched] };
+  const message = `HAM repair\n\nWorker-Class: ${worker}\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${author}\n${cites.map((c) => `Reversal-Authorized-By: ${c}`).join('\n')}`;
+  const commit = { sha: head, parents: [{ sha: author }], author: { login: null }, committer: { login: 'the-hammer-lacey[bot]' }, commit: { message }, files: [touched] };
   const comparison = { status: 'ahead', merge_base_commit: { sha: base }, files: [file] };
   const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, dispatchedHead: author,
     get: async (url) => {
@@ -221,14 +221,14 @@ test('reviews on different heads require separate HAM commits with matching Revi
   const middle = 'd'.repeat(40);
   const list = structuredClone(reviews);
   list[1].commit_id = middle;
-  const message = (reviewedHead, cites) => `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${reviewedHead}\n${cites.map((c) => `Reversal-Authorized-By: ${c}`).join('\n')}`;
+  const message = (reviewedHead, cites) => `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${reviewedHead}\n${cites.map((c) => `Reversal-Authorized-By: ${c}`).join('\n')}`;
   const firstFiles = { ...file, additions: 2, deletions: 2,
     patch: file.patch.split('\n').slice(0, 6).join('\n').replaceAll('-old', '-new').replaceAll('+new', '+old') };
   const remaining = { ...file, additions: 1, deletions: 1, patch: file.patch.split('\n').slice(6).join('\n') };
   for (const split of [true, false]) {
-    const commits = [{ sha: middle, parents: [{ sha: author }], committer: { login: 'the-hammer-lacey[bot]' },
+    const commits = [{ sha: middle, parents: [{ sha: author }], author: { login: null }, committer: { login: 'the-hammer-lacey[bot]' },
       commit: { message: message(author, split ? citations.slice(0, 2) : []) }, files: [firstFiles] },
-    { sha: head, parents: [{ sha: middle }], committer: { login: 'the-hammer-lacey[bot]' },
+    { sha: head, parents: [{ sha: middle }], author: { login: null }, committer: { login: 'the-hammer-lacey[bot]' },
       commit: { message: message(split ? middle : author, split ? citations.slice(2) : citations) },
       files: [{ ...remaining, patch: remaining.patch.replaceAll('-old', '-new').replaceAll('+new', '+old') }] }];
     const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, dispatchedHead: author,

@@ -1320,8 +1320,8 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
   });
 
   assert.equal(isTerminalCloserCommitIdentity({
-    message: 'Finalize PR',
-    committer: { login: 'merge-agent-lacey' },
+    message: 'Finalize PR\n\nWorker-Ticket: HAM',
+    author: { login: 'merge-agent-lacey' },
     commit: {
       committer: {
         name: 'Merge Agent Worker',
@@ -1331,8 +1331,8 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
   }).reason, 'closer-commit-identity');
 
   assert.equal(isTerminalCloserCommitIdentity({
-    message: 'HAM remediate final adversarial findings',
-    committer: { login: 'the-hammer-lacey[bot]' },
+    message: 'HAM remediate final adversarial findings\n\nWorker-Ticket: HAM',
+    author: { login: 'the-hammer-lacey[bot]' },
   }).reason, 'closer-commit-identity');
 
   for (const commit of [
@@ -1376,9 +1376,9 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
     execFileImpl: async () => ({
       stdout: JSON.stringify({
         sha: 'abc123',
-        message: 'Finalize PR',
+        message: 'Finalize PR\n\nWorker-Ticket: HAM',
         committerLogin: 'merge-agent-lacey',
-        authorLogin: null,
+        authorLogin: 'merge-agent-lacey',
         committerName: 'Merge Agent Worker',
         committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
       }),
@@ -1426,9 +1426,9 @@ test('watcher retries transient closer identity probe failures before suppressin
       return {
         stdout: JSON.stringify({
           sha: 'def456',
-          message: 'Finalize PR',
+          message: 'Finalize PR\n\nWorker-Ticket: HAM',
           committerLogin: 'merge-agent-lacey',
-          authorLogin: null,
+          authorLogin: 'merge-agent-lacey',
           committerName: 'Merge Agent Worker',
           committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
         }),
@@ -1528,18 +1528,18 @@ test('watcher closer identity resolver reuses the same commit probe result', asy
       const joined = (args || []).join(' ');
       if (file === 'git') {
         // Local-git read: a plain commit with no closer trailer — this case's closer
-        // identity is carried by the GitHub committer login, which only the gh fallback
+        // identity is carried by the GitHub author login plus HAM provenance, which only the gh fallback
         // below can resolve, so local git legitimately falls through.
         if (joined.includes('--format=%H %P')) return { stdout: 'fed789 abc123\n' };
-        if (joined.includes('--format=%B')) return { stdout: 'Finalize PR\n' };
+        if (joined.includes('--format=%B')) return { stdout: 'Finalize PR\n\nWorker-Ticket: HAM\n' };
         return { stdout: '' };
       }
       return {
         stdout: JSON.stringify({
           sha: 'fed789',
-          message: 'Finalize PR',
+          message: 'Finalize PR\n\nWorker-Ticket: HAM',
           committerLogin: 'merge-agent-lacey',
-          authorLogin: null,
+          authorLogin: 'merge-agent-lacey',
           committerName: 'Merge Agent Worker',
           committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
         }),

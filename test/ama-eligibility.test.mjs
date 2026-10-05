@@ -3,6 +3,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { isEligibleForAmaClosure, __testables__ } from '../src/ama/eligibility.mjs';
+import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
+import { parseCommitTrailers } from '../src/ama/ham-provenance.mjs';
+import { isTerminalCloserCommitIdentity } from '../src/head-closer-commit-suppression.mjs';
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 
 const GATE_CONTEXT = DEFAULT_ADVERSARIAL_GATE_CONTEXT;
@@ -2983,34 +2986,37 @@ test('ham terminal remediation: forged self-attested parent and trailers do not 
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 
-test('ham terminal remediation: external committer cannot self-certify a stale head', () => {
-  const reviewedHead = 'abc12345';
-  const currentHead = 'def67890';
-  const { reviewState, prMetadata, cfg } = eligibleFixture({
-    reviewState: {
-      headSha: reviewedHead,
-      verdict: 'request-changes',
-      blockingFindingCount: 1,
-      blockingFindingState: 'known',
-    },
-    prMetadata: { headSha: currentHead },
-  });
-  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
-    env: ENV,
-    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
-    hamTerminalRemediationGroundTruth: hamGroundTruth({
-      headSha: currentHead,
-      parentSha: reviewedHead,
-      committer: 'some-human-contributor',
-    }),
-  });
+for (const author of ['hammer-worker', 'codex-worker-bot']) {
+  test(`ham terminal remediation: external committer cannot self-certify a stale head (author=${author})`, () => {
+    const reviewedHead = 'abc12345';
+    const currentHead = 'def67890';
+    const { reviewState, prMetadata, cfg } = eligibleFixture({
+      reviewState: {
+        headSha: reviewedHead,
+        verdict: 'request-changes',
+        blockingFindingCount: 1,
+        blockingFindingState: 'known',
+      },
+      prMetadata: { headSha: currentHead },
+    });
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+      env: ENV,
+      hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+      hamTerminalRemediationGroundTruth: hamGroundTruth({
+        headSha: currentHead,
+        parentSha: reviewedHead,
+        author,
+        committer: 'some-human-contributor',
+      }),
+    });
 
-  assert.equal(result.eligible, false);
-  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
-  assert.equal(result.trace.hamTerminalRemediation.ok, false);
-  assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
-  assert.ok(result.reasons.includes('stale-review-head') || result.reasons.includes('blocking-findings-present'));
-});
+    assert.equal(result.eligible, false);
+    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
+    assert.equal(result.trace.hamTerminalRemediation.ok, false);
+    assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
+    assert.ok(result.reasons.includes('stale-review-head') || result.reasons.includes('blocking-findings-present'));
+  });
+}
 
 test('ham terminal remediation: null GitHub committer falls back to verified author identity', () => {
   const reviewedHead = 'abc12345';
@@ -3285,5 +3291,70 @@ test('HAMINTENT: hammer provenance cannot self-certify a reverted or unknown pri
     assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
     assert.equal(result.trace.hamTerminalRemediation.checks.primaryChange, false);
     assert.ok(result.reasons.includes(primaryChange ? 'primary-change-reverted' : 'primary-change-unknown'));
+  }
+});
+
+
+test('HAM identity agrees across reversal, terminal eligibility and closer suppression', () => {
+  const reviewedHead = 'a'.repeat(40), currentHead = 'c'.repeat(40);
+  const primaryFile = { filename: 'src/auth.js', status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -10 +10 @@\n-old\n+new' };
+  const message = `repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${reviewedHead}\nReversal-Authorized-By: PRR_identity finding=1`;
+  const review = { node_id: 'PRR_identity', commit_id: reviewedHead, state: 'CHANGES_REQUESTED',
+    user: { login: 'lacey-codex-reviewer[bot]' },
+    body: '## Blocking issues\n- **Auth repair**\n  - **File:** `src/auth.js`\n  - **Lines:** `10`\n  - **Problem:** Revert.\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' };
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { headSha: reviewedHead, verdict: 'request-changes',
+      blockingFindingCount: 1, blockingFindingState: 'known' },
+    prMetadata: { headSha: currentHead },
+  });
+  for (const [author, committer, commitMessage, allowed] of [
+    [null, 'the-hammer-lacey[bot]', message, true], // Ground-truth legacy hammer identity.
+    ['codex-worker-bot', 'the-hammer-lacey[bot]', message, false],
+    ['the-hammer-lacey[bot]', 'some-human-contributor', message, false],
+    ['codex-worker-bot', 'the-hammer-lacey[bot]', message.replace('Closed-By: hammer (adversarial-pipe-mode)', ''), false],
+    ['the-hammer-lacey[bot]', 'the-hammer-lacey[bot]', message.replace('Closed-By: hammer (adversarial-pipe-mode)', ''), true],
+    ['the-hammer-lacey[bot]', null, message, true],
+  ]) {
+    const commit = { sha: currentHead, author: { login: author },
+      committer: { login: committer }, commit: { message: commitMessage },
+      files: [{ ...primaryFile, patch: '@@ -10 +10 @@\n-new\n+old' }] };
+    const primaryChange = { headSha: currentHead, hasHammerCommits: true,
+      primaryHead: reviewedHead, mergeBase: 'b'.repeat(40), primaryFiles: [primaryFile], finalFiles: [],
+      reversalAuthorizations: [{ commit, review, reviewedFiles: [primaryFile], parentFiles: [primaryFile] }] };
+    const ground = hamGroundTruth({ headSha: currentHead, parentSha: reviewedHead,
+      author: commit.author, committer: commit.committer });
+    ground.commit.trailers = { ...parseCommitTrailers(commitMessage),
+      'remediated-findings': ground.commit.trailers['Remediated-Findings'] };
+    ground.commit.primaryChange = primaryChange;
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+      env: ENV, hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+      hamTerminalRemediationGroundTruth: ground,
+    });
+    assert.equal(checkPrimaryChange(primaryChange, currentHead).ok, allowed);
+    assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, allowed);
+    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, allowed);
+    assert.equal(result.eligible, allowed);
+    // Explicit terminal trailers remain a separate suppression path. Exercise
+    // the linked identity branch without them, independently of merge authority.
+    assert.equal(isTerminalCloserCommitIdentity({ ...commit, commit: { message:
+      commitMessage.replace('Closed-By: hammer (adversarial-pipe-mode)', '') } }).suppressed,
+    allowed && Boolean(author));
+  }
+});
+
+test('HAM committer identity cannot treat terminal ticket and Closed-By as advisory', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', blockingFindingCount: 1, blockingFindingState: 'known' },
+    prMetadata: { headSha: 'def67890' },
+  });
+  for (const overrides of [{ workerTicket: 'HAM-lookalike' }, { closedBy: 'hammer' }]) {
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+      env: ENV, hamTerminalRemediation: hamEvidence(),
+      hamTerminalRemediationGroundTruth: hamGroundTruth({ author: null,
+        committer: 'the-hammer-lacey[bot]', ...overrides }),
+    });
+    assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
+    assert.equal(result.eligible, false);
   }
 });

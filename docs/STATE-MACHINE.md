@@ -530,6 +530,25 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 > and for hosts without AMA. Operational runbook:
 > [`RUNBOOK-ama-closure.md`](RUNBOOK-ama-closure.md).
 
+A merge-agent rebase of a worker-authored head creates a new SHA that remains
+reviewable unless it carries recognized terminal closer trailers or linked
+closer-author HAM-ticket provenance with no linked foreign committer. Merge-agent
+finalize/remediation commits with `Worker-Ticket: PR-<n>` and no recognized
+terminal trailer remain reviewable, including when authored by `merge-agent-lacey`.
+A closer committer stamp alone does not
+suppress review, certify daemon clean merge, or arm stale-head hammer resume.
+The watcher runs review on that new SHA before ordinary closure resumes; busy
+bases can therefore produce another rebase/review cycle. Real terminal HAM
+commits with an unlinked author remain accepted by eligibility and reversal
+checks when their linked HAM committer carries the full terminal trailer set.
+Either linked non-HAM identity rejects terminal-remediation certification and
+reversal authorization, even when the trailers are present.
+Suppression also rejects terminal trailers with either linked foreign identity.
+The remote GitHub probe requires linked closer provenance; an unidentified remote
+commit cannot suppress review. Local Git retains the offline trailer-only
+fallback, so this guard does not eliminate deliberate trailer forgery on the
+local-first path. Downstream closure authority remains independently verified.
+
 Once a review settles on the current head, each watcher tick routes closure
 down exactly one of two paths:
 
@@ -611,8 +630,14 @@ Key control points:
   in-lease GitHub gate (`bin/hammer-merge.sh`). The hammer gate reloads the same
   merge-authority config as `ama-check`; strict remediation defaults to enabled.
   The uncited remainder stays protected. Authorization also requires
-  verified closure ancestry and live GitHub HAM committer identity (linked author fallback
-  only when no committer is linked). Repeat the trailer for every finding whose
+  verified closure ancestry and a `Worker-Ticket` of `HAM` or `AMA-PR-<n>`.
+  The shared `hamCommitIdentityMatches` rule rejects any linked non-HAM author
+  or committer, then accepts a linked HAM author, or an unlinked author with a
+  linked HAM committer and the full terminal trailer set (`Worker-Class: hammer`,
+  including `hammer-corp` / `hammer-claude`, the valid ticket, and
+  `Closed-By: hammer (adversarial-pipe-mode)`). A rebase stamp on a linked foreign
+  author cannot authorize a reversal, even with those trailers. Repeat the trailer
+  for every finding whose
   fix edits primary-change lines, with `kind=blocking` or `kind=non-blocking` (blocking
   by default). Each reviewer family supplies its own latest final review; multiple
   final reviewers on the same head can be cited together. Split HAM commits by

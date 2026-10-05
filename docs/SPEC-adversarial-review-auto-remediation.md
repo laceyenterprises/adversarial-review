@@ -2322,6 +2322,35 @@ For each row the daemon must:
 
 The `--admin` flag is an intentional branch-protection bypass for this lane. The safety floor is therefore explicit and cumulative: the row must already be in the watcher-authorized fast-merge state, the live head must still equal the authorized SHA, CI must summarize as successful, an allowlisted `fast-merge:*` label must still be present, and `fast-merge-veto` must remain absent. If any of those predicates stop being true, the daemon must fail closed to the normal adversarial-review path or leave the row in `fast_merge_skipped` for a later poll; it must not broaden merge authority.
 
+HAM worker-ticket provenance is defined once by
+`src/ama/ham-provenance.mjs::isHamWorkerTicket`: after trimming whitespace,
+accept exactly `HAM` or `AMA-PR-<n>` (decimal digits), case-insensitively.
+`HAM-<suffix>`, `HAM anything`, and other prefix lookalikes do not qualify.
+Closer identity suppression, fast-merge changed-head verification, primary-change
+reversal authorization, and AMA terminal-remediation eligibility use this ticket
+predicate. `hamCommitIdentityMatches` rejects any linked non-HAM author or
+committer. Otherwise, it accepts a HAM author, or an unlinked author with a
+HAM committer only with `Worker-Class: hammer` (including
+`hammer-corp` / `hammer-claude` for reversal authorization), a valid
+`Worker-Ticket`, and `Closed-By: hammer (adversarial-pipe-mode)`. This preserves
+legacy HAM commits whose GitHub author is unlinked while rejecting a HAM
+committer stamped onto a linked foreign author, even with those trailers.
+Eligibility still requires its exact `Worker-Class: hammer` safety check. Closer suppression uses
+its narrower closer-login allowlist and requires a HAM ticket in its identity
+branch, with no linked foreign committer. Merge-agent finalize/remediation
+commits with `Worker-Ticket: PR-<n>` and no recognized terminal trailer remain
+reviewable even when authored by `merge-agent-lacey`. Explicit `Closed-By` /
+`Closer` markers also require the shared identity check whenever linked logins
+are present. The GitHub probe calls `isTerminalCloserCommitIdentity` with
+`requireLinkedIdentity: true`, so a remote commit with neither login linked
+cannot suppress review. An unlinked author with a linked HAM committer still
+requires the full terminal trailer set described above. Local Git reads retain
+trailer-only suppression without GitHub credentials; this local-first fallback
+does not authenticate the push actor or replace downstream AMA/fast-merge checks.
+Linked author and committer logins are email-based signals, not proof of the
+push actor; see the limitation in
+[`KNOWN-SHARP-EDGES.md`](../KNOWN-SHARP-EDGES.md#terminal-closer-trailers-are-not-identity-proof).
+
 The only supported changed-head exception is a HAM terminal-remediation commit
 directly on top of the authorized head. That exception is fail-closed. For any
 lane that waives stale-head, blocking-finding, remediation-state, or non-HAM

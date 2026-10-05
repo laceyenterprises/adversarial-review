@@ -30,6 +30,12 @@ function normalizeHamLogin(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+// The hammer emits HAM or its AMA dispatch ticket. Prefix lookalikes and
+// arbitrary HAM suffixes are not provenance; all closure gates share this rule.
+export function isHamWorkerTicket(value) {
+  return /^(HAM|AMA-PR-\d+)$/i.test(String(value || '').trim());
+}
+
 // HSC-01: blank lines BETWEEN trailer lines must not truncate the scan. The
 // hammer commits its provenance with one `git commit -m` per trailer
 // (templates/hammer-prompt.md), and git renders every `-m` as its OWN paragraph
@@ -86,6 +92,24 @@ export function hamAuditCommentAuthorMatches(authorOrComment) {
   const commentAuthor = normalizeHamLogin(rawAuthor);
   if (!commentAuthor) return false;
   return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
+}
+
+// Linked logins are provenance signals, not cryptographic identity proof.
+// Either linked foreign identity disqualifies the commit. Only an unlinked
+// author may fall back to a HAM committer with the full terminal trailer set.
+export function hamCommitIdentityMatches(commit, {
+  trailers = parseCommitTrailers(commit?.commit?.message || commit?.message || ''),
+  loginMatches = hamAuditCommentAuthorMatches,
+} = {}) {
+  const login = (identity) => normalizeHamLogin(typeof identity === 'object' ? identity?.login : identity);
+  const author = login(commit?.author);
+  const committer = login(commit?.committer);
+  if ((author && !loginMatches(author)) || (committer && !loginMatches(committer))) return false;
+  if (author) return true;
+  return Boolean(committer)
+    && /^hammer(?:-corp|-claude)?$/i.test(trailers['worker-class'] || '')
+    && isHamWorkerTicket(trailers['worker-ticket'])
+    && trailers['closed-by'] === 'hammer (adversarial-pipe-mode)';
 }
 
 export { HAM_AUDIT_COMMENT_AUTHOR_LOGINS };

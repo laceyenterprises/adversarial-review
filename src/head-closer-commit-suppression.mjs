@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
-import { parseCommitTrailers } from './ama/ham-provenance.mjs';
+import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers } from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -292,6 +292,10 @@ const TERMINAL_CLOSER_BOT_IDENTITIES = new Set([
   'merge-agent-lacey',
   'the-hammer-lacey[bot]',
 ]);
+const TERMINAL_CLOSER_LINKED_LOGINS = new Set([
+  'merge-agent-lacey',
+  'the-hammer-lacey[bot]',
+]);
 const NON_REVIEWABLE_HEAD_DELTA_REASONS = new Set([
   'closer-commit-trailer',
 ]);
@@ -315,7 +319,7 @@ function normalizeCommitTrailers(trailers) {
   return normalized;
 }
 
-export function isTerminalCloserCommitIdentity(commit = {}) {
+export function isTerminalCloserCommitIdentity(commit = {}, { requireLinkedIdentity = false } = {}) {
   const message = commit?.commit?.message || commit?.message || '';
   const trailers = {
     ...parseCommitTrailers(message),
@@ -324,6 +328,17 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
   const normalizedTrailers = {};
   for (const [key, value] of Object.entries(trailers)) {
     normalizedTrailers[normalizeIdentityPart(key)] = String(value || '').trim();
+  }
+  const linkedLogin = (identity) => normalizeIdentityPart(typeof identity === 'object' ? identity?.login : identity);
+  const hasLinkedIdentity = Boolean(linkedLogin(commit?.author) || linkedLogin(commit?.committer));
+  const identityMatches = hamCommitIdentityMatches(commit, {
+    trailers: normalizedTrailers,
+    loginMatches: (login) => TERMINAL_CLOSER_LINKED_LOGINS.has(normalizeIdentityPart(login)),
+  });
+  // Remote probes must bind terminal markers to linked closer provenance.
+  // Local Git has no linked logins and retains the offline trailer fallback.
+  if ((requireLinkedIdentity || hasLinkedIdentity) && !identityMatches) {
+    return { suppressed: false, reason: null };
   }
   const trailerKey = normalizedTrailers['closed-by'] ? 'closed-by' : 'closer';
   const trailerIdentity = normalizeTrailerIdentity(normalizedTrailers[trailerKey]);
@@ -335,11 +350,13 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
     };
   }
 
-  const candidates = [
-    commit?.committer?.login,
-  ].map(normalizeIdentityPart).filter(Boolean);
-  const closerIdentity = candidates.find((candidate) => TERMINAL_CLOSER_BOT_IDENTITIES.has(candidate));
-  if (closerIdentity) {
+  const closerIdentity = normalizeIdentityPart(typeof commit?.author === 'object'
+    ? commit?.author?.login : commit?.author);
+  // The identity branch requires a linked closer author and rejects a linked
+  // foreign committer through the shared helper. Its unlinked-author fallback
+  // cannot reach this branch: the required Closed-By is handled above.
+  const workerTicket = normalizedTrailers['worker-ticket'] || '';
+  if (TERMINAL_CLOSER_LINKED_LOGINS.has(closerIdentity) && isHamWorkerTicket(workerTicket) && identityMatches) {
     return {
       suppressed: true,
       reason: 'closer-commit-identity',
@@ -500,7 +517,7 @@ export async function getHeadCloserCommitSuppression({
   // Daemon-robust: the terminal-closer identity is carried in the commit message
   // (`Closed-By: hammer` trailer), which local git reads without gh auth. The remote
   // probe below is the fallback for the rare case the commit is absent from the local
-  // checkout, and for a committer.login-only closer identity (not derivable locally).
+  // checkout, and for an author.login closer identity (not derivable locally).
   const localCommit = await fetchVerifiedCommitFromLocalGitImpl({
     repoPath,
     prNumber,
@@ -525,7 +542,7 @@ export async function getHeadCloserCommitSuppression({
         'api',
         `repos/${repoPath}/commits/${sha}`,
         '--jq',
-        '{sha:.sha,message:.commit.message,committerLogin:.committer.login}',
+        '{sha:.sha,message:.commit.message,authorLogin:.author.login,committerLogin:.committer.login}',
       ],
       retries: retryDelays.length,
       backoffMs: Number(retryDelays[0]) || 500,
@@ -535,9 +552,10 @@ export async function getHeadCloserCommitSuppression({
     const commit = {
       sha: raw.sha || sha,
       message: raw.message || '',
+      author: { login: raw.authorLogin || null },
       committer: { login: raw.committerLogin || null },
     };
-    return isTerminalCloserCommitIdentity(commit);
+    return isTerminalCloserCommitIdentity(commit, { requireLinkedIdentity: true });
   } catch (err) {
     logger?.warn?.(
       `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +

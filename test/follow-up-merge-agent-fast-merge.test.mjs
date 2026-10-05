@@ -90,6 +90,7 @@ function hamCommit({
   sha = 'sha-HAM',
   parentSha = 'sha-A',
   author = 'merge-agent-lacey',
+  ticket = 'HAM',
   remediatedFindings = '1 addressed (0 blocking, 1 non-blocking)',
   files = [{ filename: 'src/fix.mjs' }],
 } = {}) {
@@ -104,7 +105,7 @@ function hamCommit({
         'HAM remediate final adversarial findings',
         '',
         'Worker-Class: hammer',
-        'Worker-Ticket: HAM',
+        `Worker-Ticket: ${ticket}`,
         `Reviewed-Head: ${parentSha}`,
         'Closed-By: hammer (adversarial-pipe-mode)',
         `Remediated-Findings: ${remediatedFindings}`,
@@ -591,7 +592,7 @@ test('fast-merge head change requeues through canonical review reset and never m
   assert.equal(claimWithWatcherCas(db, 802).changes, 1);
 });
 
-test('fast-merge HAM provenance head change is authorized and merged at the new exact head', async () => {
+test('fast-merge AMA dispatch ticket provenance head change is authorized and merged at the new exact head', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-root-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-audit-'));
   const db = makeDb();
@@ -600,7 +601,7 @@ test('fast-merge HAM provenance head change is authorized and merged at the new 
   const gh = makeGhStub({
     views: [openView('sha-HAM'), openView('sha-HAM')],
     checks: [successChecks(), successChecks()],
-    commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
+    commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A', ticket: 'AMA-PR-42' }) },
     timeline: hamTimeline(),
   });
   seedHqOwnerConfig(hqRoot);

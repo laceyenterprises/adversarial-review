@@ -730,6 +730,6 @@ test('a transient primary-change API failure recovers within the default gh retr
     prNumber: 5348, headSha: HEAD_SHA, includePrimaryChange: true, execFileImpl,
     execGhWithRetryImpl: (options) => execGhWithRetry({ ...options, sleep: async () => {} }),
     logger: { warn() {}, debug() {} } });
-  assert.equal(prReads, 2);
+  assert.equal(prReads, 3);
   assert.equal(commit.primaryChange.hasHammerCommits, false);
 });

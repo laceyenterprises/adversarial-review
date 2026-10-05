@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkPrimaryChange, fetchPrimaryChange, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
+import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 const head = 'c'.repeat(40);
+// This suite isolates history semantics; ci-cost.test.mjs exercises the live collector.
+const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {
+  fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true }),
+});
 function predicate(primaryChange) {
   return isEligibleForAmaClosure({ headSha: head, verdict: 'approved', riskClass: 'low',
     remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,

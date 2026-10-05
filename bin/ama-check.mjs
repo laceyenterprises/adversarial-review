@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { checkCiCost } from '../src/ama/ci-cost.mjs';
 /**
  * AMA eligibility CLI shim.
  *
@@ -556,6 +557,7 @@ function main(argv = process.argv.slice(2)) {
   }
   const primaryChange = args['primary-change'] ? loadJson(args['primary-change'])
     : { headSha: prMetadata.headSha, hasHammerCommits: null };
+  const ciCostGate = checkCiCost(primaryChange?.ciCost, prMetadata.headSha);
   if (hamTerminalRemediationGroundTruth?.commit) {
     hamTerminalRemediationGroundTruth = {
       ...hamTerminalRemediationGroundTruth,
@@ -568,6 +570,10 @@ function main(argv = process.argv.slice(2)) {
     hamTerminalRemediationGroundTruth,
     rebaseReviewCoverage,
   });
+  if (!ciCostGate.ok) {
+    result.eligible = false;
+    if (!result.reasons.includes(ciCostGate.reason)) result.reasons.push(ciCostGate.reason);
+  }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return 0;
 }

@@ -2079,3 +2079,66 @@ for (const exact of [true, false]) test(`REMORPHAN exact-head recovery ${exact ?
     assert.equal(summary.reviewerSpawns.some(spawn => spawn.subjectContext?.reviewerHeadSha === 'sha-happy-101'), exact, output);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+
+test('engaged discovery drain spills unknown-capacity Gemini and refreshes spawn waiver metadata', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const routeUrl = fileUrl('src', 'reviewer-route-selection.mjs');
+    const fallbackUrl = fileUrl('src', 'review-worker-class-fallback.mjs');
+    const routeSource = `
+      import * as actual from '${routeUrl}?actual';
+      import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
+      export * from '${routeUrl}?actual';
+      export function selectReviewerRouteForAttempt(args) {
+        return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini,
+          timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: 'gemini',
+            timeoutFailures: 2, sameModelAsBuilder: false, builderClass: 'codex' } };
+      }
+    `;
+    const fallbackSource = `
+      export * from '${fallbackUrl}?actual';
+      export async function resolveReviewerWorkerClassWithFallback(args) {
+        return args.depthPressure?.engaged
+          ? { fellBack: true, workerClass: 'claude-code', from: 'gemini', to: 'claude-code',
+              reason: 'queue-depth-pressure', queueDepth: args.depthPressure.depth,
+              queueDepthThreshold: args.depthPressure.threshold }
+          : { fellBack: false, reason: 'fixture-no-pressure' };
+      }
+    `;
+    const loader = buildLoaderSource().replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(routeUrl)}) return {
+        format: 'module', shortCircuit: true, source: ${JSON.stringify(routeSource)} };
+      if (url === ${JSON.stringify(fallbackUrl)}) return {
+        format: 'module', shortCircuit: true, source: ${JSON.stringify(fallbackSource)} };
+      return nextLoad(url, context);
+    `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: fixtureEnv({ ...installGhFixture(tmp), GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
+          GH_CLAUDE_REVIEWER_TOKEN: 'fixture-claude',
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: '1',
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '2' }),
+      });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /Draining 2 reviewer dispatch candidate\(s\) before continuing reviewer discovery/);
+    assert.match(output, /review-queue-depth-route .*from=gemini to=claude reason=queue-depth-pressure/);
+    const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
+    const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+    const preferred = summary.reviewerSpawns.find((spawn) => spawn.subjectContext.reviewerModel === 'gemini');
+    const spill = summary.reviewerSpawns.find((spawn) => spawn.subjectContext.reviewerModel === 'claude');
+    assert.ok(preferred, output);
+    assert.ok(spill, output);
+    assert.match(preferred.subjectContext.crossModelReviewWaiverReason, /to reviewer=gemini/);
+    assert.equal(spill.subjectContext.crossModelReviewWaived, false);
+    assert.equal(spill.subjectContext.crossModelReviewWaiverReason, null);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

@@ -46,6 +46,8 @@ import {
 } from '../src/review-state-statements.mjs';
 import {
   compareReviewerDispatchCandidates,
+  createReviewerLaneState,
+  runBoundedReviewerDispatchQueue,
   reviewerDispatchPassKind,
   reviewerSafetyPassKind,
 } from '../src/watcher-reviewer-pool.mjs';
@@ -968,6 +970,7 @@ function spillCandidate(ctl, prNumber, createdAt, {
     prNumber, repoPath: 'o/r', reviewerModel: 'gemini', wakePriority,
     subject: { createdAt, builderClass }, hasPriorPostedReview: rereview,
     current: { review_status: 'pending', reviewer_model: 'gemini' },
+    depthPassKind: rereview ? 'rereview' : 'first-pass',
     async reevaluateDepthSpill() {
       const passKind = rereview ? 'rereview' : 'first-pass';
       const decision = await resolveReviewerWorkerClassWithFallback({
@@ -984,15 +987,29 @@ function spillCandidate(ctl, prNumber, createdAt, {
   };
 }
 
-function prepareSpills(ctl, candidates, options = {}) {
-  return prepareQueueDepthSpillover(candidates, {
+async function prepareSpills(ctl, candidates, options = {}) {
+  const dispatchOptions = {
     controller: ctl, geminiCredentialConcurrency: 1, maxConcurrent: 6,
     activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]),
     compareCandidates: compareReviewerDispatchCandidates, logger: {}, ...options,
+  };
+  const ordered = await prepareQueueDepthSpillover(candidates, dispatchOptions);
+  const releases = [];
+  const started = [];
+  for (const candidate of ordered) candidate.run = () => new Promise((resolve) => {
+    started.push(candidate.prNumber);
+    releases.push(() => resolve({ dispatched: true }));
   });
+  const result = await runBoundedReviewerDispatchQueue(ordered, {
+    ...dispatchOptions, singleWave: true, singleWaveSettleGraceMs: 1,
+  });
+  for (const release of releases) release();
+  ordered.started = started;
+  ordered.dispatchResult = result;
+  return ordered;
 }
 
-test('#7743 replay: sticky saturated-deferred Gemini beats newer discovery and wake priority', async () => {
+test('saturated spill follows the pool wake priority and preserves the per-tick budget', async () => {
   const root = tempRoot();
   try {
     const ctl = controller({ root, depth: 6, threshold: 6 });
@@ -1000,9 +1017,10 @@ test('#7743 replay: sticky saturated-deferred Gemini beats newer discovery and w
     const newer = spillCandidate(ctl, 7750, '2026-10-05T02:30:00Z', { wakePriority: true });
     const rereview = spillCandidate(ctl, 7702, '2026-10-04T01:00:00Z', { rereview: true });
     const order = await prepareSpills(ctl, [newer, rereview, older]);
-    assert.deepEqual(order.map((c) => c.prNumber), [7743, 7750, 7702]);
-    assert.equal(older.reviewerModel, 'claude-code');
-    assert.equal(newer.reviewerModel, 'gemini', 'the single spill slot belongs to #7743');
+    assert.deepEqual(order.map((c) => c.prNumber), [7750, 7743, 7702]);
+    assert.equal(older.reviewerModel, 'gemini');
+    assert.equal(newer.reviewerModel, 'claude-code', 'the pool gives the wake candidate priority');
+    assert.deepEqual(order.started, [7750]);
     const report = readReviewQueueDepthFailoverReport(root);
     assert.equal(report.engagementSpilloverReviews, ctl.granted());
     assert.equal(report.cost.currentEngagementSpilloverReviews, ctl.granted());
@@ -1034,19 +1052,83 @@ test('every drain re-evaluates sticky Gemini and skips builder-equals-fallback',
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('unknown preferred capacity does not spend fallback quota and logs oldest age', async () => {
+test('unknown Gemini capacity keeps one preferred slot and spills the rest with oldest-age logging', async () => {
   const root = tempRoot();
   try {
     const ctl = controller({ root, depth: 6, threshold: 2 });
-    const candidate = spillCandidate(ctl, 7743, '2026-10-05T01:55:00Z');
+    const oldest = spillCandidate(ctl, 7743, '2026-10-05T01:55:00Z');
+    const newer = spillCandidate(ctl, 7750, '2026-10-05T02:30:00Z');
     const logs = [];
-    await prepareSpills(ctl, [candidate], { geminiCredentialConcurrency: null,
-      nowMs: Date.parse('2026-10-05T02:55:00Z'), logger: { log: (line) => logs.push(line) } });
-    assert.equal(candidate.reviewerModel, 'gemini');
+    const ordered = await prepareSpills(ctl, [newer, oldest], {
+      geminiCredentialConcurrency: null, activeReviewerCounts: new Map(),
+      nowMs: Date.parse('2026-10-05T02:55:00Z'), logger: { log: (line) => logs.push(line) },
+    });
+    assert.equal(oldest.reviewerModel, 'gemini');
+    assert.equal(newer.reviewerModel, 'claude-code');
+    assert.equal(ctl.granted(), 1);
+    assert.deepEqual(ordered.started, [7743, 7750]);
     assert.match(logs[0], /oldest_first_pass_age_ms=3600000/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('unknown Gemini capacity spills when the degraded single slot is already occupied', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 2, threshold: 2 });
+    const candidate = spillCandidate(ctl, 1, '2026-10-05T01:55:00Z');
+    const ordered = await prepareSpills(ctl, [candidate], { geminiCredentialConcurrency: null });
+    assert.equal(candidate.reviewerModel, 'claude-code');
+    assert.deepEqual(ordered.started, [1]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('pool protects the wake Gemini slot when its fallback is refused', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 2, threshold: 2 });
+    const older = spillCandidate(ctl, 1, '2026-10-05T01:55:00Z');
+    const wake = spillCandidate(ctl, 2, '2026-10-05T02:30:00Z', { wakePriority: true });
+    wake.reevaluateDepthSpill = async () => assert.fail('free Gemini seat must not spill');
+    const ordered = await prepareSpills(ctl, [older, wake], { activeReviewerCounts: new Map() });
+    assert.equal(wake.reviewerModel, 'gemini');
+    assert.equal(older.reviewerModel, 'claude-code');
+    assert.deepEqual(ordered.started, [2, 1]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('non-Gemini pipeline seats consume preferred capacity before the next spill', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 2, threshold: 2 });
+    const pipeline = spillCandidate(ctl, 1, '2026-10-05T01:55:00Z');
+    pipeline.reviewerModel = 'codex';
+    pipeline.pipelineGeminiSeats = 1;
+    const next = spillCandidate(ctl, 2, '2026-10-05T02:30:00Z');
+    const ordered = await prepareSpills(ctl, [next, pipeline], { activeReviewerCounts: new Map() });
+    assert.equal(next.reviewerModel, 'claude-code');
+    assert.deepEqual(ordered.started, [1, 2]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('spill honors the pool rereview floor and uses the same lane for pressure and charging', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = createFirstPassSpilloverController({ rootDir: root, readDepth: () => 2,
+      readRereviewDepth: () => 2, resolveThresholdImpl: () => 2, resolveRereviewThresholdImpl: () => 2, logger: {} });
+    const first = spillCandidate(ctl, 1, '2026-10-05T01:55:00Z');
+    const rereview = spillCandidate(ctl, 2, '2026-10-05T02:30:00Z', { rereview: true });
+    const laneState = createReviewerLaneState({ firstPassBurstLimit: 1 });
+    laneState.firstPassStartsSinceRereview = 1;
+    const ordered = await prepareSpills(ctl, [first, rereview], {
+      activeReviewerCounts: new Map(), laneState,
+    });
+    assert.equal(rereview.reviewerModel, 'gemini');
+    assert.equal(first.reviewerModel, 'claude-code');
+    assert.deepEqual(ordered.started, [2, 1]);
+    assert.equal(readReviewQueueDepthFailoverReport(root).lanes['first-pass'].cost.spilloverReviewsTotal, 1);
+    assert.equal(readReviewQueueDepthFailoverReport(root).lanes.rereview.cost.spilloverReviewsTotal, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('per-tick spill budget drains a saturated backlog across consecutive ticks', async () => {
   const root = tempRoot();
@@ -1084,5 +1166,19 @@ test('refund corrects the live engagement report and frees a slot for the next d
     await prepareSpills(ctl, [candidate]);
     assert.equal(candidate.reviewerModel, 'claude-code');
     assert.equal(readReviewQueueDepthFailoverReport(root).engagementSpilloverReviews, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('spill pressure uses the explicit charge lane when row markers have been cleared', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = createFirstPassSpilloverController({ rootDir: root, readDepth: () => 0,
+      readRereviewDepth: () => 2, resolveThresholdImpl: () => 2, resolveRereviewThresholdImpl: () => 2, logger: {} });
+    const candidate = spillCandidate(ctl, 1, '2026-10-05T01:55:00Z', { rereview: true });
+    delete candidate.hasPriorPostedReview;
+    await prepareSpills(ctl, [candidate]);
+    assert.equal(candidate.reviewerModel, 'claude-code');
+    assert.equal(readReviewQueueDepthFailoverReport(root).lanes.rereview.cost.spilloverReviewsTotal, 1);
+    assert.equal(readReviewQueueDepthFailoverReport(root).lanes['first-pass'].cost.spilloverReviewsTotal, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

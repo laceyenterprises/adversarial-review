@@ -641,38 +641,29 @@ export function createFirstPassSpilloverController({
   };
 }
 
-/** Run on every drain, including candidates deferred by an earlier launch wave.
- * Keep the graded per-tick budget: repeated drains reuse its unspent/refunded
- * slots. The pool remains the authority for fallback credential admission.
+/** Prepare every drain, including candidates deferred by an earlier wave.
+ * The pool calls the spill hook only when its actual Gemini seats are full.
+ * Repeated drains reuse the controller's unspent/refunded per-tick budget.
  */
 export async function prepareQueueDepthSpillover(candidates, {
-  controller, geminiCredentialConcurrency = null, activeReviewerCounts = new Map(),
-  maxConcurrent = 1, compareCandidates, nowMs = Date.now(), logger = console,
+  controller, compareCandidates, nowMs = Date.now(), logger = console,
 } = {}) {
-  const ordered = [...candidates].sort((a, b) => compareCandidates(
-    { ...a, wakePriority: false }, { ...b, wakePriority: false },
-  ));
-  const firstPass = ordered.filter((candidate) => candidate.hasPriorPostedReview === false
-    || (candidate.hasPriorPostedReview !== true && !candidate.current?.posted_at
-      && !candidate.current?.rereview_requested_at));
+  const ordered = [...candidates].sort(compareCandidates);
+  const passKind = (candidate) => candidate.depthPassKind ?? (
+    candidate.hasPriorPostedReview === false
+      || (candidate.hasPriorPostedReview !== true && !candidate.current?.posted_at
+        && !candidate.current?.rereview_requested_at) ? 'first-pass' : 'rereview'
+  );
+  const firstPass = ordered.filter((candidate) => passKind(candidate) === 'first-pass');
   const oldestMs = Math.min(...firstPass.map((candidate) => Date.parse(candidate.subject?.createdAt)).filter(Number.isFinite));
   logger.log?.(`[watcher] review-queue-depth-wait oldest_first_pass_age_ms=${Number.isFinite(oldestMs) ? Math.max(0, nowMs - oldestMs) : 0} first_pass_waiting=${firstPass.length}`);
-  if (!controller?.plan().engaged && !controller?.plan('rereview').engaged) return candidates;
-  const count = (key) => Number(activeReviewerCounts instanceof Map
-    ? activeReviewerCounts.get(key) || 0 : activeReviewerCounts?.[key] || 0);
-  if (count('__total__') >= maxConcurrent) return ordered;
-  // Unknown broker capacity fails closed for discretionary spending.
-  let preferredFree = geminiCredentialConcurrency === null ? Infinity
-    : Math.max(0, Math.min(maxConcurrent - count('__total__'), geminiCredentialConcurrency - count('gemini')));
   for (const candidate of ordered) {
-    if (candidate.reviewerModel !== 'gemini') continue;
-    const seats = Math.max(1, Number(candidate.pipelineGeminiSeats || 0));
-    if (preferredFree >= seats) {
-      preferredFree -= seats;
-      continue;
-    }
-    const passKind = firstPass.includes(candidate) ? 'first-pass' : 'rereview';
-    if (controller?.depthPressure(passKind)?.engaged) await candidate.reevaluateDepthSpill?.();
+    candidate.prepareForGeminiSaturation = async () => {
+      if (candidate.reviewerModel === 'gemini'
+        && controller?.depthPressure(passKind(candidate))?.engaged) {
+        await candidate.reevaluateDepthSpill?.();
+      }
+    };
   }
   return ordered;
 }

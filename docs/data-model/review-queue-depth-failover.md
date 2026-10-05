@@ -22,7 +22,12 @@ state only, so first-pass and re-review can disagree without resetting each
 other's cost ledger or appending alternating engage/disengage events.
 
 The top-level `armed`, `engaged`, `updatedAt`, `lastTransition`, `transitions`,
-and `cost` fields are derived summaries across the lane records. Top-level
+`engagementSpilloverReviews`, and `cost` fields are derived summaries across the
+lane records. Top-level `engagementSpilloverReviews` is the live net count of
+depth-spill admissions minus refunds across the lanes
+(`cost.currentEngagementSpilloverReviews`). The identically named field in
+`transitions[]` is a historical snapshot at that transition; refunds update
+the live count but do not rewrite transition snapshots. Top-level
 `depth`, `threshold`, and `spillSlots` remain the first-pass values for
 compatibility with older operator tooling. Older reports without `lanes` are
 loaded as a first-pass lane report and rewritten in the lane shape on the next

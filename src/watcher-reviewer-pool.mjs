@@ -1130,6 +1130,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const active = new Set();
   const activeRecords = new Map();
   const errors = [];
+  const saturationPrepared = new Set();
   const laneStarts = { firstPass: 0, rereview: 0 };
   let maxObservedConcurrency = 0;
   let attempted = 0;
@@ -1275,6 +1276,11 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         continue;
       }
       if (isGeminiCandidate(entry.candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiConcurrencyLimit) {
+        // Use actual admission order and occupied seats, including pipelines.
+        // Returning to the selector after the async hook preserves lane fairness
+        // and rechecks capacity if another reviewer completed during the probe.
+        if (typeof entry.candidate.prepareForGeminiSaturation === 'function'
+          && !saturationPrepared.has(entry.candidate)) return entry;
         recordDeferredReason(
           entry,
           geminiConcurrencyLimit < 1
@@ -1323,6 +1329,13 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       && !initialWaveClosed
       && (entry = nextStartableEntry()) !== null
     ) {
+      if (isGeminiCandidate(entry.candidate)
+        && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiConcurrencyLimit
+        && !saturationPrepared.has(entry.candidate)) {
+        saturationPrepared.add(entry.candidate);
+        await entry.candidate.prepareForGeminiSaturation();
+        continue;
+      }
       entry.started = true;
       const startedEntry = entry;
       recordLaneAdmission(startedEntry.candidate);

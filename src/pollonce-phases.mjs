@@ -1701,15 +1701,17 @@ export async function processReviewSubject(entry, ctx) {
       });
       if (route.quotaBlocked) return;
       let depthSpillReserved = false;
+      const dispatchHasPriorPostedReview =
+        entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
       const depthPassKind = reviewerDispatchPassKind({
         current: existing,
-        hasPriorPostedReview: entry.hasPriorPostedReview,
+        hasPriorPostedReview: dispatchHasPriorPostedReview,
       });
 
       // RWF-01: review-dispatch worker-class fallback (quota trigger)
       // RSP-01: plus the queue-depth trigger, when the break-glass lever is
       // armed and this tick still has spill budget. Depth routing is deferred
-      // until each drain has the full, oldest-first census and live capacity.
+      // until pool admission confirms Gemini saturation in its live lane order.
       // `depthPressure()` is
       // `{ engaged: false }` on every host that has not armed it, which makes
       // the resolver take its pre-RSP-01 path unchanged.
@@ -1838,40 +1840,44 @@ export async function processReviewSubject(entry, ctx) {
         );
       }
 
-      crossModelWaiverReason = route.afhReviewerFallback?.lastResort
-        ? (
-            `AFH last-resort reviewer fallback switched reviewer=${route.afhReviewerFallback.fromReviewerModel} ` +
-            `to reviewer=${route.afhReviewerFallback.toReviewerModel} because every cross-model reviewer ` +
-            `(including gemini) is grounded (${route.afhReviewerFallback.reason}); ` +
-            `reviewer=${route.afhReviewerFallback.toReviewerModel} matches builder=${route.builderClass}, ` +
-            'so the cross-model guarantee is waived until a provider recovers.'
-          )
-        : route.timeoutFallback
-        ? (
-            `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
-            `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +
-            `${route.timeoutFallback.timeoutFailures} timeout failures; ` +
-            (route.timeoutFallback.sameModelAsBuilder
-              ? `reviewer=${route.timeoutFallback.toReviewerModel} matches builder=${route.timeoutFallback.builderClass}, so cross-model guarantee is waived for this recovery pass.`
-              : 'cross-model guarantee remains intact for this recovery pass.')
-          )
-        : route.reviewWorkerClassFallback?.lastResort
-        ? (
-            `review-worker-class fallback switched worker=${route.reviewWorkerClassFallback.fromWorkerClass} ` +
-            `to worker=${route.reviewWorkerClassFallback.toWorkerClass} because the selected reviewer was ` +
-            `grounded (${route.reviewWorkerClassFallback.reason}); reviewer=${route.reviewerModel} ` +
-            `matches builder=${route.builderClass}, so the cross-model guarantee is waived for this recovery pass.`
-          )
-        : describeCrossModelReviewWaiver(
-            route.builderClass,
-            route.reviewerModel,
-            process.env
+      function updateCrossModelWaiverReason() {
+        crossModelWaiverReason = route.afhReviewerFallback?.lastResort
+          && route.afhReviewerFallback.toReviewerModel === route.reviewerModel
+          ? (
+              `AFH last-resort reviewer fallback switched reviewer=${route.afhReviewerFallback.fromReviewerModel} ` +
+              `to reviewer=${route.afhReviewerFallback.toReviewerModel} because every cross-model reviewer ` +
+              `(including gemini) is grounded (${route.afhReviewerFallback.reason}); ` +
+              `reviewer=${route.afhReviewerFallback.toReviewerModel} matches builder=${route.builderClass}, ` +
+              'so the cross-model guarantee is waived until a provider recovers.'
+            )
+          : route.timeoutFallback?.toReviewerModel === route.reviewerModel
+          ? (
+              `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
+              `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +
+              `${route.timeoutFallback.timeoutFailures} timeout failures; ` +
+              (route.timeoutFallback.sameModelAsBuilder
+                ? `reviewer=${route.timeoutFallback.toReviewerModel} matches builder=${route.timeoutFallback.builderClass}, so cross-model guarantee is waived for this recovery pass.`
+                : 'cross-model guarantee remains intact for this recovery pass.')
+            )
+          : route.reviewWorkerClassFallback?.lastResort
+          ? (
+              `review-worker-class fallback switched worker=${route.reviewWorkerClassFallback.fromWorkerClass} ` +
+              `to worker=${route.reviewWorkerClassFallback.toWorkerClass} because the selected reviewer was ` +
+              `grounded (${route.reviewWorkerClassFallback.reason}); reviewer=${route.reviewerModel} ` +
+              `matches builder=${route.builderClass}, so the cross-model guarantee is waived for this recovery pass.`
+            )
+          : describeCrossModelReviewWaiver(
+              route.builderClass,
+              route.reviewerModel,
+              process.env
+            );
+        if (crossModelWaiverReason) {
+          console.warn(
+            `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
           );
-      if (crossModelWaiverReason) {
-        console.warn(
-          `[watcher] cross-model-review-waived repo=${repoPath} pr=${prNumber} ${crossModelWaiverReason}`
-        );
+        }
       }
+      updateCrossModelWaiverReason();
 
       // (stale-drift check already ran at the top of the per-PR loop;
       // duplicate block removed — caused SyntaxError on import per LAC-439.)
@@ -2746,8 +2752,6 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
-      const dispatchHasPriorPostedReview =
-        entry.hasPriorPostedReview ?? Boolean(stmtHasPostedReview.get(repoPath, prNumber));
       const dispatchCandidate = {
         repoPath,
         prNumber,
@@ -2761,6 +2765,7 @@ export async function processReviewSubject(entry, ctx) {
         subject,
         current,
         hasPriorPostedReview: dispatchHasPriorPostedReview,
+        depthPassKind,
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
@@ -2774,12 +2779,21 @@ export async function processReviewSubject(entry, ctx) {
           firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason: 'pool-admission-deferred' });
           depthSpillReserved = false;
           route = this.preferredRoute;
+          this.syncDepthSpillRoute('pool-admission-deferred');
+        },
+        syncDepthSpillRoute(reason) {
+          const from = this.reviewerModel;
           this.reviewerModel = route.reviewerModel;
+          updateCrossModelWaiverReason();
+          if (from !== this.reviewerModel) console.log(
+            `[watcher] review-queue-depth-route repo=${repoPath} pr=${prNumber} `
+            + `from=${from} to=${this.reviewerModel} reason=${reason}`
+          );
         },
         async reevaluateDepthSpill() {
           if (depthSpillReserved) return;
           await applyWorkerFallback(firstPassSpilloverController?.depthPressure?.(depthPassKind) ?? null);
-          this.reviewerModel = route.reviewerModel;
+          this.syncDepthSpillRoute('queue-depth-pressure');
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         async run() {

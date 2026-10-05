@@ -564,3 +564,10 @@ test('HAMIDENT-02: bounded unlinked identity repair requires own HAM trailers an
     'Never re-author a', 'Never attempt a second re-author',
   ]) assert.ok(step.includes(required), `missing repair guard: ${required}`);
 });
+
+test('HAMCIWAKE-01 pending-only terminal audit records exact-head resume intent', () => {
+  assert.match(HAMMER_PROMPT, /resumeOwed: \(\$reason == "required-checks-pending"\)/);
+  assert.match(HAMMER_PROMPT, /resumeHead:.*\$validatedHead/);
+  assert.match(HAMMER_PROMPT, /hammer-ci-pending-resume-owed head=\$POST_REMEDIATION_SHA/);
+  assert.match(HAMMER_PROMPT, /ham_append_terminal_audit deferred required-checks-pending \|\| \{ ham_release_merge_lease; return 1; \}/);
+});

@@ -82,6 +82,8 @@ ham_append_terminal_audit() {
       mergeCommitSha: $mergeCommit,
       mergedAt: $mergedAt,
       reason: $reason,
+      resumeOwed: ($reason == "required-checks-pending"),
+      resumeHead: (if $reason == "required-checks-pending" then $validatedHead else null end),
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
     }' > "$ham_audit_attempt_json"
@@ -444,7 +446,8 @@ while :; do
     cat "$HAM_GATE_JSON" >&2
     HAM_REMOTE_CI_STATUS=remote-ci-timeout
     if ham_required_gate_pending_only; then
-      ham_append_terminal_audit deferred required-checks-pending || true
+      ham_append_terminal_audit deferred required-checks-pending || { ham_release_merge_lease; return 1; }
+      echo "hammer-ci-pending-resume-owed head=$POST_REMEDIATION_SHA" >&2
       ham_mark_merge_lease_retryable_abort required-checks-pending
     else
       ham_append_terminal_audit failed-without-merge github-gate-timeout || true

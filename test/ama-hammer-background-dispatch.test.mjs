@@ -899,3 +899,48 @@ test('abort removes a queued task without launching it', async () => {
   await queue.drain();
   assert.equal(launched, false);
 });
+
+for (const scenario of ['green', 'red', 'worker', 'blocking', 'live-blocking']) {
+  test(`HAMCIWAKE-01 watcher reviewed H0 -> closer H1: ${scenario}`, async t => {
+    const body = SETTLED_BODY.replace('- None.', scenario === 'blocking' ? '- Blocking defect.' : '- None.')
+      .replace('## Non-blocking Issues\n\n- None.', '## Non-blocking Issues\n\n- Measurement evidence needs clarification.');
+    const wakes = [];
+    const payloads = [];
+    const args = closureArgs({
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      resolveReviewCycleExhaustionImpl: () => ({ riskClass: 'low', reviewCycleExhausted: false }),
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === HEAD ? [body]
+        : scenario === 'live-blocking' ? ['## Verdict\nRequest changes\n## Blocking Issues\n- Live defect.'] : [],
+      resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: scenario !== 'worker', reason: 'closer-commit-trailer' }),
+      fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: 'H1', parentSha: HEAD, message: 'Closed-By: hammer' }),
+      resolveHamTerminalRemediationEvidenceImpl: async () => null,
+      runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible', reasons: [] }),
+      fetchMergedProtectiveDependentsImpl: async () => [],
+      fetchProtectivePredecessorStateImpl: async () => null,
+      requestEligibleHammerWakeImpl: options => { wakes.push(options); },
+      maybeDispatchAmaCloserImpl: async payload => { payloads.push(payload); return { dispatched: true }; },
+    });
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    args.reviewStateRow.review_body = body;
+    args.candidate.headSha = 'H1';
+    args.currentRevisionRef = 'H1';
+    args.candidate.statusCheckRollup = [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED',
+      conclusion: scenario === 'red' ? 'FAILURE' : 'SUCCESS' }];
+    args.candidate.branchProtection.requiredContexts = [];
+    args.loadConfigImpl = () => ({ getMergeAuthorityConfig: () => ({ enabled: true, branchProtection: { required: false } }) });
+    await maybeDispatchAmaClosureFor(args);
+    assert.equal(wakes.length, 1);
+    assert.equal(wakes[0].headSha, 'H1');
+    assert.equal(wakes[0].eligibility.eligible, scenario === 'green');
+    assert.equal(payloads.length, scenario === 'red' ? 0 : 1);
+    if (scenario === 'red') return;
+    assert.equal(payloads[0].reviewState.headSha, HEAD);
+    assert.equal(payloads[0].prMetadata.headSha, 'H1');
+    assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, !['worker', 'live-blocking'].includes(scenario));
+    if (scenario === 'green') {
+      assert.equal(payloads[0].reviewState.verdict, 'comment-only');
+      assert.equal(payloads[0].reviewState.blockingFindingCount, 0);
+      assert.equal(payloads[0].reviewState.nonBlockingFindingCount, 1);
+    }
+  });
+}

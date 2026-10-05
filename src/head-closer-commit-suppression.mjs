@@ -384,6 +384,7 @@ export function normalizeVerifiedCloserCommit(commitJson = {}) {
   return {
     sha,
     parentSha,
+    parentCount: commitJson?.parents?.length ?? commitJson?.parents?.nodes?.length ?? (parentSha ? 1 : 0),
     message,
     trailers: parseCommitTrailers(message),
     author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
@@ -604,4 +605,25 @@ export async function getHeadCloserCommitSuppressionWithBoundedRetry({
       if (delayMs > 0) await sleepImpl(delayMs);
     }
   }
+}
+
+// HAMCIWAKE-01: head identity alone does not cover an intervening worker push.
+// Walk a bounded chain, proving every delta commit with the same suppression
+// primitive used by review-spawn. Failure leaves the ordinary stale-head gate.
+export async function proveCloserOnlyHeadDelta({ reviewedHead, currentHead,
+  maxCommits = 8, suppressionImpl = getHeadCloserCommitSuppression,
+  fetchCommitImpl = fetchHeadCloserVerifiedCommit, ...options } = {}) {
+  if (!reviewedHead || !currentHead || reviewedHead === currentHead) return false;
+  let head = currentHead;
+  const seen = new Set();
+  for (let count = 0; count < maxCommits && head !== reviewedHead; count++) {
+    if (!head || seen.has(head)) return false;
+    seen.add(head);
+    const proof = await suppressionImpl({ ...options, headSha: head });
+    if (proof?.suppressed !== true || proof.reason !== 'closer-commit-trailer') return false;
+    const commit = await fetchCommitImpl({ ...options, headSha: head });
+    if (commit?.sha !== head || !commit.parentSha || (commit.parentCount != null && commit.parentCount !== 1)) return false;
+    head = commit.parentSha;
+  }
+  return head === reviewedHead;
 }

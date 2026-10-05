@@ -22,8 +22,9 @@ const REFUND_REASONS = new Set(['active-remediation-job', 'lease-held', 'live-ru
   'ama-closer-launch-in-progress', 'dispatch-status-unknown', 'dispatch-deferred-transient', 'gate-read-failed',
 ]);
 const text = value => String(value || '').slice(0, 300);
-export function orphanDispatchReasonsCovered(reasons) {
-  return reasons.length > 0 && reasons.every(reason => ALLOWED.has(reason));
+export function orphanDispatchReasonsCovered(reasons, { closerHead = false } = {}) {
+  return reasons.length > 0 && reasons.every(reason => ALLOWED.has(reason)
+    || (closerHead && reasons.includes('stale-review-head') && reason === 'blocking-findings-unknown'));
 }
 
 // Unknown evidence holds dispatch, but is distinct from a proven live owner.
@@ -202,7 +203,18 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   const candidateAllowed = Boolean(headSha && candidate?.merged !== true && String(candidate?.prState || '').toLowerCase() === 'open'
     && !candidate?.isDraft && !labels.some(label => ['do-not-merge', 'no-merge-hold', 'merge-agent-skip'].includes(label))
     && result?.amaEnabled && stopAllowed);
-  const eligible = candidateAllowed && orphanDispatchReasonsCovered(reasons)
+  let closerHead = false;
+  if (candidateAllowed && stale && reasons.includes('blocking-findings-unknown')) {
+    try {
+      const proof = await closerHeadImpl({ repoPath: repo, prNumber, headSha, logger });
+      closerHead = proof?.suppressed === true && proof.reason === 'closer-commit-trailer';
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      logger?.warn?.(`Orphan identity probe failed: ${text(error.message || error)}`);
+      return { outcome: 'ama-pending', amaClosureResult: { ...result, skipMergeAgent: true } };
+    }
+  }
+  const eligible = candidateAllowed && orphanDispatchReasonsCovered(reasons, { closerHead })
     && (primary || stale || (blocking && (stopped === 'no-progress' || stopped === 'remediation-stopped' || belowMax)));
   const primaryUnknown = candidateAllowed && primary && !eligible;
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'orphan-watchdog');
@@ -235,8 +247,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       logger?.warn?.(`Orphan ${operation} ${isTransientGhError(error) ? 'transient' : 'failed'}: ${text(error.message || error)}`);
       return { outcome: 'ama-pending', amaClosureResult: { ...result, skipMergeAgent: true } };
     };
-    let closerHead = false;
-    if (stale) {
+    if (stale && !closerHead) {
       let proof;
       try { proof = await closerHeadImpl({ repoPath: repo, prNumber, headSha, logger }); }
       catch (error) { return holdExternalError(error, 'identity-probe'); }

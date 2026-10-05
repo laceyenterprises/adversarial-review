@@ -2112,3 +2112,13 @@ This configuration exception removes that circular dependency without inventing
 findings or weakening the hammer's remediation contract.
 
 STANDUPGATE-02 probes use 15-second subprocess timeouts without inner retries, bounded by the daemon operation and recovery caps. `gh api --paginate --slurp` requires [GitHub CLI 2.51.0](https://github.com/cli/cli/compare/e83e04930641e062249dc4aba2cba5b2d35d1278...v2.51.0) or newer; older versions refuse the proof and log the unsupported flag. Top-level `ciConfigurationAdmission` records pre-lease admission; `attempts[].ciConfiguration` records the proof actually used by a successful merge. Newly concluded red CI follows normal permanent gate refusal; only empty or pending rollups permit retry after proof revocation.
+
+HAMCIWAKE-01: `closer-commit-trailer` review-spawn suppression also supports
+CI-green resume. A bounded ancestry walk must prove that every commit since the
+reviewed head is a closer commit before the watcher reads that head's verdict
+and findings; CI and mergeability still refer to the exact live head. A pending-only
+hammer exit durably records `resumeOwed` and `resumeHead` in its deferred audit
+and logs `hammer-ci-pending-resume-owed`. The CI-green wake resumes the normal
+leased, per-head-budgeted verify-and-merge lane without minting a review. The
+orphan watchdog covers `blocking-findings-unknown` only beside `stale-review-head`
+and a proven closer head; all other refusal reasons retain their existing rules.

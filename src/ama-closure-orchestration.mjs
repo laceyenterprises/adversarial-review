@@ -87,6 +87,7 @@ import {
   buildNonReviewableHeadDeltaEvidence,
   fetchHeadCloserVerifiedCommit,
   getHeadCloserCommitSuppression,
+  proveCloserOnlyHeadDelta,
 } from './head-closer-commit-suppression.mjs';
 import { isDismissStaleRequestChangesOnResolvedEnabled } from './merge-agent-dispatch-decision.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
@@ -961,11 +962,34 @@ export async function maybeDispatchAmaClosureFor({
     }
   }
   throwIfAborted(signal);
+  // HAMCIWAKE-01: resolve review evidence at its original identity only when
+  // every intervening commit is the closer's own. All PR/CI inputs stay live.
+  const originalReviewedHead = reviewStateRow?.reviewer_head_sha;
+  let closerOnlyHeadDelta = false;
+  if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha) {
+    try {
+      closerOnlyHeadDelta = await runCoexistenceOperation(
+        'closer-only-review-delta',
+        ({ signal: operationSignal }) => proveCloserOnlyHeadDelta({
+          reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha,
+          repoPath, prNumber, env, logger, signal: operationSignal,
+          suppressionImpl: resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression,
+          fetchCommitImpl: fetchHeadCloserVerifiedCommitImpl,
+        }),
+        { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
+      );
+    } catch (error) {
+      throwIfAborted(signal);
+      if (error?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw error;
+      logger?.warn?.(`Closer-only review delta proof failed: ${error.message || error}`);
+    }
+  }
+  let evidenceHeadSha = closerOnlyHeadDelta ? originalReviewedHead : settledReviewHeadSha;
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
-    headSha: settledReviewHeadSha,
+    headSha: evidenceHeadSha,
     mergeability: mergeabilityForGate,
     labels: labelNames,
     prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
@@ -986,7 +1010,7 @@ export async function maybeDispatchAmaClosureFor({
   const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
   // COMMENTCLOSE-01: a verdict resolved through a recorded final-round push came
   // from the REVIEWED head, so its live reconcile reads that head's reviews.
-  const liveReviewHeadSha = gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
+  const liveReviewHeadSha = closerOnlyHeadDelta || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
     ? gateSnapshot.reviewedHeadSha
     : settledReviewHeadSha;
   if (
@@ -1005,13 +1029,30 @@ export async function maybeDispatchAmaClosureFor({
     // the known naming discrepancy without mutating the globally-used
     // REVIEWER_BOT_LOGINS map (which review-body-capture / closeout-scraper rely on).
     try {
+      // A review on the live closer head supersedes historical evidence. Never
+      // substitute H0 over a fresh blocking review on H1 (or a failed lookup).
+      if (closerOnlyHeadDelta) {
+        const currentBodies = await runCoexistenceOperation(
+          'closer-head-live-review',
+          ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
+            repoPath, prNumber, headSha: settledReviewHeadSha,
+            authoritativeReviewerLogins, fetchLatestHeadReviewBodiesImpl,
+            retryDelaysMs: liveReviewRetryDelaysMs, logger, signal: operationSignal,
+          }),
+          { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
+        );
+        if (currentBodies.length > 0) {
+          closerOnlyHeadDelta = false;
+          evidenceHeadSha = settledReviewHeadSha;
+        }
+      }
       const bodies = authoritativeReviewerLogins.length
         ? await runCoexistenceOperation(
             'live-review-reconcile',
             ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
               repoPath,
               prNumber,
-              headSha: liveReviewHeadSha,
+              headSha: evidenceHeadSha,
               authoritativeReviewerLogins,
               fetchLatestHeadReviewBodiesImpl,
               retryDelaysMs: liveReviewRetryDelaysMs,
@@ -1052,7 +1093,7 @@ export async function maybeDispatchAmaClosureFor({
       repo: repoPath,
       prNumber,
       reviewRow: reviewStateRow,
-      headSha: settledReviewHeadSha,
+      headSha: evidenceHeadSha,
       mergeability: mergeabilityForGate,
       labels: labelNames,
       prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
@@ -1214,7 +1255,8 @@ export async function maybeDispatchAmaClosureFor({
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     labels: Array.isArray(labelNames) ? labelNames : undefined,
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
-    validatedHead: reviewState.headSha,
+    validatedHead: closerOnlyHeadDelta && reviewState.blockingFindingState !== 'unknown' && reviewState.blockingFindingCount === 0
+      ? currentPrHeadSha : reviewState.headSha,
   });
   if (!autonomousMergeExecutionEnabled) {
     const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
@@ -1315,6 +1357,13 @@ export async function maybeDispatchAmaClosureFor({
     );
   }
 
+  // A closer's parked head resumes only after exact-head CI is green. Keep
+  // the bounded worker exited; the watcher and orphan watchdog own the wait.
+  if (closerOnlyHeadDelta && disabledEligibility.reasons.includes('ci-not-green')) {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
+      reason: 'closer-head-ci-not-green', reasons: ['ci-not-green'] }, { amaEnabled: true });
+  }
+
   let allowStaleReviewHeadHammerResume = false;
   let hamTerminalRemediationEvidenceOptions = null;
   let hamTerminalRemediationValidated = false;
@@ -1364,7 +1413,9 @@ export async function maybeDispatchAmaClosureFor({
         },
       );
       throwIfAborted(signal);
-      allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
+      allowStaleReviewHeadHammerResume = closerOnlyHeadDelta
+        && closerCommitSuppression?.suppressed === true
+        && closerCommitSuppression?.reason === 'closer-commit-trailer';
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
@@ -1862,7 +1913,7 @@ export async function maybeDispatchAmaClosureFor({
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
     reviewedSha: reviewState.headSha,
     targetRemediationSha: currentPrHeadSha || reviewState.headSha,
-    dispatchRecordHeadSha: reviewState.headSha,
+    dispatchRecordHeadSha: closerOnlyHeadDelta ? currentPrHeadSha : reviewState.headSha,
     dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
     allowStaleReviewHeadHammerResume,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,

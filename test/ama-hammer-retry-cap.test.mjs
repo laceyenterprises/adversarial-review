@@ -3410,3 +3410,34 @@ test('deferral queue fails closed on missing or invalid timestamps and shares ex
   assert.equal(evaluateHammerDeferralQueue({ ...ledger, deferralLaunches: Array(12).fill('launch') }, now).expired, true);
   assert.equal(evaluateHammerDeferralQueue({ ...ledger, deferralNextAt: '2026-07-06T12:02:00Z' }, now).backoff, true);
 });
+
+test('HAMCIWAKE-01 green own-head resume dispatches under the H1 budget', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamciwake-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  // H0 reviewed comment-only with one finding; H1 is the hammer's own push.
+  writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), repo: REPO, prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD, attempt: { outcome: 'deferred', reason: 'required-checks-pending',
+      resumeOwed: true, resumeHead: ADVANCED_HEAD }, now: '2026-07-06T11:59:00Z' });
+  const args = hammerDispatchArgs(rootDir, {
+    reviewState: { nonBlockingFindingCount: 1 },
+    prMetadata: { headSha: ADVANCED_HEAD, statusCheckRollup: [
+      { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    ] },
+    dispatchContext: { targetRemediationSha: ADVANCED_HEAD, dispatchRecordHeadSha: ADVANCED_HEAD,
+      allowStaleReviewHeadHammerResume: true },
+  });
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.execCalls.length, 1);
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD };
+  const record = readAmaCloserDispatchRecord(rootDir, identity);
+  assert.ok(record);
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...record,
+    state: 'dispatch-failed', launchRequestId: null, dispatchId: null, workerId: null,
+    retryCount: AMA_CLOSER_REDISPATCH_BOUND }));
+  const capped = await maybeDispatchAmaCloser({ ...args, ...deps });
+  assert.equal(capped.dispatched, false);
+  assert.equal(capped.reason, 'dispatch-retry-exhausted');
+  assert.equal(deps.execCalls.length, 1);
+});

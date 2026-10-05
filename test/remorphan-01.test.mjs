@@ -575,3 +575,13 @@ test('reservation records the reviewed dispatch head and never refunds a proven 
   assert.equal(readWatchdog(args).reserved, 0);
   assert.equal(readWatchdog(args).attempts, 1);
 });
+
+for (const proven of [true, false]) test(`HAMCIWAKE-01 unknown findings require closer proof (${proven})`, async t => {
+  const { tick, calls } = setup(t, 7704);
+  const overrides = { result: { amaEnabled: true, reasons: ['stale-review-head',
+    'verdict-not-settled-success', 'blocking-findings-unknown', 'ci-not-green'] },
+    closerHeadImpl: async () => ({ suppressed: proven, reason: proven ? 'closer-commit-trailer' : null }) };
+  for (let i = 0; i < 6; i++) await tick(overrides);
+  assert.equal(calls.dispatch.length, proven ? 1 : 0);
+  assert.equal(calls.reviews.length, 0);
+});

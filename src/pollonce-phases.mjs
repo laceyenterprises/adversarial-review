@@ -1727,7 +1727,12 @@ export async function processReviewSubject(entry, ctx) {
           primary: primaryReviewerWorkerClass,
           fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
           depthPressure,
-          burstPressure: depthPressure ? null : reviewerBurstController?.pressure?.({
+          // Discovery must leave an engaged depth lane on its preferred route
+          // until the pool checks saturation. Spending burst here would bypass
+          // that check and charge the wrong lever before depth can run.
+          burstPressure: depthPressure
+            || firstPassSpilloverController?.depthPressure?.(depthPassKind)?.engaged
+            ? null : reviewerBurstController?.pressure?.({
             repo: repoPath,
             // Thunk: only a repo-in-scope, pack-scoped lease ever pays for this.
             packTokens: () => packTokensForSubject({

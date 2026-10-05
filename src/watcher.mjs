@@ -1263,6 +1263,7 @@ async function pollOnce(
       return { dispatched: 0, maxObservedConcurrency: 0 };
     }
     const candidates = reviewerDispatchCandidates.splice(0, reviewerDispatchCandidates.length);
+    const startedCandidates = new Set();
     const startedAt = process.hrtime.bigint();
     console.log(
       `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
@@ -1280,14 +1281,16 @@ async function pollOnce(
         singleWave: true,
         singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
         splitPostReviewSettlement: admissionSettlementSplitEnabled,
-        onCandidateStarted: detachedReviewerDispatchTracker.track,
+        onCandidateStarted: (started) => {
+          startedCandidates.add(started.candidate);
+          detachedReviewerDispatchTracker.track(started);
+        },
         logger: console,
       });
       if (drainResult.deferred > 0) {
         const deferredCandidates = Array.isArray(drainResult.deferredCandidates)
           ? drainResult.deferredCandidates
           : [];
-        for (const candidate of deferredCandidates) candidate.refundDepthSpill?.();
         reviewerDispatchCandidates.unshift(...deferredCandidates);
         console.log(
           `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
@@ -1298,6 +1301,11 @@ async function pollOnce(
       }
       return drainResult;
     } finally {
+      // Also settle reservations when the drain throws before returning its
+      // deferred list. Started candidates own their spawn/refusal settlement.
+      for (const candidate of candidates) {
+        if (!startedCandidates.has(candidate)) candidate.refundDepthSpill?.();
+      }
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
         console.warn(

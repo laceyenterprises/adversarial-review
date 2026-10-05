@@ -1110,6 +1110,23 @@ test('non-Gemini pipeline seats consume preferred capacity before the next spill
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('Gemini pipeline seats keep their route and leave the spill slot for a plain candidate', async () => {
+  const root = tempRoot();
+  try {
+    const ctl = controller({ root, depth: 2, threshold: 2 });
+    const pipeline = spillCandidate(ctl, 1, '2026-10-05T01:55:00Z');
+    pipeline.pipelineGeminiSeats = 1;
+    pipeline.reevaluateDepthSpill = async () => assert.fail('pipeline spill cannot free a Gemini seat');
+    const next = spillCandidate(ctl, 2, '2026-10-05T02:30:00Z');
+    const ordered = await prepareSpills(ctl, [next, pipeline]);
+    assert.equal(pipeline.reviewerModel, 'gemini');
+    assert.equal(next.reviewerModel, 'claude-code');
+    assert.deepEqual(ordered.started, [2]);
+    assert.deepEqual(ordered.dispatchResult.deferredCandidates, [pipeline]);
+    assert.equal(ctl.granted(), 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('spill honors the pool rereview floor and uses the same lane for pressure and charging', async () => {
   const root = tempRoot();
   try {

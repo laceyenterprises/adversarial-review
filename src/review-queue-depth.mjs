@@ -660,6 +660,8 @@ export async function prepareQueueDepthSpillover(candidates, {
   for (const candidate of ordered) {
     candidate.prepareForGeminiSaturation = async () => {
       if (candidate.reviewerModel === 'gemini'
+        // Changing the main route cannot release seats required by a pipeline.
+        && !(candidate.pipelineGeminiSeats > 0)
         && controller?.depthPressure(passKind(candidate))?.engaged) {
         await candidate.reevaluateDepthSpill?.();
       }

@@ -29,12 +29,20 @@ admission, so candidates beyond that slot can still spill.
 
 Discovery launches remain enabled while the lever is engaged; no full repository
 census or lifecycle sweep is required before admitting the first wave. Each lane
-shares its graded per-tick budget across drains. Depth re-evaluation suppresses
-the separate burst-pressure trigger, so a depth spill spends only depth budget.
+shares its graded per-tick budget across drains. While a subject's lane has
+engaged depth pressure and unspent depth budget, discovery suppresses the
+separate burst-pressure trigger and leaves depth routing to pool admission.
+Depth re-evaluation also suppresses burst, so a depth spill spends only depth
+budget. Burst discovery remains available when that lane is disengaged or its
+depth budget is exhausted. Quota fallback remains available independently.
+Candidates whose pipeline still requires Gemini seats cannot spill their main
+route, because that would not release Gemini capacity.
 A candidate refused by a later gate, or deferred by pool admission, refunds its
 reservation. A pool deferral uses reason `pool-admission-deferred`, restores the
 preferred route, and can be re-evaluated in a later drain. Spill and refund route
-changes refresh cross-model waiver metadata before spawn.
+changes refresh cross-model waiver metadata before spawn. A failed drain also
+refunds reservations for every candidate it did not start; started candidates
+settle their own reservations at spawn or refusal.
 
 ## This is a cost lever, not a parallelism knob
 

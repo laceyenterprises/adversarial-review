@@ -88,6 +88,7 @@ import { reconcileDuplicateFamilyLabels, runDuplicateFamilyCensusForWatcher } fr
 import { runAgyReviewerStartupChecks, warnIfAntigravityReviewerAuthUnavailable } from './watcher-agy-startup-preflight.mjs';
 import { startArgusSecurityDrainForWatcherTick } from './argus-security-drain.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
+import { createPrTrustGate } from './untrusted-pr-gate.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
   OPERATOR_APPROVED_LABEL,
@@ -1037,6 +1038,7 @@ function createWatcherOperatorSurface() {
   return createCompositeOperatorSurface({
     controls: {
       execFileImpl: execFileAsync,
+      actorTrustGate: createPrTrustGate({ execFileImpl: execFileAsync }),
     },
     triage: {
       stateNames: {

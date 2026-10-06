@@ -215,7 +215,9 @@ async function runCodePrSecurityFixture({ rootDir }) {
     number: PR_NUMBER,
     title: '[claude-code] add PR export endpoint',
     state: currentState,
-    head: { sha: currentHead },
+    head: { sha: currentHead, repo: { full_name: REPO } },
+    user: { login: 'fixture-member' },
+    author_association: 'MEMBER',
     labels: [],
   });
 

@@ -133,6 +133,29 @@ rebuilds it when that domain config's mtime or the process-wide orchestration
 mode changes, preserving
 adapter-owned pools, caches, and leases without mixing state between domains.
 
+### Operator comment trust
+
+PR discovery and label controls accept trusted author associations (`OWNER`,
+`MEMBER`, `COLLABORATOR`) and configured identities. For other actors, they
+also check live repository permission (`admin`, `maintain`, or `write`).
+Adding an operator to `roles.adversarial.operator_logins` is optional for
+those trust checks when the live permission lookup succeeds.
+
+Linked-spec context uses a narrower check: `fetchLinkedSpecContents` in
+`src/prompt-context.mjs` follows links from the PR body and from comments
+whose authors have a trusted association or are allowlisted. It does not
+look up live permissions for comment authors. If GitHub reports an operator
+as `CONTRIBUTOR` (for example, with private org membership), add their login
+to `roles.adversarial.operator_logins` to have spec links in their comments
+included in reviewer and remediation prompts. Otherwise those comment links
+are silently ignored even when their PRs and labels pass the live permission
+check. Operators with a trusted association need no allowlist entry for
+linked-spec comments.
+
+For operators without a trusted association, the allowlist entry is required
+for comment-linked specs even if a live permission check grants PR intake
+and label control access.
+
 ---
 
 ## Why this works — the design notes worth reading

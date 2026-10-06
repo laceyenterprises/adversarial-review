@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 
 import { fetchLatestLabelEvent } from '../../../github-label-events.mjs';
 import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
+import { auditUntrustedSkip } from '../../../untrusted-pr-gate.mjs';
 import {
   DUPLICATE_FAMILY_HOLD_LABEL,
   DUPLICATE_FAMILY_LABEL,
@@ -163,6 +164,12 @@ function createGitHubPRLabelControlsAdapter({
   execFileImpl = execFileAsync,
   auditEmitter = null,
   labels = {},
+  // UNTRUSTEDPR-01: `{ evaluateActor(repo, login) }` from untrusted-pr-gate.
+  // The watcher (composition root) injects it; an untrusted labeler's event is
+  // reported not-applied, so no label control — retrigger-review,
+  // retrigger-remediation, wakes, overrides — ever acts on it.
+  actorTrustGate = null,
+  log = console,
 } = {}) {
   const labelNames = {
     operatorApproved: labels.operatorApproved || OPERATOR_APPROVED_LABEL,
@@ -178,12 +185,21 @@ function createGitHubPRLabelControlsAdapter({
   } = {}) {
     const { repo, prNumber } = parseSubjectExternalId(subjectRef?.subjectExternalId);
     const event = await fetchLatestLabelEventImpl(repo, prNumber, labelName, { execFileImpl });
-    const result = applyRevisionScopedLabelEvent({
+    let result = applyRevisionScopedLabelEvent({
       event,
       currentRevisionRef,
       reason,
       roundCap,
     });
+    if (result.applied && actorTrustGate) {
+      const trust = await actorTrustGate.evaluateActor(repo, result.actor);
+      if (!trust.trusted) {
+        auditUntrustedSkip({
+          repo, prNumber, headSha: currentRevisionRef, actor: result.actor, reason: trust.reason, surface: `label:${labelName}`,
+        }, { log });
+        result = { ...result, applied: false, reason: 'untrusted-actor' };
+      }
+    }
     if (typeof auditEmitter === 'function') {
       await auditEmitter({
         labelName,

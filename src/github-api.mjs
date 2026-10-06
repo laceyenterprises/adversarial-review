@@ -90,7 +90,9 @@ query PullRequestRollup(
       comments(first: $commentsFirst, after: $commentsAfter) {
         nodes {
           id
+          authorAssociation
           author {
+            __typename
             login
           }
           body
@@ -226,7 +228,9 @@ query PullRequestRollupComments(
       comments(first: $commentsFirst, after: $commentsAfter) {
         nodes {
           id
+          authorAssociation
           author {
+            __typename
             login
           }
           body
@@ -413,7 +417,9 @@ query PullRequestReviewContext(
       comments(first: $commentsFirst, after: $commentsAfter) {
         nodes {
           id
+          authorAssociation
           author {
+            __typename
             login
           }
           body
@@ -490,11 +496,21 @@ function normalizeLabels(labelsConnection) {
     .filter(Boolean);
 }
 
+// UNTRUSTEDPR-01: association and App-ness ride along so prompt builders can
+// drop comment text from authors the fleet does not trust.
+function commentTrustFields(association, authorType) {
+  return {
+    ...(association ? { authorAssociation: String(association) } : {}),
+    ...(authorType === 'Bot' ? { authorType: 'Bot' } : {}),
+  };
+}
+
 function normalizeComment(comment) {
   return {
     id: comment?.id == null ? null : String(comment.id),
     ...(comment?.node_id ? { node_id: comment.node_id } : {}),
     author: normalizeAuthor(comment?.author),
+    ...commentTrustFields(comment?.authorAssociation, comment?.authorType || comment?.author?.__typename),
     body: String(comment?.body || ''),
     createdAt: comment?.createdAt || null,
   };
@@ -926,6 +942,7 @@ async function fetchLegacyComments(execFileImpl, repo, prNumber) {
       id: comment?.id == null ? null : String(comment.id),
       ...(comment?.node_id ? { node_id: comment.node_id } : {}),
       author: normalizeAuthor(comment?.user),
+      ...commentTrustFields(comment?.author_association, comment?.user?.type),
       body: String(comment?.body || ''),
       createdAt: comment?.created_at || null,
     })),

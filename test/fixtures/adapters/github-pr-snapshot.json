@@ -8,11 +8,20 @@
       "updated_at": "2026-05-10T21:20:00.000Z",
       "head": {
         "sha": "abc123def456",
-        "ref": "codex-ara-04/ARA-04"
+        "ref": "codex-ara-04/ARA-04",
+        "repo": {
+          "full_name": "laceyenterprises/adversarial-review"
+        }
+      },
+      "base": {
+        "repo": {
+          "full_name": "laceyenterprises/adversarial-review"
+        }
       },
       "user": {
         "login": "codex-worker"
       },
+      "author_association": "MEMBER",
       "labels": [
         {
           "name": "risk:medium"

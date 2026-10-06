@@ -1030,6 +1030,8 @@ test('STALECLOSER-03 closer head: mergeability UNKNOWN then CLEAN produces a wak
   assert.equal(waiting.recoveryWait, true, 'transient UNKNOWN is a retry, not a stop');
   assert.equal(waiting.reason, 'closer-head-mergeability-unknown');
   assert.equal(waiting.closerAuthoredStale.decision, 'retry');
+  assert.equal(waiting.closerAuthoredStale.carryForward, true, 'clean verdict carries forward during retry');
+  assert.deepEqual(waiting.reasons, ['pr-mergeability-unknown'], 'carried validated head has no stale-head miss');
   assert.deepEqual(waiting.closerAuthoredStale.reasons, ['pr-mergeability-unknown']);
   assert.equal(payloads.length, 0);
   assert.equal(watcherWakes.length, 0);
@@ -1064,6 +1066,8 @@ test('STALECLOSER-03 closer head: CI in progress, then green after the hammer ex
   assert.equal(waiting.recoveryWait, true);
   assert.equal(waiting.reason, 'closer-head-ci-not-green');
   assert.equal(waiting.closerAuthoredStale.decision, 'retry');
+  assert.equal(waiting.closerAuthoredStale.carryForward, true, 'clean verdict carries forward during retry');
+  assert.deepEqual(waiting.reasons, ['ci-not-green'], 'carried validated head has no stale-head miss');
   assert.equal(watcherWakes.length, 0);
   assert.equal(payloads.length, 0);
 

@@ -1451,6 +1451,9 @@ async function dispatchAmaClosureFor({
   // Transient-only misses on a closer's parked head (exact-head CI pending,
   // mergeability UNKNOWN) are an ordinary watcher wait: retry, never stop. Red
   // or unknown CI and real conflicts still reach the capped hammer repair lane.
+  // The snapshot above uses evaluateMergeEligibility, with validatedHead carried
+  // forward even for retry. Its head matches; isEligibleForAmaClosure's
+  // stale-review-head reason is not part of this snapshot.
   if (closerOnlyHeadDelta && closerAuthoredStale.decision === 'retry'
     && disabledEligibility.reasons.length > 0
     && disabledEligibility.reasons.every((reason) => ['ci-not-green', 'pr-mergeability-unknown'].includes(reason))) {

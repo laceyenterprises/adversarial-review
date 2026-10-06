@@ -2267,6 +2267,7 @@ function schemaV1() {
                   __keys: {
                     remaining_pct: { __type: TYPE_FLOAT, __default: 0.0, __min: 0, __max: 100, __enforceMax: true },
                     protected_classes: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: [] },
+                    reroute_held: { __type: TYPE_BOOL, __default: true },
                   },
                 }])),
               },

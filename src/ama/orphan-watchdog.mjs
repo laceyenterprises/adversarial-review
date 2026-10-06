@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
-import { proveCloserOnlyHeadDelta } from '../head-closer-commit-suppression.mjs';
+import { proveCloserAuthoredStaleHead } from '../closer-authored-stale.mjs';
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 import { amaCloserLeaseFilePath, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
@@ -22,6 +22,8 @@ const REFUND_REASONS = new Set(['active-remediation-job', 'lease-held', 'live-ru
   'ama-closer-launch-in-progress', 'dispatch-status-unknown', 'dispatch-deferred-transient', 'gate-read-failed',
 ]);
 const text = value => String(value || '').slice(0, 300);
+// STALECLOSER-03: the same commit-graph proof the AMA closer and rescue use.
+const proveCloserAuthoredHead = async options => (await proveCloserAuthoredStaleHead(options))?.proven === true;
 export function orphanDispatchReasonsCovered(reasons, { closerHead = false } = {}) {
   return reasons.length > 0 && reasons.every(reason => ALLOWED.has(reason)
     || (closerHead && reasons.includes('stale-review-head') && reason === 'blocking-findings-unknown'));
@@ -184,7 +186,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   result, reviewStateRow, dispatchJob, dispatchHammer, ticks = 6, maxAttempts = 2,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = 5000,
-  closerHeadImpl = proveCloserOnlyHeadDelta, logger = console, signal = null,
+  closerHeadImpl = proveCloserAuthoredHead, logger = console, signal = null,
   fsImpl = { existsSync, mkdirSync, openSync, closeSync }, DatabaseImpl = Database, flockSyncImpl = fsExt.flockSync }) {
   if (!headSha) return null;
   // A queued/running background gate has no settled observation yet.
@@ -205,7 +207,16 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     && result?.amaEnabled && stopAllowed);
   let closerHead = false;
   let closerProofChecked = false;
-  if (candidateAllowed && stale && reasons.includes('blocking-findings-unknown')) {
+  // STALECLOSER-03: the closer already evaluated the shared predicate for this
+  // exact head; reuse it. A transient-only miss (CI pending, mergeability
+  // UNKNOWN) is the closer's recoveryWait that the hammer wake resolves: leave
+  // it to that hold and keep this head's tick streak (no reset, no dispatch).
+  const shared = result?.closerAuthoredStale?.currentHead === headSha ? result.closerAuthoredStale : null;
+  if (candidateAllowed && shared?.decision === 'retry') return null;
+  if (shared && ['eligible', 'not-eligible', 'rereview-exact-head'].includes(shared.decision)) {
+    closerProofChecked = true;
+    closerHead = shared.decision !== 'rereview-exact-head';
+  } else if (candidateAllowed && stale) {
     try {
       closerProofChecked = true;
       closerHead = await closerHeadImpl({ repoPath: repo, prNumber,

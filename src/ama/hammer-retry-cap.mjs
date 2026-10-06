@@ -189,6 +189,18 @@ function retryableFieldsForSeries(ledger) {
   return { retryable, retryableLaunchRequestIds };
 }
 
+// STALECLOSER-03: per-HEAD transient-retry grants. Keyed by head and kept
+// across job-key changes, so a fresh review cannot re-arm a head's grant.
+function transientRetryFields(ledger) {
+  const raw = ledger?.transientRetryHeads;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const entries = Object.entries(raw)
+    .map(([head, count]) => [normalizeKey(head), Math.max(0, Math.trunc(Number(count) || 0))])
+    .filter(([head, count]) => head && count > 0)
+    .slice(-RETRYABLE_LAUNCH_HISTORY);
+  return entries.length ? { transientRetryHeads: Object.fromEntries(entries) } : {};
+}
+
 function sanitizeLifetimeCount(rawValue, ceiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES) {
   if (rawValue === null || rawValue === undefined) return 0;
   const n = Number(rawValue);
@@ -347,6 +359,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     // Refunded exits belong to the series, like attemptCount.
     ...retryableFieldsForSeries(decision.jobKeyChanged ? null : existing),
     ...deferralFieldsForSeries(existing, decision.jobKeyChanged),
+    ...transientRetryFields(existing),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
@@ -426,6 +439,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     targetSuppressed,
     ...retryableFieldsForSeries(jobKeyChanged ? null : existing),
     ...deferralFieldsForSeries(existing, jobKeyChanged),
+    ...transientRetryFields(existing),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
@@ -504,6 +518,64 @@ export function refundHammerRetryDispatch(rootDir, identity, {
   };
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return { refunded: true, reason: 'hammer-exited-without-close', retryable: retryable + 1 };
+}
+
+export const HAMMER_TRANSIENT_RETRY_PER_HEAD = 1;
+
+/**
+ * STALECLOSER-03: re-open the series/target cap for ONE more hammer on a
+ * closer-authored stale head whose only blockers were transient (exact-head CI
+ * pending, mergeability UNKNOWN). The caller grants only when the shared
+ * `closerAuthoredStaleEligible` predicate now reads eligible for `headSha`.
+ * The grant is bounded per HEAD (`HAMMER_TRANSIENT_RETRY_PER_HEAD`), never
+ * touches the lifetime count, and refuses once the lifetime ceiling is hit, so
+ * the lifetime ceiling stays the hard stop.
+ *
+ * @returns {{ granted: boolean, reason: string, headGrants: number }}
+ */
+export function grantTransientHammerRetry(rootDir, identity, {
+  jobKey,
+  headSha,
+  lifetimeDispatchCeiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
+  perHeadLimit = HAMMER_TRANSIENT_RETRY_PER_HEAD,
+  now = null,
+} = {}) {
+  const existing = readHammerRetryCapLedger(rootDir, identity);
+  const head = normalizeKey(headSha);
+  const heads = transientRetryFields(existing).transientRetryHeads || {};
+  const headGrants = head ? (heads[head] || 0) : 0;
+  const refuse = (reason) => ({ granted: false, reason, headGrants });
+  if (!existing || existing.__corrupt) return refuse('no-ledger');
+  if (!head) return refuse('no-head');
+  const ledgerJobKey = normalizeKey(existing.jobKey);
+  const incomingJobKey = normalizeKey(jobKey);
+  if (ledgerJobKey && incomingJobKey && ledgerJobKey !== incomingJobKey) return refuse('series-changed');
+  const decision = evaluateHammerRetryCap(existing, { jobKey, headSha: head, lifetimeDispatchCeiling });
+  if (decision.lifetimeCapExhausted) return refuse('lifetime-ceiling-reached');
+  if (!decision.capExhausted) return refuse('cap-not-exhausted');
+  if (headGrants >= Math.max(0, Math.trunc(Number(perHeadLimit) || 0))) return refuse('transient-retry-head-exhausted');
+  const reopenedCount = HAMMER_RETRY_CAP_TOTAL_DISPATCHES - 1;
+  const targetMatches = normalizeKey(existing.targetRemediationSha) === head;
+  const otherHeads = { ...heads };
+  delete otherHeads[head];
+  const doc = {
+    ...existing,
+    attemptCount: Math.min(Math.max(0, Math.trunc(Number(existing.attemptCount) || 0)), reopenedCount),
+    targetAttemptCount: targetMatches
+      ? Math.min(Math.max(0, Math.trunc(Number(existing.targetAttemptCount) || 0)), reopenedCount)
+      : existing.targetAttemptCount,
+    suppressed: false,
+    targetSuppressed: false,
+    suppressionState: null,
+    suppressedJobKey: null,
+    suppressedHeadSha: null,
+    suppressedAttemptCount: null,
+    transientRetryHeads: { ...otherHeads, [head]: headGrants + 1 },
+    lastTransientRetryAt: now || null,
+    updatedAt: now || existing.updatedAt || null,
+  };
+  writeHammerRetryCapLedger(rootDir, identity, { ...doc, ...transientRetryFields(doc) });
+  return { granted: true, reason: 'closer-authored-stale-transient-retry', headGrants: headGrants + 1 };
 }
 
 // LEASEPARK-01: lifetime refund budget survives fresh reviews, bounding the

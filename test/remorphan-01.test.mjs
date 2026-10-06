@@ -585,3 +585,40 @@ for (const proven of [true, false]) test(`HAMCIWAKE-01 unknown findings require 
   assert.equal(calls.dispatch.length, proven ? 1 : 0);
   assert.equal(calls.reviews.length, 0);
 });
+
+// STALECLOSER-03: the watchdog reuses the closer's shared closer-authored-stale
+// decision for this exact head instead of re-deriving its own.
+const sharedDecision = (decision, currentHead = 'current-head') => ({
+  amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'],
+  closerAuthoredStale: { decision, eligible: decision === 'eligible', currentHead, reviewedHead: 'reviewed-head' },
+});
+const noProbe = async () => { throw new Error('the shared decision must be reused'); };
+test('STALECLOSER-03 shared retry holds without probing, dispatching or re-reviewing', async t => {
+  const { tick, calls } = setup(t, 7704);
+  for (let i = 0; i < 8; i++) assert.equal(await tick({ result: sharedDecision('retry'), closerHeadImpl: noProbe }), null);
+  assert.equal(calls.dispatch.length, 0);
+  assert.equal(calls.reviews.length, 0);
+});
+for (const decision of ['eligible', 'not-eligible']) {
+  test(`STALECLOSER-03 shared ${decision} proves the closer head without a second proof`, async t => {
+    const { tick, calls } = setup(t, 7704);
+    for (let i = 0; i < 6; i++) await tick({ result: sharedDecision(decision), closerHeadImpl: noProbe });
+    assert.equal(calls.dispatch.length, 1);
+    assert.equal(calls.dispatch[0].closerHead, true);
+  });
+}
+test('STALECLOSER-03 shared rereview-exact-head (non-closer commit) never enters the HAM route', async t => {
+  const { tick, calls } = setup(t, 7704);
+  for (let i = 0; i < 8; i++) await tick({ result: sharedDecision('rereview-exact-head'), closerHeadImpl: noProbe });
+  assert.equal(calls.dispatch.length, 0);
+});
+test('STALECLOSER-03 a shared decision for another head is ignored; stale heads are proven directly', async t => {
+  const { tick, calls } = setup(t, 7704);
+  const proofs = [];
+  const closerHeadImpl = async options => { proofs.push(options); return true; };
+  for (let i = 0; i < 6; i++) await tick({ result: sharedDecision('retry', 'older-head'), closerHeadImpl });
+  assert.ok(proofs.length > 0, 'a stale head is proven even without blocking-findings-unknown');
+  assert.equal(proofs[0].currentHead, 'current-head');
+  assert.equal(calls.dispatch.length, 1);
+  assert.equal(calls.dispatch[0].closerHead, true);
+});

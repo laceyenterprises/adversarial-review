@@ -2696,6 +2696,76 @@ test('fresh branch-holder exhaustion record still holds instead of hot-looping d
   assert.equal(deps.execCalls.length, 0, 'fresh branch-holder exhaustion must not hot-loop hq dispatch');
 });
 
+function closerAuthoredStaleCapArgs(rootDir, closerAuthoredStale) {
+  return hammerDispatchArgs(rootDir, {
+    prMetadata: {
+      headSha: ADVANCED_HEAD,
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    },
+    dispatchContext: {
+      targetRemediationSha: ADVANCED_HEAD,
+      dispatchRecordHeadSha: ADVANCED_HEAD,
+      allowStaleReviewHeadHammerResume: true,
+      // The orchestrator's daemon attempt declined first (a clean eligible
+      // head is the daemon's to merge); the hammer takes over under its cap.
+      forceHammerAfterDaemonFailure: true,
+      daemonFailureReasons: ['stale-review-head'],
+      closerAuthoredStale,
+    },
+  });
+}
+
+test('STALECLOSER-03: an eligible closer-authored head re-opens an exhausted series cap once per head', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-closer-authored-stale-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  _resetHammerRetryCapAlertDebounceForTests();
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  for (let i = 0; i < HAMMER_RETRY_CAP_TOTAL_DISPATCHES; i += 1) {
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD });
+  }
+  const eligible = { eligible: true, decision: 'eligible', currentHead: ADVANCED_HEAD, reviewedHead: REVIEWED_HEAD };
+
+  // Without the shared predicate the closer refuses the stale head (agent-os#7801).
+  const refused = await maybeDispatchAmaCloser({
+    ...closerAuthoredStaleCapArgs(rootDir, { ...eligible, eligible: false, decision: 'retry' }),
+    ...hammerDispatchDeps({ deliverAlertImpl: async () => {} }),
+  });
+  assert.equal(refused.dispatched, false);
+  assert.deepEqual(refused.reasons, ['stale-review-head']);
+
+  const deps = hammerDispatchDeps({ deliverAlertImpl: async () => {} });
+  const result = await maybeDispatchAmaCloser({ ...closerAuthoredStaleCapArgs(rootDir, eligible), ...deps });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(deps.execCalls.length, 1, 'the closer re-dispatches without an operator step or budget bump');
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.deepEqual(ledger.transientRetryHeads, { [ADVANCED_HEAD]: 1 });
+  assert.equal(ledger.lifetimeAttemptCount, HAMMER_RETRY_CAP_TOTAL_DISPATCHES + 1);
+  assert.equal(ledger.suppressed, false);
+});
+
+test('STALECLOSER-03: the per-head transient grant is spent after one retry on the same head', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-closer-authored-stale-spent-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  _resetHammerRetryCapAlertDebounceForTests();
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  for (let i = 0; i < HAMMER_RETRY_CAP_TOTAL_DISPATCHES; i += 1) {
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD });
+  }
+  writeFileSync(hammerRetryCapFilePath(rootDir, identity), JSON.stringify({
+    ...readHammerRetryCapLedger(rootDir, identity), transientRetryHeads: { [ADVANCED_HEAD]: 1 },
+  }));
+  const deps = hammerDispatchDeps({ deliverAlertImpl: async () => {} });
+  const result = await maybeDispatchAmaCloser({
+    ...closerAuthoredStaleCapArgs(rootDir, {
+      eligible: true, decision: 'eligible', currentHead: ADVANCED_HEAD, reviewedHead: REVIEWED_HEAD,
+    }),
+    ...deps,
+  });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(deps.execCalls.length, 0);
+});
+
 test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operator alert once', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-integration-suppress-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

@@ -1037,12 +1037,20 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     options?.nonReviewableHeadDelta || null,
     { reviewedHead, currentHead },
   );
+  // STALECLOSER-03: the shared `closerAuthoredStaleEligible` predicate, bound to
+  // this exact reviewed/current head pair, carries the reviewed verdict across
+  // closer-only commits. Blockers, CI and mergeability are still gated below.
+  const closerAuthoredStale = options?.closerAuthoredStale || null;
+  const closerAuthoredStaleOk = closerAuthoredStale?.eligible === true
+    && Boolean(reviewedHead) && closerAuthoredStale.reviewedHead === reviewedHead
+    && Boolean(currentHead) && closerAuthoredStale.currentHead === currentHead;
   const headMatchOk =
     operatorOverride
     || (reviewedHead && reviewedHead === currentHead)
     || hamTerminalRemediation.ok === true
     || rebaseReviewCoverage.ok
-    || nonReviewableHeadDelta.ok;
+    || nonReviewableHeadDelta.ok
+    || closerAuthoredStaleOk;
   if (!headMatchOk) reasons.push('stale-review-head');
 
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
@@ -1445,6 +1453,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       hamTerminalRemediation: hamTerminalRemediation.ok === true,
       rebaseReviewCoverage,
       nonReviewableHeadDelta,
+      closerAuthoredStale: closerAuthoredStaleOk,
     },
     remediation: { pending: remediationPending, known: remediationStateKnown },
     config: { enabled: amaEnabled },

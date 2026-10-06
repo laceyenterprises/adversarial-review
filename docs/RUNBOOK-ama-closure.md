@@ -2151,7 +2151,17 @@ identity. Remote commit probes require linked closer identity. This existing
 local trust boundary is tracked by LAC-1848; a trailer alone never grants merge
 authority, and the downstream hammer repeats live gates.
 
-## CI-cost refusal (CIGUARD-01)
+## CI-cost mode (CIGUARD-01 / CIGUARDADV-01)
+
+CIGUARDADV-01 records the 2026-10-06 operator decision, "Cost guard advisory
+now", superseding the unconditional CIGUARD-01 merge refusal. The AMA cost
+predicate is advisory by default: `checkCiCost` returns
+`{ ok: true, advisory: <reason> }` for flagged, failed, missing, stale or
+unreadable evidence. The reasons remain `ci-cost-unauthorized`,
+`ci-cost-check-failed` and `ci-cost-read-failed`. Spend controls are the org
+budget cap, billing read and ci-spend-alarm. Authoring CI changes still
+requires operator authorization; specs must state cadence and runner OS and
+justify non-Linux per-PR jobs.
 
 Live primary-change collection also reads workflow blobs at the merge base and
 candidate head, all PR files, current labels and paginated label events, plus
@@ -2160,15 +2170,31 @@ of branch protection. The offline cost engine is vendored at
 `scripts/ci-cost-guard.py` from agent-os; keep the copies identical when changing
 policy. JSON mode needs only Python's standard library, while Node owns YAML
 parsing through its existing js-yaml dependency. API truncation, malformed YAML,
-unresolved dynamic runners/matrices and unavailable Python fail closed.
+unresolved dynamic runners/matrices and unavailable Python still produce
+negative evidence; the selected mode determines whether it refuses merge.
 
-A flagged change requires `ci-cost-approved` last applied by a human listed in
-`roles.adversarial.operator_logins`. An empty list authorizes nobody. Neither
+Set `AMA_CI_COST_MODE=blocking` to restore CIGUARD-01. Only that value
+(case-insensitive) selects blocking; unset and all other values select advisory.
+In blocking mode, a flagged change requires `ci-cost-approved` last applied by
+a human listed in `roles.adversarial.operator_logins`. An empty list authorizes nobody. Neither
 `operator-approved` nor terminal HAM remediation can waive this check. A failed
 or pending cost check still blocks after authorization until CI reruns green.
-The closer CLI also rejects missing cost evidence; the merge-agent procedure
-runs `bin/ci-cost-check.mjs` immediately before its exact-head merge command.
-After the submodule floats into the deploy checkout, restart the watcher and
+Missing, stale or unreadable cost evidence also refuses merge in blocking mode.
+The daemon and closer reach the predicate through `checkPrimaryChange`; the
+merge-agent procedure runs `bin/ci-cost-check.mjs` immediately before its
+exact-head merge command. That CLI emits JSON containing both the gate result
+(including an advisory reason when present) and the raw cost evidence; it exits
+zero for an advisory result and nonzero for a blocking refusal. The evidence
+collector still retains workflow findings, estimates and authorization results in
+`primaryChange.ciCost`; `checkPrimaryChange` does not forward the advisory reason
+in its own result. Required-check greenness and primary-change preservation
+remain independent gates: advisory cost mode cannot make a failed required
+CI check green or certify unreadable primary-change history.
+
+Apply the mode override consistently to watcher, follow-up/closer and
+merge-agent environments so all merge paths use the intended policy.
+After the submodule floats into the deploy checkout, or after changing a
+daemon's mode environment, restart the watcher and
 follow-up daemons through the registered `scripts/os-restart.sh` operator path
 so long-running processes load the new predicate. Do not admin-merge this gate
 change or edit live service state to make the gate green.

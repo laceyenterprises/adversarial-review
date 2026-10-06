@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ama/ham-provenance.mjs';
+import { isTrustedCommentAuthor, resolveTrustedIdentityAllowlist } from './untrusted-pr-gate.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -77,6 +78,7 @@ export async function fetchLinkedSpecContents(repo, prNumber, {
   prContext = null,
   fetchPRContextImpl,
   execFileImpl,
+  trustedIdentityAllowlist = null,
 } = {}) {
   if (!execFileImpl) throw new Error('execFileImpl is required');
 
@@ -84,7 +86,12 @@ export async function fetchLinkedSpecContents(repo, prNumber, {
     if (!fetchPRContextImpl) throw new Error('fetchPRContextImpl is required');
     return fetchPRContextImpl(repo, prNumber);
   })();
-  const combinedText = [pr.body || '', ...(pr.comments || []).map((c) => c.body || '')].join('\n\n');
+  // UNTRUSTEDPR-01: the docs linked here are injected as governing context, so
+  // a comment from an untrusted author must never choose them.
+  const comments = pr.comments || [];
+  const allowlist = comments.length ? (trustedIdentityAllowlist || resolveTrustedIdentityAllowlist()) : null;
+  const trustedComments = comments.filter((comment) => isTrustedCommentAuthor(comment, { allowlist }));
+  const combinedText = [pr.body || '', ...trustedComments.map((c) => c.body || '')].join('\n\n');
   const linked = extractLinkedRepoDocs(combinedText, repo).slice(0, 12);
   if (!linked.length) return '';
 

@@ -674,7 +674,7 @@ test('github-pr subject adapter supplements stale adapter discovery with gh when
         '--limit',
         '100',
         '--json',
-        'number,title,state,headRefOid,labels,createdAt,updatedAt,author',
+        'number,title,state,headRefOid,labels,createdAt,updatedAt,author,isCrossRepository',
       ]);
       return { stdout: JSON.stringify([ghNewPull, adapterPull]) };
     },
@@ -794,6 +794,8 @@ test('github-pr subject adapter uses optional GitHub adapter when present withou
               createdAt: '2026-05-10T21:00:00.000Z',
               updatedAt: '2026-05-10T21:20:00.000Z',
               author: { login: 'codex-worker' },
+              authorAssociation: 'MEMBER',
+              isCrossRepository: false,
             }],
           }),
         };
@@ -1031,8 +1033,13 @@ const REGRESSION_PR_BASE = {
   title: '[codex] ADAG-13: comms-event DAG triggers',
   state: 'open',
   updated_at: '2026-05-18T04:08:48.000Z',
-  head: { sha: '70194f3c82f6b37fb1b84bcc80f5ed5347d1e824', ref: 'codex-adag-13-r7/ADAG-13' },
+  head: {
+    sha: '70194f3c82f6b37fb1b84bcc80f5ed5347d1e824',
+    ref: 'codex-adag-13-r7/ADAG-13',
+    repo: { full_name: 'laceyenterprises/agent-os' },
+  },
   user: { login: 'codex-worker' },
+  author_association: 'MEMBER',
   labels: [],
 };
 

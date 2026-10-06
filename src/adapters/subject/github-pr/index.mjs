@@ -20,6 +20,7 @@ import {
   resolveGitHubAdapterBin,
 } from '../../../github-adapter-client.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from '../../../rate-limit-throttle.mjs';
+import { auditUntrustedSkip, createPrTrustGate, createRepoPermissionResolver } from '../../../untrusted-pr-gate.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -191,7 +192,27 @@ function createGitHubPRSubjectAdapter({
   cacheTtlMs = resolveSubjectCacheTtlMs(),
   recordApiCall = null,
   env = process.env,
+  prTrustGate = null,
+  log = console,
 } = {}) {
+  // UNTRUSTEDPR-01: discovery is the single intake for every watcher path
+  // (census, Argus, label controls, review, remediation, hammer, merge), so a
+  // fork or untrusted-author PR dropped here is never seen by any of them.
+  const trustGate = prTrustGate || createPrTrustGate({
+    env,
+    execFileImpl,
+    log,
+    resolvePermission: createRepoPermissionResolver({
+      execFileImpl,
+      fetchPermissionImpl: octokit?.rest?.repos?.getCollaboratorPermissionLevel
+        ? async (repoPath, username) => {
+          const { owner, repo } = splitRepo(repoPath);
+          const { data } = await octokit.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username });
+          return data?.permission;
+        }
+        : null,
+    }),
+  });
   // Per-adapter-instance scratch cache. Entries carry a monotonic
   // fetch timestamp and are rejected on read once older than
   // `cacheTtlMs` (default 30s, overridable via
@@ -309,7 +330,7 @@ function createGitHubPRSubjectAdapter({
         '--limit',
         '100',
         '--json',
-        'number,title,state,headRefOid,labels,createdAt,updatedAt,author',
+        'number,title,state,headRefOid,labels,createdAt,updatedAt,author,isCrossRepository',
       ], {
         maxBuffer: 10 * 1024 * 1024,
       }));
@@ -336,9 +357,22 @@ function createGitHubPRSubjectAdapter({
         const { owner, repo } = splitRepo(repoPath);
         let adapterPulls = null;
         const seenSubjectExternalIds = new Set();
-        const appendSnapshot = (pr) => {
+        const appendSnapshot = async (pr) => {
           const snapshot = normalizePRSnapshot(repoPath, pr);
           if (seenSubjectExternalIds.has(snapshot.subjectExternalId)) return;
+          // Untrusted is not marked seen: a later, richer source re-evaluates it.
+          const trust = await trustGate.evaluatePr(repoPath, pr);
+          if (!trust.trusted) {
+            auditUntrustedSkip({
+              repo: repoPath,
+              prNumber: snapshot.prNumber,
+              headSha: snapshot.headSha,
+              actor: trust.evidence?.authorLogin,
+              reason: trust.reason,
+              surface: 'discovery',
+            }, { log });
+            return;
+          }
           seenSubjectExternalIds.add(snapshot.subjectExternalId);
           setCache(snapshot);
           refs.push({
@@ -356,7 +390,7 @@ function createGitHubPRSubjectAdapter({
         }
         if (Array.isArray(adapterPulls)) {
           for (const pr of adapterPulls) {
-            appendSnapshot(pr);
+            await appendSnapshot(pr);
           }
           if (!octokit?.rest?.pulls?.list) continue;
         }
@@ -374,7 +408,7 @@ function createGitHubPRSubjectAdapter({
             direction: 'desc',
           }));
           for (const pr of data) {
-            appendSnapshot(pr);
+            await appendSnapshot(pr);
           }
         } catch (err) {
           octokitListError = err;
@@ -387,7 +421,7 @@ function createGitHubPRSubjectAdapter({
               status: 200,
             }));
             for (const pr of data.data) {
-              appendSnapshot(pr);
+              await appendSnapshot(pr);
             }
           } catch (ghErr) {
             if (Array.isArray(adapterPulls) && adapterPulls.length > 0) {

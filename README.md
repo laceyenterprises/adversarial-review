@@ -680,7 +680,10 @@ Claude print-mode prompts travel on stdin, with explicit `--model`/`--effort`
 flags. Before routing a full prompt, the reviewer checks both delivery and
 context budgets. An oversized prompt stays with the selected cross-model
 reviewer and is split into bounded chunks if no alternate route fits.
-Every chunk must fit and the entire diff must be covered; a hard ceiling or
+Every chunk must fit. File units that fit are reviewed intact; oversized files
+are split by line, with elision only for lines that cannot fit alongside their
+file and hunk headers. Elided additions produce synthetic blocking findings;
+elided context and deletions produce non-blocking evidence notes. A hard ceiling or
 chunk-cap failure records terminal `reviewer-prompt-too-large` evidence and
 queues the existing `reviewer.oversized_agy_prompt` operator alert.
 The size preflight throws `ReviewerPromptTooLargeError`; `reviewer.mjs` exits
@@ -699,12 +702,31 @@ mechanism (no shared configuration-schema keys):
 - `ADVERSARIAL_REVIEW_BYTES_PER_TOKEN`: conservative code estimate, default 2.
 - `ADVERSARIAL_REVIEW_<CLAUDE|CODEX|GEMINI>_DELIVERY_MAX_BYTES`: off-argv
   delivery limit, default 16 MiB. Antigravity keeps its existing argv budget.
+- `ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES`: minimum line size eligible for
+  elision, default 32 KiB (minimum configurable value 1024 bytes), capped at
+  one quarter of the chunk budget. A line that fits is always reviewed in full,
+  regardless of this threshold. Markers retain up to 1024 bytes at each end,
+  original byte length, and SHA-256. Review bodies block only on elided additions;
+  head-keyed metadata, including diff-line kind, is saved under `data/review-elisions/`.
 - `ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES`: diff plus extra-context ceiling,
-  default 8 MiB. The existing `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS`
-  bounds all chunked reviews (default 20).
+  default 8 MiB, measured on the raw diff plus extra context before elision.
+  This bounds preprocessing work even for a single generated line; content
+  above it remains an operator-owned size refusal.
+  `ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS` bounds all chunked reviews (default 20).
 
 Set context allocations to the deployed model's supported input budget after
 reserving space for tools and output. Every `hosted-reviewer-selection` event
 logs the checked model, full prompt bytes, and resolved budget, including
 prompts that fit. A new PR head or operator retrigger is
 required after a terminal size failure; lease recovery does not retry it.
+Exhausted non-infrastructure failures create a durable, head-keyed decision in
+`data/review-failure-decisions/`. This is an informational failure record; it
+does not consume choices or change the gate. Use the existing retrigger,
+operator risk approval, or hold/closure controls to act on the failure. The
+operator-decision alert outbox carries the record and deduplicates by its ID
+and blocker-series ID. Clearing the no-progress lane starts a fresh series
+and allows another page on the same head; the current failure reason is
+refreshed in the record. The green fail-open gate displays the record ID;
+this record does not authorize automatic merge. Record and elision-evidence
+writes are best-effort and cannot suppress a page or fail a completed review.
+A new head still re-arms review through the existing REVIEWSTALL-01 policy.

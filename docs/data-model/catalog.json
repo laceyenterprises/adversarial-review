@@ -567,6 +567,30 @@
       ],
       "owner": "AMA bounded finding disputes and reviewer context provenance",
       "recoveryColumns": ["reserved_at", "paged"]
+    },
+    {
+      "id": "review-failure-decisions",
+      "title": "Review Failure Records",
+      "path": "docs/data-model/review-failure-decisions.md",
+      "store": "data/review-failure-decisions/",
+      "schemaSurface": "src/review-retry-exhaustion.mjs",
+      "relatedSchemaSurfaces": [
+        "src/adversarial-gate-status.mjs",
+        "src/alert-delivery.mjs"
+      ],
+      "owner": "watcher review retry exhaustion"
+    },
+    {
+      "id": "review-elisions",
+      "title": "Review Elisions",
+      "path": "docs/data-model/review-elisions.md",
+      "store": "data/review-elisions/",
+      "schemaSurface": "src/reviewer.mjs",
+      "relatedSchemaSurfaces": [
+        "src/reviewer-harness.mjs"
+      ],
+      "owner": "reviewer prompt-budget evidence",
+      "elisionKindValues": ["+", "-", " "]
     }
   ]
 }

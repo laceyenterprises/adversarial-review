@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // Reviewer model-execution harness.
 //
 // ARC-10: the bespoke per-harness spawn surface (Claude/Codex/Gemini/Antigravity
@@ -3080,9 +3081,12 @@ function splitOversizedPatchByLines(patch, {
   maxBytes,
   maxChunks,
   chunks,
+  elideOptions = null,
+  elisions = [],
+  diffLineOffset = 0,
 }) {
   const lines = String(patch || '').replace(/\r\n/g, '\n').split('\n');
-  const { headerLines, bodyLines } = splitPatchHeaderAndBodyLines(lines);
+  const { headerLines } = splitPatchHeaderAndBodyLines(lines);
   const budgetExtraContext = `${extraContext || ''}${chunkContextBudgetSuffix || ''}`;
   const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel(reviewerModel, '', budgetExtraContext, {
     promptStage,
@@ -3099,6 +3103,17 @@ function splitOversizedPatchByLines(patch, {
     + headerBytes
     + (headerLines.length > 0 && bodyBytes > 0 ? headerBodySeparatorBytes : 0)
     + bodyBytes;
+  // Preserve every line that can fit with its file and active hunk headers,
+  // even when the entire file needs multiple chunks.
+  const elided = elideOptions ? elideLongDiffLines(patch, {
+    ...elideOptions,
+    diffLineOffset,
+    shouldElide: (value, { kind, hunkLine, index }) => kind !== null
+      && index >= headerLines.length
+      && promptBytesForBody(agyPromptBytes(value) + (hunkLine ? agyPromptBytes(hunkLine) + 1 : 0)) > maxBytes,
+  }) : null;
+  if (elided) elisions.push(...elided.elisions);
+  const { bodyLines } = splitPatchHeaderAndBodyLines(elided ? elided.diff.split('\n') : lines);
   const startBodyWithLine = (line, lineBytes) => {
     if (/^@@\s/.test(line)) return { lines: [line], bytes: lineBytes };
     if (activeHunkLine) {
@@ -3167,13 +3182,18 @@ function splitDiffForAgyChunks(diff, {
   promptStage = 'first',
   maxBytes = resolveAgyArgvMaxBytes(),
   maxChunks = resolveAgyChunkMaxChunks(),
+  elideOptions = null,
 } = {}) {
   if (maxChunks <= 0) {
     return { ok: false, chunks: [], truncated: true, reason: 'chunking-disabled' };
   }
   const chunks = [];
-  const files = parseDiffFiles(diff);
-  const units = files.length > 0 ? files.map((file) => file.patch) : [String(diff || '')];
+  const elisions = [];
+  const normalizedDiff = String(diff || '').replace(/\r\n/g, '\n');
+  const files = parseDiffFiles(normalizedDiff);
+  const units = files.length > 0 ? files.map((file) => file.patch) : [normalizedDiff];
+  let unitOffset = 0;
+  let lineOffset = 0;
   const budgetExtraContext = `${extraContext || ''}${chunkContextBudgetSuffix || ''}`;
   let pendingUnit = '';
   const canFitUnit = (unit) => pushAgyChunk([], unit, {
@@ -3197,6 +3217,11 @@ function splitDiffForAgyChunks(diff, {
   };
   for (const unit of units) {
     if (!unit) continue;
+    const unitStart = normalizedDiff.indexOf(unit, unitOffset);
+    lineOffset += normalizedDiff.slice(unitOffset, unitStart).split('\n').length - 1;
+    const diffLineOffset = lineOffset;
+    lineOffset += unit.split('\n').length - 1;
+    unitOffset = unitStart + unit.length;
     if (pendingUnit) {
       const combinedUnit = `${pendingUnit}\n${unit}`;
       if (canFitUnit(combinedUnit)) {
@@ -3230,6 +3255,9 @@ function splitDiffForAgyChunks(diff, {
       maxBytes,
       maxChunks,
       chunks,
+      elideOptions,
+      elisions,
+      diffLineOffset,
     });
     if (!split.ok) {
       if (split.reason === 'chunk-cap-hit') {
@@ -3245,7 +3273,7 @@ function splitDiffForAgyChunks(diff, {
     }
     return { ok: false, chunks, truncated: false, reason: flushed.reason };
   }
-  return { ok: chunks.length > 0, chunks, truncated: false, reason: chunks.length > 0 ? null : 'empty-diff' };
+  return { ok: chunks.length > 0, chunks, elisions, truncated: false, reason: chunks.length > 0 ? null : 'empty-diff' };
 }
 
 function markdownSectionBody(markdown, heading) {
@@ -3282,7 +3310,7 @@ function extractMarkdownIssueList(markdown, heading) {
   return filtered;
 }
 
-function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {
+function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null, elisions = [] } = {}) {
   if (truncated) throw new ReviewerPromptTooLargeError('cannot merge an incomplete chunk review');
   const texts = chunkReviews.map((chunk) => sanitizeReviewPayloadBestEffort(chunk.reviewText)).filter(Boolean);
   const parts = [
@@ -3291,10 +3319,24 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
   ];
   parts.push('', '## Blocking issues');
   const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
+  blocking.push(...elisions.filter((entry) => entry.kind === '+').map((entry) =>
+    `- **Unreviewed elided content at ${entry.path}:${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})**\n`
+    + `  - **File:** ${entry.path}\n`
+    + `  - **Lines:** ${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})\n`
+    + `  - **Problem:** ${entry.byteLength} bytes were partially withheld from the reviewer; sha256=${entry.sha256}.\n`
+    + '  - **Why it matters:** Added content has not been fully reviewed.\n'
+    + '  - **Recommended fix:** Provide a reviewable diff or obtain an explicit operator risk decision before merging.'));
   parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
   const verdict = blocking.length > 0 ? 'Request changes' : 'Comment only';
   parts.push('', '## Non-blocking issues');
   const nonBlocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Non-blocking issues'));
+  nonBlocking.push(...elisions.filter((entry) => entry.kind !== '+').map((entry) =>
+    `- **Elided ${entry.kind === '-' ? 'deleted' : 'context'} content at ${entry.path}:${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})**\n`
+    + `  - **File:** ${entry.path}\n`
+    + `  - **Lines:** ${entry.line ?? 'unknown'} (${entry.side} side, diff line ${entry.diffLine})\n`
+    + `  - **Problem:** ${entry.byteLength} bytes were partially withheld from the reviewer; sha256=${entry.sha256}.\n`
+    + '  - **Why it matters:** This line introduces no new content.\n'
+    + '  - **Recommended fix:** Retain the elision evidence for operator inspection.'));
   parts.push(nonBlocking.length > 0 ? nonBlocking.join('\n') : '- None.');
   parts.push('', '## Suggested fixes');
   const suggestedFixes = texts.flatMap((text) => extractMarkdownIssueList(text, 'Suggested fixes'));
@@ -3353,6 +3395,66 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   };
 }
 
+// Buffer cuts must not turn a valid UTF-8 preview into replacement characters.
+function utf8DiffPreview(bytes, edgeBytes, fromEnd = false) {
+  let start = fromEnd ? Math.max(0, bytes.length - edgeBytes) : 0;
+  let end = fromEnd ? bytes.length : Math.min(edgeBytes, bytes.length);
+  if (fromEnd) {
+    while (start < end && (bytes[start] & 0xc0) === 0x80) start += 1;
+  } else if (end < bytes.length) {
+    while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  }
+  return bytes.subarray(start, end).toString('utf8');
+}
+
+export function elideLongDiffLines(diff, {
+  thresholdBytes = 32 * 1024, edgeBytes = 1024, shouldElide = null, diffLineOffset = 0,
+} = {}) {
+  const elisions = [];
+  let oldPath = '<unknown>';
+  let newPath = '<unknown>';
+  let inHunk = false;
+  let oldLine = 0;
+  let newLine = 0;
+  let hunkLine = null;
+  const text = String(diff || '').split('\n').map((value, index) => {
+    if (value.startsWith('diff --git ')) {
+      inHunk = false;
+      hunkLine = null;
+      oldPath = newPath = '<unknown>';
+    }
+    if (!inHunk && value.startsWith('--- ')) oldPath = value.slice(4).replace(/^a\//, '');
+    if (!inHunk && value.startsWith('+++ ')) newPath = value.slice(4).replace(/^b\//, '');
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(value);
+    let line = null;
+    let side = 'new';
+    const kind = !hunk && /^[+ -]/.test(value)
+      && (inHunk || (!value.startsWith('--- ') && !value.startsWith('+++ '))) ? value[0] : null;
+    if (hunk) {
+      inHunk = true;
+      hunkLine = value;
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+    } else if (inHunk) {
+      if (value.startsWith('-')) {
+        side = 'old';
+        line = oldLine++;
+      } else if (value.startsWith('+')) line = newLine++;
+      else if (value.startsWith(' ')) {
+        line = newLine++;
+        oldLine += 1;
+      }
+    }
+    const path = side === 'old' || newPath === '/dev/null' ? oldPath : newPath;
+    const bytes = Buffer.from(value);
+    if (bytes.length <= thresholdBytes || (shouldElide && !shouldElide(value, { kind, hunkLine, index }))) return value;
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    elisions.push({ path, line, side, kind, diffLine: diffLineOffset + index + 1, byteLength: bytes.length, sha256 });
+    return `${utf8DiffPreview(bytes, edgeBytes)} [elided unreviewed content; bytes=${bytes.length}; sha256=${sha256}] ${utf8DiffPreview(bytes, edgeBytes, true)}`;
+  }).join('\n');
+  return { diff: text, elisions };
+}
+
 async function reviewAgyOversizedInChunks(diff, extraContext, {
   env = process.env,
   reviewerModel = 'gemini',
@@ -3371,6 +3473,9 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   if (agyPromptBytes(diff) + agyPromptBytes(extraContext) > hardMaxBytes) {
     throw new ReviewerPromptTooLargeError(`hard ceiling exceeded: size=${agyPromptBytes(diff) + agyPromptBytes(extraContext)} hardMaxBytes=${hardMaxBytes}`);
   }
+  const configuredThreshold = Number(env.ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES);
+  const thresholdBytes = Math.min(Number.isFinite(configuredThreshold) && configuredThreshold >= 1024
+    ? configuredThreshold : 32 * 1024, Math.floor(maxBytes / 4));
   const split = splitDiffForAgyChunks(diff, {
     reviewerModel,
     extraContext,
@@ -3378,6 +3483,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     promptStage,
     maxBytes,
     maxChunks,
+    elideOptions: { thresholdBytes, edgeBytes: Math.max(1, Math.min(1024, Math.floor(thresholdBytes / 8))) },
   });
   if (!split.ok || split.truncated) {
     throw new ReviewerPromptTooLargeError(
@@ -3419,8 +3525,10 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     truncated: split.truncated,
     promptBytes,
     maxBytes,
+    elisions: split.elisions,
   });
   return {
+    elisions: split.elisions,
     rawReviewText: mergedReviewText,
     reviewText: mergedReviewText,
     tokenUsage: sumChunkTokenUsage(chunkUsages),

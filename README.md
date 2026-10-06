@@ -152,6 +152,10 @@ are silently ignored even when their PRs and labels pass the live permission
 check. Operators with a trusted association need no allowlist entry for
 linked-spec comments.
 
+For operators without a trusted association, the allowlist entry is required
+for comment-linked specs even if a live permission check grants PR intake
+and label control access.
+
 ---
 
 ## Why this works — the design notes worth reading

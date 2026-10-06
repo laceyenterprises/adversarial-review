@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchCiCost, checkCiCost, evaluateCiCost } from '../src/ama/ci-cost.mjs';
+import { fetchCiCost, checkCiCost, evaluateCiCost, ciCostMode } from '../src/ama/ci-cost.mjs';
 import { checkPrimaryChange, fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
+
+// The tests below pin the CIGUARD-01 refusal, which stays available behind
+// AMA_CI_COST_MODE=blocking. CIGUARDADV-01 made advisory the default; the
+// advisory tests at the end of this file clear the override explicitly.
+process.env.AMA_CI_COST_MODE = 'blocking';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const label = 'ci-cost-approved';
@@ -66,4 +71,33 @@ test('Linux path-filtered concurrency-preserving change remains clear', () => {
 
 test('missing cost evidence cannot certify an otherwise eligible history snapshot', () => {
   assert.equal(checkPrimaryChange({ headSha: head, hasHammerCommits: false }, head).reason, 'ci-cost-read-failed');
+});
+
+
+function withMode(mode, fn) {
+  const previous = process.env.AMA_CI_COST_MODE;
+  if (mode === undefined) delete process.env.AMA_CI_COST_MODE; else process.env.AMA_CI_COST_MODE = mode;
+  try { return fn(); } finally {
+    if (previous === undefined) delete process.env.AMA_CI_COST_MODE; else process.env.AMA_CI_COST_MODE = previous;
+  }
+}
+
+test('CIGUARDADV-01: advisory is the default mode; only an explicit override blocks', () => {
+  assert.equal(ciCostMode({}), 'advisory');
+  assert.equal(ciCostMode({ AMA_CI_COST_MODE: 'ADVISORY' }), 'advisory');
+  assert.equal(ciCostMode({ AMA_CI_COST_MODE: 'blocking' }), 'blocking');
+  assert.equal(ciCostMode({ AMA_CI_COST_MODE: 'nonsense' }), 'advisory');
+});
+
+test('CIGUARDADV-01: advisory mode reports but never refuses flagged, failed or unreadable cost evidence', async () => {
+  const unauthorized = await read();
+  const failed = await read({ login: 'operator', failed: true });
+  const stale = await read({ stale: true });
+  withMode(undefined, () => {
+    assert.deepEqual(checkCiCost(unauthorized, head), { ok: true, advisory: 'ci-cost-unauthorized' });
+    assert.deepEqual(checkCiCost(failed, head), { ok: true, advisory: 'ci-cost-check-failed' });
+    assert.deepEqual(checkCiCost(stale, head), { ok: true, advisory: 'ci-cost-read-failed' });
+    assert.deepEqual(checkCiCost(null, head), { ok: true, advisory: 'ci-cost-read-failed' });
+    assert.deepEqual(checkCiCost(unauthorized, head, { mode: 'blocking' }), { ok: false, reason: 'ci-cost-unauthorized' });
+  });
 });

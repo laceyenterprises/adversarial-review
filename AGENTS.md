@@ -60,13 +60,25 @@ adversarial-gate status context. Do not fork the classification rules again. A
 closer that reads green while the daemon reads red deadlocks the PR (SEV3
 2026-09-28, agent-os#7314).
 
-## CI cost authorization (CIGUARD-01)
+## CI cost authorization (CIGUARD-01 / CIGUARDADV-01)
 
 Do not add CI runners, matrix entries, triggers or long per-PR steps without
 operator authorization (`ci-cost-approved`). Specs state cadence and runner OS
-and justify any non-Linux per-PR job. Merge authorization is additive: a failed
-CI-cost check or flagged workflow diff requires a live operator-applied label.
-`roles.adversarial.operator_logins` is the trusted identity list; no worker,
-bot, `operator-approved` escape, or repository without branch protection waives
-this gate. `node bin/ci-cost-check.mjs OWNER/REPO PR HEAD` independently reads
-workflow cost and label provenance against the live head before merge.
+and justify any non-Linux per-PR job.
+
+CIGUARDADV-01 records the 2026-10-06 operator decision, "Cost guard advisory
+now": the AMA CI-cost predicate is advisory by default. Flagged, failed or
+unreadable cost evidence returns `{ ok: true, advisory: <reason> }` rather
+than refusing merge. Spend controls are the org budget cap, billing read and
+ci-spend-alarm. Required-check greenness remains a separate merge gate.
+
+`AMA_CI_COST_MODE=blocking` restores CIGUARD-01: flagged workflow changes
+require a live `ci-cost-approved` label last applied by a human in
+`roles.adversarial.operator_logins`; failed or pending cost checks and
+unreadable evidence refuse merge. No worker, bot, `operator-approved` escape,
+or repository without branch protection waives that blocking-mode gate.
+`node bin/ci-cost-check.mjs OWNER/REPO PR HEAD` independently reads workflow
+cost and label provenance against the live head before merge, emits the
+evidence and advisory reason as JSON, and uses the same mode. See
+[`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md#ci-cost-mode-ciguard-01--ciguardadv-01)
+for deployment and override details.

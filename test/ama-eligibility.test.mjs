@@ -198,6 +198,26 @@ test('eligible: canonical rebase coverage clears stale-review-head', () => {
   );
 });
 
+// STALECLOSER-03: the shared closer-authored-stale predicate clears the stale
+// head only for the exact reviewed/current pair it judged eligible.
+for (const [label, closerAuthoredStale, cleared] of [
+  ['eligible exact pair', { eligible: true, reviewedHead: '11111111', currentHead: '22222222' }, true],
+  ['retry', { eligible: false, decision: 'retry', reviewedHead: '11111111', currentHead: '22222222' }, false],
+  ['other current head', { eligible: true, reviewedHead: '11111111', currentHead: '33333333' }, false],
+  ['other reviewed head', { eligible: true, reviewedHead: '44444444', currentHead: '22222222' }, false],
+]) {
+  test(`STALECLOSER-03 closer-authored stale evidence (${label}) ${cleared ? 'clears' : 'keeps'} stale-review-head`, () => {
+    const { reviewState, prMetadata, cfg } = eligibleFixture({
+      reviewState: { headSha: '11111111' },
+      prMetadata: { headSha: '22222222' },
+    });
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV, closerAuthoredStale });
+    assert.equal(result.reasons.includes('stale-review-head'), !cleared, JSON.stringify(result.reasons));
+    assert.equal(result.trace.headMatch.closerAuthoredStale, cleared);
+    if (cleared) assert.equal(result.eligible, true, JSON.stringify(result.reasons));
+  });
+}
+
 test('not eligible: empty patch-id rebase coverage keeps stale-review-head', () => {
   const reviewedHead = '11111111';
   const currentHead = '22222222';

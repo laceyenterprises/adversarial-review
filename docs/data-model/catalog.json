@@ -365,8 +365,17 @@
       "path": "docs/data-model/hammer-retry-cap.md",
       "store": "data/follow-up-jobs/hammer-retry-cap/",
       "schemaSurface": "src/ama/hammer-retry-cap.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs"],
       "owner": "AMA hammer dispatch retry and redrive caps"
+    },
+    {
+      "id": "closer-authored-stale",
+      "title": "Closer-Authored Stale Verdict Audits",
+      "path": "docs/data-model/closer-authored-stale.md",
+      "store": "data/closer-authored-stale/",
+      "schemaSurface": "src/closer-authored-stale.mjs",
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs"],
+      "owner": "AMA closer-authored stale-head verdict carry-forward"
     },
     {
       "id": "ama-closer-dispatches",

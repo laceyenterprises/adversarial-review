@@ -119,6 +119,7 @@ import {
   HAMMER_TARGET_REDRIVE_CAP_SUPPRESSION_STATE,
   evaluateHammerRetryCap,
   evaluateHammerDeferralQueue,
+  grantTransientHammerRetry,
   normalizeHammerLifetimeDispatchCeiling,
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
@@ -4025,6 +4026,11 @@ export async function maybeDispatchAmaCloser({
   }
 
   const eligibilityOptions = { ...(options || {}) };
+  // STALECLOSER-03: the closer judges a closer-authored stale head with the same
+  // predicate rescue and the hammer wake used (computed by the orchestrator).
+  if (dispatchContext?.closerAuthoredStale && !eligibilityOptions.closerAuthoredStale) {
+    eligibilityOptions.closerAuthoredStale = dispatchContext.closerAuthoredStale;
+  }
   if (
     dispatchContext?.allowStaleReviewHeadHammerResume === true &&
     !eligibilityOptions.hamTerminalRemediation &&
@@ -5598,11 +5604,36 @@ export async function maybeDispatchAmaCloser({
     // pre-exec like the per-head record), so an interrupted-in-flight dispatch
     // never bumped it — there is no phantom increment to reclaim here. A deploy
     // bounce mid-launch simply never counted, which is the correct fail-safe.
-    const hammerRetryCapDecision = evaluateHammerRetryCap(hammerRetryLedger, {
+    let hammerRetryCapDecision = evaluateHammerRetryCap(hammerRetryLedger, {
       jobKey: reviewedSha,
       headSha: targetRemediationSha,
       lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
     });
+    // STALECLOSER-03: a hammer "no merge" whose only blockers were transient
+    // (exact-head CI pending, mergeability UNKNOWN) leaves this closer head
+    // eligible under the shared predicate once they clear. Re-open the
+    // series/target cap ONCE per head, never the lifetime ceiling, so the
+    // durable retry needs no operator step and no budget bump.
+    const closerAuthoredStale = dispatchContext?.closerAuthoredStale;
+    if (hammerRetryCapDecision.capExhausted && !hammerRetryCapDecision.lifetimeCapExhausted
+      && closerAuthoredStale?.eligible === true && closerAuthoredStale.currentHead === targetRemediationSha) {
+      const grant = grantTransientHammerRetry(rootDir, hammerCapIdentity, {
+        jobKey: reviewedSha,
+        headSha: targetRemediationSha,
+        lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
+        now: dispatchContext.dispatchedAt,
+      });
+      logAmaCloserDispatchEvent(logger, 'ama_closer.transient_retry_grant', {
+        repo, prNumber, headSha: targetRemediationSha, reviewedSha, ...grant,
+      }, { level: grant.granted ? 'info' : 'warn' });
+      if (grant.granted) {
+        hammerRetryCapDecision = evaluateHammerRetryCap(readHammerRetryCapLedger(rootDir, hammerCapIdentity), {
+          jobKey: reviewedSha,
+          headSha: targetRemediationSha,
+          lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
+        });
+      }
+    }
     if (hammerRetryCapDecision.capExhausted) {
       const hammerSeriesCapExhausted = hammerRetryCapDecision.alreadySuppressed
         || hammerRetryCapDecision.nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES;

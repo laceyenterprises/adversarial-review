@@ -1,7 +1,7 @@
 import test from 'node:test';
 import { acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +14,8 @@ import {
   resolveAmaHammerDispatchMode,
 } from '../src/ama-hammer-background-dispatch.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+import { hammerWakeAuditPath, readHammerWakeAudit, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
+import { CLOSER_AUTHORED_STALE_WAKE_REASON, closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
 
 function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
@@ -1002,3 +1004,92 @@ test('pending closer-head CI remains an ordinary coexistence wait beyond the rec
   assert.deepEqual(pages, []);
   assert.deepEqual(reviews, []);
 });
+
+// STALECLOSER-03: the real wake against a stubbed watcher, so the dedupe and
+// eligibility gates in hammer-wake.mjs are exercised end to end.
+function closerAuthoredStaleWakes(args) {
+  const watcherWakes = [];
+  args.requestEligibleHammerWakeImpl = options => requestEligibleHammerWake({
+    ...options,
+    requestWatcherWakeImpl: wake => { watcherWakes.push(wake); return { requested: true, payload: { request_id: `w${watcherWakes.length}` } }; },
+    log: { log() {}, warn() {} },
+  });
+  return watcherWakes;
+}
+
+test('STALECLOSER-03 closer head: mergeability UNKNOWN then CLEAN produces a wake and a closer', async t => {
+  const { args, payloads } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const watcherWakes = closerAuthoredStaleWakes(args);
+  args.candidate.mergeable = 'UNKNOWN';
+  args.candidate.mergeStateStatus = 'UNKNOWN';
+  let samples = 0;
+  const waiting = await maybeDispatchAmaClosureFor({ ...args, mergeabilitySampleDelayMs: 0,
+    fetchPullRequestMergeabilityImpl: async () => { samples += 1; return { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }; } });
+  assert.ok(samples > 0, 'UNKNOWN is re-sampled before it is classified');
+  assert.equal(waiting.recoveryWait, true, 'transient UNKNOWN is a retry, not a stop');
+  assert.equal(waiting.reason, 'closer-head-mergeability-unknown');
+  assert.equal(waiting.closerAuthoredStale.decision, 'retry');
+  assert.equal(waiting.closerAuthoredStale.carryForward, true, 'clean verdict carries forward during retry');
+  assert.deepEqual(waiting.reasons, ['pr-mergeability-unknown'], 'carried validated head has no stale-head miss');
+  assert.deepEqual(waiting.closerAuthoredStale.reasons, ['pr-mergeability-unknown']);
+  assert.equal(payloads.length, 0);
+  assert.equal(watcherWakes.length, 0);
+  assert.equal(existsSync(closerAuthoredStaleAuditPath(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber, headSha: 'H1' })), false);
+
+  args.candidate.mergeable = 'MERGEABLE';
+  args.candidate.mergeStateStatus = 'CLEAN';
+  const resolved = await maybeDispatchAmaClosureFor(args);
+  assert.equal(resolved.closerAuthoredStale.decision, 'eligible');
+  assert.equal(watcherWakes.length, 1, 'mergeability resolving on the closer head wakes the watcher');
+  assert.equal(watcherWakes[0].headSha, 'H1');
+  assert.equal(readHammerWakeAudit(hammerWakeAuditPath(args.rootDir, { repo: args.repoPath, prNumber: args.prNumber,
+    headSha: 'H1', eligibilityReason: CLOSER_AUTHORED_STALE_WAKE_REASON }))?.outcome, 'requested');
+  assert.equal(payloads.length, 1, 'the closer is dispatched for the eligible closer head');
+  assert.equal(payloads[0].dispatchContext.closerAuthoredStale.eligible, true);
+  assert.equal(payloads[0].dispatchContext.closerAuthoredStale.currentHead, 'H1');
+  const audit = JSON.parse(readFileSync(closerAuthoredStaleAuditPath(args.rootDir,
+    { repo: args.repoPath, prNumber: args.prNumber, headSha: 'H1' }), 'utf8'));
+  assert.equal(audit.reviewedHead, HEAD);
+  assert.deepEqual(audit.closerCommits, ['H1']);
+
+  // Re-observation of the same eligible head is deduped: one wake per head.
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(watcherWakes.length, 1);
+});
+
+test('STALECLOSER-03 closer head: CI in progress, then green after the hammer exits, produces a wake', async t => {
+  const { args, payloads } = closerResumeFixture('pending');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  const watcherWakes = closerAuthoredStaleWakes(args);
+  const waiting = await maybeDispatchAmaClosureFor(args);
+  assert.equal(waiting.recoveryWait, true);
+  assert.equal(waiting.reason, 'closer-head-ci-not-green');
+  assert.equal(waiting.closerAuthoredStale.decision, 'retry');
+  assert.equal(waiting.closerAuthoredStale.carryForward, true, 'clean verdict carries forward during retry');
+  assert.deepEqual(waiting.reasons, ['ci-not-green'], 'carried validated head has no stale-head miss');
+  assert.equal(watcherWakes.length, 0);
+  assert.equal(payloads.length, 0);
+
+  args.candidate.statusCheckRollup = [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+  const green = await maybeDispatchAmaClosureFor(args);
+  assert.equal(green.closerAuthoredStale.decision, 'eligible');
+  assert.equal(watcherWakes.length, 1, 'CI turning green on the closer head wakes the watcher');
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
+});
+
+for (const [scenario, decision] of [['green', 'eligible'], ['worker', 'rereview-exact-head'], ['red', 'not-eligible'],
+  ['pending', 'retry'], ['blocking', 'not-eligible']]) {
+  test(`STALECLOSER-03 probe answers ${decision} for ${scenario} without side effects`, async t => {
+    const { args, payloads, wakes } = closerResumeFixture(scenario);
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    const result = await maybeDispatchAmaClosureFor({ ...args, probeCloserAuthoredStale: true });
+    assert.equal(result.probe, true);
+    assert.equal(result.dispatched, false);
+    assert.equal(result.closerAuthoredStale.decision, decision);
+    assert.equal(result.closerAuthoredStale.eligible, decision === 'eligible');
+    assert.deepEqual(payloads, []);
+    assert.deepEqual(wakes, []);
+  });
+}

@@ -66,6 +66,12 @@ import {
   rekeyAmaCloserLease,
 } from './ama/closer-lease.mjs';
 import { requestEligibleHammerWake } from './hammer-wake.mjs';
+import {
+  CLOSER_AUTHORED_STALE_WAKE_REASON,
+  closerAuthoredStaleEligible,
+  proveCloserAuthoredStaleHead,
+  writeCloserAuthoredStaleAudit,
+} from './closer-authored-stale.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
 import { classifyCheckRollup } from './checks-summary.mjs';
@@ -88,7 +94,6 @@ import {
   buildNonReviewableHeadDeltaEvidence,
   fetchHeadCloserVerifiedCommit,
   getHeadCloserCommitSuppression,
-  proveCloserOnlyHeadDelta,
 } from './head-closer-commit-suppression.mjs';
 import { isDismissStaleRequestChangesOnResolvedEnabled } from './merge-agent-dispatch-decision.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
@@ -724,6 +729,29 @@ export function writeAutonomousMergeDisabledAudit({
  */
 
 export async function maybeDispatchAmaClosureFor({
+  // The rescue dispatch-only contract (agent-os merge-agent rescue) names these.
+  orphanRecovery,
+  runDaemonCleanMergeAttemptImpl,
+  maybeDispatchAmaCloserImpl,
+  ...options
+} = {}) {
+  // STALECLOSER-03: every result for a stale head carries the shared
+  // closer-authored-stale decision, so the orphan watchdog and rescue read the
+  // closer's own answer.
+  const closerAuthoredStaleSink = {};
+  const result = await dispatchAmaClosureFor({
+    ...options, orphanRecovery, runDaemonCleanMergeAttemptImpl, maybeDispatchAmaCloserImpl,
+    closerAuthoredStaleSink,
+  });
+  const decision = closerAuthoredStaleSink.value?.decision;
+  return decision && decision !== 'not-applicable' && result && typeof result === 'object'
+    && !result.closerAuthoredStale
+    ? { ...result, closerAuthoredStale: closerAuthoredStaleSink.value }
+    : result;
+}
+
+async function dispatchAmaClosureFor({
+  closerAuthoredStaleSink = null,
   automatedRecovery = false,
   orphanRecovery = null,
   priorDaemonCleanMerge = null,
@@ -762,6 +790,11 @@ export async function maybeDispatchAmaClosureFor({
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
   proveCommentOnlyFinalRoundHeadImpl = proveCommentOnlyFinalRoundHead,
+  // STALECLOSER-03: return the shared closer-authored-stale decision before any
+  // side effect (lease rekey, audits, wakes, dispatch). merge-agent rescue reads it.
+  probeCloserAuthoredStale = false,
+  fetchPullRequestMergeabilityImpl = fetchPullRequestMergeability,
+  mergeabilitySampleDelayMs = MERGEABILITY_SAMPLE_DELAY_MS,
   now = () => Date.now(),
   env = process.env,
   signal = null,
@@ -928,14 +961,14 @@ export async function maybeDispatchAmaClosureFor({
         candidate || {},
         async () => {
           throwIfAborted(operationSignal);
-          return fetchPullRequestMergeability(repoPath, prNumber, {
+          return fetchPullRequestMergeabilityImpl(repoPath, prNumber, {
             execFileImpl: execFileAsync,
             signal: operationSignal,
           });
         },
         {
           attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
-          delayMs: MERGEABILITY_SAMPLE_DELAY_MS,
+          delayMs: mergeabilitySampleDelayMs,
           sleepImpl: (ms) => abortableSleep(ms, operationSignal),
           classify: closureGateMergeability,
         },
@@ -980,13 +1013,19 @@ export async function maybeDispatchAmaClosureFor({
       fetchHeadCloserVerifiedCommitImpl(options));
     return commitCache.get(options.headSha);
   };
-  let closerOnlyHeadDelta = false;
+  // STALECLOSER-03: the anchors are the reviewed head plus the comment-only
+  // final-round pushes recorded for it, which already carry its verdict; the
+  // hammer often stacks its closer commit on that push (agent-os#7818/#7822).
+  let closerHeadProof = { proven: false, reason: 'not-stale' };
   if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha) {
     try {
-      closerOnlyHeadDelta = await runCoexistenceOperation(
+      closerHeadProof = await runCoexistenceOperation(
         'closer-only-review-delta',
-        ({ signal: operationSignal }) => proveCloserOnlyHeadDelta({
+        ({ signal: operationSignal }) => proveCloserAuthoredStaleHead({
           reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha,
+          anchorHeads: commentOnlyFinalRoundPushedHeads
+            .filter((entry) => entry?.reviewedHead === originalReviewedHead)
+            .map((entry) => entry.workerPushedHeadSha),
           repoPath, prNumber, env, logger, signal: operationSignal,
           suppressionImpl: cachedSuppression,
           fetchCommitImpl: cachedCommit,
@@ -997,9 +1036,12 @@ export async function maybeDispatchAmaClosureFor({
       throwIfAborted(signal);
       if (error?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT') throw error;
       logger?.warn?.(`Closer-only review delta proof failed: ${error.message || error}`);
+      closerHeadProof = { proven: false, reviewedHead: originalReviewedHead, currentHead: settledReviewHeadSha,
+        closerCommits: [], reason: 'closer-proof-failed' };
     }
   }
-  let evidenceHeadSha = closerOnlyHeadDelta ? originalReviewedHead : settledReviewHeadSha;
+  let closerOnlyHeadDelta = closerHeadProof?.proven === true;
+  let evidenceHeadSha = closerOnlyHeadDelta ? closerHeadProof.anchorHead : settledReviewHeadSha;
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
@@ -1122,6 +1164,28 @@ export async function maybeDispatchAmaClosureFor({
   }
   throwIfAborted(signal);
   const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
+
+  // STALECLOSER-03: the ONE closer-authored-stale rule. A live review on the
+  // closer head (which reset `closerOnlyHeadDelta` above) supersedes it.
+  const closerAuthoredStale = closerAuthoredStaleEligible({
+    headProof: closerOnlyHeadDelta || closerHeadProof?.proven !== true
+      ? closerHeadProof
+      : { ...closerHeadProof, proven: false, reason: 'closer-head-reviewed' },
+    verdict: SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
+      ? 'settled-success'
+      : String(gateSnapshot?.settledReview?.verdict || ''),
+    blockingFindingState: gateSnapshot?.settledReview?.blockingFindingState,
+    blockingFindingCount: gateSnapshot?.settledReview?.blockingFindingCount,
+    checksConclusion: classifyCheckRollup(candidate?.statusCheckRollup, {
+      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
+    }),
+    mergeability: closureGateMergeability(mergeabilityForGate || {}),
+  });
+  if (closerAuthoredStaleSink) closerAuthoredStaleSink.value = closerAuthoredStale;
+  if (probeCloserAuthoredStale) {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, probe: true,
+      reason: 'closer-authored-stale-probe', closerAuthoredStale }, { amaEnabled: true });
+  }
 
   // CLR-01 — carry a live closer lease forward when the head it is keyed to is no
   // longer the PR head.
@@ -1271,7 +1335,7 @@ export async function maybeDispatchAmaClosureFor({
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
     labels: Array.isArray(labelNames) ? labelNames : undefined,
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
-    validatedHead: closerOnlyHeadDelta && reviewState.blockingFindingState !== 'unknown' && reviewState.blockingFindingCount === 0
+    validatedHead: closerOnlyHeadDelta && closerAuthoredStale.carryForward
       ? currentPrHeadSha : reviewState.headSha,
   });
   if (!autonomousMergeExecutionEnabled) {
@@ -1357,13 +1421,24 @@ export async function maybeDispatchAmaClosureFor({
   // RPL-05: wake only after the full policy snapshot has cleared, including
   // the explicit protective-predecessor/gate-keeper hold above. This is an
   // edge-trigger into the existing watcher AMA route, not merge authority.
+  // STALECLOSER-03: a closer-authored stale head wakes under its own reason the
+  // tick the shared predicate turns eligible (CI went green, mergeability resolved).
+  if (closerAuthoredStale.eligible) {
+    writeCloserAuthoredStaleAudit(rootDir, {
+      repo: repoPath, prNumber, eligibility: closerAuthoredStale, verdict: reviewState.verdict,
+      blockingFindingCount: reviewState.blockingFindingCount,
+      nonBlockingFindingCount: reviewState.nonBlockingFindingCount, logger,
+    });
+  }
   try {
     requestEligibleHammerWakeImpl({
       rootDir,
       repo: repoPath,
       prNumber,
       headSha: currentPrHeadSha || candidate?.headSha || '',
-      eligibility: disabledEligibility,
+      ...(closerAuthoredStale.eligible
+        ? { eligibilityReason: CLOSER_AUTHORED_STALE_WAKE_REASON, eligibility: { eligible: true, reasons: [] } }
+        : { eligibility: disabledEligibility }),
       log: logger,
     });
   } catch (err) {
@@ -1373,15 +1448,19 @@ export async function maybeDispatchAmaClosureFor({
     );
   }
 
-  // Pending-only CI on a closer's parked head is an ordinary watcher wait.
-  // Red or unknown CI still reaches the capped hammer repair lane.
-  if (closerOnlyHeadDelta && disabledEligibility.reasons.length === 1
-    && disabledEligibility.reasons.includes('ci-not-green')
-    && classifyCheckRollup(prMetadata.statusCheckRollup, {
-      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
-    }) === 'PENDING') {
-    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
-      recoveryWait: true, reason: 'closer-head-ci-not-green', reasons: ['ci-not-green'] }, { amaEnabled: true });
+  // Transient-only misses on a closer's parked head (exact-head CI pending,
+  // mergeability UNKNOWN) are an ordinary watcher wait: retry, never stop. Red
+  // or unknown CI and real conflicts still reach the capped hammer repair lane.
+  // The snapshot above uses evaluateMergeEligibility, with validatedHead carried
+  // forward even for retry. Its head matches; isEligibleForAmaClosure's
+  // stale-review-head reason is not part of this snapshot.
+  if (closerOnlyHeadDelta && closerAuthoredStale.decision === 'retry'
+    && disabledEligibility.reasons.length > 0
+    && disabledEligibility.reasons.every((reason) => ['ci-not-green', 'pr-mergeability-unknown'].includes(reason))) {
+    return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: closerAuthoredStale.reasons.includes('ci-pending')
+        ? 'closer-head-ci-not-green' : 'closer-head-mergeability-unknown',
+      reasons: disabledEligibility.reasons, closerAuthoredStale }, { amaEnabled: true });
   }
 
   let allowStaleReviewHeadHammerResume = false;
@@ -1923,6 +2002,7 @@ export async function maybeDispatchAmaClosureFor({
     reviewedSha: reviewState.headSha,
     targetRemediationSha: currentPrHeadSha || reviewState.headSha,
     dispatchRecordHeadSha: closerOnlyHeadDelta ? currentPrHeadSha : reviewState.headSha,
+    closerAuthoredStale,
     dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
     allowStaleReviewHeadHammerResume,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,

@@ -1432,6 +1432,20 @@ default to below max. A scoped `merge-agent-requested` retains its operator
 fallback precedence, including on heads whose watchdog budget is exhausted.
 A closer head that HAM cannot re-certify gets one exact-head re-review.
 Admission never waives CI, primary-change, identity, policy or merge leases.
+
+STALECLOSER-03 shares `closerAuthoredStaleEligible` across the closer, eligible
+hammer wake and orphan watchdog (also exposed to agent-os rescue). A proven
+closer-only chain may carry a settled clean reviewed verdict to its current
+head. Exact-head pending CI or unknown mergeability yields `retry`; green CI
+and `MERGEABLE` yields `eligible`; resolved conflicts are hard misses and cannot
+reopen an exhausted hammer cap. Once eligible, dispatch may persist one extra
+series/target retry grant per head, while preserving the lifetime ceiling and
+all ordinary authority gates. Spent grants survive head churn and fresh reviews.
+Carry-forward observations are audited once per closer head; audit write
+failures warn without changing authority. See the
+[hammer retry ledger](data-model/hammer-retry-cap.md) and
+[carried-verdict audit](data-model/closer-authored-stale.md) for durable fields.
+
 Across-head live launch records and pending reviewer/remediator queues retain
 ownership. A closer `dispatching` intent without a launch identity proves
 ownership only while the existing closer lease/PID/age checks report a live

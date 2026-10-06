@@ -17,11 +17,26 @@ export function evaluateCiCost(payload, { python = process.env.HQ_PYTHON3 || 'py
   return result;
 }
 
-export function checkCiCost(evidence, headSha) {
+// CIGUARDADV-01 (operator decision 2026-10-06, "Cost guard advisory now"): the
+// CI-cost check is ADVISORY by default. A flagged, unreadable or failed cost
+// check is reported (returned as `advisory`) but never blocks merge; spend is
+// controlled by the org budget cap, the billing read and the ci-spend-alarm.
+// AMA_CI_COST_MODE=blocking restores the CIGUARD-01 refusal.
+export function ciCostMode(env = process.env) {
+  return String(env.AMA_CI_COST_MODE || '').toLowerCase() === 'blocking' ? 'blocking' : 'advisory';
+}
+
+function blockingCheck(evidence, headSha) {
   if (!evidence || evidence.headSha !== headSha || evidence.error) return { ok: false, reason: 'ci-cost-read-failed' };
   if (evidence.failedCheck) return { ok: false, reason: 'ci-cost-check-failed' };
   if (evidence.ok !== true) return { ok: false, reason: 'ci-cost-unauthorized' };
   return { ok: true };
+}
+
+export function checkCiCost(evidence, headSha, { mode = ciCostMode() } = {}) {
+  const result = blockingCheck(evidence, headSha);
+  if (result.ok || mode === 'blocking') return result;
+  return { ok: true, advisory: result.reason };
 }
 
 async function pages(get, path, field = null) {

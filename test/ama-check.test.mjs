@@ -1790,5 +1790,8 @@ test('ama-check requires history evidence even when a caller omits the HAM claim
   assert.equal(result.status, 0, result.stderr);
   const verdict = JSON.parse(result.stdout);
   assert.equal(verdict.eligible, false);
-  assert.ok(verdict.reasons.includes('ci-cost-read-failed'));
+  // CIGUARDADV-01: the CI-cost read is advisory by default, so missing history
+  // evidence is refused by the primary-change gate rather than the cost gate.
+  assert.ok(verdict.reasons.includes('primary-change-unknown'), JSON.stringify(verdict.reasons));
+  assert.ok(!verdict.reasons.includes('ci-cost-read-failed'), JSON.stringify(verdict.reasons));
 });

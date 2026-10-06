@@ -24,6 +24,7 @@ import {
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { closerAuthoredStaleEligible } from '../src/closer-authored-stale.mjs';
 import {
   acquireAmaCloserLease,
   AMA_CLOSER_LEASE_STATUS,
@@ -2741,6 +2742,39 @@ test('STALECLOSER-03: an eligible closer-authored head re-opens an exhausted ser
   assert.deepEqual(ledger.transientRetryHeads, { [ADVANCED_HEAD]: 1 });
   assert.equal(ledger.lifetimeAttemptCount, HAMMER_RETRY_CAP_TOTAL_DISPATCHES + 1);
   assert.equal(ledger.suppressed, false);
+});
+
+test('STALECLOSER-03: a conflicting closer head cannot reopen an exhausted series cap', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-closer-conflicting-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  for (let i = 0; i < HAMMER_RETRY_CAP_TOTAL_DISPATCHES; i += 1) {
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD });
+  }
+  const before = readHammerRetryCapLedger(rootDir, identity);
+  const eligibility = closerAuthoredStaleEligible({
+    headProof: { proven: true, reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD,
+      anchorHead: REVIEWED_HEAD, closerCommits: [ADVANCED_HEAD] },
+    verdict: 'settled-success', blockingFindingState: 'known', blockingFindingCount: 0,
+    checksConclusion: 'SUCCESS', mergeability: 'CONFLICTING',
+  });
+  assert.equal(eligibility.eligible, false);
+  assert.deepEqual(eligibility.reasons, ['pr-not-mergeable']);
+  const args = closerAuthoredStaleCapArgs(rootDir, eligibility);
+  const deps = hammerDispatchDeps({ deliverAlertImpl: async () => {} });
+  const result = await maybeDispatchAmaCloser({
+    ...args, prMetadata: { ...args.prMetadata, mergeableState: 'CONFLICTING' }, ...deps,
+  });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'hammer-retry-cap-exhausted', JSON.stringify(result));
+  assert.equal(deps.execCalls.length, 0);
+  const after = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(after.attemptCount, before.attemptCount);
+  assert.equal(after.lifetimeAttemptCount, before.lifetimeAttemptCount);
+  assert.equal(after.transientRetryHeads, undefined, 'conflicting head must not receive a retry grant');
+  const cap = evaluateHammerRetryCap(after, { jobKey: REVIEWED_HEAD, headSha: ADVANCED_HEAD });
+  assert.equal(cap.capExhausted, true);
+  assert.equal(cap.lifetimeCapExhausted, false);
 });
 
 test('STALECLOSER-03: the per-head transient grant is spent after one retry on the same head', async (t) => {

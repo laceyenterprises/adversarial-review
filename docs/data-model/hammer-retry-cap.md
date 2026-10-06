@@ -42,6 +42,8 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `targetAttemptCount` | non-negative integer | Confirmed hammer dispatches against `targetRemediationSha` across job keys. A changed known target SHA resets the count; missing legacy values are backfilled from `attemptCount` on suppression writes and from the evaluated target count on dispatch writes. |
 | `retryable` | non-negative integer, optional | Dispatches refunded because the hammer exited `succeeded` without closing its PR (HAMBG-02), or its launch failed for an infrastructure reason and it pushed nothing (CLOSERREUSE-01). `attemptCount` and the matching `targetAttemptCount` go down by one, and `retryable` goes up by one. At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
 | `retryableLaunchRequestIds` | string array, optional | Launch request ids already refunded, so a launch observed on several ticks is refunded once. Last 10 kept; reset with `retryable`. |
+| `transientRetryHeads` | object of head SHA to positive integer grant count, optional | Spent closer-authored stale-head retry grants. Default limit is one grant per head. Retained for the PR's lifetime across target churn, dispatch/suppression writes and fresh-review job-key resets; unlike refunded launch history, this map is never truncated to ten heads. Absent legacy values mean no grants recorded. |
+| `lastTransientRetryAt` | ISO-8601 string or null, optional | Timestamp supplied for the latest transient retry grant, or null if none was supplied. Preserved with grant history on later dispatch/suppression writes and fresh-review resets. |
 | `deferralLaunches` | string array | Launch IDs observed parked on merge-lease contention or pending required checks in this review series. Dedupes refunds across ticks and against `retryableLaunchRequestIds`. Resets on a changed known job key because the certified reviewed-head queue changed. At twelve deferrals the queue expires. |
 | `deferralStartedAt` | ISO-8601 string or null | First observed deferral in this series; anchors the six-hour queue deadline. Resets with the job key. |
 | `deferralNextAt` | ISO-8601 string or null | Earliest resume time after the latest newly observed deferral; two-minute exponential backoff capped at thirty minutes. Resets with the job key. |
@@ -76,8 +78,23 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
   durable usage counter. Fresh reviews cannot replenish lifetime refunds, so
   the total launch ceiling is bounded by the normal lifetime ceiling plus twelve.
   Both refund paths refuse a launch already refunded by the other path.
-- Per-series suppression can clear only when a known fresh reviewed-head job key
-  arrives. Lifetime suppression survives fresh-review resets.
+- Per-series suppression clears when a known fresh reviewed-head job key
+  arrives. STALECLOSER-03 also permits `grantTransientHammerRetry` to reopen an
+  exhausted series/target cap once per closer-authored stale head: dispatch must
+  first receive an eligible shared predicate for the exact live target head.
+  That predicate requires a proven closer-only chain, a settled clean carried
+  verdict, green exact-head CI and `MERGEABLE` mergeability. Pending CI or unknown
+  mergeability retry without granting; resolved conflicts are hard misses.
+  All ordinary dispatch and merge authority gates still apply.
+- A grant requires a readable existing ledger, a head SHA, the same known review
+  series, an exhausted series/target cap, unused per-head grant capacity and room
+  below the configured lifetime ceiling. It atomically persists the spent grant
+  and timestamp, lowers `attemptCount` (and a matching `targetAttemptCount`) to at
+  most one, and clears `suppressed`, `targetSuppressed`, `suppressionState` and the
+  three suppression stamps. It preserves alert timestamps, lifetime counts and
+  lifetime suppression; it never grants once the lifetime ceiling is exhausted.
+  The grant is spent even if the subsequent launch fails. Confirmed launches
+  consume the reopened slot and increment the lifetime counter normally.
 - Target-redrive suppression is scoped to the live target SHA. When the target
   SHA changes, target suppression and `targetAlertedAt` reset so a genuinely new
   target is not blocked by stale target state.

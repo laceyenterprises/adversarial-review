@@ -16,6 +16,7 @@ import {
   evaluateHammerRetryCap,
   grantTransientHammerRetry,
   HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
+  markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
 } from '../src/ama/hammer-retry-cap.mjs';
@@ -119,6 +120,21 @@ test('transient misses (CI pending, mergeability UNKNOWN) retry; never a stop', 
   assert.equal(redUnknown.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.NOT_ELIGIBLE);
 });
 
+test('resolved non-mergeable heads are hard misses even with green exact-head CI', async () => {
+  const graph = { [C1]: { parent: R, closer: true } };
+  for (const mergeability of ['CONFLICTING', ' conflicting ', 'UNEXPECTED']) {
+    const { eligibility } = await decide(graph, { currentHead: C1, mergeability });
+    assert.equal(eligibility.eligible, false);
+    assert.equal(eligibility.transient, false);
+    assert.equal(eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.NOT_ELIGIBLE);
+    assert.deepEqual(eligibility.reasons, ['pr-not-mergeable']);
+    assert.equal(eligibility.carryForward, true);
+  }
+  const pending = await decide(graph, { currentHead: C1, mergeability: 'CONFLICTING', checksConclusion: 'PENDING' });
+  assert.equal(pending.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.NOT_ELIGIBLE);
+  assert.equal(pending.eligibility.transient, false);
+});
+
 test('blocking, unknown-blocking and unsettled verdicts are not carried forward', async () => {
   const graph = { [C1]: { parent: R, closer: true } };
   for (const [review, reason] of [
@@ -210,6 +226,9 @@ test('transient hammer retry is granted once per HEAD, not per PR', (t) => {
   // The re-armed hammer runs and is recorded; the grant survives the record.
   recordHammerRetryDispatch(rootDir, IDENTITY, { jobKey: R, headSha: C1, now: '2026-10-05T01:01:00Z' });
   assert.deepEqual(readHammerRetryCapLedger(rootDir, IDENTITY).transientRetryHeads, { [C1]: 1 });
+  assert.equal(readHammerRetryCapLedger(rootDir, IDENTITY).lastTransientRetryAt, '2026-10-05T01:00:00Z');
+  markHammerRetryCapExhausted(rootDir, IDENTITY, { jobKey: R, headSha: C1, now: '2026-10-05T01:02:00Z' });
+  assert.equal(readHammerRetryCapLedger(rootDir, IDENTITY).lastTransientRetryAt, '2026-10-05T01:00:00Z');
   assert.equal(evaluate(C1).capExhausted, true);
   const again = grantTransientHammerRetry(rootDir, IDENTITY, { jobKey: R, headSha: C1 });
   assert.deepEqual(again, { granted: false, reason: 'transient-retry-head-exhausted', headGrants: 1 });
@@ -218,6 +237,32 @@ test('transient hammer retry is granted once per HEAD, not per PR', (t) => {
   const nextHead = grantTransientHammerRetry(rootDir, IDENTITY, { jobKey: R, headSha: C2 });
   assert.equal(nextHead.granted, true);
   assert.deepEqual(readHammerRetryCapLedger(rootDir, IDENTITY).transientRetryHeads, { [C1]: 1, [C2]: 1 });
+});
+
+test('spent transient grants survive more than ten heads and fresh-review resets', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closer-authored-stale-grant-churn-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  exhaustSeries(rootDir);
+  const lifetimeDispatchCeiling = 20;
+  const heads = Array.from({ length: 11 }, (_, i) => i.toString(16).padStart(40, '0'));
+  for (const headSha of heads) {
+    const options = { jobKey: R, headSha, lifetimeDispatchCeiling };
+    assert.equal(grantTransientHammerRetry(rootDir, IDENTITY, options).granted, true);
+    recordHammerRetryDispatch(rootDir, IDENTITY, options);
+  }
+  const ledger = readHammerRetryCapLedger(rootDir, IDENTITY);
+  assert.equal(Object.keys(ledger.transientRetryHeads).length, 11);
+  assert.equal(ledger.lifetimeAttemptCount, 13);
+  const revisit = { jobKey: R, headSha: heads[0], lifetimeDispatchCeiling };
+  assert.deepEqual(grantTransientHammerRetry(rootDir, IDENTITY, revisit), {
+    granted: false, reason: 'transient-retry-head-exhausted', headGrants: 1,
+  });
+  for (let i = 0; i < 2; i += 1) {
+    recordHammerRetryDispatch(rootDir, IDENTITY, { ...revisit, jobKey: W });
+  }
+  assert.deepEqual(grantTransientHammerRetry(rootDir, IDENTITY, { ...revisit, jobKey: W }), {
+    granted: false, reason: 'transient-retry-head-exhausted', headGrants: 1,
+  });
 });
 
 test('transient hammer retry never re-opens the lifetime ceiling or a different series', (t) => {

@@ -92,7 +92,8 @@ export async function proveCloserAuthoredStaleHead({
  *
  * Decisions: `eligible`; `retry` when the only misses are transient (exact-head
  * CI PENDING, mergeability UNKNOWN) -- wait and re-evaluate, never stop;
- * `not-eligible` for a hard miss (red/unknown CI, blockers, unsettled verdict);
+ * `not-eligible` for a hard miss (red/unknown CI, resolved non-mergeable head,
+ * blockers, unsettled verdict);
  * `rereview-exact-head` when a non-closer commit sits after the reviewed head;
  * `not-applicable` when the head is not stale at all.
  */
@@ -133,6 +134,7 @@ export function closerAuthoredStaleEligible({
   else if (checks !== 'SUCCESS') hard.push(checks ? 'ci-not-green' : 'ci-unknown');
   const merge = String(mergeability || '').trim().toUpperCase();
   if (!merge || merge === 'UNKNOWN') transient.push('pr-mergeability-unknown');
+  else if (merge !== 'MERGEABLE') hard.push('pr-not-mergeable');
   if (hard.length) {
     return { eligible: false, carryForward, transient: false, ...headSummary,
       decision: NOT_ELIGIBLE, reasons: [...hard, ...transient] };

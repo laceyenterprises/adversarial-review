@@ -190,15 +190,17 @@ function retryableFieldsForSeries(ledger) {
 }
 
 // STALECLOSER-03: per-HEAD transient-retry grants. Keyed by head and kept
-// across job-key changes, so a fresh review cannot re-arm a head's grant.
+// for the PR's lifetime, so head churn or a fresh review cannot re-arm a grant.
 function transientRetryFields(ledger) {
   const raw = ledger?.transientRetryHeads;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const entries = Object.entries(raw)
     .map(([head, count]) => [normalizeKey(head), Math.max(0, Math.trunc(Number(count) || 0))])
-    .filter(([head, count]) => head && count > 0)
-    .slice(-RETRYABLE_LAUNCH_HISTORY);
-  return entries.length ? { transientRetryHeads: Object.fromEntries(entries) } : {};
+    .filter(([head, count]) => head && count > 0);
+  return entries.length ? {
+    transientRetryHeads: Object.fromEntries(entries),
+    ...(ledger.lastTransientRetryAt !== undefined ? { lastTransientRetryAt: ledger.lastTransientRetryAt } : {}),
+  } : {};
 }
 
 function sanitizeLifetimeCount(rawValue, ceiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES) {

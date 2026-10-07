@@ -2268,6 +2268,13 @@ function schemaV1() {
                     remaining_pct: { __type: TYPE_FLOAT, __default: 0.0, __min: 0, __max: 100, __enforceMax: true },
                     protected_classes: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: [] },
                     reroute_held: { __type: TYPE_BOOL, __default: true },
+                    // QUOTAPAUSE-01: at or below this measured remaining, hold
+                    // every autonomous launch on the credential (protected
+                    // classes included); 0 disables the pause.
+                    pause_pct: { __type: TYPE_FLOAT, __default: 5.0, __min: 0, __max: 100, __enforceMax: true },
+                    // QUOTAPAUSE-01: release pause and floor once the measured
+                    // period reset is at most this many hours away.
+                    release_before_reset_hours: { __type: TYPE_FLOAT, __default: 12.0, __min: 0, __max: 168, __enforceMax: true },
                   },
                 }])),
               },

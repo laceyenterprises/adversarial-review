@@ -7737,3 +7737,32 @@ test('reserve floor mirrors every credential and rejects invalid strict policy',
     assert.deepEqual(loadConfig({ topPath, env: {} }).get('worker_pool.quota.reserve_floor.openai-oauth.protected_classes'), ['', ' ', '*']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('QUOTAPAUSE-01 pause_pct and release_before_reset_hours mirror the Python schema per credential', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'quota-pause-config-'));
+  try {
+    const topPath = join(dir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n');
+    const cfg = loadConfig({ topPath, env: {} });
+    for (const credential of ['openai-oauth', 'openai-oauth-corp', 'anthropic-oauth']) {
+      assert.equal(cfg.get(`worker_pool.quota.reserve_floor.${credential}.pause_pct`), 5);
+      assert.equal(cfg.get(`worker_pool.quota.reserve_floor.${credential}.release_before_reset_hours`), 12);
+    }
+    writeFileSync(topPath, 'version: 1\nworker_pool:\n  quota:\n    reserve_floor:\n      anthropic-oauth: {pause_pct: 3.5, release_before_reset_hours: 6}\n      openai-oauth: {pause_pct: 0}\n');
+    const tuned = loadConfig({ topPath, env: {} });
+    assert.equal(tuned.get('worker_pool.quota.reserve_floor.anthropic-oauth.pause_pct'), 3.5);
+    assert.equal(tuned.get('worker_pool.quota.reserve_floor.anthropic-oauth.release_before_reset_hours'), 6);
+    assert.equal(tuned.get('worker_pool.quota.reserve_floor.openai-oauth.pause_pct'), 0);
+    assert.equal(tuned.get('worker_pool.quota.reserve_floor.openai-oauth-corp.pause_pct'), 5);
+    for (const policy of [
+      'openai-oauth: {pause_pct: -1}',
+      'openai-oauth: {pause_pct: 101}',
+      'anthropic-oauth: {release_before_reset_hours: -1}',
+      'anthropic-oauth: {release_before_reset_hours: 169}',
+      'anthropic-oauth: {release_before_reset_hours: "soon"}',
+    ]) {
+      writeFileSync(topPath, `version: 1\nworker_pool:\n  quota:\n    reserve_floor:\n      ${policy}\n`);
+      assert.throws(() => loadConfig({ topPath, env: {} }), AgentOSConfigError, policy);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

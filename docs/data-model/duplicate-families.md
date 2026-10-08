@@ -87,6 +87,15 @@ and no longer keeps the family active. This reconciliation also runs when every
 member has left the discovery slice; terminal evidence counts as an observation
 for deactivation. Discovery observations take precedence over older reviewed
 state (including a reopened closed PR).
+
+`reviewed_prs` is in the same local SQLite `data/reviews.db` as the duplicate
+tables, created by `ensureReviewStateSchema()` in `src/review-state.mjs`.
+The session-ledger backend setting affects build-completion provenance reads
+through `src/session-ledger-read-adapter.mjs`; selecting Postgres does not move
+the watcher tables. The local table-presence probe supports standalone duplicate
+stores without `reviewed_prs`. Such stores retain cached states; a failed read
+of an existing table fails the census and preserves holds.
+
 Slice absence by itself is not treated as closure. Existing databases created with the older
 `(family_id, repo, pr_number)` key are migrated in place by
 `ensureDuplicateFamilySchema(db)`.

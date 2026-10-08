@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { readBuildCompletionSignalForPr } from '../src/session-ledger-read-adapter.mjs';
 import { evaluateDuplicateFamilyCandidate } from '../src/duplicate-family-gate.mjs';
 import {
   detectDuplicateFamiliesForRepo,
@@ -1547,7 +1548,7 @@ test('DUPTERM-01: unverified empty census preserves terminal reconciliation for 
 });
 
 
-test('DUPTERM-01: unreadable reviewed-state join fails the census without releasing cached holds', async () => {
+test('DUPTERM-01: unreadable reviewed-state join propagates the error without releasing cached holds', async () => {
   const db = memoryDb();
   const options = { repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({
     6674: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
@@ -1557,13 +1558,71 @@ test('DUPTERM-01: unreadable reviewed-state join fails the census without releas
     reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], options);
     // A malformed joined table models a real SQLite read failure, not a PR closure.
     db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER)');
+    const prepare = db.prepare.bind(db);
+    let readError;
+    db.prepare = (sql) => {
+      try {
+        return prepare(sql);
+      } catch (err) {
+        readError = err;
+        throw err;
+      }
+    };
     const result = await runDuplicateFamilyCensusForWatcher({ db, subjectEntries: [], repoPath: REPO,
       env: {}, log: { log() {}, error() {} } });
-    assert.match(result.error.message, /no such column/);
+    assert.ok(readError instanceof Error);
+    assert.equal(result.error, readError);
     assert.equal(listDuplicateFamilies(db)[0].status, 'advisory');
     assert.equal(evaluateDuplicateFamilyCandidate(readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 6674 }),
       { prNumber: 6674, headSha: 'head-6674' }).held, true);
     assert.deepEqual(db.prepare('SELECT pr_state FROM duplicate_family_candidates').all(),
       [{ pr_state: 'open' }, { pr_state: 'open' }]);
+  } finally { db.close(); }
+});
+
+test('DUPTERM-01: Postgres provenance keeps terminal PR authority in local reviews.db', async () => {
+  const db = memoryDb();
+  try {
+    reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], {
+      repoPath: REPO,
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        6674: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        6680: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, pr_state TEXT)');
+    for (const n of [6674, 6680]) db.prepare('INSERT INTO reviewed_prs VALUES (?, ?, ?)').run(REPO, n, 'merged');
+    let provenanceReads = 0;
+    const census = await runDuplicateFamilyCensusForWatcher({
+      db, repoPath: REPO,
+      subjectEntries: [subject(7777, { title: '[codex] OTHER-01: unrelated work' })],
+      env: {
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger',
+        AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+      },
+      log: { log() {}, error() {} },
+      readBuildCompletionSignalForPrImpl: (args) => {
+        const result = readBuildCompletionSignalForPr({
+          ...args,
+          spawnSyncImpl: (command, argv, options) => {
+            provenanceReads += 1;
+            assert.equal(command, 'psql');
+            assert.ok(argv.includes('postgres://ledger.example/agent_os_ledger'));
+            assert.match(options.input, /FROM build_completions/);
+            assert.doesNotMatch(options.input, /reviewed_prs|sqlite_master/);
+            return { status: 0, stdout: JSON.stringify({ ticket_id: 'OTHER-01', spec_ref: 'spec@1' }), stderr: '' };
+          },
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.target.backend, 'postgres');
+        return result;
+      },
+    });
+    assert.equal(census.error, undefined);
+    assert.ok(provenanceReads > 0);
+    assert.equal(listDuplicateFamilies(db)[0].status, 'inactive');
+    assert.deepEqual(db.prepare('SELECT pr_state FROM duplicate_family_candidates ORDER BY pr_number').all(),
+      [{ pr_state: 'merged' }, { pr_state: 'merged' }]);
   } finally { db.close(); }
 });

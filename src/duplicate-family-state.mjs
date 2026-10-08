@@ -639,6 +639,9 @@ function mergePersistedDuplicateCandidates(db, subjectEntries, repoPath) {
   if (!repoPath) return Array.isArray(subjectEntries) ? subjectEntries : [];
   const merged = Array.isArray(subjectEntries) ? [...subjectEntries] : [];
   const seen = new Set(merged.map((entry) => subjectEntryKey(entry, repoPath)).filter(Boolean));
+  // This is the watcher's local reviews.db, not the session ledger. reviewed_prs
+  // stays here even when build-completion provenance is read from Postgres.
+  // Standalone duplicate-family stores may omit this optional local table.
   const hasReviewedPrs = Boolean(db.prepare(
     `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reviewed_prs'`
   ).get());

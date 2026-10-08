@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { readBuildCompletionSignalForPr } from '../src/session-ledger-read-adapter.mjs';
 import { evaluateDuplicateFamilyCandidate } from '../src/duplicate-family-gate.mjs';
 import {
   detectDuplicateFamiliesForRepo,
@@ -584,6 +585,9 @@ test('authoritative reviewed_prs terminal state releases a vanished sibling', ()
     });
 
     assert.equal(listDuplicateFamilies(db)[0].status, 'inactive');
+    const terminal = db.prepare('SELECT pr_state, updated_at FROM duplicate_family_candidates WHERE pr_number = 348').get();
+    assert.equal(terminal.pr_state, 'closed');
+    assert.equal(terminal.updated_at, '2026-09-11T00:01:00.000Z');
   } finally {
     db.close();
   }
@@ -1423,4 +1427,202 @@ test('nested source build directories and code under docs count toward overlap',
     subject(2, { paths: ['docs/reports/incident.md', 'tools/docs/gen.mjs'] }),
   ], { repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({}) })[0];
   assert.equal(excluded.contentEvidence.pairs[0].reason, 'incident-record-code-pair');
+});
+
+// DUPTERM-01 / LAC-1895: terminal siblings can all leave discovery together.
+for (const [identity, states] of [
+  ['HEALTHMEM-01', { 6674: 'closed', 6680: 'merged' }],
+  ['SPAWNTMO-01', { 6801: 'merged', 6802: 'closed', 6812: 'merged' }],
+]) {
+  test(`DUPTERM-01: empty discovery naturally reconciles ${identity} terminal members`, async () => {
+    const db = memoryDb();
+    const numbers = Object.keys(states).map(Number);
+    const options = { repoPath: REPO, now: '2026-09-20T16:02:35.058Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader(Object.fromEntries(numbers.map((n) =>
+        [n, { ticket_id: identity, spec_ref: 'spec@1' }]))),
+    };
+    try {
+      reconcileDuplicateFamiliesForRepo(db, numbers.map((n) => subject(n)), options);
+      db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, pr_state TEXT)');
+      for (const n of numbers) db.prepare('INSERT INTO reviewed_prs VALUES (?, ?, ?)').run(REPO, n, states[n]);
+      const census = await runDuplicateFamilyCensusForWatcher({ db, subjectEntries: [], repoPath: REPO,
+        env: {}, log: { log() {}, error() {} },
+        readBuildCompletionSignalForPrImpl: options.readBuildCompletionSignalForPrImpl });
+      assert.equal(census.error, undefined);
+      assert.equal(listDuplicateFamilies(db)[0].status, 'inactive');
+      for (const n of numbers) {
+        const row = db.prepare('SELECT * FROM duplicate_family_candidates WHERE repo = ? AND pr_number = ?').get(REPO, n);
+        assert.equal(row.pr_state, states[n]);
+        assert.notEqual(row.updated_at, options.now);
+        assert.notEqual(row.last_seen_at, options.now);
+      }
+      const before = listDuplicateFamilies(db)[0].transition_log_json;
+      reconcileDuplicateFamiliesForRepo(db, [], options);
+      assert.equal(listDuplicateFamilies(db)[0].transition_log_json, before);
+    } finally { db.close(); }
+  });
+}
+
+test('DUPTERM-01: terminal evidence refreshes mixed families without discarding absent live siblings', () => {
+  const db = memoryDb();
+  const numbers = [6674, 6680, 6812];
+  const options = { repoPath: REPO, now: '2026-09-20T16:02:35.058Z',
+    readBuildCompletionSignalForPrImpl: provenanceReader(Object.fromEntries(numbers.map((n) =>
+      [n, { ticket_id: 'DPA-01', spec_ref: 'spec@1' }]))),
+  };
+  try {
+    reconcileDuplicateFamiliesForRepo(db, numbers.map((n) => subject(n)), options);
+    db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, pr_state TEXT)');
+    db.prepare('INSERT INTO reviewed_prs VALUES (?, ?, ?)').run(REPO, 6674, 'closed');
+    reconcileDuplicateFamiliesForRepo(db, [], { ...options, now: '2026-10-08T20:47:00Z' });
+    assert.equal(listDuplicateFamilies(db)[0].status, 'advisory');
+    assert.equal(listDuplicateFamilies(db)[0].candidate_count, 2);
+    assert.equal(db.prepare('SELECT pr_state FROM duplicate_family_candidates WHERE pr_number = 6674').get().pr_state, 'closed');
+    for (const n of [6680, 6812]) assert.equal(db.prepare('SELECT pr_state FROM duplicate_family_candidates WHERE pr_number = ?').get(n).pr_state, 'open');
+  } finally { db.close(); }
+});
+
+for (const state of [null, 'unknown', 'error', 'open']) {
+  test(`DUPTERM-01: absent discovery with reviewed state ${state} preserves cached holds`, () => {
+    const db = memoryDb();
+    const options = { repoPath: REPO, now: '2026-09-20T16:02:35.058Z',
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        6674: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        6680: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    };
+    try {
+      reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], options);
+      db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, pr_state TEXT)');
+      if (state !== null) db.prepare('INSERT INTO reviewed_prs VALUES (?, ?, ?)').run(REPO, 6674, state);
+      reconcileDuplicateFamiliesForRepo(db, [], { ...options, now: '2026-10-08T20:47:00Z' });
+      assert.equal(listDuplicateFamilies(db)[0].status, 'advisory');
+      assert.equal(evaluateDuplicateFamilyCandidate(readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 6674 }), { prNumber: 6674, headSha: 'head-6674' }).held, true);
+      const row = db.prepare('SELECT * FROM duplicate_family_candidates WHERE pr_number = 6674').get();
+      assert.equal(row.pr_state, 'open');
+    } finally { db.close(); }
+  });
+}
+
+
+test('DUPTERM-01: discovery reopen wins over older reviewed terminal state', () => {
+  const db = memoryDb();
+  const options = { repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({
+    6674: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    6680: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+  }) };
+  try {
+    reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], options);
+    db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, pr_state TEXT)');
+    db.prepare('INSERT INTO reviewed_prs VALUES (?, ?, ?)').run(REPO, 6674, 'closed');
+    reconcileDuplicateFamiliesForRepo(db, [subject(6674)], options);
+    assert.equal(listDuplicateFamilies(db)[0].status, 'advisory');
+    assert.equal(db.prepare('SELECT pr_state FROM duplicate_family_candidates WHERE pr_number = 6674').get().pr_state, 'open');
+  } finally { db.close(); }
+});
+
+test('DUPTERM-01: unverified empty census preserves terminal reconciliation for a later healthy tick', async () => {
+  const db = memoryDb();
+  const options = { repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({
+    6674: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    6680: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+  }) };
+  try {
+    reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], options);
+    db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, pr_state TEXT)');
+    for (const n of [6674, 6680]) db.prepare('INSERT INTO reviewed_prs VALUES (?, ?, ?)').run(REPO, n, 'merged');
+    const result = await runDuplicateFamilyCensusForWatcher({ db, subjectEntries: [], repoPath: REPO,
+      env: { AGENT_OS_SESSION_LEDGER_DB_PATH: '/private/tmp/dupterm-nonexistent-ledger.db' },
+      log: { log() {}, error() {} } });
+    assert.match(result.error.message, /missing-ledger-target/);
+    assert.equal(listDuplicateFamilies(db)[0].status, 'advisory');
+    assert.deepEqual(db.prepare('SELECT pr_state FROM duplicate_family_candidates').all(),
+      [{ pr_state: 'open' }, { pr_state: 'open' }]);
+    const mutations = [];
+    await reconcileDuplicateFamilyLabels({ db, repoPath: REPO, census: result,
+      octokit: { rest: { issues: { addLabels: async (p) => mutations.push(p), removeLabel: async (p) => mutations.push(p) } } } });
+    assert.deepEqual(mutations, []);
+    reconcileDuplicateFamiliesForRepo(db, [], options);
+    assert.equal(listDuplicateFamilies(db)[0].status, 'inactive');
+  } finally { db.close(); }
+});
+
+
+test('DUPTERM-01: unreadable reviewed-state join propagates the error without releasing cached holds', async () => {
+  const db = memoryDb();
+  const options = { repoPath: REPO, readBuildCompletionSignalForPrImpl: provenanceReader({
+    6674: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+    6680: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+  }) };
+  try {
+    reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], options);
+    // A malformed joined table models a real SQLite read failure, not a PR closure.
+    db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER)');
+    const prepare = db.prepare.bind(db);
+    let readError;
+    db.prepare = (sql) => {
+      try {
+        return prepare(sql);
+      } catch (err) {
+        readError = err;
+        throw err;
+      }
+    };
+    const result = await runDuplicateFamilyCensusForWatcher({ db, subjectEntries: [], repoPath: REPO,
+      env: {}, log: { log() {}, error() {} } });
+    assert.ok(readError instanceof Error);
+    assert.equal(result.error, readError);
+    assert.equal(listDuplicateFamilies(db)[0].status, 'advisory');
+    assert.equal(evaluateDuplicateFamilyCandidate(readDuplicateFamilyForPr(db, { repo: REPO, prNumber: 6674 }),
+      { prNumber: 6674, headSha: 'head-6674' }).held, true);
+    assert.deepEqual(db.prepare('SELECT pr_state FROM duplicate_family_candidates').all(),
+      [{ pr_state: 'open' }, { pr_state: 'open' }]);
+  } finally { db.close(); }
+});
+
+test('DUPTERM-01: Postgres provenance keeps terminal PR authority in local reviews.db', async () => {
+  const db = memoryDb();
+  try {
+    reconcileDuplicateFamiliesForRepo(db, [subject(6674), subject(6680)], {
+      repoPath: REPO,
+      readBuildCompletionSignalForPrImpl: provenanceReader({
+        6674: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+        6680: { ticket_id: 'DPA-01', spec_ref: 'spec@1' },
+      }),
+    });
+    db.exec('CREATE TABLE reviewed_prs (repo TEXT, pr_number INTEGER, pr_state TEXT)');
+    for (const n of [6674, 6680]) db.prepare('INSERT INTO reviewed_prs VALUES (?, ?, ?)').run(REPO, n, 'merged');
+    let provenanceReads = 0;
+    const census = await runDuplicateFamilyCensusForWatcher({
+      db, repoPath: REPO,
+      subjectEntries: [subject(7777, { title: '[codex] OTHER-01: unrelated work' })],
+      env: {
+        AGENT_OS_CONFIG_PATH: '/dev/null',
+        AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger',
+        AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on',
+      },
+      log: { log() {}, error() {} },
+      readBuildCompletionSignalForPrImpl: (args) => {
+        const result = readBuildCompletionSignalForPr({
+          ...args,
+          spawnSyncImpl: (command, argv, options) => {
+            provenanceReads += 1;
+            assert.equal(command, 'psql');
+            assert.ok(argv.includes('postgres://ledger.example/agent_os_ledger'));
+            assert.match(options.input, /FROM build_completions/);
+            assert.doesNotMatch(options.input, /reviewed_prs|sqlite_master/);
+            return { status: 0, stdout: JSON.stringify({ ticket_id: 'OTHER-01', spec_ref: 'spec@1' }), stderr: '' };
+          },
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.target.backend, 'postgres');
+        return result;
+      },
+    });
+    assert.equal(census.error, undefined);
+    assert.ok(provenanceReads > 0);
+    assert.equal(listDuplicateFamilies(db)[0].status, 'inactive');
+    assert.deepEqual(db.prepare('SELECT pr_state FROM duplicate_family_candidates ORDER BY pr_number').all(),
+      [{ pr_state: 'merged' }, { pr_state: 'merged' }]);
+  } finally { db.close(); }
 });

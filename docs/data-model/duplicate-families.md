@@ -82,7 +82,20 @@ The primary key is `(repo, pr_number)`. The watcher keeps candidate
 rows current for every PR still mapped to an active family. For candidates that
 leave the open-PR discovery slice, the census joins the authoritative
 `reviewed_prs.pr_state`; a sibling recorded there as merged or closed is
-re-injected with that terminal state and no longer keeps the family active.
+re-injected with that terminal state, persisted as a terminal candidate observation,
+and no longer keeps the family active. This reconciliation also runs when every
+member has left the discovery slice; terminal evidence counts as an observation
+for deactivation. Discovery observations take precedence over older reviewed
+state (including a reopened closed PR).
+
+`reviewed_prs` is in the same local SQLite `data/reviews.db` as the duplicate
+tables, created by `ensureReviewStateSchema()` in `src/review-state.mjs`.
+The session-ledger backend setting affects build-completion provenance reads
+through `src/session-ledger-read-adapter.mjs`; selecting Postgres does not move
+the watcher tables. The local table-presence probe supports standalone duplicate
+stores without `reviewed_prs`. Such stores retain cached states; a failed read
+of an existing table fails the census and preserves holds.
+
 Slice absence by itself is not treated as closure. Existing databases created with the older
 `(family_id, repo, pr_number)` key are migrated in place by
 `ensureDuplicateFamilySchema(db)`.

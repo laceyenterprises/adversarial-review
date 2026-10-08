@@ -82,7 +82,11 @@ The primary key is `(repo, pr_number)`. The watcher keeps candidate
 rows current for every PR still mapped to an active family. For candidates that
 leave the open-PR discovery slice, the census joins the authoritative
 `reviewed_prs.pr_state`; a sibling recorded there as merged or closed is
-re-injected with that terminal state and no longer keeps the family active.
+re-injected with that terminal state, persisted as a terminal candidate observation,
+and no longer keeps the family active. This reconciliation also runs when every
+member has left the discovery slice; terminal evidence counts as an observation
+for deactivation. Discovery observations take precedence over older reviewed
+state (including a reopened closed PR).
 Slice absence by itself is not treated as closure. Existing databases created with the older
 `(family_id, repo, pr_number)` key are migrated in place by
 `ensureDuplicateFamilySchema(db)`.

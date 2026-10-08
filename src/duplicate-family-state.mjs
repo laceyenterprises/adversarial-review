@@ -668,6 +668,7 @@ function mergePersistedDuplicateCandidates(db, subjectEntries, repoPath) {
     merged.push({
       repoPath: row.repo,
       prNumber: row.pr_number,
+      duplicateTerminalObserved: ['merged', 'closed'].includes(String(row.authoritative_pr_state || '').toLowerCase()),
       subject: {
         number: row.pr_number,
         title: row.title,
@@ -892,10 +893,16 @@ export function upsertDuplicateFamilies(db, families, {
 export function reconcileDuplicateFamiliesForRepo(db, subjectEntries, options = {}) {
   ensureDuplicateFamilySchema(db);
   const repoPath = options.repoPath;
-  refreshObservedDuplicateCandidateRows(db, subjectEntries, repoPath, options.now);
-  const observedCandidateKeys = observedSubjectCandidateKeys(subjectEntries, repoPath);
   const censusEntries = mergePersistedDuplicateCandidates(db, subjectEntries, repoPath);
   const families = detectDuplicateFamiliesForRepo(censusEntries, options);
+  // Persisted open siblings are slice context, not fresh observations. Only
+  // authoritative terminal siblings may join discovery as lifecycle evidence.
+  const discoveryKeys = observedSubjectCandidateKeys(subjectEntries, repoPath);
+  const observedEntries = censusEntries.filter((entry) =>
+    discoveryKeys.has(subjectEntryKey(entry, repoPath))
+    || entry.duplicateTerminalObserved === true);
+  refreshObservedDuplicateCandidateRows(db, observedEntries, repoPath, options.now);
+  const observedCandidateKeys = observedSubjectCandidateKeys(observedEntries, repoPath);
   const familyIds = upsertDuplicateFamilies(db, families, {
     ...options,
     repoPath,

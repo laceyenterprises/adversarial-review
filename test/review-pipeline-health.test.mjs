@@ -76,7 +76,7 @@ import { REREVIEW_CI_BLOCKED_STATUS } from '../src/review-statuses.mjs';
 import { DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS, idleReapSeconds, ceilingReapSeconds } from '../src/reviewer-pass-reaper.mjs';
 import { LEGACY_ORPHAN_FAILURE_MESSAGE } from '../src/reviewer-reattach.mjs';
 import { ensureTtmTrackerSchema } from '../src/ttm-tracker.mjs';
-import { ensureDuplicateFamilySchema } from '../src/duplicate-family-state.mjs';
+import { ensureDuplicateFamilySchema, reconcileDuplicateFamiliesForRepo } from '../src/duplicate-family-state.mjs';
 import { stopPendingNoRemediationJobs } from '../src/follow-up-jobs.mjs';
 
 const NOW = '2026-05-25T18:00:00.000Z';
@@ -6171,4 +6171,33 @@ test('token-refresh-pending thresholds are operator-tunable', () => {
   assert.equal(defaults.tokenRefreshPendingWindowMs, 3600000);
   assert.equal(defaults.tokenRefreshPendingThreshold, 3);
   assert.equal(defaults.tokenRefreshPendingShareThreshold, 0.2);
+});
+
+
+test('DUPTERM-01: natural terminal census clears stale family health findings', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openDb(rootDir);
+  const families = [
+    ['agent-os-main-healthmem-01-2026-09-12-1ae5785b5b', [[6674, 'closed'], [6680, 'merged']]],
+    ['agent-os-main-spawntmo-01-2026-09-14-0d5a4dcc99', [[6801, 'merged'], [6802, 'closed'], [6812, 'merged']]],
+  ];
+  for (const [familyId, members] of families) {
+    insertDuplicateFamily(db, { familyId, firstDetectedAt: '2026-05-23T18:00:00Z',
+      candidates: members.map(([prNumber]) => ({ prNumber })) });
+    for (const [prNumber, state] of members) db.prepare(
+      'INSERT INTO reviewed_prs (repo, pr_number, pr_state, reviewed_at, reviewer) VALUES (?, ?, ?, ?, ?)'
+    ).run(REPO, prNumber, state, NOW, 'codex');
+  }
+  const findings = () => evaluateReviewPipelineFindings(collectReviewPipelineHealth({
+    rootDir, now: () => new Date(NOW),
+    config: { duplicateFamilyHeldMaxAgeMs: 60 * 60 * 1000 },
+  }), { observedAt: NOW }).filter((f) => f.code === 'review:duplicate_family_held_too_long');
+  assert.equal(findings().length, 2);
+  reconcileDuplicateFamiliesForRepo(db, [], { repoPath: REPO, now: NOW,
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }) });
+  assert.deepEqual(findings(), []);
+  assert.deepEqual(db.prepare('SELECT status FROM duplicate_families ORDER BY family_id').all(),
+    [{ status: 'inactive' }, { status: 'inactive' }]);
+  db.close();
 });

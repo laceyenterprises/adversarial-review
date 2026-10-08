@@ -130,3 +130,13 @@ temporary sandbox. No retry or baseline investigation was attempted.
 Per the dispatch's stop-on-failure instruction, this RCA is retained locally,
 uncommitted; no push, PR, merge, deployment or success signal occurred.
 Validation isolation must be resolved before a governed publication attempt.
+
+## Publication process correction (HAM final review)
+
+The final review noted a missing worker-class prefix in the stated brief
+title. The live PR #1250 title begins with `[codex]`; the brief title in its
+body is not the routing title. Future publication of this work must use
+`npm run pr:create:tagged` so the worker-class prefix is present at creation
+time. Retitling cannot repair a terminal malformed creation-time routing row
+or request another review. This note records the publication contract without
+changing the evidence assessment above.

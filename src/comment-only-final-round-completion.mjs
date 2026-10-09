@@ -125,7 +125,7 @@ export function projectRecoveredWorkflowAuthBlocker({ job, operationalBlockers, 
   const index = operationalBlockers.findIndex((blocker) =>
     classifyGithubAuthOperationalBlocker(blocker)?.kind === 'workflow-push-candidate'
     && extractCommitShaFromOperationalBlocker(blocker) === receipt.headSha
-    && blocker.expectedRemoteSha === receipt.expectedRemoteSha);
+    && (blocker.expectedRemoteSha || job.revisionRef) === receipt.expectedRemoteSha);
   if (index < 0) return withheld('historical-workflow-blocker-mismatch');
   return {
     operationalBlockers: operationalBlockers.filter((_, candidate) => candidate !== index),

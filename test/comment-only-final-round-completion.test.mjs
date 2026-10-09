@@ -353,6 +353,45 @@ test('WFDRIFT-01: native publication plus independent push and exact-head CI res
   assert.deepEqual(job.remediationPlan, { currentRound: 2, maxRounds: 2 });
 });
 
+
+test('WFDRIFT-01: omitted optional blocker lease uses the native job revision fallback', async () => {
+  const job = workflowPublicationJob();
+  const reply = workflowReply();
+  delete reply.operationalBlockers[0].expectedRemoteSha;
+  reply.operationalBlockers[0].reasoning = 'GitHub refused the workflow without workflows permission. '
+    + 'Preserved local remediation through ' + pushedHead + '.';
+  const original = JSON.stringify(reply);
+  const { result } = await resolve({ job, reply });
+  assert.equal(result.completed, true);
+  assert.equal(result.completionFields.operationalBlockerResolution.resolved, true);
+  assert.equal(result.completionFields.operationalBlockerResolution.expectedRemoteSha, job.revisionRef);
+  assert.equal(JSON.stringify(reply), original, 'optional lease recovery never mutates the historical reply');
+  assert.deepEqual(job.remediationPlan, { currentRound: 2, maxRounds: 2 });
+});
+
+test('WFDRIFT-01: explicit or fallback lease mismatches never resolve the historical blocker', async () => {
+  for (const mode of ['explicit-mismatch', 'fallback-mismatch', 'missing-fallback']) {
+    const job = workflowPublicationJob();
+    const reply = workflowReply();
+    const blocker = reply.operationalBlockers[0];
+    blocker.reasoning = 'GitHub refused the workflow without workflows permission. '
+      + 'Preserved local remediation through ' + pushedHead + '.';
+    if (mode === 'explicit-mismatch') blocker.expectedRemoteSha = '3'.repeat(40);
+    else {
+      delete blocker.expectedRemoteSha;
+      if (mode === 'fallback-mismatch') job.revisionRef = '3'.repeat(40);
+      else delete job.revisionRef;
+    }
+    const original = JSON.stringify(reply);
+    const { result } = await resolve({ job, reply });
+    assert.equal(result.completed, false, mode);
+    assert.equal(result.completionFields.operationalBlockerResolution.resolved, false, mode);
+    assert.equal(result.completionFields.operationalBlockerResolution.reason,
+      mode === 'missing-fallback' ? 'independent-worker-push-proof-missing' : 'historical-workflow-blocker-mismatch', mode);
+    assert.equal(JSON.stringify(reply), original, mode);
+  }
+});
+
 test('WFDRIFT-01: native receipt never substitutes for worker trailer, replay, live head or CI proof', async () => {
   const cases = [
     { change: (job) => { delete job.operationalBlockerRecovery.retry.nativePublicationReceipt; } },

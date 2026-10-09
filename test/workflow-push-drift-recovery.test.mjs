@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from '../src/github-auth-recovery.mjs';
+import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
+import { claimNextFollowUpJob, createFollowUpJob, markFollowUpJobSpawned } from '../src/follow-up-jobs.mjs';
 
 const execFileAsync = promisify(execFile);
 const oldHead = 'a'.repeat(40);
@@ -13,7 +15,7 @@ const fixedHead = 'b'.repeat(40);
 const quiet = { log() {}, warn() {}, error() {} };
 
 function fixture(t, { paths = '.github/workflows/repair.yml\0', remote, headBefore = oldHead, headAfter = fixedHead,
-  brokerFails = false, pushFails = false, failDiff = false, killSwitch = false } = {}) {
+  brokerFails = false, pushFails = false, failDiff = false, killSwitch = false, headReads = [] } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'wfdrift-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const file of ['modules/worker-pool/lib/hq-gh.sh',
@@ -29,6 +31,7 @@ function fixture(t, { paths = '.github/workflows/repair.yml\0', remote, headBefo
   const args = { workspaceDir: '/fixture/workspace', branch: 'feature', workerClass: 'codex',
     repo: 'example/repo', prNumber: 42, commitSha: headAfter, expectedRemoteSha: headBefore,
     requiresWorkflowPush: true, jobId: 'fixture-job', env, retryDelaysMs: [], log: quiet,
+    sleepImpl: async (ms) => { calls.push({ type: 'sleep', ms }); },
     readFileImpl: () => 'fixture-secret',
     fetchImpl: async (url) => {
       calls.push({ type: 'mint', url });
@@ -42,7 +45,11 @@ function fixture(t, { paths = '.github/workflows/repair.yml\0', remote, headBefo
         if (failDiff) throw new Error('missing commit object');
         return { stdout: paths };
       }
-      if (command === 'gh') return { stdout: observedHead + '\n' };
+      if (command === 'gh') {
+        const read = headReads.length ? headReads.shift() : observedHead;
+        if (read instanceof Error) throw read;
+        return { stdout: read + '\n' };
+      }
       if (command === 'bash') {
         assert.equal(options.env.WORKER_CLASS, 'merge-agent');
         assert.equal(options.env.GH_TOKEN, 'ghs_fixture-scoped-token');
@@ -75,6 +82,199 @@ test('WFDRIFT-01: an explicit late workflow denial is a bounded recovery candida
     'revoked entitlement and missing workflows permission']) {
     assert.equal(classifyGithubAuthOperationalBlocker({ category: 'github-auth', detail: reason }).kind, 'terminal');
   }
+});
+
+test('WFDRIFT-01: preflight retries transient head reads with bounded backoff', async (t) => {
+  const { args, calls } = fixture(t, { headReads: [new Error('TLS handshake timeout'),
+    new Error('HTTP 503 service unavailable'), oldHead] });
+  args.retryDelaysMs = [1, 2];
+  const result = await retryGithubAuthPushOnce(args);
+  assert.equal(result.pushed, true);
+  assert.deepEqual(calls.filter((call) => call.type === 'sleep').map((call) => call.ms), [1, 2]);
+  assert.equal(calls.filter((call) => call.type === 'gh').length, 4);
+  assert.equal(calls.filter((call) => call.type === 'bash').length, 1);
+});
+
+test('WFDRIFT-01: exhausted and permanent preflight failures never push', async (t) => {
+  for (const [headReads, expectedReads] of [
+    [Array.from({ length: 3 }, () => new Error('connection reset')), 3],
+    [[new Error('HTTP 403 forbidden')], 1],
+    [['unreadable'], 1],
+  ]) {
+    const { args, calls } = fixture(t, { headReads });
+    args.retryDelaysMs = [1, 2];
+    const result = await retryGithubAuthPushOnce(args);
+    assert.equal(result.reason, 'workflow-push-remote-head-unproven');
+    assert.equal(result.pushed, false);
+    assert.equal(calls.filter((call) => call.type === 'gh').length, expectedReads);
+    assert.equal(calls.filter((call) => call.type === 'bash').length, 0);
+  }
+});
+
+test('WFDRIFT-01: verification retries stale and transient reads without losing native update proof', async (t) => {
+  for (const pushFails of [false, true]) {
+    const { args, calls } = fixture(t, { pushFails,
+      headReads: [oldHead, new Error('TLS handshake timeout'), oldHead, fixedHead] });
+    args.retryDelaysMs = [1, 2];
+    let recorded = null;
+    args.recordNativePublicationImpl = (proof) => {
+      assert.equal(calls.filter((call) => call.type === 'gh').length, 1);
+      assert.equal(proof.method, 'git-update');
+      recorded = proof;
+    };
+    const result = await retryGithubAuthPushOnce(args);
+    assert.equal(result.pushed, true);
+    assert.equal(result.nativePublicationReceipt.headSha, fixedHead);
+    assert.equal(result.nativePublicationReceipt.method, 'git-update-and-live-pr-head');
+    assert.deepEqual(result.pendingNativePublication, recorded);
+    assert.deepEqual(calls.filter((call) => call.type === 'sleep').map((call) => call.ms), [1, 2]);
+    assert.equal(calls.filter((call) => call.type === 'bash').length, 1);
+  }
+});
+
+test('WFDRIFT-01: exhausted verification resumes from retained proof without another push', async (t) => {
+  for (const verificationRead of [oldHead, new Error('HTTP 503 service unavailable')]) {
+    const { args, calls } = fixture(t, { headReads: [oldHead,
+      verificationRead, verificationRead, verificationRead] });
+    args.retryDelaysMs = [1, 2];
+    const result = await retryGithubAuthPushOnce(args);
+    assert.equal(result.pushed, false);
+    assert.equal(result.retryLater, true);
+    assert.equal(result.nativePublicationReceipt, undefined);
+    assert.equal(result.pendingNativePublication.headSha, fixedHead);
+    const resumed = await retryGithubAuthPushOnce({ ...args,
+      pendingNativePublication: JSON.parse(JSON.stringify(result.pendingNativePublication)) });
+    assert.equal(resumed.pushed, true);
+    assert.equal(resumed.nativePublicationReceipt.headSha, fixedHead);
+    assert.equal(calls.filter((call) => call.type === 'bash').length, 1);
+  }
+});
+
+test('WFDRIFT-01: permanent verification errors and expired holds retain proof without active retries', async (t) => {
+  for (const verificationRead of [new Error('HTTP 403 forbidden'), oldHead]) {
+    const headReads = [oldHead, verificationRead];
+    const { args, calls } = fixture(t, { headReads });
+    const first = await retryGithubAuthPushOnce(args);
+    const pending = { ...first.pendingNativePublication, observedAt: '2020-01-01T00:00:00.000Z' };
+    headReads.push(verificationRead);
+    const result = await retryGithubAuthPushOnce({ ...args, pendingNativePublication: pending });
+    assert.equal(result.pushed, false);
+    assert.equal(result.retryLater, false);
+    assert.deepEqual(result.pendingNativePublication, pending);
+    assert.equal(result.nativePublicationReceipt, undefined);
+    const resumed = await retryGithubAuthPushOnce({ ...args, pendingNativePublication: pending });
+    assert.equal(resumed.pushed, true);
+    assert.equal(calls.filter((call) => call.type === 'bash').length, 1);
+  }
+});
+
+test('WFDRIFT-01: retained native evidence must match the full recovery identity', async (t) => {
+  const f = fixture(t);
+  const initial = await retryGithubAuthPushOnce(f.args);
+  for (const changed of [{ schemaVersion: 2 }, { source: 'operator' }, { method: 'unknown' },
+    { jobId: 'other-job' }, { repo: 'other/repo' }, { prNumber: 43 }, { branch: 'other' },
+    { expectedRemoteSha: 'c'.repeat(40) }, { headSha: 'c'.repeat(40) }, { observedAt: 'invalid' }]) {
+    const { args, calls } = fixture(t, { remote: fixedHead });
+    const result = await retryGithubAuthPushOnce({ ...args,
+      pendingNativePublication: { ...initial.pendingNativePublication, ...changed } });
+    assert.equal(result.pushed, false);
+    assert.equal(result.reason, 'already-published');
+    assert.equal(result.nativePublicationReceipt, undefined);
+    assert.equal(calls.filter((call) => call.type === 'bash').length, 0);
+  }
+});
+
+test('WFDRIFT-01: successful push exit without a native transcript never creates publication proof', async (t) => {
+  for (const liveHead of [oldHead, fixedHead]) {
+    const { args } = fixture(t, { headReads: [oldHead, liveHead] });
+    const mocked = args.execFileImpl;
+    args.execFileImpl = async (command, argv, options) => {
+      const result = await mocked(command, argv, options);
+      return command === 'bash' ? { stdout: '', stderr: '' } : result;
+    };
+    const result = await retryGithubAuthPushOnce(args);
+    assert.equal(result.pushed, false);
+    assert.equal(result.nativePublicationReceipt, undefined);
+    assert.equal(result.pendingNativePublication, undefined);
+    assert.equal(result.alreadyPublished, liveHead === fixedHead ? true : undefined);
+  }
+});
+
+test('WFDRIFT-01: daemon persists update proof and resumes verification on the next reconcile tick', async (t) => {
+  const { env, calls, args } = fixture(t, { headReads: [oldHead,
+    ...Array.from({ length: 3 }, () => new Error('TLS handshake timeout'))] });
+  const rootDir = env.HQ_REPO_ROOT;
+  const stamp = new Date().toISOString();
+  createFollowUpJob({ rootDir, repo: args.repo, prNumber: args.prNumber, reviewerModel: 'claude',
+    reviewBody: '## Blocking Issues\n- None.\n\n## Verdict\nRequest changes', reviewPostedAt: stamp });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: stamp, launcherPid: process.pid });
+  const workspaceDir = join(rootDir, 'data/follow-up-jobs/workspaces', claimed.job.jobId);
+  mkdirSync(workspaceDir, { recursive: true });
+  const outputPath = join(workspaceDir, 'last-message.md');
+  const replyPath = join(rootDir, 'hq/dispatch/remediation-replies', claimed.job.jobId, 'remediation-reply.json');
+  mkdirSync(join(replyPath, '..'), { recursive: true });
+  const secretPath = join(rootDir, 'secret');
+  writeFileSync(secretPath, 'fixture-secret');
+  writeFileSync(outputPath, 'GitHub denied the workflow push.\n');
+  const reply = { kind: 'adversarial-review-remediation-reply', schemaVersion: 1,
+    jobId: claimed.job.jobId, repo: args.repo, prNumber: args.prNumber, outcome: 'blocked',
+    summary: 'Workflow push denied.', validation: [], addressed: [], pushback: [], blockers: [],
+    operationalBlockers: [{ title: 'github-auth', finding: 'GitHub rejected the workflow without workflows permission.',
+      reasoning: 'The physical worker credential cannot publish workflows.',
+      commitSha: fixedHead, expectedRemoteSha: oldHead }], reReview: { requested: false, reason: null } };
+  writeFileSync(replyPath, JSON.stringify(reply));
+  const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, spawnedAt: stamp,
+    worker: { model: 'codex', processId: 9004, state: 'spawned', workspaceDir: relative(rootDir, workspaceDir),
+      outputPath: relative(rootDir, outputPath), replyPath, logPath: relative(rootDir, join(workspaceDir, 'worker.log')) } });
+  const job = { ...spawned.job, branch: args.branch, revisionRef: oldHead };
+  writeFileSync(claimed.jobPath, JSON.stringify(job));
+  const testEnv = { HQ_REPO_ROOT: rootDir, HQ_ROOT: join(rootDir, 'hq'),
+    OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
+    ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'true' };
+  const previousEnv = Object.fromEntries(Object.keys(testEnv).map((key) => [key, process.env[key]]));
+  const previousFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = previousFetch;
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  Object.assign(process.env, testEnv);
+  globalThis.fetch = args.fetchImpl;
+  let rereviews = 0;
+  const reconcile = (currentJob) => reconcileFollowUpJob({ rootDir, job: currentJob,
+    jobPath: claimed.jobPath, isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => null, postCommentImpl: async () => ({ posted: true }),
+    requestRereviewWakeImpl: () => ({ requested: true }),
+    requestReviewRereviewImpl: () => {
+      rereviews += 1;
+      return { triggered: true, status: 'pending' };
+    },
+    execFileImpl: async (command, argv, options) => {
+      if (command === 'git' && !argv.includes('log')) return { stdout: '' };
+      if (command === 'gh' && calls.filter((call) => call.type === 'gh').length > 0) {
+        const persisted = JSON.parse(readFileSync(claimed.jobPath, 'utf8'));
+        assert.equal(persisted.operationalBlockerRecovery.retry.pendingNativePublication.headSha, fixedHead);
+        assert.equal(persisted.operationalBlockerRecovery.retry.nativePublicationReceipt, undefined);
+      }
+      return args.execFileImpl(command, argv, options);
+    }, log: quiet,
+  });
+  const first = await reconcile(job);
+  assert.equal(first.action, 'active', first.reason);
+  assert.equal(first.reason, 'workflow-publication-verification-pending');
+  assert.equal(rereviews, 0);
+  const persisted = JSON.parse(readFileSync(claimed.jobPath, 'utf8'));
+  assert.equal(persisted.status, 'in_progress');
+  assert.deepEqual(persisted.remediationPlan, job.remediationPlan);
+  assert.equal(persisted.operationalBlockerRecovery.retry.pushed, false);
+  const result = await reconcile(persisted);
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.operationalBlockerRecovery.retry.pushed, true);
+  assert.equal(result.job.operationalBlockerRecovery.retry.nativePublicationReceipt.headSha, fixedHead);
+  assert.equal(rereviews, 1);
+  assert.equal(calls.filter((call) => call.type === 'bash').length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(replyPath, 'utf8')), reply);
 });
 
 test('WFDRIFT-01: outgoing workflow commits choose scoped transport despite stale job paths', async (t) => {

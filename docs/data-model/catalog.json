@@ -87,9 +87,11 @@
         "src/remediation-claimed-requeue.mjs",
         "src/remediation-worker-class-fallback.mjs",
         "src/remediation-quota-evidence.mjs",
-        "src/review-mode-selection.mjs"
+        "src/review-mode-selection.mjs",
+        "src/github-auth-recovery.mjs"
       ],
-      "owner": "follow-up remediation queue"
+      "owner": "follow-up remediation queue",
+      "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"]
     },
     {
       "id": "merge-lease-attempts",

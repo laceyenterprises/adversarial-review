@@ -2,8 +2,38 @@
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/github-auth-recovery.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
+
+## Native workflow publication evidence (WFDRIFT-01)
+
+`operationalBlockerRecovery` records `{ category: "github-auth", classification,
+rescue, retry, recordedAt }`. After a scoped native push emits a matching Git
+update transcript, reconcile atomically saves
+`retry.pendingNativePublication` before querying the live PR head. Its shape is
+`{ schemaVersion: 1, source: "native-workflow-publisher", method: "git-update",
+jobId, repo, prNumber, branch, expectedRemoteSha, headSha, observedAt }`.
+`observedAt` is the original update-evidence timestamp. No subprocess output or
+credential is stored. `retry.workflowPush` retains the proven outgoing paths,
+provider and lease/commit identity.
+
+Live head reads retry transient subprocess errors with 250/750 ms backoff;
+post-push verification also retries a stale head. Exhausted transient or stale
+verification sets `retry.pushed: false`,
+`retry.reason: "workflow-push-publication-unproven"` and `retry.retryLater: true`
+for ten minutes from the update-evidence timestamp. The job stays in
+`in-progress/`; later reconcile ticks validate the saved job/repo/PR/branch/lease/
+commit identity and resume verification without another push or worker spawn.
+Permanent errors and expiration of that window stop active verification retries
+under normal settlement rules, while retaining update evidence for a later
+explicit recovery. Failed capability preparation also preserves saved evidence.
+
+Only a fresh exact-target PR-head observation upgrades that evidence to
+`retry.nativePublicationReceipt`, with method `git-update-and-live-pr-head` and
+a fresh `observedAt`, and sets `retry.pushed: true`. An already-published head
+without matching native update evidence cannot create a receipt. Final-round
+blocker projection still requires independent worker/trailer/patch-equivalence
+proof and exact-head pending/green CI; the worker reply remains immutable.
 
 ## Comment-only final-round evidence
 

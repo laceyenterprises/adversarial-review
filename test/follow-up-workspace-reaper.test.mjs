@@ -266,9 +266,21 @@ test('a hung lookup is bounded through throttle wait and cannot prevent terminal
   const { options, workspace } = fixture(t);
   const path = workspace(1, undefined, 'completed', options.nowMs - 73 * 3600_000);
   options.budgetMs = 25;
-  options.lookupPRImpl = () => new Promise(() => {});
+  // Inventory setup must not spend the lookup budget on a busy CI runner.
+  // Advance the pass clock only after admission; boundedLookup still uses
+  // its real timer to end the hung request and abort the throttle wait.
+  let clock = 0;
+  let lookupSignal;
+  options.clockImpl = () => clock;
+  options.lookupPRImpl = ({ signal, timeoutMs }) => {
+    assert.equal(timeoutMs, options.budgetMs);
+    lookupSignal = signal;
+    clock = options.budgetMs;
+    return new Promise(() => {});
+  };
   const result = await reapFollowUpWorkspaces(options);
   assert.equal(result.prLookups, 1);
+  assert.equal(lookupSignal.aborted, true);
   assert.equal(result.reaped, 1);
   assert.equal(existsSync(path), false);
 });

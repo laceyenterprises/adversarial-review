@@ -477,7 +477,9 @@ async function tryEscalateWorkflowPushCapability({
     const elevatedEnv = { ...(env || {}) };
     applyMergeAgentWorkflowPushTokenEnv(elevatedEnv, token);
     const capability = await inspectRemediationPushTokenCapability({ env: elevatedEnv, execFileImpl, log, retryDelaysMs });
-    return { ok: capability.hasWorkflowCapability, capability, error: null };
+    return { ok: capability.hasWorkflowCapability, capability, error: null,
+      // Ephemeral transport only; callers must never persist this token environment.
+      pushEnv: withGhGitCredentialEnv(elevatedEnv) };
   } catch (err) {
     if (isTransientWorkflowPushPreflightError(err)) {
       throw new WorkflowPushPreflightTransientError(
@@ -807,6 +809,7 @@ export {
   parseOAuthScopesFromGhAuthStatus,
   parseOAuthScopesFromGhApiHeaders,
   remediationTouchesWorkflowFiles,
+  tryEscalateWorkflowPushCapability,
   resolveRemediationPushTokenIdentity,
   withGhGitCredentialEnv,
 };

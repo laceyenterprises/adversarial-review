@@ -2663,11 +2663,16 @@ async function reconcileFollowUpJob({
           requestReviewRereviewImpl,
           execFileImpl,
           env: process.env,
+          recordRecoveryImpl: (updatedJob) => writeFollowUpJob(jobPath, updatedJob),
         });
         if (recovery.operationalBlockerRecovery) {
           operationalBlockerRecovery = recovery.operationalBlockerRecovery;
           if (recovery.rereview) rereview = recovery.rereview;
           job = recovery.job;
+          if (operationalBlockerRecovery.retry?.retryLater) {
+            writeFollowUpJob(jobPath, job);
+            return { action: 'active', reason: 'workflow-publication-verification-pending', job, jobPath };
+          }
         }
       }
     }

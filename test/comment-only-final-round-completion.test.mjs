@@ -313,3 +313,130 @@ test('HELDHEAD-01 pending-only CI reply is work-complete even when replay proof 
   assert.equal(result.completionFields.withheldPushHeadSha, pushedHead);
   assert.equal(result.workerPushedHeadSha, null);
 });
+
+function workflowPublicationJob() {
+  const job = finalRoundJob({ branch: 'feature', remediationPlan: { currentRound: 2, maxRounds: 2 } });
+  job.operationalBlockerRecovery = {
+    category: 'github-auth', classification: { kind: 'workflow-push-candidate' },
+    rescue: { preserved: true, kind: 'git-bundle', commitSha: pushedHead, repo: job.repo,
+      prNumber: job.prNumber, createdAt: '2026-10-09T01:30:00.000Z' },
+    retry: { retried: true, pushed: true, reason: 'push-succeeded',
+      workflowPush: { source: 'workspace-commits', provider: 'github-app-merge-agent',
+        paths: ['.github/workflows/repair.yml'], commitSha: pushedHead, expectedRemoteSha: reviewedHead },
+      nativePublicationReceipt: { schemaVersion: 1, source: 'native-workflow-publisher',
+        method: 'git-update-and-live-pr-head', jobId: job.jobId, repo: job.repo,
+        prNumber: job.prNumber, branch: job.branch, headSha: pushedHead,
+        expectedRemoteSha: reviewedHead, observedAt: '2026-10-09T01:31:00.000Z' } },
+  };
+  return job;
+}
+
+function workflowReply() {
+  return { outcome: 'partial', blockers: [], operationalBlockers: [{
+    title: 'github-auth', expectedRemoteSha: reviewedHead,
+    reasoning: 'GitHub refused the workflow without workflows permission. Lease ' + reviewedHead
+      + '; preserved local remediation through ' + pushedHead + '.',
+    needsHumanInput: 'Grant workflows permission or publish the preserved commit.',
+  }] };
+}
+
+test('WFDRIFT-01: native publication plus independent push and exact-head CI resolves only the historical auth blocker', async () => {
+  const job = workflowPublicationJob();
+  const reply = workflowReply();
+  const original = JSON.stringify(reply);
+  const { result } = await resolve({ job, reply });
+  assert.equal(result.completed, true);
+  assert.equal(result.workerPushedHeadSha, pushedHead);
+  assert.equal(result.completionFields.operationalBlockerResolution.resolved, true);
+  assert.equal(result.completionFields.operationalBlockerResolution.blockerIndex, 0);
+  assert.equal(JSON.stringify(reply), original, 'historical reply is immutable');
+  assert.deepEqual(job.remediationPlan, { currentRound: 2, maxRounds: 2 });
+});
+
+
+test('WFDRIFT-01: omitted optional blocker lease uses the native job revision fallback', async () => {
+  const job = workflowPublicationJob();
+  const reply = workflowReply();
+  delete reply.operationalBlockers[0].expectedRemoteSha;
+  reply.operationalBlockers[0].reasoning = 'GitHub refused the workflow without workflows permission. '
+    + 'Preserved local remediation through ' + pushedHead + '.';
+  const original = JSON.stringify(reply);
+  const { result } = await resolve({ job, reply });
+  assert.equal(result.completed, true);
+  assert.equal(result.completionFields.operationalBlockerResolution.resolved, true);
+  assert.equal(result.completionFields.operationalBlockerResolution.expectedRemoteSha, job.revisionRef);
+  assert.equal(JSON.stringify(reply), original, 'optional lease recovery never mutates the historical reply');
+  assert.deepEqual(job.remediationPlan, { currentRound: 2, maxRounds: 2 });
+});
+
+test('WFDRIFT-01: explicit or fallback lease mismatches never resolve the historical blocker', async () => {
+  for (const mode of ['explicit-mismatch', 'fallback-mismatch', 'missing-fallback']) {
+    const job = workflowPublicationJob();
+    const reply = workflowReply();
+    const blocker = reply.operationalBlockers[0];
+    blocker.reasoning = 'GitHub refused the workflow without workflows permission. '
+      + 'Preserved local remediation through ' + pushedHead + '.';
+    if (mode === 'explicit-mismatch') blocker.expectedRemoteSha = '3'.repeat(40);
+    else {
+      delete blocker.expectedRemoteSha;
+      if (mode === 'fallback-mismatch') job.revisionRef = '3'.repeat(40);
+      else delete job.revisionRef;
+    }
+    const original = JSON.stringify(reply);
+    const { result } = await resolve({ job, reply });
+    assert.equal(result.completed, false, mode);
+    assert.equal(result.completionFields.operationalBlockerResolution.resolved, false, mode);
+    assert.equal(result.completionFields.operationalBlockerResolution.reason,
+      mode === 'missing-fallback' ? 'independent-worker-push-proof-missing' : 'historical-workflow-blocker-mismatch', mode);
+    assert.equal(JSON.stringify(reply), original, mode);
+  }
+});
+
+test('WFDRIFT-01: native receipt never substitutes for worker trailer, replay, live head or CI proof', async () => {
+  const cases = [
+    { change: (job) => { delete job.operationalBlockerRecovery.retry.nativePublicationReceipt; } },
+    { change: (job) => { job.operationalBlockerRecovery.retry.nativePublicationReceipt.source = 'operator'; } },
+    { change: (job) => { job.operationalBlockerRecovery.retry.pushed = false; } },
+    { change: (job) => { job.operationalBlockerRecovery.retry.reason = 'already-published'; } },
+    { change: (job) => { job.operationalBlockerRecovery.retry.nativePublicationReceipt.headSha = '3'.repeat(40); } },
+    { change: (job) => { job.operationalBlockerRecovery.retry.workflowPush.paths = []; } },
+    { execFileImpl: pushedWorkspaceExec({ jobId: 'foreign-job' }) },
+    { execFileImpl: pushedWorkspaceExec({ head: '3'.repeat(40) }) },
+    { ciGate: { ...pendingGate, state: 'failed' } },
+    { ciGate: { ...pendingGate, headSha: '3'.repeat(40) } },
+    { audit: { suspect: ['foreign patch'], error: null } },
+  ];
+  for (const entry of cases) {
+    const job = workflowPublicationJob();
+    entry.change?.(job);
+    const { result } = await resolve({ job, reply: workflowReply(), ...entry });
+    assert.equal(result.completed, false);
+    assert.equal(result.completionFields.operationalBlockerResolution.resolved, false);
+  }
+  const normal = pushedWorkspaceExec();
+  const missingReplay = await resolve({ job: workflowPublicationJob(), reply: workflowReply(),
+    execFileImpl: async (command, args) => args.includes('cherry') && args[args.indexOf('cherry') + 1] === pushedHead
+      ? { stdout: '+ ' + reviewedHead + '\n' } : normal(command, args) });
+  assert.equal(missingReplay.result.completed, false);
+  assert.equal(missingReplay.result.completionFields.operationalBlockerResolution.resolved, false);
+});
+
+test('WFDRIFT-01: generic auth and unrelated human blockers survive the projection', async () => {
+  for (const reasoning of ['The credential expired.', '401 unauthorized', '403 forbidden',
+    'Revoked entitlement; missing workflows permission', 'Revoked token; missing workflows permission']) {
+    const generic = workflowReply();
+    generic.operationalBlockers[0].reasoning = reasoning;
+    generic.operationalBlockers[0].commitSha = pushedHead;
+    generic.operationalBlockers[0].needsHumanInput = 'Grant workflows permission to the App or repair the credential.';
+    const genericResult = await resolve({ job: workflowPublicationJob(), reply: generic });
+    assert.equal(genericResult.result.completed, false);
+    assert.equal(genericResult.result.completionFields.operationalBlockerResolution.resolved, false);
+  }
+  const reply = workflowReply();
+  reply.operationalBlockers.push({ title: 'missing-deploy-credential',
+    finding: 'Deployment credentials are unavailable.', needsHumanInput: 'Provision the deploy key.' });
+  const result = await resolve({ job: workflowPublicationJob(), reply });
+  assert.equal(result.result.completed, false);
+  assert.equal(result.result.completionFields.operationalBlockerResolution.resolved, true);
+  assert.equal(reply.operationalBlockers.length, 2);
+});

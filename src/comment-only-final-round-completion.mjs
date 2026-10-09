@@ -14,11 +14,13 @@
 // For a withheld push, ciState records only reported-pending, not probed CI.
 // The worker's free-text title is never read to decide that CI is merely pending.
 import { writeFileAtomic } from './atomic-write.mjs';
-import { isTransientGitFailure, proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
+import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker } from './github-auth-recovery.mjs';
+import { FINAL_ROUND_REPLAY_PROOF, isTransientGitFailure, proveFinalRoundWorkerPush } from './comment-only-final-round.mjs';
 import {
   OPERATIONAL_BLOCKER_KIND_PENDING_CI,
   isDeclaredOperationalBlockerCode,
 } from './kernel/remediation-reply.mjs';
+import { isWorkflowPath } from './remediation-workflow-push-capability.mjs';
 import { ensureJobBaseBranch } from './remediation-git-pr-io.mjs';
 import { parseHqWorkerWorkspaceFromPayload, resolveHqWorkerWorkspace } from './remediation-hq-dispatch.mjs';
 
@@ -77,6 +79,60 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, {
   if (ciGate.state !== 'pending') return { pendingCiOnly: false, reason: 'untagged-blocker-ci-not-pending' };
   if (outcome === 'blocked') return { pendingCiOnly: false, reason: 'untagged-blocker-outcome-blocked' };
   return { pendingCiOnly: true, reason: 'ci-probe-pending-ci' };
+}
+
+// Resolve exactly one historical workflow-auth blocker from a native-owned
+// publication receipt. The immutable reply never changes; this projection is
+// evaluated only after the existing live/trailer/patch-equivalence push proof.
+export function projectRecoveredWorkflowAuthBlocker({ job, operationalBlockers, push, ciGate }) {
+  const recovery = job?.operationalBlockerRecovery;
+  if (!recovery || recovery.classification?.kind !== 'workflow-push-candidate') {
+    return { operationalBlockers, audit: null };
+  }
+  const retry = recovery.retry;
+  const receipt = retry?.nativePublicationReceipt;
+  const head = push?.workerPushedHeadSha;
+  const withheld = (reason) => ({ operationalBlockers,
+    audit: { source: 'native-workflow-publication', resolved: false, reason } });
+  if (recovery.category !== 'github-auth' || recovery.rescue?.preserved !== true
+    || recovery.rescue?.kind !== 'git-bundle' || retry?.retried !== true || retry?.pushed !== true
+    || !['push-succeeded', 'push-succeeded-remote-confirmed'].includes(retry?.reason)
+    || receipt?.schemaVersion !== 1 || receipt.source !== 'native-workflow-publisher'
+    || receipt.method !== 'git-update-and-live-pr-head') {
+    return withheld('native-workflow-publication-receipt-missing');
+  }
+  if (receipt.jobId !== job.jobId || receipt.repo !== job.repo
+    || receipt.prNumber !== Number(job.prNumber) || receipt.branch !== job.branch
+    || !/^[a-f0-9]{40}$/i.test(receipt.headSha || '')
+    || !/^[a-f0-9]{40}$/i.test(receipt.expectedRemoteSha || '')
+    || !Number.isFinite(Date.parse(receipt.observedAt || ''))
+    || recovery.rescue.repo !== job.repo || recovery.rescue.prNumber !== Number(job.prNumber)
+    || recovery.rescue.commitSha !== receipt.headSha
+    || !Array.isArray(retry.workflowPush?.paths) || !retry.workflowPush.paths.some(isWorkflowPath)
+    || retry.workflowPush?.source !== 'workspace-commits'
+    || retry.workflowPush?.provider !== 'github-app-merge-agent'
+    || retry.workflowPush?.commitSha !== receipt.headSha
+    || retry.workflowPush?.expectedRemoteSha !== receipt.expectedRemoteSha) {
+    return withheld('native-workflow-publication-receipt-mismatch');
+  }
+  if (!head || head !== receipt.headSha || push.liveHeadSha !== head
+    || push.proof?.method !== FINAL_ROUND_REPLAY_PROOF) {
+    return withheld('independent-worker-push-proof-missing');
+  }
+  if (!ciGate || ciGate.headSha !== head || !CI_STATES_WITHOUT_FAILURE.has(ciGate.state)) {
+    return withheld('exact-head-ci-proof-missing');
+  }
+  const index = operationalBlockers.findIndex((blocker) =>
+    classifyGithubAuthOperationalBlocker(blocker)?.kind === 'workflow-push-candidate'
+    && extractCommitShaFromOperationalBlocker(blocker) === receipt.headSha
+    && (blocker.expectedRemoteSha || job.revisionRef) === receipt.expectedRemoteSha);
+  if (index < 0) return withheld('historical-workflow-blocker-mismatch');
+  return {
+    operationalBlockers: operationalBlockers.filter((_, candidate) => candidate !== index),
+    audit: { source: 'native-workflow-publication', resolved: true, reason: 'exact-head-workflow-publication-proven',
+      blockerIndex: index, headSha: head, expectedRemoteSha: receipt.expectedRemoteSha,
+      receipt, workerPushProof: push.proof, ciState: ciGate.state },
+  };
 }
 
 /**
@@ -159,21 +215,25 @@ export async function resolveCommentOnlyFinalRoundCompletion({
     : null;
 
   const blockers = Array.isArray(reply.blockers) ? reply.blockers : [];
-  const operationalBlockers = Array.isArray(reply.operationalBlockers) ? reply.operationalBlockers : [];
+  const historicalOperationalBlockers = Array.isArray(reply.operationalBlockers) ? reply.operationalBlockers : [];
   let classification;
+  let ciGate = null;
   let ciState = reply.reReview?.normalizedFrom === 'ci-pending-only' ? 'reported-pending' : null;
-  if (blockers.length > 0) {
-    classification = { pendingCiOnly: false, reason: 'review-blockers' };
-  } else if (operationalBlockers.length > 0 && workerPushedHeadSha) {
-    const ciGate = await inspectRemediationCiRegressionImpl({
+  if (blockers.length === 0 && historicalOperationalBlockers.length > 0 && workerPushedHeadSha) {
+    ciGate = await inspectRemediationCiRegressionImpl({
       repo: job.repo, prNumber: job.prNumber, execFileImpl, env, log,
     });
     ciState = ciGate?.state || null;
-    classification = classifyFinalRoundOperationalBlockers(operationalBlockers, {
+  }
+  const projection = projectRecoveredWorkflowAuthBlocker({
+    job, operationalBlockers: historicalOperationalBlockers, push, ciGate,
+  });
+  if (blockers.length > 0) {
+    classification = { pendingCiOnly: false, reason: 'review-blockers' };
+  } else {
+    classification = classifyFinalRoundOperationalBlockers(projection.operationalBlockers, {
       ciGate, pushedHead: workerPushedHeadSha, outcome: reply.outcome,
     });
-  } else {
-    classification = classifyFinalRoundOperationalBlockers(operationalBlockers, { pushedHead: workerPushedHeadSha });
   }
   // A worker that pushed nothing may still finish cleanly (it disproved the
   // findings); only a proven push can carry a partial/blocked reply over. An
@@ -190,6 +250,7 @@ export async function resolveCommentOnlyFinalRoundCompletion({
     completed,
     workerPushedHeadSha,
     completionFields: {
+      ...(projection.audit ? { operationalBlockerResolution: projection.audit } : {}),
       ...(workerPushedHeadSha ? { workerPushedHeadSha, workerPushProof: push.proof } : {}),
       ...(withheldPushHeadSha ? { withheldPushHeadSha } : {}),
       finalRoundOutcome: { completed, reason, ciState, push: push.reason },

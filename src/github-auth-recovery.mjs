@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -17,6 +17,16 @@ const GITHUB_ADAPTER_FILES = Object.freeze([
   'modules/worker-pool/lib/shims/gh',
   'modules/worker-pool/bin/git-safe',
 ]);
+
+const LOCAL_GIT_OPTIONS = Object.freeze({ timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
+
+// HQ supplies the trusted workspace. Scope cross-UID trust to that repository
+// for this invocation, overriding inherited wildcard trust without global edits.
+// Replacement refs must not alter preserved objects or outgoing history.
+function recoveryGitArgs(workspaceDir, args) {
+  return ['--no-replace-objects', '-c', 'safe.directory=', '-c',
+    'safe.directory=' + resolve(workspaceDir), '-C', workspaceDir, ...args];
+}
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -176,7 +186,7 @@ async function preserveUnpushedCommit({
 }) {
   const sha = String(commitSha || '').trim();
   if (!sha) return { preserved: false, reason: 'missing-commit-sha' };
-  await execFileImpl('git', ['-C', workspaceDir, 'cat-file', '-e', `${sha}^{commit}`]);
+  await execFileImpl('git', recoveryGitArgs(workspaceDir, ['cat-file', '-e', `${sha}^{commit}`]), LOCAL_GIT_OPTIONS);
   const safeRepo = String(repo || 'unknown').replace(/[^A-Za-z0-9_.-]+/g, '_');
   const safeJob = String(jobId || `pr-${prNumber}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
   const stamp = String(observedAt || new Date().toISOString()).replace(/[^0-9A-Za-z]+/g, '-');
@@ -186,16 +196,14 @@ async function preserveUnpushedCommit({
   const bundlePath = join(rescueDir, `${stamp}-${safeJob}-${sha.slice(0, 12)}.bundle`);
   const rescueRef = `refs/adversarial-review/rescues/${safeJob}/${sha}`;
   try {
-    await execFileImpl('git', ['-C', workspaceDir, 'update-ref', rescueRef, sha]);
-    await execFileImpl('git', ['-C', workspaceDir, 'bundle', 'create', bundlePath, rescueRef], {
-      maxBuffer: 5 * 1024 * 1024,
+    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', rescueRef, sha]), LOCAL_GIT_OPTIONS);
+    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'create', bundlePath, rescueRef]), {
+      ...LOCAL_GIT_OPTIONS, timeout: 60000,
     });
-    await execFileImpl('git', ['-C', workspaceDir, 'bundle', 'verify', bundlePath], {
-      maxBuffer: 5 * 1024 * 1024,
-    });
+    await execFileImpl('git', recoveryGitArgs(workspaceDir, ['bundle', 'verify', bundlePath]), LOCAL_GIT_OPTIONS);
   } finally {
     try {
-      await execFileImpl('git', ['-C', workspaceDir, 'update-ref', '-d', rescueRef]);
+      await execFileImpl('git', recoveryGitArgs(workspaceDir, ['update-ref', '-d', rescueRef]), LOCAL_GIT_OPTIONS);
     } catch {
       // Best-effort cleanup; the durable artifact is the verified bundle.
     }
@@ -226,10 +234,9 @@ async function prepareWorkflowRecoveryPush({
     return { ok: false, reason: 'workflow-push-commit-unproven' };
   }
   try {
-    const { stdout } = await execFileImpl('git', ['--no-replace-objects', '-C', workspaceDir,
+    const { stdout } = await execFileImpl('git', recoveryGitArgs(workspaceDir, [
       'log', '--format=', '--name-only', '-z', '--no-renames',
-      expectedHead + '..' + commitSha, '--', '.github/workflows/'],
-    { timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
+      expectedHead + '..' + commitSha, '--', '.github/workflows/']), LOCAL_GIT_OPTIONS);
     const raw = String(stdout || '');
     if (!raw || !raw.endsWith('\0')) {
       return { ok: false, reason: 'workflow-push-paths-unproven' };
@@ -338,7 +345,7 @@ async function retryGithubAuthPushOnce({
   let targetBranch = String(branch || '').trim();
   if (!targetBranch) {
     try {
-      const checkedOut = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+      const checkedOut = await execFileImpl('git', recoveryGitArgs(workspaceDir, ['rev-parse', '--abbrev-ref', 'HEAD']), LOCAL_GIT_OPTIONS);
       targetBranch = String(checkedOut.stdout || '').trim();
       if (targetBranch === 'HEAD') targetBranch = '';
     } catch { /* Detached or unavailable workspace. */ }
@@ -399,7 +406,7 @@ export GH_TOKEN="$HQ_ENTITLEMENT_GH_TOKEN" GITHUB_TOKEN="$HQ_ENTITLEMENT_GH_TOKE
     // is the head it built on. Prefer it over the reviewed revision, which is
     // stale whenever the head moved between review and spawn.
     try {
-      const tracked = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${targetBranch}^{commit}`]);
+      const tracked = await execFileImpl('git', recoveryGitArgs(workspaceDir, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${targetBranch}^{commit}`]), LOCAL_GIT_OPTIONS);
       expectedHead = String(tracked.stdout || '').trim();
     } catch { /* No tracking ref in this workspace. */ }
   }
@@ -492,6 +499,9 @@ export GIT_TERMINAL_PROMPT=0
   const options = {
     env: {
       ...pushEnv,
+      // The strict publication transcript parser requires deterministic Git
+      // messages; isolate this locale from the daemon and physical worker.
+      ...(workflowPush ? { LC_ALL: 'C', LANG: 'C', LANGUAGE: 'C' } : {}),
       AGENT_OS_ROOT: agentOsRoot,
       WORKER_CLASS: workflowPush ? 'merge-agent' : (workerClass || 'codex'),
       WORKFLOW_PUSH_SCOPED: workflowPush ? '1' : '0',

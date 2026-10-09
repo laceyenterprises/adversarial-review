@@ -4,8 +4,8 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
-import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from '../src/github-auth-recovery.mjs';
+import { join, relative, resolve } from 'node:path';
+import { classifyGithubAuthOperationalBlocker, extractCommitShaFromOperationalBlocker, preserveUnpushedCommit, recoverGithubAuthOperationalBlocker, retryGithubAuthPushOnce } from '../src/github-auth-recovery.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { claimNextFollowUpJob, createFollowUpJob, markFollowUpJobSpawned } from '../src/follow-up-jobs.mjs';
 
@@ -369,14 +369,78 @@ test('WFDRIFT-01: native Git history retains an intermediate workflow edit rever
   assert.equal(calls.filter((call) => call.type === 'mint').length, 1);
 });
 
+
+test('WFDRIFT-01: native ownership guard is scoped to the workspace across preservation and history reads', async (t) => {
+  const repo = mkdtempSync(join(tmpdir(), 'wfdrift-trusted-git-'));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  const git = (args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  git(['init', '-b', 'feature']); git(['config', 'user.name', 'Fixture Worker']);
+  git(['config', 'user.email', 'fixture@example.com']);
+  writeFileSync(join(repo, 'base'), 'base\n'); git(['add', '.']); git(['commit', '-m', 'base']);
+  const headBefore = git(['rev-parse', 'HEAD']);
+  mkdirSync(join(repo, '.github/workflows'), { recursive: true });
+  writeFileSync(join(repo, '.github/workflows/repair.yml'), 'name: fixture\n');
+  git(['add', '.']); git(['commit', '-m', 'workflow repair']);
+  const headAfter = git(['rev-parse', 'HEAD']);
+  git(['update-ref', 'refs/remotes/origin/feature', headBefore]);
+  git(['replace', headAfter, headBefore]);
+  const guardEnv = { ...process.env, GIT_TEST_ASSUME_DIFFERENT_OWNER: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_COUNT: '0' };
+  await assert.rejects(execFileAsync('git', ['-C', repo, 'cat-file', '-e', headAfter + '^{commit}'],
+    { env: guardEnv, timeout: 15000 }), /dubious ownership|unsafe repository/i);
+  const rawCalls = [];
+  const nativeGit = (command, argv, options = {}) => {
+    rawCalls.push(argv);
+    return execFileAsync(command, argv, { ...options, env: guardEnv });
+  };
+  const preserved = await preserveUnpushedCommit({ hqRoot: join(repo, 'hq'), workspaceDir: repo,
+    repo: 'example/repo', prNumber: 42, jobId: 'fixture-job', commitSha: headAfter,
+    observedAt: '2026-10-09T03:15:00.000Z', execFileImpl: nativeGit });
+  assert.equal(preserved.preserved, true);
+  assert.match((await execFileAsync('git', ['bundle', 'list-heads', preserved.path])).stdout, new RegExp(headAfter));
+  const { args } = fixture(t, { headBefore, headAfter });
+  const mocked = args.execFileImpl;
+  args.workspaceDir = repo; args.branch = ''; args.expectedRemoteSha = null;
+  args.execFileImpl = (command, argv, options) => command === 'git'
+    ? nativeGit(command, argv, options) : mocked(command, argv, options);
+  const recovered = await retryGithubAuthPushOnce(args);
+  assert.equal(recovered.pushed, true);
+  assert.deepEqual(recovered.workflowPush.paths, ['.github/workflows/repair.yml'],
+    'replacement refs cannot hide actual outgoing workflow history');
+  assert.equal(rawCalls.length, 8, 'cat-file, two update-ref, two bundle, log and two rev-parse siblings');
+  for (const argv of rawCalls) {
+    assert.ok(argv.includes('--no-replace-objects'));
+    assert.ok(argv.includes('safe.directory=' + resolve(repo)));
+    assert.equal(argv.includes('safe.directory=*'), false);
+  }
+});
+
+test('WFDRIFT-01: authentic localized Git suffix never relaxes native publication proof', async (t) => {
+  const { args } = fixture(t);
+  const mocked = args.execFileImpl;
+  args.execFileImpl = async (command, argv, options) => {
+    const result = await mocked(command, argv, options);
+    // The phrase is Git's French gettext translation. The installed Git's
+    // native forced-push line remained English; this is a refusal fixture.
+    return command === 'bash' ? { stdout: '', stderr: ' + ' + oldHead.slice(0, 7) + '...'
+      + fixedHead.slice(0, 7) + ' fixture -> feature (mise à jour forcée)\n' } : result;
+  };
+  const result = await retryGithubAuthPushOnce(args);
+  assert.equal(result.pushed, false);
+  assert.equal(result.reason, 'publication-observed-without-native-update-proof');
+  assert.equal(result.nativePublicationReceipt, undefined);
+});
+
 test('WFDRIFT-01: scoped push shell never reselects physical credentials', async (t) => {
   const { args, calls, env } = fixture(t);
   const marker = join(env.HQ_REPO_ROOT, 'shell-marker');
   const shim = join(env.HQ_REPO_ROOT, 'modules/worker-pool/bin/git-safe');
-  writeFileSync(shim, '#!/bin/sh\n[ "$GH_TOKEN" = ghs_fixture-scoped-token ] || exit 71\n[ "$WORKER_CLASS" = merge-agent ] || exit 72\n[ "$GIT_CONFIG_VALUE_1" = "!gh auth git-credential" ] || exit 73\ntouch "$SHELL_MARKER"\necho "$EXPECTED_REMOTE_SHA..$COMMIT_SHA fixture -> $TARGET_BRANCH" >&2\n');
+  writeFileSync(shim, '#!/bin/sh\n[ "$GH_TOKEN" = ghs_fixture-scoped-token ] || exit 71\n[ "$WORKER_CLASS" = merge-agent ] || exit 72\n[ "$GIT_CONFIG_VALUE_1" = "!gh auth git-credential" ] || exit 73\n[ "$LC_ALL:$LANG:$LANGUAGE" = C:C:C ] || exit 75\ntouch "$SHELL_MARKER"\necho "$EXPECTED_REMOTE_SHA..$COMMIT_SHA fixture -> $TARGET_BRANCH" >&2\n');
   chmodSync(shim, 0o755);
   writeFileSync(join(env.HQ_REPO_ROOT, 'modules/worker-pool/lib/hq-gh.sh'), 'exit 74\n');
-  args.env = { ...env, SHELL_MARKER: marker };
+  args.env = { ...env, SHELL_MARKER: marker, LC_ALL: 'fr_FR.UTF-8',
+    LANG: 'fr_FR.UTF-8', LANGUAGE: 'fr', LC_MESSAGES: 'fr_FR.UTF-8' };
   const mocked = args.execFileImpl;
   args.execFileImpl = async (command, argv, options) => {
     const result = await mocked(command, argv, options);
@@ -385,6 +449,7 @@ test('WFDRIFT-01: scoped push shell never reselects physical credentials', async
   const result = await retryGithubAuthPushOnce(args);
   assert.equal(result.pushed, true);
   assert.equal(existsSync(marker), true);
+  assert.equal(args.env.LC_ALL, 'fr_FR.UTF-8', 'publisher locale is isolated from its parent');
   assert.equal(calls.filter((call) => call.type === 'mint').length, 1);
 });
 

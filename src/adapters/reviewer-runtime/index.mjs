@@ -124,9 +124,11 @@ async function recoverReviewerRunRecords({
       continue;
     }
     if (result.failureClass === 'daemon-bounce' && db) {
+      // REVIEWBOUNCE-01: a bounce is infra, never a review attempt. The
+      // re-queue is bounded by infra_auto_recover_attempts instead.
       const outcome = db.prepare(
         leaseRecoveryEnabled
-          ? "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
+          ? "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
           : "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE reviewer_session_uuid = ? AND review_status = 'reviewing'"
       ).run(
         now.toISOString(),

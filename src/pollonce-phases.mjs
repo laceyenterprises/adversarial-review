@@ -106,6 +106,11 @@ import {
 import { checkHcpHealthz } from './hcp-health.mjs';
 import { handlePostedReviewRow } from './posted-review-row.mjs';
 import {
+  DAEMON_BOUNCE_FAILURE_CLASS,
+  daemonBounceReviewerHold,
+  isDaemonBounceFailure,
+} from './daemon-bounce-recovery.mjs';
+import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
   quotaHoldDecision,
 } from './quota-exhaustion.mjs';
@@ -606,7 +611,9 @@ export function reviewRowInTerminalFailureState(row, currentHeadSha) {
   }
   if (row.review_status !== 'pending') return false;
   if (!row.failed_at) return false;
-  if (!(Number(row.review_attempts || 0) > 0)) return false;
+  // REVIEWBOUNCE-01: a bounced row charges no attempt, but it must still route
+  // through the bounded infra CAS rather than the uncharged pending claim.
+  if (!(Number(row.review_attempts || 0) > 0) && !isDaemonBounceFailure(row)) return false;
   const rowHead = row.reviewer_head_sha || null;
   if (!rowHead || !currentHeadSha) return false;
   return String(rowHead) === String(currentHeadSha);
@@ -2432,6 +2439,19 @@ export async function processReviewSubject(entry, ctx) {
           log: console,
         });
         if (reconciliation.handled) {
+          return;
+        }
+      }
+      // REVIEWBOUNCE-01: a bounced reviewer that is still running will post; let
+      // the reaper settle it instead of spawning a duplicate. No attempt charged.
+      if (infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS) {
+        const bounceHold = daemonBounceReviewerHold(current);
+        if (bounceHold.hold) {
+          console.log(
+            `[watcher] Holding daemon-bounce re-queue for ${repoPath}#${prNumber}: ` +
+              `bounced reviewer pgid=${bounceHold.pgid} still running (until ` +
+              `${new Date(bounceHold.holdUntilMs).toISOString()}); not consuming infra auto-recover attempt`
+          );
           return;
         }
       }

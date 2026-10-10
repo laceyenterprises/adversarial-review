@@ -15,6 +15,7 @@ import { readSingleReviewDecision } from './review-mode-latency.mjs';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import { inFlightReviewerSessions } from './reviewer-session-registry.mjs';
 import { verifyPgidIdentitySync } from './process-group-identity.mjs';
+import { bouncedPostedReviewSettleSql, isDaemonBounceFailure } from './daemon-bounce-recovery.mjs';
 import { calculateReviewerCeilingSeconds, resolveReviewerCeilingConfig, resolveReviewerIdleTimeoutSeconds } from './reviewer-timeout-model.mjs';
 import {
   resolveHandoffConfig,
@@ -275,7 +276,7 @@ function reapRunningPassTimeouts({
 
   const getReviewRow = db.prepare(
     `SELECT review_status, reviewer_session_uuid, reviewer_pgid, reviewer_started_at, reviewer_head_sha,
-            revision_ref, reviewer, linear_ticket, infra_auto_recover_attempts
+            revision_ref, reviewer, linear_ticket, infra_auto_recover_attempts, failure_message
        FROM reviewed_prs
       WHERE repo = ?
         AND pr_number = ?`
@@ -320,6 +321,7 @@ function reapRunningPassTimeouts({
         AND review_status = 'reviewing'
         AND ${ACTIVE_REVIEW_CLAIM_PREDICATE}`
   );
+  const recoverBouncedPostedReview = db.prepare(bouncedPostedReviewSettleSql(ACTIVE_REVIEW_CLAIM_PREDICATE));
   const updatePass = db.prepare(
     `UPDATE reviewer_passes
         SET ended_at = ?,
@@ -350,6 +352,28 @@ function reapRunningPassTimeouts({
         endedAt,
         row.repo,
         row.pr_number,
+        reviewerSessionUuid,
+        reviewerSessionUuid,
+        reviewerSessionUuid,
+        row.started_at,
+        row.started_at,
+        row.head_sha || null,
+        row.head_sha || null
+      );
+      reviewChanged = reviewResult.changes > 0;
+    } else if (
+      (current?.review_status === 'failed' || current?.review_status === 'pending')
+      && isDaemonBounceFailure(current)
+    ) {
+      // REVIEWBOUNCE-01: the bounced reviewer posted anyway. Settle in the same
+      // transaction as the pass, exact head only.
+      const reviewerSessionUuid = reviewerSessionUuidFromPass(row);
+      const reviewResult = recoverBouncedPostedReview.run(
+        endedAt,
+        row.repo,
+        row.pr_number,
+        row.head_sha || null,
+        row.head_sha || null,
         reviewerSessionUuid,
         reviewerSessionUuid,
         reviewerSessionUuid,

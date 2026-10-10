@@ -235,6 +235,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
+import { maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
@@ -2289,6 +2290,13 @@ export async function processReviewSubject(entry, ctx) {
               `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: ` +
                 `${ciAdmission.reason}; reviewer admission requires green external CI.`
             );
+            // CIBLOCKHAM-01: no remediation job is left for the red head, so
+            // the hammer owns it; the closer dedups and caps it per head.
+            await maybeRouteCiBlockedToHammer({
+              ciAdmission, rootDir: ROOT, db, repoPath, prNumber, existing: current,
+              subjectRef: subject.ref, currentRevisionRef: pendingRevisionRef,
+              labelNames: prLabelNames, execFileImpl: execFileAsync,
+            });
             await projectGateStatusSafe(current);
             return;
           }
@@ -3274,8 +3282,15 @@ export async function processReviewSubject(entry, ctx) {
                 if (parked.changes === 1) {
                   console.warn(
                     `[watcher] Parked CI-blocked re-review for ${repoPath}#${prNumber}: ` +
-                      'failed external CI with no follow-up job to requeue.'
+                      `failed external CI with no remediation job left (${ciAdmission.reason}).`
                   );
+                  // CIBLOCKHAM-01: the hammer owns the red head from this tick.
+                  await maybeRouteCiBlockedToHammer({
+                    ciAdmission, rootDir: ROOT, db, repoPath, prNumber,
+                    existing: stmtGetReviewRow.get(repoPath, prNumber) || current,
+                    subjectRef: subject.ref, currentRevisionRef: subject.headSha || pendingRevisionRef,
+                    labelNames: prLabelNames, execFileImpl: execFileAsync,
+                  });
                 } else {
                   stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
                 }

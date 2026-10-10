@@ -414,6 +414,154 @@ test('reconcileFollowUpJob waits for external CI before requesting re-review', a
   assert.equal(stored.remediationPlan.nextAction.type, 'wait-ci-settlement');
 });
 
+// CIBLOCKHAM-01 (c): agent-os PR 8007's remediation round 2 of 2 ended `failed`
+// with "Human intervention required" because repo-guards was still PENDING when
+// the bounded CI wait expired. A pending CI is not a failed remediation: the
+// round completes and requests the re-review; the watcher's CI admission holds
+// the reviewer until CI settles, then green re-reviews and red requeues or
+// routes to the hammer.
+async function completeRoundWithCiPendingAtTimeout(rootDir, { priorCompletedRounds = 0 } = {}) {
+  writeReviewRow(rootDir);
+  createFollowUpJob({ ...makeJobInput(rootDir), priorCompletedRounds });
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = hqReplyPathForJob(claimed.job);
+  writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Rebased and applied the remediation changes.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: { requested: true, reason: 'Remediation landed and is ready for another adversarial pass.' },
+  }, null, 2)}\n`, 'utf8');
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath,
+    },
+  });
+  const pendingGate = async () => ({
+    state: 'pending',
+    conclusion: 'PENDING',
+    headSha: 'pending-head',
+    totalExternalChecks: 3,
+    failedChecks: [],
+    pendingChecks: [{ name: 'repo-guards', state: 'PENDING' }],
+  });
+  const comments = [];
+  const reconcile = (at) => reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => at,
+    isProcessAliveImpl: () => false,
+    resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: pendingGate,
+    postCommentImpl: async (args) => { comments.push(args); return { posted: true }; },
+  });
+  // Inside the bounded wait the round keeps waiting (unchanged).
+  const waiting = await reconcile('2026-04-21T10:05:00.000Z');
+  assert.equal(waiting.reason, 'ci-settlement-pending');
+  // The 30-minute default wait expires with the checks still PENDING.
+  const reconciled = await reconcile('2026-04-21T10:40:00.000Z');
+  return { claimed, reconciled, comments };
+}
+
+test('CIBLOCKHAM-01: a remediation CI wait that expires while checks are PENDING completes and requests the re-review', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { reconciled, comments } = await completeRoundWithCiPendingAtTimeout(rootDir);
+
+  assert.equal(reconciled.reconciled, true, JSON.stringify(reconciled));
+  assert.equal(reconciled.outcome, 'completed');
+  assert.equal(reconciled.job.status, 'completed');
+  assert.equal(reconciled.job.failure, undefined);
+  assert.equal(reconciled.job.reReview.requested, true);
+  assert.equal(reconciled.job.reReview.ciSettlement, 'pending-at-timeout');
+  assert.equal(reconciled.job.reReview.ciGate.pendingChecks[0].name, 'repo-guards');
+  const reviewRow = readReviewRow(rootDir);
+  assert.equal(reviewRow.review_status, 'pending');
+  assert.equal(reviewRow.revision_ref, 'pending-head');
+  for (const comment of comments) {
+    assert.doesNotMatch(JSON.stringify(comment), /Human intervention required/);
+  }
+});
+
+test('CIBLOCKHAM-01: the watcher resumes a pending-at-timeout round on green CI and on red CI', async () => {
+  const { guardRereviewCiBeforeReviewer } = await import('../src/reviewer-ci-admission.mjs');
+  const quiet = { log() {}, warn() {} };
+  const settled = (state) => async () => ({
+    state,
+    conclusion: state === 'green' ? 'SUCCESS' : 'FAILURE',
+    headSha: 'pending-head',
+    totalExternalChecks: 3,
+    failedChecks: state === 'green' ? [] : [{ name: 'repo-guards', state: 'FAILURE' }],
+    pendingChecks: [],
+  });
+  const rereviewGuard = (rootDir, state) => guardRereviewCiBeforeReviewer({
+    rootDir,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    passKind: 'rereview',
+    reviewerHeadSha: 'pending-head',
+    log: quiet,
+    now: () => '2026-04-21T11:00:00.000Z',
+    inspectCiImpl: settled(state),
+  });
+
+  // Green: the re-review the round requested proceeds.
+  const greenRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  await completeRoundWithCiPendingAtTimeout(greenRoot);
+  const green = await rereviewGuard(greenRoot, 'green');
+  assert.equal(green.proceed, true);
+  assert.equal(green.reason, 'ci-green');
+
+  // Red with a round left: the completed job is requeued (unchanged).
+  const redRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed: redClaim } = await completeRoundWithCiPendingAtTimeout(redRoot);
+  assert.ok(redClaim.job.remediationPlan.currentRound < redClaim.job.remediationPlan.maxRounds);
+  const red = await rereviewGuard(redRoot, 'failed');
+  assert.equal(red.reason, 'ci-regression-requeued');
+  assert.equal(red.job.status, 'pending');
+  assert.equal(red.hammerOwner, undefined);
+
+  // Red on the last round (PR 8007's round 2 of 2): the hammer owns the head.
+  const lastRoot = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const probe = buildProbeRounds();
+  const { claimed: lastClaim } = await completeRoundWithCiPendingAtTimeout(lastRoot, {
+    priorCompletedRounds: probe - 1,
+  });
+  assert.equal(lastClaim.job.remediationPlan.currentRound, lastClaim.job.remediationPlan.maxRounds);
+  // The first red tick re-stops the job at its round cap; every later tick
+  // finds nothing left to requeue (the steady state PR 8007 logged).
+  for (const expectedReason of ['ci-regression-stopped', 'ci-regression-no-job', 'ci-regression-no-job']) {
+    const last = await rereviewGuard(lastRoot, 'failed');
+    assert.equal(last.reason, expectedReason);
+    assert.equal(last.hammerOwner, true, expectedReason);
+    assert.equal(last.parkReview, true, expectedReason);
+  }
+});
+
+function buildProbeRounds() {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createFollowUpJob(makeJobInput(rootDir));
+  return created.job.remediationPlan.maxRounds;
+}
+
 test('reconcileFollowUpJob requeues remediation when the pushed head has failed CI', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writeReviewRow(rootDir);

@@ -18,6 +18,8 @@ function buildLoaderSource() {
   const reviewStateActualUrl = `${reviewStateUrl}?actual`;
   const headCloserUrl = fileUrl('src', 'head-closer-commit-suppression.mjs');
   const headCloserActualUrl = `${headCloserUrl}?actual`;
+  const ciRegressionUrl = fileUrl('src', 'remediation-ci-regression.mjs');
+  const ciRegressionActualUrl = `${ciRegressionUrl}?actual`;
   const subjectAdapterUrl = fileUrl('src', 'adapters', 'subject', 'github-pr', 'index.mjs');
   const packageParentUrl = fileUrl('package.json');
 
@@ -54,6 +56,9 @@ function buildLoaderSource() {
 const stubs = new Map(${JSON.stringify(Object.entries(stubs))});
 if (process.env.FIXTURE_CAP_SCENARIO === 'ham') {
   stubs.delete(${JSON.stringify(fileUrl('src', 'ama', 'ham-provenance.mjs'))});
+}
+if (process.env.FIXTURE_CI_BLOCKED === '1') {
+  stubs.set(${JSON.stringify(ciRegressionUrl)}, 'fixture:remediation-ci-regression');
 }
 
 export async function resolve(specifier, context, nextResolve) {
@@ -108,6 +113,23 @@ export async function load(url, context, nextLoad) {
         export async function fetchHeadCloserVerifiedCommit({ headSha }) {
           return { sha: headSha, parentSha: 'cap-head-5', parentCount: 1,
             message: 'HAM close\\nClosed-By: hammer (adversarial-pipe-mode)' };
+        }
+      `)}
+    };
+  }
+
+  if (url === 'fixture:remediation-ci-regression') {
+    // CIBLOCKHAM-01: repo-guards failed on the parked head; never call gh.
+    return {
+      format: 'module',
+      shortCircuit: true,
+      source: ${JSON.stringify(`
+        export * from ${JSON.stringify(ciRegressionActualUrl)};
+        export async function inspectRemediationCiRegression() {
+          globalThis.__ciInspections = (globalThis.__ciInspections || 0) + 1;
+          return { state: 'failed', conclusion: 'FAILURE', headSha: 'timeout-head-164', totalExternalChecks: 3,
+            failedChecks: [{ name: 'repo-guards', state: 'FAILURE', workflowName: 'repo-guards', detailsUrl: null }],
+            pendingChecks: [] };
         }
       `)}
     };
@@ -181,7 +203,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'timeout-head-164', labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
-    'fixture:ama-dispatch-closer': "export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
+    'fixture:ama-dispatch-closer': "export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { if (args?.dispatchContext?.ciBlockedHammerOwner === true) (globalThis.__ciBlockedCloserCalls ||= []).push({ reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, failedChecks: (args?.dispatchContext?.ciFailedChecks || []).map((check) => check.name) }); (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
     'fixture:config-loader': "export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; }, getOrchestrationMode() { return process.env.FIXTURE_ORCHESTRATION_MODE || 'native'; } }; } export function getConfig() { return undefined; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {} export function loadConfigRuntime() { return buildConfig(); }",
     'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
     'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function hamCommitIdentityMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseCommitTrailerValues() { return {}; } export function parseRemediatedFindingsTrailer() { return null; } export function isHamWorkerTicket() { return false; }",
@@ -235,6 +257,18 @@ if (capScenario) {
     insertRow.run('laceyenterprises/adversarial-review', 164, '2026-05-27T04:00:00.000Z', 'claude', 'open', 'pending', 0,
       null, null, 'cap-head-5');
   }
+} else if (process.env.FIXTURE_CI_BLOCKED === '1') {
+  // CIBLOCKHAM-01: the review posted on reviewed-head-164; the remediation
+  // head timeout-head-164 failed repo-guards and the re-review is parked.
+  db.prepare(\`INSERT INTO reviewer_passes
+    (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, ended_at, status,
+     head_sha, gh_comment_id, body_md, body_captured_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`)
+    .run('laceyenterprises/adversarial-review', 164, 1, 'claude', 'first-pass', '2026-05-27T03:00:00.000Z',
+      '2026-05-27T03:10:00.000Z', 'completed', 'reviewed-head-164', 'IC_164', '## Verdict\\nComment only',
+      '2026-05-27T03:10:00.000Z');
+  insertRow.run('laceyenterprises/adversarial-review', 164, '2026-05-27T03:10:00.000Z', 'claude', 'open', 'ci-blocked', 1,
+    null, '[ci-regression-no-job] Re-review is parked', 'timeout-head-164');
 } else {
   insertRow.run(
     'laceyenterprises/adversarial-review',
@@ -292,6 +326,8 @@ console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   reviewStatus: row.review_status,
   failureMessage: row.failure_message,
   closerCalls: globalThis.__timeoutHandoffCloserCalls || [],
+  ciBlockedCloserCalls: globalThis.__ciBlockedCloserCalls || [],
+  ciInspections: globalThis.__ciInspections || 0,
   capComments: globalThis.__capComments,
   capLabels: globalThis.__capLabels,
   reviewerSpawns: globalThis.__timeoutHandoffReviewerSpawns || [],
@@ -618,3 +654,56 @@ for (const scenario of ['escalate', 'paused', 'ham']) {
     }
   });
 }
+
+// CIBLOCKHAM-01: a parked CI-blocked re-review with no remediation job left is
+// handed to the hammer on the real watcher tick: the reviewer stays parked (it
+// still requires green CI), no reviewer spawns, no operator write, and the
+// closer sees the CI-blocked route with the failing check.
+test('watcher pollOnce routes a CI-blocked PR with no remediation job left to the hammer', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-blocked-hammer-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GITHUB_TOKEN: 'fixture-token',
+          AGENT_OS_HQ_BIN: '/usr/bin/false',
+          ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
+          FIXTURE_AMA_ENABLED: '1',
+          FIXTURE_AMA_REASON: 'dispatched',
+          FIXTURE_CI_BLOCKED: '1',
+        },
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.ciInspections, 1, output);
+    assert.equal(summary.reviewStatus, 'ci-blocked', 'reviewer admission still requires green external CI');
+    assert.equal(summary.reviewerSpawns.length, 0);
+    assert.equal(summary.operatorWrites.length, 0);
+    assert.equal(summary.dispatches.length, 0, 'the legacy merge-agent lane is not used');
+    assert.deepEqual(summary.ciBlockedCloserCalls, [{ reviewCycleExhausted: true, failedChecks: ['repo-guards'] }], output);
+    assert.match(output, /Holding CI-blocked re-review for laceyenterprises\/adversarial-review#164: ci-regression-no-job/);
+    assert.match(output, /ci-blocked routed laceyenterprises\/adversarial-review#164 to the hammer for final adjudication: ama-dispatched/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

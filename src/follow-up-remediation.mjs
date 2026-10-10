@@ -2540,7 +2540,12 @@ async function reconcileFollowUpJob({
               jobPath,
             };
           }
-
+        }
+        // CIBLOCKHAM-01: checks still PENDING at the bounded wait are not a failed
+        // remediation. Request the re-review; the watcher's CI admission holds the
+        // reviewer until CI settles, then green re-reviews and red requeues or
+        // routes to the hammer.
+        if (ciGate.state !== 'green' && ciGate.state !== 'pending') {
           rereview = buildRereviewResult({
             requested: false,
             reason: null,
@@ -2632,6 +2637,7 @@ async function reconcileFollowUpJob({
             requestedAt,
           },
         });
+        if (ciGate.state === 'pending') rereview = { ...rereview, ciSettlement: 'pending-at-timeout', ciGate };
       } else if (job?.finalRound === 'comment-only') {
         rereview = {
           ...buildRereviewResult({

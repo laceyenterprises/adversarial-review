@@ -1125,6 +1125,34 @@ showed the old behaviour: "operator attention required", then about 10h at
   The override labels (`operator-approved`, `merge-agent-requested`,
   `paused-for-redesign`) still clear the cap.
 
+### CI-blocked with no remediation job left → hammer owner (CIBLOCKHAM-01)
+
+agent-os PR 8007 parked as `ci-regression-no-job`: its remediation rounds were
+spent, repo-guards failed on the last remediation head, and nobody owned it. The
+watcher now hands such a PR to this closer with `ciBlockedHammerOwner`
+(`src/ci-blocked-hammer.mjs`), through the hammer-owner route CYCLECAPHAM-01
+uses (`src/hammer-owner-route.mjs`).
+
+- The re-review row stays `ci-blocked`; reviewer admission still requires green
+  CI. Look for `ci-blocked routed <repo>#<pr> to the hammer for final
+  adjudication` in the watcher log, on the park tick and on each 5-minute
+  same-head CI recheck (`ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS`).
+- The closer admits the red, unreviewed head as a final-hammer close and adds a
+  "CIBLOCKHAM-01 — failed CI with no remediation job left: you are the owner"
+  prompt section with the failing checks. Codex-first, the lease and every
+  merge predicate are unchanged.
+- `ci-blocked hammer route failed … authoritative reviewed head unavailable`
+  means no posted review pass with a head SHA exists in `reviewer_passes`; the
+  PR stays parked as before.
+- A recorded no-merge decision returns `ci-blocked-hammer-final-no-merge` and
+  launches no retry hammer. That decision or an exhausted hammer retry cap pages
+  SEV1 `ama.ci_blocked.hammer_final`, once per `repo#pr@head`.
+
+A remediation round whose CI wait expires with the checks still PENDING now
+completes and requests the re-review (`reReview.ciSettlement` is
+`pending-at-timeout` in the job). It no longer ends `failed` with "Human
+intervention required".
+
 ### A hammer that died of an infrastructure cause (CLOSERREUSE-01)
 
 A hammer that dies on a provider 429, a revoked OAuth grant or an adapter boot

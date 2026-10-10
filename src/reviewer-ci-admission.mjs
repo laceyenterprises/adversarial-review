@@ -12,8 +12,31 @@ function buildRereviewCiRegressionReason({ repo, prNumber, ciGate }) {
   return `Remediation for ${repo}#${prNumber} introduced or left failed CI on the current PR head before re-review: ${formatCiCheckList(ciGate?.failedChecks)}. Requeueing so the next remediation worker fixes CI before re-review.`;
 }
 
-function buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate }) {
-  return `[ci-regression-no-job] Re-review for ${repo}#${prNumber} is parked because the current PR head has failed external CI and no follow-up job exists to requeue: ${formatCiCheckList(ciGate?.failedChecks)}. Push a fix or requeue remediation; the watcher will re-arm once the head changes or CI turns green.`;
+// CIBLOCKHAM-01: a red head with no remediation job left has exactly one owner,
+// the hammer. The reviewer stays parked (reviewer admission requires green
+// external CI); the watcher routes the PR to the hammer for final adjudication.
+const CI_BLOCKED_PARK_CAUSES = Object.freeze({
+  'ci-regression-no-job': 'no follow-up job exists to requeue',
+  // The requeue re-stops a job at its round cap (or a no-progress round).
+  'ci-regression-stopped': 'no remediation round is left to requeue',
+});
+
+function buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate, reason = 'ci-regression-no-job' }) {
+  const cause = CI_BLOCKED_PARK_CAUSES[reason] || CI_BLOCKED_PARK_CAUSES['ci-regression-no-job'];
+  return `[${reason}] Re-review for ${repo}#${prNumber} is parked because the current PR head has failed external CI and ${cause}: ${formatCiCheckList(ciGate?.failedChecks)}. Routed to the hammer for final adjudication; reviewer admission still requires green external CI, and the watcher will re-arm once the head changes or CI turns green.`;
+}
+
+function ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason, ...rest }) {
+  return {
+    proceed: false,
+    reason,
+    ciGate,
+    ...rest,
+    parkReview: true,
+    parkReviewStatus: REREVIEW_CI_BLOCKED_STATUS,
+    hammerOwner: true,
+    failureMessage: buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate, reason }),
+  };
 }
 
 function normalizeCiAdmissionState(state) {
@@ -132,14 +155,7 @@ async function guardRereviewCiBeforeReviewer({
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
           `(${formatCiCheckList(ciGate.failedChecks)}) but no follow-up job exists to requeue.`
       );
-      return {
-        proceed: false,
-        reason: 'ci-regression-no-job',
-        ciGate,
-        parkReview: true,
-        parkReviewStatus: REREVIEW_CI_BLOCKED_STATUS,
-        failureMessage: buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate }),
-      };
+      return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-no-job' });
     }
 
     const reason = buildRereviewCiRegressionReason({ repo, prNumber, ciGate });
@@ -171,15 +187,14 @@ async function guardRereviewCiBeforeReviewer({
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +
           `(${formatCiCheckList(ciGate.failedChecks)}) requeue produced status=${nextStatus || 'unknown'}.`
       );
-      return {
-        proceed: false,
-        reason: nextStatus === 'stopped'
-          ? 'ci-regression-stopped'
-          : 'ci-regression-not-requeued',
-        ciGate,
+      const jobFields = {
         jobPath: requeued?.jobPath || latest.jobPath,
         job: requeued?.job || latest.job || null,
       };
+      if (nextStatus === 'stopped') {
+        return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-stopped', ...jobFields });
+      }
+      return { proceed: false, reason: 'ci-regression-not-requeued', ciGate, ...jobFields };
     } catch (err) {
       if (err?.code === 'ENOENT') {
         log.warn?.(
@@ -187,14 +202,7 @@ async function guardRereviewCiBeforeReviewer({
             `(${formatCiCheckList(ciGate.failedChecks)}) but the stopped follow-up job no longer exists. ` +
             'Nothing remains to requeue.'
         );
-        return {
-          proceed: false,
-          reason: 'ci-regression-no-job',
-          ciGate,
-          parkReview: true,
-          parkReviewStatus: REREVIEW_CI_BLOCKED_STATUS,
-          failureMessage: buildRereviewCiBlockedFailureMessage({ repo, prNumber, ciGate }),
-        };
+        return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-no-job' });
       }
       log.warn?.(
         `[watcher] Refusing re-review for ${repo}#${prNumber}: failed external CI ` +

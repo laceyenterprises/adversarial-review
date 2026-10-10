@@ -91,9 +91,9 @@ The Grafana dashboard lives at
   oldest queued re-review row.
 - `review_pipeline_ci_blocked_rereviews`: open re-reviews parked at
   `review_status='ci-blocked'` because external CI failed and no remediation
-  job exists to requeue. The watcher backoff-gates same-head CI rechecks for
-  parked rows so the finding remains observable without turning into a GitHub
-  polling loop.
+  job is left to requeue. The watcher routes each one to the hammer as owner
+  (CIBLOCKHAM-01) and backoff-gates same-head CI rechecks for parked rows so
+  the finding remains observable without turning into a GitHub polling loop.
 - `review_pipeline_first_pass_ci_orphans`: open first-pass PR heads with a
   failed GitHub checks bucket, no posted review verdict, and no known live
   branch worker. The probe is capped by
@@ -331,7 +331,7 @@ can distinguish "never posted in window" from a null/corrupt timestamp column.
 | `review:queue_starvation` | oldest pending row in the watcher first-pass lane is >10m old, excluding rows with a current CI-regression-stopped follow-up deferral; `details.starvationCause` is `reviewer-runtime-failure`, `capacity-allocated-elsewhere`, or `no-capacity` | ticket | no pending first-pass row exceeds the age threshold |
 | `review:first_pass_ci_orphan` | open first-pass PR head has failed GitHub checks, no review verdict, and no known live worker on that branch; first-pass review is not CI-gated, so this is additive to queue starvation rather than a replacement | ticket | checks pass, a worker owns the branch, a review verdict posts, or the PR leaves the open population |
 | `review:first_pass_ci_orphan_probe_blind` | `review_pipeline_first_pass_ci_orphans_collected == 0` because GitHub checks, worker-liveness probing, or the configured first-pass CI orphan probe budget prevented a complete snapshot | ticket | every eligible first-pass CI orphan candidate is probed successfully |
-| `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job exists to requeue; same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
+| `review:rereview_ci_blocked` | one or more open re-reviews are parked at `review_status='ci-blocked'` because external CI failed and no remediation job is left to requeue; the hammer owns the head (CIBLOCKHAM-01) and same-head CI probes are backoff-gated | ticket | the PR head moves, CI turns green, remediation is requeued, or the PR leaves the open population |
 | `review:rereview_deferred` | pending re-review row remains intentionally deferred behind an active, requeued, or CI-regression-stopped follow-up job for longer than the queue-starvation threshold (default 10m); CI-regression stopped deferrals are matched from persisted `remediationPlan.stop.ciRegression=true` metadata and last only while the stopped-job archive is retained (normally 24h) | ticket | the active/requeued follow-up job finishes and re-arms review, the stopped CI-regression job ages out of the 24h stopped-job archive, the row leaves pending, or the deferral falls below threshold |
 | `review:rereview_queue_wait` | oldest pending re-review row without an active, requeued, or current CI-regression-stopped follow-up deferral is older than the queue-starvation threshold (default 10m) | ticket | no pending re-review row without one of those current follow-up deferrals exceeds the age threshold |
 | `review:operational_blocker_human_intervention` | one or more stopped remediation rounds include an operational blocker whose text positively asks for human/manual/operator intervention | ticket | no stopped operational blocker requires human intervention |

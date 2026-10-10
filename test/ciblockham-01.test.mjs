@@ -435,13 +435,20 @@ test('(e) a CI-blocked hammer no-merge decision is final: no retry hammer, and t
   await seedFinishedCiBlockedHammer(rootDir);
   for (const dispatchedAt of ['2026-10-10T17:35:00Z', '2026-10-10T17:40:00Z']) {
     const deps = closerDeps({ nextLaunch: 'lrq_unexpected', comments: [noMergeClosingStatus(RED_HEAD)] });
-    const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { dispatchedAt }), ...deps });
+    const warnings = [];
+    const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { dispatchedAt }), ...deps,
+      logger: { ...QUIET_LOGGER, warn: (...args) => warnings.push(args) } });
     assert.equal(result.dispatched, false, JSON.stringify(result));
     assert.equal(result.reason, CI_BLOCKED_HAMMER_FINAL_NO_MERGE_REASON);
     assert.equal(result.needsOperator, true);
     assert.equal(result.launchRequestId, LRQ_FIRST);
     assert.equal(deps.launches.length, 0, `${dispatchedAt}: the no-merge decision is final`);
     assert.equal(hammerOwnerRouteFinalOutcome(result), 'hammer-no-merge');
+    assert.ok(warnings.some((args) => args.some((arg) =>
+      typeof arg === 'string' && arg.includes('ama_closer.ci_blocked_hammer_final_no_merge'))),
+    'terminal telemetry must identify the CI-blocked owner route');
+    assert.ok(!warnings.some((args) => args.some((arg) =>
+      typeof arg === 'string' && arg.includes('ama_closer.review_cycle_cap_hammer_final_no_merge'))));
   }
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 1);
 });

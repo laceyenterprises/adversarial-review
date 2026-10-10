@@ -4731,7 +4731,7 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
-      logAmaCloserDispatchEvent(logger, 'ama_closer.review_cycle_cap_hammer_final_no_merge', {
+      logAmaCloserDispatchEvent(logger, `ama_closer.${hammerOwnerRoute.replace(/-/g, '_')}_hammer_final_no_merge`, {
         repo, prNumber, headSha: existingRecordLeaseIdentity.headSha,
         launchRequestId: existingRecord.launchRequestId, hammerOwnerRoute,
       }, { level: 'warn' });

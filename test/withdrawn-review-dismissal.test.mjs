@@ -95,7 +95,8 @@ for (const scenario of ['withdrawn', 'standing', 'dismissal refused']) {
   test(`rendered hammer merge respects the GitHub review veto: ${scenario}`, async t => {
     const f = await fixture(t);
     const dir = f.rootDir, bin = join(dir, 'fixture-bin'); mkdirSync(bin);
-    symlinkSync(join(root, 'bin'), join(dir, 'bin'));
+    // The CI harness preserves symlinks; bin imports resolve through this fixture.
+    for (const entry of ['bin', 'src', 'node_modules']) symlinkSync(join(root, entry), join(dir, entry));
     const stateFile = join(dir, 'github.json');
     if (scenario === 'standing') f.reviews[0].body = body.replace('False finding', 'Standing finding');
     writeFileSync(stateFile, JSON.stringify({ reviews: f.reviews, comments: f.comments, events: [] }));

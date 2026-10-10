@@ -3764,7 +3764,8 @@ test('bounce recovery requeues reviewing rows for cancelled reviewer run records
     assert.deepEqual(recovered, { recovered: 1, pruned: 0 });
     const row = db.prepare('SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE reviewer_session_uuid = ?').get('cancelled-recovery-session');
     assert.equal(row.review_status, 'pending');
-    assert.equal(row.review_attempts, 1);
+    // REVIEWBOUNCE-01: a bounce is infra and never charges the review retry cap.
+    assert.equal(row.review_attempts, 0);
     assert.match(row.failure_message, /daemon-bounce/);
   } finally {
     db.close();

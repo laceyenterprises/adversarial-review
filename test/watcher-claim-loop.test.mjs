@@ -583,8 +583,77 @@ try {
   console.error(err?.stack || err?.message || err);
   process.exit(1);
 }
+
 `;
 }
+
+test('queued bounce retry loses the claim when reconciliation observes a newer failed bounce session', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-bounce-race-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const bounceUrl = fileUrl('src', 'daemon-bounce-recovery.mjs');
+    const recoverySource = `
+      import { reconcileDaemonBounceBeforeRetry as actual } from ${JSON.stringify(`${bounceUrl}?actual`)};
+      export * from ${JSON.stringify(`${bounceUrl}?actual`)};
+      export async function reconcileDaemonBounceBeforeRetry(args) {
+        const result = await actual({ ...args, isAlive: () => false, sleep: async () => {},
+          findPostedReview: async () => {
+            globalThis.__watcherClaimLoopDb.prepare(\`UPDATE reviewed_prs
+              SET review_status = 'failed', reviewer_session_uuid = 'bounce-B',
+                  reviewer_started_at = '2026-10-10T16:50:00.000Z',
+                  failed_at = '2026-10-10T16:51:00.000Z', reviewer_pgid = 8181
+              WHERE pr_number = 101\`).run();
+            return null;
+          },
+        });
+        globalThis.__bounceRecoveryResult = result;
+        return result;
+      }
+    `;
+    const loader = buildLoaderSource().replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(bounceUrl)}) {
+        return { format: 'module', shortCircuit: true, source: ${JSON.stringify(recoverySource)} };
+      }
+      return nextLoad(url, context);
+    `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs
+          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+           reviewer_head_sha, reviewer_session_uuid, reviewer_started_at,
+           reviewer_pgid, failed_at, failure_message)
+          VALUES ('laceyenterprises/adversarial-review', 101, '2026-10-10',
+            'claude', 'open', 'failed', 'sha-happy-101', 'bounce-A',
+            '2026-10-10T16:40:00.000Z', 7171, '2026-10-10T16:41:00.000Z',
+            '[daemon-bounce] Reviewer interrupted')\`).run();
+      `,
+      afterFirstPoll: `
+        assert.equal(globalThis.__bounceRecoveryResult.handled, false);
+        assert.equal(globalThis.__bounceRecoveryResult.reason, 'dead-no-posted-review');
+        const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+        assert.equal(row.review_status, 'failed');
+        assert.equal(row.reviewer_session_uuid, 'bounce-B');
+        assert.equal(row.reviewer_pgid, 8181);
+        assert.equal(row.reviewer_started_at, '2026-10-10T16:50:00.000Z');
+        assert.equal(row.failed_at, '2026-10-10T16:51:00.000Z');
+        assert.equal(row.infra_auto_recover_attempts, 0);
+        assert.ok(!claims.some(claim => claim.prNumber === 101));
+        assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || [])
+          .some(spawn => spawn.subjectContext?.prNumber === 101));
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 function buildRefreshRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');

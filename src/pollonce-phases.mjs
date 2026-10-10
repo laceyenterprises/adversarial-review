@@ -106,6 +106,12 @@ import {
 import { checkHcpHealthz } from './hcp-health.mjs';
 import { handlePostedReviewRow } from './posted-review-row.mjs';
 import {
+  DAEMON_BOUNCE_FAILURE_CLASS,
+  reconcileDaemonBounceBeforeRetry,
+  isDaemonBounceFailure,
+} from './daemon-bounce-recovery.mjs';
+import { settleDaemonBouncePostedReview } from './daemon-bounce-posted-review.mjs';
+import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
   quotaHoldDecision,
 } from './quota-exhaustion.mjs';
@@ -142,6 +148,7 @@ import {
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
+  stmtMarkDaemonBounceRecoveryAttemptStarted,
   stmtMarkTokenRefreshRecoveryAttemptStarted,
   stmtMarkArgusSecurityQueued,
   stmtMarkMalformed,
@@ -606,7 +613,9 @@ export function reviewRowInTerminalFailureState(row, currentHeadSha) {
   }
   if (row.review_status !== 'pending') return false;
   if (!row.failed_at) return false;
-  if (!(Number(row.review_attempts || 0) > 0)) return false;
+  // REVIEWBOUNCE-01: a bounced row charges no attempt, but it must still route
+  // through the bounded infra CAS rather than the uncharged pending claim.
+  if (!(Number(row.review_attempts || 0) > 0) && !isDaemonBounceFailure(row)) return false;
   const rowHead = row.reviewer_head_sha || null;
   if (!rowHead || !currentHeadSha) return false;
   return String(rowHead) === String(currentHeadSha);
@@ -2435,6 +2444,33 @@ export async function processReviewSubject(entry, ctx) {
           return;
         }
       }
+      // A bounce timeout cannot release a live reviewer claim. Confirm exit and
+      // reconcile late posts before the infra CAS replaces the original session.
+      if (infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS) {
+        const bounceRecovery = await reconcileDaemonBounceBeforeRetry({
+          row: current,
+          findPostedReview: reviewerCommandFailedReviewProbe,
+          resolveReviewerLogin: reviewerBotLogin,
+          markPosted: ({ row, postedAt, postedReview }) => {
+            const changes = settleDaemonBouncePostedReview({
+              db, rootDir: ROOT, row, postedAt, postedReview,
+              defaultBaseBranch: subject.baseRefName || subject.baseBranch || 'main',
+            });
+            if (changes === 1) {
+              markWatcherReviewHeartbeat({ repo: row.repo, pr_number: row.pr_number, posted_at: postedAt });
+            }
+            return changes;
+          },
+          settleRunRecord: (event) => settleDurableReviewerRunState(event),
+        });
+        if (bounceRecovery.handled) {
+          console.log(
+            `[watcher] Holding daemon-bounce re-queue for ${repoPath}#${prNumber}: ` +
+              `${bounceRecovery.reason}; preserving original claim without consuming infra auto-recover attempt`
+          );
+          return;
+        }
+      }
       // HRR graceful-degradation for hard provider usage caps. A quota-exhausted
       // reviewer cannot succeed until the provider's cap window lifts, so retrying
       // before then would only burn the bounded infra auto-recover budget against a
@@ -2930,6 +2966,22 @@ export async function processReviewSubject(entry, ctx) {
                 prNumber,
                 current?.failed_at || null,
                 current?.reviewer_head_sha || null
+              )
+              : infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS
+              ? stmtMarkDaemonBounceRecoveryAttemptStarted.run(
+                attemptAt,
+                reviewerSessionUuid,
+                reviewerHeadSha,
+                pendingRevisionRef,
+                reviewerTimeoutMs,
+                reviewerLeaseExpiresAt,
+                repoPath,
+                prNumber,
+                current.reviewer_session_uuid,
+                current.reviewer_started_at,
+                current.failed_at,
+                current.reviewer_head_sha,
+                INFRA_AUTO_RECOVER_CAP
               )
               : infraRecoveryClass
               ? stmtMarkInfraAutoRecoveryAttemptStarted.run(

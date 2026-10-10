@@ -1,13 +1,13 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/review-state.mjs`, `src/review-state-statements.mjs`, `src/review-state-db.mjs`, `src/reviewer-route-selection.mjs`, `src/reviewer-pass-tokens.mjs`, `src/reviewer-harness.mjs`, `src/ama/closer-pass-attempt.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/daemon-bounce-posted-review.mjs`, `src/orphan-post-reconcile.mjs`, and `src/follow-up-jobs.mjs`
 
 ## Ownership
 
 - Store: `data/reviews.db`
 - Tables: `reviewer_passes`, `reviewer_rate_limit_snapshots`
 - Schema: `migrations/20260518_reviewer_passes.sql` plus later additive migrations
-- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
+- Writers: `src/reviewer-pass-tokens.mjs`, `src/reviewer-pass-reaper.mjs`, `src/reviewer-spawn-settle.mjs`, `src/pollonce-phases.mjs`, `src/daemon-bounce-posted-review.mjs`, `src/orphan-post-reconcile.mjs`, `src/follow-up-jobs.mjs`
 - Repair CLI: `scripts/backfill-reviewer-passes.mjs`; `bin/reconcile-posted-orphans.mjs` links posted review artifacts for reconciled `failed-orphan` rows
 
 `reviewer_passes` is the durable record of each first-pass, remediation, and
@@ -133,6 +133,25 @@ unless they explicitly wire an early-release callback. If the callback's
 bookkeeping write fails, `spawnReviewer` logs the failure and leaves the row for
 the caller's normal post-return settlement path; a posted review must not be
 downgraded to a failed reviewer pass solely because the early callback failed.
+
+## Daemon-bounce late-post recovery
+
+`src/daemon-bounce-posted-review.mjs` links a verified exact-head GitHub review
+to the first-pass or rereview row whose `metadata_json.reviewerSessionUuid`
+matches the bounced delivery claim. It persists `body_md`, `verdict`,
+`gh_comment_id`, and `body_captured_at`, completes the pass, and queues or
+deduplicates the recovered review's follow-up before committing the delivery
+row's posted transition. Missing or conflicting pass evidence and failed
+handoffs roll back the SQLite transaction, retaining a retryable bounce claim.
+If the file-backed job survives a rollback or daemon crash, the existing
+review-keyed queue dedupe prevents duplicate remediation on retry. Later artifact
+capture can fill attribution without needing the reaper to create the handoff.
+
+Replacement dispatch uses a dedicated bounce CAS pinned to the original
+session, start time, failure timestamp, and head on failed and pending delivery
+rows. Nullable evidence uses exact NULL-safe equality, preserving ownership
+while allowing incomplete claims to recover once. The shared infrastructure
+claim cannot claim daemon-bounce failures.
 
 ## Launch and reattach identity
 

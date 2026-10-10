@@ -948,6 +948,24 @@ Stop behavior:
 
 ---
 
+## Daemon-bounce review recovery
+
+Before replacing a same-head failed or pending daemon-bounce claim, the watcher
+confirms the verified original process group has exited and reprobes GitHub for
+a late review. Incomplete process evidence uses the persisted timeout or a
+one-hour fallback hold; expiry permits a late-review probe and bounded recovery
+without signaling an unverified group. Missing session/head/login evidence falls
+back to the infrastructure claim. Nullable claim evidence is compared exactly
+with NULL-safe equality, so a newer claim still defeats recovery. The queued replacement must still match the inspected session, start
+time, failure timestamp, and head; a newer session makes the claim lose its CAS.
+
+A late exact-head review is captured into that session's reviewer pass with its
+body, verdict, and GitHub artifact ID. The watcher queues or deduplicates the
+follow-up before committing the posted delivery transition. Missing pass
+evidence or failed handoff leaves SQLite settlement retryable. A follow-up file
+that survives a crash or rollback is deduplicated on retry; later artifact
+capture does not need to recreate the handoff.
+
 ## Event-driven re-review wakes (RPL-04)
 
 A remediation closeout or a CI state transition no longer waits for the next

@@ -112,3 +112,13 @@ test('cross-model reviewer names find reviews posted by the codex bot aliases', 
     }
   }
 });
+
+
+test('exact-head recovery finds the matching review even behind a newer other-head post', async () => {
+  const exact = { user: { login: 'lacey-gemini-reviewer[bot]' }, submitted_at: POSTED_AT, commit_id: 'exact-head' };
+  const newer = { ...exact, submitted_at: '2026-08-22T22:16:08.000Z', commit_id: 'other-head' };
+  const probe = makeReviewPostedProbe(octokitReturning([exact, newer]));
+  assert.equal(await probe(row(), { refresh: true, headSha: 'exact-head' }), exact);
+  assert.equal(await probe(row(), { refresh: true, headSha: 'missing-head' }), null);
+  assert.equal(await probe(row()), newer, 'existing callers retain their probe scope');
+});

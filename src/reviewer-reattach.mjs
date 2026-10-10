@@ -268,7 +268,7 @@ function killPgid(pgid, signal = 'SIGKILL') {
 function makeReviewPostedProbe(octokit) {
   const cache = new Map();
 
-  return async function reviewPostedAfter(row, { refresh = false } = {}) {
+  return async function reviewPostedAfter(row, { refresh = false, headSha = null } = {}) {
     const startedAtMs = parseTime(row.reviewer_started_at);
 
     const { owner, repo } = splitRepoPath(row.repo);
@@ -301,6 +301,7 @@ function makeReviewPostedProbe(octokit) {
     if (!expectedLogins.length) return null;
     return cache.get(key)
       .filter((review) => expectedLogins.some((login) => loginsMatch(review?.user?.login, login)))
+      .filter((review) => !headSha || review?.commit_id === headSha)
       .filter((review) => {
         const submittedAtMs = parseTime(review?.submitted_at);
         return submittedAtMs !== null && (startedAtMs === null || submittedAtMs >= startedAtMs);

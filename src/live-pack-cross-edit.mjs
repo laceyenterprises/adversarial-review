@@ -16,12 +16,20 @@
 //   - remediation context: the live-run facts for every pack dir the PR
 //     touches, rendered into the remediation prompt as trusted data.
 //
+// LIVEPACKSTAMP-01 (SEV1 2026-10-10): the pipeline's own post-merge gate-stamp
+// PR for a running pack (agent-os PR 8031) is not a cross-pack edit. It is
+// exempt only when the PR author is the post-merge-actions GitHub App, the
+// branch is `post-merge-actions/<slug>-gate-stamp-<hash>`, and the pack's only
+// change is `postMergeActions.dispatchGate.completedSpecRef` in its plan.json
+// (parsed JSON at base and head). Every exemption is recorded in the review
+// body. Anything else is gated exactly as before.
+//
 // Cost is bounded: per touched pack, one plan.json fetch (a second only when
 // the pack is absent at the base ref) and one LIMIT-bounded, indexed,
 // read-only ledger SELECT (up to three attempts for transient failures).
 
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 
 import { execGhWithRetry } from './gh-cli.mjs';
 import { fetchRepoFileAtRef } from './pack-lockhash.mjs';
@@ -31,6 +39,8 @@ import {
   LIVE_DAG_RUN_STATES,
   readActiveDagRunsForPlan,
 } from './session-ledger-read-adapter.mjs';
+import { loadRoleConfig } from './role-config.mjs';
+import { normalizeActorLogin } from './untrusted-pr-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 const PR_FILES_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
@@ -38,6 +48,12 @@ const PR_FILES_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 const LIVE_PACK_CROSS_EDIT_KIND = 'live_pack_cross_edit';
 const LIVE_PACK_EDIT_WAIVER_LABEL = 'live-pack-edit-approved';
 const LIVE_PACK_FINDING_HEADING = '## Live Pack Cross-Edit Finding';
+const LIVE_PACK_STAMP_EXEMPTION_HEADING = '## Live Pack Gate-Stamp Exemption';
+// The entitlement post-merge actions run under (agent-os config.yaml); its
+// gh_bot_login is the identity the bump PR is opened as.
+const POST_MERGE_ACTIONS_ENTITLEMENT = 'post-merge-actions-worker';
+const GATE_STAMP_BRANCH_PREFIX = 'post-merge-actions/';
+const GATE_STAMP_HASH_RE = /^[0-9a-f]{7,64}$/;
 
 const PACK_DIR_RE = /^projects\/([^/]+)\/(.+)$/;
 const GUARDED_PACK_FILE_RE = /^(?:SPEC\.md|SPEC\.meta\.json|plan\.json|prompts\/.+)$/;
@@ -164,6 +180,113 @@ async function loadPackPlan({
   return { ok: true, planId: null, ticketIds: [], planRef: null };
 }
 
+// App logins of the post-merge-actions entitlement. Only `[bot]` forms are
+// kept: GitHub logins cannot contain brackets, so no human account can match,
+// while a bare configured alias could name a user. Unreadable config is an
+// empty set, which grants no exemption.
+function resolvePostMergeActionsBotLogins({
+  env = process.env,
+  loadRoleConfigImpl = loadRoleConfig,
+  log = console,
+} = {}) {
+  const key = `entitlements.${POST_MERGE_ACTIONS_ENTITLEMENT}.gh_bot_login`;
+  try {
+    const cfg = loadRoleConfigImpl({ env, contextKey: key });
+    return new Set(String(cfg.get(key, '') || '').split(',')
+      .map((login) => normalizeActorLogin(login))
+      .filter((login) => login.endsWith('[bot]')));
+  } catch (err) {
+    log?.warn?.(`[live-pack-cross-edit] ${key} unreadable; no gate-stamp exemption: ${err?.message || err}`);
+    return new Set();
+  }
+}
+
+// The PR author as REST renders it (`name[bot]`, `type: Bot`). The review
+// context's GraphQL author is a bare login that cannot prove an App account.
+async function fetchPullRequestAuthorLogin(repo, prNumber, { execFileImpl = execFileAsync } = {}) {
+  const { stdout } = await execGhWithRetry({
+    execFileImpl,
+    args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '{login: .user.login, type: .user.type}'],
+  });
+  const user = JSON.parse(String(stdout));
+  return normalizeActorLogin(user?.login, { typename: user?.type });
+}
+
+function withoutGateStampField(plan) {
+  const copy = structuredClone(plan);
+  const gate = copy?.postMergeActions?.dispatchGate;
+  if (gate && typeof gate === 'object' && !Array.isArray(gate)) delete gate.completedSpecRef;
+  return copy;
+}
+
+// LIVEPACKSTAMP-01: is this PR the pack's own post-merge gate stamp? Returns
+// { exempt: true, ... } only when every condition holds; any read failure or
+// mismatch returns { exempt: false, reason } and the finding stands. Checks
+// run cheapest first so an ordinary PR costs no I/O here.
+async function evaluateGateStampExemption({
+  repo,
+  prNumber,
+  slug,
+  branch = '',
+  paths = [],
+  baseRef = '',
+  headRef = '',
+  fetchFileAtRefImpl = fetchRepoFileAtRef,
+  resolvePrAuthorImpl = fetchPullRequestAuthorLogin,
+  trustedStampLoginsImpl = resolvePostMergeActionsBotLogins,
+} = {}) {
+  const prefix = `${GATE_STAMP_BRANCH_PREFIX}${slug}-gate-stamp-`;
+  const branchName = String(branch || '').trim();
+  const hash = branchName.startsWith(prefix) ? branchName.slice(prefix.length) : '';
+  if (!GATE_STAMP_HASH_RE.test(hash)) return { exempt: false, reason: 'branch-not-gate-stamp' };
+  const planPath = `projects/${slug}/plan.json`;
+  const packFiles = touchedPacksFromPaths(paths, { guardedOnly: false }).get(slug) || [];
+  if (packFiles.length !== 1 || packFiles[0] !== planPath) {
+    return { exempt: false, reason: 'pack-files-beyond-plan-json' };
+  }
+  const base = normalizeText(baseRef);
+  const head = normalizeText(headRef);
+  if (!repo || !prNumber || !base || !head || base === head) return { exempt: false, reason: 'refs-unknown' };
+  let author;
+  try {
+    author = await resolvePrAuthorImpl(repo, prNumber);
+  } catch (err) {
+    console.warn('[live-pack-cross-edit] gate-stamp author read failed:', err?.message || err);
+    return { exempt: false, reason: 'author-unreadable' };
+  }
+  const trusted = trustedStampLoginsImpl();
+  if (!author || !author.endsWith('[bot]') || !trusted.has(author)) {
+    return { exempt: false, reason: 'author-not-post-merge-actions' };
+  }
+  let basePlan;
+  let headPlan;
+  try {
+    basePlan = JSON.parse(String(await fetchFileAtRefImpl(repo, planPath, base)));
+    headPlan = JSON.parse(String(await fetchFileAtRefImpl(repo, planPath, head)));
+  } catch (err) {
+    console.warn('[live-pack-cross-edit] gate-stamp plan read failed:', err?.message || err);
+    return { exempt: false, reason: 'plan-unreadable' };
+  }
+  const from = basePlan?.postMergeActions?.dispatchGate?.completedSpecRef ?? null;
+  const to = headPlan?.postMergeActions?.dispatchGate?.completedSpecRef;
+  if (typeof to !== 'string' || !to.endsWith(`@${hash}`) || to === from) {
+    return { exempt: false, reason: 'stamp-value-mismatch' };
+  }
+  if (!isDeepStrictEqual(withoutGateStampField(basePlan), withoutGateStampField(headPlan))) {
+    return { exempt: false, reason: 'plan-changes-beyond-gate-stamp' };
+  }
+  return {
+    exempt: true,
+    reason: 'post-merge-gate-stamp',
+    author,
+    branch: branchName,
+    file: planPath,
+    field: 'postMergeActions.dispatchGate.completedSpecRef',
+    from,
+    to,
+  };
+}
+
 function defaultReadActiveDagRuns({ planId, states }) {
   return readActiveDagRunsForPlan({ planId, states });
 }
@@ -255,6 +378,7 @@ function buildLivePackCrossEditFinding({ pack, touchedFiles }) {
 
 async function evaluateLivePackCrossEdits({
   repo,
+  prNumber = null,
   diffText = '',
   changedPaths = null,
   branch = '',
@@ -264,22 +388,37 @@ async function evaluateLivePackCrossEdits({
   labels = [],
   fetchFileAtRefImpl = fetchRepoFileAtRef,
   readActiveDagRunsImpl = defaultReadActiveDagRuns,
+  resolvePrAuthorImpl = fetchPullRequestAuthorLogin,
+  trustedStampLoginsImpl = resolvePostMergeActionsBotLogins,
 } = {}) {
   const paths = Array.isArray(changedPaths) ? changedPaths : changedPathsFromDiff(diffText);
   const touched = touchedPacksFromPaths(paths, { guardedOnly: true });
   const prTicketIds = extractPrTicketIds({ branch, title });
   const packs = [];
   const candidateFindings = [];
+  const exemptions = [];
   for (const [slug, touchedFiles] of touched) {
     const pack = await resolvePackLiveness({
       repo, slug, baseRef, headRef, fetchFileAtRefImpl, readActiveDagRunsImpl,
     });
     const ownPack = prTicketIds.some((id) => pack.ticketIds.includes(id));
-    packs.push({ ...pack, ownPack, touchedFiles });
-    if (ownPack) continue;
-    if (pack.live || pack.inconclusive) {
-      candidateFindings.push(buildLivePackCrossEditFinding({ pack, touchedFiles }));
+    if (ownPack || !(pack.live || pack.inconclusive)) {
+      packs.push({ ...pack, ownPack, touchedFiles });
+      continue;
     }
+    const stamp = await evaluateGateStampExemption({
+      repo, prNumber, slug, branch, paths, baseRef, headRef,
+      fetchFileAtRefImpl, resolvePrAuthorImpl, trustedStampLoginsImpl,
+    });
+    packs.push({ ...pack, ownPack, touchedFiles, ...(stamp.exempt ? { gateStampExempt: true } : {}) });
+    if (stamp.exempt) {
+      const { author, branch: stampBranch, file, field, from, to, reason } = stamp;
+      exemptions.push({ kind: LIVE_PACK_CROSS_EDIT_KIND, pack: slug, plan_id: pack.planId,
+        run_ids: pack.runs.map((run) => run.run_id), touched_files: touchedFiles,
+        reason, author, branch: stampBranch, file, field, from, to });
+      continue;
+    }
+    candidateFindings.push(buildLivePackCrossEditFinding({ pack, touchedFiles }));
   }
   const waived = candidateFindings.length > 0
     && normalizeLabelNames(labels).has(LIVE_PACK_EDIT_WAIVER_LABEL);
@@ -287,6 +426,7 @@ async function evaluateLivePackCrossEdits({
     findings: waived ? [] : candidateFindings,
     waived,
     waivedFindings: waived ? candidateFindings : [],
+    exemptions,
     prTicketIds,
     packs,
   };
@@ -379,6 +519,18 @@ function applyLivePackCrossEditFindings(reviewText, findings) {
     .join('\n')
     .replace(/\s+$/, '');
   return `${body}\n\n${LIVE_PACK_FINDING_HEADING}\n\n\`\`\`json\n${JSON.stringify(findings, null, 2)}\n\`\`\`\n`;
+}
+
+// LIVEPACKSTAMP-01 audit: an exempted gate stamp is recorded in the review
+// body, never silently dropped. It adds no finding and leaves the verdict.
+function appendLivePackStampExemptions(reviewText, exemptions) {
+  if (!Array.isArray(exemptions) || exemptions.length === 0) return reviewText;
+  const bullets = exemptions.map((entry) =>
+    `- \`${entry.pack}\` is live, but this PR is its own post-merge gate stamp (author \`${entry.author}\`, ` +
+    `branch \`${entry.branch}\`): the only change is \`${entry.field}\` in \`${entry.file}\`, ` +
+    `\`${entry.from ?? '<unset>'}\` → \`${entry.to}\`. Not a cross-pack edit.`);
+  return `${String(reviewText || '').replace(/\s+$/, '')}\n\n${LIVE_PACK_STAMP_EXEMPTION_HEADING}\n\n` +
+    `${bullets.join('\n')}\n\n\`\`\`json\n${JSON.stringify(exemptions, null, 2)}\n\`\`\`\n`;
 }
 
 function reviewBodyHasLivePackCrossEditFinding(reviewBody) {
@@ -507,9 +659,11 @@ async function applyLivePackCrossEditReview(reviewText, {
   // dispatch labels may predate an operator's removal during model review.
   const currentLabels = Array.isArray(labels) ? labels : [];
   let findings;
+  let exemptions = [];
   try {
     const review = await evaluateImpl({
       repo,
+      prNumber,
       diffText: diff,
       branch: prContext?.headRefName || '',
       title: prContext?.title || '',
@@ -518,6 +672,13 @@ async function applyLivePackCrossEditReview(reviewText, {
       labels: currentLabels,
     });
     findings = review.findings;
+    exemptions = review.exemptions || [];
+    for (const entry of exemptions) {
+      log?.error?.(
+        `[reviewer] live-pack cross-edit exempt for ${repo}#${prNumber}: pack=${entry.pack} ` +
+          `reason=${entry.reason} author=${entry.author} ${entry.field} ${entry.from ?? '<unset>'} -> ${entry.to}`,
+      );
+    }
     if (review.waived) {
       log?.error?.(
         `[reviewer] live-pack cross-edit waived by ${LIVE_PACK_EDIT_WAIVER_LABEL} for ${repo}#${prNumber}: ` +
@@ -536,7 +697,7 @@ async function applyLivePackCrossEditReview(reviewText, {
         `runs=${finding.run_ids.join(',') || '<inconclusive>'} files=${finding.touched_files.join(', ')}`,
     );
   }
-  return applyLivePackCrossEditFindings(reviewText, findings);
+  return appendLivePackStampExemptions(applyLivePackCrossEditFindings(reviewText, findings), exemptions);
 }
 
 // Remediation entry point for a follow-up job. `execFileImpl` is threaded to
@@ -568,10 +729,13 @@ export {
   LIVE_PACK_CROSS_EDIT_KIND,
   LIVE_PACK_EDIT_WAIVER_LABEL,
   LIVE_PACK_FINDING_HEADING,
+  LIVE_PACK_STAMP_EXEMPTION_HEADING,
+  appendLivePackStampExemptions,
   applyLivePackCrossEditFindings,
   applyLivePackCrossEditReview,
   buildLivePackCrossEditFinding,
   changedPathsFromDiff,
+  evaluateGateStampExemption,
   evaluateLivePackCrossEdits,
   extractPrTicketIds,
   formatLivePackRemediationContext,
@@ -581,6 +745,7 @@ export {
   resolveLivePackContextForJob,
   resolveLivePackRemediationContext,
   resolvePackLiveness,
+  resolvePostMergeActionsBotLogins,
   reviewBodyHasLivePackCrossEditFinding,
   touchedPacksFromPaths,
 };

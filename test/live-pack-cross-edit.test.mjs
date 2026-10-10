@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   LIVE_PACK_CROSS_EDIT_KIND,
   LIVE_PACK_EDIT_WAIVER_LABEL,
+  LIVE_PACK_STAMP_EXEMPTION_HEADING,
   applyLivePackCrossEditFindings,
   applyLivePackCrossEditReview,
   evaluateLivePackCrossEdits,
@@ -11,6 +12,7 @@ import {
   inconclusiveFindingsForDiff,
   resolveLivePackContextForJob,
   resolveLivePackRemediationContext,
+  resolvePostMergeActionsBotLogins,
   reviewBodyHasLivePackCrossEditFinding,
   touchedPacksFromPaths,
 } from '../src/live-pack-cross-edit.mjs';
@@ -594,4 +596,173 @@ test('files API fallback preserves protected source of a quoted rename', async (
     fetchFileAtRefImpl: fetchPlan, readActiveDagRunsImpl: makeLedger().impl });
   assert.equal(result.findings.length, 1);
   assert.deepEqual(result.findings[0].touched_files, ['projects/model-efficiency-gym/SPEC.md']);
+});
+
+// LIVEPACKSTAMP-01: agent-os PR 8031, the pipeline's own post-merge gate stamp
+// for a running pack, was blocked as a cross-pack edit and then emptied.
+const HRX = 'gym-hard-review-fix-rework';
+const HRX_RUN = 'dagrun_01M4JPWP4TKGN6APC5QBB7MFYY';
+const HRX_PLAN = `projects/${HRX}/plan.json`;
+const STAMP_BRANCH = `post-merge-actions/${HRX}-gate-stamp-b5a1770ccd93`;
+const STAMP_HEAD = 'ccf7db386aaaa';
+const MERGE_AGENT = 'lacey-merge-agent[bot]';
+
+function hrxPlan(completedSpecRef, extra = {}) {
+  return {
+    planId: 'gym-hard-review-fix-rework-v1',
+    specRef: `${HRX}@b5a1770ccd93`,
+    tickets: [{ id: 'HRX-01' }, { id: 'HRX-02' }],
+    postMergeActions: {
+      planPath: `projects/${HRX}/post-merge.json`,
+      dispatchGate: { completedSpecRef },
+    },
+    ...extra,
+  };
+}
+
+function stampFixture({ head = hrxPlan(`${HRX}@b5a1770ccd93`), files = {} } = {}) {
+  const byRef = {
+    main: { [HRX_PLAN]: hrxPlan(`${HRX}@ada1f320e7bd`), ...PLANS },
+    [STAMP_HEAD]: { [HRX_PLAN]: head, ...PLANS, ...files },
+  };
+  const reads = [];
+  const fetchFileAtRefImpl = (repo, path, ref) => {
+    assert.equal(repo, REPO);
+    reads.push(`${path}@${ref}`);
+    const doc = byRef[ref]?.[path];
+    if (!doc) {
+      const err = new Error('gh: Not Found (HTTP 404)');
+      err.stderr = 'HTTP 404';
+      throw err;
+    }
+    return JSON.stringify(doc);
+  };
+  return { fetchFileAtRefImpl, reads };
+}
+
+async function evaluateStamp({ paths = [HRX_PLAN], author = MERGE_AGENT, branch = STAMP_BRANCH, head, files } = {}) {
+  const fixture = stampFixture({ head, files });
+  const authorReads = [];
+  const ledger = makeLedger({
+    'gym-hard-review-fix-rework-v1': [{ run_id: HRX_RUN, state: 'running' }],
+    'model-efficiency-gym-v1': [{ run_id: MEG_RUN, state: 'running' }],
+  });
+  const result = await evaluateLivePackCrossEdits({
+    repo: REPO,
+    prNumber: 8031,
+    diffText: diffFor(paths),
+    branch,
+    title: `[codex] Stamp ${HRX} dispatchGate.completedSpecRef (${HRX}@b5a1770ccd93)`,
+    baseRef: 'main',
+    headRef: STAMP_HEAD,
+    fetchFileAtRefImpl: fixture.fetchFileAtRefImpl,
+    readActiveDagRunsImpl: ledger.impl,
+    resolvePrAuthorImpl: async (repo, prNumber) => {
+      authorReads.push(`${repo}#${prNumber}`);
+      if (author instanceof Error) throw author;
+      return author;
+    },
+    trustedStampLoginsImpl: () => new Set([MERGE_AGENT]),
+  });
+  return { result, reads: fixture.reads, authorReads };
+}
+
+test('LIVEPACKSTAMP-01 (a): the exact PR 8031 gate stamp is exempt and audited in the review body', async () => {
+  const { result, authorReads } = await evaluateStamp();
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.waived, false);
+  assert.deepEqual(authorReads, [`${REPO}#8031`]);
+  assert.equal(result.exemptions.length, 1);
+  const [exemption] = result.exemptions;
+  assert.equal(exemption.pack, HRX);
+  assert.equal(exemption.reason, 'post-merge-gate-stamp');
+  assert.equal(exemption.author, MERGE_AGENT);
+  assert.equal(exemption.field, 'postMergeActions.dispatchGate.completedSpecRef');
+  assert.equal(exemption.from, `${HRX}@ada1f320e7bd`);
+  assert.equal(exemption.to, `${HRX}@b5a1770ccd93`);
+  assert.deepEqual(exemption.run_ids, [HRX_RUN]);
+  assert.equal(result.packs[0].gateStampExempt, true);
+
+  // Through the reviewer entry point: no finding, verdict untouched, exemption visible.
+  const logs = [];
+  const body = await applyLivePackCrossEditReview(REVIEW_TEXT, {
+    repo: REPO,
+    prNumber: 8031,
+    diff: diffFor([HRX_PLAN]),
+    prContext: { title: 'stamp', headRefName: STAMP_BRANCH, baseRefName: 'main', headRefOid: STAMP_HEAD },
+    reviewerHeadSha: STAMP_HEAD,
+    log: { error: (line) => logs.push(line) },
+    evaluateImpl: async (args) => {
+      assert.equal(args.prNumber, 8031);
+      return result;
+    },
+  });
+  assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'comment-only');
+  assert.equal(reviewBodyHasLivePackCrossEditFinding(body), false);
+  assert.ok(body.startsWith(REVIEW_TEXT.trimEnd()));
+  assert.match(body, new RegExp(LIVE_PACK_STAMP_EXEMPTION_HEADING));
+  assert.match(body, /"reason": "post-merge-gate-stamp"/);
+  assert.ok(logs.some((line) => /live-pack cross-edit exempt .*pack=gym-hard-review-fix-rework/.test(line)));
+});
+
+test('LIVEPACKSTAMP-01 (b): the same stamp branch from any other author stays blocked', async () => {
+  for (const author of ['lacey-codex-agent[bot]', 'lacey-merge-agent', 'app-lookalike', '', new Error('gh 502')]) {
+    const { result } = await evaluateStamp({ author });
+    assert.equal(result.findings.length, 1, `author ${author}`);
+    assert.equal(result.findings[0].pack, HRX);
+    assert.deepEqual(result.exemptions, []);
+  }
+});
+
+test('LIVEPACKSTAMP-01 (c): the merge agent changing anything else in the pack stays blocked', async () => {
+  const cases = [
+    { name: 'another plan field', head: hrxPlan(`${HRX}@b5a1770ccd93`, { tickets: [{ id: 'HRX-01' }, { id: 'X-01' }] }) },
+    { name: 'specRef too', head: { ...hrxPlan(`${HRX}@b5a1770ccd93`), specRef: `${HRX}@ffffffffffff` } },
+    { name: 'another dispatchGate key', head: hrxPlan(`${HRX}@b5a1770ccd93`, {
+      postMergeActions: { planPath: `projects/${HRX}/post-merge.json`, dispatchGate: { completedSpecRef: `${HRX}@b5a1770ccd93`, extra: 1 } },
+    }) },
+    { name: 'stamp value not the branch hash', head: hrxPlan(`${HRX}@0123456789ab`) },
+    { name: 'no value change', head: hrxPlan(`${HRX}@ada1f320e7bd`) },
+    { name: 'the pack SPEC.md as well', paths: [HRX_PLAN, `projects/${HRX}/SPEC.md`] },
+    { name: 'a prompt as well', paths: [HRX_PLAN, `projects/${HRX}/prompts/hrx-02.md`] },
+    { name: 'a non-guarded pack file as well', paths: [HRX_PLAN, `projects/${HRX}/README.md`] },
+    { name: 'a branch for another slug', branch: 'post-merge-actions/model-efficiency-gym-gate-stamp-b5a1770ccd93' },
+    { name: 'an official-record branch', branch: `post-merge-actions/${HRX}-official-record-b5a1770ccd93` },
+  ];
+  for (const { name, ...args } of cases) {
+    const { result } = await evaluateStamp(args);
+    assert.deepEqual(result.findings.map((finding) => finding.pack), [HRX], name);
+    assert.deepEqual(result.exemptions, [], name);
+  }
+});
+
+test('LIVEPACKSTAMP-01 (d): a stamp for pack A that also touches pack B is blocked for B', async () => {
+  const { result } = await evaluateStamp({
+    paths: [HRX_PLAN, 'projects/model-efficiency-gym/plan.json'],
+    files: { 'projects/model-efficiency-gym/plan.json': { ...PLANS['projects/model-efficiency-gym/plan.json'], note: 'x' } },
+  });
+  assert.deepEqual(result.findings.map((finding) => finding.pack), ['model-efficiency-gym']);
+  assert.deepEqual(result.exemptions.map((entry) => entry.pack), [HRX]);
+  const body = applyLivePackCrossEditFindings(REVIEW_TEXT, result.findings);
+  assert.equal(normalizeEffectiveReviewVerdict(body, { log: null }), 'request-changes');
+});
+
+test('LIVEPACKSTAMP-01: only App ([bot]) logins of the post-merge-actions entitlement are trusted', () => {
+  const seen = [];
+  const logins = resolvePostMergeActionsBotLogins({
+    env: {},
+    loadRoleConfigImpl: ({ contextKey }) => ({
+      get(key) {
+        seen.push(contextKey, key);
+        return 'lacey-merge-agent[bot],lacey-merge-agent,merge-agent-lacey[bot],merge-agent-lacey';
+      },
+    }),
+  });
+  assert.deepEqual([...logins].sort(), ['lacey-merge-agent[bot]', 'merge-agent-lacey[bot]']);
+  assert.ok(seen.every((key) => key === 'entitlements.post-merge-actions-worker.gh_bot_login'));
+  const unreadable = resolvePostMergeActionsBotLogins({
+    loadRoleConfigImpl: () => { throw new Error('config broken'); },
+    log: { warn() {} },
+  });
+  assert.equal(unreadable.size, 0);
 });

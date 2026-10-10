@@ -3,6 +3,10 @@ import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
+import {
+  REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
+  composeReviewCycleCapHammerPrompt,
+} from './review-cycle-cap-route.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
@@ -364,6 +368,12 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   ));
   if (options?.reviewCycleExhausted === true) {
     if (effectiveReasons.includes('stale-review-head')) {
+      // CYCLECAPHAM-01: the review cycle cap trips on the remediation push the
+      // watcher would have reviewed next, so that head is unreviewed by
+      // construction. No review follows the cap: the hammer adjudicates that
+      // head as final reviewer and must still certify it (validated HAM commit
+      // with Reviewed-Head) before any merge predicate passes.
+      if (options?.reviewCycleCapReached === true) return true;
       // COMMENTCLOSE-02: the comment-only final round is often the round that
       // exhausts the budget (agent-os#7334: round 2 of 2), and its proven push is
       // a stale reviewed head by construction. That one stale head may resume
@@ -4132,7 +4142,11 @@ export async function maybeDispatchAmaCloser({
     // Codex-first guard: live orchestration reports completedRemediationRounds.
     // That evidence must prove Codex/remediator had a turn before terminal
     // Hammer authority can arm; rereview-only exhaustion is not enough.
-    const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState);
+    // CYCLECAPHAM-01: a capped PR is a final-hammer close. Codex-first still
+    // holds: a remediator that owns the reviewed head is never preempted.
+    const reviewCycleCapRoute = dispatchContext?.reviewCycleCapReached === true
+      && reviewState?.remediationPending !== true;
+    const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
     const routeReasons = verdict.eligible ? eligibleHammerRouteReasons
       : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed')
         : verdict.reasons;
@@ -4183,6 +4197,7 @@ export async function maybeDispatchAmaCloser({
       )
       && isHammerRemediableEligibilityMiss(routeReasons, {
         reviewCycleExhausted,
+        reviewCycleCapReached: reviewCycleCapRoute,
         allowStaleReviewHeadHammerResume:
           dispatchContext?.allowStaleReviewHeadHammerResume === true,
         settledCommentOnlyTerminalMs,
@@ -4339,6 +4354,10 @@ export async function maybeDispatchAmaCloser({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   });
 
+  if (dispatchContext?.reviewCycleCapReached === true && useHammerTerminalRemediationPrompt) {
+    prompt += composeReviewCycleCapHammerPrompt({ reviewedSha, targetRemediationSha,
+      cap: dispatchContext.reviewCycleCap, history: dispatchContext.reviewCycleHistory });
+  }
   if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
   const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
@@ -4639,6 +4658,7 @@ export async function maybeDispatchAmaCloser({
     let releaseUnprovenTerminalHoldMerged = false;
     let advancedTerminalDispatchSuperseded = false;
     let hammerEndedWithoutMerge = false;
+    let hammerNoMergeOutcome = null;
     throwIfAborted(signal);
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -4765,6 +4785,7 @@ export async function maybeDispatchAmaCloser({
           // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
           hammerEndedWithoutMerge = true;
           const noMergeOutcome = hammerOutcome.outcome;
+          hammerNoMergeOutcome = noMergeOutcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
           status = 'failed';
           existingDispatchStatus = status;
@@ -5519,6 +5540,32 @@ export async function maybeDispatchAmaCloser({
       && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)
     ) {
       return noAmaDispatch({ dispatched: false, reason: dispatchStatusReason(status) });
+    }
+    // CYCLECAPHAM-01: on a capped PR the hammer is the final adjudicator. Its
+    // recorded no-merge decision ends the route: no retry hammer, and the
+    // operator is paged. An exit without a close is not a decision and keeps
+    // the bounded re-arm above.
+    if (
+      hammerEndedWithoutMerge
+      && hammerNoMergeOutcome === 'failed-without-merge'
+      && dispatchContext?.reviewCycleCapReached === true
+    ) {
+      logAmaCloserDispatchEvent(logger, 'ama_closer.review_cycle_cap_hammer_final_no_merge', {
+        repo,
+        prNumber,
+        headSha: existingRecordLeaseIdentity.headSha,
+        launchRequestId: existingRecord.launchRequestId,
+      }, { level: 'warn' });
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
+        needsOperator: true,
+        workerClass: existingRecord.workerClass || workerClass,
+        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+        launchRequestId: existingRecord.launchRequestId || null,
+        promptPath: existingRecord.promptPath || null,
+      });
     }
   } else if (existingRecordHasLivePendingInterruption) {
     return noAmaDispatch({

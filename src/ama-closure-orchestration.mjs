@@ -940,6 +940,10 @@ async function dispatchAmaClosureFor({
   if ((dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code) === 'max-rounds-reached') {
     reviewCycleExhausted = true;
   }
+  // CYCLECAPHAM-01: the watcher's review-cycle-cap hand-off. The cap stops
+  // review-then-remediate cycles, so the capped PR is a final-hammer close.
+  const reviewCycleCapReached = dispatchJob?.reviewCycleCapReached === true;
+  if (reviewCycleCapReached) reviewCycleExhausted = true;
 
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
   // GitHub returns mergeable=UNKNOWN transiently right after a push or when the
@@ -2004,6 +2008,10 @@ async function dispatchAmaClosureFor({
     dispatchRecordHeadSha: closerOnlyHeadDelta ? currentPrHeadSha : reviewState.headSha,
     closerAuthoredStale,
     dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
+    reviewCycleCapReached,
+    reviewCycleCap: reviewCycleCapReached ? dispatchJob?.reviewCycleCap ?? null : null,
+    reviewCycleHistory: reviewCycleCapReached && Array.isArray(dispatchJob?.reviewCycleHistory)
+      ? dispatchJob.reviewCycleHistory : [],
     allowStaleReviewHeadHammerResume,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,
     riskClass: reviewState.riskClass,

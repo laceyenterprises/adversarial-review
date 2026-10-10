@@ -1080,6 +1080,41 @@ To inspect a PR: the watcher log carries `ama_closer.hammer_exited_without_close
 `data/follow-up-jobs/hammer-retry-cap/<repo>-pr-<n>.json` shows `retryable` and
 `retryableLaunchRequestIds`.
 
+### Review cycle cap → hammer final adjudication (CYCLECAPHAM-01)
+
+Operator decision, 2026-10-10: "Hammers judgement is final". A PR that hits the
+review cycle cap (`review_cycle_cap`, default 5 review-then-remediate cycles in
+`review_cycle_window_hours`) is not parked for the operator. agent-os PR 7956
+showed the old behaviour: "operator attention required", then about 10h at
+`CHANGES_REQUESTED` until a hand merge.
+
+- The watcher posts the cap comment ("routed to the hammer for final
+  adjudication"), applies `reviewer-cycle-cap-reached`, and keeps automatic
+  review paused. On that tick and every later one it hands the PR to this
+  closer with `reviewCycleCapReached` and the recent cycle history
+  (`src/review-cycle-cap-hammer.mjs`). The route stands while the row is an
+  automatic cap pause, or while the label is on and the watcher's
+  `review_cycle_counters.escalated_at` marker is set. A hand-applied label
+  alone routes nothing, and `paused-for-redesign` takes the PR off the route.
+- The closer treats the PR as a final-hammer close and admits the unreviewed
+  head of the last remediation push. It does not admit it while a remediation
+  job still owns the reviewed head. The hammer prompt gains a
+  "CYCLECAPHAM-01 — review cycle cap: you are the final adjudicator" section.
+  The hammer remediates real findings, records false ones as
+  `withdrawn-by-hammer` with exact-head evidence (the HAMFINAL-01 record shape),
+  and merges under its lease with validated HAM evidence. Otherwise it posts
+  `HAM closing status — no merge.` with its reasons. It requests no re-review.
+- A recorded no-merge decision on this route is final. Unlike the HAMBG-02 table
+  above, the closer returns `review-cycle-cap-hammer-final-no-merge`
+  (`needsOperator: true`) and launches no retry hammer. An exit without a close
+  is not a decision and keeps the refunded re-arm. The existing hammer retry cap
+  and lifetime ceiling bound the attempts.
+- Only the no-merge decision or an exhausted hammer retry cap pages the
+  operator, as SEV1 `ama.review_cycle_cap.hammer_final`, once per
+  `repo#pr@head`. Read the hammer's closing-status comment on the PR first.
+  The override labels (`operator-approved`, `merge-agent-requested`,
+  `paused-for-redesign`) still clear the cap.
+
 ### A hammer that died of an infrastructure cause (CLOSERREUSE-01)
 
 A hammer that dies on a provider 429, a revoked OAuth grant or an adapter boot

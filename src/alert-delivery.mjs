@@ -1,4 +1,5 @@
 import { closureLagAlertId } from './ama/closure-lag.mjs';
+import { REVIEW_CYCLE_CAP_HAMMER_PAGE_EVENT } from './ama/review-cycle-cap-route.mjs';
 import {
   existsSync,
   mkdirSync,
@@ -603,9 +604,10 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
   };
 }
 
-// The pager carries stalled first-pass reviews, exhausted AMA recovery and
-// bounded intent-preservation exhaustion. Other pipeline notices remain
-// durable digest entries.
+// The pager carries stalled first-pass reviews, exhausted AMA recovery,
+// bounded intent-preservation exhaustion and a review-cycle-cap hammer route
+// that ended without a merge. Other pipeline notices remain durable digest
+// entries.
 function alertPresentationForDoc(doc) {
   const event = String(doc?.event || 'adversarial_review.notice');
   const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
@@ -641,6 +643,14 @@ function alertPresentationForDoc(doc) {
     return { severity: 'SEV1', headline: 'PR owner-of-last-resort recovery exhausted',
       body: String(doc.text || ''), action: 'Inspect the exact-head recovery evidence; retain all safety gates.',
       detail: `PR: ${payload.repo}#${payload.prNumber}; head: ${payload.headSha}; attempts: ${payload.attempts}; reasons: ${(payload.reasons || []).join(',')}` };
+  }
+
+  // CYCLECAPHAM-01: the hammer was the final adjudicator for a review-cycle-cap
+  // PR and ended the route without a merge (no-merge decision or retry cap).
+  if (event === REVIEW_CYCLE_CAP_HAMMER_PAGE_EVENT) {
+    return { severity: 'SEV1', headline: 'Review-cycle-cap PR: hammer ended without a merge',
+      body: String(doc.text || ''), action: 'Read the hammer closing status on the PR; retain all safety gates.',
+      detail: `PR: ${payload.repo}#${payload.prNumber}; head: ${payload.headSha}; outcome: ${payload.outcome}; reason: ${payload.reason}` };
   }
 
   if (['ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted'].includes(event)) {
@@ -1379,12 +1389,13 @@ async function deliverAlert(text, {
       }
     }
   }
-  if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted', 'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain', 'ama.orphan_recovery.store-error'].includes(event)) {
+  if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted', 'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain', 'ama.orphan_recovery.store-error', REVIEW_CYCLE_CAP_HAMMER_PAGE_EVENT].includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
     doc.id = event === 'ama.closure_lag.slo_breach' ? closureLagAlertId(payload)
       : `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
-    if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')) {
+    if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')
+      || event === REVIEW_CYCLE_CAP_HAMMER_PAGE_EVENT) {
       doc.id = `${event}-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex')}`;
     }
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {

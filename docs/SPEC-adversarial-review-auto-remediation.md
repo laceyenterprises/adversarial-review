@@ -1589,14 +1589,54 @@ distinct head increments the count when it lands within the configured window
 of the prior counted verdict; a larger gap resets the sequence to `1`.
 
 When the next review attempt would exceed `review_cycle_cap`, the watcher posts
-one escalation comment for the PR, applies `reviewer-cycle-cap-reached`, marks
-the review row `failed`, and skips automatic reviewer dispatch. The escalation
-dedupe is PR-scoped, not head-scoped: once any head for that PR has escalated,
-later pushes while the cap pause remains active must not post another cap
-comment. A cap bookkeeping failure on the success path must never prevent the
-canonical `review_status='posted'` write for a successfully posted review.
+one comment for the PR ("routed to the hammer for final adjudication"), applies
+`reviewer-cycle-cap-reached`, marks the review row `failed`, and skips automatic
+reviewer dispatch. The escalation dedupe is PR-scoped, not head-scoped: once any
+head for that PR has escalated, later pushes while the cap pause remains active
+must not post another cap comment. A cap bookkeeping failure on the success path
+must never prevent the canonical `review_status='posted'` write for a
+successfully posted review.
 
-The cap pause is cleared only by an override label:
+### Review cycle cap → hammer final adjudication (CYCLECAPHAM-01)
+
+Operator decision, 2026-10-10: "Hammers judgement is final". A capped PR is
+routed to the hammer (the AMA closer) as the final adjudicator, not to the
+operator. agent-os PR 7956 showed the old contract: "operator attention
+required", about 10h at `CHANGES_REQUESTED`, then a hand merge.
+
+- **Hand-off.** On the cap tick and on every later tick while the cap pause
+  stands, the watcher hands the PR to the AMA/merge-agent coexistence path with
+  `reviewCycleCapReached` and the recent cycle history. The cap pause stands
+  while the row is an automatic cap pause, or while `reviewer-cycle-cap-reached`
+  is on the PR and the watcher's escalation marker
+  (`review_cycle_counters.escalated_at`) is set. The `failed` cap row is
+  re-armed to `pending` once the head moves past the last reviewed head, so the
+  label plus marker is the durable signal. A hand-applied label without the
+  marker routes nothing; `paused-for-redesign` routes nothing.
+- **Closer.** The flag makes the PR a final-hammer close (`reviewCycleExhausted`)
+  and admits the unreviewed head of the last remediation push, which the
+  watcher would otherwise have reviewed next. Codex-first still holds: a
+  remediator that owns the reviewed head is never preempted. Every merge
+  predicate is unchanged: the head is merged only under validated HAM terminal
+  remediation evidence (HAM commit with `Reviewed-Head`), with green CI,
+  mergeability, the primary-change predicate, hard-stop labels and the lease.
+- **Hammer.** The prompt makes the hammer the final adjudicator. It reads the
+  latest review and the cycle history, remediates the findings it judges real,
+  and records the findings it judges false as `withdrawn-by-hammer` with
+  exact-head evidence. The record uses the same resolution literal and fields as
+  HAMFINAL-01 (`Finding-Identity`, `Reviewed-Head`, `Finding-Reviewed-Head`,
+  `Evidence-SHA256`, a fenced evidence block). It then validates and merges, or
+  posts `HAM closing status — no merge.` with its reasons. It never requests
+  another adversarial review.
+- **Bounds.** The cap still stops review-then-remediate cycles. The hammer gets
+  the existing per-head retry cap and lifetime ceiling. A recorded no-merge
+  decision on this route is final: the closer returns
+  `review-cycle-cap-hammer-final-no-merge` with `needsOperator` and launches no
+  retry hammer. Only that decision or an exhausted hammer retry cap pages the
+  operator, as SEV1 `ama.review_cycle_cap.hammer_final` with one outbox identity
+  per `repo#pr@head`. No new blocking gate is added.
+
+The override labels below still apply, and clear the cap:
 
 - `operator-approved` removes `reviewer-cycle-cap-reached`, resets the cycle
   counter, and restores the review row to `posted` so the existing current-head
@@ -2615,7 +2655,7 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 - `adversarial-merge-blocked` — AMA-only hard stop for the current head. It overrides AMA closure even when review, risk, and `operator-approved` would otherwise pass; authors may apply it to block their own PR, and AMA never removes it automatically.
 - `adversarial-merge-requested` — AMA-only scoped request to evaluate closure on an otherwise risk-class-blocked PR. It is accepted only from an attributable non-author current-head label event, bypasses only the AMA risk-class gate, and is not a merge-agent fallback trigger.
 - `merge-agent-requested` — explicit scoped request to fire a merge-agent pass for the current head SHA even when the standard verdict gate would skip. It still respects open-PR, hard-skip, active-remediation, and duplicate-dispatch guards, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion. Consumed after a successful dispatch, or after an acknowledged `skip-no-agent-os` when agent-os is missing or merge-agent dispatch is force-disabled.
-- `reviewer-cycle-cap-reached` — watcher-owned pause label applied when the review-cycle cap is exceeded. Operators clear that pause by applying exactly one of `operator-approved`, `merge-agent-requested`, or `paused-for-redesign`; the first two restore the row to `posted` for the existing merge-agent override lanes, while `paused-for-redesign` leaves review paused.
+- `reviewer-cycle-cap-reached` — watcher-owned label applied when the review-cycle cap is exceeded: automatic review is paused and the PR is routed to the hammer for final adjudication (CYCLECAPHAM-01); it needs no operator action. Operators may still clear the pause by applying exactly one of `operator-approved`, `merge-agent-requested`, or `paused-for-redesign`; the first two restore the row to `posted` for the existing merge-agent override lanes, while `paused-for-redesign` leaves review paused and takes the PR off the hammer route.
 - `merge-agent-skip`, `do-not-merge`, `no-merge-hold`, `duplicate-family-hold` — merge-lane hard skips that even an operator-approved or merge-agent-requested label does not bypass. `merge-agent-stuck` is a hard skip by default, but a scoped current-head `merge-agent-requested` label may bypass it for explicit operator recovery. `duplicate-family-hold` is watcher-owned, blocks AMA, hammer routing, merge-agent dispatch, and fast-merge, and clears after the duplicate-family census no longer sees an unresolved live unsuppressed family for the candidate or after suppression evidence releases that candidate. Operators release a false-positive duplicate-family candidate by applying the PR-wide `not-a-duplicate-stack` label; it survives head movement and must be removed manually when it no longer applies. Because the hold is applied automatically by the watcher rather than by an operator, it is excluded from the explicit operator-skip label set that makes the required `agent-os/adversarial-gate` status fail.
 
 The `final-pass-on-budget-exhausted` trigger is **not** a label — it is selected automatically by the dispatch decision tree when the env flag is set and the round budget is consumed. There is no GitHub-visible label for it; the audit trail is the dispatch record (`data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`, `trigger`, `priority`, and `priorityFlagSupported` fields) plus the `MERGE_AGENT_DISPATCH_TRIGGER` env var passed to the worker.

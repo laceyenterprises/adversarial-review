@@ -59,7 +59,7 @@ declare -a LABELS=(
   "stale-drift|PR drift helper flagged stale branch; refresh before more review.|C5DEF5"
   "pr-class: additive-only|Initial PR diff was additive-only; scope expansion requires approval.|B7E4C7"
   "operator-approved: scope-expand|Current-head approval for additive-only PR scope expansion.|0E8A16"
-  "reviewer-cycle-cap-reached|Reviewer cycle cap reached; operator must approve, merge-agent, or redesign.|F9D0C4"
+  "reviewer-cycle-cap-reached|Review cycle cap reached; routed to the hammer for final adjudication.|F9D0C4"
   "paused-for-redesign|Operator paused the PR for redesign after cycle-cap escalation.|8B949E"
   "operator-approved: advisory-only-review|Current-head approval for advisory-only review without remediation dispatch.|0E8A16"
   "live-pack-edit-approved|Operator waiver: PR may edit the spec, plan or prompts of another running build pack.|0E8A16"

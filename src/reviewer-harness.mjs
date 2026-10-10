@@ -37,6 +37,7 @@ import { promisify } from 'node:util';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { normalizeTokenUsage, readCodexTranscriptTokenUsage } from './reviewer-pass-tokens.mjs';
 import { ReviewerPromptTooLargeError } from './reviewer-outcomes.mjs';
+import { CHUNK_HEAD_LEGEND, annotateRemovedDiffLines, buildPostImageContext, splitHunkPostImages } from './reviewer-chunk-context.mjs';
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
   resolveAgyPrintTimeoutMs,
@@ -3084,6 +3085,8 @@ function splitOversizedPatchByLines(patch, {
   elideOptions = null,
   elisions = [],
   diffLineOffset = 0,
+  postImageReserveBytes = 0,
+  splitRecords = null,
 }) {
   const lines = String(patch || '').replace(/\r\n/g, '\n').split('\n');
   const { headerLines } = splitPatchHeaderAndBodyLines(lines);
@@ -3124,7 +3127,11 @@ function splitOversizedPatchByLines(patch, {
     }
     return { lines: [line], bytes: lineBytes };
   };
-  for (const line of bodyLines) {
+  // REVIEWCHUNK-01: a caller that appends a split hunk's head post-image packs
+  // lines short of maxBytes; a chunk's first line may still use the full budget.
+  let currentStart = 0;
+  const recordSplit = (end) => splitRecords?.push({ chunk: chunks[chunks.length - 1], headerLines, bodyLines, start: currentStart, end });
+  for (const [lineIndex, line] of bodyLines.entries()) {
     const lineBytes = agyPromptBytes(line);
     if (/^@@\s/.test(line)) {
       activeHunkLine = line;
@@ -3135,9 +3142,10 @@ function splitOversizedPatchByLines(patch, {
       ? start.bytes
       : currentBodyBytes + 1 + lineBytes;
     const candidatePromptBytes = promptBytesForBody(candidateBodyBytes);
-    if (candidatePromptBytes <= maxBytes) {
+    if (candidatePromptBytes <= (start ? maxBytes : maxBytes - postImageReserveBytes)) {
       if (start) {
         currentLines = start.lines;
+        currentStart = lineIndex;
       } else {
         currentLines.push(line);
       }
@@ -3155,12 +3163,14 @@ function splitOversizedPatchByLines(patch, {
       maxChunks,
     });
     if (!pushed.ok) return pushed;
+    recordSplit(lineIndex);
     const next = startBodyWithLine(line, lineBytes);
     if (promptBytesForBody(next.bytes) > maxBytes) {
       return { ok: false, reason: 'single-line-over-budget' };
     }
     currentLines = next.lines;
     currentBodyBytes = next.bytes;
+    currentStart = lineIndex;
   }
   if (currentLines.length > 0) {
     const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
@@ -3171,6 +3181,7 @@ function splitOversizedPatchByLines(patch, {
       maxChunks,
     });
     if (!pushed.ok) return pushed;
+    recordSplit(bodyLines.length);
   }
   return { ok: true };
 }
@@ -3183,6 +3194,8 @@ function splitDiffForAgyChunks(diff, {
   maxBytes = resolveAgyArgvMaxBytes(),
   maxChunks = resolveAgyChunkMaxChunks(),
   elideOptions = null,
+  postImageReserveBytes = 0,
+  splitRecords = null,
 } = {}) {
   if (maxChunks <= 0) {
     return { ok: false, chunks: [], truncated: true, reason: 'chunking-disabled' };
@@ -3258,6 +3271,8 @@ function splitDiffForAgyChunks(diff, {
       elideOptions,
       elisions,
       diffLineOffset,
+      postImageReserveBytes,
+      splitRecords,
     });
     if (!split.ok) {
       if (split.reason === 'chunk-cap-hit') {
@@ -3476,7 +3491,10 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   const configuredThreshold = Number(env.ADVERSARIAL_REVIEW_LONG_LINE_MAX_BYTES);
   const thresholdBytes = Math.min(Number.isFinite(configuredThreshold) && configuredThreshold >= 1024
     ? configuredThreshold : 32 * 1024, Math.floor(maxBytes / 4));
-  const split = splitDiffForAgyChunks(diff, {
+  // REVIEWCHUNK-01: mark removed lines, add the head legend, and reserve room for
+  // the head post-image of split hunks. Each step is dropped in turn rather than
+  // fail a diff the pre-REVIEWCHUNK-01 split could review.
+  const splitOptions = {
     reviewerModel,
     extraContext,
     chunkContextBudgetSuffix: agyOversizedChunkContextBudgetSuffix(maxChunks),
@@ -3484,7 +3502,27 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
     maxBytes,
     maxChunks,
     elideOptions: { thresholdBytes, edgeBytes: Math.max(1, Math.min(1024, Math.floor(thresholdBytes / 8))) },
-  });
+  };
+  const annotatedDiff = annotateRemovedDiffLines(diff, { maxLineBytes: thresholdBytes - 16 });
+  const chunkPromptBytes = (chunkDiff, context) => agyPromptBytes(buildPromptForReviewerModel(reviewerModel, chunkDiff, context, {
+    promptStage, runtime: reviewerModel === 'gemini' ? 'antigravity' : undefined }));
+  const diffBudgetBytes = maxBytes - chunkPromptBytes('', `${extraContext}${splitOptions.chunkContextBudgetSuffix}${CHUNK_HEAD_LEGEND}`);
+  let split;
+  let splitRecords;
+  let chunkLegend;
+  for (const attempt of [
+    { splitDiff: annotatedDiff, legend: CHUNK_HEAD_LEGEND, postImageReserveBytes: Math.max(0, Math.floor(diffBudgetBytes / 5)) },
+    { splitDiff: annotatedDiff, legend: CHUNK_HEAD_LEGEND, postImageReserveBytes: 0 },
+    { splitDiff: diff, legend: '', postImageReserveBytes: 0 },
+  ]) {
+    splitRecords = [];
+    chunkLegend = attempt.legend;
+    split = splitDiffForAgyChunks(attempt.splitDiff, { ...splitOptions, splitRecords,
+      chunkContextBudgetSuffix: `${splitOptions.chunkContextBudgetSuffix}${attempt.legend}`,
+      postImageReserveBytes: attempt.postImageReserveBytes });
+    if (split.ok && !split.truncated) break;
+  }
+  const splitRecordByChunk = new Map(splitRecords.map((record) => [record.chunk, record]));
   if (!split.ok || split.truncated) {
     throw new ReviewerPromptTooLargeError(
       `oversized diff chunking unavailable: ${split.reason}; `
@@ -3496,7 +3534,12 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   let execution = null;
   for (let index = 0; index < split.chunks.length; index += 1) {
     const chunk = split.chunks[index];
-    const chunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}`;
+    const baseChunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}${chunkLegend}`;
+    const splitRecord = splitRecordByChunk.get(chunk);
+    const chunkContext = splitRecord
+      ? `${baseChunkContext}${buildPostImageContext(splitHunkPostImages(splitRecord), {
+        fits: (postImage) => chunkPromptBytes(chunk.diff, `${baseChunkContext}${postImage}`) <= maxBytes })}`
+      : baseChunkContext;
     const result = reviewerModel === 'gemini'
       ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd })
       : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd });

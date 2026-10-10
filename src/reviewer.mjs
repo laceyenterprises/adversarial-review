@@ -131,6 +131,8 @@ import {
   buildGhErrorDetail,
 } from './reviewer-util.mjs';
 import { fetchPRDiff, fetchPRDiffFromFilesApi } from './reviewer-diff-fetch.mjs';
+import { resolvePrOwnReviewDiff } from './reviewer-own-diff.mjs';
+import { groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from './review-head-grounding.mjs';
 import {
   dispatchReviewerModel,
   reviewAgyOversizedInChunks,
@@ -1912,6 +1914,14 @@ async function main() {
     }
   }
 
+  let prContext;
+  try {
+    prContext = await fetchPRContext(repo, prNumber);
+  } catch (err) {
+    console.error(`[reviewer] Failed to fetch required PR context for ${repo}#${prNumber}: ${err.message}`);
+    process.exit(1);
+  }
+
   // 1. Fetch diff
   let diff;
   let reviewedPackLockhash = null;
@@ -1929,6 +1939,9 @@ async function main() {
     console.log(`[reviewer] Empty diff for ${repo}#${prNumber} — nothing to review`);
     process.exit(0);
   }
+  // REVIEWCHUNK-01: a stale stored base inflates `gh pr diff`; review merge-base(head, base tip)...head.
+  const { diff: ownDiff, scope: reviewDiffScope } = await resolvePrOwnReviewDiff({ repo, prNumber, headSha: reviewerHeadSha, baseRef: prContext?.baseRefName, prDiff: diff, log: console });
+  diff = ownDiff;
 
   try {
     reviewedPackLockhash = await resolveReviewedPackLockhash({
@@ -1944,14 +1957,6 @@ async function main() {
     } else {
       process.exit(1);
     }
-  }
-
-  let prContext;
-  try {
-    prContext = await fetchPRContext(repo, prNumber);
-  } catch (err) {
-    console.error(`[reviewer] Failed to fetch required PR context for ${repo}#${prNumber}: ${err.message}`);
-    process.exit(1);
   }
 
   // RPL-08: classify from the diff already in hand — no extra GitHub round trip
@@ -2262,6 +2267,11 @@ async function main() {
       `[reviewer] WARN: additive-only scope check failed for ${repo}#${prNumber}; continuing normal review: ${err?.message || err}`
     );
   }
+  // REVIEWCHUNK-01: demote blocking cards whose quoted code is absent at head (never adds a gate).
+  const headGrounding = await groundBlockingFindingsAtHead(reviewText, { repo, headSha: reviewerHeadSha, diff, log: console });
+  reviewText = headGrounding.reviewText;
+  persistReviewGroundingMetadata({ rootDir: ROOT, repo, prNumber, reviewDbAttemptNumber, reviewAttemptNumber, reviewerClass: effectiveModel,
+    passKind, headSha: reviewerHeadSha, execution: reviewerExecution, headGrounding: headGrounding.grounding, reviewDiffScope });
   const reviewTextForPost = await applyReviewScopeGates(reviewText, {
     scopeViolationFinding, repo, prNumber, diff, prContext,
     labels: verdictModeResolution.labels, reviewerHeadSha, log: console,

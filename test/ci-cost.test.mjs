@@ -62,6 +62,31 @@ test('merge eligibility refuses flagged diff, preserves other gates with approva
   state.requiredChecks = false;
   assert.ok(evaluateMergeEligibility(state).reasons.includes('ci-not-green'));
 });
+test('REVIEWCHUNK-01: a stale stored base does not bill base-branch workflow changes to the PR', async () => {
+  // The PR merged main after a main-side workflow change: the stored base is
+  // stale, so the PR files list carries main's workflow, while the three-dot
+  // compare against the current base tip shows only the PR's own file.
+  for (const ownWorkflow of [false, true]) {
+    const paths = [];
+    const pr = { head: { sha: head }, base: { sha: base, ref: 'main' }, changed_files: 2, labels: [] };
+    const ownFiles = [{ filename: 'src/feature.mjs', status: 'modified' }];
+    if (ownWorkflow) ownFiles.push({ filename: '.github/workflows/ci.yml', status: 'added' });
+    const result = await fetchCiCost({ repo: 'future/repo', prNumber: 1, headSha: head, operators: ['operator'],
+      get: async (path) => {
+        paths.push(path);
+        if (path.endsWith('/pulls/1')) return pr;
+        if (path.includes('/compare/')) return { merge_base_commit: { sha: base }, files: ownFiles };
+        if (path.includes('/files?')) return [{ filename: 'src/feature.mjs', status: 'modified' }, { filename: '.github/workflows/ci.yml', status: 'added' }];
+        if (path.includes('/contents/')) return { encoding: 'base64', content: Buffer.from(workflow).toString('base64') };
+        if (path.includes('/check-runs?')) return { check_runs: [] };
+        if (path.includes('/statuses?')) return [];
+        throw new Error(`unexpected ${path}`);
+      } });
+    assert.ok(paths.includes(`repos/future/repo/compare/main...${head}`));
+    assert.equal(result.flagged, ownWorkflow, `ownWorkflow=${ownWorkflow}`);
+    assert.equal(result.ok, !ownWorkflow);
+  }
+});
 test('Linux path-filtered concurrency-preserving change remains clear', () => {
   const old = { on: { pull_request: { paths: ['src/**'] } }, concurrency: { group: 'ci', 'cancel-in-progress': true }, jobs: { lint: { 'runs-on': 'ubuntu-latest', steps: [{ run: 'python lint.py' }] } } };
   const after = structuredClone(old);

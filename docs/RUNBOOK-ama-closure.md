@@ -1376,8 +1376,16 @@ then still stands. A rerun on the same head is idempotent.
 The withdrawal is final. The adversarial gate, the closer predicate
 (`isEligibleForAmaClosure`, `bin/ama-check.mjs`) and the HAM self-cert treat a
 withdrawn finding as resolved when its identity matches a blocking finding of
-the reviewed head's review and its digest is intact (ama-check re-hashes the
-evidence in the HAM-authored comment; edited or non-HAM comments are ignored).
+the cited review, its `Finding-Reviewed-Head` matches that review's head, and its
+`Reviewed-Head` matches the current evaluated head. Descendant-head evidence
+cannot resolve a finding after a branch reset to its reviewed ancestor.
+Cross-head carry-forward requires independently validated coverage or content
+equivalence; the withdrawal itself supplies neither. `ama-check` requires the
+local durable admission in `data/reviews.db` under `--root-dir` (default: the
+adversarial-review checkout), matching the comment node ID, HAM author,
+full-body digest, both heads, finding identity and evidence digest. It also
+re-hashes the comment's embedded evidence. Unrecorded, edited or non-HAM
+comments and missing/unreadable stores resolve nothing.
 A review whose every blocking finding is withdrawn projects the gate as
 `success (hammer-adjudicated)`, never as "operator decision required", and is a
 settled verdict for closure. Any finding still standing is remediated and
@@ -1386,10 +1394,12 @@ remaining findings, lists each withdrawn finding in its audit as
 `- **<title>** (blocking) — withdrawn-by-hammer: Evidence-SHA256 <digest> on head <sha>`,
 then rebases, validates, checks required checks and merges under its lease.
 Reviewer prompts on the same head still receive the trusted withdrawal comments
-(trusted HAM author, recorded node ID, head and body digest; 16,000 bytes per
-comment, 256,000 bytes total) and are told not to re-raise those findings
+(recorded `resolution = 'withdrawn-by-hammer'`, trusted HAM author, recorded node
+ID, head and body digest; 16,000 bytes per comment, 256,000 bytes total) and are told not to re-raise those findings
 against the unchanged head. The evidence never grants merge authority beyond
 resolving the named finding.
+Legacy disputes with nullable resolution are omitted from this final-withdrawal
+context even when their comment provenance is valid.
 
 Neither finding-anchored reversal nor dispute raises `hq decision raise`.
 Disputes no longer spend the review cap, page, or emit

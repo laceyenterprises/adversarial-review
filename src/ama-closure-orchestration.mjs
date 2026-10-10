@@ -1325,7 +1325,8 @@ async function dispatchAmaClosureFor({
     strictMode,
   };
   const hammerSettled = gateSnapshot?.settledReview?.verdict === 'request-changes'
-    && resolveHammerAdjudication({ ...reviewState, reviewedHead: reviewState.headSha }, reviewState.hammerWithdrawnFindings).allBlockingWithdrawn;
+    && resolveHammerAdjudication({ ...reviewState, reviewedHead: reviewState.headSha, currentHead: currentPrHeadSha },
+      reviewState.hammerWithdrawnFindings).allBlockingWithdrawn;
   const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) || hammerSettled
     ? 'settled-success'
     : String(gateSnapshot?.settledReview?.verdict || '');

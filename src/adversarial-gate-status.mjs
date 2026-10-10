@@ -345,12 +345,12 @@ function classifyBlockersFromBody(body, verdict) {
 // red, and it must never route to "operator decision required". A review with
 // one finding still standing is unchanged (that finding is remediated or stays
 // blocking).
-function hammerAdjudicatedEveryBlocker(body, { reviewedHead, hammerWithdrawals }) {
+function hammerAdjudicatedEveryBlocker(body, { reviewedHead, currentHead, hammerWithdrawals }) {
   if (!Array.isArray(hammerWithdrawals) || hammerWithdrawals.length === 0) return false;
   const verdict = normalizeEffectiveReviewVerdict(body);
   if (verdict !== 'request-changes') return false;
   return resolveHammerAdjudication(
-    { ...classifyBlockersFromBody(body, verdict), reviewedHead },
+    { ...classifyBlockersFromBody(body, verdict), reviewedHead, currentHead },
     hammerWithdrawals,
   ).allBlockingWithdrawn;
 }
@@ -695,6 +695,7 @@ function pickAdversarialGateStatus({
     makeDecision(state, description, reason, context, extra);
   const hammerAdjudicated = (body) => hammerAdjudicatedEveryBlocker(body, {
     reviewedHead: reviewRow?.reviewer_head_sha || headSha,
+    currentHead: headSha,
     hammerWithdrawals,
   });
   const decideHammerAdjudicated = () => decide(
@@ -927,7 +928,7 @@ function pickAdversarialGateStatus({
       }
       if (settledReview.verdict === 'request-changes') {
         if (resolveHammerAdjudication(
-          { ...settledReview, reviewedHead: settledReviewedHead },
+          { ...settledReview, reviewedHead: settledReviewedHead, currentHead: headSha },
           hammerWithdrawals,
         ).allBlockingWithdrawn) return decideHammerAdjudicated();
         return decide('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');

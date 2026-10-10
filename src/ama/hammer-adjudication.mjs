@@ -88,15 +88,26 @@ export function parseWithdrawalComment(body) {
 }
 
 // PR comments (timeline events or `gh pr view --json comments`) authored by the
-// entitled HAM identity. Anyone else's lookalike comment is ignored.
-export function hammerWithdrawalsFromComments(comments) {
+// entitled HAM identity, matching a successfully admitted durable withdrawal.
+// A post alone is insufficient: the helper can fail its subsequent head check.
+export function hammerWithdrawalsFromComments(comments, recordedWithdrawals = []) {
   return (Array.isArray(comments) ? comments : []).flatMap((comment) => {
     const author = typeof comment?.author === 'string' ? comment.author
       : comment?.author?.login || comment?.user?.login || comment?.actor?.login || null;
     const body = typeof comment?.body === 'string' ? comment.body : comment?.comment?.body;
     if (!hamAuditCommentAuthorMatches(author)) return [];
     const withdrawal = parseWithdrawalComment(body);
-    return withdrawal ? [withdrawal] : [];
+    if (!withdrawal) return [];
+    const admitted = recordedWithdrawals.some((row) => row.resolution === HAMMER_WITHDRAWN_RESOLUTION
+      && row.commentId && [comment.id, comment.node_id].includes(row.commentId)
+      && hamAuditCommentAuthorMatches(row.commentAuthor)
+      && String(row.commentAuthor).replace(/\[bot\]$/, '').toLowerCase()
+        === String(author).replace(/\[bot\]$/, '').toLowerCase()
+      && row.commentSha256 === sha256(body)
+      && row.identity === withdrawal.identity && row.headSha === withdrawal.headSha
+      && row.findingReviewedHead === withdrawal.findingReviewedHead
+      && row.evidenceSha256 === withdrawal.evidenceSha256);
+    return admitted ? [withdrawal] : [];
   });
 }
 
@@ -111,7 +122,8 @@ export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = consol
   try {
     db = new Database(path, { readonly: true, fileMustExist: true });
     return db.prepare(`SELECT identity, head_sha AS headSha, finding_reviewed_head AS findingReviewedHead,
-      evidence_sha256 AS evidenceSha256, resolution FROM ham_finding_disputes
+      evidence_sha256 AS evidenceSha256, resolution, comment_id AS commentId,
+      comment_author AS commentAuthor, comment_sha256 AS commentSha256 FROM ham_finding_disputes
       WHERE repo=? AND pr_number=? AND resolution=? AND comment_id IS NOT NULL`)
       .all(repo, Number(prNumber), HAMMER_WITHDRAWN_RESOLUTION);
   } catch (error) {
@@ -121,22 +133,23 @@ export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = consol
 }
 
 // A withdrawal resolves a finding of the review on `reviewedHead` when it names
-// that finding identity and was adjudicated against that review (or on that
-// head). Applies only when the structured blocker list is known and complete.
+// that finding identity and binds both the cited review and the evaluated head.
+// Cross-head coverage must be validated independently, never inferred here.
+// Applies only when the structured blocker list is known and complete.
 export function resolveHammerAdjudication({
-  blockingFindingState, blockingFindingCount, blockingFindingIdentities, reviewedHead,
+  blockingFindingState, blockingFindingCount, blockingFindingIdentities, reviewedHead, currentHead = reviewedHead,
 } = {}, withdrawals = []) {
   const count = Number(blockingFindingCount);
   const identities = Array.isArray(blockingFindingIdentities) ? blockingFindingIdentities : null;
   const head = String(reviewedHead || '');
   const applicable = String(blockingFindingState || '').toLowerCase() === 'known'
     && Number.isInteger(count) && count > 0 && identities !== null && identities.length === count
-    && SHA40.test(head);
+    && SHA40.test(head) && SHA40.test(currentHead || '');
   const resolved = applicable
     ? (Array.isArray(withdrawals) ? withdrawals : []).filter((entry) => entry?.resolution === HAMMER_WITHDRAWN_RESOLUTION
       && identities.includes(entry.identity)
       && SHA64.test(entry.evidenceSha256 || '')
-      && [entry.findingReviewedHead, entry.headSha].includes(head))
+      && entry.findingReviewedHead === head && entry.headSha === currentHead)
     : [];
   const withdrawnIdentities = [...new Set(resolved.map((entry) => entry.identity))];
   return {

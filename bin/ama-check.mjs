@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
-import { blockingFindingIdentitiesFromBody, hammerWithdrawalsFromComments } from '../src/ama/hammer-adjudication.mjs';
+import { blockingFindingIdentitiesFromBody, hammerWithdrawalsFromComments, readHammerWithdrawals } from '../src/ama/hammer-adjudication.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import {
   resolveRoundBudgetForJob,
@@ -578,8 +578,12 @@ function main(argv = process.argv.slice(2)) {
     hamTerminalRemediationGroundTruth,
     rebaseReviewCoverage,
     // HAMFINAL-01 ("Hammers judgement is final"): HAM-authored
-    // `withdrawn-by-hammer` comments whose evidence still hashes to its digest.
-    hammerWithdrawnFindings: hammerWithdrawalsFromComments(timelineJson),
+    // `withdrawn-by-hammer` comments must match successful durable admission.
+    hammerWithdrawnFindings: hammerWithdrawalsFromComments(timelineJson, readHammerWithdrawals({
+      rootDir: args['root-dir'] ? resolve(args['root-dir']) : DEFAULT_ROOT_DIR,
+      repo: args.repo,
+      prNumber: prJson?.number,
+    })),
   });
   if (!ciCostGate.ok) {
     result.eligible = false;

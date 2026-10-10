@@ -2,6 +2,7 @@ import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -206,7 +207,9 @@ test('7987 replay: the hammer remediates finding 1 and its self-cert accepts the
   for (const reason of ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success']) {
     assert.ok(!verdict.reasons.includes(reason), `${reason} must not stand; reasons=${JSON.stringify(verdict.reasons)}`);
   }
-  assert.equal(verdict.trace.verdict.hammerAdjudication.withdrawnCount, 2);
+  // The old-head withdrawals do not carry forward. The independently checked
+  // terminal remediation audit covers all three findings on HAM_HEAD instead.
+  assert.equal(verdict.trace.verdict.hammerAdjudication.withdrawnCount, 0);
   assert.equal(verdict.trace.verdict.hammerAdjudication.settled, false);
 });
 
@@ -245,19 +248,21 @@ test('regression: dispute-only eligibility matches a clean review', () => {
   assert.equal(partial.eligible, false);
 });
 
-test('regression: ama-check reads dispute-only withdrawals from HAM comments and stays eligible', (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), 'hamfinal-01-ama-check-'));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+test('regression: ama-check requires durable admission after a withdrawal post', async (t) => {
+  const rig = disputeRig(t);
+  const tmp = rig.rootDir;
   const write = (name, value) => {
     const path = join(tmp, name);
     writeFileSync(path, typeof value === 'string' ? value : `${JSON.stringify(value, null, 2)}\n`);
     return path;
   };
-  const comment = (index) => ({
-    event: 'commented', user: { login: 'the-hammer-lacey[bot]' }, created_at: '2026-10-10T11:55:00Z',
-    body: buildWithdrawalComment({ reviewRef: REVIEW.html_url, findingNumber: index + 1, identity: IDENTITIES[index],
-      headSha: REVIEWED_HEAD, findingReviewedHead: REVIEWED_HEAD, evidence: BASELINE_EVIDENCE }),
-  });
+  const comments = [];
+  const postComment = async (body) => {
+    const comment = { event: 'commented', node_id: `IC_${comments.length}`, user: { login: 'the-hammer-lacey[bot]' },
+      created_at: '2026-10-10T11:55:00Z', body };
+    comments.push(comment);
+    return comment;
+  };
   const run = (timeline) => {
     const result = spawnSync(process.execPath, [
       new URL('../bin/ama-check.mjs', import.meta.url).pathname,
@@ -280,28 +285,62 @@ test('regression: ama-check reads dispute-only withdrawals from HAM comments and
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
   };
-  const withdrawn = run([comment(0), comment(1), comment(2)]);
+  for (const number of [1, 2]) await disputeFinding(rig.args(number), { ...rig.deps, postComment });
+  let headReads = 0;
+  await assert.rejects(disputeFinding(rig.args(3), { ...rig.deps, postComment, get: async (url) => {
+    if (url.includes('/reviews?')) return [REVIEW];
+    if (++headReads > 1) throw new Error('live-head read exhausted');
+    return { state: 'open', head: { sha: REVIEWED_HEAD } };
+  } }), /live-head read exhausted/);
+  const failedRow = rig.db.prepare('SELECT * FROM ham_finding_disputes WHERE identity=?').get(IDENTITIES[2]);
+  assert.equal(failedRow.resolution, null);
+  assert.equal(failedRow.comment_id, null);
+  assert.equal(failedRow.requests, 0);
+  const failed = run(comments);
+  assert.equal(failed.eligible, false);
+  assert.equal(failed.trace.verdict.hammerAdjudication.withdrawnCount, 2);
+  assert.ok(failed.reasons.includes('blocking-findings-present'));
+  const failedGate = pickAdversarialGateStatus({ reviewRow: reviewRow(), latestJob: null, headSha: REVIEWED_HEAD,
+    hammerWithdrawals: readHammerWithdrawals({ rootDir: tmp, repo: REPO, prNumber: PR }) });
+  assert.equal(failedGate.reason, 'blocking-review');
+
+  await disputeFinding(rig.args(3), { ...rig.deps, postComment });
+  const withdrawn = run(comments);
   assert.equal(withdrawn.eligible, true, JSON.stringify(withdrawn.reasons));
   assert.equal(withdrawn.trace.verdict.hammerAdjudication.settled, true);
   // A lookalike comment from anyone but the hammer resolves nothing.
-  const spoofed = run([comment(0), comment(1), { ...comment(2), user: { login: 'pr-author' } }]);
-  assert.equal(spoofed.eligible, false);
-  assert.ok(spoofed.reasons.includes('blocking-findings-present'));
+  // Edits outside the evidence block still invalidate the full-body digest.
+  for (const changed of [
+    { ...comments.at(-1), user: { login: 'pr-author' } },
+    { ...comments.at(-1), node_id: 'IC_unrecorded' },
+    { ...comments.at(-1), body: comments.at(-1).body + '\nEdited footer' },
+  ]) {
+    const spoofed = run([...comments.slice(0, 3), changed]);
+    assert.equal(spoofed.eligible, false);
+    assert.ok(spoofed.reasons.includes('blocking-findings-present'));
+  }
+  rig.db.prepare('UPDATE ham_finding_disputes SET head_sha=? WHERE identity=?').run(OTHER_HEAD, IDENTITIES[2]);
+  assert.equal(run(comments).eligible, false);
 });
 
 test('guardrail: withdrawals need trusted, unedited, concrete evidence on the reviewed head', () => {
   const body = buildWithdrawalComment({ reviewRef: REVIEW.node_id, findingNumber: 2, identity: IDENTITIES[1],
     headSha: REVIEWED_HEAD, findingReviewedHead: REVIEWED_HEAD, evidence: BASELINE_EVIDENCE });
-  const hammer = { author: 'the-hammer-lacey', body };
-  assert.equal(hammerWithdrawalsFromComments([hammer]).length, 1);
-  assert.equal(hammerWithdrawalsFromComments([{ user: { login: 'the-hammer-lacey[bot]' }, body }]).length, 1);
+  const hammer = { node_id: 'IC_verified', author: 'the-hammer-lacey', body };
+  const records = [{ ...withdrawal(1), commentId: hammer.node_id, commentAuthor: 'the-hammer-lacey[bot]',
+    commentSha256: createHash('sha256').update(body).digest('hex'),
+    evidenceSha256: createHash('sha256').update(BASELINE_EVIDENCE.trim()).digest('hex') }];
+  assert.deepEqual(hammerWithdrawalsFromComments([hammer]), []);
+  assert.equal(hammerWithdrawalsFromComments([hammer], records).length, 1);
+  assert.equal(hammerWithdrawalsFromComments([{ id: '42', node_id: hammer.node_id,
+    user: { login: 'the-hammer-lacey[bot]' }, body }], records).length, 1);
   for (const forged of [
     { ...hammer, author: 'pr-author' },
     { ...hammer, body: body.replace('parses\n```', 'still parses\n```') },
     { ...hammer, body: body.replace(/```[\s\S]*```\n/, '') },
     { ...hammer, body: body.replace('Resolution: withdrawn-by-hammer', 'Resolution: disputed') },
-  ]) assert.deepEqual(hammerWithdrawalsFromComments([forged]), []);
-  const [parsed] = hammerWithdrawalsFromComments([hammer]);
+  ]) assert.deepEqual(hammerWithdrawalsFromComments([forged], records), []);
+  const [parsed] = hammerWithdrawalsFromComments([hammer], records);
   const state = { ...reviewState(), reviewedHead: REVIEWED_HEAD };
   assert.equal(resolveHammerAdjudication(state, [parsed]).withdrawnCount, 1);
   // A withdrawal recorded against another head, or an unknown blocker list, resolves nothing.
@@ -328,6 +367,30 @@ test('guardrail: the withdrawal store read is read-only and fail-soft', (t) => {
     requests INTEGER DEFAULT 0, PRIMARY KEY(repo, pr_number, identity))`);
   legacy.close();
   assert.deepEqual(readHammerWithdrawals({ rootDir, repo: REPO, prNumber: PR, logger: { warn() {} } }), []);
+});
+
+test('regression: descendant-head withdrawals cannot settle the reviewed head after a reset', async (t) => {
+  const rig = disputeRig(t);
+  for (const number of [1, 2, 3]) {
+    await disputeFinding({ ...rig.args(number), headSha: HAM_HEAD }, { ...rig.deps,
+      get: async (url) => url.includes('/reviews?') ? [REVIEW]
+        : url.includes('/compare/') ? { status: 'ahead' } : { state: 'open', head: { sha: HAM_HEAD } },
+    });
+  }
+  const records = readHammerWithdrawals({ rootDir: rig.rootDir, repo: REPO, prNumber: PR });
+  const state = { ...reviewState(), reviewedHead: REVIEWED_HEAD };
+  assert.equal(resolveHammerAdjudication({ ...state, currentHead: HAM_HEAD }, records).allBlockingWithdrawn, true);
+  assert.equal(resolveHammerAdjudication({ ...state, currentHead: REVIEWED_HEAD }, records).withdrawnCount, 0);
+  assert.equal(resolveHammerAdjudication({ ...state, reviewedHead: HAM_HEAD, currentHead: HAM_HEAD }, records).withdrawnCount, 0);
+  const gate = pickAdversarialGateStatus({ reviewRow: reviewRow(), latestJob: null,
+    headSha: REVIEWED_HEAD, hammerWithdrawals: records });
+  assert.equal(gate.reason, 'blocking-review');
+  const verdict = isEligibleForAmaClosure(reviewState(),
+    { prNumber: PR, headSha: REVIEWED_HEAD, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE', labels: [] },
+    { enabled: true, workerClass: 'hammer' }, { env: {}, hammerWithdrawnFindings: records });
+  assert.equal(verdict.eligible, false);
+  assert.equal(verdict.trace.verdict.hammerAdjudication.withdrawnCount, 0);
+  assert.ok(verdict.reasons.includes('blocking-findings-present'));
 });
 
 test('guardrail: prose-only evidence cannot withdraw a finding', async (t) => {

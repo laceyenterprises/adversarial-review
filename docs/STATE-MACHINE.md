@@ -657,6 +657,12 @@ Key control points:
   "Hammers judgement is final"). No re-review is requested; the gate, closer and
   self-cert accept the withdrawal, and a review whose every blocking finding is
   withdrawn projects `success (hammer-adjudicated)`. Before
+  applying a withdrawal, the finding's reviewed head must match the cited
+  review and the evidence head must match the current evaluated head. A branch
+  reset cannot reuse descendant-head evidence. `ama-check` also matches the
+  HAM comment's node ID, author and full-body digest to successful durable
+  admission; a posted comment from a failed admission resolves nothing.
+  Legacy disputes with nullable resolution grant no final prompt authority. Before
   opening the existing database, the helper checks effective UID ownership of
   daemon state and the configured pager sink. Only the latest authoritative
   review in live-head ancestry may be disputed.

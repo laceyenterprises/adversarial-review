@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ama/ham-provenance.mjs';
+import { HAMMER_WITHDRAWN_RESOLUTION } from './ama/hammer-adjudication.mjs';
 import { isTrustedCommentAuthor, resolveTrustedIdentityAllowlist } from './untrusted-pr-gate.mjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -194,7 +195,8 @@ export function formatPrIntentContext(body) {
 export function formatFindingDisputeContext(pr, reservations = []) {
   const head = pr?.headRefOid || pr?.head?.sha;
   if (!head) return '';
-  const comments = reservations.filter((row) => row.head_sha === head && row.comment_id)
+  const comments = reservations.filter((row) => row.head_sha === head && row.comment_id
+    && row.resolution === HAMMER_WITHDRAWN_RESOLUTION)
     .map((row) => (pr.comments || []).findLast((comment) => {
       const author = typeof comment.author === 'string' ? comment.author : comment.author?.login;
       return String(comment.body || '').startsWith('HAM finding dispute — ')

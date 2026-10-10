@@ -188,7 +188,7 @@ test('reviewer includes reserved HAM evidence in both full and slim prompt paths
   const { __test__ } = await import('../src/reviewer.mjs');
   const comment = { id: 'IC_verified', author: 'the-hammer-lacey',
     body: `HAM finding dispute — PRR_fixture finding=1\nReviewed-Head: ${head}\nJSONB proof` };
-  const reservations = [{ head_sha: head, comment_id: comment.id, comment_author: 'the-hammer-lacey[bot]',
+  const reservations = [{ head_sha: head, resolution: 'withdrawn-by-hammer', comment_id: comment.id, comment_author: 'the-hammer-lacey[bot]',
     comment_sha256: createHash('sha256').update(comment.body).digest('hex') }];
   for (const slim of [false, true]) {
     const context = await __test__.buildReviewerExtraContext({ repo: 'fixture/repo', prNumber: 1,
@@ -262,6 +262,8 @@ test('legacy dispute schema upgrades preserve budgets and provenance reads are s
   assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }), []);
   db.prepare(`UPDATE ham_finding_disputes SET head_sha=?, comment_id='IC_1',
     comment_author='the-hammer-lacey', comment_sha256='digest'`).run(head);
+  assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }), []);
+  db.prepare("UPDATE ham_finding_disputes SET resolution='withdrawn-by-hammer'").run();
   assert.equal(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }).length, 1);
   for (const scope of [{ repo: 'other/repo' }, { prNumber: 2 }, { headSha: author }]) {
     assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head, ...scope }), []);
@@ -273,6 +275,30 @@ test('failed dispute side effects refund the request reservation', async (t) => 
   for (let i = 0; i < 3; i++) await assert.rejects(disputeFinding(h.args, h.deps), /gh unavailable/);
   assert.equal(h.db.prepare('SELECT requests FROM ham_finding_disputes').get().requests, 0);
   assert.equal(h.calls.length, 0);
+});
+
+test('a genuine legacy HAMINTENT-02 dispute never receives final-withdrawal authority', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ham-legacy-context-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db); t.after(() => db.close());
+  // Byte shape of the pre-HAMFINAL helper on origin/main (HAMINTENT-02).
+  const comment = { id: 'IC_legacy', author: 'the-hammer-lacey', body:
+    `HAM finding dispute — ${review.html_url} finding=1\nReviewed-Head: ${head}\nFinding-Reviewed-Head: ${author}\n\n`
+    + '```\n$ git show HEAD:fixture.json | python3 -m json.tool\n{}\n```\n\n'
+    + 'Reviewer: evaluate this evidence on the exact head and explicitly confirm or withdraw the blocking finding. '
+    + 'Merge remains blocked pending adjudication.' };
+  db.prepare(`INSERT INTO ham_finding_disputes
+    (repo, pr_number, identity, requests, head_sha, comment_id, comment_author, comment_sha256)
+    VALUES ('fixture/repo', 1, 'legacy', 1, ?, ?, ?, ?)`).run(head, comment.id, 'the-hammer-lacey[bot]',
+    createHash('sha256').update(comment.body).digest('hex'));
+  const rows = db.prepare('SELECT * FROM ham_finding_disputes').all();
+  assert.equal(rows[0].resolution, null);
+  assert.equal(formatFindingDisputeContext({ headRefOid: head, comments: [comment] }, rows), '');
+  assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }), []);
+  // Even a modern-shaped comment with valid provenance must be admitted first.
+  const modern = { ...comment, body: comment.body.replace('Reviewed-Head:', 'Resolution: withdrawn-by-hammer\nReviewed-Head:') };
+  assert.equal(formatFindingDisputeContext({ headRefOid: head, comments: [modern] },
+    [{ ...rows[0], comment_sha256: createHash('sha256').update(modern.body).digest('hex') }]), '');
 });
 
 test('helper rejects posts under a non-HAM identity and refunds their reservation', async (t) => {
@@ -351,7 +377,7 @@ test('context includes every reserved finding, only its latest comment, with a t
   for (let index = 0; index < 4; index++) {
     const body = `HAM finding dispute — PRR_fixture finding=${index + 1}\nReviewed-Head: ${head}\nEvidence ${index}`;
     comments.push({ id: `IC_${index}`, author: 'the-hammer-lacey', body });
-    reservations.push({ comment_id: `IC_${index}`, head_sha: head, comment_author: 'the-hammer-lacey',
+    reservations.push({ comment_id: `IC_${index}`, head_sha: head, resolution: 'withdrawn-by-hammer', comment_author: 'the-hammer-lacey',
       comment_sha256: createHash('sha256').update(body).digest('hex') });
   }
   comments.unshift({ ...comments[0], id: 'IC_old', body: comments[0].body + ' superseded' });
@@ -361,7 +387,7 @@ test('context includes every reserved finding, only its latest comment, with a t
   for (let index = 4; index < 40; index++) {
     const body = `HAM finding dispute — PRR_fixture finding=${index + 1}\nReviewed-Head: ${head}\n` + 'x'.repeat(16000);
     comments.push({ id: `IC_${index}`, author: 'the-hammer-lacey', body });
-    reservations.push({ comment_id: `IC_${index}`, head_sha: head, comment_author: 'the-hammer-lacey',
+    reservations.push({ comment_id: `IC_${index}`, head_sha: head, resolution: 'withdrawn-by-hammer', comment_author: 'the-hammer-lacey',
       comment_sha256: createHash('sha256').update(body).digest('hex') });
   }
   const bounded = formatFindingDisputeContext({ headRefOid: head, comments }, reservations);

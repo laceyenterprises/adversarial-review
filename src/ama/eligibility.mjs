@@ -177,7 +177,8 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * closer-trailer scoped; it never shells out or re-derives the classification.
  * @property {Object[]=} hammerWithdrawnFindings HAMFINAL-01 `withdrawn-by-hammer`
  * adjudications (`{identity, headSha, findingReviewedHead, evidenceSha256, resolution}`).
- * Only those naming a blocking finding identity of the reviewed head resolve it.
+ * Only those naming a blocking finding identity of the cited review, with both
+ * the review head and current evidence head matching, resolve it.
  */
 
 /**
@@ -1070,7 +1071,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // review is withdrawn, the review is settled; one standing finding still
   // blocks (and still needs validated HAM remediation evidence, below).
   const hammerAdjudication = resolveHammerAdjudication(
-    { ...reviewState, reviewedHead },
+    { ...reviewState, reviewedHead, currentHead },
     options?.hammerWithdrawnFindings ?? reviewState?.hammerWithdrawnFindings,
   );
   const hammerSettled = verdictNormalized === 'request-changes' && hammerAdjudication.allBlockingWithdrawn;

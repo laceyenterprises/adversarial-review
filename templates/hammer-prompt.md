@@ -215,6 +215,13 @@ NO re-review, so the same-head duplicate guard can never strand the PR. Exit 0
 means the withdrawal is recorded; any other exit means it is not, and the
 finding still stands (remediate it or stop with the exit's reason). A rerun on
 the same head is idempotent.
+The predicate verifies the posted comment against the successful admission in
+the canonical `--root-dir` database, including its node ID and full-body digest.
+A comment left by a failed helper call cannot resolve a finding. Withdrawal
+evidence applies only on its recorded live head and to its cited review head;
+after another head change, independently validated remediation coverage or
+content equivalence is required. Never reuse descendant-head evidence after
+resetting the branch to the reviewed ancestor.
 
 After a withdrawal, do NOT release the lease, stop, or wait for a reviewer. In
 the same run: remediate and certify every remaining finding exactly as for any

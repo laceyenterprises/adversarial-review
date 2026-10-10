@@ -33,10 +33,15 @@ final". A row with `resolution = 'withdrawn-by-hammer'` and a `comment_id` is a
 resolved blocking finding. The gate (`src/adversarial-gate-status.mjs`) and the
 watcher closure orchestration read these rows through the read-only, fail-soft
 `readHammerWithdrawals` in `src/ama/hammer-adjudication.mjs`. A withdrawal resolves
-a finding only when its identity is a blocking finding of the reviewed head's
-review and `finding_reviewed_head` (or `head_sha`) equals that head.
-`bin/ama-check.mjs` reads the same adjudication from the HAM-authored PR comment
-instead, and re-hashes the embedded evidence against `Evidence-SHA256`. The
+a finding only when its identity is a blocking finding of the cited review,
+`finding_reviewed_head` equals that review's head, and `head_sha` equals the
+current evaluated head. Evidence gathered on a descendant does not apply after
+a branch reset to the reviewed ancestor. Withdrawals do not carry to another
+head without independently validated coverage or content equivalence.
+`bin/ama-check.mjs` matches the HAM-authored PR comment to these successfully
+recorded rows, checking comment node ID, author, full-body digest, both heads,
+finding identity and evidence digest, then re-hashes the embedded evidence
+against `Evidence-SHA256`. A missing or unreadable store resolves nothing. The
 helper requires a fenced exact-head repro or head-file quote, requests no
 re-review, and does not page.
 
@@ -54,7 +59,8 @@ A rerun for the same identity and head returns the recorded withdrawal without
 posting again.
 
 The reviewer reads this table without writes, scoped by `(repo, PR, head)`.
-Only comments matching the recorded node ID, trusted HAM author and body digest
+Only rows with `resolution = 'withdrawn-by-hammer'` and comments matching the
+recorded node ID, trusted HAM author and body digest
 enter dispute context. Legacy REST and adapter contexts retain `node_id` alongside
 their numeric IDs; either the context ID or its node ID may match the reservation.
 String and `{ login }` author forms use the same trusted-login and digest check.
@@ -80,7 +86,8 @@ A failed withdrawal (post failure, untrusted identity, head race) refunds the
 request reservation and records no provenance or resolution. Its comment, if
 posted, stays on GitHub but never enters reserved reviewer context.
 The HAMFINAL-01 columns are added as nullable to legacy tables; legacy rows have
-no `resolution` and resolve nothing.
+no `resolution` and resolve nothing; even legacy disputes with valid comment
+provenance are omitted from final-withdrawal prompt context.
 
 The CLI exits 78 with `ama_finding_dispute_owner_refused` before opening SQLite
 when the daemon owner check fails, and exits 79 with

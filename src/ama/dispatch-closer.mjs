@@ -4658,7 +4658,6 @@ export async function maybeDispatchAmaCloser({
     let releaseUnprovenTerminalHoldMerged = false;
     let advancedTerminalDispatchSuperseded = false;
     let hammerEndedWithoutMerge = false;
-    let hammerNoMergeOutcome = null;
     throwIfAborted(signal);
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -4671,11 +4670,71 @@ export async function maybeDispatchAmaCloser({
     throwIfAborted(signal);
     let status = statusProbe?.status || null;
     existingDispatchStatus = status;
-    if (certifiedContentionPark && !deferredPark &&
-        (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === 'failed')) {
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-        reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
-    }
+    // A durable closing decision outranks the process exit (including failure
+    // after posting it) and certified parks. Unknown evidence holds the launch;
+    // only a readable absence of a decision permits normal retry admission.
+    const reconcileCapFinalDecision = async (observedStatus) => {
+      if (dispatchContext?.reviewCycleCapReached !== true
+        || !(AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(observedStatus)
+          || AMA_CLOSER_RETRYABLE_STATUSES.has(observedStatus))) return null;
+      const livePr = await probeAmaLivePrForMergeDispatch({
+        dispatchContext, execFileImpl, repo, prNumber, signal,
+      });
+      throwIfAborted(signal);
+      const noMergeDecision = livePr?.state === 'OPEN'
+        ? await hasNoMergeAuditForCurrentHead({
+          hqRoot, repo, prNumber,
+          headSha: livePr.headRefOid || targetRemediationSha,
+          fetchPullRequestRollupImpl, execFileImpl,
+        })
+        : false;
+      throwIfAborted(signal);
+      if (!livePr || !['OPEN', 'CLOSED', 'MERGED'].includes(livePr.state) || noMergeDecision === null) {
+        return retainExistingAmaCloserDispatch(existingRecord, workerClass, observedStatus);
+      }
+      if (!noMergeDecision) return null;
+      finalizeAmaCloserLeaseBestEffort({
+        rootDir, leaseIdentity: existingRecordLeaseIdentity,
+        terminalOutcome: 'failed-without-merge', now: dispatchContext.dispatchedAt,
+        logger, repo, prNumber,
+      });
+      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: observedStatus,
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: 'failed-without-merge',
+        outcome: 'failed-without-merge',
+      }));
+      const hammerCleanup = await cleanupHammerCloserWorker({
+        prNumber, workerClass, existingRecord, hqPath, hqRoot, execFileImpl, logger,
+        reason: `terminal-status-${observedStatus}`,
+      });
+      assertHammerCleanupSucceeded(hammerCleanup);
+      await recordAmaCloserReviewerPassTokens({
+        rootDir, hqRoot, repo, prNumber,
+        record: { ...existingRecord, lastObservedStatus: observedStatus,
+          lastObservedAt: dispatchContext.dispatchedAt },
+        status: observedStatus, merged: false, observedAt: dispatchContext.dispatchedAt,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+        logger,
+      });
+      logAmaCloserDispatchEvent(logger, 'ama_closer.review_cycle_cap_hammer_final_no_merge', {
+        repo, prNumber, headSha: existingRecordLeaseIdentity.headSha,
+        launchRequestId: existingRecord.launchRequestId,
+      }, { level: 'warn' });
+      return noAmaDispatch({
+        dispatched: false, skipMergeAgent: true,
+        reason: REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
+        needsOperator: true,
+        workerClass: existingRecord.workerClass || workerClass,
+        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+        launchRequestId: existingRecord.launchRequestId || null,
+        promptPath: existingRecord.promptPath || null,
+      });
+    };
     let phantomActiveWorkerRun = null;
     // The LRQ's ledger row, when the unknown-status path below read it.
     let launchRequestProbe = null;
@@ -4726,6 +4785,13 @@ export async function maybeDispatchAmaCloser({
           pid: phantomActiveWorkerRun.pid || null,
         }, { level: 'warn' });
       }
+    }
+    const capFinalDecision = await reconcileCapFinalDecision(status);
+    if (capFinalDecision) return capFinalDecision;
+    if (certifiedContentionPark && !deferredPark &&
+        (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === 'failed')) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
     }
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed')) {
       if (
@@ -4785,7 +4851,6 @@ export async function maybeDispatchAmaCloser({
           // bypassed the bounded hammer retry/alert path (HAMSYNC-01).
           hammerEndedWithoutMerge = true;
           const noMergeOutcome = hammerOutcome.outcome;
-          hammerNoMergeOutcome = noMergeOutcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
           status = 'failed';
           existingDispatchStatus = status;
@@ -5390,6 +5455,8 @@ export async function maybeDispatchAmaCloser({
       if (launchRequestProbe?.ok && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
         status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus);
         existingDispatchStatus = status;
+        const capFinalDecision = await reconcileCapFinalDecision(status);
+        if (capFinalDecision) return capFinalDecision;
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
@@ -5540,32 +5607,6 @@ export async function maybeDispatchAmaCloser({
       && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)
     ) {
       return noAmaDispatch({ dispatched: false, reason: dispatchStatusReason(status) });
-    }
-    // CYCLECAPHAM-01: on a capped PR the hammer is the final adjudicator. Its
-    // recorded no-merge decision ends the route: no retry hammer, and the
-    // operator is paged. An exit without a close is not a decision and keeps
-    // the bounded re-arm above.
-    if (
-      hammerEndedWithoutMerge
-      && hammerNoMergeOutcome === 'failed-without-merge'
-      && dispatchContext?.reviewCycleCapReached === true
-    ) {
-      logAmaCloserDispatchEvent(logger, 'ama_closer.review_cycle_cap_hammer_final_no_merge', {
-        repo,
-        prNumber,
-        headSha: existingRecordLeaseIdentity.headSha,
-        launchRequestId: existingRecord.launchRequestId,
-      }, { level: 'warn' });
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
-        needsOperator: true,
-        workerClass: existingRecord.workerClass || workerClass,
-        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-        launchRequestId: existingRecord.launchRequestId || null,
-        promptPath: existingRecord.promptPath || null,
-      });
     }
   } else if (existingRecordHasLivePendingInterruption) {
     return noAmaDispatch({

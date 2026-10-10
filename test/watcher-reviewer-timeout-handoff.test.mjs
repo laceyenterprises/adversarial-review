@@ -52,6 +52,9 @@ function buildLoaderSource() {
 
   return `
 const stubs = new Map(${JSON.stringify(Object.entries(stubs))});
+if (process.env.FIXTURE_CAP_SCENARIO === 'ham') {
+  stubs.delete(${JSON.stringify(fileUrl('src', 'ama', 'ham-provenance.mjs'))});
+}
 
 export async function resolve(specifier, context, nextResolve) {
   if (context.parentURL?.startsWith('fixture:') && !specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.includes(':')) {
@@ -93,10 +96,19 @@ export async function load(url, context, nextLoad) {
       shortCircuit: true,
       source: ${JSON.stringify(`
         export * from ${JSON.stringify(headCloserActualUrl)};
+        import { isTerminalCloserCommitIdentity } from ${JSON.stringify(headCloserActualUrl)};
+        const ham = isTerminalCloserCommitIdentity({ message: 'HAM close\\nClosed-By: hammer (adversarial-pipe-mode)' });
+        if (process.env.FIXTURE_CAP_SCENARIO === 'ham') {
+          if (!ham.suppressed) throw new Error('fixture HAM must suppress reviewers');
+        }
         const none = { suppressed: false, reason: 'fixture-no-closer-commit' };
-        export async function getHeadCloserCommitSuppression() { return none; }
-        export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return none; }
-        export function createHeadCloserCommitSuppressionResolver() { return async () => none; }
+        export async function getHeadCloserCommitSuppression() { return process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
+        export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
+        export function createHeadCloserCommitSuppressionResolver() { return async () => process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
+        export async function fetchHeadCloserVerifiedCommit({ headSha }) {
+          return { sha: headSha, parentSha: 'cap-head-5', parentCount: 1,
+            message: 'HAM close\\nClosed-By: hammer (adversarial-pipe-mode)' };
+        }
       `)}
     };
   }
@@ -213,9 +225,9 @@ if (capScenario) {
       .run('https://github.com/laceyenterprises/adversarial-review/pull/164', 'cap-head-' + cycle, cycle, at, 'Cycle ' + cycle + ': Changes Requested');
     db.prepare('INSERT INTO review_cycle_counters (pr_url, head_sha, verdict_count, last_verdict_at, escalated_at) VALUES (?, ?, ?, ?, ?)')
       .run('https://github.com/laceyenterprises/adversarial-review/pull/164', 'cap-head-' + cycle, cycle, at,
-        capScenario === 'paused' && cycle === 5 ? at : null);
+        capScenario !== 'escalate' && cycle === 5 ? at : null);
   }
-  if (capScenario === 'paused') {
+  if (capScenario !== 'escalate') {
     insertRow.run('laceyenterprises/adversarial-review', 164, '2026-05-27T04:00:00.000Z', 'claude', 'open', 'failed', 1,
       '2026-05-27T04:00:00.000Z', '[review-cycle-cap] 5 successive review/remediation cycles without converging; routed to the hammer for final adjudication', 'cap-head-5');
   } else {
@@ -536,7 +548,7 @@ for (const { name, liveEnv, expectedDispatches } of [
 // CYCLECAPHAM-01: a PR at the review cycle cap goes to the hammer through the
 // real watcher tick: no reviewer spawn, no operator write, the closer sees the
 // cap route with the cycle history.
-for (const scenario of ['escalate', 'paused']) {
+for (const scenario of ['escalate', 'paused', 'ham']) {
   test(`watcher pollOnce routes a review-cycle-cap PR to the hammer (${scenario} tick)`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), `watcher-cycle-cap-hammer-${scenario}-`));
     const loaderPath = path.join(tmp, 'fixture-loader.mjs');
@@ -561,7 +573,7 @@ for (const scenario of ['escalate', 'paused']) {
             FIXTURE_AMA_ENABLED: '1',
             FIXTURE_AMA_REASON: 'dispatched',
             FIXTURE_CAP_SCENARIO: scenario,
-            FIXTURE_CAP_LABEL: scenario === 'paused' ? '1' : '0',
+            FIXTURE_CAP_LABEL: scenario !== 'escalate' ? '1' : '0',
           },
         }
       );

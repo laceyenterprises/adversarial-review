@@ -2640,6 +2640,9 @@ export async function processReviewSubject(entry, ctx) {
         execFileImpl: execFileAsync,
       });
       if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)) {
+        // The HAM head suppresses reviewers, not reconciliation of its owner.
+        // The cap route still passes through the closer's eligibility/lease gates.
+        if ((await routeReviewCycleCapToHammer(current)).handled) return;
         const closerSpawnSuppression = await resolveHeadCloserCommitSuppression();
         if (closerSpawnSuppression.suppressed) {
           console.log(
@@ -2700,10 +2703,6 @@ export async function processReviewSubject(entry, ctx) {
               `${firstPassBudgetSuppression.reason}${budgetDetail}; ${rowActionDetail}`
           );
           declineFleetSelfRepairRereview(firstPassBudgetSuppression.reason);
-          if (firstPassBudgetSuppression.reason === 'review-cycle-cap-paused') {
-            // CYCLECAPHAM-01: no review follows the cap; the hammer owns the PR.
-            await routeReviewCycleCapToHammer(current);
-          }
           return;
         }
       }

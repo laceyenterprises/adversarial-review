@@ -1096,6 +1096,12 @@ showed the old behaviour: "operator attention required", then about 10h at
   automatic cap pause, or while the label is on and the watcher's
   `review_cycle_counters.escalated_at` marker is set. A hand-applied label
   alone routes nothing, and `paused-for-redesign` takes the PR off the route.
+  Reconciliation precedes reviewer-only closer-head suppression, so a hammer
+  that pushes a `Closed-By: hammer (adversarial-pipe-mode)` commit and exits
+  with the PR still open remains on this route. The latest successful verdict
+  in `review_cycle_verdicts` pins the original reviewed head independently of
+  admission resets that clear `reviewer_head_sha`; the live head remains the
+  remediation target, never substituted as reviewed evidence.
 - The closer treats the PR as a final-hammer close and admits the unreviewed
   head of the last remediation push. It does not admit it while a remediation
   job still owns the reviewed head. The hammer prompt gains a
@@ -1109,6 +1115,10 @@ showed the old behaviour: "operator attention required", then about 10h at
   (`needsOperator: true`) and launches no retry hammer. An exit without a close
   is not a decision and keeps the refunded re-arm. The existing hammer retry cap
   and lifetime ceiling bound the attempts.
+  Trusted exact-head no-merge evidence is checked for terminal failed and
+  cancelled launches as well as successful launches, before retry admission
+  or certified-park handling. Unreadable evidence holds the dispatch for a
+  later tick; process failure alone cannot override a recorded decision.
 - Only the no-merge decision or an exhausted hammer retry cap pages the
   operator, as SEV1 `ama.review_cycle_cap.hammer_final`, once per
   `repo#pr@head`. Read the hammer's closing-status comment on the PR first.

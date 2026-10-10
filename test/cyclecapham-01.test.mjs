@@ -37,6 +37,8 @@ import {
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { alertPresentationForDoc, deliverAlert } from '../src/alert-delivery.mjs';
 import { maybeRouteReviewCycleCapToHammer } from '../src/review-cycle-cap-hammer.mjs';
+import { buildAdversarialGateSnapshot } from '../src/adversarial-gate-status.mjs';
+import { ensureReviewStateSchema, getReviewRow, requestReviewRereview } from '../src/review-state.mjs';
 import {
   REVIEWER_CYCLE_CAP_REACHED_LABEL,
   buildReviewCycleCapEscalationComment,
@@ -173,7 +175,7 @@ test('cap reached: the watcher hands the PR to the hammer with the cycle history
   assert.equal(dispatchJob.reviewCycleCap, 5);
   assert.deepEqual(dispatchJob.reviewCycleHistory.map((row) => row.verdict_count), [1, 2, 3, 4, 5]);
   assert.equal(dispatchJob.reviewCycleHistory.at(-1).head_sha, REVIEWED_HEAD);
-  assert.equal(reviewStateRow, CAP_PAUSED_ROW);
+  assert.deepEqual(reviewStateRow, CAP_PAUSED_ROW);
   assert.deepEqual(labelNames, [REVIEWER_CYCLE_CAP_REACHED_LABEL]);
   assert.deepEqual(alerts, [], 'reaching the cap is not an operator page');
 });
@@ -227,6 +229,55 @@ test('an operator-selected paused-for-redesign pause is not routed to the hammer
   assert.equal(result.handled, false);
   assert.equal(result.reason, 'not-review-cycle-cap-paused');
   assert.equal(calls.length, 0);
+});
+
+test('a real failed-head reset retains the authoritative reviewed identity through the gate and closer on later ticks', async (t) => {
+  const rootDir = tempRoot(t, 'cyclecapham-reset-');
+  const db = cycleCapDb();
+  t.after(() => db.close());
+  ensureReviewStateSchema(db);
+  db.prepare(`INSERT INTO reviewed_prs
+    (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, reviewer_head_sha, failure_message)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(REPO, PR_NUMBER, '2026-10-10T04:35:00Z', 'codex', 'open', 'failed',
+      REVIEWED_HEAD, CAP_PAUSED_ROW.failure_message);
+  markReviewCycleEscalated(db, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  const reset = requestReviewRereview({
+    db, rootDir, repo: REPO, prNumber: PR_NUMBER, expectedFailedHead: REVIEWED_HEAD,
+    targetRevisionRef: REMEDIATED_HEAD, reason: 'Failed review superseded by a new PR head.',
+    logger: QUIET_LOGGER,
+  });
+  assert.equal(reset.triggered, true);
+  assert.equal(reset.reviewRow.reviewer_head_sha, null);
+  const deps = closerDeps();
+  for (const dispatchedAt of ['2026-10-10T05:00:00Z', '2026-10-10T05:05:00Z']) {
+    const result = await maybeRouteReviewCycleCapToHammer({
+      rootDir, db, repoPath: REPO, prNumber: PR_NUMBER,
+      existing: getReviewRow(db, { repo: REPO, prNumber: PR_NUMBER }),
+      currentRevisionRef: REMEDIATED_HEAD, labelNames: [REVIEWER_CYCLE_CAP_REACHED_LABEL],
+      ...handOffDeps({ coexistence: async ({ reviewStateRow, dispatchJob }) => {
+        const snapshot = await buildAdversarialGateSnapshot(rootDir, {
+          repo: REPO, prNumber: PR_NUMBER, reviewRow: reviewStateRow,
+          headSha: REMEDIATED_HEAD, includeSettledReview: true,
+        });
+        assert.equal(snapshot.reviewedHeadSha, REVIEWED_HEAD);
+        assert.equal(snapshot.settledReview.remediationPending, false);
+        const args = closerArgs(rootDir, { dispatchedAt });
+        const closure = await maybeDispatchAmaCloser({
+          ...args, ...deps,
+          reviewState: { ...args.reviewState, ...snapshot.settledReview, headSha: snapshot.reviewedHeadSha },
+          dispatchContext: { ...args.dispatchContext, reviewedSha: snapshot.reviewedHeadSha,
+            reviewCycleCapReached: dispatchJob.reviewCycleCapReached },
+        });
+        assert.equal(closure.dispatched, true, JSON.stringify(closure));
+        return { outcome: 'ama-dispatched', amaClosureResult: closure };
+      } }),
+    });
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'ama-dispatched');
+    assert.equal(getReviewRow(db, { repo: REPO, prNumber: PR_NUMBER }).reviewer_head_sha, null,
+      'the hammer projection does not mutate reviewer admission');
+  }
 });
 
 // The closer, driven for real.
@@ -292,7 +343,7 @@ function closerArgs(rootDir, { reviewCycleCapReached = true, dispatchedAt = '202
   };
 }
 
-function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompts = [] } = {}) {
+function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompts = [], workerStatus = 'succeeded' } = {}) {
   const statusProbes = [];
   const launches = [];
   return {
@@ -304,7 +355,7 @@ function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompt
     execFileImpl: async (_cmd, args) => {
       if (args[0] === 'dispatch' && args[1] === 'status') {
         statusProbes.push(args[2]);
-        return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        return { stdout: JSON.stringify({ status: workerStatus }), stderr: '' };
       }
       if (args[0] === 'dispatch') {
         launches.push(args);
@@ -517,6 +568,41 @@ test('a cap-route hammer no-merge decision is final: no retry hammer, and the cl
   }
   assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 1);
 });
+
+for (const workerStatus of ['failed', 'cancelled', 'unknown']) {
+  test(`a trusted exact-head closing decision survives ${workerStatus} LRQ status across ticks`, async (t) => {
+    const rootDir = tempRoot(t, `cyclecapham-final-${workerStatus}-`);
+    await seedFinishedCapHammer(rootDir);
+    for (const dispatchedAt of ['2026-10-10T05:05:00Z', '2026-10-10T05:07:00Z']) {
+      const deps = closerDeps({ workerStatus, comments: [noMergeClosingStatus(REMEDIATED_HEAD)] });
+      if (workerStatus === 'unknown') {
+        deps.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'failed' } });
+      }
+      const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { dispatchedAt }), ...deps });
+      assert.equal(result.reason, REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON, JSON.stringify(result));
+      assert.equal(result.needsOperator, true);
+      assert.equal(deps.launches.length, 0);
+    }
+    assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 1);
+  });
+}
+
+for (const decision of ['absent', 'wrong-head', 'untrusted', 'unreadable']) {
+  test(`a failed capped hammer retries only with readable absence of a trusted decision (${decision})`, async (t) => {
+    const rootDir = tempRoot(t, `cyclecapham-evidence-${decision}-`);
+    await seedFinishedCapHammer(rootDir);
+    const comments = decision === 'absent' ? [] : [noMergeClosingStatus(decision === 'wrong-head' ? REVIEWED_HEAD : REMEDIATED_HEAD)];
+    if (decision === 'untrusted') comments[0].author = { login: 'foreign-worker' };
+    const deps = closerDeps({ workerStatus: 'failed', comments, nextLaunch: LRQ_SECOND });
+    if (decision === 'unreadable') deps.fetchPullRequestRollupImpl = async () => { throw new Error('comments unavailable'); };
+    const result = await maybeDispatchAmaCloser({
+      ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T05:05:00Z' }), ...deps,
+    });
+    assert.equal(result.dispatched, decision !== 'unreadable', JSON.stringify(result));
+    assert.equal(deps.launches.length, decision === 'unreadable' ? 0 : 1);
+    assert.notEqual(result.reason, REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON);
+  });
+}
 
 test('off the cap route, the same no-merge outcome keeps the ordinary bounded retry (HAMBG-02 unchanged)', async (t) => {
   _resetHammerRetryCapAlertDebounceForTests();

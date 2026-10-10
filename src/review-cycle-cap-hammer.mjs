@@ -132,9 +132,14 @@ export async function maybeRouteReviewCycleCapToHammer({
       reviewCycleCap: cap,
       reviewCycleHistory,
     };
+    // Admission resets clear reviewer_head_sha. The successful verdict ledger
+    // outlives those resets and pins the hammer to the last actual review,
+    // never to the unreviewed live head or a later failed reviewer attempt.
+    const reviewedHeadSha = reviewCycleHistory.at(-1)?.head_sha || existing?.reviewer_head_sha;
+    if (!reviewedHeadSha) throw new Error('review-cycle-cap authoritative reviewed head unavailable');
     const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcherImpl({
       rootDir,
-      reviewStateRow: existing,
+      reviewStateRow: { ...existing, reviewer_head_sha: reviewedHeadSha },
       dispatchJob,
       candidate,
       labelNames: normalizeLabelNames(Array.isArray(candidate?.labels) ? candidate.labels : labelNames),

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { amaRetainLoopCapFor } from '../kernel/convergence-budget.mjs';
 import { reconcileRecoveryLaunches } from './recovery-launch-reconciliation.mjs';
+import { isCloserHeadRereviewDeclined } from '../closer-head-rereview-decline.mjs';
 
 const FINDING_REASONS = new Set([
   'blocking-findings-unknown',
@@ -161,6 +162,10 @@ async function recoverAmaAutomationLocked({
   }
   if (state.event) return exhausted();
   if (state.attempts >= maxAttempts || /(?:retry-cap|lifetime-cap).*exhausted/.test(reason)) return stalled('attempt-cap');
+  // NOOWNER-01: the watcher declined this head's re-review (its tip is a closer
+  // commit, which is never re-reviewed). Asking again would only loop; wait out
+  // the stall deadline, then page once.
+  if (stale && isCloserHeadRereviewDeclined(reviewStateRow, headSha)) return stalled('rereview-declined-closer-head');
   try {
     if (stale || (malformed && !state.rereviewRequested)) {
       state.rereviewBaseline = reviewStamp;

@@ -137,14 +137,58 @@ function sanitizeAckCommentText(value, maxChars = 500) {
   return `${escapedHeadings.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
+// NOOWNER-01: the acknowledgement for a label consumed on a PR with no
+// follow-up job, naming what the watcher did instead of a requeue.
+function buildNoJobAckCommentBody({ marker, safeActor, safeReason, noJobHandoff }) {
+  const action = String(noJobHandoff?.action || 'none');
+  const outcome = sanitizeAckCommentText(noJobHandoff?.outcome || 'unknown', 120) || 'unknown';
+  const detail = noJobHandoff?.detail ? sanitizeAckCommentText(noJobHandoff.detail, 500) : null;
+  const actionText = {
+    hammer: 'handed the PR to the hammer through the CI-blocked owner route (CIBLOCKHAM-01)',
+    job: 'created a follow-up job from the latest posted adversarial review, pinned to the live head',
+  }[action] || 'found nothing to remediate';
+  const needsOperator = action === 'none'
+    || /error|not-handled|not-created|unavailable/.test(outcome);
+  const lines = [
+    `<!-- ${marker} -->`,
+    needsOperator
+      ? '### Remediation retrigger needs operator attention'
+      : '### Remediation retrigger accepted (no follow-up job)',
+    '',
+    `The \`${RETRIGGER_REMEDIATION_LABEL}\` label was consumed. This PR had no follow-up job to requeue, `
+      + `so the watcher ${actionText}.`,
+    '',
+    `- Requested by: \`${safeActor}\``,
+    `- Action: \`${action}\``,
+    `- Outcome: \`${outcome}\`${detail ? ` (${detail})` : ''}`,
+    '',
+    needsOperator
+      ? 'Next: the label has been removed. Resolve the outcome above, then apply the label again or apply `retrigger-review` for a fresh adversarial pass.'
+      : 'Next: the owner named above acts on this PR. The label has been removed so this request is not applied again.',
+  ];
+  if (safeReason) {
+    lines.push('', `Reason: ${safeReason}`);
+  }
+  return lines.join('\n');
+}
+
 function buildAckCommentBody({
   labelEventKey,
   labelEventActor,
   reason,
   bumpResult,
   requeueResult,
+  noJobHandoff = null,
 }) {
   const marker = buildAckCommentMarker(labelEventKey);
+  if (noJobHandoff) {
+    return buildNoJobAckCommentBody({
+      marker,
+      safeActor: sanitizeAckCommentText(labelEventActor || 'unknown', 120) || 'unknown',
+      safeReason: reason ? sanitizeAckCommentText(reason, 500) : null,
+      noJobHandoff,
+    });
+  }
   const requeueOutcome = requeueOutcomeFromResult(requeueResult);
   const requeueReason = requeueResult?.reason || requeueResult?.error || null;
   const requeueFailed = requeueOutcome !== 'requeued';
@@ -226,6 +270,7 @@ async function postRetriggerAckComment({
   bumpResult,
   requeueResult,
   revisionRef = null,
+  noJobHandoff = null,
 }) {
   const body = buildAckCommentBody({
     labelEventKey,
@@ -233,6 +278,7 @@ async function postRetriggerAckComment({
     reason,
     bumpResult,
     requeueResult,
+    noJobHandoff,
   });
   const marker = buildAckCommentMarker(labelEventKey);
   const existing = await findExistingAckComment({
@@ -301,7 +347,9 @@ async function postRetriggerAckComment({
   }
 }
 
-function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpResult, requeueResult, revisionRef = null }) {
+function buildPendingAckComment({
+  labelEventKey, labelEventActor, reason, bumpResult, requeueResult, revisionRef = null, noJobHandoff = null,
+}) {
   return {
     posted: false,
     reason: 'pending',
@@ -323,6 +371,7 @@ function buildPendingAckComment({ labelEventKey, labelEventActor, reason, bumpRe
         error: requeueResult?.error || null,
       },
       revisionRef: revisionRef || null,
+      ...(noJobHandoff ? { noJobHandoff } : {}),
     },
   };
 }
@@ -410,6 +459,7 @@ async function retryAckCommentForConsumption({
     bumpResult: context.bumpResult,
     requeueResult: context.requeueResult,
     revisionRef: context.revisionRef,
+    noJobHandoff: context.noJobHandoff || null,
   });
   const nextConsumption = {
     ...consumption,
@@ -543,6 +593,10 @@ export async function tryRetriggerRemediationFromLabel({
   requeueImpl = requeueFollowUpJobForNextRound,
   labelEvent = null,
   revisionRef = null,
+  // NOOWNER-01: `async ({ repo, prNumber, revisionRef }) => ({ action, outcome,
+  // detail })`, called when the PR has no follow-up job (see
+  // src/retrigger-no-job-handoff.mjs). Without it, `no-job` leaves the label.
+  noJobHandoffImpl = null,
 }) {
   const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
   if (!labelEventKey) {
@@ -606,6 +660,13 @@ export async function tryRetriggerRemediationFromLabel({
   }
 
   const latest = findLatestFollowUpJob(rootDir, { repo, prNumber });
+  if (!latest && typeof noJobHandoffImpl === 'function') {
+    return consumeLabelWithoutJob({
+      rootDir, repo, prNumber, execFileImpl, now, appendAuditRow, auditRootDir, reason,
+      labelEvent, labelEventKey, labelEventActor, idempotencyKey,
+      revisionRef: normalizedRevisionRef, noJobHandoffImpl,
+    });
+  }
   if (!latest) {
     return { outcome: 'no-job', detail: 'no follow-up job exists for this PR yet' };
   }
@@ -873,4 +934,105 @@ export async function tryRetriggerRemediationFromLabel({
     outcome: 'bumped-and-requeued',
     detail: `bumped maxRounds ${bumpResult.priorMaxRounds} → ${bumpResult.newMaxRounds}, requeued remediation worker`,
   });
+}
+
+// NOOWNER-01: consume a label applied to a PR with no follow-up job. Same
+// durability order as the requeue path: consumption record, audit row, label
+// removal, acknowledgement. A failed removal or comment is retried by the
+// `label-already-consumed` path and `retryPendingRetriggerAckComments`.
+async function consumeLabelWithoutJob({
+  rootDir, repo, prNumber, execFileImpl, now, appendAuditRow, auditRootDir, reason,
+  labelEvent, labelEventKey, labelEventActor, idempotencyKey, revisionRef, noJobHandoffImpl,
+}) {
+  let noJobHandoff;
+  try {
+    const handoff = await noJobHandoffImpl({ repo, prNumber, revisionRef });
+    noJobHandoff = {
+      action: String(handoff?.action || 'none'),
+      outcome: String(handoff?.outcome || 'unknown'),
+      detail: handoff?.detail ? String(handoff.detail) : null,
+    };
+  } catch (err) {
+    noJobHandoff = { action: 'none', outcome: 'handoff-error', detail: err?.message || String(err) };
+  }
+  const ts = now();
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
+  const auditRow = {
+    ts,
+    verb: VERB,
+    repo,
+    pr: prNumber,
+    domainId: subjectIdentity.domainId,
+    subjectExternalId: subjectIdentity.subjectExternalId,
+    revisionRef: subjectIdentity.revisionRef,
+    reason,
+    operator: `pr-label:${labelEventActor}`,
+    jobKey: null,
+    idempotencyKey,
+    source: 'pr-label',
+    labelEvent: {
+      id: labelEvent?.id || null,
+      nodeId: labelEvent?.nodeId || null,
+      actor: labelEventActor,
+      createdAt: labelEvent?.createdAt || null,
+      label: RETRIGGER_REMEDIATION_LABEL,
+    },
+    noJobHandoff,
+    outcome: `no-job-${noJobHandoff.action}`,
+  };
+  const ackContext = buildPendingAckComment({
+    labelEventKey, labelEventActor, reason, revisionRef, noJobHandoff,
+  });
+  const consumption = buildLabelConsumptionDoc({
+    labelEventKey, idempotencyKey, repo, prNumber, jobPath: null,
+    auditStatus: 'pending', auditRow, ackComment: ackContext, consumedAt: ts,
+  });
+  writeLabelConsumption(rootDir, labelEventKey, consumption);
+  try {
+    appendAuditRow(auditRootDir, auditRow);
+  } catch (err) {
+    return {
+      outcome: 'no-job-audit-failed',
+      detail: `no follow-up job; ${noJobHandoff.action} -> ${noJobHandoff.outcome}; operator mutation audit append failed: ${err?.message || err}`,
+      noJobHandoff,
+    };
+  }
+  writeLabelConsumption(rootDir, labelEventKey, { ...consumption, auditStatus: 'written', auditedAt: ts });
+
+  let labelRemoved = false;
+  try {
+    await removeLabelFromPR({ repo, prNumber, execFileImpl });
+    labelRemoved = true;
+  } catch (err) {
+    return {
+      outcome: 'no-job-label-removal-failed',
+      detail: `no follow-up job; ${noJobHandoff.action} -> ${noJobHandoff.outcome}; label removal failed: ${err?.message || err}`,
+      noJobHandoff,
+    };
+  }
+  const ackComment = await postRetriggerAckComment({
+    rootDir, repo, prNumber, execFileImpl, labelEventKey, labelEventActor, reason,
+    bumpResult: null, requeueResult: null, revisionRef, noJobHandoff,
+  });
+  writeLabelConsumption(rootDir, labelEventKey, {
+    ...consumption,
+    auditStatus: 'written',
+    auditedAt: ts,
+    labelRemoved,
+    ackComment: {
+      ...ackComment,
+      context: ackContext.context,
+      attempts: 1,
+      maxAttempts: ACK_COMMENT_MAX_ATTEMPTS,
+      attemptedAt: new Date().toISOString(),
+    },
+  });
+  return {
+    outcome: `no-job-${noJobHandoff.action}`,
+    detail: `no follow-up job; ${noJobHandoff.action} -> ${noJobHandoff.outcome}`
+      + (noJobHandoff.detail ? ` (${noJobHandoff.detail})` : ''),
+    noJobHandoff,
+    labelRemoved,
+    ackComment,
+  };
 }

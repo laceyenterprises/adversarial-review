@@ -3,7 +3,7 @@
 **Owner:** AMA merge authority
 **Store:** `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/`
 **Source of truth:** `src/ama/audit.mjs`
-**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`
+**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`, `src/ama/hammer-stop-hold.mjs`
 
 ## Purpose
 
@@ -19,9 +19,11 @@ at mode `0640`.
 | `createdAt`, `updatedAt` | ISO timestamps | First write and latest append. |
 | `status` | string | Latest attempt outcome, except `succeeded` stays sticky. |
 | `attempts` | array | Immutable ordered attempt history. |
+| `appendedRecords` | optional array | Compatibility evidence recovered from trailing JSONL after the leading JSON document. Parsed lines retain their original shape; malformed lines become `{ unparsed: string }` with at most 2000 characters. Preserved by subsequent atomic rewrites, without changing `status` or numbering `attempts`. |
 | `attempts[].attemptNumber` | positive integer | Sequential, starting at `1`. |
 | `attempts[].startedAt` | ISO timestamp | Append time. |
 | `attempts[].outcome` | string | `in_progress`, `deferred`, `superseded`, `succeeded`, or `failed-without-merge`. Other attempt fields carry caller evidence, including `closingStatus` for gate-cap parks. |
+| `attempts[].attemptPhase`, `attempts[].path` | optional strings | Per-attempt producer provenance. Daemon phases are `daemon-pre-merge`, `daemon-merged`, and `daemon-failed`; `path` names its closure authority, including `ham-terminal-remediation` for a daemon call on a HAM-certified head. Hammer phases include `hammer-gh-pr-merge` and `hammer-gate-attempt-cap`. Document-level authority alone does not identify the producer of a marked attempt. |
 | `reconciliation.needsRepair` | boolean | Latest append's repair signal. Present on records auto-created by append. |
 | `reconciliation.lastVerifiedAt` | ISO timestamp | Latest append time. Present on records auto-created by append. |
 | `closingKeywordRewrites` | optional array | Title and body rewrites computed by the daemon; absent on older records. Each item is `{original, referencedNumber, referencedRepo, replacement}`. |
@@ -57,6 +59,25 @@ erDiagram
 includes the reconciliation block and any supplied provenance metadata. Later
 appends preserve existing metadata and update reconciliation. A successful
 record cannot be demoted by a later append.
+
+`parseAmaAuditDocument` accepts a valid leading object followed by non-empty
+JSONL lines and exposes them as `appendedRecords`; unrelated parse failures
+still throw. This is recovery for historical hand-appended hammer evidence,
+not a second writer protocol. Records can carry `outcome`, `reason`, `head` /
+`currentHead` / `headSha` / `validatedHead`, `closingStatus`, `next`, and
+`timestamp` / `recordedAt` without the numbered-attempt shape.
+
+The [hammer stop hold](hammer-stop-hold.md) reads both arrays for the live and
+reviewed heads, choosing the latest matching hammer terminal decision by
+`startedAt` / `timestamp` / `recordedAt`, then array order. Explicit hammer
+phases (`hammer-*` or `before-hammer-*`) are accepted only with no path or a
+hammer path (`hammer`, `ham-terminal-remediation`); other explicit phases are
+excluded. A path without a phase must be a hammer path. Legacy entries with
+neither marker are accepted only when document `closureAuthority` is absent
+or a hammer path. Explicit hammer provenance wins over document metadata;
+daemon attempts never set or clear a hammer decision. A latest hammer
+`failed-without-merge` or legacy `no-merge` starts a hold; a later hammer defer
+or success clears it.
 
 `resumeOwed` / `resumeHead` have no runtime consumer. The watcher independently
 proves the closer-only ancestry from the reviewed head on each tick and reads

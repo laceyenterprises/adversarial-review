@@ -311,10 +311,46 @@ function validateAttempt(attempt) {
  */
 function readExisting(filePath) {
   try {
-    return JSON.parse(readFileSync(filePath, 'utf8'));
+    return parseAmaAuditDocument(readFileSync(filePath, 'utf8'));
   } catch (err) {
     if (err?.code === 'ENOENT') return null;
     throw err;
+  }
+}
+
+/**
+ * NOOWNER-01: hammers have appended their own one-line no-merge record after
+ * the pretty-printed document (agent-os PR 7991@167974d1, PR 7865@6b5e0954,
+ * adversarial-review PR 1239@0c4e78bc). Strict JSON.parse then threw
+ * "Unexpected non-whitespace character after JSON at position N" on every
+ * closer tick for that head, and no writer could append to the file. Keep the
+ * leading document and carry the trailing lines as `appendedRecords`, so the
+ * next atomic rewrite keeps the hammer's evidence instead of dropping it. Any
+ * other parse failure still throws.
+ */
+export function parseAmaAuditDocument(raw) {
+  const text = String(raw);
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    const position = /after JSON at position (\d+)/.exec(err?.message || '');
+    if (!(err instanceof SyntaxError) || !position) throw err;
+    const doc = JSON.parse(text.slice(0, Number(position[1])));
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw err;
+    const appended = text.slice(Number(position[1])).split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return { unparsed: line.slice(0, 2000) };
+        }
+      });
+    return {
+      ...doc,
+      appendedRecords: [...(Array.isArray(doc.appendedRecords) ? doc.appendedRecords : []), ...appended],
+    };
   }
 }
 

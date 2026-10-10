@@ -195,4 +195,4 @@ function summarizeChecksConclusion(statusCheckRollup, { env = process.env, cfg =
   });
 }
 
-export { checkItemState, classifyCheckRollup, latestCheckRollupItems, summarizeChecksConclusion };
+export { checkItemState, classifyCheckRollup, isAdversarialOwnStatusContext, latestCheckRollupItems, summarizeChecksConclusion };

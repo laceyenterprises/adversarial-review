@@ -2151,6 +2151,53 @@ for (const exact of [true, false]) test(`REMORPHAN exact-head recovery ${exact ?
 });
 
 
+// NOOWNER-01 (agent-os PR 8022): AMA automated recovery re-armed the row for an
+// exact-head review of a hammer-rebased closer head. Every poll then logged
+// "Retrying PR ... previous status=pending" and "reviewer spawn SUPPRESSED ...
+// closer-commit-trailer" and returned, so nothing owned the PR. One tick now
+// declines the request back to the posted review, where the closer owns it.
+test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns the row to posted instead of looping', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-noowner-closer-head-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource()
+      .replace("return async () => ({ suppressed: false, reason: 'fixture' });", "return async () => ({ suppressed: true, reason: 'closer-commit-trailer' });")
+      .replace("export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: false, reason: 'fixture' }; }", "export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: true, reason: 'closer-commit-trailer' }; }"));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: `
+      db.prepare(\`INSERT INTO reviewer_passes
+        (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, ended_at, status,
+         head_sha, gh_comment_id, body_md, body_captured_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`).run(
+        'laceyenterprises/adversarial-review', 101, 1, 'gemini', 'first-pass', '2026-10-10T18:00:00Z',
+        '2026-10-10T18:10:00Z', 'completed', 'sha-reviewed-101', 'IC_101', '## Verdict\\nComment only',
+        '2026-10-10T18:10:00Z');
+      db.prepare(\`INSERT INTO reviewed_prs
+        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         review_attempts, revision_ref, rereview_requested_at, rereview_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`).run(
+        'laceyenterprises/adversarial-review', 101, '2026-10-10T18:10:00Z', 'gemini',
+        'open', 'pending', 0, 'sha-happy-101', '2026-10-10T18:36:00Z',
+        'AMA automated recovery: stale-review-head');
+    ` }));
+    const run = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+      env: fixtureEnv(installGhFixture(tmp)),
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.equal(run.status, 0, output);
+    const line = run.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
+    assert.ok(line, output);
+    const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+    assert.match(output, /reviewer spawn SUPPRESSED for laceyenterprises\/adversarial-review#101: closer-commit-trailer/);
+    assert.equal(summary.reviewerSpawns.some((spawn) => spawn.subjectContext?.reviewerHeadSha === 'sha-happy-101'), false, output);
+    assert.equal(summary.rows['101'].review_status, 'posted', output);
+    assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-reviewed-101', output);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
 function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {

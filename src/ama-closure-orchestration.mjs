@@ -1314,6 +1314,7 @@ async function dispatchAmaClosureFor({
     mergeableState: closureGateMergeability(mergeabilityForGate || {}),
     labels: Array.isArray(labelNames) ? labelNames : undefined,
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
+    baseSha: candidate?.baseSha || null,
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
     title: String(candidate?.title ?? ''),
@@ -1483,6 +1484,9 @@ async function dispatchAmaClosureFor({
   }
 
   let allowStaleReviewHeadHammerResume = false;
+  // NOOWNER-01: the live head's tip carries the closer trailer, so policy never
+  // re-reviews it and a hammer stop hold may stand in for the re-review.
+  let liveHeadCloserAuthored = false;
   let hamTerminalRemediationEvidenceOptions = null;
   let hamTerminalRemediationValidated = false;
   let nonReviewableHeadDeltaEvidence = null;
@@ -1520,9 +1524,9 @@ async function dispatchAmaClosureFor({
         },
       );
       throwIfAborted(signal);
-      allowStaleReviewHeadHammerResume = closerOnlyHeadDelta
-        && closerCommitSuppression?.suppressed === true
+      liveHeadCloserAuthored = closerCommitSuppression?.suppressed === true
         && closerCommitSuppression?.reason === 'closer-commit-trailer';
+      allowStaleReviewHeadHammerResume = closerOnlyHeadDelta && liveHeadCloserAuthored;
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
@@ -2031,6 +2035,7 @@ async function dispatchAmaClosureFor({
     ciFailedChecks: ciBlockedHammerOwner && Array.isArray(dispatchJob?.ciFailedChecks)
       ? dispatchJob.ciFailedChecks : [],
     allowStaleReviewHeadHammerResume,
+    liveHeadCloserAuthored,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,
     riskClass: reviewState.riskClass,
     requiredGateContext,

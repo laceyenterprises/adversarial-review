@@ -1210,6 +1210,74 @@ Now:
 A failure class outside that list (`worker_crashed`, an exit after progress
 with no 429, an unreadable LRQ row) stays charged, as before.
 
+### A PR whose hammer cannot launch or has stopped (NOOWNER-01)
+
+SEV1 2026-10-10: open PRs sat for hours with no actor until the operator
+relabelled them. A PR with a posted review is now always either owned by an
+actor on a bounded clock, or the operator has been paged once with the reason.
+
+- **Pre-launch refusal** (`src/ama/prelaunch-refusal-retry.mjs`). A dispatch
+  that fails before any worker launched (no launch request: provisioning or
+  admission refusal) no longer parks at `dispatch-retry-exhausted` once its fast
+  retries are spent. The closer retries once per pending-lease reclaim window
+  (about 31 minutes at the default 600 s dispatch timeout) for 6 hours from the
+  first observation that fast retries are spent. It pages once when the slow cadence starts
+  (`ama_closer.prelaunch_refusal_slow_retry`, with the exact `[hq]` refusal
+  line) and once when the window closes and retries stop
+  (`ama_closer.prelaunch_refusal_exhausted`). Between attempts the closer
+  answers `dispatch-refusal-slow-retry-wait` (or
+  `dispatch-branch-holder-block-exhausted` for a branch holder) with
+  `recoveryWait`. The window and page markers live on the per-head dispatch
+  record as `prelaunchRefusalSlowRetry`. The original window stays authoritative
+  after every failed slow attempt, including aged branch-holder counter resets;
+  those resets neither resume fast retries nor extend the six-hour deadline.
+  A launch clears the markers and a new head
+  starts fresh. The HAM-ADOPT-01 refusal (`hammer close branch-holder
+  resolution refused ...`, `hammer close could not provision a private branch
+  ...`) is classified as a branch-holder block, so it no longer spends the
+  redispatch budget at all.
+- **Hammer stop hold** (`src/ama/hammer-stop-hold.mjs`). When the hammer's
+  latest terminal audit for the live head is `failed-without-merge`, the closer
+  does not dispatch another hammer on that head until the head, base SHA,
+  mergeability (MERGEABLE/CONFLICTING) or the external check rollup differs from
+  what it first saw. A newly available head/base SHA or a known mergeability
+  reading after `UNKNOWN` counts as a change; missing current SHA readings and
+  current `UNKNOWN` mergeability do not release the hold. Own gate exclusion
+  follows the canonical CI rule: only matching status contexts are ignored;
+  external check runs with that name remain inputs. Per-attempt producer
+  provenance excludes daemon failures, including daemon attempts on a
+  HAM-certified head, so capacity deferral cannot invent a hammer decision.
+  Unmarked legacy entries are accepted only in unattributed or hammer-owned
+  audit documents; explicit hammer markers override document ownership.
+  See the [audit](data-model/ama-audit.md) and
+  [hold-store](data-model/hammer-stop-hold.md) contracts. It answers
+  `hammer-stop-awaiting-input-change` with
+  `recoveryWait`, and pages once per head (`ama_closer.hammer_stop_hold`) naming
+  the predicate the hammer recorded. When an input changes, the hold releases
+  and the ordinary gates, lease and per-PR retry cap decide the one re-dispatch;
+  on a hammer-rebased closer head with a stale review it re-admits the hammer
+  (never on standing blocking findings, never while remediation is pending). A
+  stale review on a head whose tip is not a closer commit is never held: its
+  exact-head re-review stays the owner. The hammer-owner routes (CYCLECAPHAM-01,
+  CIBLOCKHAM-01) keep their own final no-merge decision. The retry-cap page now
+  ends with `Last hammer stop on head <sha>: <predicate>`. State:
+  `data/follow-up-jobs/hammer-stop-hold/<repo>-pr-<n>.json`.
+- **Closer-head re-review decline** (`src/closer-head-rereview-decline.mjs`).
+  An `AMA automated recovery:` re-review on a head whose tip carries the closer
+  trailer is never spawned. The watcher restores the row to `posted` at the last
+  posted review's head and records
+  `rereview_reason = system-rereview-declined:closer-head:<sha>`. Automated
+  recovery reads that marker and does not ask again: it stalls, then pages once
+  at its deadline unless the hammer stop hold owns the PR.
+- **`retrigger-remediation` with no follow-up job**
+  (`src/retrigger-no-job-handoff.mjs`). A `ci-blocked` row goes to the hammer
+  through the CIBLOCKHAM-01 route. Otherwise the latest posted review becomes a
+  follow-up job pinned to the live head (a PR with spent rounds stops at
+  `max-rounds-reached`, where the round-cap hammer handoff owns it). With no
+  posted review there is nothing to remediate. In every case the label is
+  removed and the acknowledgement names the action and outcome; the watcher
+  logs `no-job-hammer`, `no-job-job` or `no-job-none`.
+
 ### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback
 
 When the daemon clean-path fails closed on a **remediable** gate for an

@@ -53,7 +53,7 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
       '--repo',
       repo,
       '--json',
-      'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,title,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
+      'mergeable,mergeStateStatus,headRefName,baseRefName,baseRefOid,headRefOid,title,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
     ],
     { maxBuffer: 5 * 1024 * 1024, ...(signal ? { signal } : {}) }
   );
@@ -111,6 +111,8 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
     prNumber,
     branch: parsed.headRefName,
     baseBranch: parsed.baseRefName,
+    // NOOWNER-01: a moved base is one of the inputs that releases a hammer stop hold.
+    baseSha: parsed.baseRefOid || null,
     headSha: parsed.headRefOid || null,
     mergeable: parsed.mergeable || 'UNKNOWN',
     mergeStateStatus: parsed.mergeStateStatus || null,

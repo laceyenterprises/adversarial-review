@@ -1140,8 +1140,13 @@ uses (`src/hammer-owner-route.mjs`).
   (`ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS`) limits CI probes only. A HAM
   head retains the parked row across pushes, even with green CI, so process
   exit, retry and final-decision reconciliation stay reachable before reviewer
-  suppression. A non-HAM head change or green CI on the original head can
-  re-arm reviewer admission unless the hammer has reached a final outcome.
+  suppression. Dispatched and pending closure outcomes also retain the row
+  before the hammer's first push, including background launch intent and an
+  unknown worker status. A non-HAM head change or green CI on the original
+  head can re-arm reviewer admission only after closure ownership is released
+  without a final outcome. Pending or in-progress remediation anywhere in the
+  same PR ledger prevents new hammer launches and retries, even when an
+  operator retrigger leaves the row `ci-blocked` or the job names an older head.
   Automatic failed-CI admission never requeues a stopped `no-progress`
   hand-off; explicit operator remediation retriggers remain available.
 - The closer admits the red, unreviewed head as a final-hammer close and adds a

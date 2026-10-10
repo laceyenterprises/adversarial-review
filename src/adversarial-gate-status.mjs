@@ -1086,8 +1086,13 @@ async function buildAdversarialGateSnapshot(rootDir, {
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
-  const hasActiveSamePrRemediation = listFollowUpJobsInDir(rootDir, 'inProgress')
-    .some(({ job }) => job?.repo === repo && Number(job?.prNumber) === Number(prNumber));
+  // Branch ownership is PR-scoped, even when a parked row or a head move has
+  // made review evidence unsettled. Operator retriggers can queue a worker
+  // without resetting ci-blocked; neither row status nor job recency waives it.
+  const hasActiveSamePrRemediation = ['pending', 'inProgress'].some((dir) =>
+    listFollowUpJobsInDir(rootDir, dir).some(({ job }) =>
+      String(job?.repo || '').toLowerCase() === String(repo || '').toLowerCase()
+      && Number(job?.prNumber) === Number(prNumber)));
   // ASR-06. Resolved for EVERY gated head, not only for rows Argus owns,
   // because a `high` finding blocks a routable PR too: a human PR that touches a
   // dependency manifest gets its normal adversarial review AND an Argus review,
@@ -1108,6 +1113,9 @@ async function buildAdversarialGateSnapshot(rootDir, {
       commentOnlyFinalRoundPushes,
     })
     : null;
+  if (settledReview && hasActiveSamePrRemediation) {
+    Object.assign(settledReview, { verdict: '', remediationPending: true, ...UNKNOWN_BLOCKERS });
+  }
   const reviewedHeadSha = resolveProvenReviewedHead(settledReview);
   // HAMFINAL-01: the hammer's final `withdrawn-by-hammer` adjudications.
   const hammerWithdrawals = hammerWithdrawalsOverride ?? readHammerWithdrawals({ rootDir, repo, prNumber });

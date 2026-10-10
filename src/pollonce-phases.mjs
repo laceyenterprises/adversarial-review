@@ -2169,9 +2169,26 @@ export async function processReviewSubject(entry, ctx) {
         });
         const closerHead = await resolveHeadCloserCommitSuppression();
         if (closerHead.suppressed || hammerRoute.prTerminal ||
+            ['ama-dispatched', 'ama-pending'].includes(hammerRoute.outcome) ||
             ['hammer-no-merge', 'hammer-cap-exhausted'].includes(hammerRoute.outcome)) {
-          // A HAM push retains ci-blocked ownership even when its CI is green.
-          // Reviewer-only suppression must never stop the owner's next tick.
+          // Launch intent, a running worker, or unresolved closure evidence
+          // retains the durable reconciliation marker before the first HAM
+          // push too. CI greenness and unrelated pushes cannot release it.
+          await projectGateStatusSafe(current);
+          return;
+        }
+        const ciBlockedActiveFollowUp = shouldDeferReviewForActiveFollowUp({
+          rootDir: ROOT,
+          repo: repoPath,
+          prNumber,
+          currentRevisionRef: pendingRevisionRef,
+        });
+        if (ciBlockedActiveFollowUp.defer) {
+          console.log(
+            `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: active follow-up job` +
+              (ciBlockedActiveFollowUp.jobId ? ` ${ciBlockedActiveFollowUp.jobId}` : '') +
+              ` is ${ciBlockedActiveFollowUp.latestJobStatus}`
+          );
           await projectGateStatusSafe(current);
           return;
         }
@@ -2213,21 +2230,6 @@ export async function processReviewSubject(entry, ctx) {
             );
           }
         } else {
-          const ciBlockedActiveFollowUp = shouldDeferReviewForActiveFollowUp({
-            rootDir: ROOT,
-            repo: repoPath,
-            prNumber,
-            currentRevisionRef: pendingRevisionRef,
-          });
-          if (ciBlockedActiveFollowUp.defer) {
-            console.log(
-              `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: active follow-up job` +
-                (ciBlockedActiveFollowUp.jobId ? ` ${ciBlockedActiveFollowUp.jobId}` : '') +
-                ` is ${ciBlockedActiveFollowUp.latestJobStatus}`
-            );
-            await projectGateStatusSafe(current);
-            return;
-          }
           const ciBlockedRecheck = shouldRecheckCiBlockedRereview(current, {
             nowMs: Date.now(),
             env: process.env,

@@ -63,6 +63,7 @@ function buildLegacyHqRemediationDispatchArgs({
   parentSession,
   project,
   hqRoot,
+  allowConflictedBase = false,
 }) {
   const args = [
     'dispatch',
@@ -77,6 +78,9 @@ function buildLegacyHqRemediationDispatchArgs({
     '--pr', String(prNumber),
   ];
   if (branch) args.push('--branch', branch);
+  // REMCONFLICT-01: only a CONFLICTING PR's round carries this flag, so a
+  // mergeable PR's argv is byte-identical to before.
+  if (allowConflictedBase) args.push('--allow-conflicted-base');
   args.push('--root', hqRoot);
   return args;
 }

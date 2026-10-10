@@ -668,6 +668,14 @@ function buildRemediationOutcomeCommentBody({
       lines.push(
         `> **Terminal close queued.** This PR exhausted its \`${riskClass}\` risk-class remediation budget (${roundBudget} round${roundBudget === 1 ? '' : 's'}; completed: ${currentRound}). The hammer owns the final strict-mode remediation of all remaining findings and close once structural gates are green.`
       );
+    } else if (stopCode === 'hq-conflicted-base-unsupported') {
+      // REMCONFLICT-01: nothing was spawned. Worker provisioning rebases the
+      // branch onto trunk and dies on the conflict unless hq dispatch can pass
+      // --allow-conflicted-base.
+      lines.push('');
+      lines.push(
+        '> **Remediation could not start.** This PR has merge conflicts, and the installed `hq dispatch` does not support `--allow-conflicted-base`, so worker provisioning would fail its rebase onto the base branch before the remediation worker starts. Upgrade agent-os hq, then apply the `retrigger-remediation` label. No remediation round was spent.'
+      );
     } else if (reply && (reply.outcome === 'blocked' || reply.operationalBlockers?.length)) {
       lines.push('');
       lines.push(

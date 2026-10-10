@@ -49,6 +49,7 @@ import {
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { resolveRemediationWorkerClassWithFallback } from '../src/remediation-worker-class-fallback.mjs';
 import { mintClaudeCodeRemediationBrokerToken } from '../src/remediation-oauth-preflight.mjs';
+import { gateRemediationConflictedBase } from '../src/remediation-conflicted-base.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import {
   refreshFollowUpGithubToken,
@@ -808,6 +809,8 @@ async function runFollowUpDaemonIteration({
         maxConcurrent: maxConcurrentJobs,
         resolveRemediationWorkerClassImpl: resolveRemediationWorkerClassWithFallback,
         mintClaudeCodeRemediationTokenImpl: mintClaudeCodeRemediationBrokerToken,
+        // REMCONFLICT-01: a CONFLICTING PR's hq dispatch carries --allow-conflicted-base.
+        conflictedBaseGateImpl: gateRemediationConflictedBase,
         shouldStop,
       });
       logTick(

@@ -583,6 +583,7 @@ function createRemediationRuntime({
         jobId: request.jobId,
         modelResolution: ['codex', 'remediator-codex-corp'].includes(workerClass) ? request.modelResolution : null,
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
+        allowConflictedBase: Boolean(request.allowConflictedBase),
         execFileImpl,
         env,
         now,
@@ -703,6 +704,7 @@ async function dispatchRemediationViaHq({
   jobId,
   modelResolution = null,
   requiresWorkflowPush = false,
+  allowConflictedBase = false,
   execFileImpl = execFileAsync,
   env = process.env,
   now = () => new Date().toISOString(),
@@ -723,22 +725,16 @@ async function dispatchRemediationViaHq({
   // The App Contract endpoint currently omits model/reasoning overrides when
   // translating to hq dispatch. Use the existing direct transport only for
   // explicitly pinned non-blocking Codex rounds so the override takes effect.
-  const useAppContract = appMode === 'agent-os' && !modelResolution;
+  // It also forwards neither --pr/--branch nor --allow-conflicted-base, so a
+  // CONFLICTING PR's round takes the direct transport too (REMCONFLICT-01).
+  const useAppContract = appMode === 'agent-os' && !modelResolution && !allowConflictedBase;
   const hqBin = resolveHqBin(env);
   const dispatchEnv = { ...env };
   const workflowPushBrokerEvidence = requiresWorkflowPush
     ? applyMergeAgentBrokerEnv(dispatchEnv, env, { workerClass, requiresWorkflowPush })
     : null;
   const legacyHqArgs = buildLegacyHqRemediationDispatchArgs({
-    ticketRef,
-    workerClass,
-    repo,
-    prNumber,
-    branch,
-    promptPath,
-    parentSession,
-    project,
-    hqRoot,
+    ticketRef, workerClass, repo, prNumber, branch, promptPath, parentSession, project, hqRoot, allowConflictedBase,
   });
   if (modelResolution) legacyHqArgs.push('--model', modelResolution.resolvedModel, '--reasoning-level', modelResolution.resolvedReasoningLevel);
   const ticket = useAppContract
@@ -3293,6 +3289,7 @@ async function consumeNextFollowUpJob({
   quotaHoldRevalidator = null,
   resolveRemediationWorkerClassImpl = null,
   mintClaudeCodeRemediationTokenImpl = null,
+  conflictedBaseGateImpl = null,
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   log = console,
@@ -3742,6 +3739,9 @@ async function consumeNextFollowUpJob({
       });
       return { consumed: false, reason: 'shutting-down', job: requeued.job, jobPath: requeued.jobPath };
     }
+    // REMCONFLICT-01: read live mergeability at dispatch time (src/remediation-conflicted-base.mjs).
+    const conflictedBase = hqDispatchEnabled && conflictedBaseGateImpl ? await conflictedBaseGateImpl({ rootDir, job: claimed.job, jobPath: claimed.jobPath, env: jobEnv, execFileImpl, now, log, stopJobImpl: (stop) => stopConsumedJobWithComment({ ...stop, postCommentImpl, now, log }) }) : null;
+    if (conflictedBase?.result) return conflictedBase.result;
 
     // ARC-08: the health-routed AgentRuntime handles OS or local dispatch and
     // returns the worker descriptor. The subject adapter owns git workspace prep.
@@ -3769,6 +3769,7 @@ async function consumeNextFollowUpJob({
       jobId: claimed.job.jobId,
       modelResolution: codexModelResolution || claudeModelResolution,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
+      allowConflictedBase: conflictedBase?.allowConflictedBase === true,
     });
     log.info?.(`[follow-up-remediation] spawn-preparation jobId=${claimed.job.jobId} env_ms=${envPreparationMs} workspace_ms=${workspacePreparationMs} pre_spawn_total_ms=${runtimeStartedMs - preparationStartedMs} runtime_spawn_ms=${Date.now() - runtimeStartedMs}`);
     const worker = runHandle.worker;
@@ -3991,6 +3992,7 @@ async function consumeFollowUpJobsUntilCapacity({
   quotaHoldRevalidator = defaultQuotaHoldRevalidator,
   resolveRemediationWorkerClassImpl = null,
   mintClaudeCodeRemediationTokenImpl = null,
+  conflictedBaseGateImpl = null,
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   log = console,
@@ -4042,6 +4044,7 @@ async function consumeFollowUpJobsUntilCapacity({
         quotaHoldRevalidator,
         resolveRemediationWorkerClassImpl,
         mintClaudeCodeRemediationTokenImpl,
+        conflictedBaseGateImpl,
         deliverAlertImpl,
         log,
       }),

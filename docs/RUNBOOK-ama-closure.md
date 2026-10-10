@@ -1277,6 +1277,17 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   posted review there is nothing to remediate. In every case the label is
   removed and the acknowledgement names the action and outcome; the watcher
   logs `no-job-hammer`, `no-job-job` or `no-job-none`.
+- **Conflicting PRs are never held** (REMCONFLICT-01). While GitHub reports a
+  merge conflict (`mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`), the
+  hammer stop hold releases with `releasedBy: ['conflicting']` and does not
+  page, because the hammer owns merge-conflict resolution and a rebase is the
+  only input change that helps. The closer's gates, lease and per-PR retry cap
+  still bound the re-dispatch. Every non-conflict stop keeps the NOOWNER-01
+  hold. On the remediation side, a CONFLICTING PR's `hq dispatch` carries
+  `--allow-conflicted-base`, so the remediation worker starts at the branch tip
+  instead of dying in provisioning. When an accepted `retrigger-remediation`
+  starts no worker within 10 minutes, the PR gets one comment naming the
+  refusal (`closer-lease-held`, `max-rounds-reached`, ...).
 
 ### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback
 

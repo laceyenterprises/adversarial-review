@@ -976,3 +976,16 @@ test('AMASCALE: ten eligible closer dispatches are admitted with floor three and
   assert.equal(results.filter((result) => result.dispatched).length, 10, JSON.stringify(results));
   assert.equal(deps.calls.length, 10);
 });
+
+test('withdrawal-only non-exhausted review follows the clean dispatch route', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'withdrawn-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = baseArgs(rootDir, { reviewState: { reviewCycleExhausted: false, verdict: 'request-changes',
+    blockingFindingIdentities: ['unique-finding'] } });
+  args.options.hammerWithdrawnFindings = [{ identity: 'unique-finding',
+    resolution: 'withdrawn-by-hammer', evidenceSha256: 'e'.repeat(64),
+    findingReviewedHead: HEAD, headSha: HEAD }];
+  const result = await maybeDispatchAmaCloser({ ...args, ...testDeps() });
+  assert.equal(result.reason, 'daemon-clean-route', JSON.stringify(result));
+  assert.equal(result.dispatched, false);
+});

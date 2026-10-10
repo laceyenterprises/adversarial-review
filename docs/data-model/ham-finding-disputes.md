@@ -3,7 +3,7 @@
 **Owner:** AMA bounded finding disputes and reviewer context provenance
 **Store:** `data/reviews.db`, table `ham_finding_disputes`
 **Source of truth:** `src/review-state.mjs` (`ensureReviewStateSchema`)
-**Runtime surface:** `src/ama/finding-dispute.mjs`, `src/ama/finding-dispute-owner.mjs`, `src/ama/finding-dispute-context.mjs`, `bin/dispute-finding.mjs`, `src/prompt-context.mjs`, `src/reviewer.mjs`, `src/reviewer-prompt.mjs`
+**Runtime surface:** `src/ama/finding-dispute.mjs`, `src/ama/hammer-adjudication.mjs`, `src/ama/finding-dispute-owner.mjs`, `src/ama/finding-dispute-context.mjs`, `src/ama/withdrawn-review-dismissal.mjs`, `bin/dismiss-withdrawn-reviews.mjs`, `bin/dispute-finding.mjs`, `src/prompt-context.mjs`, `src/reviewer.mjs`, `src/reviewer-prompt.mjs`
 
 ## Schema
 
@@ -14,13 +14,41 @@ The composite primary key is `(repo, pr_number, identity)`. `repo` is text,
 | Column | Type | Contract |
 |---|---|---|
 | `reserved_at` | TEXT, nullable | ISO UTC timestamp of an in-flight reservation; stale after five minutes. |
-| `requests` | INTEGER, default 0 | Reserved requests; at most two per identity and bounded by the configured PR-wide review cap. |
-| `refusals` | INTEGER, default 0 | Non-pending, non-in-flight review CAS refusals; two prevent further requests. |
-| `paged` | INTEGER, default 0 | 0 = unclaimed; 1 = uncertain enqueue; 2 = durable enqueue confirmed. PR-wide deterministic alert identity prevents duplicate pages across restarts. |
+| `requests` | INTEGER, default 0 | Withdrawal attempts (successful or in flight). Since HAMFINAL-01 no longer budgeted. |
+| `refusals` | INTEGER, default 0 | Legacy: re-review CAS refusals from before HAMFINAL-01. No longer written. |
+| `paged` | INTEGER, default 0 | Legacy: pre-HAMFINAL-01 exhaustion page guard. No longer written. |
 | `head_sha` | TEXT, nullable | Exact live head for the latest helper-posted comment for this identity. |
 | `comment_id` | TEXT, nullable | GitHub comment node ID returned by the successful helper post. |
 | `comment_author` | TEXT, nullable | Trusted HAM login returned by GitHub for that post. |
 | `comment_sha256` | TEXT, nullable | SHA-256 of the exact posted UTF-8 body. |
+| `resolution` | TEXT, nullable | `withdrawn-by-hammer` once the hammer's final adjudication is recorded (HAMFINAL-01). |
+| `resolved_at` | TEXT, nullable | ISO UTC time the withdrawal was recorded. |
+| `finding_reviewed_head` | TEXT, nullable | Head the withdrawn finding's review was submitted on. |
+| `evidence_sha256` | TEXT, nullable | SHA-256 of the trimmed evidence, also printed as `Evidence-SHA256` in the comment. |
+
+## Final adjudication (HAMFINAL-01)
+
+Operator decision, 2026-10-10, after agent-os PR 7987: "Hammers judgement is
+final". A row with `resolution = 'withdrawn-by-hammer'` and a `comment_id` is a
+resolved blocking finding. The gate (`src/adversarial-gate-status.mjs`) and the
+watcher closure orchestration read these rows through the read-only, fail-soft
+`readHammerWithdrawals` in `src/ama/hammer-adjudication.mjs`. A withdrawal resolves
+a finding only when its identity is a blocking finding of the cited review,
+`finding_reviewed_head` equals that review's head, and `head_sha` equals the
+current evaluated head. Evidence gathered on a descendant does not apply after
+a branch reset to the reviewed ancestor. Withdrawals do not carry to another
+head without independently validated coverage or content equivalence. The
+held-lease hammer merge procedure uses these rows and matching live HAM comments
+to dismiss only authoritative same-head GitHub reviews whose complete blocker
+lists are withdrawn. Unknown or standing blockers and unrelated vetoes remain;
+read/dismissal failures refuse merge. Dismissal does not remove finding authority
+from the review body: `ama-check` continues to evaluate it on retries.
+`bin/ama-check.mjs` matches the HAM-authored PR comment to these successfully
+recorded rows, checking comment node ID, author, full-body digest, both heads,
+finding identity and evidence digest, then re-hashes the embedded evidence
+against `Evidence-SHA256`. A missing or unreadable store resolves nothing. The
+helper requires a fenced exact-head repro or head-file quote, requests no
+re-review, and does not page.
 
 ## Reservation and prompt trust
 
@@ -31,13 +59,15 @@ The helper validates the latest submitted authoritative blocking review in the
 live head's ancestry, live head and evidence bound of 16,000 UTF-8 bytes. An immediate transaction reserves a request before
 posting. Failed posts, head rechecks and thrown review requests refund that
 reservation; those comments cannot enter dispute context. Successful post
-provenance is recorded before `requestReviewRereview` so an immediately claimed
-review sees it. Structured CAS refusals count toward the refusal budget.
-Triggered, pending and in-flight requests retain fresh provenance; other structured
-refusals restore the prior admission for that identity.
+provenance and the withdrawal are recorded together after a live head recheck.
+A rerun for the same identity and head returns the recorded withdrawal without
+posting again only when `finding_reviewed_head` also matches the currently
+authoritative review. A newer review at the evidence head with the same identity
+requires a fresh post and admission, replacing the latest row for that identity.
 
 The reviewer reads this table without writes, scoped by `(repo, PR, head)`.
-Only comments matching the recorded node ID, trusted HAM author and body digest
+Only rows with `resolution = 'withdrawn-by-hammer'` and comments matching the
+recorded node ID, trusted HAM author and body digest
 enter dispute context. Legacy REST and adapter contexts retain `node_id` alongside
 their numeric IDs; either the context ID or its node ID may match the reservation.
 String and `{ login }` author forms use the same trusted-login and digest check.
@@ -46,31 +76,30 @@ per comment and 256,000 bytes total. REST `[bot]` and GraphQL bare app slugs are
 Missing, legacy or unreadable stores contribute no trusted context. Comments
 remain untrusted evidence and never grant merge authority.
 
-Exhaustion atomically sets `paged` before emitting
-`ama_finding_dispute_exhausted` and attempting a SEV1 page. It records the
-enqueue claim, not remote delivery acknowledgment. If the pager throws, the
-claim is cleared and a later helper invocation can retry. Successful durable
-queueing sets the guard to 2; the alert outbox retries delivery.
+Before HAMFINAL-01, exhaustion set `paged` and emitted `ama_finding_dispute_exhausted`
+with a SEV1 page. Disputes no longer request re-review, so they no longer exhaust
+or page.
 
 ## Retention and migration
 
-AMA owns these rows; no automatic pruning exists. Keep open-PR budget/page
+AMA owns these rows; no automatic pruning exists. Keep open-PR withdrawal
 records across restarts and head changes. Closed-PR archival is an operator
-maintenance action, not a budget reset. `ensureReviewStateSchema` creates the
+maintenance action. `ensureReviewStateSchema` creates the
 table and adds nullable provenance columns to legacy helper-created tables,
 preserving existing request/refusal/page counts. Legacy rows without provenance
 cannot authorize prompt context.
 
-A structured re-review refusal restores the previous admitted comment provenance,
-except when a review is already pending or in flight. A thrown request also restores it
-and refunds the request reservation. Restoration compares the new comment ID
-so a concurrent newer admission cannot be overwritten. Refused comments remain
-on GitHub but never enter reserved reviewer context.
+A failed withdrawal (post failure, untrusted identity, head race) refunds the
+request reservation and records no provenance or resolution. Its comment, if
+posted, stays on GitHub but never enters reserved reviewer context.
+The HAMFINAL-01 columns are added as nullable to legacy tables; legacy rows have
+no `resolution` and resolve nothing; even legacy disputes with valid comment
+provenance are omitted from final-withdrawal prompt context.
 
 The CLI exits 78 with `ama_finding_dispute_owner_refused` before opening SQLite
 when the daemon owner check fails, and exits 79 with
 `ama_finding_dispute_identity_refused` when the posted comment lacks authoritative
-HAM provenance; its reservation is refunded and no re-review is admitted.
+HAM provenance; its reservation is refunded and no withdrawal is recorded.
 The hammer preserves evidence and records no-merge
 status for canonical-owner handoff; it never changes user or credentials itself.
 
@@ -78,8 +107,5 @@ status for canonical-owner handoff; it never changes user or credentials itself.
 
 `reserved_at` (nullable TEXT, ISO UTC) marks an in-flight request. After five
 minutes, the next invocation refunds a stale reservation before enforcing the
-budget. Concurrent live reservations refuse a second caller. Posted provenance
-is retained for pending/in-flight reviews so they can read the fresh evidence.
-`paged` is 0 before a claim, 1 while enqueue is uncertain, and 2 after durable
-enqueue. A restart retries state 1 with the same deterministic outbox identity;
-pending, inflight, delivered and dead-letter entries all deduplicate that identity.
+reservation. Concurrent live reservations refuse a second caller.
+Legacy `paged` state 1 rows are inert; no code path retries them.

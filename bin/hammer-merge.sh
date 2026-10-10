@@ -775,6 +775,15 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     return 1
   }
 
+  # Withdrawal-only closure has no superseding HAM commit. Clear just those
+  # same-head authoritative vetoes whose full blocker lists were withdrawn.
+  if ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/dismiss-withdrawn-reviews.mjs" \
+    --root-dir "<<ROOT_DIR>>" --repo <<REPO>> --pr <<PR_NUMBER>> \
+    --head-sha "$POST_REMEDIATION_SHA" --verdict-file "$HAM_VERDICT_FILE"; then
+    ham_append_terminal_audit failed-without-merge withdrawn-review-dismissal-failed || true
+    ham_release_merge_lease
+    return 1
+  fi
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \

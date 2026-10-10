@@ -12,7 +12,7 @@ import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost } 
 import { disputeFinding } from '../src/ama/finding-dispute.mjs';
 import { assertFindingDisputeOwner } from '../src/ama/finding-dispute-owner.mjs';
 import { recordPrimaryChangeRefusal } from '../src/ama/primary-change-refusal.mjs';
-import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { alertPresentationForDoc } from '../src/alert-delivery.mjs';
 import { formatFindingDisputeContext } from '../src/prompt-context.mjs';
 const head = 'c'.repeat(40), author = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -80,56 +80,72 @@ test('a contextual hunk cannot authorize another region, and line shifts are map
   e.reversalAuthorizations[0].review.body = body.replace('`10`', '`2`');
   assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
 });
+// HAMFINAL-01: withdrawal evidence is a fenced exact-head repro + output.
+const jsonbEvidence = '```\n$ psql -c "UPDATE t SET doc = \'x\'::text"\nERROR:  column "doc" is of type jsonb but expression is of type text\n```\nGenerated destination is JSONB; TEXT assignment fails.';
 function disputeHarness(t, overrides = {}) {
   const db = new Database(':memory:'); ensureReviewStateSchema(db); t.after(() => db.close());
   db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, reviewer, review_status, pr_state, reviewed_at, revision_ref)
     VALUES ('fixture/repo', 1, 'codex', 'posted', 'open', '2026-10-03T00:00:00Z', ?)`).run(head);
   const calls = [];
   const args = { rootDir: '/fixture', repo: 'fixture/repo', prNumber: 1, headSha: head,
-    reviewRef: review.node_id, findingNumber: 1, evidence: 'Generated destination is JSONB; TEXT assignment fails.' };
+    reviewRef: review.node_id, findingNumber: 1, evidence: jsonbEvidence };
   const deps = { db, get: async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head }]
     : { state: 'open', head: { sha: head } },
   postComment: async (text) => { calls.push(['comment', text]); return { node_id: `IC_${calls.length}`, user: { login: 'the-hammer-lacey[bot]' }, body: text }; },
-  request: (input) => { calls.push(['rereview', input]); return requestReviewRereview(input); },
-  page: async (...input) => calls.push(['page', ...input]), logger: { error: (text) => calls.push(['event', text]), warn() {} }, ...overrides };
+  wake: async (input) => calls.push(['wake', input]),
+  logger: { error: (text) => calls.push(['event', text]), info() {}, warn() {} }, ...overrides };
   return { db, calls, args, deps };
 }
-test('dispute posts finding evidence then uses exact-head review CAS, with no operator decision', async (t) => {
+test('dispute records a final withdrawn-by-hammer adjudication with no re-review and no operator decision', async (t) => {
+  // Operator decision 2026-10-10: "Hammers judgement is final".
   const h = disputeHarness(t);
   const result = await disputeFinding(h.args, h.deps);
-  assert.equal(result.triggered, true);
-  assert.deepEqual(h.calls.map(([kind]) => kind), ['comment', 'rereview']);
+  assert.equal(result.withdrawn, true);
+  assert.equal(result.resolution, 'withdrawn-by-hammer');
+  assert.deepEqual(h.calls.map(([kind]) => kind), ['comment', 'wake']);
   assert.match(h.calls[0][1], /finding=1/);
   assert.match(h.calls[0][1], /JSONB/);
-  assert.equal(h.calls[1][1].targetRevisionRef, head);
-  assert.equal(h.db.prepare('SELECT revision_ref, review_status FROM reviewed_prs').get().review_status, 'pending');
+  assert.match(h.calls[0][1], /^Resolution: withdrawn-by-hammer$/m);
+  assert.match(h.calls[0][1], new RegExp(`^Evidence-SHA256: ${result.evidenceSha256}$`, 'm'));
+  assert.equal(h.calls[1][1].headSha, head);
+  // The review row is untouched: nothing for the same-head duplicate guard to drop.
+  assert.equal(h.db.prepare('SELECT revision_ref, review_status FROM reviewed_prs').get().review_status, 'posted');
   const reservations = h.db.prepare('SELECT * FROM ham_finding_disputes').all();
+  assert.equal(reservations[0].resolution, 'withdrawn-by-hammer');
+  assert.equal(reservations[0].finding_reviewed_head, head);
+  assert.equal(reservations[0].evidence_sha256, result.evidenceSha256);
   const comment = { id: reservations[0].comment_id, author: 'the-hammer-lacey', body: h.calls[0][1] };
   const context = formatFindingDisputeContext({ headRefOid: head, comments: [comment] }, reservations);
-  assert.match(context, /confirm or withdraw/); assert.match(context, /JSONB/);
+  assert.match(context, /adjudication is final/); assert.match(context, /JSONB/);
   assert.equal(formatFindingDisputeContext({ headRefOid: author, comments: [comment] }, reservations), '');
 });
-test('repeated dispute refusal pages and emits SEV1 once without requesting again', async (t) => {
-  const h = disputeHarness(t, { request: () => ({ triggered: false, reason: 'blocked' }) });
-  for (let i = 0; i < 4; i++) await disputeFinding(h.args, h.deps);
-  assert.equal(h.calls.filter(([kind]) => kind === 'comment').length, 2);
-  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
-  assert.match(h.calls.find(([kind]) => kind === 'event')[1], /SEV1/);
-});
-test('review cap exhaustion pages once without posting or rearming', async (t) => {
+test('a repeated dispute of the same finding on the same head reuses the recorded withdrawal', async (t) => {
   const h = disputeHarness(t);
+  const first = await disputeFinding(h.args, h.deps);
+  for (let i = 0; i < 3; i++) {
+    const again = await disputeFinding(h.args, h.deps);
+    assert.equal(again.withdrawn, true); assert.equal(again.alreadyRecorded, true);
+    assert.equal(again.commentId, first.commentId);
+  }
+  assert.equal(h.calls.filter(([kind]) => kind === 'comment').length, 1);
+  assert.equal(h.calls.filter(([kind]) => kind === 'page' || kind === 'event').length, 0);
+  assert.equal(h.db.prepare('SELECT requests FROM ham_finding_disputes').get().requests, 1);
+});
+test('an exhausted review-cycle cap no longer blocks a withdrawal', async (t) => {
+  const h = disputeHarness(t, { loadedConfig: { get: (key, fallback) => key === 'review_cycle_cap' ? 1 : fallback } });
   h.db.prepare(`INSERT INTO review_cycle_verdicts(pr_url, head_sha, verdict_count, verdict_at)
     VALUES ('https://github.com/fixture/repo/pull/1', ?, 10, ?)`).run(head, new Date().toISOString());
-  await disputeFinding(h.args, h.deps); await disputeFinding(h.args, h.deps);
-  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
-  assert.equal(h.calls.filter(([kind]) => kind === 'comment' || kind === 'rereview').length, 0);
+  assert.equal((await disputeFinding(h.args, h.deps)).withdrawn, true);
+  assert.equal(h.calls.filter(([kind]) => kind === 'comment').length, 1);
+  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 0);
 });
 test('head movement never re-arms a dispute', async (t) => {
   const h = disputeHarness(t); let reads = 0;
   h.deps.get = async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head }]
     : { state: 'open', head: { sha: ++reads === 1 ? head : author } };
   await assert.rejects(disputeFinding(h.args, h.deps), /head moved/);
-  assert.equal(h.calls.filter(([kind]) => kind === 'rereview').length, 0);
+  assert.equal(h.calls.filter(([kind]) => kind === 'wake').length, 0);
+  assert.equal(h.db.prepare('SELECT resolution FROM ham_finding_disputes').get().resolution, null);
   assert.equal(h.db.prepare('SELECT requests FROM ham_finding_disputes').get().requests, 0);
   assert.equal(h.db.prepare('SELECT comment_id FROM ham_finding_disputes').get().comment_id, null);
 });
@@ -147,12 +163,14 @@ test('exhaustion events use the real pager presentation', () => {
   }
 });
 
-test('a dispute after other repairs binds the re-review to live head and verifies finding ancestry', async (t) => {
+test('a dispute after other repairs binds the withdrawal to live head and verifies finding ancestry', async (t) => {
   const h = disputeHarness(t);
   h.deps.get = async (url) => url.includes('/reviews?') ? [review]
     : url.includes('/compare/') ? { status: 'ahead' } : { state: 'open', head: { sha: head } };
-  assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
-  assert.equal(h.calls[1][1].targetRevisionRef, head);
+  const result = await disputeFinding(h.args, h.deps);
+  assert.equal(result.withdrawn, true);
+  assert.equal(result.headSha, head); assert.equal(result.findingReviewedHead, author);
+  assert.match(h.calls[0][1], new RegExp(`^Reviewed-Head: ${head}$`, 'm'));
   assert.match(h.calls[0][1], new RegExp(`Finding-Reviewed-Head: ${author}`));
 });
 
@@ -170,7 +188,7 @@ test('reviewer includes reserved HAM evidence in both full and slim prompt paths
   const { __test__ } = await import('../src/reviewer.mjs');
   const comment = { id: 'IC_verified', author: 'the-hammer-lacey',
     body: `HAM finding dispute — PRR_fixture finding=1\nReviewed-Head: ${head}\nJSONB proof` };
-  const reservations = [{ head_sha: head, comment_id: comment.id, comment_author: 'the-hammer-lacey[bot]',
+  const reservations = [{ head_sha: head, resolution: 'withdrawn-by-hammer', comment_id: comment.id, comment_author: 'the-hammer-lacey[bot]',
     comment_sha256: createHash('sha256').update(comment.body).digest('hex') }];
   for (const slim of [false, true]) {
     const context = await __test__.buildReviewerExtraContext({ repo: 'fixture/repo', prNumber: 1,
@@ -178,18 +196,8 @@ test('reviewer includes reserved HAM evidence in both full and slim prompt paths
       readFindingDisputeReservationsImpl: () => reservations,
       reviewModeDecision: { slim, lowRiskClasses: [], reasons: [], files: [], stats: { files: 1, added: 1, removed: 0 } },
       fetchLinkedSpecContentsImpl: async () => '', buildHardeningReviewContextImpl: async () => '', log: { error() {} } });
-    assert.match(context, /JSONB proof/); assert.match(context, /confirm or withdraw/);
+    assert.match(context, /JSONB proof/); assert.match(context, /adjudication is final/);
   }
-});
-
-test('PR-wide exhaustion cannot page again when a reviewer changes the finding title', async (t) => {
-  const h = disputeHarness(t, { loadedConfig: { get: (key, fallback) => key === 'review_cycle_cap' ? 1 : fallback } });
-  await disputeFinding(h.args, h.deps);
-  h.deps.get = async (url) => url.includes('/reviews?')
-    ? [{ ...review, commit_id: head, body: body.replace('Narrow push enforcement', 'Renamed finding') }]
-    : { state: 'open', head: { sha: head } };
-  await disputeFinding(h.args, h.deps);
-  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
 });
 
 test('a one-line finding cannot waive a contiguous multi-line author rewrite', () => {
@@ -254,6 +262,8 @@ test('legacy dispute schema upgrades preserve budgets and provenance reads are s
   assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }), []);
   db.prepare(`UPDATE ham_finding_disputes SET head_sha=?, comment_id='IC_1',
     comment_author='the-hammer-lacey', comment_sha256='digest'`).run(head);
+  assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }), []);
+  db.prepare("UPDATE ham_finding_disputes SET resolution='withdrawn-by-hammer'").run();
   assert.equal(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }).length, 1);
   for (const scope of [{ repo: 'other/repo' }, { prNumber: 2 }, { headSha: author }]) {
     assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head, ...scope }), []);
@@ -267,12 +277,28 @@ test('failed dispute side effects refund the request reservation', async (t) => 
   assert.equal(h.calls.length, 0);
 });
 
-test('review-cycle boundary uses the shared escalation threshold', async (t) => {
-  const h = disputeHarness(t, { loadedConfig: { get: (key, fallback) => key === 'review_cycle_cap' ? 1 : fallback } });
-  h.db.prepare(`INSERT INTO review_cycle_verdicts(pr_url, head_sha, verdict_count, verdict_at)
-    VALUES ('https://github.com/fixture/repo/pull/1', ?, 1, ?)`).run(head, new Date().toISOString());
-  assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
-  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 0);
+test('a genuine legacy HAMINTENT-02 dispute never receives final-withdrawal authority', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ham-legacy-context-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db); t.after(() => db.close());
+  // Byte shape of the pre-HAMFINAL helper on origin/main (HAMINTENT-02).
+  const comment = { id: 'IC_legacy', author: 'the-hammer-lacey', body:
+    `HAM finding dispute — ${review.html_url} finding=1\nReviewed-Head: ${head}\nFinding-Reviewed-Head: ${author}\n\n`
+    + '```\n$ git show HEAD:fixture.json | python3 -m json.tool\n{}\n```\n\n'
+    + 'Reviewer: evaluate this evidence on the exact head and explicitly confirm or withdraw the blocking finding. '
+    + 'Merge remains blocked pending adjudication.' };
+  db.prepare(`INSERT INTO ham_finding_disputes
+    (repo, pr_number, identity, requests, head_sha, comment_id, comment_author, comment_sha256)
+    VALUES ('fixture/repo', 1, 'legacy', 1, ?, ?, ?, ?)`).run(head, comment.id, 'the-hammer-lacey[bot]',
+    createHash('sha256').update(comment.body).digest('hex'));
+  const rows = db.prepare('SELECT * FROM ham_finding_disputes').all();
+  assert.equal(rows[0].resolution, null);
+  assert.equal(formatFindingDisputeContext({ headRefOid: head, comments: [comment] }, rows), '');
+  assert.deepEqual(readFindingDisputeReservations({ rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head }), []);
+  // Even a modern-shaped comment with valid provenance must be admitted first.
+  const modern = { ...comment, body: comment.body.replace('Reviewed-Head:', 'Resolution: withdrawn-by-hammer\nReviewed-Head:') };
+  assert.equal(formatFindingDisputeContext({ headRefOid: head, comments: [modern] },
+    [{ ...rows[0], comment_sha256: createHash('sha256').update(modern.body).digest('hex') }]), '');
 });
 
 test('helper rejects posts under a non-HAM identity and refunds their reservation', async (t) => {
@@ -280,23 +306,6 @@ test('helper rejects posts under a non-HAM identity and refunds their reservatio
   await assert.rejects(disputeFinding(h.args, h.deps), /trusted HAM provenance/);
   assert.equal(h.db.prepare('SELECT requests FROM ham_finding_disputes').get().requests, 0);
   assert.equal(h.db.prepare('SELECT comment_id FROM ham_finding_disputes').get().comment_id, null);
-});
-
-test('failed exhaustion enqueue refunds the PR-wide page guard and permits a later retry', async (t) => {
-  const h = disputeHarness(t, { request: () => ({ triggered: false, reason: 'blocked' }) });
-  await disputeFinding(h.args, h.deps);
-  h.deps.page = async () => { throw new Error('pager unavailable'); };
-  await assert.rejects(disputeFinding(h.args, h.deps), /pager unavailable/);
-  const row = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
-  assert.equal(row.paged, 0);
-  assert.equal(row.requests, 2);
-  assert.equal(row.refusals, 2);
-  h.deps.page = async () => h.calls.push(['page']);
-  await disputeFinding(h.args, h.deps);
-  await disputeFinding(h.args, h.deps);
-  assert.equal(h.db.prepare('SELECT paged FROM ham_finding_disputes').get().paged, 2);
-  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
-  assert.equal(h.calls.filter(([kind]) => kind === 'comment').length, 2);
 });
 
 test('dispute ownership preflight checks the DB, directory, sidecars and actual configured alert sink', (t) => {
@@ -368,7 +377,7 @@ test('context includes every reserved finding, only its latest comment, with a t
   for (let index = 0; index < 4; index++) {
     const body = `HAM finding dispute — PRR_fixture finding=${index + 1}\nReviewed-Head: ${head}\nEvidence ${index}`;
     comments.push({ id: `IC_${index}`, author: 'the-hammer-lacey', body });
-    reservations.push({ comment_id: `IC_${index}`, head_sha: head, comment_author: 'the-hammer-lacey',
+    reservations.push({ comment_id: `IC_${index}`, head_sha: head, resolution: 'withdrawn-by-hammer', comment_author: 'the-hammer-lacey',
       comment_sha256: createHash('sha256').update(body).digest('hex') });
   }
   comments.unshift({ ...comments[0], id: 'IC_old', body: comments[0].body + ' superseded' });
@@ -378,7 +387,7 @@ test('context includes every reserved finding, only its latest comment, with a t
   for (let index = 4; index < 40; index++) {
     const body = `HAM finding dispute — PRR_fixture finding=${index + 1}\nReviewed-Head: ${head}\n` + 'x'.repeat(16000);
     comments.push({ id: `IC_${index}`, author: 'the-hammer-lacey', body });
-    reservations.push({ comment_id: `IC_${index}`, head_sha: head, comment_author: 'the-hammer-lacey',
+    reservations.push({ comment_id: `IC_${index}`, head_sha: head, resolution: 'withdrawn-by-hammer', comment_author: 'the-hammer-lacey',
       comment_sha256: createHash('sha256').update(body).digest('hex') });
   }
   const bounded = formatFindingDisputeContext({ headRefOid: head, comments }, reservations);
@@ -433,7 +442,7 @@ test('newer dismissed, untrusted or non-ancestor reviews do not supersede a live
     h.deps.get = async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head },
       { ...review, node_id: 'PRR_other', ...overrides }]
       : url.includes('/compare/') ? { status: 'diverged' } : { state: 'open', head: { sha: head } };
-    assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
+    assert.equal((await disputeFinding(h.args, h.deps)).withdrawn, true);
   }
 });
 
@@ -491,23 +500,12 @@ test('unreadable or capped citation refuses its waiver without poisoning author 
   }
 });
 
-test('refused or thrown re-review restores previously admitted evidence', async (t) => {
-  for (const mode of ['refused', 'pending', 'throw']) {
+test('prose-only dispute evidence is refused before any reservation or post', async (t) => {
+  for (const evidence of ['Generated destination is JSONB; TEXT assignment fails.', '```\n```\nempty fence', '```\nunterminated']) {
     const h = disputeHarness(t);
-    await disputeFinding(h.args, h.deps);
-    const before = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
-    h.deps.request = () => {
-      if (mode === 'throw') throw new Error('request unavailable');
-      return { triggered: false, status: mode === 'pending' ? 'pending' : undefined, reason: 'blocked' };
-    };
-    if (mode === 'throw') await assert.rejects(disputeFinding(h.args, h.deps), /request unavailable/);
-    else await disputeFinding(h.args, h.deps);
-    const after = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
-    for (const key of ['head_sha', 'comment_id', 'comment_author', 'comment_sha256']) {
-      if (mode === 'pending' && key === 'comment_id') assert.notEqual(after[key], before[key]);
-      else assert.equal(after[key], before[key]);
-    }
-    assert.equal(after.requests, mode === 'throw' ? before.requests : before.requests + 1);
+    await assert.rejects(disputeFinding({ ...h.args, evidence }, h.deps), /exact-head repro command and output, or the head file/);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.db.prepare('SELECT COUNT(*) AS count FROM ham_finding_disputes').get().count, 0);
   }
 });
 
@@ -519,7 +517,7 @@ test('CLI refuses non-HAM comment provenance and refunds its reservation', (t) =
   db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, reviewer, review_status, pr_state, reviewed_at, revision_ref)
     VALUES ('fixture/repo', 1, 'codex', 'posted', 'open', '2026-10-03T00:00:00Z', ?)`).run(head);
   db.close();
-  writeFileSync(join(rootDir, 'evidence.txt'), 'fixture evidence');
+  writeFileSync(join(rootDir, 'evidence.txt'), jsonbEvidence);
   const fakeGh = `#!${process.execPath}
 const args=process.argv.slice(2);
 let response;
@@ -562,18 +560,21 @@ test('malformed newer authoritative review refuses an older reversal waiver', as
  test('stale killed reservation is reclaimed before budget enforcement', async (t) => {
   const h = disputeHarness(t);
   await disputeFinding(h.args, h.deps);
-  h.db.prepare("UPDATE ham_finding_disputes SET requests=2, reserved_at='2000-01-01T00:00:00.000Z'").run();
-  assert.equal((await disputeFinding(h.args, h.deps)).status, 'already-pending');
+  // A killed caller left a stale reservation and recorded no withdrawal.
+  h.db.prepare(`UPDATE ham_finding_disputes SET requests=2, reserved_at='2000-01-01T00:00:00.000Z',
+    resolution=NULL, comment_id=NULL`).run();
+  assert.equal((await disputeFinding(h.args, h.deps)).withdrawn, true);
   const row = h.db.prepare('SELECT * FROM ham_finding_disputes').get();
   assert.equal(row.requests, 2);
   assert.equal(row.reserved_at, null);
+  assert.equal(row.resolution, 'withdrawn-by-hammer');
  });
  test('blocking COMMENTED and DISMISSED reviews can be disputed', async (t) => {
   for (const state of ['COMMENTED', 'DISMISSED']) {
     const h = disputeHarness(t);
     const get = h.deps.get;
     h.deps.get = async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head, state }] : get(url);
-    assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
+    assert.equal((await disputeFinding(h.args, h.deps)).withdrawn, true);
   }
  });
 
@@ -584,25 +585,16 @@ test('capped authorization comparison refuses the waiver', () => {
     assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
   }
 });
-test('uncertain exhaustion enqueue is retried after a killed caller', async (t) => {
-  const h = disputeHarness(t);
-  await disputeFinding(h.args, h.deps);
-  h.db.prepare('UPDATE ham_finding_disputes SET requests=2, paged=1').run();
-  await disputeFinding(h.args, h.deps);
-  assert.equal(h.calls.filter(([kind]) => kind === 'page').length, 1);
-  assert.equal(h.db.prepare('SELECT paged FROM ham_finding_disputes').get().paged, 2);
-});
-
-test('same-head cross-family dispute routes back to the cited family', async (t) => {
+test('same-head cross-family dispute withdraws the cited family finding without touching the review row', async (t) => {
   const h = disputeHarness(t);
   h.db.prepare("UPDATE reviewed_prs SET reviewer='claude'").run();
   const cited = { ...review, commit_id: head };
   h.deps.get = async (url) => url.includes('/reviews?') ? [cited,
     { ...cited, node_id: 'PRR_other_family', user: { login: 'lacey-gemini-reviewer[bot]' } }]
     : { state: 'open', head: { sha: head } };
-  assert.equal((await disputeFinding(h.args, h.deps)).triggered, true);
-  assert.equal(h.calls[1][1].reviewerFamily, 'codex');
-  assert.equal(h.db.prepare('SELECT reviewer FROM reviewed_prs').get().reviewer, 'codex');
+  assert.equal((await disputeFinding(h.args, h.deps)).withdrawn, true);
+  assert.ok(h.calls[0][1].startsWith(`HAM finding dispute — ${review.html_url} finding=1\n`));
+  assert.deepEqual(h.db.prepare('SELECT reviewer, review_status FROM reviewed_prs').get(), { reviewer: 'claude', review_status: 'posted' });
 });
 
 test('primary-change reversal shares exact HAM and AMA dispatch ticket provenance', () => {

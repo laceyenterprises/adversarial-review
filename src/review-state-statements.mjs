@@ -143,7 +143,6 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
        WHEN 'reviewer-output' THEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-output]%'
        WHEN 'attestation-sign-failed' THEN lower(COALESCE(failure_message, '')) LIKE '[attestation-sign-failed]%'
        WHEN 'hcp-unavailable' THEN lower(COALESCE(failure_message, '')) LIKE '[hcp-unavailable]%'
-       WHEN 'daemon-bounce' THEN lower(COALESCE(failure_message, '')) LIKE '[daemon-bounce]%'
        WHEN 'launchctl-bootstrap' THEN (
          lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
          lower(COALESCE(failure_message, '')) LIKE '%claude launchctl session bootstrap failed%' OR
@@ -193,6 +192,33 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
        )
        ELSE 0
      END`;
+
+// Only the session whose exit and lack of a late post were confirmed may be
+// replaced. Admission and dispatch queueing can outlive that reconciliation.
+export const MARK_DAEMON_BOUNCE_RECOVERY_ATTEMPT_STARTED_SQL =
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         revision_ref = COALESCE(?, revision_ref),
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         quota_reset_at_utc = NULL,
+         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
+   WHERE repo = ? AND pr_number = ?
+     AND review_status IN ('failed', 'pending')
+     AND reviewer_session_uuid = ?
+     AND reviewer_started_at = ?
+     AND failed_at = ?
+     AND reviewer_head_sha = ?
+     AND lower(COALESCE(failure_message, '')) LIKE '[daemon-bounce]%'
+     AND COALESCE(infra_auto_recover_attempts, 0) < ?
+     AND COALESCE(pr_state, 'open') != 'merged'`;
 
 export const MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL =
   `UPDATE reviewed_prs
@@ -359,6 +385,10 @@ export function prepareMarkTokenRefreshRecoveryAttemptStarted(db) {
 
 export function prepareMarkInfraAutoRecoveryAttemptStarted(db) {
   return db.prepare(MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL);
+}
+
+export function prepareMarkDaemonBounceRecoveryAttemptStarted(db) {
+  return db.prepare(MARK_DAEMON_BOUNCE_RECOVERY_ATTEMPT_STARTED_SQL);
 }
 
 export function prepareMarkReviewerCommandFailedRecoveredPosted(db) {

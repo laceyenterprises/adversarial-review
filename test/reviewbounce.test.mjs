@@ -9,17 +9,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { recoverReviewerRunRecords } from '../src/adapters/reviewer-runtime/index.mjs';
 import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
-import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
+import { reapRunningPassTimeouts, queueFollowUpForRecoveredPostedReview } from '../src/reviewer-pass-reaper.mjs';
 import { reviewRowInTerminalFailureState } from '../src/pollonce-phases.mjs';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
-import { MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL } from '../src/review-state-statements.mjs';
+import {
+  MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL,
+  MARK_DAEMON_BOUNCE_RECOVERY_ATTEMPT_STARTED_SQL,
+} from '../src/review-state-statements.mjs';
+import { settleDaemonBouncePostedReview } from '../src/daemon-bounce-posted-review.mjs';
 import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
 import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
 import {
@@ -117,6 +121,14 @@ function reap(rootDir, db, followUps = []) {
 }
 
 function claimInfraRecovery(db, row, failureClass) {
+  if (failureClass === DAEMON_BOUNCE_FAILURE_CLASS) {
+    return db.prepare(MARK_DAEMON_BOUNCE_RECOVERY_ATTEMPT_STARTED_SQL).run(
+      '2026-10-09T15:20:00.000Z', 'requeued-session', HEAD, null, 1200000,
+      '2026-10-09T15:40:00.000Z', REPO, PR,
+      row.reviewer_session_uuid, row.reviewer_started_at, row.failed_at,
+      row.reviewer_head_sha, DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
+    );
+  }
   return db.prepare(MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL).run(
     '2026-10-09T15:20:00.000Z',
     'requeued-session',
@@ -149,6 +161,38 @@ test('a daemon bounce re-queues the row without charging review_attempts', async
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+for (const status of ['failed', 'pending']) {
+  for (const [field, value] of [
+    ['reviewer_session_uuid', 'new-bounce-session'],
+    ['reviewer_started_at', '2026-10-09T15:21:00.000Z'],
+    ['failed_at', '2026-10-09T15:22:00.000Z'],
+    ['reviewer_head_sha', OTHER_HEAD],
+  ]) test(`bounce replacement refuses changed ${field} on a ${status} row`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      const inspected = reviewRow(db);
+      const result = await expiredBounceRecovery({ db, overrides: {
+        isAlive: () => false,
+        sleep: async () => {},
+        findPostedReview: async () => {
+          db.prepare(`UPDATE reviewed_prs SET review_status = ?, ${field} = ?
+            WHERE pr_number = ?`).run(status, value, PR);
+          return null;
+        },
+      } });
+      assert.equal(result.handled, false, 'only the inspected process was confirmed dead');
+      const replacement = reviewRow(db);
+      assert.equal(claimInfraRecovery(db, inspected, DAEMON_BOUNCE_FAILURE_CLASS).changes, 0);
+      assert.deepEqual(reviewRow(db), replacement, 'new process evidence and attempts must survive');
+    } finally {
+      db.close();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test('PR 8000 replay: the review posted after the bounce settles the row as posted for the exact head', async () => {
   const { rootDir, db } = setup();
@@ -488,3 +532,106 @@ test('expired-bounce late-post settlement cannot overwrite a replacement session
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+const BLOCKING_REVIEW = {
+  id: 5180008000,
+  commit_id: HEAD,
+  submitted_at: POSTED_AT,
+  state: 'CHANGES_REQUESTED',
+  body: '## Blocking Issues\n\n- **Broken handoff**\n  - Queue is missing.\n\n## Verdict\nRequest changes',
+};
+
+function queueRecoveredReview(args) {
+  return queueFollowUpForRecoveredPostedReview({
+    ...args,
+    summarizePRRemediationLedgerImpl: () => ({ completedRoundsForPR: 0 }),
+    resolveRoundBudgetForJobImpl: () => ({ riskClass: 'critical', roundBudget: 2 }),
+    resolveHandoffConfigImpl: () => ({ enabled: false }),
+    readSingleReviewDecisionImpl: () => null,
+  });
+}
+
+test('bounce probe captures a blocking review and hands off before a later artifact arrives', async () => {
+  const { rootDir, db } = setup();
+  try {
+    insertReviewingRow(db);
+    await bounceWatcher(rootDir, db);
+    insertRunningPass(db, { commentId: null });
+    db.exec('UPDATE reviewer_passes SET body_md = NULL, verdict = NULL');
+    let handoff;
+    const result = await expiredBounceRecovery({ db, overrides: {
+      isAlive: () => false,
+      findPostedReview: async () => BLOCKING_REVIEW,
+      markPosted: (args) => settleDaemonBouncePostedReview({ db, rootDir, ...args,
+        queueFollowUp: (payload) => {
+          assert.equal(payload.row.body_md, BLOCKING_REVIEW.body);
+          assert.equal(payload.row.verdict, 'request-changes');
+          assert.equal(payload.row.gh_comment_id, String(BLOCKING_REVIEW.id));
+          handoff = queueRecoveredReview(payload);
+        },
+      }),
+    } });
+    assert.equal(result.reason, 'marked-posted');
+    assert.equal(reviewRow(db).review_status, 'posted');
+    const pass = db.prepare('SELECT * FROM reviewer_passes').get();
+    assert.equal(pass.body_md, BLOCKING_REVIEW.body);
+    assert.equal(pass.verdict, 'request-changes');
+    assert.equal(pass.gh_comment_id, String(BLOCKING_REVIEW.id));
+    assert.equal(pass.body_captured_at, POSTED_AT);
+    assert.equal(pass.status, 'completed');
+    const job = JSON.parse(readFileSync(handoff.jobPath, 'utf8'));
+    assert.equal(job.reviewBody, BLOCKING_REVIEW.body);
+    assert.equal(job.revisionRef, HEAD);
+    // The original reviewer may finish artifact capture even after probe recovery.
+    db.prepare('UPDATE reviewer_passes SET body_captured_at = ? WHERE pass_id = ?')
+      .run('2026-10-09T15:20:00.000Z', pass.pass_id);
+    const followUps = [];
+    reap(rootDir, db, followUps);
+    assert.equal(followUps.length, 0, 'the completed recovered pass already has its handoff');
+    assert.equal(queueRecoveredReview({ rootDir, row: pass, reviewRow: reviewRow(db),
+      reviewPostedAt: POSTED_AT }).reason, 'duplicate-review-follow-up');
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+for (const failure of ['capture', 'queue', 'after-queue']) {
+  test(`late-post settlement remains retryable after ${failure} failure`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      insertRunningPass(db, { commentId: null });
+      db.exec('UPDATE reviewer_passes SET body_md = NULL, verdict = NULL');
+      const original = reviewRow(db);
+      const originalPass = db.prepare('SELECT * FROM reviewer_passes').get();
+      if (failure === 'capture') {
+        db.exec(`CREATE TRIGGER reject_capture BEFORE UPDATE ON reviewer_passes
+          BEGIN SELECT RAISE(ABORT, 'fixture capture failure'); END`);
+      }
+      const recover = (queueFollowUp) => expiredBounceRecovery({ db, overrides: {
+        isAlive: () => false,
+        findPostedReview: async () => BLOCKING_REVIEW,
+        markPosted: (args) => settleDaemonBouncePostedReview({ db, rootDir, ...args, queueFollowUp }),
+      } });
+      const failed = await recover((args) => {
+        if (failure === 'after-queue') queueRecoveredReview(args);
+        throw new Error('fixture queue failure');
+      });
+      assert.equal(failed.reason, 'bounce-recovery-inconclusive');
+      assert.deepEqual(reviewRow(db), original);
+      assert.deepEqual(db.prepare('SELECT * FROM reviewer_passes').get(), originalPass);
+      if (failure === 'capture') db.exec('DROP TRIGGER reject_capture');
+      let handoff;
+      const retried = await recover((args) => { handoff = queueRecoveredReview(args); });
+      assert.equal(retried.reason, 'marked-posted');
+      assert.equal(reviewRow(db).review_attempts, 1);
+      assert.equal(handoff.queued, failure !== 'after-queue');
+      if (failure === 'after-queue') assert.equal(handoff.reason, 'duplicate-review-follow-up');
+    } finally {
+      db.close();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}

@@ -107,10 +107,10 @@ import { checkHcpHealthz } from './hcp-health.mjs';
 import { handlePostedReviewRow } from './posted-review-row.mjs';
 import {
   DAEMON_BOUNCE_FAILURE_CLASS,
-  bouncedPostedReviewSettleSql,
   reconcileDaemonBounceBeforeRetry,
   isDaemonBounceFailure,
 } from './daemon-bounce-recovery.mjs';
+import { settleDaemonBouncePostedReview } from './daemon-bounce-posted-review.mjs';
 import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
   quotaHoldDecision,
@@ -148,6 +148,7 @@ import {
   stmtMarkAttemptStarted,
   stmtMarkClosed,
   stmtMarkInfraAutoRecoveryAttemptStarted,
+  stmtMarkDaemonBounceRecoveryAttemptStarted,
   stmtMarkTokenRefreshRecoveryAttemptStarted,
   stmtMarkArgusSecurityQueued,
   stmtMarkMalformed,
@@ -2450,11 +2451,11 @@ export async function processReviewSubject(entry, ctx) {
           row: current,
           findPostedReview: reviewerCommandFailedReviewProbe,
           resolveReviewerLogin: reviewerBotLogin,
-          markPosted: ({ row, postedAt }) => {
-            const changes = db.prepare(bouncedPostedReviewSettleSql(
-              'reviewer_session_uuid = ? AND reviewer_started_at = ? AND failed_at = ?'
-            )).run(postedAt, row.repo, row.pr_number, row.reviewer_head_sha,
-              row.reviewer_head_sha, row.reviewer_session_uuid, row.reviewer_started_at, row.failed_at).changes;
+          markPosted: ({ row, postedAt, postedReview }) => {
+            const changes = settleDaemonBouncePostedReview({
+              db, rootDir: ROOT, row, postedAt, postedReview,
+              defaultBaseBranch: subject.baseRefName || subject.baseBranch || 'main',
+            });
             if (changes === 1) {
               markWatcherReviewHeartbeat({ repo: row.repo, pr_number: row.pr_number, posted_at: postedAt });
             }
@@ -2965,6 +2966,22 @@ export async function processReviewSubject(entry, ctx) {
                 prNumber,
                 current?.failed_at || null,
                 current?.reviewer_head_sha || null
+              )
+              : infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS
+              ? stmtMarkDaemonBounceRecoveryAttemptStarted.run(
+                attemptAt,
+                reviewerSessionUuid,
+                reviewerHeadSha,
+                pendingRevisionRef,
+                reviewerTimeoutMs,
+                reviewerLeaseExpiresAt,
+                repoPath,
+                prNumber,
+                current.reviewer_session_uuid,
+                current.reviewer_started_at,
+                current.failed_at,
+                current.reviewer_head_sha,
+                INFRA_AUTO_RECOVER_CAP
               )
               : infraRecoveryClass
               ? stmtMarkInfraAutoRecoveryAttemptStarted.run(

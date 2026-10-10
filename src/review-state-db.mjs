@@ -32,6 +32,7 @@ import {
   prepareReleaseReviewerClaim,
   prepareReleaseLegacyStaleReviewerClaim,
   prepareMarkInfraAutoRecoveryAttemptStarted,
+  prepareMarkDaemonBounceRecoveryAttemptStarted,
   prepareMarkTokenRefreshRecoveryAttemptStarted,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
@@ -104,6 +105,7 @@ export const stmtGetPendingFastMergeAudits = db.prepare(
 );
 
 export const stmtMarkInfraAutoRecoveryAttemptStarted = prepareMarkInfraAutoRecoveryAttemptStarted(db);
+export const stmtMarkDaemonBounceRecoveryAttemptStarted = prepareMarkDaemonBounceRecoveryAttemptStarted(db);
 export const stmtMarkTokenRefreshRecoveryAttemptStarted = prepareMarkTokenRefreshRecoveryAttemptStarted(db);
 export const stmtMarkReviewPopulationRetryAttemptStarted = db.prepare(
   `UPDATE reviewed_prs

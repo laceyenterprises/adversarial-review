@@ -403,8 +403,15 @@ new PR
   PGID start time, sends bounded SIGTERM/SIGKILL only to that verified group,
   confirms group exit, and reprobes GitHub immediately and after 500/1500/3000ms
   for the original reviewer bot's exact-head review since session start. A late
-  post settles the original row through a session/start/failure-guarded CAS;
-  confirmed death with no post permits the existing bounded infrastructure claim.
+  post persists the exact-head review body, verdict, and GitHub artifact ID in
+  the session's matching reviewer pass and queues or deduplicates its follow-up
+  before committing the session/start/failure/head-guarded posted transition.
+  Capture or handoff failure rolls back SQLite settlement so recovery can retry;
+  an already-written follow-up is deduplicated on replay. Confirmed death with no
+  post permits a dedicated bounded bounce claim matching the inspected session,
+  start time, failure timestamp, and head on both failed and pending rows. These
+  values travel through admission and queued dispatch; a changed claim loses the
+  CAS without clearing the replacement session's evidence or charging an attempt.
   Missing identity or persisted timeout, unconfirmed exit, unsafe watcher PGID, or failed GitHub probes
   defer recovery without spending an attempt or clearing the original evidence.
 - Overdue orphan auto-retry is deliberately narrow. The watcher only attempts it when the row persisted the original launch timeout and an authoritative reviewer spawn timestamp, the orphan age exceeds that persisted timeout from the actual subprocess start, the process group is confirmed dead after the bounded recovery loop, and GitHub is reprobed over a short delayed window with no late review found. That same steady-state recovery path also settles the runtime reviewer run-state ledger before the SQLite row flips terminal. Any ambiguity falls back to sticky `failed-orphan` instead of launching a second reviewer.

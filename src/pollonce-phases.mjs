@@ -107,7 +107,8 @@ import { checkHcpHealthz } from './hcp-health.mjs';
 import { handlePostedReviewRow } from './posted-review-row.mjs';
 import {
   DAEMON_BOUNCE_FAILURE_CLASS,
-  daemonBounceReviewerHold,
+  bouncedPostedReviewSettleSql,
+  reconcileDaemonBounceBeforeRetry,
   isDaemonBounceFailure,
 } from './daemon-bounce-recovery.mjs';
 import {
@@ -2442,15 +2443,29 @@ export async function processReviewSubject(entry, ctx) {
           return;
         }
       }
-      // REVIEWBOUNCE-01: a bounced reviewer that is still running will post; let
-      // the reaper settle it instead of spawning a duplicate. No attempt charged.
+      // A bounce timeout cannot release a live reviewer claim. Confirm exit and
+      // reconcile late posts before the infra CAS replaces the original session.
       if (infraRecoveryClass === DAEMON_BOUNCE_FAILURE_CLASS) {
-        const bounceHold = daemonBounceReviewerHold(current);
-        if (bounceHold.hold) {
+        const bounceRecovery = await reconcileDaemonBounceBeforeRetry({
+          row: current,
+          findPostedReview: reviewerCommandFailedReviewProbe,
+          resolveReviewerLogin: reviewerBotLogin,
+          markPosted: ({ row, postedAt }) => {
+            const changes = db.prepare(bouncedPostedReviewSettleSql(
+              'reviewer_session_uuid = ? AND reviewer_started_at = ? AND failed_at = ?'
+            )).run(postedAt, row.repo, row.pr_number, row.reviewer_head_sha,
+              row.reviewer_head_sha, row.reviewer_session_uuid, row.reviewer_started_at, row.failed_at).changes;
+            if (changes === 1) {
+              markWatcherReviewHeartbeat({ repo: row.repo, pr_number: row.pr_number, posted_at: postedAt });
+            }
+            return changes;
+          },
+          settleRunRecord: (event) => settleDurableReviewerRunState(event),
+        });
+        if (bounceRecovery.handled) {
           console.log(
             `[watcher] Holding daemon-bounce re-queue for ${repoPath}#${prNumber}: ` +
-              `bounced reviewer pgid=${bounceHold.pgid} still running (until ` +
-              `${new Date(bounceHold.holdUntilMs).toISOString()}); not consuming infra auto-recover attempt`
+              `${bounceRecovery.reason}; preserving original claim without consuming infra auto-recover attempt`
           );
           return;
         }

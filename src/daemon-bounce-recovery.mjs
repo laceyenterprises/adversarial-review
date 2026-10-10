@@ -18,10 +18,10 @@
 //
 // A bounce is now an infra failure: it re-queues through the bounded infra
 // auto-recovery CAS and never touches review_attempts. While the bounced
-// reviewer is provably still running inside its own timeout, the re-queue
-// holds so the reaper can settle its post instead of spawning a duplicate.
+// reviewer is still running, the re-queue holds. Expired reviewers must be
+// confirmed dead and checked for a late post before replacement.
 
-import { verifyPgidIdentitySync } from './process-group-identity.mjs';
+import { currentProcessGroupId, verifyPgidIdentitySync } from './process-group-identity.mjs';
 
 export const DAEMON_BOUNCE_FAILURE_CLASS = 'daemon-bounce';
 
@@ -47,10 +47,8 @@ function defaultIsAlive(pgid) {
   }
 }
 
-// Hold only on positive evidence: the bounced reviewer's process group is alive,
-// its start time matches the claim, and it is still inside its own timeout. Any
-// unknown (no pgid, unverifiable identity, unparseable timestamps) fails open to
-// the bounded re-queue.
+// Timeout expiry is permission to recover, never proof of process exit.
+// Unknown process evidence holds the original claim for a later recovery pass.
 export function daemonBounceReviewerHold(row, {
   now = Date.now(),
   isAlive = defaultIsAlive,
@@ -59,19 +57,91 @@ export function daemonBounceReviewerHold(row, {
 } = {}) {
   if (!isDaemonBounceFailure(row)) return { hold: false, reason: 'not-daemon-bounce' };
   const pgid = Number(row?.reviewer_pgid);
-  if (!Number.isInteger(pgid) || pgid <= 0) return { hold: false, reason: 'no-reviewer-pgid' };
+  if (!Number.isInteger(pgid) || pgid <= 0) return { hold: true, reason: 'no-reviewer-pgid' };
   const startedMs = parseTimestampMs(row?.reviewer_started_at);
-  if (startedMs == null) return { hold: false, reason: 'no-reviewer-started-at' };
+  if (startedMs == null) return { hold: true, reason: 'no-reviewer-started-at' };
   const timeoutMs = Number(row?.reviewer_timeout_ms);
   const holdUntilMs = Number.isFinite(timeoutMs) && timeoutMs > 0
     ? startedMs + timeoutMs
     : (parseTimestampMs(row?.failed_at) ?? startedMs) + fallbackHoldMs;
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
-  if (!(nowMs < holdUntilMs)) return { hold: false, reason: 'reviewer-timeout-elapsed' };
-  if (isAlive(pgid) !== true) return { hold: false, reason: 'reviewer-not-alive' };
+  const alive = isAlive(pgid);
+  if (alive === false) return { hold: false, reason: 'reviewer-not-alive', pgid, holdUntilMs };
+  if (alive !== true) return { hold: true, reason: 'reviewer-liveness-unknown', pgid, holdUntilMs };
   const identity = verifyIdentity(pgid, new Date(startedMs).toISOString());
-  if (!identity?.match) return { hold: false, reason: 'reviewer-identity-mismatch' };
-  return { hold: true, reason: 'bounced-reviewer-still-running', pgid, holdUntilMs };
+  if (!identity?.match) return { hold: true, reason: 'reviewer-identity-unverified', pgid, holdUntilMs };
+  return { hold: true, reason: 'bounced-reviewer-still-running', pgid, holdUntilMs,
+    expired: Number.isFinite(timeoutMs) && timeoutMs > 0
+      && Number.isFinite(nowMs) && nowMs >= holdUntilMs };
+}
+
+// Uses the same bounded TERM/KILL and delayed GitHub reprobe window as overdue
+// reviewing-row recovery. A failed probe or cleanup leaves all claim evidence
+// intact; the caller may claim a replacement only when handled is false.
+export async function reconcileDaemonBounceBeforeRetry({
+  row,
+  now = Date.now(),
+  isAlive = defaultIsAlive,
+  verifyIdentity = verifyPgidIdentitySync,
+  killProcessGroup = (pgid, signal) => process.kill(-pgid, signal),
+  ownPgid = currentProcessGroupId,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  findPostedReview,
+  resolveReviewerLogin = null,
+  markPosted,
+  settleRunRecord = async () => {},
+} = {}) {
+  if (!isDaemonBounceFailure(row)) return { handled: false, reason: 'not-daemon-bounce' };
+  if (!row.reviewer_session_uuid || !row.reviewer_head_sha
+    || (resolveReviewerLogin && !resolveReviewerLogin(row.reviewer))) {
+    return { handled: true, reason: 'missing-review-claim-evidence' };
+  }
+  try {
+    let decision = daemonBounceReviewerHold(row, { now, isAlive, verifyIdentity });
+    if (decision.hold && !decision.expired) return { handled: true, ...decision };
+    if (decision.hold) {
+      const watcherPgid = ownPgid();
+      if (!watcherPgid || watcherPgid === decision.pgid) {
+        return { handled: true, reason: 'unsafe-process-group' };
+      }
+      for (const signal of ['SIGTERM', 'SIGKILL']) {
+        // Reverify before each signal; a PGID may be recycled during cleanup.
+        decision = daemonBounceReviewerHold(row, { now, isAlive, verifyIdentity });
+        if (!decision.hold) break;
+        if (!decision.expired) return { handled: true, ...decision };
+        try {
+          killProcessGroup(decision.pgid, signal);
+        } catch (err) {
+          if (err?.code !== 'ESRCH') throw err;
+        }
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await sleep(signal === 'SIGTERM' ? 200 : 100);
+          if (isAlive(decision.pgid) === false) break;
+        }
+      }
+    }
+    // Even a successful signal is not evidence that the process group exited.
+    if (isAlive(Number(row.reviewer_pgid)) !== false) {
+      return { handled: true, reason: 'reviewer-exit-unconfirmed' };
+    }
+    for (const delay of [0, 500, 1500, 3000]) {
+      if (delay) await sleep(delay);
+      const review = await findPostedReview(row, { refresh: true, headSha: row.reviewer_head_sha });
+      if (!review || review.commit_id !== row.reviewer_head_sha) continue;
+      const postedAt = review.submitted_at;
+      if (!postedAt || markPosted({ row, postedAt, postedReview: review }) !== 1) {
+        return { handled: true, reason: 'posted-reconcile-cas-lost' };
+      }
+      await settleRunRecord({ sessionUuid: row.reviewer_session_uuid, state: 'completed',
+        settledAt: postedAt, reason: 'posted-review-recovered-after-daemon-bounce' });
+      return { handled: true, reason: 'marked-posted' };
+    }
+    await settleRunRecord({ sessionUuid: row.reviewer_session_uuid, state: 'cancelled',
+      settledAt: new Date(now).toISOString(), reason: 'daemon-bounce-reviewer-confirmed-dead' });
+    return { handled: false, reason: 'dead-no-posted-review' };
+  } catch (err) {
+    return { handled: true, reason: 'bounce-recovery-inconclusive', error: err };
+  }
 }
 
 // Settles a row a daemon bounce marked failed/pending once the bounced

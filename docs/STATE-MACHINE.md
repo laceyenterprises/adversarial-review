@@ -396,6 +396,17 @@ new PR
   no historical `reviewer_started_at` timestamp is available, the GitHub lookup
   omits its lower time bound so a current-head review already posted by the
   orphan can still be recovered despite local/GitHub clock skew.
+- Same-head `[daemon-bounce]` failed/pending claims retain their original session,
+  PGID, start time, and failure evidence while the reviewer is live or recovery
+  is inconclusive. Timeout expiry alone never permits a replacement. Before the
+  infrastructure claim, `reconcileDaemonBounceBeforeRetry` verifies the original
+  PGID start time, sends bounded SIGTERM/SIGKILL only to that verified group,
+  confirms group exit, and reprobes GitHub immediately and after 500/1500/3000ms
+  for the original reviewer bot's exact-head review since session start. A late
+  post settles the original row through a session/start/failure-guarded CAS;
+  confirmed death with no post permits the existing bounded infrastructure claim.
+  Missing identity or persisted timeout, unconfirmed exit, unsafe watcher PGID, or failed GitHub probes
+  defer recovery without spending an attempt or clearing the original evidence.
 - Overdue orphan auto-retry is deliberately narrow. The watcher only attempts it when the row persisted the original launch timeout and an authoritative reviewer spawn timestamp, the orphan age exceeds that persisted timeout from the actual subprocess start, the process group is confirmed dead after the bounded recovery loop, and GitHub is reprobed over a short delayed window with no late review found. That same steady-state recovery path also settles the runtime reviewer run-state ledger before the SQLite row flips terminal. Any ambiguity falls back to sticky `failed-orphan` instead of launching a second reviewer.
 - Re-review does **not** happen because of prose. It happens because reconciliation resets the row to `pending`.
 - A PR can move from `posted` back to `pending` only via explicit recovery logic or a valid rereview request.

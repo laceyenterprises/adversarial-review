@@ -25,6 +25,8 @@ import { pickAdversarialGateStatus } from '../src/adversarial-gate-status.mjs';
 import {
   DAEMON_BOUNCE_FAILURE_CLASS,
   daemonBounceReviewerHold,
+  bouncedPostedReviewSettleSql,
+  reconcileDaemonBounceBeforeRetry,
   isDaemonBounceFailure,
 } from '../src/daemon-bounce-recovery.mjs';
 
@@ -299,7 +301,7 @@ test('a legacy failed bounce row re-queues without touching review_attempts, bou
   }
 });
 
-test('daemonBounceReviewerHold waits only for a verified, live, in-budget bounced reviewer', () => {
+test('daemonBounceReviewerHold never releases a live bounced reviewer merely because its timeout expired', () => {
   const row = {
     failure_message: BOUNCE_MESSAGE,
     failed_at: BOUNCED_AT.toISOString(),
@@ -316,12 +318,12 @@ test('daemonBounceReviewerHold waits only for a verified, live, in-budget bounce
   assert.equal(held.holdUntilMs, Date.parse(STARTED_AT) + 1200000);
 
   assert.equal(daemonBounceReviewerHold(row, { now, isAlive: () => false, verifyIdentity: verified }).hold, false);
-  assert.equal(daemonBounceReviewerHold(row, { now, isAlive: () => null, verifyIdentity: verified }).hold, false);
-  assert.equal(daemonBounceReviewerHold(row, { now, isAlive: alive, verifyIdentity: () => ({ match: false }) }).hold, false);
+  assert.equal(daemonBounceReviewerHold(row, { now, isAlive: () => null, verifyIdentity: verified }).hold, true);
+  assert.equal(daemonBounceReviewerHold(row, { now, isAlive: alive, verifyIdentity: () => ({ match: false }) }).hold, true);
   assert.equal(daemonBounceReviewerHold(row, {
     now: Date.parse(STARTED_AT) + 1200000, isAlive: alive, verifyIdentity: verified,
-  }).hold, false);
-  assert.equal(daemonBounceReviewerHold({ ...row, reviewer_pgid: null }, { now, isAlive: alive, verifyIdentity: verified }).hold, false);
+  }).hold, true);
+  assert.equal(daemonBounceReviewerHold({ ...row, reviewer_pgid: null }, { now, isAlive: alive, verifyIdentity: verified }).hold, true);
   assert.equal(daemonBounceReviewerHold({ ...row, failure_message: '[reviewer-timeout] x' }, {
     now, isAlive: alive, verifyIdentity: verified,
   }).hold, false);
@@ -329,4 +331,160 @@ test('daemonBounceReviewerHold waits only for a verified, live, in-budget bounce
     now, isAlive: alive, verifyIdentity: verified,
   });
   assert.equal(fallback.holdUntilMs, BOUNCED_AT.getTime() + 60 * 60 * 1000);
+  assert.equal(daemonBounceReviewerHold({ ...row, reviewer_timeout_ms: null }, {
+    now: BOUNCED_AT.getTime() + 60 * 60 * 1000, isAlive: alive, verifyIdentity: verified,
+  }).expired, false, 'a fallback hold is not a persisted timeout that authorizes termination');
+});
+
+// Integration with the actual bounce transition, posted-settle SQL and infra
+// claim: every async step must preserve the original claim until recovery wins.
+async function expiredBounceRecovery({ db, overrides = {}, events = [] }) {
+  const row = reviewRow(db);
+  return reconcileDaemonBounceBeforeRetry({
+    row,
+    now: Date.parse(STARTED_AT) + row.reviewer_timeout_ms,
+    ownPgid: () => 9999,
+    verifyIdentity: () => ({ match: true }),
+    isAlive: () => true,
+    sleep: async (ms) => {
+      events.push(`wait:${ms}`);
+      assert.deepEqual(reviewRow(db), row, 'cleanup/reprobe must preserve original claim evidence');
+    },
+    findPostedReview: async (candidate, options) => {
+      assert.equal(candidate.reviewer_session_uuid, SESSION);
+      assert.deepEqual(options, { refresh: true, headSha: HEAD });
+      events.push('probe');
+      return null;
+    },
+    markPosted: ({ row, postedAt }) => db.prepare(bouncedPostedReviewSettleSql(
+      'reviewer_session_uuid = ? AND reviewer_started_at = ? AND failed_at = ?'
+    )).run(postedAt, row.repo, row.pr_number, row.reviewer_head_sha,
+      row.reviewer_head_sha, row.reviewer_session_uuid, row.reviewer_started_at, row.failed_at).changes,
+    settleRunRecord: async ({ state }) => { events.push(`settle:${state}`); },
+    ...overrides,
+  });
+}
+
+test('expired live bounce allows replacement only after TERM/KILL exit confirmation and late-post reprobes', async () => {
+  const { rootDir, db } = setup();
+  try {
+    insertReviewingRow(db);
+    await bounceWatcher(rootDir, db);
+    const events = [];
+    let alive = true;
+    const result = await expiredBounceRecovery({ db, events, overrides: {
+      isAlive: () => alive,
+      killProcessGroup: (pgid, signal) => {
+        assert.equal(pgid, 7171);
+        events.push(signal);
+        if (signal === 'SIGKILL') alive = false;
+      },
+    } });
+    assert.deepEqual(events, ['SIGTERM', 'wait:200', 'wait:200', 'wait:200',
+      'SIGKILL', 'wait:100', 'probe', 'wait:500', 'probe', 'wait:1500', 'probe',
+      'wait:3000', 'probe', 'settle:cancelled']);
+    assert.equal(result.handled, false);
+    assert.equal(reviewRow(db).reviewer_session_uuid, SESSION);
+    assert.equal(claimInfraRecovery(db, reviewRow(db), DAEMON_BOUNCE_FAILURE_CLASS).changes, 1);
+    assert.equal(reviewRow(db).reviewer_session_uuid, 'requeued-session');
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('a late exact-head review after expired-bounce termination settles the original claim instead of replacing it', async () => {
+  const { rootDir, db } = setup();
+  try {
+    insertReviewingRow(db);
+    await bounceWatcher(rootDir, db);
+    const events = [];
+    let alive = true;
+    let probes = 0;
+    const result = await expiredBounceRecovery({ db, events, overrides: {
+      isAlive: () => alive,
+      killProcessGroup: (_pgid, signal) => { events.push(signal); alive = false; },
+      findPostedReview: async () => {
+        assert.equal(alive, false, 'late-post reconciliation follows confirmed process exit');
+        events.push('probe');
+        probes += 1;
+        return probes === 4 ? { commit_id: HEAD, submitted_at: POSTED_AT } : null;
+      },
+    } });
+    assert.equal(result.reason, 'marked-posted');
+    assert.equal(result.handled, true);
+    assert.equal(events.includes('SIGKILL'), false);
+    assert.equal(events.at(-1), 'settle:completed');
+    assert.equal(reviewRow(db).review_status, 'posted');
+    assert.equal(reviewRow(db).reviewer_session_uuid, SESSION);
+    assert.equal(reviewRow(db).infra_auto_recover_attempts, 0);
+    assert.equal(claimInfraRecovery(db, reviewRow(db), DAEMON_BOUNCE_FAILURE_CLASS).changes, 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('inconclusive expired-bounce cleanup or GitHub reconciliation preserves the entire original claim', async () => {
+  for (const mode of ['survives', 'unknown-liveness', 'unknown-identity', 'signal-failure',
+    'identity-changed', 'probe-failure', 'cas-lost', 'own-group', 'unknown-own-group']) {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      const original = reviewRow(db);
+      const events = [];
+      let alive = !['probe-failure', 'cas-lost'].includes(mode);
+      let identityMatch = mode !== 'unknown-identity';
+      const result = await expiredBounceRecovery({ db, events, overrides: {
+        isAlive: () => mode === 'unknown-liveness' ? null : alive,
+        verifyIdentity: () => ({ match: identityMatch }),
+        ownPgid: () => mode === 'own-group' ? 7171 : mode === 'unknown-own-group' ? null : 9999,
+        killProcessGroup: (_pgid, signal) => {
+          events.push(signal);
+          if (mode === 'signal-failure') throw new Error('EPERM');
+          if (mode === 'identity-changed') identityMatch = false;
+        },
+        findPostedReview: async () => {
+          if (mode === 'probe-failure') throw new Error('GitHub timeout');
+          if (mode === 'cas-lost') return { commit_id: HEAD, submitted_at: POSTED_AT };
+          assert.fail('unconfirmed process exit must never reach the review probe');
+        },
+        markPosted: () => 0,
+      } });
+      assert.equal(result.handled, true, mode);
+      assert.deepEqual(reviewRow(db), original, mode);
+      assert.equal(events.some((event) => event.startsWith('settle:')), false, mode);
+      if (mode === 'identity-changed') assert.equal(events.includes('SIGKILL'), false);
+      if (['unknown-liveness', 'unknown-identity', 'own-group', 'unknown-own-group'].includes(mode)) {
+        assert.equal(events.length, 0, mode);
+      }
+    } finally {
+      db.close();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('expired-bounce late-post settlement cannot overwrite a replacement session', async () => {
+  const { rootDir, db } = setup();
+  try {
+    insertReviewingRow(db);
+    await bounceWatcher(rootDir, db);
+    const result = await expiredBounceRecovery({ db, overrides: {
+      isAlive: () => false,
+      findPostedReview: async () => {
+        claimInfraRecovery(db, reviewRow(db), DAEMON_BOUNCE_FAILURE_CLASS);
+        return { commit_id: HEAD, submitted_at: POSTED_AT };
+      },
+      settleRunRecord: async () => assert.fail('lost CAS must not settle a run record'),
+    } });
+    assert.equal(result.reason, 'posted-reconcile-cas-lost');
+    assert.equal(result.handled, true);
+    assert.equal(reviewRow(db).review_status, 'reviewing');
+    assert.equal(reviewRow(db).reviewer_session_uuid, 'requeued-session');
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

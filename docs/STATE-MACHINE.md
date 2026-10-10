@@ -398,7 +398,8 @@ new PR
   orphan can still be recovered despite local/GitHub clock skew.
 - Same-head `[daemon-bounce]` failed/pending claims retain their original session,
   PGID, start time, and failure evidence while the reviewer is live or recovery
-  is inconclusive. Timeout expiry alone never permits a replacement. Before the
+  is inconclusive within its bounded hold. For a verified live group, timeout
+  expiry requires cleanup before replacement. Before the
   infrastructure claim, `reconcileDaemonBounceBeforeRetry` verifies the original
   PGID start time, sends bounded SIGTERM/SIGKILL only to that verified group,
   confirms group exit, and reprobes GitHub immediately and after 500/1500/3000ms
@@ -412,8 +413,13 @@ new PR
   start time, failure timestamp, and head on both failed and pending rows. These
   values travel through admission and queued dispatch; a changed claim loses the
   CAS without clearing the replacement session's evidence or charging an attempt.
-  Missing identity or persisted timeout, unconfirmed exit, unsafe watcher PGID, or failed GitHub probes
-  defer recovery without spending an attempt or clearing the original evidence.
+  Missing PGID, start time, liveness or identity evidence holds until the persisted
+  timeout, or a one-hour fallback anchored to failure/start/attempt evidence. After
+  expiry it reprobes GitHub without signaling an unverified process and permits
+  bounded infrastructure recovery. Missing session/head/login evidence falls back
+  to that claim directly; nullable claim fields use exact NULL-safe CAS equality.
+  Unconfirmed exit after verified cleanup, unsafe watcher PGID, or failed GitHub
+  probes defer recovery without spending an attempt or clearing original evidence.
 - Overdue orphan auto-retry is deliberately narrow. The watcher only attempts it when the row persisted the original launch timeout and an authoritative reviewer spawn timestamp, the orphan age exceeds that persisted timeout from the actual subprocess start, the process group is confirmed dead after the bounded recovery loop, and GitHub is reprobed over a short delayed window with no late review found. That same steady-state recovery path also settles the runtime reviewer run-state ledger before the SQLite row flips terminal. Any ambiguity falls back to sticky `failed-orphan` instead of launching a second reviewer.
 - Re-review does **not** happen because of prose. It happens because reconciliation resets the row to `pending`.
 - A PR can move from `posted` back to `pending` only via explicit recovery logic or a valid rereview request.

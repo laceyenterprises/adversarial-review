@@ -377,7 +377,7 @@ test('daemonBounceReviewerHold never releases a live bounced reviewer merely bec
   assert.equal(fallback.holdUntilMs, BOUNCED_AT.getTime() + 60 * 60 * 1000);
   assert.equal(daemonBounceReviewerHold({ ...row, reviewer_timeout_ms: null }, {
     now: BOUNCED_AT.getTime() + 60 * 60 * 1000, isAlive: alive, verifyIdentity: verified,
-  }).expired, false, 'a fallback hold is not a persisted timeout that authorizes termination');
+  }).expired, true, 'the fallback hold must expire');
 });
 
 // Integration with the actual bounce transition, posted-settle SQL and infra
@@ -470,7 +470,7 @@ test('a late exact-head review after expired-bounce termination settles the orig
 });
 
 test('inconclusive expired-bounce cleanup or GitHub reconciliation preserves the entire original claim', async () => {
-  for (const mode of ['survives', 'unknown-liveness', 'unknown-identity', 'signal-failure',
+  for (const mode of ['survives', 'signal-failure',
     'identity-changed', 'probe-failure', 'cas-lost', 'own-group', 'unknown-own-group']) {
     const { rootDir, db } = setup();
     try {
@@ -633,5 +633,45 @@ for (const failure of ['capture', 'queue', 'after-queue']) {
       db.close();
       rmSync(rootDir, { recursive: true, force: true });
     }
+  });
+}
+
+for (const missing of ['pgid', 'start', 'liveness', 'identity']) {
+  test(`incomplete bounce ${missing} evidence expires without signaling and permits a CAS replacement`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db);
+      await bounceWatcher(rootDir, db);
+      if (missing === 'pgid') db.prepare('UPDATE reviewed_prs SET reviewer_pgid = NULL').run();
+      if (missing === 'start') db.prepare('UPDATE reviewed_prs SET reviewer_started_at = NULL').run();
+      const row = reviewRow(db);
+      const overrides = {
+        isAlive: () => missing === 'liveness' ? null : true,
+        verifyIdentity: () => ({ match: missing !== 'identity' }),
+        killProcessGroup: () => assert.fail('incomplete evidence must never authorize signaling'),
+      };
+      assert.equal(daemonBounceReviewerHold(row, { now: BOUNCED_AT, ...overrides }).hold, true);
+      const result = await expiredBounceRecovery({ db, overrides: {
+        ...overrides, now: BOUNCED_AT.getTime() + 3600000,
+      } });
+      assert.equal(result.handled, false);
+      assert.equal(claimInfraRecovery(db, row, DAEMON_BOUNCE_FAILURE_CLASS).changes, 1);
+      assert.equal(claimInfraRecovery(db, row, DAEMON_BOUNCE_FAILURE_CLASS).changes, 0);
+    } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+  });
+}
+
+for (const head of [null, '']) {
+  test(`missing bounce head ${JSON.stringify(head)} falls back and claims once`, async () => {
+    const { rootDir, db } = setup();
+    try {
+      insertReviewingRow(db, { head });
+      await bounceWatcher(rootDir, db);
+      const row = reviewRow(db);
+      const result = await reconcileDaemonBounceBeforeRetry({ row });
+      assert.equal(result.handled, false);
+      assert.equal(claimInfraRecovery(db, row, DAEMON_BOUNCE_FAILURE_CLASS).changes, 1);
+      assert.equal(claimInfraRecovery(db, row, DAEMON_BOUNCE_FAILURE_CLASS).changes, 0);
+    } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
   });
 }

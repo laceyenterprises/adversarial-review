@@ -951,8 +951,12 @@ Stop behavior:
 ## Daemon-bounce review recovery
 
 Before replacing a same-head failed or pending daemon-bounce claim, the watcher
-confirms the original process group has exited and reprobes GitHub for a late
-review. The queued replacement must still match the inspected session, start
+confirms the verified original process group has exited and reprobes GitHub for
+a late review. Incomplete process evidence uses the persisted timeout or a
+one-hour fallback hold; expiry permits a late-review probe and bounded recovery
+without signaling an unverified group. Missing session/head/login evidence falls
+back to the infrastructure claim. Nullable claim evidence is compared exactly
+with NULL-safe equality, so a newer claim still defeats recovery. The queued replacement must still match the inspected session, start
 time, failure timestamp, and head; a newer session makes the claim lose its CAS.
 
 A late exact-head review is captured into that session's reviewer pass with its

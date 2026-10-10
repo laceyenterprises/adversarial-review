@@ -212,10 +212,10 @@ export const MARK_DAEMON_BOUNCE_RECOVERY_ATTEMPT_STARTED_SQL =
          infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
    WHERE repo = ? AND pr_number = ?
      AND review_status IN ('failed', 'pending')
-     AND reviewer_session_uuid = ?
-     AND reviewer_started_at = ?
-     AND failed_at = ?
-     AND reviewer_head_sha = ?
+     AND reviewer_session_uuid IS ?
+     AND reviewer_started_at IS ?
+     AND failed_at IS ?
+     AND reviewer_head_sha IS ?
      AND lower(COALESCE(failure_message, '')) LIKE '[daemon-bounce]%'
      AND COALESCE(infra_auto_recover_attempts, 0) < ?
      AND COALESCE(pr_state, 'open') != 'merged'`;

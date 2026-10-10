@@ -149,7 +149,9 @@ capture can fill attribution without needing the reaper to create the handoff.
 
 Replacement dispatch uses a dedicated bounce CAS pinned to the original
 session, start time, failure timestamp, and head on failed and pending delivery
-rows. The shared infrastructure claim cannot claim daemon-bounce failures.
+rows. Nullable evidence uses exact NULL-safe equality, preserving ownership
+while allowing incomplete claims to recover once. The shared infrastructure
+claim cannot claim daemon-bounce failures.
 
 ## Launch and reattach identity
 

@@ -19,7 +19,7 @@
 // A bounce is now an infra failure: it re-queues through the bounded infra
 // auto-recovery CAS and never touches review_attempts. While the bounced
 // reviewer is still running, the re-queue holds. Expired reviewers must be
-// confirmed dead and checked for a late post before replacement.
+// verified and confirmed dead, or exhaust the incomplete-evidence hold, before replacement.
 
 import { currentProcessGroupId, verifyPgidIdentitySync } from './process-group-identity.mjs';
 
@@ -48,7 +48,7 @@ function defaultIsAlive(pgid) {
 }
 
 // Timeout expiry is permission to recover, never proof of process exit.
-// Unknown process evidence holds the original claim for a later recovery pass.
+// Unknown process evidence holds until its bounded deadline; it never authorizes signals.
 export function daemonBounceReviewerHold(row, {
   now = Date.now(),
   isAlive = defaultIsAlive,
@@ -56,23 +56,26 @@ export function daemonBounceReviewerHold(row, {
   fallbackHoldMs = DAEMON_BOUNCE_HOLD_FALLBACK_MS,
 } = {}) {
   if (!isDaemonBounceFailure(row)) return { hold: false, reason: 'not-daemon-bounce' };
-  const pgid = Number(row?.reviewer_pgid);
-  if (!Number.isInteger(pgid) || pgid <= 0) return { hold: true, reason: 'no-reviewer-pgid' };
   const startedMs = parseTimestampMs(row?.reviewer_started_at);
-  if (startedMs == null) return { hold: true, reason: 'no-reviewer-started-at' };
   const timeoutMs = Number(row?.reviewer_timeout_ms);
-  const holdUntilMs = Number.isFinite(timeoutMs) && timeoutMs > 0
-    ? startedMs + timeoutMs
-    : (parseTimestampMs(row?.failed_at) ?? startedMs) + fallbackHoldMs;
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  const holdUntilMs = startedMs != null && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? startedMs + timeoutMs
+    : (parseTimestampMs(row?.failed_at) ?? startedMs ?? parseTimestampMs(row?.last_attempted_at)
+      ?? parseTimestampMs(row?.reviewed_at) ?? 0) + fallbackHoldMs;
+  const expired = Number.isFinite(nowMs) && nowMs >= holdUntilMs;
+  const pgid = Number(row?.reviewer_pgid);
+  // Incomplete evidence bounds the wait but never authorizes a process signal.
+  const fallback = (reason) => ({ hold: !expired, reason, pgid, holdUntilMs, expired,
+    processEvidenceMissing: true });
+  if (!Number.isInteger(pgid) || pgid <= 0) return fallback('no-reviewer-pgid');
+  if (startedMs == null) return fallback('no-reviewer-started-at');
   const alive = isAlive(pgid);
-  if (alive === false) return { hold: false, reason: 'reviewer-not-alive', pgid, holdUntilMs };
-  if (alive !== true) return { hold: true, reason: 'reviewer-liveness-unknown', pgid, holdUntilMs };
+  if (alive === false) return { hold: false, reason: 'reviewer-not-alive', pgid, holdUntilMs, expired };
+  if (alive !== true) return fallback('reviewer-liveness-unknown');
   const identity = verifyIdentity(pgid, new Date(startedMs).toISOString());
-  if (!identity?.match) return { hold: true, reason: 'reviewer-identity-unverified', pgid, holdUntilMs };
-  return { hold: true, reason: 'bounced-reviewer-still-running', pgid, holdUntilMs,
-    expired: Number.isFinite(timeoutMs) && timeoutMs > 0
-      && Number.isFinite(nowMs) && nowMs >= holdUntilMs };
+  if (!identity?.match) return fallback('reviewer-identity-unverified');
+  return { hold: true, reason: 'bounced-reviewer-still-running', pgid, holdUntilMs, expired };
 }
 
 // Uses the same bounded TERM/KILL and delayed GitHub reprobe window as overdue
@@ -94,7 +97,7 @@ export async function reconcileDaemonBounceBeforeRetry({
   if (!isDaemonBounceFailure(row)) return { handled: false, reason: 'not-daemon-bounce' };
   if (!row.reviewer_session_uuid || !row.reviewer_head_sha
     || (resolveReviewerLogin && !resolveReviewerLogin(row.reviewer))) {
-    return { handled: true, reason: 'missing-review-claim-evidence' };
+    return { handled: false, reason: 'missing-review-claim-evidence' };
   }
   try {
     let decision = daemonBounceReviewerHold(row, { now, isAlive, verifyIdentity });
@@ -107,6 +110,7 @@ export async function reconcileDaemonBounceBeforeRetry({
       for (const signal of ['SIGTERM', 'SIGKILL']) {
         // Reverify before each signal; a PGID may be recycled during cleanup.
         decision = daemonBounceReviewerHold(row, { now, isAlive, verifyIdentity });
+        if (decision.processEvidenceMissing) return { handled: true, reason: 'cleanup-identity-lost' };
         if (!decision.hold) break;
         if (!decision.expired) return { handled: true, ...decision };
         try {
@@ -121,7 +125,7 @@ export async function reconcileDaemonBounceBeforeRetry({
       }
     }
     // Even a successful signal is not evidence that the process group exited.
-    if (isAlive(Number(row.reviewer_pgid)) !== false) {
+    if (!decision.processEvidenceMissing && isAlive(Number(row.reviewer_pgid)) !== false) {
       return { handled: true, reason: 'reviewer-exit-unconfirmed' };
     }
     for (const delay of [0, 500, 1500, 3000]) {
@@ -137,7 +141,8 @@ export async function reconcileDaemonBounceBeforeRetry({
       return { handled: true, reason: 'marked-posted' };
     }
     await settleRunRecord({ sessionUuid: row.reviewer_session_uuid, state: 'cancelled',
-      settledAt: new Date(now).toISOString(), reason: 'daemon-bounce-reviewer-confirmed-dead' });
+      settledAt: new Date(now).toISOString(), reason: decision.processEvidenceMissing
+        ? 'daemon-bounce-evidence-hold-expired' : 'daemon-bounce-reviewer-confirmed-dead' });
     return { handled: false, reason: 'dead-no-posted-review' };
   } catch (err) {
     return { handled: true, reason: 'bounce-recovery-inconclusive', error: err };

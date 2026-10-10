@@ -16,12 +16,15 @@ function fileUrl(...parts) {
 function buildLoaderSource() {
   const reviewStateUrl = fileUrl('src', 'review-state.mjs');
   const reviewStateActualUrl = `${reviewStateUrl}?actual`;
+  const headCloserUrl = fileUrl('src', 'head-closer-commit-suppression.mjs');
+  const headCloserActualUrl = `${headCloserUrl}?actual`;
   const subjectAdapterUrl = fileUrl('src', 'adapters', 'subject', 'github-pr', 'index.mjs');
   const packageParentUrl = fileUrl('package.json');
 
   const stubs = {
     [reviewStateUrl]: 'fixture:review-state',
     [subjectAdapterUrl]: 'fixture:subject-adapter',
+    [headCloserUrl]: 'fixture:head-closer-commit-suppression',
     [fileUrl('src', 'adapters', 'operator', 'index.mjs')]: 'fixture:operator-surface',
     [fileUrl('src', 'adapters', 'reviewer-runtime', 'index.mjs')]: 'fixture:reviewer-runtime',
     [fileUrl('src', 'branch-protection.mjs')]: 'fixture:branch-protection',
@@ -49,6 +52,9 @@ function buildLoaderSource() {
 
   return `
 const stubs = new Map(${JSON.stringify(Object.entries(stubs))});
+if (process.env.FIXTURE_CAP_SCENARIO === 'ham') {
+  stubs.delete(${JSON.stringify(fileUrl('src', 'ama', 'ham-provenance.mjs'))});
+}
 
 export async function resolve(specifier, context, nextResolve) {
   if (context.parentURL?.startsWith('fixture:') && !specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.includes(':')) {
@@ -83,6 +89,30 @@ export async function load(url, context, nextLoad) {
     };
   }
 
+  if (url === 'fixture:head-closer-commit-suppression') {
+    // The fixture heads are not real commits: never probe a host checkout or gh.
+    return {
+      format: 'module',
+      shortCircuit: true,
+      source: ${JSON.stringify(`
+        export * from ${JSON.stringify(headCloserActualUrl)};
+        import { isTerminalCloserCommitIdentity } from ${JSON.stringify(headCloserActualUrl)};
+        const ham = isTerminalCloserCommitIdentity({ message: 'HAM close\\nClosed-By: hammer (adversarial-pipe-mode)' });
+        if (process.env.FIXTURE_CAP_SCENARIO === 'ham') {
+          if (!ham.suppressed) throw new Error('fixture HAM must suppress reviewers');
+        }
+        const none = { suppressed: false, reason: 'fixture-no-closer-commit' };
+        export async function getHeadCloserCommitSuppression() { return process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
+        export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
+        export function createHeadCloserCommitSuppressionResolver() { return async () => process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
+        export async function fetchHeadCloserVerifiedCommit({ headSha }) {
+          return { sha: headSha, parentSha: 'cap-head-5', parentCount: 1,
+            message: 'HAM close\\nClosed-By: hammer (adversarial-pipe-mode)' };
+        }
+      `)}
+    };
+  }
+
   if (url === 'fixture:subject-adapter') {
     return {
       format: 'module',
@@ -108,6 +138,7 @@ export async function load(url, context, nextLoad) {
                 builderClass: 'codex',
                 labels: [
                   'risk:medium',
+                  ...(process.env.FIXTURE_CAP_LABEL === '1' ? ['reviewer-cycle-cap-reached'] : []),
                   ...(
                     process.env.FIXTURE_MERGE_AGENT_LABEL_PRESENT === '1' ||
                     (
@@ -150,7 +181,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'timeout-head-164', labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
-    'fixture:ama-dispatch-closer': "export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser() { const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
+    'fixture:ama-dispatch-closer': "export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
     'fixture:config-loader': "export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; }, getOrchestrationMode() { return process.env.FIXTURE_ORCHESTRATION_MODE || 'native'; } }; } export function getConfig() { return undefined; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {} export function loadConfigRuntime() { return buildConfig(); }",
     'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
     'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function hamCommitIdentityMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseCommitTrailerValues() { return {}; } export function parseRemediatedFindingsTrailer() { return null; } export function isHamWorkerTicket() { return false; }",
@@ -180,25 +211,56 @@ import assert from 'node:assert/strict';
 const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
 const db = globalThis.__timeoutHandoffDb;
 assert.ok(db, 'watcher should open the synthetic review-state DB');
-db.prepare(
+const capScenario = process.env.FIXTURE_CAP_SCENARIO || '';
+const insertRow = db.prepare(
   \`INSERT INTO reviewed_prs
-     (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, failed_at, failure_message)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\`
-).run(
-  'laceyenterprises/adversarial-review',
-  164,
-  '2026-05-27T04:00:00.000Z',
-  'claude',
-  'open',
-  'pending-upstream',
-  0,
-  '2026-05-27T04:00:00.000Z',
-  '[reviewer-timeout] Reviewer command timed out before posting; watcher backoff engaged.'
+     (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, failed_at, failure_message, reviewer_head_sha)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`
 );
+if (capScenario) {
+  // CYCLECAPHAM-01: five counted Changes Requested verdicts on five heads.
+  for (let cycle = 1; cycle <= 5; cycle += 1) {
+    const at = new Date(Date.now() - (6 - cycle) * 60 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO review_cycle_verdicts (pr_url, head_sha, verdict_count, verdict_at, verdict_summary) VALUES (?, ?, ?, ?, ?)')
+      .run('https://github.com/laceyenterprises/adversarial-review/pull/164', 'cap-head-' + cycle, cycle, at, 'Cycle ' + cycle + ': Changes Requested');
+    db.prepare('INSERT INTO review_cycle_counters (pr_url, head_sha, verdict_count, last_verdict_at, escalated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('https://github.com/laceyenterprises/adversarial-review/pull/164', 'cap-head-' + cycle, cycle, at,
+        capScenario !== 'escalate' && cycle === 5 ? at : null);
+  }
+  if (capScenario !== 'escalate') {
+    insertRow.run('laceyenterprises/adversarial-review', 164, '2026-05-27T04:00:00.000Z', 'claude', 'open', 'failed', 1,
+      '2026-05-27T04:00:00.000Z', '[review-cycle-cap] 5 successive review/remediation cycles without converging; routed to the hammer for final adjudication', 'cap-head-5');
+  } else {
+    // The last remediation pushed a new head and asked for its re-review.
+    insertRow.run('laceyenterprises/adversarial-review', 164, '2026-05-27T04:00:00.000Z', 'claude', 'open', 'pending', 0,
+      null, null, 'cap-head-5');
+  }
+} else {
+  insertRow.run(
+    'laceyenterprises/adversarial-review',
+    164,
+    '2026-05-27T04:00:00.000Z',
+    'claude',
+    'open',
+    'pending-upstream',
+    0,
+    '2026-05-27T04:00:00.000Z',
+    '[reviewer-timeout] Reviewer command timed out before posting; watcher backoff engaged.',
+    null
+  );
+}
+globalThis.__capComments = [];
+globalThis.__capLabels = [];
 
 const octokit = {
   paginate: async () => [{ name: 'adversarial-review', archived: false }],
   rest: {
+    issues: {
+      listComments: async () => ({ data: [] }),
+      createComment: async ({ body }) => { globalThis.__capComments.push(body); return { data: { body } }; },
+      addLabels: async ({ labels }) => { globalThis.__capLabels.push(...labels); return { data: [] }; },
+      removeLabel: async () => ({ data: [] }),
+    },
     repos: { listForOrg: async () => ({ data: [] }) },
     pulls: {
       list: async () => ({ data: [] }),
@@ -224,10 +286,14 @@ await pollOnce(octokit, {
   },
 });
 
-const row = db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
   .get('laceyenterprises/adversarial-review', 164);
 console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   reviewStatus: row.review_status,
+  failureMessage: row.failure_message,
+  closerCalls: globalThis.__timeoutHandoffCloserCalls || [],
+  capComments: globalThis.__capComments,
+  capLabels: globalThis.__capLabels,
   reviewerSpawns: globalThis.__timeoutHandoffReviewerSpawns || [],
   dispatches: globalThis.__timeoutHandoffDispatches || [],
   operatorWrites: globalThis.__timeoutHandoffOperatorWrites || [],
@@ -473,6 +539,80 @@ for (const { name, liveEnv, expectedDispatches } of [
         assert.equal(summary.dispatches[0].env.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
         assert.equal(summary.dispatches[0].triggerOverride, 'merge-agent-requested');
       }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
+// CYCLECAPHAM-01: a PR at the review cycle cap goes to the hammer through the
+// real watcher tick: no reviewer spawn, no operator write, the closer sees the
+// cap route with the cycle history.
+for (const scenario of ['escalate', 'paused', 'ham']) {
+  test(`watcher pollOnce routes a review-cycle-cap PR to the hammer (${scenario} tick)`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), `watcher-cycle-cap-hammer-${scenario}-`));
+    const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+    const registerPath = path.join(tmp, 'fixture-register.mjs');
+    const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+    try {
+      writeFileSync(loaderPath, buildLoaderSource());
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource());
+
+      const result = spawnSync(
+        process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        {
+          cwd: REPO_ROOT,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_TOKEN: 'fixture-token',
+            AGENT_OS_HQ_BIN: '/usr/bin/false',
+            ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
+            FIXTURE_AMA_ENABLED: '1',
+            FIXTURE_AMA_REASON: 'dispatched',
+            FIXTURE_CAP_SCENARIO: scenario,
+            FIXTURE_CAP_LABEL: scenario !== 'escalate' ? '1' : '0',
+          },
+        }
+      );
+
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      const summaryLine = result.stdout
+        .split(/\r?\n/)
+        .find((line) => line.startsWith(SUMMARY_MARKER));
+      assert.ok(summaryLine, output);
+      const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+      assert.equal(summary.reviewerSpawns.length, 0, 'no review-remediate cycle starts after the cap');
+      assert.equal(summary.operatorWrites.length, 0);
+      assert.equal(summary.dispatches.length, 0, 'the legacy merge-agent lane is not used');
+      if (scenario === 'escalate') {
+        assert.equal(summary.reviewStatus, 'failed');
+        assert.match(summary.failureMessage, /^\[review-cycle-cap\] .*routed to the hammer for final adjudication/);
+      } else {
+        // The head moved past the last reviewed head, so the existing re-arm
+        // made the row `pending`; the cap label still holds the review.
+        assert.equal(summary.reviewStatus, 'pending');
+      }
+      assert.equal(summary.closerCalls.length, 1, output);
+      assert.deepEqual(summary.closerCalls[0], {
+        reviewCycleCapReached: true,
+        reviewCycleExhausted: true,
+        reviewCycleCap: 5,
+        historyHeads: ['cap-head-1', 'cap-head-2', 'cap-head-3', 'cap-head-4', 'cap-head-5'],
+      });
+      if (scenario === 'escalate') {
+        assert.equal(summary.capComments.length, 1);
+        assert.match(summary.capComments[0], /routed to the hammer for final adjudication/);
+        assert.doesNotMatch(summary.capComments[0], /operator attention required/i);
+        assert.deepEqual(summary.capLabels, ['reviewer-cycle-cap-reached']);
+      } else {
+        assert.equal(summary.capComments.length, 0, 'the cap comment is posted once per PR');
+      }
+      assert.match(output, /review-cycle-cap routed laceyenterprises\/adversarial-review#164 to the hammer for final adjudication: ama-dispatched/);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

@@ -25,7 +25,7 @@ describe('label initializer contract', () => {
       ['stale-drift', ['C5DEF5', 'PR drift helper flagged stale branch; refresh before more review.']],
       ['pr-class: additive-only', ['B7E4C7', 'Initial PR diff was additive-only; scope expansion requires approval.']],
       ['operator-approved: scope-expand', ['0E8A16', 'Current-head approval for additive-only PR scope expansion.']],
-      ['reviewer-cycle-cap-reached', ['F9D0C4', 'Reviewer cycle cap reached; operator must approve, merge-agent, or redesign.']],
+      ['reviewer-cycle-cap-reached', ['F9D0C4', 'Review cycle cap reached; routed to the hammer for final adjudication.']],
       ['paused-for-redesign', ['8B949E', 'Operator paused the PR for redesign after cycle-cap escalation.']],
       ['operator-approved: advisory-only-review', ['0E8A16', 'Current-head approval for advisory-only review without remediation dispatch.']],
     ]);

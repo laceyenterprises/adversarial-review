@@ -57,8 +57,11 @@ Directory: `data/alert-delivery/`
   are durable, callers receive `{ status: "queued" }`. Callers intentionally
   treat that durable enqueue as terminal for their own debounce; transport
   delivery authority belongs to the sink health/receipt state.
-- Orphan recovery `exhausted`, `ownership-uncertain` and `store-error` events use
-  a deterministic event plus SHA-256 identity over `repo#prNumber@headSha`.
+- Orphan recovery `exhausted`, `ownership-uncertain` and `store-error` events,
+  and the CYCLECAPHAM-01 `ama.review_cycle_cap.hammer_final` SEV1 page (the
+  hammer's final no-merge decision or exhausted retry cap on a review-cycle-cap
+  PR), use a deterministic event plus SHA-256 identity over
+  `repo#prNumber@headSha`.
   Enqueue retries reuse pending, inflight, delivered and dead-letter documents,
   including a crash before the watchdog's SQLite page guard is updated.
 - Review-exhaustion `adversarial_review.operator_decision_required` pages use

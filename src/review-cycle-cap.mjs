@@ -1,5 +1,7 @@
 export const DEFAULT_REVIEW_CYCLE_CAP = 5;
 export const DEFAULT_REVIEW_CYCLE_WINDOW_HOURS = 24;
+// Watcher-owned: automatic review is paused and the PR is routed to the hammer
+// for final adjudication (CYCLECAPHAM-01), not parked for the operator.
 export const REVIEWER_CYCLE_CAP_REACHED_LABEL = 'reviewer-cycle-cap-reached';
 export const PAUSED_FOR_REDESIGN_LABEL = 'paused-for-redesign';
 export const REVIEW_CYCLE_OVERRIDE_LABELS = Object.freeze([
@@ -200,21 +202,25 @@ export function buildReviewCycleCapEscalationComment({
   const verdictLines = recent.length
     ? recent.map((row) => `- ${isoMinute(row.verdict_at)}: ${summarizeReviewCycleVerdict(row.verdict_summary)}`).join('\n')
     : '- No recent verdict summaries were captured.';
-  return `**🚨 Review cycle cap reached — operator attention required**
+  return `**🔨 Review cycle cap reached — routed to the hammer for final adjudication**
 
 This PR has gone through ${normalizedCap} successive review-then-remediate cycles without
 converging to a clean verdict. To prevent the runaway pattern documented in
-the 2026-06-03 codex TUI postmortem, automatic review is paused.
+the 2026-06-03 codex TUI postmortem, automatic review is paused and no further
+review-then-remediate cycle will start.
+
+The hammer (AMA closer) is now the final adjudicator. It reads the latest review
+and the cycle history below, remediates the findings it judges real, records
+\`withdrawn-by-hammer\` with exact-head evidence for the findings it judges false,
+validates, and merges under its lease, or records a final no-merge decision with
+its reasons. Its decision is final. The operator is paged only if the hammer
+records a no-merge decision or exhausts its bounded retry cap.
 
 Recent verdicts:
 ${verdictLines}
 
-Please choose one:
-1. Approve as-is: add label \`operator-approved\`.
-2. Force the merge-agent: add label \`merge-agent-requested\` (existing flow).
-3. Pause for redesign: add label \`paused-for-redesign\`.
-
-Once labeled, the watcher will respect the choice.`;
+Operator overrides still apply: \`operator-approved\`, \`merge-agent-requested\`,
+or \`paused-for-redesign\`.`;
 }
 
 export function markReviewCycleEscalated(db, {

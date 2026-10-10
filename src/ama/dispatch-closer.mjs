@@ -3,6 +3,10 @@ import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
+import {
+  REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
+  composeReviewCycleCapHammerPrompt,
+} from './review-cycle-cap-route.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
@@ -364,6 +368,12 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   ));
   if (options?.reviewCycleExhausted === true) {
     if (effectiveReasons.includes('stale-review-head')) {
+      // CYCLECAPHAM-01: the review cycle cap trips on the remediation push the
+      // watcher would have reviewed next, so that head is unreviewed by
+      // construction. No review follows the cap: the hammer adjudicates that
+      // head as final reviewer and must still certify it (validated HAM commit
+      // with Reviewed-Head) before any merge predicate passes.
+      if (options?.reviewCycleCapReached === true) return true;
       // COMMENTCLOSE-02: the comment-only final round is often the round that
       // exhausts the budget (agent-os#7334: round 2 of 2), and its proven push is
       // a stale reviewed head by construction. That one stale head may resume
@@ -4132,7 +4142,11 @@ export async function maybeDispatchAmaCloser({
     // Codex-first guard: live orchestration reports completedRemediationRounds.
     // That evidence must prove Codex/remediator had a turn before terminal
     // Hammer authority can arm; rereview-only exhaustion is not enough.
-    const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState);
+    // CYCLECAPHAM-01: a capped PR is a final-hammer close. Codex-first still
+    // holds: a remediator that owns the reviewed head is never preempted.
+    const reviewCycleCapRoute = dispatchContext?.reviewCycleCapReached === true
+      && reviewState?.remediationPending !== true;
+    const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
     const routeReasons = verdict.eligible ? eligibleHammerRouteReasons
       : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed')
         : verdict.reasons;
@@ -4183,6 +4197,7 @@ export async function maybeDispatchAmaCloser({
       )
       && isHammerRemediableEligibilityMiss(routeReasons, {
         reviewCycleExhausted,
+        reviewCycleCapReached: reviewCycleCapRoute,
         allowStaleReviewHeadHammerResume:
           dispatchContext?.allowStaleReviewHeadHammerResume === true,
         settledCommentOnlyTerminalMs,
@@ -4339,6 +4354,10 @@ export async function maybeDispatchAmaCloser({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   });
 
+  if (dispatchContext?.reviewCycleCapReached === true && useHammerTerminalRemediationPrompt) {
+    prompt += composeReviewCycleCapHammerPrompt({ reviewedSha, targetRemediationSha,
+      cap: dispatchContext.reviewCycleCap, history: dispatchContext.reviewCycleHistory });
+  }
   if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
   const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
@@ -4651,11 +4670,71 @@ export async function maybeDispatchAmaCloser({
     throwIfAborted(signal);
     let status = statusProbe?.status || null;
     existingDispatchStatus = status;
-    if (certifiedContentionPark && !deferredPark &&
-        (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === 'failed')) {
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-        reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
-    }
+    // A durable closing decision outranks the process exit (including failure
+    // after posting it) and certified parks. Unknown evidence holds the launch;
+    // only a readable absence of a decision permits normal retry admission.
+    const reconcileCapFinalDecision = async (observedStatus) => {
+      if (dispatchContext?.reviewCycleCapReached !== true
+        || !(AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(observedStatus)
+          || AMA_CLOSER_RETRYABLE_STATUSES.has(observedStatus))) return null;
+      const livePr = await probeAmaLivePrForMergeDispatch({
+        dispatchContext, execFileImpl, repo, prNumber, signal,
+      });
+      throwIfAborted(signal);
+      const noMergeDecision = livePr?.state === 'OPEN'
+        ? await hasNoMergeAuditForCurrentHead({
+          hqRoot, repo, prNumber,
+          headSha: livePr.headRefOid || targetRemediationSha,
+          fetchPullRequestRollupImpl, execFileImpl,
+        })
+        : false;
+      throwIfAborted(signal);
+      if (!livePr || !['OPEN', 'CLOSED', 'MERGED'].includes(livePr.state) || noMergeDecision === null) {
+        return retainExistingAmaCloserDispatch(existingRecord, workerClass, observedStatus);
+      }
+      if (!noMergeDecision) return null;
+      finalizeAmaCloserLeaseBestEffort({
+        rootDir, leaseIdentity: existingRecordLeaseIdentity,
+        terminalOutcome: 'failed-without-merge', now: dispatchContext.dispatchedAt,
+        logger, repo, prNumber,
+      });
+      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: observedStatus,
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: 'failed-without-merge',
+        outcome: 'failed-without-merge',
+      }));
+      const hammerCleanup = await cleanupHammerCloserWorker({
+        prNumber, workerClass, existingRecord, hqPath, hqRoot, execFileImpl, logger,
+        reason: `terminal-status-${observedStatus}`,
+      });
+      assertHammerCleanupSucceeded(hammerCleanup);
+      await recordAmaCloserReviewerPassTokens({
+        rootDir, hqRoot, repo, prNumber,
+        record: { ...existingRecord, lastObservedStatus: observedStatus,
+          lastObservedAt: dispatchContext.dispatchedAt },
+        status: observedStatus, merged: false, observedAt: dispatchContext.dispatchedAt,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+        logger,
+      });
+      logAmaCloserDispatchEvent(logger, 'ama_closer.review_cycle_cap_hammer_final_no_merge', {
+        repo, prNumber, headSha: existingRecordLeaseIdentity.headSha,
+        launchRequestId: existingRecord.launchRequestId,
+      }, { level: 'warn' });
+      return noAmaDispatch({
+        dispatched: false, skipMergeAgent: true,
+        reason: REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
+        needsOperator: true,
+        workerClass: existingRecord.workerClass || workerClass,
+        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+        launchRequestId: existingRecord.launchRequestId || null,
+        promptPath: existingRecord.promptPath || null,
+      });
+    };
     let phantomActiveWorkerRun = null;
     // The LRQ's ledger row, when the unknown-status path below read it.
     let launchRequestProbe = null;
@@ -4706,6 +4785,13 @@ export async function maybeDispatchAmaCloser({
           pid: phantomActiveWorkerRun.pid || null,
         }, { level: 'warn' });
       }
+    }
+    const capFinalDecision = await reconcileCapFinalDecision(status);
+    if (capFinalDecision) return capFinalDecision;
+    if (certifiedContentionPark && !deferredPark &&
+        (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || status === 'failed')) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
     }
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) || (certifiedPark && status === 'failed')) {
       if (
@@ -5369,6 +5455,8 @@ export async function maybeDispatchAmaCloser({
       if (launchRequestProbe?.ok && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(launchRequestStatus)) {
         status = amaCloserStatusFromTerminalLaunchRequestStatus(launchRequestStatus);
         existingDispatchStatus = status;
+        const capFinalDecision = await reconcileCapFinalDecision(status);
+        if (capFinalDecision) return capFinalDecision;
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,

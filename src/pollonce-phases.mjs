@@ -234,6 +234,7 @@ import {
   spawnReviewer,
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
+import { maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
@@ -2656,7 +2657,28 @@ export async function processReviewSubject(entry, ctx) {
         });
       };
 
+      const cycleCapConfig = resolveReviewCycleCapConfig({
+        loadConfigImpl: loadConfigCached,
+        logger: console,
+      });
+      // CYCLECAPHAM-01: a capped PR goes to the hammer for final adjudication on
+      // every tick, instead of waiting on an operator label.
+      const routeReviewCycleCapToHammer = (row) => maybeRouteReviewCycleCapToHammer({
+        rootDir: ROOT,
+        db,
+        repoPath,
+        prNumber,
+        existing: row,
+        subjectRef: subject.ref,
+        currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
+        labelNames: prLabelNames,
+        cap: cycleCapConfig.cap,
+        execFileImpl: execFileAsync,
+      });
       if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)) {
+        // The HAM head suppresses reviewers, not reconciliation of its owner.
+        // The cap route still passes through the closer's eligibility/lease gates.
+        if ((await routeReviewCycleCapToHammer(current)).handled) return;
         const closerSpawnSuppression = await resolveHeadCloserCommitSuppression();
         if (closerSpawnSuppression.suppressed) {
           console.log(
@@ -2721,10 +2743,6 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
 
-      const cycleCapConfig = resolveReviewCycleCapConfig({
-        loadConfigImpl: loadConfigCached,
-        logger: console,
-      });
       const cycleCapDecision = shouldEscalateReviewCycle(db, {
         repo: repoPath,
         prNumber,
@@ -2797,11 +2815,12 @@ export async function processReviewSubject(entry, ctx) {
         if (!alreadyCapPaused) {
           stmtMarkReviewCycleCapPaused.run(
             escalatedAt,
-            `[review-cycle-cap] automatic remediation budget exhausted after ${cycleCapConfig.cap} successive review/remediation cycles; dispatching final hammer close unless blocked by structural gates, explicit operator labels, or ${PAUSED_FOR_REDESIGN_LABEL}`,
+            `[review-cycle-cap] ${cycleCapConfig.cap} successive review/remediation cycles without converging; routed to the hammer for final adjudication (no further review cycle); operator overrides: operator-approved, merge-agent-requested, ${PAUSED_FOR_REDESIGN_LABEL}`,
             repoPath,
             prNumber,
           );
         }
+        await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber));
         return;
       }
 

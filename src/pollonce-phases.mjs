@@ -235,7 +235,9 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
-import { maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
+import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
+import { declineSuppressedAmaRecoveryRereview } from './closer-head-rereview-decline.mjs';
+import { handOffRetriggerWithoutJob } from './retrigger-no-job-handoff.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
@@ -1150,6 +1152,13 @@ export async function processReviewSubject(entry, ctx) {
             labelEvent,
             revisionRef: subject.ref.revisionRef,
             execFileImpl: execFileAsync,
+            // NOOWNER-01: with no follow-up job, hand off instead of leaving the label.
+            noJobHandoffImpl: () => handOffRetriggerWithoutJob({
+              rootDir: ROOT, db, repoPath, prNumber,
+              existing: stmtGetReviewRow.get(repoPath, prNumber) || existing,
+              subjectRef: subject.ref, currentRevisionRef: subject.ref.revisionRef,
+              labelNames: prLabelNames, execFileImpl: execFileAsync,
+            }),
           });
           console.log(
             `[watcher] retrigger-remediation label on ${repoPath}#${prNumber}: ${result.outcome}` +
@@ -2708,6 +2717,13 @@ export async function processReviewSubject(entry, ctx) {
           // trailer-only closer head is already merge-covered by
           // non_reviewable_head_delta — restore the verdict instead of parking.
           declineFleetSelfRepairRereview(`terminal-closer-head:${closerSpawnSuppression.reason}`);
+          // NOOWNER-01: the same for an AMA-recovery request, so the row never
+          // sits pending with no reviewer and no closer (agent-os PR 8022).
+          declineSuppressedAmaRecoveryRereview({
+            db, repoPath, prNumber, reviewRow: current || existing, headSha: subject.headSha,
+            reviewedHeadSha: latestReviewedHeadSha({ db, repoPath, prNumber }),
+            suppressionReason: closerSpawnSuppression.reason,
+          });
           return;
         }
 

@@ -148,6 +148,16 @@ import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
 import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
+import {
+  evaluateHammerStopHold,
+  HAMMER_STOP_HOLD_REASON,
+  readHammerStopForHead,
+} from './hammer-stop-hold.mjs';
+import {
+  notePrelaunchRefusalSlowRetry,
+  planPrelaunchRefusalSlowRetry,
+  PRELAUNCH_REFUSAL_SLOW_RETRY_WAIT_REASON,
+} from './prelaunch-refusal-retry.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -776,6 +786,7 @@ async function suppressHammerRetryCapExhaustion({
   existingRecord,
   alertAlreadyEmitted,
   gateReasons = [],
+  hammerStop = null,
   deliverAlertImpl,
   logger,
   now,
@@ -834,6 +845,11 @@ async function suppressHammerRetryCapExhaustion({
       `Adversarial-review ${suppressionReason} for ${repo}#${prNumber} `
       + `(head ${shortHead}, ${attemptTotal}/${effectiveCap} hammer terminal-remediation dispatches). `
       + (gateReasons.length ? `Daemon failing gates: ${gateReasons.join(', ')}. ` : '')
+      // NOOWNER-01: name the predicate the last hammer stopped on.
+      + (hammerStop?.predicate
+        ? `Last hammer stop on head ${String(hammerStop.headSha || headSha || 'unknown').slice(0, 12)}: `
+          + `${hammerStop.predicate}. `
+        : '')
       + 'PR not closing — operator intervention required; further hammer dispatch '
       + 'suppressed to protect quota.';
     try {
@@ -847,6 +863,7 @@ async function suppressHammerRetryCapExhaustion({
           attemptCount: attemptTotal,
           cap: effectiveCap,
           suppressionState,
+          hammerStopPredicate: hammerStop?.predicate || null,
         },
       });
       alertEmitted = true;
@@ -908,6 +925,7 @@ async function suppressHammerRetryCapExhaustion({
     suppressionState,
     attemptCount: attemptTotal,
     alertEmitted,
+    ...(hammerStop?.predicate ? { hammerStopPredicate: hammerStop.predicate } : {}),
     workerClass: existingRecord?.workerClass || workerClass,
     dispatchId: existingRecord?.dispatchId || existingRecord?.launchRequestId || null,
     launchRequestId: existingRecord?.launchRequestId || null,
@@ -1370,6 +1388,18 @@ export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
 ]);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
+// NOOWNER-01: eligibility misses a hammer may be re-admitted for after it
+// stopped on the same head and an input it read changed.
+// Standing blocking findings are not here: Codex stays their first responder.
+const HAMMER_STOP_REDISPATCH_REASONS = new Set([
+  'stale-review-head',
+  'verdict-not-settled-success',
+  'blocking-findings-unknown',
+  'non-blocking-findings-present',
+  'non-blocking-findings-unknown',
+  'ci-not-green',
+  'pr-not-mergeable',
+]);
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
@@ -1703,6 +1733,24 @@ function isReclaimableBranchHolderBlockedAmaCloserRecord(record, { now = null } 
   // an eligible PR until an operator edits state by hand.
   if (ageMs === null) return true;
   return ageMs >= amaCloserPendingLeaseReclaimAgeMs(record);
+}
+
+// NOOWNER-01: which pre-launch refusal, if any, has spent its fast retries.
+// No launch request means no worker ever existed for this attempt.
+function prelaunchRefusalKind(record) {
+  if (!record || record.launchRequestId || record.dispatchId) return null;
+  if (!String(record.lastError || '').trim()) return null;
+  const state = String(record.state || '').trim().toLowerCase();
+  if (isProvisionBranchHolderBlocked(record.lastError)) {
+    return state === 'dispatch-branch-holder-block-exhausted'
+      || Number(record.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND
+      ? 'branch-holder'
+      : null;
+  }
+  return ['dispatch-failed', 'dispatch-deferred-transient'].includes(state)
+    && Number(record.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
+    ? 'dispatch-refused'
+    : null;
 }
 
 function isAmaCloserMissingLrqTimedOut(record, options = {}) {
@@ -2438,6 +2486,13 @@ function isProvisionBranchHolderBlocked(errOrText) {
     .join('\n');
   if (!normalized) return false;
   if (/\b(branch[-_]holder[-_](blocked|collision|worktree)|worktree[-_]branch[-_]holder[-_]blocked)\b/.test(normalized)) {
+    return true;
+  }
+  // NOOWNER-01: the HAM-ADOPT-01 hammer-close refusal names the holder without
+  // git's "already used by worktree" wording. It was classified as an ordinary
+  // `dispatch-failed`, spent the redispatch budget, and parked agent-os PRs
+  // 8005, 7997, 8017 and 8025 at `dispatch-retry-exhausted` on 2026-10-10.
+  if (/\bhammer close (?:branch-holder resolution refused|could not provision a private branch)\b/.test(normalized)) {
     return true;
   }
   const hasWorktreeCollision = (
@@ -4014,6 +4069,7 @@ export async function maybeDispatchAmaCloser({
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
+  evaluateHammerStopHoldImpl = evaluateHammerStopHold,
   emitProtectivePredecessorFindingImpl = null,
   logGate = dispatchCloserLogGate,
   logger = console,
@@ -4126,6 +4182,7 @@ export async function maybeDispatchAmaCloser({
   const repairCertifiedPark = certifiedContentionPark && !resumeCertifiedPark
     && parkRepairReasons.length > 0
     && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
+  let hammerStopRelease = null;
   if (!resumeCertifiedPark && (!verdict.eligible || eligibleHammerRouteReasons.length > 0)) {
     if (!verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark) {
       return noAmaDispatch({
@@ -4163,6 +4220,40 @@ export async function maybeDispatchAmaCloser({
         reasons: routeReasons,
       });
     }
+    // NOOWNER-01: a hammer that stopped without merging on the live head is not
+    // dispatched again until an input it read changes (src/ama/hammer-stop-hold.mjs).
+    // A stale review only defers to the hold when the live head's tip is
+    // closer-authored, because policy never re-reviews that head; on any other
+    // head the exact-head re-review stays the owner. The hammer-owner routes keep
+    // their own final no-merge decision.
+    if (hammerOwnerRouteOf(dispatchContext) === null
+      && (!verdict.reasons.includes('stale-review-head') || dispatchContext?.liveHeadCloserAuthored === true)) {
+      const hammerStopHold = await evaluateHammerStopHoldImpl({
+        rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
+        hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
+        repo: dispatchContext?.repo,
+        prNumber,
+        headSha: prMetadata?.headSha || dispatchContext?.targetRemediationSha || null,
+        reviewedSha: dispatchContext?.reviewedSha || null,
+        prMetadata,
+        excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+        deliverAlertImpl,
+        logger,
+        now: dispatchContext?.dispatchedAt || new Date().toISOString(),
+      });
+      if (hammerStopHold.action === 'hold') {
+        // No `reasons`: the orphan watchdog and automated recovery read this as
+        // a bounded wait, never as a re-review or hammer request.
+        return noAmaDispatch({
+          dispatched: false,
+          skipMergeAgent: true,
+          recoveryWait: true,
+          reason: HAMMER_STOP_HOLD_REASON,
+          hammerStop: hammerStopHold.hammerStop,
+        });
+      }
+      if (hammerStopHold.action === 'release') hammerStopRelease = hammerStopHold;
+    }
     const pendingCiMechanicalGateMiss = isPendingCiMechanicalGateMiss(verdict, routeReasons);
     // HMR-01: a settled comment-only PR may have only its one final round, so
     // `reviewCycleExhausted` need not flip and `workerClassForMiss` can be `unknown`.
@@ -4188,10 +4279,18 @@ export async function maybeDispatchAmaCloser({
       );
     const automatedRecoveryAdmit = dispatchContext?.automatedRecovery === true
       && automatedHammerReasonsCovered(routeReasons);
+    // NOOWNER-01: the hammer stopped on this exact head and an input it read
+    // has changed since. Re-admit it, including on a stale review of a
+    // hammer-rebased head (the hold above only releases there). The hammer
+    // keeps every merge predicate; the per-PR retry cap below still applies.
+    const hammerStopRedispatchAdmit = hammerStopRelease !== null
+      && reviewState?.remediationPending !== true
+      && routeReasons.length > 0
+      && routeReasons.every((reason) => HAMMER_STOP_REDISPATCH_REASONS.has(reason));
     // Ordinary recovery widens worker-class admission only. Orphan recovery also
     // admits covered primary-repair/closer-head reasons after its ownerless grace.
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
-    const autoHammer = (!pendingCiMechanicalGateMiss && orphanAdmit) || (!pendingCiMechanicalGateMiss &&
+    const autoHammer = (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -4638,8 +4737,20 @@ export async function maybeDispatchAmaCloser({
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
   const existingRecordIsBranchHolderBlocked = isProvisionBranchHolderBlocked(existingRecord?.lastError || '');
-  const existingRecordIsReclaimableBranchHolderBlock =
-    isReclaimableBranchHolderBlockedAmaCloserRecord(existingRecord, {
+  // NOOWNER-01: a refusal before any worker launched keeps a slow, bounded
+  // cadence once its fast retries are spent (src/ama/prelaunch-refusal-retry.mjs).
+  const prelaunchSlowRetry = planPrelaunchRefusalSlowRetry({
+    record: existingRecord,
+    kind: prelaunchRefusalKind(existingRecord),
+    nowMs: parseTimeMs(dispatchContext?.dispatchedAt || new Date().toISOString()),
+    lastTouchMs: mostRecentAmaCloserTouchMs(existingRecord),
+    intervalMs: amaCloserPendingLeaseReclaimAgeMs(existingRecord),
+  });
+  // The aged branch-holder reclaim is the slow cadence for that kind; it stops
+  // when the window closes.
+  let slowRetryNote = null;
+  const existingRecordIsReclaimableBranchHolderBlock = prelaunchSlowRetry?.phase !== 'exhausted'
+    && isReclaimableBranchHolderBlockedAmaCloserRecord(existingRecord, {
       now: dispatchContext?.dispatchedAt,
     });
   const existingRecordIsRevalidatableBranchMissing =
@@ -5625,6 +5736,55 @@ export async function maybeDispatchAmaCloser({
       reason: 'lease-held',
       existingLease: existingLeaseBeforeDispatch,
     });
+  } else if (prelaunchSlowRetry && !existingRecordIsReclaimableInterruption) {
+    slowRetryNote = await notePrelaunchRefusalSlowRetry({
+      plan: prelaunchSlowRetry,
+      record: existingRecord,
+      repo,
+      prNumber,
+      headSha: existingRecord?.headSha || targetRemediationSha,
+      persistImpl: (prelaunchRefusalSlowRetry) => updateAmaCloserDispatchRecord(
+        rootDir,
+        existingDispatchIdentity,
+        (current) => (current ? { ...current, prelaunchRefusalSlowRetry } : null),
+      ),
+      deliverAlertImpl,
+      logger,
+      nowIso: dispatchContext?.dispatchedAt || new Date().toISOString(),
+    });
+    const prelaunchRefusal = {
+      kind: prelaunchSlowRetry.kind,
+      refusal: prelaunchSlowRetry.refusal,
+      startedAt: prelaunchSlowRetry.startedAt,
+      windowEndsAt: prelaunchSlowRetry.windowEndsAt,
+      nextAttemptAt: prelaunchSlowRetry.nextAttemptAt,
+      paged: slowRetryNote.paged,
+    };
+    if (prelaunchSlowRetry.phase === 'wait') {
+      // The closer owns the PR on a bounded clock; automated recovery waits.
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: true,
+        recoveryWait: true,
+        reason: prelaunchSlowRetry.kind === 'branch-holder'
+          ? 'dispatch-branch-holder-block-exhausted'
+          : PRELAUNCH_REFUSAL_SLOW_RETRY_WAIT_REASON,
+        prelaunchRefusal,
+      });
+    }
+    if (prelaunchSlowRetry.phase === 'exhausted') {
+      // Retries stopped and the operator was paged with the refusal text.
+      return noAmaDispatch(prelaunchSlowRetry.kind === 'branch-holder'
+        ? {
+          dispatched: false,
+          skipMergeAgent: true,
+          recoveryWait: true,
+          reason: 'dispatch-branch-holder-block-exhausted',
+          prelaunchRefusal,
+        }
+        : { dispatched: false, reason: 'dispatch-retry-exhausted', prelaunchRefusal });
+    }
+    // `due`: fall through to one slow-cadence dispatch attempt.
   } else if (
     existingRecord
     && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
@@ -5765,6 +5925,9 @@ export async function maybeDispatchAmaCloser({
           ? hammerRetryCapDecision.targetAlertAlreadyEmitted
           : hammerRetryCapDecision.seriesAlertAlreadyEmitted,
         gateReasons: dispatchContext?.daemonFailureReasons || [],
+        hammerStop: hammerStopRelease?.hammerStop || readHammerStopForHead({
+          hqRoot, repo, prNumber, headSha: targetRemediationSha, reviewedSha, logger,
+        }),
         deliverAlertImpl,
         logger,
         now: dispatchContext.dispatchedAt,
@@ -5974,6 +6137,8 @@ export async function maybeDispatchAmaCloser({
     lastObservedStatus: existingRecord?.lastObservedStatus || null,
     lastObservedAt: existingRecord?.lastObservedAt || null,
     lastError: null,
+    // NOOWNER-01: a slow-cadence attempt keeps its window and page markers.
+    ...(slowRetryNote?.slowRetry ? { prelaunchRefusalSlowRetry: slowRetryNote.slowRetry } : {}),
   });
 
   // AMA-07 — acquire the duplicate-dispatch lease immediately before
@@ -6507,6 +6672,7 @@ export async function maybeDispatchAmaCloser({
     const liveRecord = { ...(current || {}) };
     delete liveRecord.terminalLaunchStatus;
     delete liveRecord.reconciledAt;
+    delete liveRecord.prelaunchRefusalSlowRetry;
     return {
       ...liveRecord,
       schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,

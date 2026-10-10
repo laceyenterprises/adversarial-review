@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { HEAD_GROUNDING_TAG, groundBlockingFindingsAtHead, persistReviewGroundingMetadata } from '../src/review-head-grounding.mjs';
 import { fetchCompareOwnDiff, resolvePrOwnReviewDiff } from '../src/reviewer-own-diff.mjs';
-import { annotateRemovedDiffLines, CHUNK_HEAD_LEGEND } from '../src/reviewer-chunk-context.mjs';
+import { annotateRemovedDiffLines, buildPostImageContext, CHUNK_HEAD_LEGEND, splitHunkPostImages } from '../src/reviewer-chunk-context.mjs';
 import { __test__ as harness, reviewAgyOversizedInChunks } from '../src/reviewer-harness.mjs';
 import { buildPromptForReviewerModel } from '../src/reviewer-prompt.mjs';
 import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
@@ -363,6 +363,58 @@ test('REVIEWCHUNK-01: removed-line annotation keeps headers, line count and long
     ' keep();',
   ]);
   assert.equal(annotateRemovedDiffLines(annotated, { maxLineBytes: 100 }), annotated);
+});
+
+test('REVIEWCHUNK-01: empty context lines preserve head numbering across split boundaries', () => {
+  const images = splitHunkPostImages({
+    headerLines: ['--- a/x.mjs', '+++ b/x.mjs'],
+    bodyLines: [
+      '@@ -10,5 +20,6 @@',
+      ' before();',
+      '',
+      '-removed();',
+      '+changed();',
+      ' ',
+      '',
+      '+after();',
+      '\\ No newline at end of file',
+      '',
+    ],
+    start: 3,
+    end: 5,
+  });
+  assert.deepEqual(images, [{
+    path: 'x.mjs',
+    before: [
+      { index: 1, lineNo: 20, text: 'before();' },
+      { index: 2, lineNo: 21, text: '' },
+    ],
+    after: [
+      { index: 5, lineNo: 23, text: '' },
+      { index: 6, lineNo: 24, text: '' },
+      { index: 7, lineNo: 25, text: 'after();' },
+    ],
+  }]);
+  const context = buildPostImageContext(images);
+  assert.match(context, /20\| before\(\);\n21\| /);
+  assert.match(context, /23\| \n24\| \n25\| after\(\);/);
+  assert.doesNotMatch(context, /26\|/, 'the diff terminator is not a head line');
+});
+
+test('REVIEWCHUNK-01: empty context respects omitted and zero head counts', () => {
+  const headerLines = ['+++ b/x.mjs'];
+  assert.deepEqual(splitHunkPostImages({
+    headerLines,
+    bodyLines: ['@@ -10 +20 @@', '', ''],
+    start: 0,
+    end: 1,
+  }), [{ path: 'x.mjs', before: [], after: [{ index: 1, lineNo: 20, text: '' }] }]);
+  assert.deepEqual(splitHunkPostImages({
+    headerLines,
+    bodyLines: ['@@ -10 +20,0 @@', '-removed();', ''],
+    start: 0,
+    end: 1,
+  }), []);
 });
 
 test('REVIEWCHUNK-01: a chunk that splits a hunk carries the head post-image within budget', async () => {

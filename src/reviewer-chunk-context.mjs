@@ -68,16 +68,21 @@ function splitHunkPostImages({ headerLines = [], bodyLines = [], start = 0, end 
   const hunks = [];
   let current = null;
   bodyLines.forEach((line, index) => {
-    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (header) {
-      current = { headerIndex: index, endIndex: index + 1, newLine: Number(header[1]), lines: [] };
+      current = {
+        headerIndex: index, endIndex: index + 1, newLine: Number(header[1]),
+        newEndLine: Number(header[1]) + Number(header[2] ?? 1), lines: [],
+      };
       hunks.push(current);
       return;
     }
     if (!current) return;
     current.endIndex = index + 1;
-    if (line.startsWith('+') || line.startsWith(' ')) {
-      current.lines.push({ index, lineNo: current.newLine, text: line.slice(1) });
+    // Git may suppress the space prefix on empty context lines. The declared
+    // head range distinguishes those from a trailing split('\n') terminator.
+    if (line.startsWith('+') || line.startsWith(' ') || (line === '' && current.newLine < current.newEndLine)) {
+      current.lines.push({ index, lineNo: current.newLine, text: line.length > 0 ? line.slice(1) : line });
       current.newLine += 1;
     }
   });

@@ -3,7 +3,7 @@
 **Owner:** AMA closer dispatch and recovery
 **Store:** `data/follow-up-jobs/ama-closer-dispatches/`
 **Source of truth:** `src/ama/dispatch-closer.mjs`
-**Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`
+**Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/prelaunch-refusal-retry.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`
 
 ## Purpose
 
@@ -52,6 +52,11 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `infraRearmLoggedLaunchRequestId` | string, optional | Launch whose `ama_closer.infra_dead_hammer_rearm` event was already logged. The event is skipped while this equals `launchRequestId`, so it is logged once per launch whatever the re-arm reason. Stamped only while the record still names that launch. |
 | `retryCount` | non-negative integer | Budgeted failed-dispatch count. Transient and branch-holder refusals preserve budget. |
 | `branchHolderBlockCount` | non-negative integer | Count of branch-holder refusals for bounded same-PR worktree cleanup. |
+| `prelaunchRefusalSlowRetry` | optional object | Durable bounded pre-launch retry window; fields below. Applies only before any `launchRequestId` or `dispatchId` exists. |
+| `prelaunchRefusalSlowRetry.startedAt` | ISO timestamp | First observation that fast pre-launch retries are spent. Authoritative six-hour window origin, preserved across failed slow attempts and aged holder-counter resets. |
+| `prelaunchRefusalSlowRetry.kind` | string | `branch-holder` or `dispatch-refused`; retains slow-retry ownership independently of the current refusal counter. |
+| `prelaunchRefusalSlowRetry.pagedAt` | optional ISO timestamp | Successful initial slow-cadence alert delivery. |
+| `prelaunchRefusalSlowRetry.exhaustedPagedAt` | optional ISO timestamp | Successful window-exhaustion alert delivery. |
 | `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |
 | `lastObservedAt` | string or null | ISO-8601 timestamp for the latest worker observation. |
 | `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded on `launch-terminal` records by launch-capacity reconciliation; cleared when launching again. |
@@ -107,6 +112,16 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   Record contents are always read fresh.
 - Writes are atomic JSON rewrites. Corrupt or unreadable records are skipped by
   bounded scans so one bad file cannot blind later active reservations.
+- Exhausted pre-launch refusals retry at most once per pending-lease reclaim
+  window (about 31 minutes by default), for six hours from the first exhausted
+  observation. `startedAt` and both page markers survive every pre-launch write,
+  including `dispatching` and subsequent failures. Resetting a branch-holder
+  counter does not restart fast retries or extend the deadline. A confirmed
+  launch clears the object; a new head has a new dispatch record. Exhaustion
+  stops retries and pages once with the latest refusal. Failed alert deliveries
+  retry on later ticks; process-local debounce limits repeat pages if persistence
+  fails, but does not survive a watcher restart. No new schema version is needed
+  for this optional additive field.
 
 - Primary-change collection uses the earliest hammer launch with a valid 40-hex
   `targetRemediationSha` as trusted author-baseline evidence, even when repairs

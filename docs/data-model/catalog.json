@@ -50,12 +50,14 @@
         "bin/hammer-merge.sh",
         "src/ama/closing-keywords.mjs",
         "src/ama/no-ci-configured.mjs",
-        "src/daemon-clean-merge.mjs"
+        "src/daemon-clean-merge.mjs",
+        "src/ama/hammer-stop-hold.mjs"
       ],
       "owner": "AMA merge authority",
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
       "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
-      "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI"
+      "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
+      "compatibilityFields": ["appendedRecords"]
     },
     {
       "id": "fast-merge-audits",
@@ -387,8 +389,34 @@
       "path": "docs/data-model/ama-closer-dispatches.md",
       "store": "data/follow-up-jobs/ama-closer-dispatches/",
       "schemaSurface": "src/ama/dispatch-closer.mjs",
-      "relatedSchemaSurfaces": ["src/ama/closer-terminal-cancel.mjs", "src/follow-up-stuck-claim-sweep.mjs", "src/ama/dead-hammer-rearm.mjs", "src/ama/primary-change.mjs", "bin/reconcile-ama-closer-dispatches.mjs"],
-      "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery"
+      "relatedSchemaSurfaces": [
+        "src/ama/closer-terminal-cancel.mjs",
+        "src/follow-up-stuck-claim-sweep.mjs",
+        "src/ama/dead-hammer-rearm.mjs",
+        "src/ama/primary-change.mjs",
+        "bin/reconcile-ama-closer-dispatches.mjs",
+        "src/ama/prelaunch-refusal-retry.mjs"
+      ],
+      "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery",
+      "prelaunchRetryFields": [
+        "prelaunchRefusalSlowRetry.startedAt",
+        "prelaunchRefusalSlowRetry.kind",
+        "prelaunchRefusalSlowRetry.pagedAt",
+        "prelaunchRefusalSlowRetry.exhaustedPagedAt"
+      ]
+    },
+    {
+      "id": "hammer-stop-hold",
+      "title": "Hammer Stop Hold",
+      "path": "docs/data-model/hammer-stop-hold.md",
+      "store": "data/follow-up-jobs/hammer-stop-hold/<repo-slug>-pr-<number>.json",
+      "schemaSurface": "src/ama/hammer-stop-hold.mjs",
+      "relatedSchemaSurfaces": [
+        "src/ama/dispatch-closer.mjs",
+        "src/ama/audit.mjs",
+        "src/checks-summary.mjs"
+      ],
+      "owner": "AMA closer retry admission"
     },
     {
       "id": "ama-closer-leases",

@@ -33,7 +33,7 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { checkItemState, latestCheckRollupItems } from '../checks-summary.mjs';
+import { checkItemState, isAdversarialOwnStatusContext, latestCheckRollupItems } from '../checks-summary.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
 
 export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
@@ -94,12 +94,29 @@ function headsMatch(a, b) {
   return left === right || (left.length < 40 && right.startsWith(left)) || (right.length < 40 && left.startsWith(right));
 }
 
+function isHammerAttempt(attempt, doc) {
+  const phase = String(attempt?.attemptPhase || '').trim().toLowerCase();
+  const path = String(attempt?.path || '').trim().toLowerCase();
+  const hammerPaths = new Set(['hammer', 'ham-terminal-remediation']);
+  // Per-attempt provenance wins over document metadata: daemon and hammer
+  // attempts can share a file, including daemon calls on HAM-certified heads.
+  if (phase) return /^(?:before-)?hammer-/.test(phase)
+    && (!path || hammerPaths.has(path));
+  if (path) return hammerPaths.has(path);
+  // Legacy hammer attempts and hand-appended stop lines lacked provenance.
+  // Accept them only in unattributed or hammer-owned documents; never infer a
+  // hammer decision from an unmarked attempt in a daemon-owned audit.
+  const authority = String(doc?.closureAuthority || '').trim().toLowerCase();
+  return !authority || hammerPaths.has(authority);
+}
+
 /**
  * The hammer's latest terminal decision recorded for `headSha`, read from the
  * audit file for that head and from the reviewed head's file (a hammer that
  * pushes a new head records its stop on the reviewed head with the new head
  * named in `head`/`currentHead`). Returns the stop only when that latest
- * terminal attempt is a no-merge; a later `deferred` or `succeeded` clears it.
+ * hammer terminal attempt is a no-merge; a later hammer `deferred` or
+ * `succeeded` clears it. Daemon attempts do not set or clear hammer decisions.
  */
 export function readHammerStopForHead({
   hqRoot,
@@ -126,6 +143,7 @@ export function readHammerStopForHead({
       ...(Array.isArray(doc?.appendedRecords) ? doc.appendedRecords : []),
     ];
     entries.forEach((attempt, index) => {
+      if (!isHammerAttempt(attempt, doc)) return;
       const outcome = String(attempt?.outcome || '').trim().toLowerCase();
       if (!outcome || outcome === 'in_progress') return;
       if (!headsMatch(attemptHead(attempt, fileHead), headSha)) return;
@@ -164,7 +182,7 @@ function checkName(item) {
 export function hammerStopInputs(prMetadata, { excludeContexts = [] } = {}) {
   const excluded = new Set((excludeContexts || []).map((ctx) => String(ctx || '').trim().toLowerCase()).filter(Boolean));
   const rollup = Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [];
-  const checks = latestCheckRollupItems(rollup.filter((item) => !excluded.has(checkName(item))))
+  const checks = latestCheckRollupItems(rollup.filter((item) => !isAdversarialOwnStatusContext(item, excluded)))
     .map((item) => `${checkName(item) || 'unnamed'}=${checkItemState(item) || 'NONE'}`)
     .sort();
   const mergeability = String(prMetadata?.mergeableState || '').trim().toUpperCase();

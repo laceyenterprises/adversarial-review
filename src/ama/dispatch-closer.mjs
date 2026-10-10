@@ -1741,6 +1741,11 @@ function prelaunchRefusalKind(record) {
   if (!record || record.launchRequestId || record.dispatchId) return null;
   if (!String(record.lastError || '').trim()) return null;
   const state = String(record.state || '').trim().toLowerCase();
+  // A slow attempt may reset the holder counter. Its original window still
+  // owns every subsequent pre-launch refusal, even below the fast-retry bound.
+  const slow = record.prelaunchRefusalSlowRetry;
+  if (parseTimeMs(slow?.startedAt) !== null
+    && ['branch-holder', 'dispatch-refused'].includes(slow?.kind)) return slow.kind;
   if (isProvisionBranchHolderBlocked(record.lastError)) {
     return state === 'dispatch-branch-holder-block-exhausted'
       || Number(record.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND
@@ -6138,7 +6143,9 @@ export async function maybeDispatchAmaCloser({
     lastObservedAt: existingRecord?.lastObservedAt || null,
     lastError: null,
     // NOOWNER-01: a slow-cadence attempt keeps its window and page markers.
-    ...(slowRetryNote?.slowRetry ? { prelaunchRefusalSlowRetry: slowRetryNote.slowRetry } : {}),
+    ...((slowRetryNote?.slowRetry || existingRecord?.prelaunchRefusalSlowRetry)
+      ? { prelaunchRefusalSlowRetry: slowRetryNote?.slowRetry || existingRecord.prelaunchRefusalSlowRetry }
+      : {}),
   });
 
   // AMA-07 — acquire the duplicate-dispatch lease immediately before

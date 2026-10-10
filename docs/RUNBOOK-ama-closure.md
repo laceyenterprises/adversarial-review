@@ -1221,14 +1221,17 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   admission refusal) no longer parks at `dispatch-retry-exhausted` once its fast
   retries are spent. The closer retries once per pending-lease reclaim window
   (about 31 minutes at the default 600 s dispatch timeout) for 6 hours from the
-  moment the fast retries ran out. It pages once when the slow cadence starts
+  first observation that fast retries are spent. It pages once when the slow cadence starts
   (`ama_closer.prelaunch_refusal_slow_retry`, with the exact `[hq]` refusal
   line) and once when the window closes and retries stop
   (`ama_closer.prelaunch_refusal_exhausted`). Between attempts the closer
   answers `dispatch-refusal-slow-retry-wait` (or
   `dispatch-branch-holder-block-exhausted` for a branch holder) with
   `recoveryWait`. The window and page markers live on the per-head dispatch
-  record as `prelaunchRefusalSlowRetry`; a launch clears them and a new head
+  record as `prelaunchRefusalSlowRetry`. The original window stays authoritative
+  after every failed slow attempt, including aged branch-holder counter resets;
+  those resets neither resume fast retries nor extend the six-hour deadline.
+  A launch clears the markers and a new head
   starts fresh. The HAM-ADOPT-01 refusal (`hammer close branch-holder
   resolution refused ...`, `hammer close could not provision a private branch
   ...`) is classified as a branch-holder block, so it no longer spends the
@@ -1239,7 +1242,15 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   mergeability (MERGEABLE/CONFLICTING) or the external check rollup differs from
   what it first saw. A newly available head/base SHA or a known mergeability
   reading after `UNKNOWN` counts as a change; missing current SHA readings and
-  current `UNKNOWN` mergeability do not release the hold. It answers
+  current `UNKNOWN` mergeability do not release the hold. Own gate exclusion
+  follows the canonical CI rule: only matching status contexts are ignored;
+  external check runs with that name remain inputs. Per-attempt producer
+  provenance excludes daemon failures, including daemon attempts on a
+  HAM-certified head, so capacity deferral cannot invent a hammer decision.
+  Unmarked legacy entries are accepted only in unattributed or hammer-owned
+  audit documents; explicit hammer markers override document ownership.
+  See the [audit](data-model/ama-audit.md) and
+  [hold-store](data-model/hammer-stop-hold.md) contracts. It answers
   `hammer-stop-awaiting-input-change` with
   `recoveryWait`, and pages once per head (`ama_closer.hammer_stop_hold`) naming
   the predicate the hammer recorded. When an input changes, the hold releases

@@ -23,6 +23,7 @@ import {
 import {
   _resetHammerStopHoldPageDebounceForTests,
   changedHammerStopInputs,
+  hammerStopInputs,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from '../src/ama/hammer-stop-hold.mjs';
@@ -263,6 +264,54 @@ test('Case 1: a pre-launch refusal keeps a slow bounded cadence, pages once with
   assert.equal(alerts.length, 2, 'the exhaustion page is sent once');
 });
 
+test('branch-holder slow retries retain the original window across counter resets and watcher restarts', async (t) => {
+  _resetPrelaunchRefusalPageDebounceForTests();
+  const rootDir = tmpRoot(t, 'noowner-holder-slow-');
+  const identity = { repo: AOS, prNumber: 8025, headSha: HEAD_7997 };
+  const exhaustedAt = '2026-10-10T18:30:00Z';
+  seedRefusedRecord(rootDir, { ...identity, lastError: HAM_ADOPT_REFUSAL, at: exhaustedAt });
+  updateAmaCloserDispatchRecord(rootDir, identity, (record) => ({
+    ...record, branchHolderBlockCount: 3, state: 'dispatch-branch-holder-block-exhausted',
+  }));
+  const alerts = [];
+  const tick = async (minutes) => {
+    const deps = closerDeps({ alerts, dispatch: async () => {
+      const err = new Error('Command failed: hq dispatch');
+      err.code = 1;
+      err.stderr = HAM_ADOPT_REFUSAL;
+      throw err;
+    } });
+    const result = await maybeDispatchAmaCloser({
+      ...closerArgs(rootDir, {
+        ...identity, reviewedSha: HEAD_7997,
+        dispatchContext: { dispatchedAt: minutesAfter(exhaustedAt, minutes) },
+      }), ...deps,
+    });
+    return { result, launches: hqLaunches(deps).length };
+  };
+  assert.equal((await tick(1)).launches, 0);
+  const start = minutesAfter(exhaustedAt, 1);
+  for (const minutes of [40, 80, 120, 160, 200, 240, 280, 320, 360]) {
+    assert.equal((await tick(minutes)).launches, 1, `one attempt at minute ${minutes}`);
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    assert.equal(record.branchHolderBlockCount, 1, 'aged retry resets the holder counter');
+    assert.equal(Date.parse(record.prelaunchRefusalSlowRetry.startedAt), Date.parse(start));
+    assert.ok(record.prelaunchRefusalSlowRetry.pagedAt);
+    _resetPrelaunchRefusalPageDebounceForTests();
+    const wait = await tick(minutes + 1);
+    assert.equal(wait.launches, 0, 'no fast retry after another refusal');
+    assert.equal(wait.result.recoveryWait, true);
+  }
+  for (const minutes of [362, 450]) {
+    const stopped = await tick(minutes);
+    assert.equal(stopped.launches, 0);
+    assert.equal(stopped.result.reason, 'dispatch-branch-holder-block-exhausted');
+  }
+  assert.deepEqual(alerts.map((alert) => alert.options.event), [
+    'ama_closer.prelaunch_refusal_slow_retry', 'ama_closer.prelaunch_refusal_exhausted',
+  ]);
+});
+
 // ── Case 4 ──────────────────────────────────────────────────────────────────
 // podium PR 15: both hammer runs stopped at ci-not-green ("GitHub reports zero
 // check runs, zero commit statuses"), then
@@ -296,6 +345,86 @@ function recordPodiumStop(rootDir, at, { file = PODIUM_HEAD } = {}) {
     },
   });
 }
+
+test('hammer stop reader uses attempt provenance with an explicit legacy compatibility rule', () => {
+  const stop = { outcome: 'failed-without-merge', reason: 'ci-not-green', validatedHead: PODIUM_HEAD };
+  const read = (doc) => readHammerStopForHead({
+    hqRoot: '/fixture', repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
+    readAuditImpl: () => doc,
+  });
+  for (const path of ['daemon-merge', 'daemon-operator-approved-override', 'ham-terminal-remediation']) {
+    assert.equal(read({ attempts: [{ ...stop, path, attemptPhase: 'daemon-failed' }] }), null);
+  }
+  assert.equal(read({ attempts: [stop] })?.predicate, 'ci-not-green', 'unattributed legacy hammer');
+  assert.equal(read({ closureAuthority: 'ham-terminal-remediation', appendedRecords: [stop] })?.predicate, 'ci-not-green');
+  assert.equal(read({ closureAuthority: 'daemon-merge', attempts: [stop] }), null, 'unmarked daemon-owned history');
+  assert.equal(read({ attempts: [{ ...stop, attemptPhase: 'other-producer' }] }), null);
+  const hammer = { ...stop, attemptPhase: 'hammer-gh-pr-merge', startedAt: '2026-10-10T18:00:00Z' };
+  assert.equal(read({ closureAuthority: 'daemon-merge', attempts: [hammer] })?.predicate, 'ci-not-green',
+    'explicit hammer provenance overrides document ownership');
+  for (const outcome of ['failed-without-merge', 'deferred', 'succeeded']) {
+    assert.equal(read({ attempts: [hammer, {
+      ...stop, outcome, attemptPhase: 'daemon-failed', path: 'daemon-merge', startedAt: '2026-10-10T19:00:00Z',
+    }] })?.predicate, 'ci-not-green', 'daemon attempts cannot set or clear a hammer stop');
+  }
+  assert.equal(read({ attempts: [hammer, {
+    ...hammer, outcome: 'deferred', startedAt: '2026-10-10T19:00:00Z',
+  }] }), null, 'a later hammer defer clears the stop');
+});
+
+test('daemon failure followed by capacity deferral does not hold the first repair hammer on the next dirty tick', async (t) => {
+  const rootDir = tmpRoot(t, 'noowner-daemon-fallback-');
+  writeAmaAuditEntry({
+    hqRoot: join(rootDir, 'hq-root'), repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
+    now: '2026-10-10T18:00:00Z', metadata: { closureAuthority: 'daemon-merge' },
+    attempt: { outcome: 'failed-without-merge', reason: 'gate-not-eligible',
+      validatedHead: PODIUM_HEAD, attemptPhase: 'daemon-failed', path: 'daemon-merge' },
+  });
+  const other = { repo: PODIUM, prNumber: 99, headSha: PODIUM_REVIEWED };
+  updateAmaCloserDispatchRecord(rootDir, other, () => ({
+    ...other, state: 'dispatched', launchRequestId: 'lrq_other', dispatchId: 'dispatch_other',
+    lastAttemptedAt: '2026-10-10T18:00:00Z', dispatchedAt: '2026-10-10T18:00:00Z',
+  }));
+  const tick = async (at, forceHammerAfterDaemonFailure) => {
+    const args = podiumArgs(rootDir, { at, rollup: [
+      { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' },
+    ] });
+    args.cfg.amaCloserMaxConcurrentLaunches = 1;
+    args.dispatchContext.forceHammerAfterDaemonFailure = forceHammerAfterDaemonFailure;
+    const deps = closerDeps();
+    deps.readLaunchRequestStatusImpl = () => ({ ok: true, status: 'running' });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(deps.alerts.length, 0, 'no false hammer-stop page');
+    return { result, launches: hqLaunches(deps).length };
+  };
+  const deferred = await tick('2026-10-10T18:01:00Z', true);
+  assert.equal(deferred.result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(deferred.launches, 0);
+  updateAmaCloserDispatchRecord(rootDir, other, (record) => ({ ...record, state: 'completed' }));
+  const retry = await tick('2026-10-10T18:02:00Z', false);
+  assert.equal(retry.result.dispatched, true, JSON.stringify(retry.result));
+  assert.equal(retry.launches, 1);
+});
+
+test('own StatusContext is ignored while a same-name external CheckRun releases the hold', async (t) => {
+  const rootDir = tmpRoot(t, 'noowner-external-check-');
+  recordPodiumStop(rootDir, '2026-10-10T18:00:00Z');
+  const context = 'agent-os/adversarial-gate';
+  const rollup = (external, own) => [
+    { __typename: 'CheckRun', name: context, status: 'COMPLETED', conclusion: external, completedAt: '2026-10-10T18:00:00Z' },
+    { __typename: 'StatusContext', context, state: own, createdAt: '2026-10-10T18:01:00Z' },
+    { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' },
+  ];
+  const inputs = hammerStopInputs({ statusCheckRollup: rollup('FAILURE', 'SUCCESS') }, { excludeContexts: [context] });
+  assert.match(inputs.checks, /agent-os\/adversarial-gate=FAILURE/);
+  const tick = (at, external, own) => maybeDispatchAmaCloser({
+    ...podiumArgs(rootDir, { at, rollup: rollup(external, own) }), ...closerDeps(),
+  });
+  assert.equal((await tick('2026-10-10T18:02:00Z', 'FAILURE', 'SUCCESS')).reason, HAMMER_STOP_HOLD_REASON);
+  assert.equal((await tick('2026-10-10T18:03:00Z', 'FAILURE', 'FAILURE')).reason, HAMMER_STOP_HOLD_REASON);
+  const released = await tick('2026-10-10T18:04:00Z', 'SUCCESS', 'FAILURE');
+  assert.equal(released.dispatched, true, JSON.stringify(released));
+});
 
 test('hammer stop inputs recognize newly available readings but ignore missing current readings', () => {
   const known = { headSha: PODIUM_HEAD, baseSha: 'base-0', mergeability: 'MERGEABLE', checks: '' };

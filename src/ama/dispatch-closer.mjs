@@ -4,8 +4,10 @@ import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
 import {
-  REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
+  HAMMER_OWNER_ROUTES,
+  composeCiBlockedHammerPrompt,
   composeReviewCycleCapHammerPrompt,
+  hammerOwnerRouteOf,
 } from './review-cycle-cap-route.mjs';
 import { fetchPrimaryChange } from './primary-change.mjs';
 /**
@@ -372,7 +374,9 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
       // watcher would have reviewed next, so that head is unreviewed by
       // construction. No review follows the cap: the hammer adjudicates that
       // head as final reviewer and must still certify it (validated HAM commit
-      // with Reviewed-Head) before any merge predicate passes.
+      // with Reviewed-Head) before any merge predicate passes. CIBLOCKHAM-01
+      // passes the same flag: its red remediation push is parked unreviewed
+      // because reviewer admission requires green CI.
       if (options?.reviewCycleCapReached === true) return true;
       // COMMENTCLOSE-02: the comment-only final round is often the round that
       // exhausts the budget (agent-os#7334: round 2 of 2), and its proven push is
@@ -4142,9 +4146,10 @@ export async function maybeDispatchAmaCloser({
     // Codex-first guard: live orchestration reports completedRemediationRounds.
     // That evidence must prove Codex/remediator had a turn before terminal
     // Hammer authority can arm; rereview-only exhaustion is not enough.
-    // CYCLECAPHAM-01: a capped PR is a final-hammer close. Codex-first still
-    // holds: a remediator that owns the reviewed head is never preempted.
-    const reviewCycleCapRoute = dispatchContext?.reviewCycleCapReached === true
+    // CYCLECAPHAM-01 / CIBLOCKHAM-01: a capped PR, or a red-CI head with no
+    // remediation job left, is a final-hammer close. Codex-first still holds: a
+    // remediator that owns the reviewed head is never preempted.
+    const reviewCycleCapRoute = hammerOwnerRouteOf(dispatchContext) !== null
       && reviewState?.remediationPending !== true;
     const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
     const routeReasons = verdict.eligible ? eligibleHammerRouteReasons
@@ -4354,9 +4359,14 @@ export async function maybeDispatchAmaCloser({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   });
 
-  if (dispatchContext?.reviewCycleCapReached === true && useHammerTerminalRemediationPrompt) {
+  const hammerOwnerRoute = hammerOwnerRouteOf(dispatchContext);
+  if (hammerOwnerRoute === 'review-cycle-cap' && useHammerTerminalRemediationPrompt) {
     prompt += composeReviewCycleCapHammerPrompt({ reviewedSha, targetRemediationSha,
       cap: dispatchContext.reviewCycleCap, history: dispatchContext.reviewCycleHistory });
+  }
+  if (hammerOwnerRoute === 'ci-blocked' && useHammerTerminalRemediationPrompt) {
+    prompt += composeCiBlockedHammerPrompt({ reviewedSha, targetRemediationSha,
+      failedChecks: dispatchContext.ciFailedChecks });
   }
   if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
@@ -4674,7 +4684,7 @@ export async function maybeDispatchAmaCloser({
     // after posting it) and certified parks. Unknown evidence holds the launch;
     // only a readable absence of a decision permits normal retry admission.
     const reconcileCapFinalDecision = async (observedStatus) => {
-      if (dispatchContext?.reviewCycleCapReached !== true
+      if (hammerOwnerRoute === null
         || !(AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(observedStatus)
           || AMA_CLOSER_RETRYABLE_STATUSES.has(observedStatus))) return null;
       const livePr = await probeAmaLivePrForMergeDispatch({
@@ -4721,13 +4731,13 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
-      logAmaCloserDispatchEvent(logger, 'ama_closer.review_cycle_cap_hammer_final_no_merge', {
+      logAmaCloserDispatchEvent(logger, `ama_closer.${hammerOwnerRoute.replace(/-/g, '_')}_hammer_final_no_merge`, {
         repo, prNumber, headSha: existingRecordLeaseIdentity.headSha,
-        launchRequestId: existingRecord.launchRequestId,
+        launchRequestId: existingRecord.launchRequestId, hammerOwnerRoute,
       }, { level: 'warn' });
       return noAmaDispatch({
         dispatched: false, skipMergeAgent: true,
-        reason: REVIEW_CYCLE_CAP_HAMMER_FINAL_NO_MERGE_REASON,
+        reason: HAMMER_OWNER_ROUTES[hammerOwnerRoute].noMergeReason,
         needsOperator: true,
         workerClass: existingRecord.workerClass || workerClass,
         dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,

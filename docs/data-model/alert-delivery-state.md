@@ -58,9 +58,11 @@ Directory: `data/alert-delivery/`
   treat that durable enqueue as terminal for their own debounce; transport
   delivery authority belongs to the sink health/receipt state.
 - Orphan recovery `exhausted`, `ownership-uncertain` and `store-error` events,
-  and the CYCLECAPHAM-01 `ama.review_cycle_cap.hammer_final` SEV1 page (the
-  hammer's final no-merge decision or exhausted retry cap on a review-cycle-cap
-  PR), use a deterministic event plus SHA-256 identity over
+  and the hammer-owner SEV1 pages — CYCLECAPHAM-01
+  `ama.review_cycle_cap.hammer_final` (review-cycle-cap PR) and CIBLOCKHAM-01
+  `ama.ci_blocked.hammer_final` (failed CI with no remediation job left), each
+  sent for the hammer's final no-merge decision or exhausted retry cap — use a
+  deterministic event plus SHA-256 identity over
   `repo#prNumber@headSha`.
   Enqueue retries reuse pending, inflight, delivered and dead-letter documents,
   including a crash before the watchdog's SQLite page guard is updated.

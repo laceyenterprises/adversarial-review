@@ -235,6 +235,7 @@ import {
 } from './reviewer-spawn-settle.mjs';
 import { maybeDispatchReviewerTimeoutExhaustedMergeAgent } from './reviewer-timeout-exhausted-dispatch.mjs';
 import { maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs';
+import { maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
@@ -2158,6 +2159,39 @@ export async function processReviewSubject(entry, ctx) {
         current?.review_status === REREVIEW_CI_BLOCKED_STATUS &&
         !subject.terminal
       ) {
+        // The parked row is the durable hammer hand-off. Reconcile it before
+        // head refresh, CI backoff, or remediation admission can hide its owner.
+        const hammerRoute = await maybeRouteCiBlockedToHammer({
+          ciAdmission: { hammerOwner: true, reason: 'ci-blocked-owner-reconcile' },
+          rootDir: ROOT, db, repoPath, prNumber, existing: current,
+          subjectRef: subject.ref, currentRevisionRef: pendingRevisionRef,
+          labelNames: prLabelNames, execFileImpl: execFileAsync,
+        });
+        const closerHead = await resolveHeadCloserCommitSuppression();
+        if (closerHead.suppressed || hammerRoute.prTerminal ||
+            ['ama-dispatched', 'ama-pending'].includes(hammerRoute.outcome) ||
+            ['hammer-no-merge', 'hammer-cap-exhausted'].includes(hammerRoute.outcome)) {
+          // Launch intent, a running worker, or unresolved closure evidence
+          // retains the durable reconciliation marker before the first HAM
+          // push too. CI greenness and unrelated pushes cannot release it.
+          await projectGateStatusSafe(current);
+          return;
+        }
+        const ciBlockedActiveFollowUp = shouldDeferReviewForActiveFollowUp({
+          rootDir: ROOT,
+          repo: repoPath,
+          prNumber,
+          currentRevisionRef: pendingRevisionRef,
+        });
+        if (ciBlockedActiveFollowUp.defer) {
+          console.log(
+            `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: active follow-up job` +
+              (ciBlockedActiveFollowUp.jobId ? ` ${ciBlockedActiveFollowUp.jobId}` : '') +
+              ` is ${ciBlockedActiveFollowUp.latestJobStatus}`
+          );
+          await projectGateStatusSafe(current);
+          return;
+        }
         const blockedHeadSha = current.reviewer_head_sha || current.revision_ref || null;
         const blockedHeadMoved =
           blockedHeadSha &&
@@ -2196,21 +2230,6 @@ export async function processReviewSubject(entry, ctx) {
             );
           }
         } else {
-          const ciBlockedActiveFollowUp = shouldDeferReviewForActiveFollowUp({
-            rootDir: ROOT,
-            repo: repoPath,
-            prNumber,
-            currentRevisionRef: pendingRevisionRef,
-          });
-          if (ciBlockedActiveFollowUp.defer) {
-            console.log(
-              `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: active follow-up job` +
-                (ciBlockedActiveFollowUp.jobId ? ` ${ciBlockedActiveFollowUp.jobId}` : '') +
-                ` is ${ciBlockedActiveFollowUp.latestJobStatus}`
-            );
-            await projectGateStatusSafe(current);
-            return;
-          }
           const ciBlockedRecheck = shouldRecheckCiBlockedRereview(current, {
             nowMs: Date.now(),
             env: process.env,
@@ -3274,8 +3293,15 @@ export async function processReviewSubject(entry, ctx) {
                 if (parked.changes === 1) {
                   console.warn(
                     `[watcher] Parked CI-blocked re-review for ${repoPath}#${prNumber}: ` +
-                      'failed external CI with no follow-up job to requeue.'
+                      `failed external CI with no remediation job left (${ciAdmission.reason}).`
                   );
+                  // CIBLOCKHAM-01: the hammer owns the red head from this tick.
+                  await maybeRouteCiBlockedToHammer({
+                    ciAdmission, rootDir: ROOT, db, repoPath, prNumber,
+                    existing: stmtGetReviewRow.get(repoPath, prNumber) || current,
+                    subjectRef: subject.ref, currentRevisionRef: subject.headSha || pendingRevisionRef,
+                    labelNames: prLabelNames, execFileImpl: execFileAsync,
+                  });
                 } else {
                   stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
                 }

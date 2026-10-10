@@ -91,6 +91,7 @@
         "src/github-auth-recovery.mjs"
       ],
       "owner": "follow-up remediation queue",
+      "pendingCiRereviewEvidenceFields": ["reReview.ciSettlement", "reReview.ciGate", "remediationPlan.rounds[].reReview.ciSettlement", "remediationPlan.rounds[].reReview.ciGate"],
       "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"]
     },
     {

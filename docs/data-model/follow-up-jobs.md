@@ -5,6 +5,28 @@
 **Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/github-auth-recovery.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
 
+## Re-review accepted with CI pending at timeout (CIBLOCKHAM-01)
+
+When a valid reply requests re-review and the bounded CI settlement wait expires
+with external checks still `pending`, reconcile accepts the request and completes
+the job. Its `reReview` object adds `ciSettlement: "pending-at-timeout"` and
+`ciGate`, the last CI inspection snapshot: `state: "pending"`, `headSha`,
+`conclusion`, `rollupKnown`, `totalExternalChecks`, `failedChecks`, and
+`pendingChecks`. Check
+entries retain the classifier's check name, state, workflow name and details URL.
+This is observation evidence, not CI greenness or merge authority. Unknown CI
+at timeout retains the failure path; green CI does not add these fields.
+
+`markFollowUpJobCompleted` persists the same object at job-level `reReview` and
+at `remediationPlan.rounds[].reReview` for the completed current round. These
+optional fields accompany the ordinary request fields (`requested`,
+`requestedAt`, `reason`, `triggered`, `status`, `outcomeReason`, `reviewRow`). The
+watcher still gates reviewer dispatch on live green external CI.
+
+Automatic failed-CI admission leaves a stopped `no-progress` job stopped and
+hands ownership to the hammer; it cannot reopen that job on a later CI probe.
+Explicit operator remediation retriggers retain their existing allowlist.
+
 ## Native workflow publication evidence (WFDRIFT-01)
 
 `operationalBlockerRecovery` records `{ category: "github-auth", classification,

@@ -1658,6 +1658,58 @@ attribution (non-author, current-head), so a self-applied `operator-approved` /
 review/remediate loop, bounding the impact to review-resource churn rather than
 an unauthorized merge.
 
+### CI-blocked with no remediation job left → hammer owner (CIBLOCKHAM-01)
+
+Operator decision, 2026-10-10: "Hammers judgement is final". A PR whose current
+head fails external CI with no remediation job left is routed to the hammer as
+its owner. agent-os PR 8007 showed the old contract: remediation round 2 of 2
+pushed a head, repo-guards failed on it, and every later poll parked the
+re-review as `ci-regression-no-job` with nobody owning the red head.
+
+- **Trigger.** Re-review CI admission finds `failed` external CI on the current
+  head and nothing to requeue: no follow-up job (`ci-regression-no-job`), a job
+  that has vanished (`ci-regression-no-job`), or a requeue that re-stops the job
+  at its round cap or as no-progress (`ci-regression-stopped`). The admission
+  result carries `hammerOwner: true`. A requeueable job is unchanged
+  (`ci-regression-requeued`), and pending or unknown CI never routes.
+- **Reviewer.** The re-review row parks at `ci-blocked` as before: reviewer
+  admission still requires green external CI. The watcher re-arms the re-review
+  when the head moves or CI turns green.
+- **Hand-off.** On the park tick, and on every backoff-gated same-head CI recheck
+  that still finds no remediation job, the watcher hands the PR to the
+  AMA/merge-agent coexistence path with `ciBlockedHammerOwner` and the failing
+  checks (`src/ci-blocked-hammer.mjs`). It uses the hammer-owner route it shares
+  with CYCLECAPHAM-01 (`src/hammer-owner-route.mjs`): one dispatch-flag table,
+  one final-outcome classifier, one page shape and one prompt contract
+  (`src/ama/review-cycle-cap-route.mjs`). The closer is pinned to the head the
+  latest posted review read (`reviewer_passes.head_sha` of the newest pass with
+  a GitHub comment), never to the parked red head. Without that head the route
+  fails closed and dispatches nothing.
+- **Closer.** The flag makes the PR a final-hammer close and admits the
+  unreviewed red remediation head. Green CI is not an admission condition for
+  the hammer. Codex-first still holds, and every merge predicate is unchanged.
+  The prompt gains a "CIBLOCKHAM-01 — failed CI with no remediation job left:
+  you are the owner" section listing the failing checks. The hammer fixes the
+  failure, judges the latest review's findings with the CYCLECAPHAM-01 contract,
+  and validates and merges under its lease, or posts
+  `HAM closing status — no merge.`.
+- **Bounds.** The existing per-head hammer retry cap and lifetime ceiling bound
+  attempts. A recorded no-merge decision on this route is final: the closer
+  returns `ci-blocked-hammer-final-no-merge` with `needsOperator` and launches no
+  retry hammer. Only that decision or an exhausted hammer retry cap pages the
+  operator, as SEV1 `ama.ci_blocked.hammer_final`, once per `repo#pr@head`. No
+  new blocking gate is added.
+
+A remediation round whose bounded CI wait
+(`ADVERSARIAL_REMEDIATION_CI_SETTLE_TIMEOUT_MS`, default 30 minutes) expires
+while the external checks are still PENDING is not a failed remediation. The
+round completes and requests the re-review, recording
+`reReview.ciSettlement='pending-at-timeout'`. The watcher's re-review CI
+admission holds the reviewer until the checks settle. Green proceeds to the
+re-review. Red requeues remediation while a round is left, and otherwise takes
+the hammer-owner route above. An unknown CI state at the timeout (no readable
+rollup) still fails the round as `ci-settlement-timeout`.
+
 ## GitHub API Rollup
 
 `src/github-api.mjs` is the watcher/reviewer rollup helper for GitHub PR

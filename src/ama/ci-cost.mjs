@@ -56,12 +56,20 @@ export async function fetchCiCost({ repo, prNumber, headSha, get, rootDir, opera
     const pr = await get(`repos/${repo}/pulls/${prNumber}`);
     if (pr.head?.sha !== headSha || !/^[0-9a-f]{40}$/i.test(pr.base?.sha || '')) throw new Error('stale PR head/base');
     // Compare against the merge base, never the moving base tip or PR-owned scanner.
-    const comparison = await get(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
+    // REVIEWCHUNK-01: the merge base is taken with the CURRENT base-branch tip
+    // (three-dot compare on the base ref). The stored base SHA goes stale once a
+    // PR merges its base branch back in, and the PR files list then includes
+    // every workflow change that merge pulled in, billed to this PR.
+    const compareBase = pr.base.ref ? encodeURIComponent(pr.base.ref) : pr.base.sha;
+    const comparison = await get(`repos/${repo}/compare/${compareBase}...${headSha}`);
     const base = comparison.merge_base_commit?.sha;
     if (!/^[0-9a-f]{40}$/i.test(base || '')) throw new Error('missing merge base');
     const files = await pages(get, `repos/${repo}/pulls/${prNumber}/files`);
     if (files.length >= 3000 || (Number.isInteger(pr.changed_files) && files.length !== pr.changed_files)) throw new Error('truncated PR files');
-    const workflows = files.filter((file) => file.filename?.startsWith('.github/workflows/') || file.previous_filename?.startsWith('.github/workflows/'));
+    // The compare lists at most 300 files; past that it may be truncated, so the
+    // complete (possibly stale-base-inflated) PR files list is the safe superset.
+    const ownFiles = Array.isArray(comparison.files) && comparison.files.length < 300 ? comparison.files : files;
+    const workflows = ownFiles.filter((file) => file.filename?.startsWith('.github/workflows/') || file.previous_filename?.startsWith('.github/workflows/'));
     const readYaml = async (path, ref) => {
       const data = await get(`repos/${repo}/contents/${path}?ref=${ref}`);
       if (data.encoding !== 'base64' || typeof data.content !== 'string' || data.truncated) throw new Error(`unreadable workflow ${path}`);

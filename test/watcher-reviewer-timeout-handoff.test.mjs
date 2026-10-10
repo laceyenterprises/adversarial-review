@@ -57,6 +57,9 @@ const stubs = new Map(${JSON.stringify(Object.entries(stubs))});
 if (process.env.FIXTURE_CAP_SCENARIO === 'ham') {
   stubs.delete(${JSON.stringify(fileUrl('src', 'ama', 'ham-provenance.mjs'))});
 }
+if (process.env.FIXTURE_CI_MULTI_TICK) {
+  stubs.set(${JSON.stringify(fileUrl('src', 'alert-delivery.mjs'))}, 'fixture:ci-hammer-alert');
+}
 if (process.env.FIXTURE_CI_BLOCKED === '1') {
   stubs.set(${JSON.stringify(ciRegressionUrl)}, 'fixture:remediation-ci-regression');
 }
@@ -107,9 +110,9 @@ export async function load(url, context, nextLoad) {
           if (!ham.suppressed) throw new Error('fixture HAM must suppress reviewers');
         }
         const none = { suppressed: false, reason: 'fixture-no-closer-commit' };
-        export async function getHeadCloserCommitSuppression() { return process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
-        export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
-        export function createHeadCloserCommitSuppressionResolver() { return async () => process.env.FIXTURE_CAP_SCENARIO === 'ham' ? ham : none; }
+        export async function getHeadCloserCommitSuppression() { return (process.env.FIXTURE_CAP_SCENARIO === 'ham' || globalThis.__ciHammerPushed) ? ham : none; }
+        export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return (process.env.FIXTURE_CAP_SCENARIO === 'ham' || globalThis.__ciHammerPushed) ? ham : none; }
+        export function createHeadCloserCommitSuppressionResolver() { return async () => (process.env.FIXTURE_CAP_SCENARIO === 'ham' || globalThis.__ciHammerPushed) ? ham : none; }
         export async function fetchHeadCloserVerifiedCommit({ headSha }) {
           return { sha: headSha, parentSha: 'cap-head-5', parentCount: 1,
             message: 'HAM close\\nClosed-By: hammer (adversarial-pipe-mode)' };
@@ -127,7 +130,7 @@ export async function load(url, context, nextLoad) {
         export * from ${JSON.stringify(ciRegressionActualUrl)};
         export async function inspectRemediationCiRegression() {
           globalThis.__ciInspections = (globalThis.__ciInspections || 0) + 1;
-          return { state: 'failed', conclusion: 'FAILURE', headSha: 'timeout-head-164', totalExternalChecks: 3,
+          return { state: 'failed', conclusion: 'FAILURE', headSha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : 'timeout-head-164', totalExternalChecks: 3,
             failedChecks: [{ name: 'repo-guards', state: 'FAILURE', workflowName: 'repo-guards', detailsUrl: null }],
             pendingChecks: [] };
         }
@@ -149,7 +152,7 @@ export async function load(url, context, nextLoad) {
         export function createGitHubPRSubjectAdapter() {
           return {
             async discoverSubjects() {
-              return [{ domainId: 'code-pr', subjectExternalId: REPO + '#164', revisionRef: 'timeout-head-164' }];
+              return [{ domainId: 'code-pr', subjectExternalId: REPO + '#164', revisionRef: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : 'timeout-head-164' }];
             },
             async fetchState(ref) {
               return {
@@ -172,7 +175,7 @@ export async function load(url, context, nextLoad) {
                   ),
                 ],
                 updatedAt: '2026-05-27T04:00:00.000Z',
-                headSha: 'timeout-head-164',
+                headSha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : 'timeout-head-164',
                 terminal: false,
                 observedAt: '2026-05-27T04:00:01.000Z',
               };
@@ -184,6 +187,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    'fixture:ci-hammer-alert': "export * from '${fileUrl('src', 'alert-delivery.mjs')}?actual'; export async function deliverAlert(text, options) { (globalThis.__ciHammerPages ||= []).push(options); return { status: 'queued' }; }",
     'fixture:operator-surface': "globalThis.__timeoutHandoffOperatorWrites = []; export function createCompositeOperatorSurface() { return { extractLinearTicketId() { return null; }, syncTriageStatus: async (...args) => globalThis.__timeoutHandoffOperatorWrites.push(args), observeOperatorApproved: async () => null, observeMergeAgentOverride: async () => process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? { applied: true, observedRevisionRef: 'timeout-head-164', actor: process.env.FIXTURE_MERGE_AGENT_ACTOR || 'operator-bot', eventId: 'evt-merge-agent-requested', observedAt: process.env.FIXTURE_MERGE_AGENT_CREATED_AT || '2026-05-27T04:00:01.000Z' } : null, observeLabelControl: async () => null }; }",
     'fixture:reviewer-runtime': "globalThis.__timeoutHandoffReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__timeoutHandoffReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
@@ -191,7 +195,7 @@ export async function load(url, context, nextLoad) {
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
     'fixture:follow-up-jobs': "export const FOLLOW_UP_JOB_DIRS = { pending: 'pending', inProgress: 'in-progress', completed: 'completed', failed: 'failed', stopped: 'stopped', workspaces: 'workspaces', stoppedArchived: 'stopped-archived' }; export function classifyFollowUpCriticality() { return { critical: false, blockingFindingCount: 0, blockingFindingState: 'known', verdict: 'comment-only' }; } export function createFollowUpJob() { return { jobPath: '/tmp/watcher-timeout-follow-up.json' }; } export function listFollowUpJobsInDir() { return []; } export function listInProgressFollowUpJobs() { return []; } export function resolveRoundBudgetForJob() { return { roundBudget: 2, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 1, latestRiskClass: 'medium', latestMaxRounds: 2 }; } export function isActiveFollowUpJobStatus(status) { return ['pending','inProgress','in-progress','in_progress'].includes(status); } export function isSettledReviewJob() { return false; } export function markFollowUpJobStopped() { return { status: 'stopped' }; } export function requeueFollowUpJobForNextRound() { return { requeued: false }; } export function markFollowUpJobFailed() { return { status: 'failed' }; } export function requeueInProgressFollowUpJobForRetry() { return { requeued: false }; } export function stopPendingNoRemediationJobs() { return []; } export function writeFollowUpJob() {} export function voidSingleReviewCredit() { return { voided: false }; }",
     'fixture:remediation-prompt': "export function followUpJobRepoPrKey(job) { return String(job?.repo || '').toLowerCase() + '#' + (job?.prNumber || ''); }",
-    'fixture:follow-up-merge-agent': "globalThis.__timeoutHandoffDispatches = []; export const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched'; export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; function fixtureMergeAgentRequest() { return process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? { id: 'evt-merge-agent-requested', label: 'merge-agent-requested', actor: process.env.FIXTURE_MERGE_AGENT_ACTOR || 'operator-bot', createdAt: process.env.FIXTURE_MERGE_AGENT_CREATED_AT || '2026-05-27T04:00:01.000Z', headSha: 'timeout-head-164' } : null; } export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob(rootDir, candidate = {}) { return { ...candidate, repo: 'laceyenterprises/adversarial-review', prNumber: 164, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', lastVerdict: 'Request changes', latestFollowUpJobStatus: 'completed', latestFollowUpReReviewRequested: true, reviewFailureClass: 'reviewer-timeout', reviewFailureExhausted: true, mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: candidate.labels || [], mergeAgentRequest: candidate.mergeAgentRequestEvent ? { kind: 'merge-agent-requested', actor: candidate.mergeAgentRequestEvent.actor, labelEventId: candidate.mergeAgentRequestEvent.id, createdAt: candidate.mergeAgentRequestEvent.createdAt, headSha: candidate.mergeAgentRequestEvent.headSha, prUpdatedAt: candidate.prUpdatedAt } : null }; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export async function dispatchMergeAgentForPR(payload) { globalThis.__timeoutHandoffDispatches.push(payload); return { decision: 'dispatch', trigger: 'reviewer-timeout-exhausted' }; } export function fetchMergeAgentCandidate(repo, prNumber, options) { if (options?.rootDir !== process.cwd()) throw new Error('watcher root must be passed to candidate recovery'); const mergeAgentRequestEvent = fixtureMergeAgentRequest(); return { repo, prNumber, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: 'timeout-head-164', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [...(mergeAgentRequestEvent && process.env.FIXTURE_LIVE_REQUEST_REMOVED !== '1' ? ['merge-agent-requested'] : []), ...(process.env.FIXTURE_LIVE_HARD_SKIP ? [process.env.FIXTURE_LIVE_HARD_SKIP] : [])].map(name => ({ name })), operatorNotes: null, prState: 'open', merged: false, prUpdatedAt: '2026-05-27T04:00:01.000Z', mergeAgentRequestEvent }; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export function isScopedMergeAgentRequest(job) { const request = job?.mergeAgentRequest; if (!request) return false; if (!request.actor || String(request.actor).trim().toLowerCase() === 'unknown') return false; if (!request.labelEventId && !request.labelEventNodeId) return false; if (!request.createdAt) return false; if (String(request.headSha || '') !== String(job?.headSha || '')) return false; const prUpdatedAt = request.prUpdatedAt || job?.prUpdatedAt || null; if (prUpdatedAt && Date.parse(request.createdAt) < Date.parse(prUpdatedAt)) return false; return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export function resolveFastMergePerPollCap() { return 5; } export function scanStuckMergeAgentDispatches() { return []; } export function shouldUseReviewerTimeoutExhaustedMergeGate(job) { return job.reviewFailureClass === 'reviewer-timeout' && job.reviewFailureExhausted === true && job.latestFollowUpJobStatus === 'completed' && job.latestFollowUpReReviewRequested === true; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {}",
+    'fixture:follow-up-merge-agent': "globalThis.__timeoutHandoffDispatches = []; export const MERGE_AGENT_DISPATCHED_LABEL = 'merge-agent-dispatched'; export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; function fixtureMergeAgentRequest() { return process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? { id: 'evt-merge-agent-requested', label: 'merge-agent-requested', actor: process.env.FIXTURE_MERGE_AGENT_ACTOR || 'operator-bot', createdAt: process.env.FIXTURE_MERGE_AGENT_CREATED_AT || '2026-05-27T04:00:01.000Z', headSha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : 'timeout-head-164' } : null; } export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob(rootDir, candidate = {}) { return { ...candidate, repo: 'laceyenterprises/adversarial-review', prNumber: 164, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : 'timeout-head-164', lastVerdict: 'Request changes', latestFollowUpJobStatus: 'completed', latestFollowUpReReviewRequested: true, reviewFailureClass: 'reviewer-timeout', reviewFailureExhausted: true, mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: candidate.labels || [], mergeAgentRequest: candidate.mergeAgentRequestEvent ? { kind: 'merge-agent-requested', actor: candidate.mergeAgentRequestEvent.actor, labelEventId: candidate.mergeAgentRequestEvent.id, createdAt: candidate.mergeAgentRequestEvent.createdAt, headSha: candidate.mergeAgentRequestEvent.headSha, prUpdatedAt: candidate.prUpdatedAt } : null }; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export async function dispatchMergeAgentForPR(payload) { globalThis.__timeoutHandoffDispatches.push(payload); return { decision: 'dispatch', trigger: 'reviewer-timeout-exhausted' }; } export function fetchMergeAgentCandidate(repo, prNumber, options) { if (options?.rootDir !== process.cwd()) throw new Error('watcher root must be passed to candidate recovery'); const mergeAgentRequestEvent = fixtureMergeAgentRequest(); return { repo, prNumber, branch: 'codex/timeout-handoff', baseBranch: 'main', headSha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : 'timeout-head-164', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS', labels: [...(mergeAgentRequestEvent && process.env.FIXTURE_LIVE_REQUEST_REMOVED !== '1' ? ['merge-agent-requested'] : []), ...(process.env.FIXTURE_LIVE_HARD_SKIP ? [process.env.FIXTURE_LIVE_HARD_SKIP] : [])].map(name => ({ name })), operatorNotes: null, prState: 'open', merged: false, prUpdatedAt: '2026-05-27T04:00:01.000Z', mergeAgentRequestEvent }; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export function isScopedMergeAgentRequest(job) { const request = job?.mergeAgentRequest; if (!request) return false; if (!request.actor || String(request.actor).trim().toLowerCase() === 'unknown') return false; if (!request.labelEventId && !request.labelEventNodeId) return false; if (!request.createdAt) return false; if (String(request.headSha || '') !== String(job?.headSha || '')) return false; const prUpdatedAt = request.prUpdatedAt || job?.prUpdatedAt || null; if (prUpdatedAt && Date.parse(request.createdAt) < Date.parse(prUpdatedAt)) return false; return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export function resolveFastMergePerPollCap() { return 5; } export function scanStuckMergeAgentDispatches() { return []; } export function shouldUseReviewerTimeoutExhaustedMergeGate(job) { return job.reviewFailureClass === 'reviewer-timeout' && job.reviewFailureExhausted === true && job.latestFollowUpJobStatus === 'completed' && job.latestFollowUpReReviewRequested === true; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {}",
     'fixture:follow-up-retrigger-label': "export const RETRIGGER_REMEDIATION_LABEL = 'retrigger-remediation'; export async function retryPendingRetriggerAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerRemediationFromLabel() { return { outcome: 'noop' }; }",
     'fixture:follow-up-retrigger-review-label': "export const RETRIGGER_REVIEW_LABEL = 'retrigger-review'; export async function retryPendingRetriggerReviewAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerReviewFromLabel() { return { outcome: 'noop' }; }",
     'fixture:operator-retrigger-helpers': "export function findLatestFollowUpJob() { return null; }",
@@ -203,7 +207,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'timeout-head-164', labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
-    'fixture:ama-dispatch-closer': "export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { if (args?.dispatchContext?.ciBlockedHammerOwner === true) (globalThis.__ciBlockedCloserCalls ||= []).push({ reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, failedChecks: (args?.dispatchContext?.ciFailedChecks || []).map((check) => check.name) }); (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
+    'fixture:ama-dispatch-closer': "export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { if (args?.dispatchContext?.ciBlockedHammerOwner === true) (globalThis.__ciBlockedCloserCalls ||= []).push({ reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, failedChecks: (args?.dispatchContext?.ciFailedChecks || []).map((check) => check.name) }); (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); if (process.env.FIXTURE_CI_MULTI_TICK && args?.dispatchContext?.ciBlockedHammerOwner === true) { const tick = globalThis.__ciBlockedCloserCalls.length; if (tick === 3 && process.env.FIXTURE_CI_MULTI_TICK !== 'retry') return { dispatched: false, skipMergeAgent: true, needsOperator: true, reason: process.env.FIXTURE_CI_MULTI_TICK === 'cap' ? 'hammer-retry-cap-exhausted' : 'ci-blocked-hammer-final-no-merge' }; return { dispatched: true, launchRequestId: tick < 3 ? 'lrq_first_hammer' : 'lrq_retry_hammer', reason: tick === 2 ? 'already-dispatched' : 'dispatched', workerClass: 'hammer' }; } const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
     'fixture:config-loader': "export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; }, getOrchestrationMode() { return process.env.FIXTURE_ORCHESTRATION_MODE || 'native'; } }; } export function getConfig() { return undefined; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {} export function loadConfigRuntime() { return buildConfig(); }",
     'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
     'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function hamCommitIdentityMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseCommitTrailerValues() { return {}; } export function parseRemediatedFindingsTrailer() { return null; } export function isHamWorkerTicket() { return false; }",
@@ -320,6 +324,24 @@ await pollOnce(octokit, {
   },
 });
 
+const ciSnapshots = [];
+if (process.env.FIXTURE_CI_MULTI_TICK) {
+  const snapshot = () => db.prepare('SELECT review_status, reviewer_head_sha FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+    .get('laceyenterprises/adversarial-review', 164);
+  ciSnapshots.push(snapshot());
+  assert.equal(globalThis.__ciBlockedCloserCalls.length, 1, 'initial dispatch');
+  globalThis.__ciHammerPushed = true;
+  db.prepare('UPDATE reviewed_prs SET last_attempted_at = ? WHERE pr_number = 164').run(new Date().toISOString());
+  await pollOnce(octokit);
+  ciSnapshots.push(snapshot());
+  assert.equal(globalThis.__ciBlockedCloserCalls.length, 2, 'live hammer reconciled despite new HAM head and CI backoff');
+  // External dispatch status now reports that the first process exited. The
+  // closer returns either a retry launch or its recorded final no-merge/cap.
+  await pollOnce(octokit);
+  ciSnapshots.push(snapshot());
+  assert.equal(globalThis.__ciBlockedCloserCalls.length, 3, 'terminal worker reconciliation remains reachable');
+}
+
 const row = db.prepare('SELECT review_status, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
   .get('laceyenterprises/adversarial-review', 164);
 console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
@@ -328,6 +350,8 @@ console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   closerCalls: globalThis.__timeoutHandoffCloserCalls || [],
   ciBlockedCloserCalls: globalThis.__ciBlockedCloserCalls || [],
   ciInspections: globalThis.__ciInspections || 0,
+  ciSnapshots,
+  ciHammerPages: globalThis.__ciHammerPages || [],
   capComments: globalThis.__capComments,
   capLabels: globalThis.__capLabels,
   reviewerSpawns: globalThis.__timeoutHandoffReviewerSpawns || [],
@@ -700,10 +724,47 @@ test('watcher pollOnce routes a CI-blocked PR with no remediation job left to th
     assert.equal(summary.reviewerSpawns.length, 0);
     assert.equal(summary.operatorWrites.length, 0);
     assert.equal(summary.dispatches.length, 0, 'the legacy merge-agent lane is not used');
-    assert.deepEqual(summary.ciBlockedCloserCalls, [{ reviewCycleExhausted: true, failedChecks: ['repo-guards'] }], output);
+    assert.deepEqual(summary.ciBlockedCloserCalls, [{ reviewCycleExhausted: true, failedChecks: [] }], output);
     assert.match(output, /Holding CI-blocked re-review for laceyenterprises\/adversarial-review#164: ci-regression-no-job/);
     assert.match(output, /ci-blocked routed laceyenterprises\/adversarial-review#164 to the hammer for final adjudication: ama-dispatched/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+for (const decision of ['retry', 'no-merge', 'cap']) {
+  test(`CI-blocked ownership survives HAM push and process exit for ${decision} reconciliation`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-hammer-ticks-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      writeFileSync(loaderPath, buildLoaderSource());
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource());
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, GITHUB_TOKEN: 'fixture-token', AGENT_OS_HQ_BIN: '/usr/bin/false',
+          ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false', FIXTURE_AMA_ENABLED: '1',
+          FIXTURE_CI_BLOCKED: '1', FIXTURE_CI_MULTI_TICK: decision },
+      });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
+      assert.ok(line, output);
+      const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+      assert.deepEqual(summary.ciSnapshots, Array(3).fill({ review_status: 'ci-blocked', reviewer_head_sha: 'timeout-head-164' }), output);
+      assert.equal(summary.ciInspections, 1, 'HAM pushes retain ownership without requeue or CI probes');
+      assert.equal(summary.reviewerSpawns.length, 0);
+      assert.equal(summary.dispatches.length, 0, 'legacy merge-agent cannot take over');
+      assert.equal(summary.ciHammerPages.length, decision === 'retry' ? 0 : 1, output);
+      if (decision !== 'retry') {
+        assert.equal(summary.ciHammerPages[0].event, 'ama.ci_blocked.hammer_final');
+        assert.equal(summary.ciHammerPages[0].payload.headSha, 'ham-pushed-head-164');
+        assert.equal(summary.ciHammerPages[0].payload.outcome, decision === 'cap' ? 'hammer-cap-exhausted' : 'hammer-no-merge');
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}

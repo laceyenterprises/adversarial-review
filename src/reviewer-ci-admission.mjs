@@ -158,6 +158,15 @@ async function guardRereviewCiBeforeReviewer({
       return ciBlockedHammerOwnerResult({ repo, prNumber, ciGate, reason: 'ci-regression-no-job' });
     }
 
+    // Automatic CI admission must not reopen a no-progress hand-off. Explicit
+    // operator retriggers retain their separate stopped-job allowlist.
+    if (latest.job?.status === 'stopped' && latest.job?.remediationPlan?.stop?.code === 'no-progress') {
+      return ciBlockedHammerOwnerResult({
+        repo, prNumber, ciGate, reason: 'ci-regression-stopped',
+        jobPath: latest.jobPath, job: latest.job,
+      });
+    }
+
     const reason = buildRereviewCiRegressionReason({ repo, prNumber, ciGate });
     try {
       const requeued = requeueImpl({

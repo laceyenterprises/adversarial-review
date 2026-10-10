@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildFollowUpJob, readFollowUpJob, requeueFollowUpJobForNextRound, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { findLatestFollowUpJob } from '../src/operator-retrigger-helpers.mjs';
 
 import {
   buildRereviewCiBlockedFailureMessage,
@@ -16,6 +21,44 @@ function silentLog() {
     warn() {},
   };
 }
+
+test('consecutive failed-CI admissions retain a persisted no-progress hammer hand-off', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ci-admission-no-progress-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const repo = 'laceyenterprises/agent-os';
+  const prNumber = 6593;
+  const job = buildFollowUpJob({ repo, prNumber, reviewerModel: 'codex', reviewBody: '## Verdict\nRequest changes' });
+  job.status = 'completed';
+  job.completedAt = '2026-10-10T17:00:00.000Z';
+  job.reReview = { requested: false };
+  job.remediationPlan.currentRound = 1;
+  job.remediationPlan.maxRounds = 3;
+  job.remediationPlan.rounds = [{ round: 1, state: 'completed' }];
+  const completedDir = join(rootDir, 'data/follow-up-jobs/completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFollowUpJob(join(completedDir, `${job.jobId}.json`), job);
+  const args = {
+    rootDir, repo, prNumber, passKind: 'rereview', reviewerHeadSha: 'head-red',
+    log: silentLog(), now: () => '2026-10-10T18:00:00.000Z',
+    inspectCiImpl: async () => ({ state: 'failed', headSha: 'head-red', failedChecks: [{ name: 'repo-guards', state: 'FAILURE' }] }),
+  };
+  const first = await guardRereviewCiBeforeReviewer(args);
+  assert.equal(first.hammerOwner, true);
+  assert.equal(first.job.status, 'stopped');
+  assert.equal(first.job.remediationPlan.stop.code, 'no-progress');
+  const stoppedBytes = JSON.stringify(readFollowUpJob(first.jobPath));
+  const second = await guardRereviewCiBeforeReviewer({
+    ...args, requeueImpl: () => assert.fail('automatic admission must not reopen the hand-off'),
+  });
+  assert.equal(second.hammerOwner, true);
+  assert.equal(second.reason, 'ci-regression-stopped');
+  assert.equal(second.jobPath, first.jobPath);
+  assert.equal(JSON.stringify(readFollowUpJob(first.jobPath)), stoppedBytes);
+  assert.equal(findLatestFollowUpJob(rootDir, { repo, prNumber }).job.status, 'stopped');
+  // This is an automatic-admission restriction; operator recovery still works.
+  const operator = requeueFollowUpJobForNextRound({ rootDir, jobPath: first.jobPath, requestedBy: 'operator' });
+  assert.equal(operator.job.status, 'pending');
+});
 
 test('guardRereviewCiBeforeReviewer bypasses first-pass review admission', async () => {
   let inspected = false;

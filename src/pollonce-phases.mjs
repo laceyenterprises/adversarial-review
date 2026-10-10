@@ -2159,6 +2159,22 @@ export async function processReviewSubject(entry, ctx) {
         current?.review_status === REREVIEW_CI_BLOCKED_STATUS &&
         !subject.terminal
       ) {
+        // The parked row is the durable hammer hand-off. Reconcile it before
+        // head refresh, CI backoff, or remediation admission can hide its owner.
+        const hammerRoute = await maybeRouteCiBlockedToHammer({
+          ciAdmission: { hammerOwner: true, reason: 'ci-blocked-owner-reconcile' },
+          rootDir: ROOT, db, repoPath, prNumber, existing: current,
+          subjectRef: subject.ref, currentRevisionRef: pendingRevisionRef,
+          labelNames: prLabelNames, execFileImpl: execFileAsync,
+        });
+        const closerHead = await resolveHeadCloserCommitSuppression();
+        if (closerHead.suppressed || hammerRoute.prTerminal ||
+            ['hammer-no-merge', 'hammer-cap-exhausted'].includes(hammerRoute.outcome)) {
+          // A HAM push retains ci-blocked ownership even when its CI is green.
+          // Reviewer-only suppression must never stop the owner's next tick.
+          await projectGateStatusSafe(current);
+          return;
+        }
         const blockedHeadSha = current.reviewer_head_sha || current.revision_ref || null;
         const blockedHeadMoved =
           blockedHeadSha &&
@@ -2290,13 +2306,6 @@ export async function processReviewSubject(entry, ctx) {
               `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: ` +
                 `${ciAdmission.reason}; reviewer admission requires green external CI.`
             );
-            // CIBLOCKHAM-01: no remediation job is left for the red head, so
-            // the hammer owns it; the closer dedups and caps it per head.
-            await maybeRouteCiBlockedToHammer({
-              ciAdmission, rootDir: ROOT, db, repoPath, prNumber, existing: current,
-              subjectRef: subject.ref, currentRevisionRef: pendingRevisionRef,
-              labelNames: prLabelNames, execFileImpl: execFileAsync,
-            });
             await projectGateStatusSafe(current);
             return;
           }

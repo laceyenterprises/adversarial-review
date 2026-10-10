@@ -76,7 +76,7 @@ data/reviews.db
 | `pending` | eligible for watcher review / re-review |
 | `pending-upstream` | transient upstream/provider failure; parked behind the file-backed cascade backoff window, reclaimable by the normal claim once it expires (does not burn `review_attempts`) |
 | `reviewing` | reviewer subprocess in flight; durable claim before spawn |
-| `ci-blocked` | rereview admission found failed external CI on the current PR head and no remediation job is left to requeue (no follow-up job, or its rounds are spent). Not claimable by reviewer dispatch; the hammer owns the head meanwhile (CIBLOCKHAM-01); the watcher re-arms it when the head moves or CI turns green, and explicit remediation/operator re-review resets still go through `requestReviewRereview`. Same-head CI probes are backoff-gated so parked rows cannot make the watcher poll GitHub on every tick |
+| `ci-blocked` | rereview admission found failed external CI on the current PR head and no remediation job is left to requeue (no follow-up job, or its rounds are spent). Not claimable by reviewer dispatch; the hammer owns the head meanwhile (CIBLOCKHAM-01); the watcher reconciles hammer ownership every tick before reviewer suppression, CI backoff or follow-up deferral. HAM pushes retain the parked row; a non-HAM head change or green CI on the original head re-arms admission unless the hammer has reached a final outcome. Explicit remediation/operator re-review resets still go through `requestReviewRereview`. Same-head CI probes are backoff-gated so parked rows cannot make the watcher poll GitHub on every tick |
 | `posted` | review posted successfully |
 | `failed` | review attempt failed; eligible same-head retries use normal dispatch gates; a new head archives the failure and re-arms the row before admission |
 | `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky unless a matching posted GitHub review is found; manual recovery uses `npm run reconcile-posted-orphans` for posted-review backfill or `npm run retrigger-review` after operator verification |
@@ -146,7 +146,7 @@ new PR
             │
             ├─ rereview admission sees failed external CI and no follow-up job
             │    └─ ci-blocked
-            │         ├─ PR head advances or CI turns green ── pending
+            │         ├─ non-HAM head advances or original-head CI turns green (no final hammer outcome) ── pending
             │         └─ remediation/operator reset ───────── pending
             │
             ├─ lease-released same-head terminal failure exhausts retry cap

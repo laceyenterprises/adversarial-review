@@ -1135,8 +1135,15 @@ uses (`src/hammer-owner-route.mjs`).
 
 - The re-review row stays `ci-blocked`; reviewer admission still requires green
   CI. Look for `ci-blocked routed <repo>#<pr> to the hammer for final
-  adjudication` in the watcher log, on the park tick and on each 5-minute
-  same-head CI recheck (`ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS`).
+  adjudication` in the watcher log, on the park tick and every later poll tick,
+  before CI probe backoff or active follow-up deferral. The 5-minute backoff
+  (`ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS`) limits CI probes only. A HAM
+  head retains the parked row across pushes, even with green CI, so process
+  exit, retry and final-decision reconciliation stay reachable before reviewer
+  suppression. A non-HAM head change or green CI on the original head can
+  re-arm reviewer admission unless the hammer has reached a final outcome.
+  Automatic failed-CI admission never requeues a stopped `no-progress`
+  hand-off; explicit operator remediation retriggers remain available.
 - The closer admits the red, unreviewed head as a final-hammer close and adds a
   "CIBLOCKHAM-01 — failed CI with no remediation job left: you are the owner"
   prompt section with the failing checks. Codex-first, the lease and every

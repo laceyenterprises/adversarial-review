@@ -53,9 +53,10 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
       WHERE repo=? AND pr_number=? AND reserved_at IS NOT NULL AND reserved_at < ?`).run(repo, prNumber, new Date(Date.now() - 300000).toISOString());
     const row = db.prepare('SELECT * FROM ham_finding_disputes WHERE repo=? AND pr_number=? AND identity=?').get(...params);
     if (row.reserved_at) throw new Error('dispute reservation already in flight');
-    // Idempotent per finding and head: a re-run of the same hammer pass reuses
+    // Idempotent per finding, evidence head and reviewed head: a re-run reuses
     // the recorded adjudication instead of posting a second comment.
-    if (row.resolution === HAMMER_WITHDRAWN_RESOLUTION && row.head_sha === headSha && row.comment_id) return { done: row };
+    if (row.resolution === HAMMER_WITHDRAWN_RESOLUTION && row.head_sha === headSha
+      && row.finding_reviewed_head === review.commit_id && row.comment_id) return { done: row };
     db.prepare('UPDATE ham_finding_disputes SET requests=requests+1, reserved_at=? WHERE repo=? AND pr_number=? AND identity=?').run(new Date().toISOString(), ...params);
     return { row };
   }).immediate();

@@ -656,7 +656,13 @@ Key control points:
   withdrawn through `bin/dispute-finding.mjs` as `withdrawn-by-hammer` (HAMFINAL-01:
   "Hammers judgement is final"). No re-review is requested; the gate, closer and
   self-cert accept the withdrawal, and a review whose every blocking finding is
-  withdrawn projects `success (hammer-adjudicated)`. Before
+  withdrawn projects `success (hammer-adjudicated)`. The held-lease hammer merge
+  procedure dismisses only authoritative same-head GitHub review vetoes with
+  complete durable, comment-verified withdrawal coverage. Standing findings and
+  unrelated vetoes remain; read/dismissal failures refuse merge. Dismissed review
+  bodies retain finding authority for predicate retries. Withdrawal reuse binds
+  identity, evidence head and finding reviewed head; a superseding reviewed head
+  requires fresh admission. Before
   applying a withdrawal, the finding's reviewed head must match the cited
   review and the evidence head must match the current evaluated head. A branch
   reset cannot reuse descendant-head evidence. `ama-check` also matches the

@@ -1371,7 +1371,9 @@ live head, then records the same fields in `ham_finding_disputes` and wakes the
 watcher. **No re-review is requested**, so the watcher's same-head duplicate
 guard cannot strand the PR and no skipped audit can block it. A failed post,
 untrusted identity or head race records nothing and exits non-zero; the finding
-then still stands. A rerun on the same head is idempotent.
+then still stands. A rerun is idempotent only for the same finding identity,
+evidence head and finding reviewed head. A newer authoritative review on the
+evidence head requires fresh admission even if it repeats the identity.
 
 The withdrawal is final. The adversarial gate, the closer predicate
 (`isEligibleForAmaClosure`, `bin/ama-check.mjs`) and the HAM self-cert treat a
@@ -1388,7 +1390,19 @@ re-hashes the comment's embedded evidence. Unrecorded, edited or non-HAM
 comments and missing/unreadable stores resolve nothing.
 A review whose every blocking finding is withdrawn projects the gate as
 `success (hammer-adjudicated)`, never as "operator decision required", and is a
-settled verdict for closure. Any finding still standing is remediated and
+settled verdict for closure. Before each merge attempt, `bin/hammer-merge.sh`
+calls `bin/dismiss-withdrawn-reviews.mjs` under the held lease, after predicate
+admission and the required-check gate. It reads complete live review/comment
+lists and the local withdrawal store, verifies the same durable admission and
+comment evidence as `ama-check`, and dismisses only authoritative
+`CHANGES_REQUESTED` reviews on the exact live head whose complete blocking lists
+are withdrawn. It rechecks the review body and live head before dismissal.
+Reviews with standing or unknown findings, older-head reviews, and unrelated
+review vetoes remain. A read or dismissal failure refuses merge; GitHub still
+enforces branch protection without an administrative bypass. A withdrawal-only
+PR needs no HAM commit. `ama-check` retains dismissed review bodies as finding
+authority so an interrupted merge can retry; dismissal alone resolves nothing.
+Any finding still standing is remediated and
 certified as before. The hammer continues in the same run: it remediates the
 remaining findings, lists each withdrawn finding in its audit as
 `- **<title>** (blocking) — withdrawn-by-hammer: Evidence-SHA256 <digest> on head <sha>`,

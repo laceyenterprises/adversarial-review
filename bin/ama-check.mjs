@@ -58,7 +58,9 @@ const UNKNOWN_BLOCKERS = Object.freeze({
   blockingFindingIdentities: null,
 });
 
-const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
+// Dismissal removes GitHub's veto, not the review body's finding authority.
+// Retain that body so a withdrawal-only merge can retry after dismissal.
+const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']);
 
 function normalizeLogin(value) {
   return String(value ?? '').trim().toLowerCase().replace(/\[bot\]$/, '');

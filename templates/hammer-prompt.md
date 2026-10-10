@@ -231,7 +231,11 @@ section as `- **<title>** (blocking) — withdrawn-by-hammer: Evidence-SHA256
 <digest> on head <sha>` and count it in `Remediated-Findings`; the gate, the
 predicate and the self-cert accept withdrawn findings as resolved. A PR whose
 only unresolved findings are withdrawn needs no HAM commit: re-run the predicate
-and merge when it is `eligible: true`.
+and merge when it is `eligible: true`. The versioned merge procedure verifies
+durable withdrawal admission and HAM comment evidence, then dismisses only
+authoritative same-head `CHANGES_REQUESTED` reviews whose complete blocker lists
+are withdrawn. Reviews with standing findings and unrelated review vetoes remain;
+a dismissal failure refuses merge. No administrative bypass is used.
 Neither finding-anchored reversal nor dispute uses `hq decision raise`.
 A predicate refusal `primary-change-reverted` or `primary-change-unknown` requires
 no-merge closing status. Repair the branch or recover the evidence; a scoped

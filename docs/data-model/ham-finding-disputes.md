@@ -3,7 +3,7 @@
 **Owner:** AMA bounded finding disputes and reviewer context provenance
 **Store:** `data/reviews.db`, table `ham_finding_disputes`
 **Source of truth:** `src/review-state.mjs` (`ensureReviewStateSchema`)
-**Runtime surface:** `src/ama/finding-dispute.mjs`, `src/ama/hammer-adjudication.mjs`, `src/ama/finding-dispute-owner.mjs`, `src/ama/finding-dispute-context.mjs`, `bin/dispute-finding.mjs`, `src/prompt-context.mjs`, `src/reviewer.mjs`, `src/reviewer-prompt.mjs`
+**Runtime surface:** `src/ama/finding-dispute.mjs`, `src/ama/hammer-adjudication.mjs`, `src/ama/finding-dispute-owner.mjs`, `src/ama/finding-dispute-context.mjs`, `src/ama/withdrawn-review-dismissal.mjs`, `bin/dismiss-withdrawn-reviews.mjs`, `bin/dispute-finding.mjs`, `src/prompt-context.mjs`, `src/reviewer.mjs`, `src/reviewer-prompt.mjs`
 
 ## Schema
 
@@ -37,7 +37,12 @@ a finding only when its identity is a blocking finding of the cited review,
 `finding_reviewed_head` equals that review's head, and `head_sha` equals the
 current evaluated head. Evidence gathered on a descendant does not apply after
 a branch reset to the reviewed ancestor. Withdrawals do not carry to another
-head without independently validated coverage or content equivalence.
+head without independently validated coverage or content equivalence. The
+held-lease hammer merge procedure uses these rows and matching live HAM comments
+to dismiss only authoritative same-head GitHub reviews whose complete blocker
+lists are withdrawn. Unknown or standing blockers and unrelated vetoes remain;
+read/dismissal failures refuse merge. Dismissal does not remove finding authority
+from the review body: `ama-check` continues to evaluate it on retries.
 `bin/ama-check.mjs` matches the HAM-authored PR comment to these successfully
 recorded rows, checking comment node ID, author, full-body digest, both heads,
 finding identity and evidence digest, then re-hashes the embedded evidence
@@ -56,7 +61,9 @@ posting. Failed posts, head rechecks and thrown review requests refund that
 reservation; those comments cannot enter dispute context. Successful post
 provenance and the withdrawal are recorded together after a live head recheck.
 A rerun for the same identity and head returns the recorded withdrawal without
-posting again.
+posting again only when `finding_reviewed_head` also matches the currently
+authoritative review. A newer review at the evidence head with the same identity
+requires a fresh post and admission, replacing the latest row for that identity.
 
 The reviewer reads this table without writes, scoped by `(repo, PR, head)`.
 Only rows with `resolution = 'withdrawn-by-hammer'` and comments matching the

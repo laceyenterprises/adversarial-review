@@ -263,14 +263,14 @@ test('regression: ama-check requires durable admission after a withdrawal post',
     comments.push(comment);
     return comment;
   };
-  const run = (timeline) => {
+  const run = (timeline, reviewStatus = 'CHANGES_REQUESTED') => {
     const result = spawnSync(process.execPath, [
       new URL('../bin/ama-check.mjs', import.meta.url).pathname,
       '--pr', write('pr.json', { number: PR, headRefOid: REVIEWED_HEAD, state: 'OPEN', isDraft: false,
         mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [], baseRefName: 'main',
         statusCheckRollup: [{ __typename: 'CheckRun', name: 'lint', conclusion: 'SUCCESS' }],
         author: { login: 'codex-worker-bot' } }),
-      '--reviews', write('reviews.json', { reviews: [{ state: 'CHANGES_REQUESTED', body: REVIEW_BODY,
+      '--reviews', write('reviews.json', { reviews: [{ state: reviewStatus, body: REVIEW_BODY,
         author: { login: 'gemini-reviewer-lacey' }, submittedAt: '2026-10-10T11:48:00Z', commit: { oid: REVIEWED_HEAD } }] }),
       '--protection', write('protection.json', '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n'),
       '--timeline', write('timeline.json', timeline),
@@ -298,6 +298,7 @@ test('regression: ama-check requires durable admission after a withdrawal post',
   assert.equal(failedRow.requests, 0);
   const failed = run(comments);
   assert.equal(failed.eligible, false);
+  assert.equal(run(comments, 'DISMISSED').eligible, false, 'dismissal alone does not resolve findings');
   assert.equal(failed.trace.verdict.hammerAdjudication.withdrawnCount, 2);
   assert.ok(failed.reasons.includes('blocking-findings-present'));
   const failedGate = pickAdversarialGateStatus({ reviewRow: reviewRow(), latestJob: null, headSha: REVIEWED_HEAD,
@@ -308,6 +309,7 @@ test('regression: ama-check requires durable admission after a withdrawal post',
   const withdrawn = run(comments);
   assert.equal(withdrawn.eligible, true, JSON.stringify(withdrawn.reasons));
   assert.equal(withdrawn.trace.verdict.hammerAdjudication.settled, true);
+  assert.equal(run(comments, 'DISMISSED').eligible, true, 'closure can retry after verified withdrawal dismissal');
   // A lookalike comment from anyone but the hammer resolves nothing.
   // Edits outside the evidence block still invalidate the full-body digest.
   for (const changed of [
@@ -399,4 +401,27 @@ test('guardrail: prose-only evidence cannot withdraw a finding', async (t) => {
     /exact-head repro command and output, or the head file/);
   assert.equal(rig.calls.length, 0);
   assert.deepEqual(readHammerWithdrawals({ rootDir: rig.rootDir, repo: REPO, prNumber: PR }), []);
+});
+
+test('regression: a newer reviewed head with the same identity requires fresh withdrawal admission', async (t) => {
+  const rig = disputeRig(t);
+  let reviews = [REVIEW];
+  const deps = { ...rig.deps, get: async (url) => {
+    if (url.includes('/reviews?')) return reviews;
+    if (url.includes('/compare/')) return { status: url.endsWith(`${HAM_HEAD}...${REVIEWED_HEAD}`) ? 'behind' : 'ahead' };
+    return { state: 'open', head: { sha: HAM_HEAD } };
+  } };
+  const args = { ...rig.args(2), headSha: HAM_HEAD };
+  const first = await disputeFinding(args, deps);
+  assert.equal(first.findingReviewedHead, REVIEWED_HEAD);
+  const newer = { ...REVIEW, node_id: 'PRR_new', html_url: 'https://github.com/review-new', commit_id: HAM_HEAD };
+  reviews = [REVIEW, newer];
+  const second = await disputeFinding({ ...args, reviewRef: newer.node_id }, deps);
+  assert.equal(second.alreadyRecorded, undefined);
+  assert.equal(second.findingReviewedHead, HAM_HEAD);
+  assert.notEqual(second.commentId, first.commentId);
+  assert.equal(rig.calls.filter(([kind]) => kind === 'comment').length, 2);
+  const recorded = readHammerWithdrawals({ rootDir: rig.rootDir, repo: REPO, prNumber: PR });
+  assert.equal(resolveHammerAdjudication({ ...reviewState(), reviewedHead: HAM_HEAD, currentHead: HAM_HEAD }, recorded).withdrawnCount, 1);
+  assert.equal((await disputeFinding({ ...args, reviewRef: newer.node_id }, deps)).alreadyRecorded, true);
 });

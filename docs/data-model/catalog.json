@@ -571,6 +571,7 @@
         "src/ama/finding-dispute.mjs",
         "src/ama/finding-dispute-owner.mjs",
         "src/ama/finding-dispute-context.mjs",
+        "src/ama/hammer-adjudication.mjs",
         "bin/dispute-finding.mjs",
         "src/prompt-context.mjs",
         "src/reviewer.mjs",

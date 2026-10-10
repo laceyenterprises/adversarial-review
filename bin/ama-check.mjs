@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+import { blockingFindingIdentitiesFromBody, hammerWithdrawalsFromComments } from '../src/ama/hammer-adjudication.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '../src/ama/effective-policy.mjs';
 import {
   resolveRoundBudgetForJob,
@@ -52,6 +53,9 @@ const UNKNOWN_BLOCKERS = Object.freeze({
   // coverage gate fails closed on a null identity list (no waiver). Mirrors
   // `adversarial-gate-status.mjs::UNKNOWN_BLOCKERS`.
   nonBlockingFindingIdentities: null,
+  // HAMFINAL-01: `null` = blocking identities unresolved; no hammer withdrawal
+  // can resolve a finding of this body.
+  blockingFindingIdentities: null,
 });
 
 const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
@@ -127,6 +131,7 @@ function classifyBlockersFromReviewBody(body, verdict) {
     // authoritative on-head body the verdict + counts came from. `null` when no
     // parseable non-blocking section → AMA coverage gate fails closed.
     nonBlockingFindingIdentities: extractNonBlockingFindingIdentities(text),
+    blockingFindingIdentities: blockingFindingIdentitiesFromBody(text),
   };
 }
 
@@ -319,6 +324,7 @@ function buildReviewState({
     nonBlockingFindingState,
     nonBlockingFindingCount,
     nonBlockingFindingIdentities,
+    blockingFindingIdentities,
   } = authoritativeReview
     ? (verdict
       ? classifyBlockersFromReviewBody(authoritativeReview.review.body, verdict)
@@ -363,6 +369,8 @@ function buildReviewState({
     // on-head body the verdict/counts came from. Drives the HAM non-blocking
     // waiver coverage gate; `null` → identities unknown → fail closed.
     nonBlockingFindingIdentities,
+    // HAMFINAL-01: blocking identities the hammer's withdrawals resolve.
+    blockingFindingIdentities,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,
@@ -569,6 +577,9 @@ function main(argv = process.argv.slice(2)) {
     hamTerminalRemediation,
     hamTerminalRemediationGroundTruth,
     rebaseReviewCoverage,
+    // HAMFINAL-01 ("Hammers judgement is final"): HAM-authored
+    // `withdrawn-by-hammer` comments whose evidence still hashes to its digest.
+    hammerWithdrawnFindings: hammerWithdrawalsFromComments(timelineJson),
   });
   if (!ciCostGate.ok) {
     result.eligible = false;

@@ -1333,44 +1333,68 @@ Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
-For a disputed blocking finding, the hammer preserves the code and releases its
-merge lease, then runs `bin/dispute-finding.mjs` with `--root-dir`, `--repo`, `--pr`,
-`--head-sha`, `--review`, `--finding` and `--evidence-file`. The evidence is bounded
-to 16,000 UTF-8 bytes. Before opening SQLite or performing DDL, the helper
+**The hammer's dispute adjudication is final (HAMFINAL-01).** Operator decision,
+2026-10-10, after agent-os PR 7987:
+
+> "https://github.com/laceyenterprises/agent-os/pull/7987 also why didn't the hammer merge here. We need to investigate and fix so this doesn't happen again. Hammers judgement is final"
+
+On PR 7987 a chunked re-review raised one real blocking finding and two false
+"Malformed JSON" chunk artifacts. The hammer disputed the two, the dispute
+requested a same-head re-review, the watcher skipped it as a duplicate
+(`commit_id match`), the gate settled on `remediation-stopped — operator decision
+required`, and the hammer stopped "pending adjudication" without remediating the
+real finding. The operator hand-merged over CHANGES_REQUESTED.
+
+For a blocking finding that is false on the exact head, the hammer preserves the
+code and runs `bin/dispute-finding.mjs` with `--root-dir`, `--repo`, `--pr`,
+`--head-sha`, `--review`, `--finding` and `--evidence-file`. It keeps its merge
+lease. The evidence is bounded to 16,000 UTF-8 bytes and must be concrete
+exact-head evidence: a fenced block quoting the repro command and its output, or
+quoting the head file. Prose-only evidence is refused before anything is posted.
+Before opening SQLite or performing DDL, the helper
 requires its effective UID to own the existing `data/reviews.db`, its data
 directory and any WAL/SHM sidecars, and the configured alert sink owner boundary
 (resolved through `ADVERSARIAL_ALERT_DELIVERY_ROOT` /
 `AGENT_OS_ALERT_DELIVERY_STATE_DIR`, with the pager's normal default). Missing
 databases and cross-user writes fail before mutation. Run the helper as the
 canonical daemon owner (for example `sudo -A -H -u <owner>` with that owner's
-pager environment and the existing HAM GitHub identity). A different-user
+environment and the existing HAM GitHub identity). A different-user
 hammer shell refuses with exit 78; a non-HAM GitHub identity refuses with exit 79.
 Preserve evidence and record a no-merge handoff rather than switching accounts
 or credentials in the worker.
 The helper verifies the live head and the latest submitted authoritative review
-in its ancestry; a superseded blocking review cannot spend the dispute budget.
-It posts a finding-linked evidence comment, rechecks the head, and calls the existing
-`requestReviewRereview` CAS with `targetRevisionRef`. Both full and slim reviewer
-prompts include exact-head dispute evidence only when the comment has a trusted
-HAM author and matches the helper's durable reservation by comment node ID, head,
-poster identity and SHA-256 body digest. Legacy REST and adapter contexts carry
-`node_id` alongside their numeric IDs so the same reservation check applies.
-Each finding reservation contributes its latest comment, rather than only the
-last two disputes overall, with 16,000 bytes per comment and a 256,000-byte total
-context cap. Edited, unreserved and spoofed comments
-are omitted. The reviewer must confirm or withdraw each admitted dispute.
-The evidence is untrusted PR content, never a merge waiver. Do not merge while
-awaiting adjudication or claim the disputed finding was remediated.
+in its ancestry; a superseded blocking review cannot be withdrawn.
+It posts a HAM-authored comment carrying `Resolution: withdrawn-by-hammer`, the
+finding identity (`sha256([title, file])`), the exact head (`Reviewed-Head`), the
+reviewed head of the finding, `Evidence-SHA256` and the evidence. It rechecks the
+live head, then records the same fields in `ham_finding_disputes` and wakes the
+watcher. **No re-review is requested**, so the watcher's same-head duplicate
+guard cannot strand the PR and no skipped audit can block it. A failed post,
+untrusted identity or head race records nothing and exits non-zero; the finding
+then still stands. A rerun on the same head is idempotent.
 
-Neither finding-anchored reversal nor dispute raises `hq decision raise`. Disputes respect the configured review
-cap (also bounding total dispute requests per PR) and permit at most two requests per finding (title/file identity persists
-across heads). Cap exhaustion or repeated refusal emits `ama_finding_dispute_exhausted`
-with SEV1 and pages once per PR for its lifetime (later heads do not reset the
-guard). The atomic page guard is held during enqueue and cleared if the pager
-throws, allowing a later invocation to retry without posting another dispute or
-spending another request. A successful durable enqueue retains the guard;
-the alert outbox owns delivery retries. Failed comment writes or head rechecks refund the request reservation;
-the cycle threshold uses `shouldEscalateReviewCycle.escalate`.
+The withdrawal is final. The adversarial gate, the closer predicate
+(`isEligibleForAmaClosure`, `bin/ama-check.mjs`) and the HAM self-cert treat a
+withdrawn finding as resolved when its identity matches a blocking finding of
+the reviewed head's review and its digest is intact (ama-check re-hashes the
+evidence in the HAM-authored comment; edited or non-HAM comments are ignored).
+A review whose every blocking finding is withdrawn projects the gate as
+`success (hammer-adjudicated)`, never as "operator decision required", and is a
+settled verdict for closure. Any finding still standing is remediated and
+certified as before. The hammer continues in the same run: it remediates the
+remaining findings, lists each withdrawn finding in its audit as
+`- **<title>** (blocking) — withdrawn-by-hammer: Evidence-SHA256 <digest> on head <sha>`,
+then rebases, validates, checks required checks and merges under its lease.
+Reviewer prompts on the same head still receive the trusted withdrawal comments
+(trusted HAM author, recorded node ID, head and body digest; 16,000 bytes per
+comment, 256,000 bytes total) and are told not to re-raise those findings
+against the unchanged head. The evidence never grants merge authority beyond
+resolving the named finding.
+
+Neither finding-anchored reversal nor dispute raises `hq decision raise`.
+Disputes no longer spend the review cap, page, or emit
+`ama_finding_dispute_exhausted`; the `requests`, `refusals` and `paged` columns
+remain for legacy rows.
 Preservation refusals retain the merge hold as
 `primary-change-repair-required` with `needsOperator: true` until the REMORPHAN-01
 watchdog admits a repair worker. Refusal observations alone no longer page.
@@ -1885,10 +1909,9 @@ The dispute CLI refuses an owner mismatch with exit 78 before SQLite opens.
 Non-HAM posted comment provenance exits 79 after refunding its reservation.
 The prompt preserves
 evidence and records no-merge handoff to the canonical owner for these refusals.
-It does not automatically switch accounts or tokens. A non-triggered re-review
-restores previous admitted provenance; a thrown request also refunds its budget.
-Refusal paging releases its reserved guard after failed enqueue and retries on
-the next observation. Successful enqueue keeps the guard across restarts.
+It does not automatically switch accounts or tokens. Since HAMFINAL-01 a
+dispute requests no re-review and never pages; exit 0 means the finding is
+recorded `withdrawn-by-hammer` and the hammer's adjudication is final.
 
 ### Dispute recovery and owner routing
 
@@ -1928,7 +1951,7 @@ that recovery, and a failed bounded review pages once through operator-blocked.
 Pending CI alone is work-complete; unprobed withheld-head CI is recorded as
 `reported-pending`. The proven-head CI wait remains unchanged.
 
-HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
+HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule; the hammer's withdrawal is final and requests no re-review. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
 
 
 ### Orphan watchdog evidence boundaries

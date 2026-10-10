@@ -652,8 +652,11 @@ Key control points:
   final reviewers on the same head can be cited together. Split HAM commits by
   reviewed head when reviews differ; each commit binds one `Reviewed-Head` to its
   citations. Missing and unrelated citations remain refused.
-  A disputed blocking finding posts evidence and requests exact-head re-review
-  through `bin/dispute-finding.mjs`; the reviewer confirms or withdraws it. Before
+  A blocking finding the hammer disputes with concrete exact-head evidence is
+  withdrawn through `bin/dispute-finding.mjs` as `withdrawn-by-hammer` (HAMFINAL-01:
+  "Hammers judgement is final"). No re-review is requested; the gate, closer and
+  self-cert accept the withdrawal, and a review whose every blocking finding is
+  withdrawn projects `success (hammer-adjudicated)`. Before
   opening the existing database, the helper checks effective UID ownership of
   daemon state and the configured pager sink. Only the latest authoritative
   review in live-head ancestry may be disputed.
@@ -667,8 +670,8 @@ Key control points:
   the six-observation uncertainty lane. This watchdog precedes ordinary automated
   recovery and comment-only CI handling while observing or exhausted; scoped
   operator merge-agent fallback keeps precedence. Store failures retain a held
-  `ama-pending` result and page through the independent alert outbox. Dispute
-  exhaustion pages once per PR; failed page enqueue releases the guard for a later retry.
+  `ama-pending` result and page through the independent alert outbox. Disputes
+  no longer page or spend the review cap.
   Each finding's latest reserved comment is included, up to the context byte cap,
   with REST node IDs preserved. Trusted HAM author plus durable comment
   reservation/digest is required for dispute prompt context. Failed reads defer as `gate-read-failed`.
@@ -984,12 +987,12 @@ That order usually gets you to the truth fastest.
 HAMINTENT-02 final-review clarification: refusal page enqueue failure releases
 its guard for a later observation; transport delivery is independent. Reversal
 authority uses the parsed blocking verdict and latest authoritative review in
-parent ancestry. Non-triggered dispute requests preserve previous admitted
-provenance, and thrown requests also refund their reservation. Owner refusal (CLI 78) occurs before SQLite opens. Untrusted posted HAM
+parent ancestry. Disputes request no re-review (HAMFINAL-01); a failed
+withdrawal refunds its reservation and records nothing. Owner refusal (CLI 78) occurs before SQLite opens. Untrusted posted HAM
 provenance (CLI 79) refunds its reservation before closing. Both produce a
 no-merge handoff.
 
-HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule and request the cited reviewer family. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
+HAM finding authority is scoped per reviewer family on the same reviewed head. An authoritative review from any family on a newer descendant head supersedes older-head citations. Finding disputes use the same freshness rule; the hammer's withdrawal is final and requests no re-review. The hammer prompt includes the effective strict non-blocking policy; ama-check and the in-lease gate resolve module config and code-pr domain policy with the same precedence as daemon closure.
 
 STANDUPGATE-02 adds a daemon-only clean transition for an empty rollup only
 when the operator explicitly lists the repository in

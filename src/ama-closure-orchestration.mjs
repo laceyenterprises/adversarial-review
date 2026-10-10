@@ -31,6 +31,7 @@ import {
 import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
+import { resolveHammerAdjudication } from './ama/hammer-adjudication.mjs';
 import {
   findMalformedProtectivePredecessorLines,
   isProtectorOpen,
@@ -1275,6 +1276,14 @@ async function dispatchAmaClosureFor({
     nonBlockingFindingIdentities: Array.isArray(gateSnapshot.settledReview?.nonBlockingFindingIdentities)
       ? gateSnapshot.settledReview.nonBlockingFindingIdentities
       : null,
+    // HAMFINAL-01 ("Hammers judgement is final"): blocking identities from the
+    // same body, plus the hammer's `withdrawn-by-hammer` adjudications. A review
+    // whose every blocking finding was withdrawn settles here instead of
+    // skipping the hammer wake as `verdict-not-eligible` (agent-os PR 7987).
+    blockingFindingIdentities: Array.isArray(gateSnapshot.settledReview?.blockingFindingIdentities)
+      ? gateSnapshot.settledReview.blockingFindingIdentities
+      : null,
+    hammerWithdrawnFindings: Array.isArray(gateSnapshot.hammerWithdrawals) ? gateSnapshot.hammerWithdrawals : [],
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,
@@ -1315,7 +1324,9 @@ async function dispatchAmaClosureFor({
     autonomousMergeExecutionEnabled,
     strictMode,
   };
-  const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
+  const hammerSettled = gateSnapshot?.settledReview?.verdict === 'request-changes'
+    && resolveHammerAdjudication({ ...reviewState, reviewedHead: reviewState.headSha }, reviewState.hammerWithdrawnFindings).allBlockingWithdrawn;
+  const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) || hammerSettled
     ? 'settled-success'
     : String(gateSnapshot?.settledReview?.verdict || '');
   const wouldUseDaemonPath = isDaemonMergeReviewAllowed(reviewState, { strictMode });

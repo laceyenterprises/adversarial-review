@@ -43,6 +43,11 @@ import {
 } from './fleet-self-repair-rereview.mjs';
 import { isSettledReviewJob, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
+import {
+  blockingFindingIdentitiesFromBody,
+  readHammerWithdrawals,
+  resolveHammerAdjudication,
+} from './ama/hammer-adjudication.mjs';
 
 const execFileAsync = promisify(execFile);
 const WATCHER_OWNED_HOLD_LABELS = new Set(['duplicate-family-hold']);
@@ -301,6 +306,9 @@ const UNKNOWN_BLOCKERS = {
   // synthesize `[]` out of an unresolved body — `[]` means "present section,
   // zero findings" and would be read as "coverage trivially satisfied".
   nonBlockingFindingIdentities: null,
+  // HAMFINAL-01: `null` = blocking finding identities unresolved, so no
+  // hammer withdrawal can resolve a finding of this body.
+  blockingFindingIdentities: null,
 };
 
 /**
@@ -324,7 +332,27 @@ function classifyBlockersFromBody(body, verdict) {
     // authoritative body the verdict + counts came from. `null` when the body
     // has no parseable non-blocking section → AMA coverage gate fails closed.
     nonBlockingFindingIdentities: extractNonBlockingFindingIdentities(body),
+    // HAMFINAL-01: per-finding blocking identities, the same ones the hammer's
+    // `withdrawn-by-hammer` adjudication records.
+    blockingFindingIdentities: blockingFindingIdentitiesFromBody(body),
   };
+}
+
+// HAMFINAL-01 — operator decision 2026-10-10 after agent-os PR 7987:
+//   "Hammers judgement is final"
+// A request-changes review whose EVERY blocking finding the hammer withdrew on
+// exact-head evidence is adjudicated, not unsettled: it must not hold the gate
+// red, and it must never route to "operator decision required". A review with
+// one finding still standing is unchanged (that finding is remediated or stays
+// blocking).
+function hammerAdjudicatedEveryBlocker(body, { reviewedHead, hammerWithdrawals }) {
+  if (!Array.isArray(hammerWithdrawals) || hammerWithdrawals.length === 0) return false;
+  const verdict = normalizeEffectiveReviewVerdict(body);
+  if (verdict !== 'request-changes') return false;
+  return resolveHammerAdjudication(
+    { ...classifyBlockersFromBody(body, verdict), reviewedHead },
+    hammerWithdrawals,
+  ).allBlockingWithdrawn;
 }
 
 function normalizeComparableString(value) {
@@ -660,10 +688,20 @@ function pickAdversarialGateStatus({
   env = process.env,
   settledReview = null,
   hasActiveSamePrRemediation = false,
+  hammerWithdrawals = [],
 } = {}) {
   const context = resolveGateStatusContext(env);
   const decide = (state, description, reason, extra = null) =>
     makeDecision(state, description, reason, context, extra);
+  const hammerAdjudicated = (body) => hammerAdjudicatedEveryBlocker(body, {
+    reviewedHead: reviewRow?.reviewer_head_sha || headSha,
+    hammerWithdrawals,
+  });
+  const decideHammerAdjudicated = () => decide(
+    'success',
+    'Hammer withdrew every blocking finding on exact-head evidence; its adjudication is final.',
+    'hammer-adjudicated'
+  );
 
   if (normalizeLabelNames(labels).some((label) => ADVERSARIAL_GATE_OPERATOR_SKIP_LABELS.has(label))) {
     return decide(
@@ -888,6 +926,10 @@ function pickAdversarialGateStatus({
         );
       }
       if (settledReview.verdict === 'request-changes') {
+        if (resolveHammerAdjudication(
+          { ...settledReview, reviewedHead: settledReviewedHead },
+          hammerWithdrawals,
+        ).allBlockingWithdrawn) return decideHammerAdjudicated();
         return decide('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
       }
     }
@@ -945,6 +987,7 @@ function pickAdversarialGateStatus({
         return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
       }
       if (normalizedVerdict === 'request-changes') {
+        if (hammerAdjudicated(reviewBody)) return decideHammerAdjudicated();
         return decide('failure', 'Blocking adversarial review is still unsettled.', 'blocking-review');
       }
     }
@@ -963,6 +1006,15 @@ function pickAdversarialGateStatus({
   const normalizedVerdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
   if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
     return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
+  }
+  // HAMFINAL-01: checked before the failed/stopped branches so a review the
+  // hammer fully adjudicated is never reported as "operator decision required".
+  if (
+    normalizedVerdict === 'request-changes'
+    && !(latestJobStatus === 'completed' && latestJob?.reReview?.requested === true)
+    && hammerAdjudicated(latestJob.reviewBody)
+  ) {
+    return decideHammerAdjudicated();
   }
   if (latestJobStatus === 'failed') {
     // Pipeline gave up (remediation worker died / infra issue) — don't block
@@ -1029,6 +1081,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
+  hammerWithdrawals: hammerWithdrawalsOverride = undefined,
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
@@ -1055,6 +1108,8 @@ async function buildAdversarialGateSnapshot(rootDir, {
     })
     : null;
   const reviewedHeadSha = resolveProvenReviewedHead(settledReview);
+  // HAMFINAL-01: the hammer's final `withdrawn-by-hammer` adjudications.
+  const hammerWithdrawals = hammerWithdrawalsOverride ?? readHammerWithdrawals({ rootDir, repo, prNumber });
 
   let operatorApproval = null;
   const hasOperatorApprovedLabel = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
@@ -1091,6 +1146,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     settledReview,
     reviewedHeadSha,
     argusVerdict,
+    hammerWithdrawals,
     mergeableState: shouldIncludeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
   };
 }

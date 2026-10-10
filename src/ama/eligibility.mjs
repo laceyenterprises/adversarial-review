@@ -1,4 +1,5 @@
 import { checkPrimaryChange } from './primary-change.mjs';
+import { HAMMER_WITHDRAWN_RESOLUTION, resolveHammerAdjudication } from './hammer-adjudication.mjs';
 /**
  * AMA-02 — Adversarial Merge Authority eligibility predicate.
  *
@@ -112,6 +113,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {number=}                   nonBlockingFindingCount  Structured non-blocking-finding count from the latest current-head review.
  * @property {string=}                   nonBlockingFindingState  `'known'` when the count is trustworthy; `'unknown'` or missing fail closed in strict mode.
  * @property {string[]=}                 nonBlockingFindingIdentities  Normalized non-blocking finding titles parsed from the same current-head review body the counts came from. `null`/absent fails the HAM non-blocking waiver coverage gate closed.
+ * @property {string[]=}                 blockingFindingIdentities  HAMFINAL-01: blocking finding identities (`sha256([title, file])`) parsed from the same body. Absent/`null` means no hammer withdrawal can resolve a finding.
  * @property {string=}                   prAuthor                 PR author login — audit-only in the current single-operator contract.
  * @property {string=}                   reviewerFamily           'codex' | 'claude' — audit-only field.
  */
@@ -173,6 +175,9 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * reviewed-head → current-head delta consists only of a non-reviewable bookkeeping
  * commit. Eligibility validates this evidence as exact-head, empty-diff, and
  * closer-trailer scoped; it never shells out or re-derives the classification.
+ * @property {Object[]=} hammerWithdrawnFindings HAMFINAL-01 `withdrawn-by-hammer`
+ * adjudications (`{identity, headSha, findingReviewedHead, evidenceSha256, resolution}`).
+ * Only those naming a blocking finding identity of the reviewed head resolve it.
  */
 
 /**
@@ -1058,11 +1063,24 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
 
   // SPEC §4.2 #1 — settled-success verdict OR operator-approved override.
   const verdictNormalized = String(reviewState?.verdict || '').toLowerCase();
+  // HAMFINAL-01 — operator decision 2026-10-10 after agent-os PR 7987:
+  //   "Hammers judgement is final"
+  // A blocking finding the hammer withdrew on exact-head evidence for THIS
+  // reviewed head is resolved. When every blocking finding of a request-changes
+  // review is withdrawn, the review is settled; one standing finding still
+  // blocks (and still needs validated HAM remediation evidence, below).
+  const hammerAdjudication = resolveHammerAdjudication(
+    { ...reviewState, reviewedHead },
+    options?.hammerWithdrawnFindings ?? reviewState?.hammerWithdrawnFindings,
+  );
+  const hammerSettled = verdictNormalized === 'request-changes' && hammerAdjudication.allBlockingWithdrawn;
+  const verdictSettles = SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) || hammerSettled;
+  const standingBlockingFindings = hammerSettled ? { ...blockingFindings, count: 0 } : blockingFindings;
   const settledSuccess =
-    SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
+    verdictSettles &&
     remediationPending === false &&
-    blockingFindings.known &&
-    blockingFindings.count === 0 &&
+    standingBlockingFindings.known &&
+    standingBlockingFindings.count === 0 &&
     (
       !strictNonBlockingRemediation ||
       (nonBlockingFindings.known && nonBlockingFindings.count === 0)
@@ -1078,18 +1096,18 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   } else if (!operatorOverride && remediationPending) {
     reasons.push('remediation-pending');
   }
-  if (!operatorOverride && !blockingFindings.known) {
+  if (!operatorOverride && !standingBlockingFindings.known) {
     reasons.push('blocking-findings-unknown');
-  } else if (!operatorOverride && blockingFindings.count > 0) {
+  } else if (!operatorOverride && standingBlockingFindings.count > 0) {
     reasons.push('blocking-findings-present');
   }
   if (
     strictNonBlockingRemediation &&
     !operatorOverride &&
-    SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
+    verdictSettles &&
     remediationPending === false &&
-    blockingFindings.known &&
-    blockingFindings.count === 0 &&
+    standingBlockingFindings.known &&
+    standingBlockingFindings.count === 0 &&
     !nonBlockingFindings.known
   ) {
     reasons.push('non-blocking-findings-unknown');
@@ -1097,10 +1115,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   if (
     strictNonBlockingRemediation &&
     !operatorOverride &&
-    SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
+    verdictSettles &&
     remediationPending === false &&
-    blockingFindings.known &&
-    blockingFindings.count === 0 &&
+    standingBlockingFindings.known &&
+    standingBlockingFindings.count === 0 &&
     nonBlockingFindings.known &&
     nonBlockingFindings.count > 0
   ) {
@@ -1403,6 +1421,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       blockingFindings,
       nonBlockingFindings,
       strictNonBlockingRemediation,
+      hammerAdjudication: { ...hammerAdjudication, resolution: HAMMER_WITHDRAWN_RESOLUTION, settled: hammerSettled },
     },
     finalHammer: {
       active: reviewCycleExhausted,

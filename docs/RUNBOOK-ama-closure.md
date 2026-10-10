@@ -1237,7 +1237,10 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   latest terminal audit for the live head is `failed-without-merge`, the closer
   does not dispatch another hammer on that head until the head, base SHA,
   mergeability (MERGEABLE/CONFLICTING) or the external check rollup differs from
-  what it first saw. It answers `hammer-stop-awaiting-input-change` with
+  what it first saw. A newly available head/base SHA or a known mergeability
+  reading after `UNKNOWN` counts as a change; missing current SHA readings and
+  current `UNKNOWN` mergeability do not release the hold. It answers
+  `hammer-stop-awaiting-input-change` with
   `recoveryWait`, and pages once per head (`ama_closer.hammer_stop_hold`) naming
   the predicate the hammer recorded. When an input changes, the hold releases
   and the ordinary gates, lease and per-PR retry cap decide the one re-dispatch;

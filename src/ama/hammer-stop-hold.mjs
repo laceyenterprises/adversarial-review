@@ -176,13 +176,14 @@ export function hammerStopInputs(prMetadata, { excludeContexts = [] } = {}) {
   };
 }
 
-// Inputs that differ. A side that is unknown (null) is not evidence of change.
+// A missing current reading is not evidence of change; a newly available
+// reading does release a hold whose previous observation was unknown (null).
 export function changedHammerStopInputs(previous, current) {
   const changed = [];
   if (!previous || !current) return changed;
-  if (previous.headSha && current.headSha && previous.headSha !== current.headSha) changed.push('head');
-  if (previous.baseSha && current.baseSha && previous.baseSha !== current.baseSha) changed.push('base');
-  if (previous.mergeability && current.mergeability && previous.mergeability !== current.mergeability) {
+  if (current.headSha && previous.headSha !== current.headSha) changed.push('head');
+  if (current.baseSha && previous.baseSha !== current.baseSha) changed.push('base');
+  if (current.mergeability && previous.mergeability !== current.mergeability) {
     changed.push('mergeability');
   }
   if (typeof previous.checks === 'string' && typeof current.checks === 'string' && previous.checks !== current.checks) {

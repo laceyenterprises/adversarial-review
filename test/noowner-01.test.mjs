@@ -22,6 +22,7 @@ import {
 } from '../src/ama/prelaunch-refusal-retry.mjs';
 import {
   _resetHammerStopHoldPageDebounceForTests,
+  changedHammerStopInputs,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from '../src/ama/hammer-stop-hold.mjs';
@@ -295,6 +296,56 @@ function recordPodiumStop(rootDir, at, { file = PODIUM_HEAD } = {}) {
     },
   });
 }
+
+test('hammer stop inputs recognize newly available readings but ignore missing current readings', () => {
+  const known = { headSha: PODIUM_HEAD, baseSha: 'base-0', mergeability: 'MERGEABLE', checks: '' };
+  for (const [field, label, different] of [
+    ['headSha', 'head', PODIUM_REVIEWED],
+    ['baseSha', 'base', 'base-1'],
+    ['mergeability', 'mergeability', 'CONFLICTING'],
+  ]) {
+    for (const missing of [null, undefined]) {
+      assert.deepEqual(changedHammerStopInputs({ ...known, [field]: missing }, known), [label],
+        `${field}: recovery from a missing reading releases the hold`);
+      assert.deepEqual(changedHammerStopInputs(known, { ...known, [field]: missing }), [],
+        `${field}: a missing current reading is not evidence of change`);
+      assert.deepEqual(changedHammerStopInputs({ ...known, [field]: missing }, { ...known, [field]: missing }), []);
+    }
+    assert.deepEqual(changedHammerStopInputs(known, { ...known, [field]: different }), [label]);
+  }
+  assert.deepEqual(changedHammerStopInputs(known, known), []);
+});
+
+test('Case 4: UNKNOWN mergeability keeps the stop hold until a known reading allows one re-dispatch', async (t) => {
+  _resetHammerStopHoldPageDebounceForTests();
+  const rootDir = tmpRoot(t, 'noowner-case4-unknown-');
+  recordPodiumStop(rootDir, '2026-10-10T19:25:52Z');
+  const alerts = [];
+  const args = (at, mergeableState) => {
+    const result = podiumArgs(rootDir, { at });
+    result.prMetadata.mergeableState = mergeableState;
+    return result;
+  };
+  for (const at of ['2026-10-10T19:36:00Z', '2026-10-10T19:40:00Z']) {
+    const held = closerDeps({ alerts });
+    const result = await maybeDispatchAmaCloser({ ...args(at, 'UNKNOWN'), ...held });
+    assert.equal(result.reason, HAMMER_STOP_HOLD_REASON);
+    assert.equal(hqLaunches(held).length, 0);
+  }
+  const statePath = join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold', 'laceyenterprises-podium-pr-15.json');
+  assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).heads[PODIUM_HEAD].inputs.mergeability, null);
+
+  const released = closerDeps({ alerts });
+  const result = await maybeDispatchAmaCloser({ ...args('2026-10-10T20:00:00Z', 'MERGEABLE'), ...released });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(hqLaunches(released).length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')).heads[PODIUM_HEAD].releasedBy, ['mergeability']);
+  assert.equal(alerts.length, 1, 'recovery does not send another hold page');
+
+  const again = closerDeps({ alerts });
+  await maybeDispatchAmaCloser({ ...args('2026-10-10T20:01:00Z', 'MERGEABLE'), ...again });
+  assert.equal(hqLaunches(again).length, 0, 'the ordinary dispatch guards prevent a duplicate launch');
+});
 
 test('Case 4: a second hammer run on podium#15 is not launched until an input changes, and the cap page names the predicate', async (t) => {
   _resetHammerStopHoldPageDebounceForTests();

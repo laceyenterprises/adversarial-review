@@ -167,3 +167,19 @@ exit "$?"
     }
   });
 }
+
+for (const scenario of ['deleted comment', 'edited comment', 'empty store', 'unreadable store']) {
+  test(`merge retry revalidates dismissed authority: ${scenario}`, async t => {
+    const f = await fixture(t);
+    await dismissWithdrawnReviews(f.identity, f.deps);
+    if (scenario === 'deleted comment') f.comments.length = 0;
+    if (scenario === 'edited comment') f.comments[0].body += '\nchanged';
+    const deps = { ...f.deps };
+    if (scenario === 'empty store') f.db.prepare('DELETE FROM ham_finding_disputes').run();
+    if (scenario === 'unreadable store') deps.readWithdrawals = ({ strict }) => {
+      assert.equal(strict, true); throw new Error('store unavailable');
+    };
+    await assert.rejects(dismissWithdrawnReviews(f.identity, deps));
+    assert.equal(f.mutations.length, 1);
+  });
+}

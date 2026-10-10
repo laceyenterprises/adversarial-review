@@ -779,9 +779,8 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   # same-head authoritative vetoes whose full blocker lists were withdrawn.
   if ! "$HAM_NODE_BIN" "<<ROOT_DIR>>/bin/dismiss-withdrawn-reviews.mjs" \
     --root-dir "<<ROOT_DIR>>" --repo <<REPO>> --pr <<PR_NUMBER>> \
-    --head-sha "$POST_REMEDIATION_SHA"; then
+    --head-sha "$POST_REMEDIATION_SHA" --verdict-file "$HAM_VERDICT_FILE"; then
     ham_append_terminal_audit failed-without-merge withdrawn-review-dismissal-failed || true
-    ham_mark_merge_lease_retryable_abort withdrawn-review-dismissal-failed
     ham_release_merge_lease
     return 1
   fi

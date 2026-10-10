@@ -242,6 +242,8 @@ test('regression: dispute-only eligibility matches a clean review', () => {
   assert.deepEqual(adjudicated.reasons, clean.reasons);
   assert.equal(adjudicated.eligible, clean.eligible);
   assert.equal(adjudicated.trace.verdict.hammerAdjudication.settled, true);
+  assert.equal(adjudicated.trace.verdict.blockingFindings.count, 0);
+  assert.equal(adjudicated.trace.verdict.originalBlockingFindings.count, 3);
   const partial = isEligibleForAmaClosure(reviewState(), pr, cfg,
     { env: {}, hammerWithdrawnFindings: [withdrawal(1), withdrawal(2)] });
   assert.ok(partial.reasons.includes('blocking-findings-present'));
@@ -424,4 +426,12 @@ test('regression: a newer reviewed head with the same identity requires fresh wi
   const recorded = readHammerWithdrawals({ rootDir: rig.rootDir, repo: REPO, prNumber: PR });
   assert.equal(resolveHammerAdjudication({ ...reviewState(), reviewedHead: HAM_HEAD, currentHead: HAM_HEAD }, recorded).withdrawnCount, 1);
   assert.equal((await disputeFinding({ ...args, reviewRef: newer.node_id }, deps)).alreadyRecorded, true);
+});
+
+test('ambiguous duplicate blocker identities cannot grant withdrawal authority', () => {
+  const identity = IDENTITIES[0];
+  const result = resolveHammerAdjudication({ ...reviewState(), blockingFindingCount: 2,
+    blockingFindingIdentities: [identity, identity], currentHead: REVIEWED_HEAD }, [withdrawal(0)]);
+  assert.equal(result.applicable, false);
+  assert.equal(result.allBlockingWithdrawn, false);
 });

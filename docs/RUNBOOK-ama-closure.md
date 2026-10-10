@@ -2245,3 +2245,11 @@ daemon's mode environment, restart the watcher and
 follow-up daemons through the registered `scripts/os-restart.sh` operator path
 so long-running processes load the new predicate. Do not admin-merge this gate
 change or edit live service state to make the gate green.
+
+Merge retries strictly read the withdrawal store and revalidate the withdrawals
+that supported admission before each merge attempt. Dismissed authoritative
+same-head review bodies retain finding authority: deleted or edited comments,
+missing records, and unreadable stores refuse a retry. Duplicate title/file
+identities in a blocker list are ambiguous and grant no withdrawal authority.
+Eligibility routing uses standing blocker counts; original counts remain in
+`trace.verdict.originalBlockingFindings` for audit.

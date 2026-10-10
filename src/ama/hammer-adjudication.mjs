@@ -114,10 +114,16 @@ export function hammerWithdrawalsFromComments(comments, recordedWithdrawals = []
 // Read-only and fail-soft, like the reviewer's dispute-context read: a missing,
 // legacy or unreadable store contributes no withdrawals (the finding stays
 // blocking), it never throws into the gate.
-export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = console }) {
-  if (!rootDir || !repo || !prNumber) return [];
+export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = console, strict = false }) {
+  if (!rootDir || !repo || !prNumber) {
+    if (strict) throw new Error("withdrawal store identity missing");
+    return [];
+  }
   const path = join(rootDir, 'data', 'reviews.db');
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) {
+    if (strict) throw new Error("withdrawal store missing");
+    return [];
+  }
   let db;
   try {
     db = new Database(path, { readonly: true, fileMustExist: true });
@@ -127,6 +133,7 @@ export function readHammerWithdrawals({ rootDir, repo, prNumber, logger = consol
       WHERE repo=? AND pr_number=? AND resolution=? AND comment_id IS NOT NULL`)
       .all(repo, Number(prNumber), HAMMER_WITHDRAWN_RESOLUTION);
   } catch (error) {
+    if (strict) throw error;
     logger?.warn?.(`[ama] hammer withdrawal read failed; treating findings as unresolved: ${error?.message || error}`);
     return [];
   } finally { db?.close(); }
@@ -143,7 +150,7 @@ export function resolveHammerAdjudication({
   const identities = Array.isArray(blockingFindingIdentities) ? blockingFindingIdentities : null;
   const head = String(reviewedHead || '');
   const applicable = String(blockingFindingState || '').toLowerCase() === 'known'
-    && Number.isInteger(count) && count > 0 && identities !== null && identities.length === count
+    && Number.isInteger(count) && count > 0 && identities !== null && identities.length === count && new Set(identities).size === count
     && SHA40.test(head) && SHA40.test(currentHead || '');
   const resolved = applicable
     ? (Array.isArray(withdrawals) ? withdrawals : []).filter((entry) => entry?.resolution === HAMMER_WITHDRAWN_RESOLUTION

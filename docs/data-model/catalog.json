@@ -57,6 +57,7 @@
         "templates/hammer-prompt.md",
         "src/ama/daemon-merge.mjs",
         "bin/hammer-merge.sh",
+        "bin/hammer-verify-head.sh",
         "src/ama/closing-keywords.mjs",
         "src/ama/no-ci-configured.mjs",
         "src/daemon-clean-merge.mjs",
@@ -66,6 +67,7 @@
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
       "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
       "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
+      "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },
       "compatibilityFields": ["appendedRecords"]
     },
     {
@@ -616,6 +618,7 @@
       "path": "docs/data-model/orphan-watchdog.md",
       "store": "data/follow-up-jobs/orphan-watchdog/<sha256(repo#prNumber)>.db and .lock",
       "schemaSurface": "src/ama/orphan-watchdog.mjs",
+      "relatedSchemaSurfaces": ["src/ama/orphan-review-request.mjs"],
       "relatedSchemaSurfaces": [
         "src/ama-closure-orchestration.mjs",
         "src/ama/launch-request-status.mjs",

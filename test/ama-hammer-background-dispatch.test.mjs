@@ -14,6 +14,7 @@ import {
   resolveAmaHammerDispatchMode,
 } from '../src/ama-hammer-background-dispatch.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { hammerWakeAuditPath, readHammerWakeAudit, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
 import { CLOSER_AUTHORED_STALE_WAKE_REASON, closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
 
@@ -945,6 +946,123 @@ function closerResumeFixture(scenario) {
   return { args, wakes, payloads, liveHeads };
 }
 
+test('LEASEDEFER-01 HAM rebase resolves exact-head certification without a chain to the old review', async () => {
+  const { args, payloads } = closerResumeFixture('green');
+  args.fetchHeadCloserVerifiedCommitImpl = async () => ({ sha: 'H1', parentSha: 'rebased-worker', message: 'Closed-By: hammer' });
+  args.resolveHeadCloserCommitSuppressionImpl = async ({ headSha }) => ({
+    suppressed: headSha === 'H1', reason: headSha === 'H1' ? 'closer-commit-trailer' : 'worker' });
+  let evidenceReads = 0;
+  args.resolveHamTerminalRemediationEvidenceImpl = async () => { evidenceReads++; return null; };
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(evidenceReads, 1);
+  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
+});
+
+test('LEASEDEFER-01 stale closer refusal reaches exact-head recovery on its first tick', async () => {
+  const { args } = closerResumeFixture('green');
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+    reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
+  let requests = 0;
+  args.recoverStrandedCloserHeadImpl = async options => {
+    assert.equal(options.closerAuthored, true);
+    assert.equal(options.headSha, 'H1');
+    assert.ok(options.result.reasons.includes('stale-review-head'));
+    requests++;
+    return { dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: 'closer-head-exact-review-requested' };
+  };
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(requests, 1);
+  assert.equal(result.reason, 'closer-head-exact-review-requested');
+});
+
+test('LEASEDEFER-01 stale eligibility miss cannot transfer a live hammer lease to review', async t => {
+  const { args } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repoPath,
+    prNumber: args.prNumber, headSha: 'H1', watcherPid: process.pid });
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+    reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
+  args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+    requestRereviewImpl: () => assert.fail('hammer still owns H1') });
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.reason, 'not-eligible');
+  assert.equal(result.retryAfterMs, 30_000);
+  assert.equal(isHeldAmaCloserLease(args.rootDir, { repo: args.repoPath,
+    prNumber: args.prNumber, headSha: 'H1' }), true);
+});
+
+for (const hardReason of ['label-no-merge-hold', 'pr-not-open', 'risk-class-not-permitted',
+  'branch-protection-missing-gate', 'fast-merge-state-unsupported']) {
+  test(`stale closer head preserves operator routing for ${hardReason}`, async t => {
+    const { args } = closerResumeFixture('green');
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+      reasons: ['stale-review-head', hardReason] });
+    args.recoverStrandedCloserHeadImpl = options => {
+      assert.equal(options.result.needsOperator, true, 'hard refusal is classified before recovery');
+      return recoverStrandedCloserHead({ ...options,
+        requestRereviewImpl: () => assert.fail('held head must not request review') });
+    };
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.operatorReason, `not-eligible:${hardReason}`);
+  });
+}
+
+for (const closer of [false, true]) {
+  test(`duplicate-family census hold retains automatic retry on ${closer ? 'closer' : 'worker'} head`, async t => {
+    const { args } = closerResumeFixture(closer ? 'green' : 'worker');
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+      reasons: [...(closer ? ['stale-review-head'] : []), 'duplicate-family-unresolved'] });
+    args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+      requestRereviewImpl: () => assert.fail('census hold must not request review') });
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(result.needsOperator, undefined);
+    assert.equal(result.retryAfterMs, 30_000);
+    assert.ok(result.reasons.includes('duplicate-family-unresolved'));
+  });
+}
+
+test('refused stale closer review falls through coexistence to bounded orphan recovery', async t => {
+  const { args } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+    reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
+  let requests = 0;
+  args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+    requestRereviewImpl: async () => { requests++; return { triggered: false, reason: 'malformed-title-terminal' }; } });
+  let orphanCalls = 0;
+  const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+    maybeDispatchAmaClosureForImpl: () => maybeDispatchAmaClosureFor(args),
+    recoverOrphanImpl: async ({ result: refusal }) => {
+      orphanCalls++;
+      assert.equal(refusal.reason, 'not-eligible');
+      assert.ok(refusal.reasons.includes('stale-review-head'));
+      return { outcome: 'ama-pending', orphanRecovery: { disposition: 'exhausted' } };
+    },
+    recoverAmaAutomationImpl: () => assert.fail('orphan watchdog owns refusal'),
+  });
+  assert.equal(requests, 1);
+  assert.equal(orphanCalls, 1);
+  assert.equal(result.orphanRecovery.disposition, 'exhausted');
+});
+
+test('rebased closer head without authoritative identities cannot arm HAM resume', async t => {
+  const { args, payloads } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  args.reviewStateRow.reviewer = 'unknown-model';
+  args.fetchHeadCloserVerifiedCommitImpl = async () => ({ sha: 'H1', parentSha: 'rebased-worker', message: 'Closed-By: hammer' });
+  args.resolveHeadCloserCommitSuppressionImpl = async ({ headSha }) => ({
+    suppressed: headSha === 'H1', reason: headSha === 'H1' ? 'closer-commit-trailer' : 'worker' });
+  args.fetchLatestHeadReviewBodiesImpl = () => assert.fail('no authoritative reviewer to fetch');
+  args.resolveHamTerminalRemediationEvidenceImpl = () => assert.fail('no authority to certify this head');
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, false);
+});
+
 for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-pending', 'unknown', 'worker', 'blocking', 'live-blocking', 'live-clean']) {
   test(`HAMCIWAKE-01 watcher reviewed H0 -> closer H1: ${scenario}`, async t => {
     const { args, wakes, payloads, liveHeads } = closerResumeFixture(scenario);
@@ -1131,3 +1249,15 @@ for (const scenario of ['MERGEABLE', 'CONFLICTING', 'UNKNOWN', 'null', 'head-mov
     else assert.equal(result.dispatched, true);
   });
 }
+
+
+test('pending exact-head orphan request skips repeated stale-tip review and certificate reads', async t => {
+  const { args } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  args.reviewStateRow = { ...args.reviewStateRow, review_status: 'pending',
+    rereview_requested_at: '2026-10-11T00:00:00Z',
+    rereview_reason: 'system-orphan-head-review:H1', revision_ref: 'H1' };
+  args.fetchHeadCloserVerifiedCommitImpl = async () => assert.fail('pending review owns this tip');
+  args.resolveHamTerminalRemediationEvidenceImpl = async () => assert.fail('pending review owns this tip');
+  await maybeDispatchAmaClosureFor(args);
+});

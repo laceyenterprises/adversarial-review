@@ -1,4 +1,6 @@
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
+import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
+import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
 import { recoverOrphan } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
@@ -788,6 +790,7 @@ async function dispatchAmaClosureFor({
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   requestEligibleHammerWakeImpl = requestEligibleHammerWake,
+  recoverStrandedCloserHeadImpl = recoverStrandedCloserHead,
   fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
@@ -1050,6 +1053,7 @@ async function dispatchAmaClosureFor({
     }
   }
   let closerOnlyHeadDelta = closerHeadProof?.proven === true;
+  let closerHeadHasLiveReview = false;
   let evidenceHeadSha = closerOnlyHeadDelta ? closerHeadProof.anchorHead : settledReviewHeadSha;
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
@@ -1108,6 +1112,7 @@ async function dispatchAmaClosureFor({
           { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
         );
         if (currentBodies.length > 0) {
+          closerHeadHasLiveReview = true;
           closerOnlyHeadDelta = false;
           evidenceHeadSha = settledReviewHeadSha;
           liveReviewHeadSha = settledReviewHeadSha;
@@ -1485,8 +1490,8 @@ async function dispatchAmaClosureFor({
   }
 
   let allowStaleReviewHeadHammerResume = false;
-  // NOOWNER-01: the live head's tip carries the closer trailer, so policy never
-  // re-reviews it and a hammer stop hold may stand in for the re-review.
+  // NOOWNER-01: a closer tip suppresses ordinary automatic review refresh;
+  // ownerless, uncertified heads can use the explicit exact-head recovery.
   let liveHeadCloserAuthored = false;
   let hamTerminalRemediationEvidenceOptions = null;
   let hamTerminalRemediationValidated = false;
@@ -1502,12 +1507,16 @@ async function dispatchAmaClosureFor({
   // review also advances the head -> `stale-review-head` -> the eligibility miss
   // was never self-certifiable, so the no-dispatch "retain" tick spun unbounded (a
   // live 50-min stall). Dropping the `reviewCycleExhausted &&` guard lets the
-  // own-commit proof arm for that case too. The SAFETY INVARIANT is unchanged: an
-  // head without closer trailers or linked closer/HAM author provenance stays
-  // reviewable. This includes merge-agent rebases of worker-authored commits:
-  // a closer committer stamp alone does not arm stale-head resume. Those heads
-  // must complete review on the new SHA before ordinary closure can proceed.
-  if (reviewedHeadIsStale) {
+  // own-commit proof arm for that case too. A head without closer trailers or
+  // linked closer/HAM author provenance stays reviewable. Resume requires a
+  // closer-only chain proof or an authoritative live-review probe; unknown
+  // reviewer identity without a chain leaves the head for exact-head review.
+  // A recognized closer-trailer tip can arm HAM resume even when a rebase broke
+  // the closer-only chain. That flag admits a repair attempt; merge authority
+  // still requires the exact-head terminal-remediation validator, including its
+  // reviewed-head binding. An uncertified head needs an exact-head review.
+  if (reviewedHeadIsStale && !(isOrphanHeadReviewRequested(reviewStateRow, currentPrHeadSha)
+    && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))) {
     try {
       throwIfAborted(signal);
       const closerCommitSuppression = await runCoexistenceOperation(
@@ -1527,7 +1536,23 @@ async function dispatchAmaClosureFor({
       throwIfAborted(signal);
       liveHeadCloserAuthored = closerCommitSuppression?.suppressed === true
         && closerCommitSuppression?.reason === 'closer-commit-trailer';
-      allowStaleReviewHeadHammerResume = closerOnlyHeadDelta && liveHeadCloserAuthored;
+      if (liveHeadCloserAuthored && !closerOnlyHeadDelta && !closerHeadHasLiveReview
+        && authoritativeReviewerLogins.length > 0) {
+        const currentBodies = await runCoexistenceOperation(
+          'rebased-closer-head-live-review',
+          ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
+            repoPath, prNumber, headSha: currentPrHeadSha, authoritativeReviewerLogins,
+            fetchLatestHeadReviewBodiesImpl, retryDelaysMs: liveReviewRetryDelaysMs,
+            logger, signal: operationSignal,
+          }),
+          { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
+        );
+        closerHeadHasLiveReview = currentBodies.length > 0;
+      }
+      // A HAM rebase can break the chain to the reviewed SHA. Its exact-head
+      // ground-truth certificate below remains authoritative independently.
+      allowStaleReviewHeadHammerResume = liveHeadCloserAuthored && !closerHeadHasLiveReview
+        && (closerOnlyHeadDelta || authoritativeReviewerLogins.length > 0);
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
@@ -2259,6 +2284,20 @@ async function dispatchAmaClosureFor({
       { amaEnabled: Boolean(cfg?.enabled) },
     );
   }
+  // Classify hard refusals before any exact-head review request can take ownership.
+  if (result?.reason === 'not-eligible') {
+    const hardReason = (result.reasons || []).find((reason) =>
+      ['pr-not-open', 'risk-class-not-permitted', 'branch-protection-missing-gate',
+        'fast-merge-state-unsupported'].includes(reason)
+      || String(reason).startsWith('label-'));
+    if (hardReason) result = { ...result, needsOperator: true, operatorReason: `not-eligible:${hardReason}` };
+  }
+  const closerRecovery = await recoverStrandedCloserHeadImpl({ result,
+    closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
+    prNumber, headSha: currentPrHeadSha, reviewStateRow, labels: labelNames || [], signal,
+    timeoutMs: operationTimeoutMs, logger });
+  if (closerRecovery) return withAmaDispatchMetadata(closerRecovery, { amaEnabled: true });
+
   // CIDEDUPE-01: the closer handed this PR to the daemon, but the daemon declined
   // it this tick. Never silent: log the daemon's reason, count it per head, and
   // past the bound park for the operator when the hammer cannot take over.
@@ -2285,19 +2324,9 @@ async function dispatchAmaClosureFor({
   return withAmaDispatchMetadata(
     {
       ...result,
-      ...(result?.reason === 'not-eligible'
-        ? (() => {
-            const hardReason = (result.reasons || []).find((reason) =>
-              ['pr-not-open', 'risk-class-not-permitted', 'branch-protection-missing-gate',
-                'fast-merge-state-unsupported'].includes(reason)
-              || String(reason).startsWith('label-'));
-            return hardReason
-              ? { needsOperator: true, operatorReason: `not-eligible:${hardReason}` }
-              : {
-                retryAfterMs: 30_000,
-                ...(commentOnlyFinalRoundAwaitingCi ? { commentOnlyFinalRoundAwaitingCi: true } : {}),
-              };
-          })()
+      ...(result?.reason === 'not-eligible' && !result?.needsOperator
+        ? { retryAfterMs: 30_000,
+            ...(commentOnlyFinalRoundAwaitingCi ? { commentOnlyFinalRoundAwaitingCi: true } : {}) }
         : {}),
       ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
     },
@@ -2400,6 +2429,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
       : amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending' }));
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
+  }
+  if (amaClosureResult?.reason === 'closer-head-exact-review-requested') {
+    return { outcome: 'ama-pending', amaClosureResult };
   }
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';

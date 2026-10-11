@@ -616,6 +616,31 @@ classification uses check/step names because rollups omit output; the operator
 must inspect the actual failure before applying an override. Unchanged delivered
 receipts skip writes and paging locks.
 
+LEASEDEFER-01 adds `closer-head-exact-review-requested` → `ama-pending` when
+an unheld closer-trailer stale head has only stale/unsettled/unknown-finding
+eligibility misses and its exact-head review request is triggered or already
+pending (`status: already-pending`, `reason: review-already-pending`). Recovery
+first proves no held PR-wide closer lease and no queued/running or uncertain
+launch ownership. Live/uncertain owners retain retry/watchdog routing.
+Hard refusals retain `needsOperator`; the watcher-owned duplicate-family census
+hold retains its 30-second retry. Refused requests continue to the
+bounded REMORPHAN-01 watchdog and its per-head SEV1 exhaustion/uncertainty page.
+A closer tip without a closer-only chain may admit a HAM repair attempt only
+after an authoritative probe proves no live review on the new head. Unknown
+reviewer identity without chain proof leaves resume off. In either case,
+the exact-head terminal-remediation validator retains merge authority.
+
+Hammer lease admission checks live head/state/draft/labels before queuing.
+Refusals return `merge-lease-admission-refused` (exit 20) with a
+`hammer-lease-admission` audit and `merge-lease-admission:<reason>`.
+Holds/drafts record `deferred`, changed heads record `superseded`, and closed PRs
+record `failed-without-merge`. Transient admission gates cannot create a hammer
+stop hold. Admission has no held-lease merge decision and emits no merge-action
+receipt. Audit failures stop execution. A live merge
+race returns `already-merged` instead. Historical stop gating remains with the
+closer's `evaluateHammerStopHold`; released same-head stops cannot block the
+hammer from reaching its rebase, including REMCONFLICT-01 conflict repair.
+
 CIUNKNOWN-01 keeps empty rollups unknown. Bootstrap requires API-confirmed absence of repository workflows and base-branch required-check rules plus green managed pre-push evidence for the exact repository/head. It is limited to a settled clean review or a HAM-certified head, is revalidated before merge, and records `ciMode: no-ci-bootstrap` in the audit. All other authority and safety gates remain mandatory. Cancelled-only external CI requests one workflow rerun per check/head; a later cancelled attempt pages once.
 
 AMAFIND-01 recovery precedes any generic operator hand-off. Stale reviewed heads

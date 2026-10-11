@@ -55,6 +55,12 @@ supply no refusal receipt. A zero merge exit status or accepted-merge marker
 prevents the hammer from writing a refusal even if confirmation later fails;
 the closure audit still records the deferred outcome.
 
+Pre-acquire `hammer-lease-admission` refusals are also exempt: live label/draft
+gates defer, head movement supersedes, and closed PRs cannot enter the lane.
+No held-lease merge decision or execution has occurred. The AMA audit records
+`merge-lease-admission:<reason>` instead; these attempts do not claim executed
+refusal coverage.
+
 At the adapter seam, a returned `ok: false` is refusal evidence only when it is
 `failureClass: "permanent"` and excludes stale-head, missing-resource,
 transient and already-merged/idempotent responses. Both returned and thrown

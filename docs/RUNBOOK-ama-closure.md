@@ -1753,6 +1753,34 @@ fallback precedence, including on heads whose watchdog budget is exhausted.
 A closer head that HAM cannot re-certify gets one exact-head re-review.
 Admission never waives CI, primary-change, identity, policy or merge leases.
 
+LEASEDEFER-01 lets the closure orchestrator request an immediate
+`system-orphan-head-review:<headSha>` for a recognized closer-trailer tip when
+HAM returns `not-eligible` and every reason is one of `stale-review-head`,
+`verdict-not-settled-success` or `blocking-findings-unknown`, including the stale
+head reason. Before requesting review, recovery requires no held AMA closer
+lease for the PR at any head and a negative `probeOrphanOwnership` result for
+queued/running launches and remediation. Live or uncertain ownership returns to
+ordinary retry and the bounded watchdog. Hard refusals are classified first:
+labels, terminal PRs, disallowed risk classes and branch-protection/fast-merge
+failures retain `needsOperator` routing without requesting review. The watcher-owned
+`duplicate-family-unresolved` census hold retains its 30-second automatic retry.
+The leaf and watchdog share the durable per-head `heads.rereview` reservation
+and lock, set before attempting the request. Failed current-head review rows
+never reset through this leaf. Only a triggered request, or a returned row
+with the exact `system-orphan-head-review:<head>` marker and revision, returns `closer-head-exact-review-requested`, mapped to
+`ama-pending` while the watcher owns that review. A refused request falls through
+to REMORPHAN-01 with its existing per-head attempts/ticks and SEV1 exhaustion or
+ownership-uncertainty page; refusal never creates an unconditional wait.
+A closer-trailer tip can arm stale-head HAM resume after a rebase breaks the
+closer-only chain only after an authoritative live-review probe finds no review
+on the new head. Without chain proof or authoritative reviewer identity, resume
+stays off and an ownerless head can request exact-head review. This intentionally widens dispatch beyond ancestry-proven closer-only chains:
+intervening worker commits may enter the hammer repair lane. The hammer owns
+final adjudication of that head; dispatch admission is not merge certification.
+While an exact-head review is pending/reviewing, the stale-tip path skips the
+additional live-review/commit/certificate probes. This admits repair only: the terminal-remediation validator still proves the exact head and its
+`reviewed-head` binding before merge.
+
 STALECLOSER-03 shares `closerAuthoredStaleEligible` across the closer, eligible
 hammer wake and orphan watchdog (also exposed to agent-os rescue). A proven
 closer-only chain may carry a settled clean reviewed verdict to its current
@@ -1956,6 +1984,22 @@ check gate or attempting merge. A missing prerequisite appends a
 `failed-without-merge` terminal audit. Publish and merge failures release the
 base merge lease, including failures after GitHub confirms the merge; the AMA
 closer lease is separate and remains available for recovery.
+
+Before acquiring or queuing for the base merge lease, `ham_acquire_merge_lease`
+reads live PR head/state/draft/labels. A changed head, closed PR, draft or operator
+hold returns `merge-lease-admission-refused` (exit 20) and appends an audit with
+phase `hammer-lease-admission` and reason `merge-lease-admission:<reason>`.
+Operator holds and drafts use `deferred`; changed heads use `superseded`;
+closed PRs use `failed-without-merge`. Transient live gates do not create
+NOOWNER-01 stop holds: labels and draft state remain closure-owned gates.
+Pre-lease admission produces no merge-action receipt because no held-lease merge
+decision or execution occurred; the admission audit is its durable evidence.
+Audit-write failure is fatal. A live `MERGED`
+state returns `already-merged` (exit 20), without a refusal audit. The closer's
+`evaluateHammerStopHold` owns historical terminal stops and their release;
+the hammer does not re-read them for lane admission. Thus NOOWNER-01 releases
+on changed inputs and REMCONFLICT-01 conflict releases admit same-head
+re-dispatch to rebase under the ordinary lease and merge predicates.
 
 The base-branch merge gate uses `data/merge-leases/<repo>__<base>.json` plus
 durable waiter and attempt files. Use

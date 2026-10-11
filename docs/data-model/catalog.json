@@ -22,7 +22,8 @@
         "src/ama/hammer-stop-hold.mjs",
         "src/ama/operator-hold-refund.mjs"
       ],
-      "owner": "watcher operator-hold release routing"
+      "owner": "watcher operator-hold release routing",
+      "stageValues": ["first-review", "rereview", "blocking-findings", "clean-review", "code-work", "closeout", "cycle-cap", "review-failed", "pr-terminal"]
     },
     {
       "id": "ci-recovery-reservations",

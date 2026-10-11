@@ -45,6 +45,7 @@ export function observeHoldRelease({ db, repo, prNumber, headSha, liveLabels, no
 // Classification chooses existing routes; it grants no merge authority.
 export function holdReleaseRoute({ row, headSha, settled = {}, candidate = {}, roundsLeft = false, cycleCapped = false }) {
   if (cycleCapped) return { stage: 'cycle-cap', action: 'hammer' };
+  if (settled.remediationPending) return { stage: 'blocking-findings', action: 'remediation' };
   if (row?.review_status !== 'posted' || settled.reviewedHeadSha !== headSha || !settled.verdict) {
     return { stage: row?.reviewer_head_sha ? 'rereview' : 'first-review', action: 'review', unknown: row?.review_status === 'posted' };
   }

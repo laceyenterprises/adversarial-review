@@ -810,10 +810,14 @@ Removing the last of `no-merge-hold`, `do-not-merge` and `merge-agent-skip`
 creates a durable HOLDRELEASE-01 intent in `reviews.db`. The watcher verifies
 live state, head and labels, then arms the existing review, remediation,
 daemon clean-merge or hammer route without bypassing their gates or budgets.
-Missing captured review bodies select a current-head re-review. Release-routing
-errors log a warning and continue ordinary PR processing while retaining the
-intent for retry; they never suppress gate projection and closeout for the PR.
-A live terminal PR settles the intent as `pr-terminal`/`none`. The closer can
+Missing captured review bodies select a current-head re-review unless an active
+remediation job already owns the head. Same-head failed reviews retain their
+failure evidence and counters; ordinary retry and park gates own recovery.
+Release-routing errors log a warning and continue ordinary PR processing while
+retaining the intent for retry. A live terminal PR settles the intent as
+`pr-terminal`/`none` and ends that subject's tick. A moved head, unknown labels
+or re-applied hold also ends the tick before gate projection and closeout;
+ordinary processing resumes on the next discovery. The closer can
 unlock a prior hammer stop on an exact-head release, but hold-only refunds
 require explicit non-execution evidence and a launch ID. Current hammer audit
 producers do not supply that evidence, so operators should not expect refunds

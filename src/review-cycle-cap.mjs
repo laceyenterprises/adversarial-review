@@ -1,4 +1,3 @@
-import { isOperatorHeld } from './operator-hold-labels.mjs';
 export const DEFAULT_REVIEW_CYCLE_CAP = 5;
 export const DEFAULT_REVIEW_CYCLE_WINDOW_HOURS = 24;
 // Watcher-owned: automatic review is paused and the PR is routed to the hammer
@@ -155,12 +154,6 @@ export function recordReviewCycleVerdict(db, {
   windowHours = DEFAULT_REVIEW_CYCLE_WINDOW_HOURS,
 } = {}) {
   if (!headSha) return { recorded: false, reason: 'missing-head-sha' };
-  // A held verdict remains review evidence but spends no convergence cycle.
-  // Small contract fixtures/legacy diagnostic DBs may not have the mirror.
-  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reviewed_prs'").get()) {
-    const row = db.prepare('SELECT labels_json FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber);
-    if (isOperatorHeld(row?.labels_json)) return { recorded: false, reason: 'operator-hold' };
-  }
   const prUrl = reviewCyclePrUrl({ repo, prNumber });
   ensureReviewCycleCapSchema(db);
   const previous = latestReviewCycleVerdict(db, prUrl);

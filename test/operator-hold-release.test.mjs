@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { observeHoldRelease, holdReleaseRoute, markHoldReleaseRouted, readLatestHoldRelease } from '../src/operator-hold-release.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
@@ -30,6 +32,7 @@ for (const [name, facts, action] of [
   ['first review', { row: { review_status: 'pending' } }, 'review'],
   ['re-review', { row: posted, settled: { ...settled, reviewedHeadSha: 'b'.repeat(40) } }, 'review'],
   ['blocking findings', { row: posted, settled: { ...settled, blockingFindingCount: 1 }, roundsLeft: true }, 'remediation'],
+  ['active remediation', { row: posted, settled: { verdict: '', remediationPending: true } }, 'remediation'],
   ['clean review', { row: posted, settled, candidate }, 'daemon-clean-merge'],
   ['conflict', { row: posted, settled, candidate: { ...candidate, mergeable: 'CONFLICTING' } }, 'hammer'],
   ['red checks', { row: posted, settled, candidate: { ...candidate, checksConclusion: 'FAILURE' } }, 'hammer'],
@@ -100,16 +103,44 @@ test('same-head hammer stop is released by label removal and refunds only a hold
     readAuditImpl: () => ({ attempts: [{ outcome: 'failed-without-merge', reason: 'ci-not-green', head: headSha, startedAt: '2026-10-11T17:02:00Z' }] }) });
   assert.equal(next.action, 'hold');
 });
-test('held verdicts spend no review-cycle budget; earlier real cycles are preserved on release', t => {
+test('held verdicts retain the cycle-cap breaker across hold and release', t => {
   const { db, observe } = fixture(t);
-  const record = sha => recordReviewCycleVerdict(db, { repo, prNumber, headSha: sha });
-  assert.equal(record(headSha).reason, 'operator-hold');
+  let tick = 0;
+  const record = sha => recordReviewCycleVerdict(db, { repo, prNumber, headSha: sha,
+    verdictAt: new Date(Date.parse(heldAt) + tick++ * 1000).toISOString() });
+  assert.equal(record(headSha).count, 1);
   observe([]);
   assert.equal(record(headSha).count, 1);
   observe(['no-merge-hold']);
-  assert.equal(record('b'.repeat(40)).reason, 'operator-hold');
+  assert.equal(record('b'.repeat(40)).count, 2);
   observe([]);
-  assert.equal(record('c'.repeat(40)).count, 2);
+  assert.equal(record('c'.repeat(40)).count, 3);
+});
+
+test('refund write failure logs and still releases the hammer hold without changing charges', async t => {
+  const { rootDir, observe } = fixture(t);
+  recordHammerRetryDispatch(rootDir, { repo, prNumber }, { jobKey: headSha, headSha, now: heldAt });
+  observe([]);
+  const ledgerPath = hammerRetryCapFilePath(rootDir, { repo, prNumber });
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === ledgerPath) throw new Error('fixture refund disk failure');
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const warnings = [];
+  const result = await evaluateHammerStopHold({ rootDir, hqRoot: rootDir, repo, prNumber, headSha,
+    logger: { ...silent, warn: line => warnings.push(line) }, now: releasedAt,
+    prMetadata: { headSha, baseSha: 'base', mergeableState: 'MERGEABLE', statusCheckRollup: [] },
+    readAuditImpl: () => ({ attempts: [{ outcome: 'failed-without-merge', reason: 'label-no-merge-hold',
+      noExecution: true, launchRequestId: 'held-launch', head: headSha, startedAt: '2026-10-11T16:01:00Z' }] }),
+  });
+  assert.equal(result.action, 'release');
+  assert.deepEqual(result.changed, ['hold-released']);
+  assert.equal(readHammerRetryCapLedger(rootDir, { repo, prNumber }).attemptCount, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /operator-hold refund failed.*fixture refund disk failure/);
 });
 
 test('hold-only refunds preserve real attempts and their durable keys survive the next dispatch', t => {

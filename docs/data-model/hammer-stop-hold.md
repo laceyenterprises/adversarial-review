@@ -41,7 +41,8 @@ than the stop's `recordedAt` (the attempt's `startedAt`, then `timestamp`, then
 predicate; ordinary eligibility and retry caps still apply. Because legacy
 comparison uses attempt start time, a release during an attempt can also unlock
 its later terminal stop. Only proven hold-only non-execution stops qualify for
-the separate [retry-cap refund](hammer-retry-cap.md).
+the separate [retry-cap refund](hammer-retry-cap.md). Refund write failures
+log a warning and leave charges intact without suppressing the hold release.
 
 The closer reads fresh audit evidence on each tick; the hold file alone cannot
 create a decision. Known current SHA or mergeability readings can release an

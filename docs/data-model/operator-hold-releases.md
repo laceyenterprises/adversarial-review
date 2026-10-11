@@ -21,8 +21,8 @@ missing label snapshots cannot manufacture a release.
 | `head_sha` | TEXT NOT NULL | Live head observed when the final hold disappears. |
 | `released_at` | TEXT NOT NULL | ISO timestamp of release observation. |
 | `removed_json` | TEXT NOT NULL | JSON array of sorted, unique hold labels removed from the preceding snapshot. |
-| `stage` | TEXT, nullable | Classifier stage: `first-review`, `rereview`, `blocking-findings`, `clean-review`, `code-work`, `closeout`, `cycle-cap`, or `pr-terminal`. Null until routed. |
-| `action` | TEXT, nullable | Existing handler selected: `review`, `remediation`, `daemon-clean-merge`, `hammer`, or `none` for a terminal PR. |
+| `stage` | TEXT, nullable | Classifier stage: `first-review`, `rereview`, `blocking-findings`, `clean-review`, `code-work`, `closeout`, `cycle-cap`, `review-failed`, or `pr-terminal`. Null until routed. |
+| `action` | TEXT, nullable | Existing handler selected: `review`, `remediation`, `daemon-clean-merge`, `hammer`, or `none` for a terminal PR or same-head failed review. |
 | `routed_at` | TEXT, nullable | Timestamp when routing was armed; not proof of execution or merge. |
 | `cancelled_at` | TEXT, nullable | Timestamp when a later observed hold invalidated this intent, including previously routed releases. |
 
@@ -37,7 +37,10 @@ unrouted, non-cancelled intent for the PR is retried across ticks and restarts;
 this lookup is not restricted to its original head. Before arming a route, a
 live `gh pr view` checks state, head and holds. Re-applying any hold cancels
 existing intents. A live CLOSED or MERGED PR routes to `pr-terminal`/`none`.
-If the head moved or labels are unknown, routing waits for a later observation.
+If the head moved, labels are unknown or a hold was re-applied, the subject
+returns for that tick before gate projection and ordinary handlers. A live
+terminal PR also returns after settling the intent. These race fences defer
+ordinary processing until the next tick; routing exceptions instead fall through.
 
 Classification uses settled verdict, live checks/mergeability, remediation
 round budget and cycle-cap evidence. Missing or uncaptured completed review
@@ -46,12 +49,25 @@ routing exceptions log a warning and fall through to ordinary handlers,
 without the release-driven reviewer fence for that tick; they cannot wedge
 whole-PR processing. Unrouted intent remains durable for another tick.
 Routing grants no merge authority and no additional remediation rounds.
+An active remediation job routes to `blocking-findings`/`remediation` and remains
+the owner: release does not enqueue another job or reset the posted row.
+Same-head terminal review failures route to `review-failed`/`none`, retaining
+`failed_at`, failure text, head and all counters. The ordinary retry/park gates
+still decide whether recovery is permitted, including bounded infrastructure
+recovery; removing a hold is not an operator retrigger.
+Held verdicts with standing blockers still accrue the ordinary cycle-cap count;
+hold toggles do not hide real review/remediation cycles from the breaker.
 
 Review routes retain label freshness checks before claim and spawn. The
-current pending/failed fallback lookup can retain a historical release ID on
-the same head, including a cancelled row; these claims remain fenced and defer
-on unreadable live labels. This store does not yet clear that association when
-a review posts. Mirror writers also observe releases before refreshing labels.
+current pending/failed fallback lookup can retain a non-cancelled historical
+release ID on the same head; these claims remain fenced and defer on unreadable
+live labels. Cancelled intents are excluded, so a re-applied hold does not
+prevent ordinary held reviews through old release history. This store does not
+yet clear a non-cancelled association when a review posts. The watcher and
+ordinary label mirror writers observe releases before refreshing labels.
+`recoverFastMergeVetoes` in `src/fast-merge-audit-recovery.mjs` is an exception:
+its `fast_merge_skipped` label refresh writes directly and can lose a release
+edge before the watcher's observation.
 
 The closer uses the latest non-cancelled exact-head release to unlock a hammer
 stop (including routed intents); see [Hammer Stop Hold](hammer-stop-hold.md).

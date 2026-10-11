@@ -302,7 +302,13 @@ export async function evaluateHammerStopHold({
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
     const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(entry.inputs, inputs);
-    if (holdReleased) refundOperatorHeldHammerStop(rootDir, { repo, prNumber }, stop, { now });
+    if (holdReleased) {
+      try {
+        refundOperatorHeldHammerStop(rootDir, { repo, prNumber }, stop, { now });
+      } catch (err) {
+        logger?.warn?.(`[ama-closer] operator-hold refund failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      }
+    }
     // Probe only evidence failures, once per evaluation/pass. A computable
     // refusal (e.g. reverted primary change) releases ownership, not merge gates.
     if (HAMMER_EVIDENCE_FAILURES.has(stop.predicate)) {

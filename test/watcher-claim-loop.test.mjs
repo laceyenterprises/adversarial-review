@@ -2577,3 +2577,128 @@ fi
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }
+
+// Keep the real review-state CAS and pollOnce admission path; only external
+// surfaces and operator paging are fixture stubs.
+function runHoldReleaseRegression({ setup, verify, followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE, held = false }) {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-release-regression-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    let loader = buildLoaderSource({ followUpJobsSource }).replace(
+      ': { ...subject, ref: { ...subject.ref } };',
+      ': { ...subject, labels: globalThis.__holdReleaseLabels || subject.labels, ref: { ...subject.ref } };',
+    );
+    loader = loader.replace('  return nextLoad(url, context);', `
+      if (url === ${JSON.stringify(fileUrl('src', 'review-retry-exhaustion.mjs'))}) {
+        return { format: 'module', shortCircuit: true, source:
+          'export async function parkExhaustedReview(args) { (globalThis.__releaseParks ||= []).push(args); }' };
+      }
+      return nextLoad(url, context);
+    `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: setup, afterFirstPoll: verify }));
+    const env = fixtureEnv(installGhFixture(tmp));
+    writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
+if [[ "$1" == pr && "$2" == view ]]; then
+  printf '{"state":"OPEN","headRefOid":"sha-happy-%s","labels":${held ? '["no-merge-hold"]' : '[]'},"mergeable":"MERGEABLE","statusCheckRollup":[{"name":"fixture-ci","conclusion":"SUCCESS"}]}\\n' "$3"
+else
+  printf '{"sha":"fixture","message":"Fixture commit"}\\n'
+fi
+`);
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+}
+
+for (const [name, message, status, infraAttempts] of [
+  ['nonrecoverable failure', '[forbidden-fallback] denied', 'failed', 0],
+  ['exhausted unknown failure', 'Command failed with code 1', 'failed', 0],
+  ['lease-released exhausted failure', 'Command failed with code 1', 'pending', 0],
+  ['exhausted infrastructure failure', '[unknown] Command failed with code 1', 'failed', 99],
+]) test(`HOLDRELEASE-01: ${name} retains evidence and caps through repeated hold toggles`, () => {
+  runHoldReleaseRegression({ setup: `
+    db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+      review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref, failed_at,
+      failure_message, infra_auto_recover_attempts)
+      VALUES (?, 101, '2026-10-11T16:00:00Z', 'claude', 'open', ?, 99,
+        '["no-merge-hold"]', 'sha-happy-101', 'sha-happy-101', '2026-10-11T16:01:00Z', ?, ?)\`).run(
+        'laceyenterprises/adversarial-review', '${status}', '${message}', ${infraAttempts});
+  `, verify: `
+    const check = () => {
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+      assert.equal(row.review_status, 'failed');
+      assert.equal(row.review_attempts, 99);
+      assert.equal(row.failed_at, '2026-10-11T16:01:00Z');
+      assert.equal(row.failure_message, '${message}');
+      assert.equal(row.infra_auto_recover_attempts, ${infraAttempts});
+      assert.equal(row.reviewer_head_sha, 'sha-happy-101');
+      assert.ok(!claims.some(c => c.prNumber === 101));
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
+    };
+    check();
+    globalThis.__holdReleaseLabels = ['no-merge-hold'];
+    await pollOnce(octokit, pollOptions);
+    check();
+    globalThis.__holdReleaseLabels = [];
+    await pollOnce(octokit, pollOptions);
+    check();
+    const releases = db.prepare('SELECT * FROM operator_hold_releases WHERE pr_number = 101').all();
+    assert.equal(releases.length, 2);
+    for (const release of releases) {
+      assert.equal(release.stage, 'review-failed');
+      assert.equal(release.action, 'none');
+      assert.ok(release.routed_at);
+    }
+  ` });
+});
+
+test('HOLDRELEASE-01: active remediation owns the posted row without reset or duplicate enqueue', () => {
+  runHoldReleaseRegression({
+    followUpJobsSource: DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace(
+      "export function createFollowUpJob() { return { jobPath: '/tmp/watcher-claim-loop-follow-up.json' }; }",
+      "export function createFollowUpJob() { throw new Error('active remediation must not be enqueued again'); }",
+    ),
+    setup: `
+      globalThis.__holdReleaseSettled = { verdict: '', remediationPending: true };
+      db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+        review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref, rereview_reason)
+        VALUES (?, 101, '2026-10-11T16:00:00Z', 'claude', 'open', 'posted', 2,
+          '["no-merge-hold"]', 'sha-happy-101', 'sha-happy-101', 'remediation owns head')\`).run(
+          'laceyenterprises/adversarial-review');
+    `, verify: `
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+      assert.equal(row.review_status, 'posted');
+      assert.equal(row.review_attempts, 2);
+      assert.equal(row.rereview_reason, 'remediation owns head');
+      assert.ok(!claims.some(c => c.prNumber === 101));
+      const release = db.prepare('SELECT * FROM operator_hold_releases WHERE pr_number = 101').get();
+      assert.equal(release.stage, 'blocking-findings');
+      assert.equal(release.action, 'remediation');
+      assert.ok(release.routed_at);
+    `,
+  });
+});
+
+test('HOLDRELEASE-01: cancelled history does not fence an ordinary held first review', () => {
+  runHoldReleaseRegression({ held: true, setup: `
+    globalThis.__holdReleaseLabels = ['no-merge-hold'];
+    db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+      review_status, review_attempts, labels_json, revision_ref)
+      VALUES (?, 101, '2026-10-11T16:00:00Z', 'claude', 'open', 'pending', 0,
+        '["no-merge-hold"]', 'sha-happy-101')\`).run('laceyenterprises/adversarial-review');
+    const { observeHoldRelease } = await import(${JSON.stringify(fileUrl('src', 'operator-hold-release.mjs'))});
+    observeHoldRelease({ db, repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+      headSha: 'sha-happy-101', liveLabels: [] });
+    observeHoldRelease({ db, repo: 'laceyenterprises/adversarial-review', prNumber: 101,
+      headSha: 'sha-happy-101', liveLabels: ['no-merge-hold'] });
+  `, verify: `
+    assert.ok(claims.some(c => c.prNumber === 101));
+    assert.ok((globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
+    assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number = 101').get().review_status, 'posted');
+    assert.ok(db.prepare('SELECT cancelled_at FROM operator_hold_releases WHERE pr_number = 101').get().cancelled_at);
+  ` });
+});

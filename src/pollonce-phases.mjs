@@ -803,7 +803,7 @@ export async function processReviewSubject(entry, ctx) {
         });
         if (!release && existing && ['pending', 'pending-upstream', 'failed'].includes(existing.review_status)) {
           holdReleaseId = db.prepare(`SELECT id FROM operator_hold_releases WHERE repo = ? AND pr_number = ?
-            AND head_sha = ? ORDER BY id DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha)?.id || null;
+            AND head_sha = ? AND cancelled_at IS NULL ORDER BY id DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha)?.id || null;
         }
         if (release) {
           holdReleaseId = release.id;
@@ -832,7 +832,7 @@ export async function processReviewSubject(entry, ctx) {
             roundsLeft: ledger.completedRoundsForPR < Math.max(budget.roundBudget, Number(ledger.latestMaxRounds) || 0),
             cycleCapped: isReviewCycleCapFailedRow(existing) || prLabelNames.includes('reviewer-cycle-cap-reached'),
           });
-          if (route.action === 'remediation') {
+          if (route.action === 'remediation' && !settled.remediationPending) {
             const pass = db.prepare(`SELECT * FROM reviewer_passes WHERE repo = ? AND pr_number = ?
               AND head_sha = ? AND status = 'completed' AND pass_kind IN ('first-pass', 'rereview')
               ORDER BY ended_at DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha);
@@ -842,6 +842,12 @@ export async function processReviewSubject(entry, ctx) {
             else queueFollowUpForRecoveredPostedReview({ rootDir: ROOT, row: pass, reviewRow: existing,
               reviewPostedAt: existing.posted_at, defaultBaseBranch: subject.baseRefName || 'main' });
           }
+          // Keep same-head failure evidence for the ordinary bounded retry
+          // gates, including infrastructure recovery. A label toggle is not
+          // an operator retrigger and must never reset a failed attempt.
+          if (route.action === 'review' && reviewRowInTerminalFailureState(existing, subject.headSha)) {
+            route = { stage: 'review-failed', action: 'none' };
+          }
           if (route.action === 'review' && ['posted', 'failed', 'rereview-ci-blocked'].includes(existing?.review_status)) {
             requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber,
               targetRevisionRef: subject.headSha, requestedAt: release.released_at, preserveBudgets: true,
@@ -849,7 +855,7 @@ export async function processReviewSubject(entry, ctx) {
             });
             existing = stmtGetReviewRow.get(repoPath, prNumber);
           }
-          clearNoProgressLane(ROOT, { repo: repoPath, prNumber }, { logger: console });
+          if (route.action !== 'none') clearNoProgressLane(ROOT, { repo: repoPath, prNumber }, { logger: console });
           markHoldReleaseRouted({ db, release, route });
         }
       } catch (err) {

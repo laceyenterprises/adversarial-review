@@ -516,7 +516,7 @@ async function spawnReviewer(args) {
   const rootDir = args.rootDir || ROOT;
   const env = args.quotaCheckEnv || process.env;
   const fallback = args.geminiQuotaFallbackRoute;
-  const canFallback = fallback && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
+  const canFallback = fallback && !fallback.quotaBlocked && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
   const runFallback = async (quotaResult = null) => {
     const gate = shouldPauseReviewerModel(rootDir, fallback.reviewerModel);
     if (gate.paused) {
@@ -531,8 +531,13 @@ async function spawnReviewer(args) {
     }
     let runtimeStarted = false;
     try {
+      const reviewerSessionUuid = randomUUID();
+      // Transfer the durable claim before any fallback process can post.
+      await args.onGeminiQuotaFallback?.({ ...fallback, reviewerSessionUuid });
       return await spawnReviewerOnce({
         ...args,
+        reviewerSessionUuid,
+        pipelineGeminiSeats: 0,
         reviewerModel: fallback.reviewerModel,
         botTokenEnv: fallback.botTokenEnv,
         codexBrokerProvider: fallback.codexBrokerProvider || 'codex',
@@ -578,7 +583,7 @@ async function spawnReviewer(args) {
       console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
       return runFallback(result);
     }
-    return { ...result, failureClass: 'quota-exhausted' };
+    return result;
   }
   return result;
 }

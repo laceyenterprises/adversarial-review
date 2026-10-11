@@ -230,3 +230,10 @@ the pass before posting. Body capture also preserves the decision alongside
 the verified GitHub artifact. Reviewer crash recovery prefers this pass-bound
 evidence over the best-effort review-mode latency event. Older passes without
 it still use the head-and-attempt-keyed event; neither source means normal rounds.
+
+A same-pass Gemini quota fallback creates a fresh runtime session UUID and spawn
+token as well as a new ledger attempt after a terminal Gemini pass. Before
+starting it, the watcher atomically transfers the existing `reviewed_prs` claim
+from the original UUID to the fallback UUID and persists the effective reviewer
+and broker. Logical review/remediation round counters are unchanged; recovery
+uses the fallback reviewer identity if the watcher restarts before settlement.

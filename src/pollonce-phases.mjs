@@ -14,6 +14,7 @@
 // helpers/constants). Leaf helpers and prepared statements are imported directly
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
+import { transferGeminiFallbackSession } from './gemini-fallback-session.mjs';
 import { readGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
@@ -3011,7 +3012,7 @@ export async function processReviewSubject(entry, ctx) {
 
             const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
             const attemptAt = new Date().toISOString();
-            const reviewerSessionUuid = randomUUID();
+            let reviewerSessionUuid = randomUUID();
             // After ARA-06's operator-surface carve, the per-PR loop iterates
             // typed `subject` (SubjectState) values from the subject adapter
             // — there is no `pr` GitHub-PR object in scope here. The handle
@@ -3548,7 +3549,32 @@ export async function processReviewSubject(entry, ctx) {
                 repo: repoPath,
                 prNumber,
                 reviewerModel: route.reviewerModel,
-                geminiQuotaFallbackRoute: baseRoute,
+                geminiQuotaFallbackRoute: selectReviewerRouteForAttempt({
+                  subject,
+                  baseRoute: applyAfhReviewerRouteForAttempt({
+                    subject,
+                    baseRoute: applyEffectiveReviewerRoute({
+                      builderClass: baseRoute.builderClass, baseRoute, mode: 'off',
+                      primaryReviewerQuotaCapped: false, routeTable: baseRoute.routeTable,
+                    }),
+                    grounding: afhGrounding, geminiReviewerMode: 'off', routeTable: baseRoute.routeTable,
+                  }).route,
+                  rootDir: ROOT, repoPath, prNumber, currentRow: existing,
+                  headSha: reviewerHeadSha, afhGrounding, emitCacheEvent,
+                }),
+                onGeminiQuotaFallback: ({ reviewerModel, codexBrokerProvider, reviewerSessionUuid: nextSessionUuid, quotaBlocked }) => {
+                  if (quotaBlocked) throw new Error('Gemini fallback route is quota blocked');
+                  transferGeminiFallbackSession(db, {
+                    repo: repoPath, prNumber, previousSessionUuid: reviewerSessionUuid,
+                    reviewerSessionUuid: nextSessionUuid, reviewerModel, codexBrokerProvider,
+                  });
+                  reviewerSessionUuid = nextSessionUuid;
+                  reviewerProcessStarted = false;
+                  if (credentialProbeReservation?.probe) {
+                    releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                    credentialProbeReservation = null;
+                  }
+                },
                 rootDir: ROOT,
                 codexBrokerProvider: route.codexBrokerProvider || 'codex',
                 botTokenEnv: route.botTokenEnv,

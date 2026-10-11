@@ -5,8 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+import { transferGeminiFallbackSession } from '../src/gemini-fallback-session.mjs';
+import { postedReviewForRow } from '../src/orphan-post-reconcile.mjs';
+import { createFixtureStubReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/fixture-stub/index.mjs';
+import { readReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { beginReviewerPass, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
-import { openReviewStateDb } from '../src/review-state.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { recordReviewerCredentialFailure, readReviewerCredentialOutage, readCascadeState } from '../src/reviewer-cascade.mjs';
 import { readGeminiQuotaCooldown } from '../src/gemini-quota-cooldown.mjs';
 import { spawnReviewer, settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
@@ -444,3 +448,51 @@ for (const ok of [true, false]) {
     } finally { await rm(rootDir, { recursive: true, force: true }); }
   });
 }
+
+// Uses the runtime's real run-record claim and the real SQLite pass ledger.
+test('Gemini terminal run fallback transfers claim and survives bounce recovery', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'gemini-terminal-run-'));
+  const db = openReviewStateDb(rootDir);
+  ensureReviewStateSchema(db);
+  try {
+    const capture = newCapture();
+    const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false', ADVERSARIAL_REVIEW_STATE_DIR: rootDir }, capture });
+    const originalSession = args.reviewerSessionUuid;
+    const fixture = createFixtureStubReviewerRuntimeAdapter({ rootDir, reviewerBodies: ['quota', 'fallback'] });
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewer, review_status,
+      reviewer_session_uuid, reviewer_head_sha, last_attempted_at, reviewed_at)
+      VALUES (?, ?, 'gemini', 'reviewing', ?, ?, ?, '2026-10-11T00:00:00Z')`).run(
+      args.repo, args.prNumber, originalSession, args.reviewerHeadSha, '2026-10-11T00:00:00Z');
+    let effectiveSession = originalSession;
+    let effectiveToken;
+    const result = await spawnReviewer({ ...args, rootDir, reviewerModel: 'gemini', builderTag: 'codex',
+      beginReviewerPassImpl: beginReviewerPass, completeReviewerPassImpl: completeReviewerPass,
+      geminiQuotaFallbackRoute: { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
+      onGeminiQuotaFallback: route => {
+        transferGeminiFallbackSession(db, { ...route, repo: args.repo, prNumber: args.prNumber,
+          previousSessionUuid: effectiveSession });
+        effectiveSession = route.reviewerSessionUuid;
+      },
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer(req) {
+          const runtimeResult = await fixture.spawnReviewer(req);
+          if (req.model === 'gemini') return { ...runtimeResult, ok: false, failureClass: 'quota-exhausted' };
+          assert.notEqual(req.sessionUuid, originalSession);
+          effectiveToken = req.subjectContext.reviewerSpawnToken;
+          // A bounce between posting and settlement uses durable model attribution.
+          const row = db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(args.repo, args.prNumber);
+          const review = { user: { login: 'lacey-claude-reviewer[bot]' }, state: 'APPROVED',
+            submitted_at: '2026-10-11T00:01:00Z', commit_id: args.reviewerHeadSha };
+          assert.equal(postedReviewForRow(row, [review]), review);
+          return { ...runtimeResult, reviewBodyDelivery: 'adapter' };
+        },
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.ok(effectiveToken);
+    assert.equal(readReviewerRunRecord(rootDir, effectiveSession).state, 'completed');
+    assert.equal(db.prepare('SELECT reviewer_session_uuid FROM reviewed_prs').get().reviewer_session_uuid, effectiveSession);
+    assert.throws(() => transferGeminiFallbackSession(db, { repo: args.repo, prNumber: args.prNumber,
+      previousSessionUuid: originalSession, reviewerSessionUuid: randomUUID(), reviewerModel: 'codex' }), /lost session claim/);
+  } finally { db.close(); await rm(rootDir, { recursive: true, force: true }); }
+});

@@ -524,3 +524,14 @@ To clear the provider hold manually, first verify quota is available, then
 remove the resolved `gemini-quota-cooldown.json` file. No restart is required.
 Per-PR quota and OAuth holds are independent and may still defer dispatch.
 See [the store contract](data-model/gemini-quota-cooldown.md) for path and schema.
+
+Same-pass quota fallback transfers the session-fenced review claim to a fresh
+runtime UUID and records the effective reviewer and broker before spawn. Bounce
+recovery therefore searches the fallback bot. The Gemini credential probe is
+released on transfer; the fallback uses the AFH and timeout routing chain with
+Gemini disabled. The fallback spawn carries zero Gemini seats and does not lease
+an AGY identity. Queue admission and depth spill remain charged to the original
+Gemini worker class for this one logical pass: a provider-wide outage can
+temporarily overshoot Claude/Codex per-class capacity by the number of already
+admitted Gemini passes. New admissions use the durable cooldown and are charged
+to their effective class normally.

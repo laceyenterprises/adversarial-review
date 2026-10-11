@@ -519,3 +519,11 @@ test('quotaHoldDecision falls back to message re-parse when the stored column is
   assert.equal(d.source, 'provider-reported');
   assert.equal(d.hold, true);
 });
+
+
+test('failure-class literals in stdout are not broker quota diagnostics', () => {
+  for (const text of ['quota-exhausted', 'quota_exhausted', 'GeminiCredentialPoolNoCreditError']) {
+    assert.equal(detectQuotaExhaustion(text).isQuotaExhausted, false);
+  }
+  assert.equal(detectQuotaExhaustion('Gemini credential checkout deferred: quota_exhausted', { providerDiagnostic: true }).isQuotaExhausted, true);
+});

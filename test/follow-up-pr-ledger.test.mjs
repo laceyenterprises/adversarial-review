@@ -93,6 +93,8 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
   });
   assert.deepEqual(ledger, {
     completedRoundsForPR: 0,
+    infrastructureRefundsForPR: 0,
+    publishedRoundsForPR: 0,
     consecutiveNonBlockingRounds: 0,
     latestMaxRounds: null,
     latestRiskClass: 'medium',

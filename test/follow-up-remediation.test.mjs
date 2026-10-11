@@ -8728,12 +8728,18 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
     event: {
       lrq: 'lrq_apc05_topic_success',
       status: 'succeeded',
+      failureClass: 'codex-tool-host-unavailable',
+      failureReason: 'publish-blocked',
+      failureCode: 'boot-failure',
+      exitCode: 143,
+      recoveryAttempt: 1,
     },
     now: () => '2026-04-21T10:25:00.000Z',
     execFileImpl: async (command, args) => {
       throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
     },
-    resolvePRLifecycleImpl: async () => null,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: claimed.job.revisionRef }),
+    postCommentImpl: async () => ({ posted: false, error: 'offline fixture' }),
     requestReviewRereviewImpl: () => ({
       triggered: true,
       status: 'pending',
@@ -8751,6 +8757,10 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
   assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_apc05_topic_success');
   assert.equal(result.job.completion.dispatchStatus.source, 'app-contract-topic');
   assert.equal(result.job.completion.dispatchStatus.status, 'succeeded');
+  assert.equal(result.job.completion.dispatchStatus.failureReason, undefined);
+  assert.equal(result.job.completion.dispatchStatus.failureCode, undefined);
+  assert.equal(result.job.completion.dispatchStatus.exitCode, undefined);
+  assert.equal(summarizePRRemediationLedger(rootDir, result.job).infrastructureRefundsForPR, 0);
   assert.equal(result.job.reReview.requested, true);
   assert.equal(existsSync(spawned.jobPath), false);
 });

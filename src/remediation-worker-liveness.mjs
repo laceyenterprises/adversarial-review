@@ -103,10 +103,8 @@ async function assessWorkerLivenessDetailed(job, {
 } = {}) {
   const worker = job?.remediationWorker || {};
   if (
-    workerTerminalEvent?.status === 'succeeded'
-    && workerTerminalEventMatches(worker, workerTerminalEvent)
-    && workerTerminalReplyPath
-    && existsSync(workerTerminalReplyPath)
+    workerTerminalEventMatches(worker, workerTerminalEvent)
+    && workerTerminalEvent?.status === 'succeeded' && workerTerminalReplyPath && existsSync(workerTerminalReplyPath)
   ) {
     const nowAt = parseIsoTime(now());
     const spawnedAt = parseIsoTime(worker.spawnedAt);

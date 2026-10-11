@@ -165,10 +165,6 @@ function readEvidence(value) {
 }
 
 export async function recoverOrphan(options) {
-  if (isOperatorHeld(options.labels || options.candidate?.labels)) {
-    options.logger?.log?.(`Orphan watchdog held: 1 (${options.repo}#${options.prNumber})`);
-    return null;
-  }
   try { return await recoverOrphanWithStore(options); }
   catch (error) {
     if (options.signal?.aborted) throw error;
@@ -187,7 +183,7 @@ export async function recoverOrphan(options) {
   }
 }
 
-async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate, labels = [],
+async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate, labels = candidate?.labels || [],
   result, reviewStateRow, dispatchJob, dispatchHammer, ticks = 6, maxAttempts = 2,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = 5000,

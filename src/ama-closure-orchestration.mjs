@@ -2409,9 +2409,8 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   const operatorHold = operatorHoldPath === 'daemon-clean-merge'
     ? amaClosureResult.daemonCleanMerge : amaClosureResult;
   const amaClosureOperatorPreemptable = operatorHoldPath !== null;
-  // Preserve the existing action exclusions; hold accounting uses the full set.
   const mergeAgentRequestedScoped = !labelNames?.some((label) =>
-    [...OPERATOR_HOLD_LABELS.filter(label => !['no-merge', 'no-auto-merge', 'hold'].includes(label)), 'adversarial-merge-blocked',
+    [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked',
       'merge-agent-stuck', 'duplicate-family-hold'].includes(label))
     && !reviewStateRow?.remediation_pending
     && labelNames?.includes('merge-agent-requested')

@@ -1,6 +1,7 @@
-// Operator intent only: pipeline state labels deliberately remain countable.
+// Only holds enforced by the merge authorities suppress pipeline accounting.
+// Pipeline state labels deliberately remain countable.
 export const OPERATOR_HOLD_LABELS = Object.freeze([
-  'no-merge-hold', 'do-not-merge', 'merge-agent-skip', 'no-merge', 'no-auto-merge', 'hold',
+  'no-merge-hold', 'do-not-merge', 'merge-agent-skip',
 ]);
 
 export function isOperatorHeld(labels = []) {
@@ -18,8 +19,8 @@ export function operatorHeldSql(column = 'labels_json') {
 export const SQL_COUNT_HELD_OPEN_PRS =
   `SELECT COUNT(*) AS n FROM reviewed_prs WHERE pr_state = 'open' AND ${operatorHeldSql()}`;
 
-// Health reads retain closed history, but exclude deliberate holds from all
-// open-row classifiers, including aggregate queries and correlated subqueries.
+// Opt-in accounting reads retain closed history and exclude enforced holds.
+// Never apply this to lifecycle repair or diagnostic cleanup reads.
 export function excludingHeldOpenRows(sql) {
   const cte = `reviewed_prs AS (SELECT * FROM main.reviewed_prs WHERE pr_state IS NOT 'open' OR NOT ${operatorHeldSql()})`;
   return /^\s*WITH\s/i.test(sql) ? sql.replace(/^(\s*WITH\s)/i, `$1${cte}, `) : `WITH ${cte} ${sql}`;

@@ -29,14 +29,17 @@ for (const label of OPERATOR_HOLD_LABELS) {
     } finally { db.close(); }
   });
   test(`${label}: watchdog never probes, dispatches or pages`, async () => {
-    const logs = [];
-    const result = await recoverOrphan({ logger: { log: message => logs.push(message) }, labels: [{ name: label }], hasOwnerImpl: () => assert.fail('ownership probe'), pageImpl: () => assert.fail('page'), dispatchHammer: () => assert.fail('dispatch') });
+    const result = await recoverOrphan({ headSha: 'head', repo: 'fixture/repo', prNumber: 1,
+      rootDir: '/fixture/unused', candidate: { prState: 'open', labels: [{ name: label }] },
+      result: { amaEnabled: true, reason: 'primary-change-repair-required' },
+      fsImpl: { existsSync: () => false, mkdirSync: () => assert.fail('store creation') },
+      hasOwnerImpl: () => assert.fail('ownership probe'), pageImpl: () => assert.fail('page'),
+      dispatchHammer: () => assert.fail('dispatch') });
     assert.equal(result, null);
-    assert.match(logs[0], /held: 1/);
   });
 }
 
 test('pipeline labels remain countable', () => {
-  assert.equal(isOperatorHeld(['merge-agent-stuck', 'adversarial-merge-blocked']), false);
+  assert.equal(isOperatorHeld(['merge-agent-stuck', 'adversarial-merge-blocked', 'no-merge', 'no-auto-merge', 'hold']), false);
   assert.equal(isOperatorHeld('invalid json'), false);
 });

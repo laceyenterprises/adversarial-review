@@ -1309,11 +1309,22 @@ function isMissingSchemaError(error) {
 
 function safeAll(db, sql, params = []) {
   try {
-    return db.prepare(/\b(?:FROM|JOIN)\s+reviewed_prs\b/i.test(sql) ? excludingHeldOpenRows(sql) : sql).all(...params);
+    return db.prepare(sql).all(...params);
   } catch (error) {
     if (isMissingSchemaError(error)) return [];
     throw error;
   }
+}
+
+// Hold accounting is opt-in: repair candidates and diagnostic cleanup must
+// retain the complete lifecycle population. Cache schema evidence per read.
+const holdAccountingAvailable = new WeakMap();
+function safeAllCounting(db, sql, params = []) {
+  if (!holdAccountingAvailable.has(db)) {
+    const columns = new Set(safeAll(db, 'PRAGMA table_info(reviewed_prs)').map(row => row.name));
+    holdAccountingAvailable.set(db, columns.has('labels_json') && columns.has('pr_state'));
+  }
+  return safeAll(db, holdAccountingAvailable.get(db) ? excludingHeldOpenRows(sql) : sql, params);
 }
 
 function openReviewStateReadOnlyDb(rootDir) {
@@ -2155,7 +2166,7 @@ function readActiveTransientBackoffs(rootDir, { nowMs }) {
 
 function readActiveQuotaHolds(db, { nowMs }) {
   if (!db) return [];
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo,
             pr_number,
@@ -2191,7 +2202,7 @@ function readActiveQuotaHolds(db, { nowMs }) {
 
 function readOutageTransientRows(db) {
   if (!db) return [];
-  return safeAll(
+  return safeAllCounting(
     db,
     `SELECT repo,
             pr_number,
@@ -2257,7 +2268,7 @@ function summarizeOutage(db, rootDir) {
 
 function readHcpPreflightAbortedRows(db) {
   if (!db) return [];
-  return safeAll(
+  return safeAllCounting(
     db,
     `WITH latest_completed_pass AS (
        SELECT repo,
@@ -2383,7 +2394,7 @@ function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
 }
 
 function summarizeFirstPassQueue(db, { nowMs, stoppedCiRegressionJobs = null }) {
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo, pr_number, reviewed_at, rereview_requested_at, last_attempted_at, posted_at,
             failed_at, failure_message, review_attempts,
@@ -2908,7 +2919,7 @@ function summarizeDeferredRereviews(db, followUpJobs, { nowMs, stoppedCiRegressi
   if (!db) return { count: 0, oldest: null, prs: [] };
   const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
   const stoppedCiJobs = stoppedCiRegressionJobs || stoppedCiRegressionJobsByPr(followUpJobs);
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo,
             pr_number,
@@ -3008,7 +3019,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
   const activeJobsByPr = activeFollowUpJobsByPr(followUpJobs);
   const stoppedCiJobs = stoppedCiRegressionJobs || stoppedCiRegressionJobsByPr(followUpJobs);
   const terminalJobsByPr = terminalFollowUpJobsByPr(followUpJobs);
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo,
             pr_number,
@@ -3094,7 +3105,7 @@ function summarizeQueuedRereviews(db, followUpJobs, { nowMs, stoppedCiRegression
 
 function summarizeCiBlockedRereviews(db, { nowMs }) {
   if (!db) return { count: 0, oldest: null, prs: [] };
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo,
             pr_number,
@@ -3134,7 +3145,7 @@ function summarizeCiBlockedRereviews(db, { nowMs }) {
 }
 
 function summarizeMalformedPrTitles(db) {
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo, pr_number, reviewed_at, failed_at, failure_message, review_attempts
        FROM reviewed_prs
@@ -3413,7 +3424,7 @@ function summarizeMergeStalls({ followUpJobs, reviewRows, nowMs, config }) {
     const prNumber = Number(entry.job.prNumber);
     if (!repo || !Number.isInteger(prNumber)) continue;
     const reviewRow = reviewRows.get(`${repo}#${prNumber}`);
-    if (!reviewRow || reviewRow.pr_state !== 'open') continue;
+    if (!reviewRow || reviewRow.pr_state !== 'open' || isOperatorHeld(reviewRow.labels_json)) continue;
     const stoppedAt = entry.job.stoppedAt
       || entry.job.remediationPlan?.stop?.stoppedAt
       || new Date(entry.stat.mtimeMs).toISOString();
@@ -3831,6 +3842,7 @@ function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() })
       ignoredTerminalPrs.push({ ...summary, prState });
       continue;
     }
+    if (prState === 'open' && isOperatorHeld(reviewRow.labels_json)) continue;
     stale.push(summary);
   }
   return { total, stale, ignoredTerminalPrs };
@@ -3917,7 +3929,7 @@ function summarizeReviewerSlots(db, {
   nowMs,
   settlingMs = DEFAULT_REVIEWER_SLOT_SETTLING_MS,
 } = {}) {
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT r.repo, r.pr_number, r.pr_state, r.review_status, r.reviewer,
             r.last_attempted_at, r.reviewer_session_uuid, r.reviewer_pgid,
@@ -4023,7 +4035,7 @@ function summarizeReviewerSlots(db, {
 // DB without infra_auto_recover_attempts returns empty instead of throwing.
 function summarizeStuckRetryLoops(db, { cap }) {
   if (!db) return { cap, prs: [], byFailureClass: [], dominantFailureClass: null };
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo,
             pr_number,
@@ -4067,7 +4079,7 @@ function summarizeStuckRetryLoops(db, { cap }) {
 
 function summarizeTerminalReviewFailures(db) {
   if (!db) return { prs: [], byFailureClass: [], dominantFailureClass: null };
-  const rows = safeAll(
+  const rows = safeAllCounting(
     db,
     `SELECT repo,
             pr_number,
@@ -4491,11 +4503,15 @@ function readDirtyPrBacklogState(hqRoot, { env = process.env, nowMs, db = null }
       continue;
     }
     const backlog = state?.dirtyPrBacklog;
-    const signature = Array.isArray(backlog?.signature) ? backlog.signature : [];
-    const heldKeys = new Set(db ? db.prepare("SELECT repo, pr_number, labels_json FROM reviewed_prs WHERE pr_state='open'").all()
+    const rawDirtyPrCount = Number(backlog?.dirtyPrCount || 0);
+    if (!backlog || !Number.isFinite(rawDirtyPrCount) || rawDirtyPrCount <= 0) {
+      return { present: false, statePath, dirtyPrCount: 0, held: 0, prs: [] };
+    }
+    const signature = Array.isArray(backlog.signature) ? backlog.signature : [];
+    const heldKeys = new Set(db ? safeAll(db, "SELECT repo, pr_number, labels_json FROM reviewed_prs WHERE pr_state='open'")
       .filter(row => isOperatorHeld(row.labels_json)).map(row => `${row.repo}#${row.pr_number}`) : []);
     const held = signature.filter(key => heldKeys.has(String(key).split('@')[0])).length;
-    const dirtyPrCount = Math.max(0, Number(backlog?.dirtyPrCount || 0) - held);
+    const dirtyPrCount = Math.max(0, rawDirtyPrCount - held);
     if (!backlog || !Number.isFinite(dirtyPrCount) || dirtyPrCount <= 0) {
       return { present: false, statePath, dirtyPrCount: 0, held, prs: [] };
     }
@@ -6200,7 +6216,7 @@ function collectReviewPipelineHealth({
       activeReviewRows: db ? reviewRows : null,
       nowMs,
       staleAfterMs: config.pipelineTickIntervalMs * 2,
-    });
+    }).filter(park => !isOperatorHeld(reviewRows.get(`${park.repo}#${park.prNumber}`)?.labels_json));
     const zombieReviewerPasses = db
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };

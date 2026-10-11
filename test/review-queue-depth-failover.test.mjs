@@ -1307,3 +1307,28 @@ test('wait spill respects quota and reviewer entitlement', async () => {
     assert.equal(result.workerClass, 'gemini');
   }
 });
+
+test('held count is read once per plan and reused in spill logs', () => {
+  let reads = 0;
+  const logs = [];
+  const ctl = createFirstPassSpilloverController({
+    readDepth: () => 8, readHeld: () => { reads++; return 3; },
+    resolveThresholdImpl: () => 2, logger: { warn: message => logs.push(message) },
+  });
+  ctl.plan();
+  ctl.plan();
+  for (let prNumber = 1; prNumber <= 4; prNumber++) assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber }), true);
+  assert.equal(reads, 1);
+  assert.equal(logs.filter(message => message.includes('held: 3')).length, 5);
+});
+
+test('failed held count is logged as unknown without disabling depth pressure', () => {
+  const logs = [];
+  const ctl = createFirstPassSpilloverController({
+    readDepth: () => 2, readHeld: () => { throw new Error('unavailable'); },
+    resolveThresholdImpl: () => 2, logger: { warn: message => logs.push(message) },
+  });
+  assert.equal(ctl.plan().engaged, true);
+  assert.ok(logs.some(message => /held count read failed: unavailable/.test(message)));
+  assert.ok(logs.some(message => /held: unknown/.test(message)));
+});

@@ -14,6 +14,21 @@ The live `gh pr view` terminal-state probe uses bounded transient retries for
 timeouts, TLS/network drops, and HTTP 5xx-style failures; non-transient failures
 are still reported immediately in the reconciliation summary.
 
+Operator-held accounting uses only the merge-enforced labels `no-merge-hold`,
+`do-not-merge`, and `merge-agent-skip`. Open PRs with those labels are omitted
+from queue depth, open-row failure/stall classifiers, conflict findings, TTM
+pressure and imported dirty-backlog counts. `no-merge`, `no-auto-merge`, and
+`hold` do not suppress accounting or orphan watchdog admission. Pipeline-owned
+labels such as `merge-agent-stuck` remain visible.
+
+Hold filtering is explicit on counting reads. Terminal reconciliation still
+probes held pending and posted PRs, and lifecycle outcome totals retain every
+row. The shared PR map retains held rows so their merge-park records remain
+subject to normal freshness cleanup rather than being deleted as absent PRs;
+held parks and stale closer leases do not raise stall findings. If a legacy
+ledger lacks `labels_json`, counting reads keep their unfiltered population and
+`held` is unknown (`null`), rather than silently reporting an empty queue.
+
 Run locally:
 
 ```sh

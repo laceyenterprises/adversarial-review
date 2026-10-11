@@ -446,6 +446,7 @@ export function createFirstPassSpilloverController({
   writeFileImpl = writeFileAtomic,
 } = {}) {
   const plans = new Map();
+  const heldByKind = new Map();
   const remainingByKind = new Map();
   const grantedByKind = new Map();
   let granted = 0;
@@ -494,6 +495,14 @@ export function createFirstPassSpilloverController({
     const depthReader = kind === 'rereview' ? readRereviewDepth : readDepth;
     const depth = threshold === null ? null : readDepthImpl(depthReader, { logger });
     const plan = firstPassSpilloverPlan({ depth, threshold });
+    let held = null;
+    if (threshold !== null && typeof readHeld === 'function') {
+      try { held = readHeld(); }
+      catch (error) {
+        logger?.warn?.(`[watcher] review-queue-depth held count read failed: ${error?.message || error}`);
+      }
+    }
+    heldByKind.set(kind, held);
     plans.set(kind, plan);
     remainingByKind.set(kind, plan.spillSlots);
     grantedByKind.set(kind, 0);
@@ -542,7 +551,7 @@ export function createFirstPassSpilloverController({
       report = summarizeReport(report);
       logger?.warn?.(
         `[watcher] review-queue-depth-failover ${event} pass_kind=${kind} `
-        + `depth=${plan.depth} held: ${readFirstPassReviewQueueDepth(readHeld) ?? 0} threshold=${plan.threshold} spill_slots=${plan.spillSlots} `
+        + `depth=${plan.depth} held: ${heldByKind.get(kind) ?? 'unknown'} threshold=${plan.threshold} spill_slots=${plan.spillSlots} `
         + `engagement_spillover_reviews=${transition.engagementSpilloverReviews} `
         + `unit="${FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT}"`
       );
@@ -632,7 +641,7 @@ export function createFirstPassSpilloverController({
       report = summarizeReport(report);
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
-        + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} held: ${readFirstPassReviewQueueDepth(readHeld) ?? 0} threshold=${current.threshold} `
+        + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} held: ${heldByKind.get(kind) ?? 'unknown'} threshold=${current.threshold} `
         + `slot=${grantedByKind.get(kind)}/${current.spillSlots} `
         + `engagement_spillover_reviews=${lane.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`

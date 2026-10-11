@@ -1,12 +1,13 @@
 import test, { beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, openSync, closeSync } from 'node:fs';
+import fsExt from 'fs-ext';
 import { EventEmitter } from 'node:events';
-import { recordLocalRemediationOutcome } from '../src/remediation-round-accounting.mjs';
+import { recordLocalRemediationOutcome, settleInfrastructureRemediationRound } from '../src/remediation-round-accounting.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { infrastructureRefundReason, localWorkerErrorOutcome } from '../src/remediation-infrastructure-refund.mjs';
-import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned, summarizePRRemediationLedger, buildFollowUpJob, getFollowUpJobDir, readFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { createFollowUpJob, claimNextFollowUpJob, markFollowUpJobSpawned, summarizePRRemediationLedger, buildFollowUpJob, getFollowUpJobDir, readFollowUpJob, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { buildRemediationOutcomeCommentBody } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
 import { assessWorkerLivenessDetailed } from '../src/remediation-worker-liveness.mjs';
@@ -191,6 +192,7 @@ test('PR ledger retains the two refunds across jobs and counts published rounds 
     }
     const ledger = summarizePRRemediationLedger(rootDir, { repo: 'fixture/repo', prNumber: 1 });
     assert.equal(ledger.infrastructureRefundsForPR, 2);
+    assert.equal(summarizePRRemediationLedger(rootDir, { repo: 'fixture/repo', prNumber: 1 }, { refundsOnly: true }).infrastructureRefundsForPR, 2);
     assert.equal(ledger.publishedRoundsForPR, 1);
     assert.equal(ledger.completedRoundsForPR, 3);
     assert.equal(infrastructureRefundReason({ outcome: { status: 'failed', failureReason: 'publish-blocked' },
@@ -200,7 +202,7 @@ test('PR ledger retains the two refunds across jobs and counts published rounds 
       jobId: 'fixture', remediationPlan: { currentRound: 3, maxRounds: 3, publishedRoundsForPR: ledger.publishedRoundsForPR,
         stop: { code: 'max-rounds-reached' } },
     } });
-    assert.match(body, /1 round published a commit/);
+    assert.match(body, /1 round observed head movement \(since tracking began\)/);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
@@ -314,4 +316,81 @@ test('local boot and signal events are durable and cannot recreate a settled job
 test('errors after a successful spawn are not classified as boot failures', () => {
   assert.equal(localWorkerErrorOutcome({ processId: 1234 }, new Error('kill refused')).failureReason, 'worker-error');
   assert.equal(localWorkerErrorOutcome({ processId: null }, new Error('spawn refused')).failureReason, 'boot-failed');
+});
+
+
+test('settlement preserves concurrent disk updates and skips a missing job', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-fresh-'));
+  try {
+    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
+      reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
+    const claimed = claimNextFollowUpJob({ rootDir });
+    const current = readFollowUpJob(claimed.jobPath);
+    current.concurrentEvidence = 'keep';
+    writeFollowUpJob(claimed.jobPath, current);
+    const args = { rootDir, job: claimed.job, jobPath: claimed.jobPath, worker: {},
+      liveness: { state: 'exited' }, lifecycle: { source: 'live', headSha: 'b' } };
+    assert.equal(await settleInfrastructureRemediationRound(args), null);
+    const settled = readFollowUpJob(claimed.jobPath);
+    assert.equal(settled.concurrentEvidence, 'keep');
+    assert.equal(settled.remediationPlan.rounds.at(-1).publishedHeadSha, 'b');
+    rmSync(claimed.jobPath);
+    assert.equal((await settleInfrastructureRemediationRound(args)).action, 'skipped');
+    assert.equal(existsSync(claimed.jobPath), false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('refund marker does not stamp or overwrite an immediately claimed pending job', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-marker-'));
+  try {
+    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
+      reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
+    const claimed = claimNextFollowUpJob({ rootDir });
+    const result = await settleInfrastructureRemediationRound({ rootDir, job: claimed.job,
+      jobPath: claimed.jobPath, worker: {}, liveness: { state: 'exited',
+        dispatchStatus: { status: 'failed', failureReason: 'publish-blocked' } },
+      lifecycle: { source: 'live', headSha: 'a' }, completedAt: new Date().toISOString(),
+      postOutcomeComment: async (args) => {
+        assert.equal(args.jobPath, undefined);
+        const retry = claimNextFollowUpJob({ rootDir });
+        assert.ok(retry);
+        assert.equal(retry.job.commentDelivery, undefined);
+        assert.equal(readFollowUpJob(retry.jobPath).status, 'in_progress');
+      },
+    });
+    assert.equal(result.action, 'requeued');
+    assert.equal(summarizePRRemediationLedger(rootDir, result.job, { refundsOnly: true }).infrastructureRefundsForPR, 1);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+
+test('contention defers settlement and retries local boot outcome writes', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-lock-'));
+  let fd;
+  try {
+    createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a',
+      reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
+    const claimed = claimNextFollowUpJob({ rootDir });
+    const child = new EventEmitter();
+    const worker = { processId: 1234, model: 'codex', child };
+    markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker });
+    fd = openSync(join(rootDir, 'data', 'follow-up-jobs', '.write.lock'), 'a');
+    fsExt.flockSync(fd, 'exnb');
+    const result = await settleInfrastructureRemediationRound({ rootDir, job: claimed.job,
+      jobPath: claimed.jobPath, worker, liveness: { state: 'exited' },
+      lifecycle: { source: 'live', headSha: 'a' } });
+    assert.equal(result.reason, 'accounting-retry-next-tick');
+    recordLocalRemediationOutcome({ rootDir, jobPath: claimed.jobPath, worker,
+      log: { warn(message) { assert.fail(message); } } });
+    child.emit('error', Object.assign(new Error('unavailable'), { syscall: 'spawn fixture' }));
+    assert.equal(readFollowUpJob(claimed.jobPath).remediationWorker.recordedOutcome, undefined);
+    fsExt.flockSync(fd, 'un');
+    closeSync(fd);
+    fd = undefined;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(readFollowUpJob(claimed.jobPath).remediationWorker.recordedOutcome.failureReason, 'boot-failed');
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

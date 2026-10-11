@@ -759,6 +759,12 @@ that ceiling (zero disables it); non-negative integers are clamped to two.
 Only decimal digits after trimming whitespace are accepted, and blank or
 invalid values use two. Eligibility and requeue share the job-write lock.
 An ineligible refund continues through existing HQ transient retry handling.
+Settlement re-reads the current job under the lock and patches only round head
+fields; lock contention or missing records skip until the next tick. Only the
+PR-filtered refund history is scanned inside this lock. Local outcome writes
+retry lock contention five times with bounded backoff. Refund notices post
+best-effort without terminal delivery stamps on pending records. Budget-stop
+comments report observed head movement since tracking began.
 The [follow-up job data model](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01)
 defines the persisted fields and publication-count limitations.
 

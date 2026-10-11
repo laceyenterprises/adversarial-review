@@ -640,7 +640,7 @@ function buildRemediationOutcomeCommentBody({
     lines.push(`**Outcome:** stopped (\`${stopCode}\`).`);
     if (['max-rounds-reached', 'round-budget-exhausted'].includes(stopCode)) {
       const published = job?.remediationPlan?.publishedRoundsForPR || 0;
-      lines.push(`${published} ${published === 1 ? 'round' : 'rounds'} published a commit.`);
+      lines.push(`${published} ${published === 1 ? 'round' : 'rounds'} observed head movement (since tracking began).`);
     }
     if (stopCode === 'rereview-blocked') {
       const blockedReason = reReview?.outcomeReason || reReview?.status || 'unknown';

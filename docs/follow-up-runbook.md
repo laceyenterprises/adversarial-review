@@ -44,7 +44,10 @@ There are at most two refunds across the PR's jobs, including archives. Set
 `ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS=0` to disable refunds or `=1` to lower
 the limit; larger integers are clamped to two. Only decimal digits after trimming
 whitespace are accepted; blank and invalid values use two.
-No config-schema key is added. Retry comments say `not charged: <reason>` and
+No config-schema key is added. Retry comments are best-effort, without stamping pending job records, and say
+`not charged: <reason>`. Budget-stop comments count observed head movement since
+tracking began, including non-worker pushes; legacy publications are unknown.
+The durable refund evidence is
 `retryHistory[].retryMetadata.code` is `infrastructure-refund`. Harness-specific
 failures prefer an eligible fallback but run the uncapped primary when none is
 eligible; they do not create quota holds. See the

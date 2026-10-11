@@ -29,7 +29,7 @@ The persisted accounting fields are:
   `signal` captured from local child error/exit events. HQ outcomes instead come
   from dispatch status; failed terminal events must confirm that status first.
 - `remediationPlan.publishedRoundsForPR`: the ledger's count of rounds with
-  `publishedHeadSha`, plus any newly observed movement for the current round.
+  `publishedHeadSha`, computed when a budget stop is recorded.
   It feeds budget-stop comments and cannot reconstruct historical publications.
 
 The retry transition removes the claimed round and decrements `currentRound`;
@@ -44,7 +44,13 @@ can lower the limit to a non-negative integer, including zero, but cannot raise
 it above two. Only decimal digits after trimming whitespace are accepted;
 blank and invalid overrides use the default. Eligibility and requeue share
 the job-write lock. A declined refund retains existing HQ transient retry rules
-and their separate bounded budget.
+and their separate bounded budget. Settlement patches only current round head
+fields from a fresh locked record. Missing records or lock contention defer
+settlement to the next tick. Local event writes retry lock contention five times
+with exponential delays of 25–400 ms and verify worker identity each time.
+Refund notices are best-effort posts without terminal comment-delivery stamps;
+GitHub failures cannot mutate a claimable pending job. Budget comments report
+observed head movement since tracking began, rather than worker publications.
 
 `harnessSpecific` is true for `codex-tool-host-unavailable` or a local
 `boot-failed` outcome. The retry prefers an eligible configured fallback with

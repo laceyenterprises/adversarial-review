@@ -1692,7 +1692,7 @@ function reapTerminalFollowUpWorkspaces({
 // scanned directories must NOT silently zero out the directory's
 // contribution to the ledger for unrelated PRs. Errors are caught
 // per-file (logged + skipped), not per-directory.
-function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prNumber }) {
+function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prNumber }, { refundsOnly = false } = {}) {
   const targetDomainId = String(domainId || 'code-pr');
   const targetRepo = String(repo ?? '');
   const targetPr = Number(prNumber);
@@ -1714,6 +1714,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
         infrastructureRefunds.add(`${job.jobId}:${retry.requeuedAt}:${retry.round}`);
       }
     }
+    if (refundsOnly) return;
     for (const round of job.remediationPlan?.rounds || []) {
       if (round.publishedHeadSha && round.publishedHeadSha !== round.startHeadSha) {
         publishedRounds.add(`${job.jobId}:${round.round}`);
@@ -1724,7 +1725,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   let latestTimestamp = '';
   // SINGLEREVIEW-01: single-review stops created at or before the PR's latest
   // void no longer spend budget (see `voidSingleReviewCredit`).
-  const singleReviewVoidedAt = readSingleReviewVoid(rootDir, {
+  const singleReviewVoidedAt = refundsOnly ? null : readSingleReviewVoid(rootDir, {
     domainId: targetDomainId, repo: targetRepo, prNumber: targetPr,
   })?.voidedAt || null;
   const singleReviewStopJobIds = [];
@@ -1777,7 +1778,8 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
 
     let names;
     try {
-      names = readdirSync(dir).filter((name) => name.endsWith('.json'));
+      names = readdirSync(dir).filter((name) => name.endsWith('.json')
+        && (!refundsOnly || name.startsWith(`${sanitizeRepo(targetRepo)}-pr-${targetPr}-`)));
     } catch (err) {
       console.error(
         `[follow-up-jobs] Failed to list ${key} directory while summarizing ` +
@@ -1810,6 +1812,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
       if (Number(job.prNumber) !== targetPr) continue;
 
       recordInfrastructureHistory(job);
+      if (refundsOnly) continue;
       if (terminalKeys.has(key)) recordCommentOnlyFinalRound(rawJob, key);
 
       if (terminalKeys.has(key)) {
@@ -1884,6 +1887,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   for (const job of scanArchivedStoppedFollowUpJobs(rootDir, targetRepo, targetPr)) {
     if (String(job.domainId || 'code-pr') !== targetDomainId) continue;
     recordInfrastructureHistory(job);
+    if (refundsOnly) continue;
     recordCommentOnlyFinalRound(job, 'stopped-archived');
     const worker = job?.remediationWorker;
     const neverSpawned = worker == null || typeof worker !== 'object' || Array.isArray(worker)

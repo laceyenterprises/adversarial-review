@@ -3309,7 +3309,7 @@ async function consumeNextFollowUpJob({
   if (!claimed) {
     return { consumed: false, reason: 'no-pending-jobs' };
   }
-  claimed.job.remediationPlan.publishedRoundsForPR = summarizePRRemediationLedger(rootDir, claimed.job).publishedRoundsForPR || 0;
+  if (claimed.stopped) claimed.job.remediationPlan.publishedRoundsForPR = summarizePRRemediationLedger(rootDir, claimed.job).publishedRoundsForPR || 0;
   if (claimed.stopped) {
     const stoppedAt = now();
     if (claimed.reason === 'max-rounds-reached') {

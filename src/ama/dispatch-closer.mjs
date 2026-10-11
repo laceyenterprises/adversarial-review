@@ -130,6 +130,7 @@ import {
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
+  refundUnexecutedHammerDispatch,
   deferHammerRetryDispatch,
   refundHammerRetryDispatch,
 } from './hammer-retry-cap.mjs';
@@ -147,7 +148,7 @@ import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
-import { maybeRearmInfraDeadHammer } from './dead-hammer-rearm.mjs';
+import { maybeRearmInfraDeadHammer, unexecutedHammerReason } from './dead-hammer-rearm.mjs';
 import {
   evaluateHammerStopHold,
   HAMMER_STOP_HOLD_REASON,
@@ -1739,6 +1740,7 @@ function isReclaimableBranchHolderBlockedAmaCloserRecord(record, { now = null } 
 // No launch request means no worker ever existed for this attempt.
 function prelaunchRefusalKind(record) {
   if (!record || record.launchRequestId || record.dispatchId) return null;
+  if (record.prelaunchRefusalSlowRetry?.kind === 'non-execution') return 'non-execution';
   if (!String(record.lastError || '').trim()) return null;
   const state = String(record.state || '').trim().toLowerCase();
   // A slow attempt may reset the holder counter. Its original window still
@@ -4490,7 +4492,7 @@ export async function maybeDispatchAmaCloser({
   const existingDispatchIdentity = newerLaunchRecord
     ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
     : reviewedHeadDispatchIdentity;
-  const existingRecord = newerLaunchRecord || reviewedHeadRecord;
+  let existingRecord = newerLaunchRecord || reviewedHeadRecord;
   let existingRecordLeaseIdentity = {
     repo,
     prNumber,
@@ -4566,6 +4568,88 @@ export async function maybeDispatchAmaCloser({
     existingDispatchLeaseIdentity = existingRecordLeaseIdentity;
     existingLeaseBeforeDispatch = targetLeaseBeforeDispatch;
     targetLeaseBeforeDispatch = null;
+  }
+  let prefetchedLaunchRequestProbe = null;
+  // HAMREFUND-01: reconcile terminal launches before the stale-lease tombstone
+  // path can strand them. A real closing decision and authoritative terminal PR
+  // state always win, even when the harness reports a signal/host failure.
+  if (existingRecord?.launchRequestId && !existingDispatchHeadAdvanced
+    && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
+    const probe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+      launchRequestId: existingRecord.launchRequestId,
+      ledgerTarget: dispatchContext.ledgerTarget || null,
+      ledgerDbPath: dispatchContext.ledgerDbPath || null,
+      env: process.env, hqRoot, rootDir,
+    })).catch(() => ({ ok: false, reason: 'launch-request-unreadable' }));
+    prefetchedLaunchRequestProbe = probe;
+    throwIfAborted(signal);
+    const terminal = probe?.ok && ['failed', 'succeeded'].includes(probe.row?.status);
+    const reason = terminal ? unexecutedHammerReason(probe.row) : null;
+    if (reason && !auditTerminalOutcome) {
+      const live = await probeAmaLivePrForMergeDispatch({ dispatchContext, execFileImpl, repo, prNumber, signal });
+      const noMerge = live?.state === 'OPEN' && live.headRefOid === existingRecord.headSha
+        ? await hasNoMergeAuditForCurrentHead({
+          hqRoot, repo, prNumber, headSha: live.headRefOid, fetchPullRequestRollupImpl, execFileImpl,
+        }) : null;
+      const merged = readMergedBuildCompletionSignal({
+        repo, prNumber, headSha: existingRecord.headSha, hqRoot, rootDir, env: process.env,
+        readBuildCompletionProducerEvidenceImpl, readBuildCompletionSignalForPrImpl,
+      });
+      throwIfAborted(signal);
+      if (noMerge === false && isCleanMissingMergedSignal(merged)) {
+        const reconciledLaunchRequestId = existingRecord.launchRequestId;
+        const refund = refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
+          jobKey: existingRecord.reviewedSha || reviewedSha,
+          headSha: existingRecord.headSha, launchRequestId: existingRecord.launchRequestId,
+          now: dispatchContext.dispatchedAt,
+        });
+        if (refund.refunded || ['already-refunded', 'no-charged-attempt'].includes(refund.reason)
+          || (refund.reason === 'no-ledger' && !readHammerRetryCapLedger(rootDir, { repo, prNumber }))) {
+          const cleanup = await cleanupHammerCloserWorker({
+            prNumber, workerClass, existingRecord, hqPath, hqRoot, execFileImpl, logger,
+            reason: 'unexecuted-hammer',
+          });
+          assertHammerCleanupSucceeded(cleanup);
+          await recordAmaCloserReviewerPassTokens({
+            rootDir, hqRoot, repo, prNumber, record: existingRecord,
+            status: 'failed', merged: false, observedAt: dispatchContext.dispatchedAt,
+            ledgerTarget: dispatchContext.ledgerTarget || null,
+            ledgerDbPath: dispatchContext.ledgerDbPath || null,
+            env: process.env, pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+            logger,
+          });
+          finalizeAmaCloserLeaseBestEffort({
+            rootDir, leaseIdentity: existingRecordLeaseIdentity, terminalOutcome: 'failed-without-merge',
+            now: dispatchContext.dispatchedAt, logger, repo, prNumber,
+          });
+          // Preserve retryCount as the monotonic reviewer-pass identity. Only
+          // admission subtracts these refunds; reusing a pass number is unsafe.
+          let dispatchRecordReconciled = false;
+          existingRecord = updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => {
+            if (current?.launchRequestId !== reconciledLaunchRequestId) return null;
+            dispatchRecordReconciled = true;
+            return {
+              ...current,
+              previousUnexecutedLaunchRequestId: current.launchRequestId,
+              launchRequestId: null, dispatchId: null,
+              unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1,
+              state: 'dispatch-failed', lastError: reason,
+              prelaunchRefusalSlowRetry: {
+                ...current.prelaunchRefusalSlowRetry, kind: 'non-execution',
+              },
+            };
+          });
+          if (!dispatchRecordReconciled) {
+            logger?.warn?.(JSON.stringify({
+              event: 'ama_closer.unexecuted_refund_dispatch_record_changed',
+              repo, prNumber, launchRequestId: reconciledLaunchRequestId, refund,
+            }));
+            return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'dispatch-record-changed' });
+          }
+          existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
+        }
+      }
+    }
   }
   if (targetLeaseBeforeDispatch) {
     if (isReclaimableDispatchedAmaCloserLease(targetLeaseBeforeDispatch, {
@@ -4746,7 +4830,8 @@ export async function maybeDispatchAmaCloser({
   // cadence once its fast retries are spent (src/ama/prelaunch-refusal-retry.mjs).
   const prelaunchSlowRetry = planPrelaunchRefusalSlowRetry({
     record: existingRecord,
-    kind: prelaunchRefusalKind(existingRecord),
+    kind: existingDispatchHeadAdvanced && existingRecord?.prelaunchRefusalSlowRetry?.kind === 'non-execution'
+      ? null : prelaunchRefusalKind(existingRecord),
     nowMs: parseTimeMs(dispatchContext?.dispatchedAt || new Date().toISOString()),
     lastTouchMs: mostRecentAmaCloserTouchMs(existingRecord),
     intervalMs: amaCloserPendingLeaseReclaimAgeMs(existingRecord),
@@ -4863,7 +4948,7 @@ export async function maybeDispatchAmaCloser({
     };
     let phantomActiveWorkerRun = null;
     // The LRQ's ledger row, when the unknown-status path below read it.
-    let launchRequestProbe = null;
+    let launchRequestProbe = prefetchedLaunchRequestProbe;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) {
       const workerRunProbe = await readLatestWorkerRunStatusFromLedger({
         launchRequestId: existingRecord.launchRequestId,
@@ -4928,6 +5013,13 @@ export async function maybeDispatchAmaCloser({
         // fell through to treating the hammer as merged without asking GitHub.
         && !certifiedPark
         && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
+        // Preserve the terminal-success hold below before HAMBG-02 can infer
+        // an exit without close from an OPEN PR whose merge may be queued.
+        && !(mergedSignalUnknown && !existingDispatchHeadAdvanced
+          && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
+          && !isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
+            now: dispatchContext.dispatchedAt,
+          }))
       ) {
         const terminalLivePr = await probeAmaLivePrForMergeDispatch({
           dispatchContext,
@@ -5569,7 +5661,7 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (status === 'unknown') {
-      launchRequestProbe = await readLaunchRequestStatusImpl({
+      launchRequestProbe = launchRequestProbe || await readLaunchRequestStatusImpl({
         launchRequestId: existingRecord.launchRequestId,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -5792,7 +5884,7 @@ export async function maybeDispatchAmaCloser({
     // `due`: fall through to one slow-cadence dispatch attempt.
   } else if (
     existingRecord
-    && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
+    && Number(existingRecord.retryCount || 0) - Number(existingRecord.unexecutedRefundCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
     && !existingRecordIsReclaimableInterruption
     && !existingRecordIsBranchHolderBlocked
     && !existingRecordIsRevalidatableBranchMissing
@@ -6137,6 +6229,8 @@ export async function maybeDispatchAmaCloser({
     dispatchId: existingRecord?.dispatchId || null,
     launchRequestId: existingRecord?.launchRequestId || null,
     retryCount: priorRetryCount + 1,
+    unexecutedRefundCount: existingDispatchHeadAdvanced ? 0 : Number(existingRecord?.unexecutedRefundCount || 0),
+    previousUnexecutedLaunchRequestId: existingRecord?.previousUnexecutedLaunchRequestId || null,
     branchHolderBlockCount: existingBranchHolderBlockCount,
     state: 'dispatching',
     lastObservedStatus: existingRecord?.lastObservedStatus || null,
@@ -6144,6 +6238,7 @@ export async function maybeDispatchAmaCloser({
     lastError: null,
     // NOOWNER-01: a slow-cadence attempt keeps its window and page markers.
     ...((slowRetryNote?.slowRetry || existingRecord?.prelaunchRefusalSlowRetry)
+      && !(existingDispatchHeadAdvanced && existingRecord?.prelaunchRefusalSlowRetry?.kind === 'non-execution')
       ? { prelaunchRefusalSlowRetry: slowRetryNote?.slowRetry || existingRecord.prelaunchRefusalSlowRetry }
       : {}),
   });
@@ -6172,6 +6267,9 @@ export async function maybeDispatchAmaCloser({
       });
     } else if (
       AMA_CLOSER_RETRYABLE_STATUSES.has(existingDispatchStatus || '')
+      || (existingRecord?.prelaunchRefusalSlowRetry?.kind === 'non-execution'
+        && existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
+        && existingLease.lrqId === existingRecord.previousUnexecutedLaunchRequestId)
       || (
         !existingRecord?.launchRequestId
         && isReclaimablePendingAmaCloserLease(existingLease, {
@@ -6679,7 +6777,7 @@ export async function maybeDispatchAmaCloser({
     const liveRecord = { ...(current || {}) };
     delete liveRecord.terminalLaunchStatus;
     delete liveRecord.reconciledAt;
-    delete liveRecord.prelaunchRefusalSlowRetry;
+    if (liveRecord.prelaunchRefusalSlowRetry?.kind !== 'non-execution') delete liveRecord.prelaunchRefusalSlowRetry;
     return {
       ...liveRecord,
       schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,

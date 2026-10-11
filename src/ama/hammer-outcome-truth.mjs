@@ -115,7 +115,8 @@ export function selectNewerHammerLaunchRecord(records, {
     const headSha = String(record?.headSha || '').trim();
     if (!headSha || headSha === reviewedHead) continue;
     if (String(record?.reviewedSha || '').trim() !== series) continue;
-    if (!record?.launchRequestId) continue;
+    if (!record?.launchRequestId
+      && !(record?.previousUnexecutedLaunchRequestId && record.prelaunchRefusalSlowRetry?.kind === 'non-execution')) continue;
     const dispatchedMs = parseTimeMs(record.dispatchedAt);
     if (dispatchedMs === null) continue;
     if (!newest || dispatchedMs > newest.dispatchedMs) newest = { record, dispatchedMs };

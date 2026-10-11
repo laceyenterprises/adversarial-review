@@ -869,9 +869,13 @@ export function readLaunchRequestStatusFromLedger({
   if (!resolution.ok) return resolution;
   let queried;
   if (resolution.target.backend === 'sqlite') {
+    // HAMREFUND-01: older offline ledgers may predate the detail column.
+    const detailColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'failure_detail');
+    if (!detailColumn.ok) return detailColumn;
+    const detailSelect = detailColumn.exists ? 'failure_detail' : 'NULL AS failure_detail';
     queried = querySqliteRows(
       resolution.target,
-      `SELECT launch_request_id, status, updated_at, terminal_at, failure_class
+      `SELECT launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}
          FROM launch_requests
         WHERE launch_request_id = @launchRequestId
         LIMIT 1`,
@@ -885,7 +889,8 @@ export function readLaunchRequestStatusFromLedger({
           'status', status,
           'updated_at', updated_at,
           'terminal_at', terminal_at,
-          'failure_class', failure_class
+          'failure_class', failure_class,
+          'failure_detail', to_jsonb(launch_requests)->>'failure_detail'
         )
          FROM launch_requests
         WHERE launch_request_id = :'lrq'

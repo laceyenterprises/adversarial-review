@@ -1759,6 +1759,8 @@ test('fresh succeeded current-head hammer without HAM evidence is retried as a f
         return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
     }),
+    // A clean missing signal permits the ordinary bounded exit refund.
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
   });
 
   assert.equal(result.dispatched, true);

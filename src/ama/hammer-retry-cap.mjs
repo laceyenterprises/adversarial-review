@@ -79,7 +79,7 @@ export const HAMMER_TARGET_REDRIVE_CAP_EXHAUSTED_REASON = 'hammer-target-redrive
 // lives in the base-branch gate-attempt records under data/merge-leases/ with
 // its own `retryable`, and neither budget draws on the other. Only this many exits per series are refunded;
 // after that an exit stays charged and the normal cap suppresses and alerts.
-// The lifetime count is never refunded, so the lifetime ceiling still bounds
+// These older refunds leave lifetime charges intact, so that ceiling bounds
 // every PR. CLOSERREUSE-01 refunds a hammer that died of an infrastructure
 // cause without pushing from this same budget (src/ama/dead-hammer-rearm.mjs):
 // one refund per series, whichever way the hammer ended.
@@ -362,6 +362,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     ...retryableFieldsForSeries(decision.jobKeyChanged ? null : existing),
     ...deferralFieldsForSeries(existing, decision.jobKeyChanged),
     ...transientRetryFields(existing),
+    ...(existing?.unexecutedLaunchRequestIds ? { unexecutedLaunchRequestIds: existing.unexecutedLaunchRequestIds } : {}),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
@@ -442,6 +443,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     ...retryableFieldsForSeries(jobKeyChanged ? null : existing),
     ...deferralFieldsForSeries(existing, jobKeyChanged),
     ...transientRetryFields(existing),
+    ...(existing?.unexecutedLaunchRequestIds ? { unexecutedLaunchRequestIds: existing.unexecutedLaunchRequestIds } : {}),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
@@ -520,6 +522,36 @@ export function refundHammerRetryDispatch(rootDir, identity, {
   };
   writeHammerRetryCapLedger(rootDir, identity, doc);
   return { refunded: true, reason: 'hammer-exited-without-close', retryable: retryable + 1 };
+}
+
+// HAMREFUND-01: no execution is a separate refund, with no per-series grant.
+// Lifetime charges and suppression remain intact so head churn cannot bypass
+// the PR-wide ceiling. Keep bounded launch history across dispatches/reviews.
+export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, headSha, launchRequestId, now } = {}) {
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  if (!ledger || ledger.__corrupt) return { refunded: false, reason: 'no-ledger' };
+  if (normalizeKey(ledger.jobKey) !== normalizeKey(jobKey)) return { refunded: false, reason: 'series-changed' };
+  const launch = normalizeKey(launchRequestId);
+  if (!launch) return { refunded: false, reason: 'no-launch' };
+  const launches = ledger.unexecutedLaunchRequestIds || [];
+  if (launches.includes(launch)) return { refunded: false, reason: 'already-refunded' };
+  // An older refund must not subtract the same dispatch twice.
+  if (ledger.retryableLaunchRequestIds?.includes(launch) || ledger.deferralLaunches?.includes(launch)) {
+    return { refunded: false, reason: 'already-refunded' };
+  }
+  const down = (count) => Math.max(0, Number(count || 0) - 1);
+  if (!ledger.attemptCount) return { refunded: false, reason: 'no-charged-attempt' };
+  writeHammerRetryCapLedger(rootDir, identity, {
+    ...ledger,
+    attemptCount: down(ledger.attemptCount),
+    targetAttemptCount: normalizeKey(ledger.targetRemediationSha) === normalizeKey(headSha)
+      ? down(ledger.targetAttemptCount) : ledger.targetAttemptCount,
+    unexecutedLaunchRequestIds: [...launches, launch].slice(-RETRYABLE_LAUNCH_HISTORY),
+    suppressed: false,
+    targetSuppressed: false,
+    updatedAt: now || ledger.updatedAt,
+  });
+  return { refunded: true, reason: 'unexecuted' };
 }
 
 export const HAMMER_TRANSIENT_RETRY_PER_HEAD = 1;

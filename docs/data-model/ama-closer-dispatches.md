@@ -50,11 +50,13 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `infraRearmLoggedLaunchRequestId` | string, optional | Launch whose `ama_closer.infra_dead_hammer_rearm` event was already logged. The event is skipped while this equals `launchRequestId`, so it is logged once per launch whatever the re-arm reason. Stamped only while the record still names that launch. |
-| `retryCount` | non-negative integer | Budgeted failed-dispatch count. Transient and branch-holder refusals preserve budget. |
+| `retryCount` | non-negative integer | Monotonic launch/pass attempt identity. Admission subtracts `unexecutedRefundCount` from this value when enforcing the per-head redispatch bound. Transient and branch-holder refusals preserve budget. |
+| `unexecutedRefundCount` | non-negative integer, optional | Number of durable non-execution refunds reconciled for this dispatch head. Defaults to zero; reset when the dispatch head advances. Does not reset retry/pass numbering or refund lifetime charges. |
+| `previousUnexecutedLaunchRequestId` | string, optional | Most recently reconciled non-execution launch, retained after clearing `launchRequestId` and `dispatchId`. Keeps the refunded record discoverable as the review series owner during slow retry. |
 | `branchHolderBlockCount` | non-negative integer | Count of branch-holder refusals for bounded same-PR worktree cleanup. |
-| `prelaunchRefusalSlowRetry` | optional object | Durable bounded pre-launch retry window; fields below. Applies only before any `launchRequestId` or `dispatchId` exists. |
-| `prelaunchRefusalSlowRetry.startedAt` | ISO timestamp | First observation that fast pre-launch retries are spent. Authoritative six-hour window origin, preserved across failed slow attempts and aged holder-counter resets. |
-| `prelaunchRefusalSlowRetry.kind` | string | `branch-holder` or `dispatch-refused`; retains slow-retry ownership independently of the current refusal counter. |
+| `prelaunchRefusalSlowRetry` | optional object | Durable bounded retry window; fields below. Pre-launch refusals apply before launch IDs exist. `non-execution` also applies after a durable harness death; its window survives admission of replacement launches. |
+| `prelaunchRefusalSlowRetry.startedAt` | ISO timestamp | First observation that fast pre-launch retries are spent, or a durable non-execution launch is reconciled. Authoritative six-hour window origin, preserved across failed slow attempts and aged holder-counter resets. |
+| `prelaunchRefusalSlowRetry.kind` | string | `branch-holder`, `dispatch-refused`, or `non-execution`; retains slow-retry ownership independently of the current refusal counter. |
 | `prelaunchRefusalSlowRetry.pagedAt` | optional ISO timestamp | Successful initial slow-cadence alert delivery. |
 | `prelaunchRefusalSlowRetry.exhaustedPagedAt` | optional ISO timestamp | Successful window-exhaustion alert delivery. |
 | `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |
@@ -117,11 +119,27 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   observation. `startedAt` and both page markers survive every pre-launch write,
   including `dispatching` and subsequent failures. Resetting a branch-holder
   counter does not restart fast retries or extend the deadline. A confirmed
-  launch clears the object; a new head has a new dispatch record. Exhaustion
+  launch clears pre-launch refusal windows. A `non-execution` window survives
+  replacement admission and later deaths; a new head resets that window and
+  `unexecutedRefundCount`, while PR-wide lifetime charges remain intact. Exhaustion
   stops retries and pages once with the latest refusal. Failed alert deliveries
   retry on later ticks; process-local debounce limits repeat pages if persistence
   fails, but does not survive a watcher restart. No new schema version is needed
   for this optional additive field.
+
+- HAMREFUND-01 requires durable signal/tool-host failure fields, the same
+  live OPEN head, no terminal local audit, readable absence of a no-merge
+  closing audit and a cleanly missing merged signal with repository producer
+  evidence. It refunds series/target charges once per retained launch identity,
+  preserves lifetime charges and suppression, cleans up the worker, records the
+  failed pass and terminalizes the lease before arming `non-execution` slow retry.
+  A concurrent record change emits
+  `ama_closer.unexecuted_refund_dispatch_record_changed` with the refunded LRQ.
+  The ledger refund remains durable and is idempotent on reconciliation.
+- Bare `succeeded` launches use existing terminal-success/exit-without-close
+  handling and its one-refund-per-series grant. An unknown merged signal with
+  a live `DISPATCHED` same-head lease retains the terminal-success hold before
+  an OPEN PR can be interpreted as an exit without close.
 
 - Primary-change collection uses the earliest hammer launch with a valid 40-hex
   `targetRemediationSha` as trusted author-baseline evidence, even when repairs

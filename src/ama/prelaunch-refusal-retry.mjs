@@ -18,7 +18,10 @@
 // refusal text, and once more when the window closes and retries stop.
 //
 // The window and page markers live on the per-head closer dispatch record, so
-// a new head starts a fresh budget, and a launch that succeeds clears them.
+// a new head starts a fresh budget, and a prelaunch refusal clears on launch.
+// HAMREFUND-01 also uses this clock for terminal launches with no execution.
+// Their window survives successful admission: admission alone does not prove
+// the new worker executed, and repeated deaths must not restart the window.
 
 export const PRELAUNCH_REFUSAL_SLOW_RETRY_WINDOW_MS = 6 * 60 * 60 * 1000;
 export const PRELAUNCH_REFUSAL_SLOW_RETRY_WAIT_REASON = 'dispatch-refusal-slow-retry-wait';
@@ -102,6 +105,7 @@ export function planPrelaunchRefusalSlowRetry({
 }
 
 function kindText(kind) {
+  if (kind === 'non-execution') return 'the hammer ended without executing its close';
   return kind === 'branch-holder'
     ? 'the hammer worktree provision was refused (branch holder)'
     : 'hq refused the hammer dispatch before a worker launched';
@@ -135,12 +139,12 @@ export async function notePrelaunchRefusalSlowRetry({
   let paged = false;
   if (!slow[pageField] && !PAGED_IN_PROCESS.has(debounceKey) && typeof deliverAlertImpl === 'function') {
     const text = exhausted
-      ? `Adversarial-review hammer for ${repo}#${prNumber} (head ${shortHead}) still could not launch `
+      ? `Adversarial-review hammer for ${repo}#${prNumber} (head ${shortHead}) still could not complete a close `
         + `when its slow retry window closed at ${plan.windowEndsAt}; retries have stopped. `
         + `Last refusal: ${plan.refusal}. Operator action required: clear the cause. `
         + 'A new PR head starts a fresh closer dispatch budget.'
-      : `Adversarial-review hammer for ${repo}#${prNumber} (head ${shortHead}) could not launch: `
-        + `${kindText(plan.kind)} and the fast retries are spent. Refusal: ${plan.refusal}. `
+      : `Adversarial-review hammer for ${repo}#${prNumber} (head ${shortHead}) could not complete a close: `
+        + `${kindText(plan.kind)} and requires a bounded retry cadence. Refusal: ${plan.refusal}. `
         + `The closer retries every ${minutes} min until ${plan.windowEndsAt}, then stops and pages again. `
         + 'No action is needed if the cause clears before then.';
     try {

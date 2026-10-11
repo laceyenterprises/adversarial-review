@@ -13,6 +13,7 @@ import {
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
   readLatestWorkerRunStatusFromLedger,
+  readLaunchRequestStatusFromLedger,
   readReviewerSessionUsageFromLedger,
   readWorkerRunUsageFromLedger,
   resolveSessionLedgerReadTarget,
@@ -1086,4 +1087,35 @@ test('active DAG reads retry transient failures, stop on permanent errors, and f
     assert.equal(calls, 1);
     assert.equal(result.ok, false);
   }
+});
+
+
+for (const detail of ['worker process ended by SIGTERM (exit_code=143); a signal death is never a success', 'codex-tool-host-unavailable', null]) {
+  test(`HAMREFUND-01: SQLite projects the durable launch failure detail (${detail})`, (t) => {
+    const root = tempRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const dbPath = path.join(root, 'ledger.sqlite');
+    const db = new Database(dbPath);
+    db.exec(`CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT${detail === null ? '' : ', failure_detail TEXT'})`);
+    if (detail === null) db.prepare('INSERT INTO launch_requests VALUES (?, ?, ?, ?, ?)').run('lrq_58bbdea0', 'failed', null, null, 'worker_killed');
+    else db.prepare('INSERT INTO launch_requests VALUES (?, ?, ?, ?, ?, ?)').run('lrq_58bbdea0', 'failed', null, null, 'worker_killed', detail);
+    db.close();
+    const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'lrq_58bbdea0', ledgerTarget: { backend: 'sqlite', path: dbPath }, env: HERMETIC_CONFIG_ENV });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.row.failure_detail, detail);
+  });
+}
+
+test('HAMREFUND-01: PostgreSQL projects failure detail without requiring a new schema column', () => {
+  const result = readLaunchRequestStatusFromLedger({
+    launchRequestId: 'lrq_58bbdea0',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    env: HERMETIC_CONFIG_ENV,
+    spawnSyncImpl: (_cmd, _args, options) => {
+      assert.match(options.input, /to_jsonb\(launch_requests\)->>'failure_detail'/);
+      return { status: 0, stdout: JSON.stringify({ launch_request_id: 'lrq_58bbdea0', status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' }) + '\n', stderr: '' };
+    },
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.row.failure_detail, 'SIGTERM');
 });

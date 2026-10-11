@@ -107,6 +107,18 @@ export function classifyDeadHammerCause({ failureClass, failureDetail = '', stdo
   return { infra: false, cause: cls || null };
 }
 
+// Only durable harness fields count; quoted worker output is not evidence.
+export function unexecutedHammerReason(row = {}) {
+  if (row.failure_class === 'codex-tool-host-unavailable' || row.reason === 'codex-tool-host-unavailable' || row.failure_reason === 'codex-tool-host-unavailable'
+    || row.failure_detail === 'codex-tool-host-unavailable') return 'codex-tool-host-unavailable';
+  if (row.failure_class === 'worker_killed'
+    && ([137, 143].includes(Number(row.exit_code))
+      || /\b(?:SIGTERM|SIGKILL)\b/.test(String(row.failure_detail || '')))) {
+    return `worker_killed:${Number(row.exit_code) === 137 || /\bSIGKILL\b/.test(String(row.failure_detail || '')) ? 'SIGKILL' : 'SIGTERM'}`;
+  }
+  return null;
+}
+
 function readFileTail(path, maxBytes = WORKER_OUTPUT_TAIL_BYTES) {
   let fd = null;
   try {

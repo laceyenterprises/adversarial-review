@@ -1,3 +1,5 @@
+import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
+import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
 import { normalizeCiPendingOnlyReply } from './kernel/remediation-reply.mjs';
 import { execFile } from 'node:child_process';
@@ -20,6 +22,7 @@ import {
   remediationWorkerTrailerClass,
 } from './remediation-worker-provenance.mjs';
 import {
+  summarizePRRemediationLedger,
   claimNextFollowUpJob,
   getFollowUpJobDir,
   findInProgressFollowUpJobByLaunchRequestId,
@@ -340,26 +343,6 @@ function buildCiRegressionRetryReason(job, ciGate) {
   return `Remediation for ${job.repo}#${job.prNumber} introduced or left failed CI on the current PR head: ${formatCiCheckList(ciGate.failedChecks)}. Requeueing so the next remediation worker fixes the CI regression before re-review.`;
 }
 
-function logRoundBudgetDecision(log, {
-  riskClass,
-  runsCompleted,
-  cap,
-  decision,
-  repo = null,
-  prNumber = null,
-}) {
-  const payload = {
-    event: 'remediation-round-budget',
-    repo,
-    prNumber,
-    riskClass,
-    runsCompleted,
-    cap,
-    decision,
-  };
-  log?.log?.(`[follow-up] ${JSON.stringify(payload)}`);
-}
-
 class StartupContractError extends Error {
   constructor(reason, { violationType, requestedValue = null, resolvedValue = null, startupEvidence = null } = {}) {
     super(reason);
@@ -659,6 +642,9 @@ function createRemediationRuntime({
         sourceEnv: env,
         workerClass: ['codex', 'remediator-codex-corp'].includes(workerClass) ? workerClass : undefined,
         now,
+      });
+      spawnedWorker.child?.once?.('error', (error) => {
+        spawnedWorker.recordedOutcome = localWorkerErrorOutcome(spawnedWorker, error);
       });
       return createLocalRemediationHandle({
         runRef: String(
@@ -1665,7 +1651,7 @@ async function reconcileFollowUpJob({
 } = {}) {
   const worker = job?.remediationWorker;
   const isHqWorker = worker?.dispatchMode === 'hq' && typeof worker?.dispatchId === 'string' && worker.dispatchId.trim();
-  if ((!isHqWorker && !worker?.processId) || worker.state !== 'spawned') {
+  if ((!isHqWorker && !worker?.processId && !recordedInfrastructureReason(worker?.recordedOutcome)) || worker?.state !== 'spawned') {
     return {
       action: 'skipped',
       reason: 'missing-worker-metadata',
@@ -1803,6 +1789,11 @@ async function reconcileFollowUpJob({
   }
 
   const completedAt = now();
+  const refund = await settleInfrastructureRemediationRound({
+    rootDir, job, jobPath, worker, liveness, lifecycle, lifecycleStop, completedAt,
+    postOutcomeComment: postReconcileOutcomeCommentSafe, postCommentImpl, now, log,
+  });
+  if (refund) return refund;
   if (liveness.state === 'manual-inspection') {
     const manualInspectionFailure = { code: 'manual-inspection-required', message: liveness.reason };
     const { commentDelivery: manualInspectionDelivery } = buildReconcileCommentDelivery({
@@ -2943,7 +2934,8 @@ async function reconcileFollowUpJob({
   }
 
   const dispatchFailureDetail = liveness?.dispatchStatus?.failureDetail || null;
-  if (worker?.dispatchMode === 'hq' && classifyHqDispatchFailure(liveness?.dispatchStatus) === 'transient') {
+  if (worker?.dispatchMode === 'hq' && !recordedInfrastructureReason(liveness?.dispatchStatus)
+    && classifyHqDispatchFailure(liveness?.dispatchStatus) === 'transient') {
     const nextTransientRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
     const maxTransientRetries = resolveMaxTransientRemediationRetries();
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);
@@ -3318,6 +3310,7 @@ async function consumeNextFollowUpJob({
   if (!claimed) {
     return { consumed: false, reason: 'no-pending-jobs' };
   }
+  claimed.job.remediationPlan.publishedRoundsForPR = summarizePRRemediationLedger(rootDir, claimed.job).publishedRoundsForPR || 0;
   if (claimed.stopped) {
     const stoppedAt = now();
     if (claimed.reason === 'max-rounds-reached') {
@@ -3821,6 +3814,7 @@ async function consumeNextFollowUpJob({
       },
     });
     spawnAttempted = true;
+    recordLocalRemediationOutcome({ rootDir, jobPath: updated.jobPath, worker, log });
 
     return {
       consumed: true,

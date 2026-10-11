@@ -622,7 +622,9 @@ function buildRemediationOutcomeCommentBody({
   lines.push(`> Remediator: ${harness} · ${execution.resolvedModel || execution.model || 'unknown'} · ${execution.resolvedReasoningLevel || 'none'}`);
   lines.push('');
 
-  if (action === 'completed') {
+  if (action === 'refunded') {
+    lines.push(`**Outcome:** ${sanitizeFailureText(failure?.message || 'not charged: infrastructure failure')}. Queued once more.`);
+  } else if (action === 'completed') {
     // The completed action is gated on rereview acceptance in
     // reconcileFollowUpJob, so by the time we render here we know the
     // rereview either was accepted (status='pending', triggered=true)
@@ -636,6 +638,10 @@ function buildRemediationOutcomeCommentBody({
   } else if (action === 'stopped') {
     const stopCode = job?.remediationPlan?.stop?.code || 'no-progress';
     lines.push(`**Outcome:** stopped (\`${stopCode}\`).`);
+    if (['max-rounds-reached', 'round-budget-exhausted'].includes(stopCode)) {
+      const published = job?.remediationPlan?.publishedRoundsForPR || 0;
+      lines.push(`${published} ${published === 1 ? 'round' : 'rounds'} published a commit.`);
+    }
     if (stopCode === 'rereview-blocked') {
       const blockedReason = reReview?.outcomeReason || reReview?.status || 'unknown';
       lines.push('');

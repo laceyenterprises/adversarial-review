@@ -1,3 +1,4 @@
+import { recordedInfrastructureReason } from './remediation-infrastructure-refund.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -103,10 +104,9 @@ async function assessWorkerLivenessDetailed(job, {
 } = {}) {
   const worker = job?.remediationWorker || {};
   if (
-    workerTerminalEvent?.status === 'succeeded'
-    && workerTerminalEventMatches(worker, workerTerminalEvent)
-    && workerTerminalReplyPath
-    && existsSync(workerTerminalReplyPath)
+    workerTerminalEventMatches(worker, workerTerminalEvent)
+    && ((HQ_TERMINAL_STATUSES.has(workerTerminalEvent?.status) && recordedInfrastructureReason(workerTerminalEvent))
+      || (workerTerminalEvent?.status === 'succeeded' && workerTerminalReplyPath && existsSync(workerTerminalReplyPath)))
   ) {
     const nowAt = parseIsoTime(now());
     const spawnedAt = parseIsoTime(worker.spawnedAt);

@@ -1701,11 +1701,25 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   }
 
   let completedRoundsForPR = 0;
+  const infrastructureRefunds = new Set();
+  const publishedRounds = new Set();
   const completedRoundTimestamps = [];
   const completedRoundTriggers = [];
   const completedRemediationRevisionRefs = new Set();
   const commentOnlyFinalRoundRevisionRefs = new Set();
   const commentOnlyFinalRoundPushedHeads = [];
+  const recordInfrastructureHistory = (job) => {
+    for (const retry of job.remediationPlan?.retryHistory || []) {
+      if (retry.retryMetadata?.code === 'infrastructure-refund') {
+        infrastructureRefunds.add(`${job.jobId}:${retry.requeuedAt}:${retry.round}`);
+      }
+    }
+    for (const round of job.remediationPlan?.rounds || []) {
+      if (round.publishedHeadSha && round.publishedHeadSha !== round.startHeadSha) {
+        publishedRounds.add(`${job.jobId}:${round.round}`);
+      }
+    }
+  };
   let latestJob = null;
   let latestTimestamp = '';
   // SINGLEREVIEW-01: single-review stops created at or before the PR's latest
@@ -1795,6 +1809,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
 
+      recordInfrastructureHistory(job);
       if (terminalKeys.has(key)) recordCommentOnlyFinalRound(rawJob, key);
 
       if (terminalKeys.has(key)) {
@@ -1868,6 +1883,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   // (SINGLEREVIEW-01, which spend the tier budget) are taken from it.
   for (const job of scanArchivedStoppedFollowUpJobs(rootDir, targetRepo, targetPr)) {
     if (String(job.domainId || 'code-pr') !== targetDomainId) continue;
+    recordInfrastructureHistory(job);
     recordCommentOnlyFinalRound(job, 'stopped-archived');
     const worker = job?.remediationWorker;
     const neverSpawned = worker == null || typeof worker !== 'object' || Array.isArray(worker)
@@ -1899,6 +1915,8 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
 
   return {
     completedRoundsForPR,
+    infrastructureRefundsForPR: infrastructureRefunds.size,
+    publishedRoundsForPR: publishedRounds.size,
     consecutiveNonBlockingRounds,
     latestMaxRounds,
     latestRiskClass,
@@ -2646,6 +2664,7 @@ function claimNextFollowUpJob({
               round: nextRoundNumber,
               kind: 'remediation',
             }),
+            startHeadSha: job.revisionRef || null,
             state: 'claimed',
             claimedAt,
             claimedBy: {
@@ -3259,6 +3278,7 @@ function markFollowUpJobStopped({
     jobPath,
     destinationKey: 'stopped',
     buildNextJob: (currentJob) => {
+      currentJob.remediationPlan.publishedRoundsForPR = summarizePRRemediationLedger(rootDir, currentJob).publishedRoundsForPR || 0;
       const nextJob = computeFollowUpJobStoppedState({
         currentJob,
         stoppedAt,

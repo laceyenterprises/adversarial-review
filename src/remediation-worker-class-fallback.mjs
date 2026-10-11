@@ -208,7 +208,14 @@ export async function resolveRemediationWorkerClassWithFallback({
   });
 
   const primaryCap = capOf(primaryClass);
-  if (!primaryCap.capped) {
+  const lastRetry = job?.remediationPlan?.retryHistory?.findLast((entry) =>
+    entry.round === job.remediationPlan.currentRound && entry.retryMetadata?.code === 'infrastructure-refund');
+  const infrastructureFallback = lastRetry?.retryMetadata?.code === 'infrastructure-refund'
+    && lastRetry.retryMetadata.harnessSpecific
+    && (lastRetry.retryMetadata.workerClass === primaryClass
+      || (lastRetry.retryMetadata.reason === 'codex-tool-host-unavailable'
+        && ['codex', 'remediator-codex-corp'].includes(primaryClass)));
+  if (!primaryCap.capped && !infrastructureFallback) {
     if (primaryCap.resetsWithinHoldWindow) {
       return {
         ...base,
@@ -271,8 +278,8 @@ export async function resolveRemediationWorkerClassWithFallback({
       hold: false,
       from: primaryClass,
       to: candidate,
-      reason: 'primary-grounded-fallback',
-      capSource: primaryCap.capSource,
+      reason: infrastructureFallback ? 'infrastructure-fallback' : 'primary-grounded-fallback',
+      capSource: infrastructureFallback ? lastRetry.retryMetadata.reason : primaryCap.capSource,
       primaryState: primaryCap.state,
       resetAt: primaryCap.resetAt,
       candidateState: statuses ? cap.state : 'unverified',

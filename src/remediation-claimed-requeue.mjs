@@ -1,8 +1,32 @@
 import { readFileSync, renameSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { getFollowUpJobDir, writeFollowUpJob } from './follow-up-jobs.mjs';
+import { getFollowUpJobDir, requeueInProgressFollowUpJobForRetry, writeFollowUpJob } from './follow-up-jobs.mjs';
 import { DEFAULT_REMEDIATOR_ENV } from './remediation-dispatch-mode.mjs';
 import { MAX_QUOTA_HOLD_WINDOW_MS } from './remediation-quota-evidence.mjs';
+
+// REMCONFLICT-01: transient capability probes retry before worker spawn on the
+// shared bounded budget, preserving an explicit operator retrigger's authority.
+export function requeueClaimedJobForConflictedBaseProbe({
+  rootDir, job, jobPath, error, maxRetries, now, log = console,
+}) {
+  if (!error.isConflictedBaseProbeTransientError
+    || Number(job?.remediationPlan?.transientRetries || 0) >= maxRetries) return null;
+  const requeued = requeueInProgressFollowUpJobForRetry({
+    rootDir,
+    jobPath,
+    requeuedAt: now(),
+    retryReason: error.message,
+    retryMetadata: { code: 'hq-conflicted-base-probe-transient', recoverable: true },
+    allowDirectWorkerRetry: true,
+  });
+  const override = job?.remediationPlan?.nextAction;
+  if (override?.operatorOverride === true) {
+    requeued.job.remediationPlan.nextAction = { ...override, ...requeued.job.remediationPlan.nextAction, operatorOverride: true };
+    writeFollowUpJob(requeued.jobPath, requeued.job);
+  }
+  log.warn?.(`[follow-up-remediation] transient conflicted-base probe for ${job.repo}#${job.prNumber}; requeued: ${error.message}`);
+  return { consumed: false, reason: 'hq-conflicted-base-probe-transient', ...requeued };
+}
 
 // A claimed job that never reached the worker runtime must be budget neutral.
 // This covers both config errors and a shutdown during workspace preparation.

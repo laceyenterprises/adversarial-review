@@ -114,7 +114,7 @@ import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { cloneRemediationWorkspace } from './remediation-workspace-clone.mjs';
 import { drainRemediationJobs } from './remediation-parallel-drain.mjs';
-import { holdClaimedJobForCappedRemediator, requeueClaimedFollowUpJobBeforeSpawn } from './remediation-claimed-requeue.mjs';
+import { holdClaimedJobForCappedRemediator, requeueClaimedFollowUpJobBeforeSpawn, requeueClaimedJobForConflictedBaseProbe } from './remediation-claimed-requeue.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 import {
   loadRoleConfig,
@@ -3828,25 +3828,8 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
-    if (err.isConflictedBaseProbeTransientError
-      && Number(claimed.job?.remediationPlan?.transientRetries || 0) < resolveMaxTransientRemediationRetries()) {
-      const requeued = requeueInProgressFollowUpJobForRetry({
-        rootDir,
-        jobPath: claimed.jobPath,
-        requeuedAt: now(),
-        retryReason: err.message,
-        retryMetadata: { code: 'hq-conflicted-base-probe-transient', recoverable: true },
-        allowDirectWorkerRetry: true,
-      });
-      // A pre-spawn retry must retain the one-shot operator authorization.
-      const override = claimed.job?.remediationPlan?.nextAction;
-      if (override?.operatorOverride === true) {
-        requeued.job.remediationPlan.nextAction = { ...override, ...requeued.job.remediationPlan.nextAction, operatorOverride: true };
-        writeFollowUpJob(requeued.jobPath, requeued.job);
-      }
-      log.warn?.(`[follow-up-remediation] transient conflicted-base probe for ${claimed.job.repo}#${claimed.job.prNumber}; requeued: ${err.message}`);
-      return { consumed: false, reason: 'hq-conflicted-base-probe-transient', ...requeued };
-    }
+    const probeRetry = requeueClaimedJobForConflictedBaseProbe({ rootDir, job: claimed.job, jobPath: claimed.jobPath, error: err, maxRetries: resolveMaxTransientRemediationRetries(), now, log });
+    if (probeRetry) return probeRetry;
     if (err.isWorkflowPushPreflightTransientError) {
       const requeuedAt = now();
       const requeuedAtMs = Date.parse(requeuedAt);

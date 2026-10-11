@@ -1305,7 +1305,10 @@ actor on a bounded clock, or the operator has been paged once with the reason.
 - **Cycle-cap ownership before drain** (CAPROUTE-01). The watcher reconciles
   the capped PR's hammer owner before generic failed-row retry admission and
   before the watcher drain gate, including when the row's `revision_ref` lags
-  the live head. Like posted-review closure handling, this may launch a hammer
+  the live head. A handled route preserves the automatic `failed` cap row
+  across head moves instead of re-arming it as `pending`. Previously reset
+  rows still route through the cap label and escalation marker. Like
+  posted-review closure handling, this may launch a hammer
   during watcher drain; drain stops new reviewer admission, not this closure
   handoff. The closer's eligibility, lease, retry cap and lifetime ceiling
   remain authoritative.

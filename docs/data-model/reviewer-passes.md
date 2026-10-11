@@ -21,6 +21,23 @@ cancelled or superseded work records `cancelled`. This keeps time-to-merge
 rollups from counting an unproven merge. `metadata_json.workerClass` holds the
 logical AMA dispatch class, even when `reviewer_class` names a fallback harness.
 
+## Delivery head wait marker
+
+`reviewed_prs.head_wait_started_at` is nullable ISO 8601 text, added
+idempotently by `ensureReviewStateSchema` to both fresh and existing stores.
+Existing rows retain `NULL`; no discovery timestamps are backfilled or changed.
+`requestReviewRereview` stamps this field when an already-pending row moves to
+another `revision_ref`. Same-head automatic polls retain the marker. A normal
+review-cycle reset clears it and uses `rereview_requested_at` for the new wait;
+an explicit same-head operator retrigger likewise clears it and stamps the
+operator request time.
+
+Admission reads `head_wait_started_at`, then `rereview_requested_at`, then
+`reviewed_at`. The marker does not classify a pass as a re-review. In particular,
+an unreviewed moved head still uses the 480-second first-pass bound rather than
+the 900-second re-review bound. `reviewed_at` remains the original discovery
+anchor used by TTM and latency reports.
+
 ## Claimed reviewer account
 
 The delivery row in `reviewed_prs` has nullable `codex_broker_provider`.

@@ -170,6 +170,15 @@ new PR
   changing its reviewer, claiming a pass, or spending an attempt. Postgres reads
   retry transient connection failures for at most three total attempts with 100/200ms backoff;
   permanent query failures defer immediately.
+- When an already-pending head moves, `requestReviewRereview` stamps
+  `head_wait_started_at` without changing the original `reviewed_at` discovery
+  timestamp or creating a re-review marker. Same-head polls retain the wait
+  start. Review-cycle resets clear it and anchor the next wait to
+  `rereview_requested_at`. Gemini credential saturation compares this durable
+  wait against 480 seconds for first-pass or 900 seconds for re-review; a spill
+  logs `reason=review-max-wait` (depth-triggered spills retain
+  `reason=queue-depth-pressure`). The existing max-wait environment overrides
+  can set either bound to zero to disable it.
 - `malformed` is intentionally sticky.
 - A reviewer size preflight refusal exits with reserved CLI code 76 and settles
   as terminal `reviewer-prompt-too-large` on that head, without lease recovery.

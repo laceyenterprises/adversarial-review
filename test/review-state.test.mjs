@@ -74,6 +74,7 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     const columns = db.prepare('PRAGMA table_info(reviewed_prs)').all().map((column) => column.name);
     assert.ok(columns.includes('rereview_requested_at'));
     assert.ok(columns.includes('rereview_reason'));
+    assert.ok(columns.includes('head_wait_started_at'));
     assert.ok(columns.includes('reviewer_session_uuid'));
     assert.ok(columns.includes('reviewer_pgid'));
     assert.ok(columns.includes('reviewer_started_at'));
@@ -122,6 +123,21 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
   } finally {
     db.close();
   }
+});
+
+test('head wait schema upgrades existing rows without rewriting discovery history', (t) => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  insertReviewRow(rootDir, { reviewStatus: 'pending', revisionRef: 'old-head' });
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.exec('ALTER TABLE reviewed_prs DROP COLUMN head_wait_started_at');
+    ensureReviewStateSchema(db);
+    ensureReviewStateSchema(db);
+    const row = db.prepare('SELECT reviewed_at, head_wait_started_at FROM reviewed_prs').get();
+    assert.equal(row.reviewed_at, '2026-04-24T12:00:00.000Z');
+    assert.equal(row.head_wait_started_at, null);
+  } finally { db.close(); }
 });
 
 test('review-state migrations upgrade old reviewer_passes schema idempotently', () => {
@@ -1188,15 +1204,50 @@ test("requestReviewRereview refreshes an already-pending row's revision_ref for 
   const verify = openReviewStateDb(rootDir);
   try {
     const row = verify.prepare(
-      'SELECT review_status, revision_ref, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+      'SELECT review_status, revision_ref, reviewed_at, head_wait_started_at, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
     ).get('laceyenterprises/adversarial-review', 10);
     assert.equal(row.review_status, 'pending');
     assert.equal(row.revision_ref, 'head-current-238');
+    assert.equal(row.reviewed_at, '2026-04-24T12:00:00.000Z');
+    assert.equal(row.head_wait_started_at, '2026-09-11T02:30:00.000Z');
     assert.equal(row.rereview_requested_at, null);
     assert.equal(row.rereview_reason, null);
   } finally {
     verify.close();
   }
+
+  const sameHead = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    requestedAt: '2026-09-11T02:35:00.000Z', targetRevisionRef: 'head-current-238',
+    reason: 'auto-refresh: pending review queued on current head',
+  });
+  assert.equal(sameHead.reviewRow.reviewed_at, '2026-04-24T12:00:00.000Z');
+  assert.equal(sameHead.reviewRow.head_wait_started_at, '2026-09-11T02:30:00.000Z');
+  assert.equal(sameHead.reviewRow.rereview_requested_at, null);
+
+  const operatorReset = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    requestedAt: '2026-09-11T02:40:00.000Z', targetRevisionRef: 'head-current-238',
+    reason: 'retrigger-review: retry current head',
+  });
+  assert.equal(operatorReset.reviewRow.head_wait_started_at, null);
+  assert.equal(operatorReset.reviewRow.rereview_requested_at, '2026-09-11T02:40:00.000Z');
+  assert.equal(operatorReset.reviewRow.reviewed_at, '2026-04-24T12:00:00.000Z');
+
+  const postedDb = openReviewStateDb(rootDir);
+  try {
+    postedDb.prepare("UPDATE reviewed_prs SET review_status = 'posted', head_wait_started_at = ?")
+      .run('2026-09-11T02:30:00.000Z');
+  } finally { postedDb.close(); }
+  const rereview = requestReviewRereview({
+    rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    requestedAt: '2026-09-11T02:50:00.000Z', targetRevisionRef: 'head-next-238',
+    reason: 'auto-refresh: posted review is on an older head',
+  });
+  assert.equal(rereview.triggered, true);
+  assert.equal(rereview.reviewRow.head_wait_started_at, null);
+  assert.equal(rereview.reviewRow.rereview_requested_at, '2026-09-11T02:50:00.000Z');
+  assert.equal(rereview.reviewRow.reviewed_at, '2026-04-24T12:00:00.000Z');
 });
 
 test("requestReviewRereview does not treat incidental retrigger-review prose as explicit pending-row override", () => {

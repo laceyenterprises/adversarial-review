@@ -50,6 +50,8 @@
  *   npm run diagnose-stuck-rereview -- --apply
  */
 
+import { isOperatorHeld } from './operator-hold-labels.mjs';
+
 import { parseArgs } from 'node:util';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -493,6 +495,12 @@ function applyStuckRereviewRows({
 
   for (const entry of stuckRows) {
     const row = entry.row;
+    const liveRow = db.prepare('SELECT labels_json FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(row.repo, row.pr_number);
+    if (isOperatorHeld(liveRow?.labels_json)) {
+      results.push({ repo: row.repo, prNumber: row.pr_number, applied: false, skipped: true,
+        status: 'skipped', reason: 'operator-hold' });
+      continue;
+    }
     const key = watchdogKey(row);
     const prior = state.entries[key] && typeof state.entries[key] === 'object'
       ? state.entries[key]

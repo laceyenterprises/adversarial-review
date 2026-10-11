@@ -1,3 +1,5 @@
+import { isOperatorHeld } from './operator-hold-labels.mjs';
+import { summarizeChecksConclusion } from './checks-summary.mjs';
 // HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
 // ARC-18: extracted per-PR processing phase of pollOnce (watcher.mjs).
 //
@@ -46,7 +48,10 @@ import {
 
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
-import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
+import { observeHoldRelease, holdReleaseRoute, markHoldReleaseRouted } from './operator-hold-release.mjs';
+import { clearNoProgressLane } from './watcher-no-progress-lane.mjs';
+import { queueFollowUpForRecoveredPostedReview } from './reviewer-pass-reaper.mjs';
+import { projectAdversarialGateStatus, resolveSettledReviewVerdict } from './adversarial-gate-status.mjs';
 import { labelsContainDuplicateFamilyHold } from './duplicate-family-gate.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
@@ -776,10 +781,6 @@ export async function processReviewSubject(entry, ctx) {
       if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
         activeMergeAgentPRs.push({ repo: repoPath, prNumber, headSha: subject.headSha || null });
       }
-      if (staleDriftSkip) {
-        console.log(staleDriftSkip.message);
-        return;
-      }
       let existing = cachedCurrent ?? stmtGetReviewRow.get(repoPath, prNumber);
       // ARC-03 review finding: review rows are keyed (repo, pr) but carry a
       // domain identity. Only the owning domain may process a row — without
@@ -790,6 +791,66 @@ export async function processReviewSubject(entry, ctx) {
         existing &&
         String(existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID) !== String(domainId)
       ) {
+        return;
+      }
+      let holdReleaseId = null;
+      // Compare before any early return or label refresh. Retain unrouted
+      // release intent across read errors; the ordinary handlers own execution.
+      try {
+        const release = !subject.terminal && observeHoldRelease({
+          db, repo: repoPath, prNumber, headSha: subject.headSha, liveLabels: subject.labelsKnown === false ? undefined : subject.labels,
+        });
+        if (!release && existing && ['pending', 'pending-upstream', 'failed'].includes(existing.review_status)) {
+          holdReleaseId = db.prepare(`SELECT id FROM operator_hold_releases WHERE repo = ? AND pr_number = ?
+            AND head_sha = ? ORDER BY id DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha)?.id || null;
+        }
+        if (release) {
+          holdReleaseId = release.id;
+          const settled = resolveSettledReviewVerdict(ROOT, {
+            repo: repoPath, prNumber, reviewRow: existing, currentHeadSha: subject.headSha,
+          });
+          let candidate = {};
+          {
+            const { stdout } = await execFileAsync('gh', ['pr', 'view', String(prNumber), '--repo', repoPath,
+              '--json', 'state,headRefOid,labels,mergeable,mergeStateStatus,statusCheckRollup'],
+            { timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
+            const live = JSON.parse(stdout);
+            // A re-applied hold cancels this intent before any action is armed.
+            observeHoldRelease({ db, repo: repoPath, prNumber, headSha: live.headRefOid, liveLabels: live.labels });
+            if (!Array.isArray(live.labels) || String(live.state).toUpperCase() !== 'OPEN' || live.headRefOid !== subject.headSha
+              || isOperatorHeld(live.labels)) return;
+            candidate = { ...live, checksConclusion: summarizeChecksConclusion(live.statusCheckRollup) };
+          }
+          const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
+          const budget = resolveRoundBudgetForJob({ linearTicketId, riskClass: ledger.latestRiskClass }, { rootDir: ROOT });
+          const route = holdReleaseRoute({ row: existing, headSha: subject.headSha, settled, candidate,
+            roundsLeft: ledger.completedRoundsForPR < Math.max(budget.roundBudget, Number(ledger.latestMaxRounds) || 0),
+            cycleCapped: isReviewCycleCapFailedRow(existing) || prLabelNames.includes('reviewer-cycle-cap-reached'),
+          });
+          if (route.action === 'review' && ['posted', 'failed', 'rereview-ci-blocked'].includes(existing?.review_status)) {
+            requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber,
+              targetRevisionRef: subject.headSha, requestedAt: release.released_at, preserveBudgets: true,
+              reason: `hold-release:${release.id}: current-head review stage unknown`,
+            });
+            existing = stmtGetReviewRow.get(repoPath, prNumber);
+          }
+          if (route.action === 'remediation') {
+            const pass = db.prepare(`SELECT * FROM reviewer_passes WHERE repo = ? AND pr_number = ?
+              AND head_sha = ? AND status = 'completed' AND pass_kind IN ('first-pass', 'rereview')
+              ORDER BY ended_at DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha);
+            if (!pass?.body_md) throw new Error('released review body unavailable; retry next tick');
+            queueFollowUpForRecoveredPostedReview({ rootDir: ROOT, row: pass, reviewRow: existing,
+              reviewPostedAt: existing.posted_at, defaultBaseBranch: subject.baseRefName || 'main' });
+          }
+          clearNoProgressLane(ROOT, { repo: repoPath, prNumber }, { logger: console });
+          markHoldReleaseRouted({ db, release, route });
+        }
+      } catch (err) {
+        console.warn(`[watcher] hold-release read/route deferred for ${repoPath}#${prNumber}: ${err?.message || err}`);
+        if (holdReleaseId) return;
+      }
+      if (staleDriftSkip) {
+        console.log(staleDriftSkip.message);
         return;
       }
       async function projectGateStatusSafe(reviewRow) {
@@ -1616,7 +1677,7 @@ export async function processReviewSubject(entry, ctx) {
         }
         // Store normalized label names in reviewed_prs.labels_json. Readers
         // still accept the older GitHub label-object shape for historical rows.
-        stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
+        if (subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         return;
       }
@@ -2680,7 +2741,7 @@ export async function processReviewSubject(entry, ctx) {
       }
       // Store normalized label names in reviewed_prs.labels_json. Readers
       // still accept the older GitHub label-object shape for historical rows.
-      stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
+      if (subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
 
       const roundBudgetDecision = evaluateRoundBudgetForReview({
         rootDir: ROOT,
@@ -2923,6 +2984,24 @@ export async function processReviewSubject(entry, ctx) {
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         async run() {
+          // Pool admission can defer a release for several ticks. Fence the
+          // release-driven review before the claim spends any attempt budget.
+          if (holdReleaseId) {
+            try {
+              const live = await fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync });
+              if (isOperatorHeld(live.labels)) observeHoldRelease({ db, repo: repoPath, prNumber,
+                headSha: live.headRefOid || subject.headSha, liveLabels: live.labels });
+              const intent = db.prepare('SELECT cancelled_at FROM operator_hold_releases WHERE id = ?').get(holdReleaseId);
+              if (intent?.cancelled_at || !Array.isArray(live.labels) || isOperatorHeld(live.labels)) {
+                this.refundDepthSpill();
+                return { dispatched: false, reason: 'hold-release-cancelled' };
+              }
+            } catch (err) {
+              this.refundDepthSpill();
+              console.warn(`[watcher] hold-release freshness read deferred for ${repoPath}#${prNumber}: ${err.message}`);
+              return { dispatched: false, reason: 'hold-release-read-deferred' };
+            }
+          }
           const releaseAdmissionCapacity = this.admissionReleaseCapacity || null;
           // REVIEW-DEDUP (idempotency lease): one (pr, head) dispatch per
           // window. A second pool worker racing the same head is turned away
@@ -3013,6 +3092,14 @@ export async function processReviewSubject(entry, ctx) {
             const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
             const attemptAt = new Date().toISOString();
             let reviewerSessionUuid = randomUUID();
+            const releaseUnexecutedHoldReviewClaim = () => db.transaction(() => {
+              db.prepare(`UPDATE reviewed_prs SET review_attempts = ?, infra_auto_recover_attempts = ?,
+                review_population_retry_attempts = ? WHERE repo = ? AND pr_number = ?
+                AND review_status = 'reviewing' AND reviewer_session_uuid = ?`).run(
+                current?.review_attempts || 0, current?.infra_auto_recover_attempts || 0,
+                current?.review_population_retry_attempts || 0, repoPath, prNumber, reviewerSessionUuid);
+              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+            }).immediate();
             // After ARA-06's operator-surface carve, the per-PR loop iterates
             // typed `subject` (SubjectState) values from the subject adapter
             // — there is no `pr` GitHub-PR object in scope here. The handle
@@ -3206,6 +3293,14 @@ export async function processReviewSubject(entry, ctx) {
                 stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
                 return { dispatched: false, reason: 'pr-closed-before-spawn' };
               }
+              if (holdReleaseId && (!Array.isArray(freshPR.labels) || isOperatorHeld(freshPR.labels))) {
+                // This claim never executed. Restore only the counters this
+                // exact session could have charged, without granting a retry.
+                if (isOperatorHeld(freshPR.labels)) observeHoldRelease({ db, repo: repoPath, prNumber,
+                  headSha: freshPR.headRefOid || subject.headSha, liveLabels: freshPR.labels });
+                releaseUnexecutedHoldReviewClaim();
+                return { dispatched: false, reason: 'hold-reapplied-before-spawn' };
+              }
               const freshHeadSha = freshPR.headRefOid || null;
               if (
                 reviewerHeadSha &&
@@ -3221,6 +3316,10 @@ export async function processReviewSubject(entry, ctx) {
                 return { dispatched: false, reason: 'head-moved-before-spawn' };
               }
             } catch (err) {
+              if (holdReleaseId) {
+                releaseUnexecutedHoldReviewClaim();
+                return { dispatched: false, reason: 'hold-release-read-deferred' };
+              }
               // Non-fatal — proceed with spawn rather than block. A failed
               // freshness check is no worse than not having one at all.
               console.warn(

@@ -1,3 +1,5 @@
+import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
+import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 // NOOWNER-01 (SEV1) — after a hammer stops without merging, the next hammer
 // run on the same head waits for an input to change, and the operator is paged
 // once with the predicate the hammer named.
@@ -184,6 +186,15 @@ export function readHammerStopForHead({
   const { attempt } = latest;
   return {
     headSha,
+    // Auditable stops in this review series let release refund multiple
+    // hold-only runs without handing back any genuine code-work attempt.
+    refundStops: terminal.filter(item => STOP_OUTCOMES.has(item.outcome)
+      && !String(item.attempt?.attemptPhase || '').startsWith('before-')).map(item => ({
+      auditHead: item.fileHead,
+      predicate: oneLine(item.attempt?.reason, 120),
+      recordedAt: item.attempt?.startedAt || item.attempt?.timestamp || item.attempt?.recordedAt || null,
+      stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || ''}`,
+    })),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
     closingStatus: oneLine(attempt?.closingStatus),
     next: oneLine(attempt?.next),
@@ -285,7 +296,10 @@ export async function evaluateHammerStopHold({
     };
   let dirty = !prior || prior.stopKey !== stop.stopKey;
   if (!entry.releasedAt) {
-    const changed = changedHammerStopInputs(entry.inputs, inputs);
+    const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
+    const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
+    const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(entry.inputs, inputs);
+    if (holdReleased) refundOperatorHeldHammerStop(rootDir, { repo, prNumber }, stop, { now });
     // Probe only evidence failures, once per evaluation/pass. A computable
     // refusal (e.g. reverted primary change) releases ownership, not merge gates.
     if (HAMMER_EVIDENCE_FAILURES.has(stop.predicate)) {

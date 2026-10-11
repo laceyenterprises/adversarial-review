@@ -363,6 +363,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     ...deferralFieldsForSeries(existing, decision.jobKeyChanged),
     ...transientRetryFields(existing),
     ...(existing?.unexecutedLaunchRequestIds ? { unexecutedLaunchRequestIds: existing.unexecutedLaunchRequestIds } : {}),
+    ...(existing?.operatorHoldRefundStopKeys ? { operatorHoldRefundStopKeys: existing.operatorHoldRefundStopKeys } : {}),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the

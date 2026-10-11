@@ -1,3 +1,5 @@
+import { isOperatorHeld } from './operator-hold-labels.mjs';
+import { observeHoldRelease } from './operator-hold-release.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';
@@ -980,6 +982,7 @@ async function fetchLivePRLifecycle({
     mergedAt: parsed.mergedAt || null,
     closedAt: parsed.closedAt || null,
     labels: Array.isArray(parsed.labels) ? parsed.labels : [],
+    labelsKnown: Array.isArray(parsed.labels),
     headSha: parsed.headRefOid || null,
   };
 }
@@ -989,13 +992,13 @@ async function fetchLivePRLifecycle({
 // of the system (e.g. requestReviewRereview's pr_state guardrail) see a
 // consistent picture. No-op when there's no review row yet — we don't
 // fabricate one because the watcher owns row creation.
-function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, closedAt, labels }) {
+function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, closedAt, labels, headSha = null }) {
   if (prState !== 'merged' && prState !== 'closed' && prState !== 'open') return;
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
     const existing = db
-      .prepare('SELECT id FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+      .prepare('SELECT id, labels_json FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
       .get(repo, prNumber);
     if (!existing) return;
 
@@ -1008,6 +1011,10 @@ function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, cl
         "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = COALESCE(?, closed_at), labels_json = COALESCE(?, labels_json) WHERE repo = ? AND pr_number = ?"
       ).run(closedAt || null, Array.isArray(labels) ? JSON.stringify(labels) : null, repo, prNumber);
     } else {
+      // Sibling lifecycle readers must not overwrite the last held snapshot
+      // before watcher discovery has committed its release intent.
+      if (headSha && Array.isArray(labels)) observeHoldRelease({ db, repo, prNumber, headSha, liveLabels: labels });
+      else if (isOperatorHeld(existing.labels_json) && !isOperatorHeld(labels)) labels = null;
       const reopenFailedReviewResetCondition = `pr_state IN ('closed', 'merged')
                    AND review_status IN ('failed', 'failed-orphan')`;
       db.prepare(
@@ -1059,7 +1066,8 @@ async function resolvePRLifecycle(rootDir, {
         prState: live.prState,
         mergedAt: live.mergedAt,
         closedAt: live.closedAt,
-        labels: live.labels,
+        labels: live.labelsKnown === false ? null : live.labels,
+        headSha: live.headSha,
       });
     } catch {
       // Persisting back to the mirror is best-effort. If the DB is
@@ -1103,6 +1111,7 @@ function requestReviewRereview({
   expectedFailedHead = null,
   automaticMalformedRecovery = false,
   automaticWithheldHeadRecovery = false,
+  preserveBudgets = false,
   inTransaction = false,
   reviewerFamily = null,
 }) {
@@ -1118,7 +1127,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, reviewerFamily, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, preserveBudgets, reviewerFamily, inTransaction: true,
       })).immediate();
     }
 
@@ -1201,7 +1210,13 @@ function requestReviewRereview({
              ${reviewerFamily ? 'reviewer = ?,' : ''}
              ${buildReviewStateResetAssignments({
                overrides: {
-                 review_attempts: expectedFailedHead ? '0' : 'review_attempts',
+                 review_attempts: expectedFailedHead && !preserveBudgets ? '0' : 'review_attempts',
+                 ...(preserveBudgets ? {
+                   infra_auto_recover_attempts: 'infra_auto_recover_attempts',
+                   review_population_retry_attempts: 'review_population_retry_attempts',
+                   review_population_retry_last_at: 'review_population_retry_last_at',
+                   review_population_retry_head_sha: 'review_population_retry_head_sha',
+                 } : {}),
                  last_attempted_at: 'last_attempted_at',
                  rereview_requested_at: '?',
                  rereview_reason: '?',

@@ -1019,3 +1019,24 @@ test('CAPROUTE-01: watchdog request takes effect with retrigger-review already p
     assert.equal(results[0].wakeRequested, true);
   } finally { db.close(); }
 });
+
+test('HOLDRELEASE-01: held watchdog passes spend no re-arm attempts or erase real failure evidence', t => {
+  const rootDir = makeRoot(t);
+  seedReviewedPRsRow(rootDir, { rereview_requested_at: '2026-10-11T10:00:00Z', revision_ref: 'same-head' });
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.prepare(`UPDATE reviewed_prs SET labels_json = '["no-merge-hold"]'`).run();
+    const row = db.prepare('SELECT * FROM reviewed_prs').get();
+    for (let i = 0; i < 6; i++) {
+      const results = applyStuckRereviewRows({ db, rootDir, stuckRows: [{ row }], requestedAt: '2026-10-11T12:00:00Z', maxAttempts: 1 });
+      assert.equal(results[0].reason, 'operator-hold');
+    }
+    db.prepare(`UPDATE reviewed_prs SET labels_json = '[]'`).run();
+    const released = applyStuckRereviewRows({ db, rootDir, stuckRows: [{ row }], requestedAt: '2026-10-11T13:00:00Z', maxAttempts: 1 });
+    assert.equal(released[0].attempts, 1);
+    db.prepare(`UPDATE reviewed_prs SET failed_at = '2026-10-11T13:05:00Z'`).run();
+    const failed = db.prepare('SELECT * FROM reviewed_prs').get();
+    const blocked = applyStuckRereviewRows({ db, rootDir, stuckRows: [{ row: failed }], requestedAt: '2026-10-11T14:00:00Z' });
+    assert.equal(blocked[0].reason, 'terminal-failure-evidence-present');
+  } finally { db.close(); }
+});

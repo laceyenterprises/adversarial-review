@@ -285,7 +285,7 @@ export async function load(url, context, nextLoad) {
   const simpleStubs = {
     'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenance({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
-    'fixture:adversarial-gate-status': "export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",
+    'fixture:adversarial-gate-status': "export function resolveSettledReviewVerdict() { return { verdict: '', remediationPending: false }; } export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
     'fixture:duplicate-family-state': "export function duplicateFamilySchemaTableNames() { return []; } export function ensureDuplicateFamilySchema() {} export async function runDuplicateFamilyCensusForWatcher() { return { families: [], familyIds: [] }; } export async function reconcileDuplicateFamilyLabels() { return { inspected: 0, changed: 0 }; }",
     'fixture:follow-up-jobs': ${JSON.stringify(followUpJobsSource)},
@@ -2432,5 +2432,79 @@ test('CAPROUTE-01: failed capped row with an old revision reaches the hammer bef
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 30000 });
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+for (const hadReview of [false, true]) test(`HOLDRELEASE-01: same-head release drives ${hadReview ? 're-review' : 'first review'} once through pollOnce`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hold-release-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+        review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref)
+        VALUES (?, 101, ?, 'claude', 'open', 'pending', 0, '["no-merge-hold"]', ?, ?)\`).run(
+        'laceyenterprises/adversarial-review', '2026-10-11T16:00:00Z', ${hadReview ? "'old-head'" : 'null'}, 'sha-happy-101');
+    `, afterFirstPoll: `
+      const firstSpawns = globalThis.__watcherClaimLoopReviewerSpawns.length;
+      await pollOnce(octokit, pollOptions);
+      assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, firstSpawns);
+      const releases = db.prepare('SELECT * FROM operator_hold_releases WHERE pr_number = 101').all();
+      assert.equal(releases.length, 1);
+      assert.equal(releases[0].stage, '${hadReview ? 'rereview' : 'first-review'}');
+      assert.equal(releases[0].action, 'review');
+      assert.ok(releases[0].routed_at);
+    ` }));
+    const env = fixtureEnv(installGhFixture(tmp));
+    writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
+if [[ "$1" == pr && "$2" == view ]]; then
+  printf '{"state":"OPEN","headRefOid":"sha-happy-%s","labels":[],"mergeable":"MERGEABLE","statusCheckRollup":[{"name":"fixture-ci","conclusion":"SUCCESS"}]}\\n' "$3"
+else
+  printf '{"sha":"fixture","message":"Fixture commit"}\\n'
+fi
+`);
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 60000 });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    assert.equal(output.match(/\[watcher\] hold-released repo=.* pr=101 /g)?.length, 1, output);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('HOLDRELEASE-01: hold re-applied after reviewer claim gives no spawn and refunds only that claim', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hold-reapply-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource().replace('headRefOid, labels: []',
+      "headRefOid, labels: globalThis.__reappliedHold ? ['no-merge-hold'] : []"));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    let runner = buildRunnerSource({ prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+        review_status, review_attempts, labels_json, revision_ref)
+        VALUES (?, 101, ?, 'claude', 'open', 'pending', 0, '["no-merge-hold"]', ?)\`).run(
+        'laceyenterprises/adversarial-review', '2026-10-11T16:00:00Z', 'sha-happy-101');
+    `, afterFirstPoll: `
+      const row = db.prepare('SELECT review_status, review_attempts FROM reviewed_prs WHERE pr_number = 101').get();
+      assert.equal(row.review_status, 'pending');
+      assert.equal(row.review_attempts, 0);
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(s => s.prNumber === 101).length, 0);
+      assert.ok(db.prepare('SELECT cancelled_at FROM operator_hold_releases WHERE pr_number = 101').get().cancelled_at);
+    ` });
+    runner = runner.replace('claims.push(payload);', 'claims.push(payload); if (payload.prNumber === 101) globalThis.__reappliedHold = true;');
+    writeFileSync(runnerPath, runner);
+    const env = fixtureEnv(installGhFixture(tmp));
+    writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
+if [[ "$1" == pr && "$2" == view ]]; then
+  printf '{"state":"OPEN","headRefOid":"sha-happy-%s","labels":[],"mergeable":"MERGEABLE","statusCheckRollup":[{"name":"fixture-ci","conclusion":"SUCCESS"}]}\\n' "$3"
+else
+  printf '{"sha":"fixture","message":"Fixture commit"}\\n'
+fi
+`);
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

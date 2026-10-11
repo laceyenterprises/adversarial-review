@@ -2580,7 +2580,8 @@ fi
 
 // Keep the real review-state CAS and pollOnce admission path; only external
 // surfaces and operator paging are fixture stubs.
-function runHoldReleaseRegression({ setup, verify, followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE, held = false }) {
+function runHoldReleaseRegression({ setup, verify, followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE, held = false,
+  transformLoader = source => source, transformRunner = source => source }) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-release-regression-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2597,9 +2598,9 @@ function runHoldReleaseRegression({ setup, verify, followUpJobsSource = DEFAULT_
       }
       return nextLoad(url, context);
     `);
-    writeFileSync(loaderPath, loader);
+    writeFileSync(loaderPath, transformLoader(loader));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
-    writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: setup, afterFirstPoll: verify }));
+    writeFileSync(runnerPath, transformRunner(buildRunnerSource({ prePollSetup: setup, afterFirstPoll: verify })));
     const env = fixtureEnv(installGhFixture(tmp));
     writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
 if [[ "$1" == pr && "$2" == view ]]; then
@@ -2701,4 +2702,114 @@ test('HOLDRELEASE-01: cancelled history does not fence an ordinary held first re
     assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number = 101').get().review_status, 'posted');
     assert.ok(db.prepare('SELECT cancelled_at FROM operator_hold_releases WHERE pr_number = 101').get().cancelled_at);
   ` });
+});
+
+for (const [name, status, message, chargedCounter] of [
+  ['infra failure', 'failed', '[hcp-unavailable] offline fixture', 'infra_auto_recover_attempts'],
+  ['lease-released infra failure', 'pending', '[hcp-unavailable] offline fixture', 'infra_auto_recover_attempts'],
+  ['upstream hold', 'pending-upstream', '[cascade] upstream failure', null],
+  ['population failure', 'failed', 'generated-but-not-posted: no GitHub review found', 'review_population_retry_attempts'],
+  ['unknown failure', 'failed', 'Command failed with code 1', null],
+]) for (const fence of ['read-error', 'reapplied-hold']) {
+  test(`HOLDRELEASE-01: unexecuted ${name} claim restores its snapshot after ${fence}`, () => {
+    runHoldReleaseRegression({
+      transformLoader: source => source.replace('globalThis.__watcherClaimLoopDb = db;', JSON.stringify(`
+          globalThis.__watcherClaimLoopDb = db;
+          const prepare = db.prepare.bind(db);
+          db.prepare = sql => {
+            const stmt = prepare(sql);
+            if (/SET review_status = 'reviewing'/.test(sql) || sql.startsWith('UPDATE reviewed_prs SET review_status = ?')) {
+              const run = stmt.run.bind(stmt);
+              stmt.run = (...args) => {
+                if (args.includes(101) && /SET review_status = 'reviewing'/.test(sql)) (globalThis.__beforeClaimSnapshots ||= []).push(
+                  prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get());
+                const result = run(...args);
+                if (sql.startsWith('UPDATE reviewed_prs SET review_status = ?')) globalThis.__restoredClaimSnapshot = prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+                return result;
+              };
+            }
+            return stmt;
+          };
+        `).slice(1, -1)).replace(
+        'const overrides = globalThis.__watcherClaimLoopFreshHeads || {};',
+        "if (prNumber === 101 && globalThis.__claimFence === 'read-error') throw new Error('fixture transient gh error'); const overrides = globalThis.__watcherClaimLoopFreshHeads || {};",
+      ).replace('headRefOid, labels: []',
+        "headRefOid, labels: prNumber === 101 && globalThis.__claimFence === 'reapplied-hold' ? ['no-merge-hold'] : []"),
+      transformRunner: source => source.replace('claims.push(payload);', `
+        claims.push(payload);
+        if (payload.prNumber === 101) {
+          (globalThis.__claimSnapshots ||= []).push(db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get());
+          if (globalThis.__claimSnapshots.length === 1) globalThis.__claimFence = '${fence}';
+        }
+      `),
+      setup: `
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+          review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref, failed_at,
+          failure_message, infra_auto_recover_attempts, quota_reset_at_utc, last_attempted_at,
+          review_population_retry_attempts, review_population_retry_last_at, review_population_retry_head_sha,
+          reviewer_session_uuid, reviewer_started_at, reviewer_timeout_ms, reviewer_lease_expires_at, reviewer_pgid)
+          VALUES ('laceyenterprises/adversarial-review', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
+            ?, 1, '["no-merge-hold"]', 'sha-happy-101', 'prior-revision', '2026-05-15T12:01:00Z', ?, 1,
+            '2026-05-15T12:02:00Z', '2026-05-15T12:00:00Z', 0, '2026-05-15T12:00:00Z', 'sha-happy-101',
+            'prior-session', '2026-05-15T12:00:00Z', 1234, '2026-05-15T12:02:00Z', 12345)\`).run('${status}', '${message}');
+      `,
+      verify: `
+        const beforeClaim = globalThis.__beforeClaimSnapshots[0];
+        const restored = globalThis.__restoredClaimSnapshot || db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+        for (const column of ['review_status', 'reviewer_head_sha', 'failed_at', 'failure_message',
+          'quota_reset_at_utc', 'last_attempted_at', 'revision_ref', 'review_population_retry_last_at',
+          'review_population_retry_head_sha', 'review_attempts', 'infra_auto_recover_attempts',
+          'review_population_retry_attempts', 'reviewer_session_uuid', 'reviewer_started_at',
+          'reviewer_timeout_ms', 'reviewer_lease_expires_at', 'reviewer_pgid',
+          'reviewer', 'linear_ticket', 'codex_broker_provider']) {
+          assert.equal(restored[column], beforeClaim[column], 'restored ' + column);
+        }
+        const afterTick = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+        for (const column of ['review_status', 'failed_at', 'failure_message', 'reviewer_head_sha']) {
+          assert.equal(afterTick[column], beforeClaim[column], 'failure survives tick: ' + column);
+        }
+        assert.equal(globalThis.__claimSnapshots.length, 1, 'first retry claimed');
+        assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
+        globalThis.__claimFence = null;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(globalThis.__claimSnapshots.length, 2, 'next retry claimed');
+        const nextClaim = globalThis.__claimSnapshots[1];
+        assert.equal(nextClaim.review_status, 'reviewing');
+        ${chargedCounter ? `assert.equal(nextClaim.${chargedCounter}, beforeClaim.${chargedCounter} + 1, 'next retry uses bounded CAS');` : ''}
+        assert.ok((globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
+      `,
+    });
+  });
+}
+
+test('HOLDRELEASE-01: rollback cannot overwrite a replacement session', () => {
+  runHoldReleaseRegression({
+    transformLoader: source => source.replace(
+      'const overrides = globalThis.__watcherClaimLoopFreshHeads || {};',
+      "if (prNumber === 101 && globalThis.__replacementSession) throw new Error('fixture transient gh error'); const overrides = globalThis.__watcherClaimLoopFreshHeads || {};",
+    ),
+    transformRunner: source => source.replace('claims.push(payload);', `
+      claims.push(payload);
+      if (payload.prNumber === 101) {
+        db.prepare("UPDATE reviewed_prs SET reviewer_session_uuid = 'replacement-session' WHERE pr_number = 101").run();
+        globalThis.__replacementSession = true;
+      }
+    `),
+    setup: `
+      db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+        review_status, review_attempts, labels_json, reviewer_head_sha, failed_at, failure_message,
+        infra_auto_recover_attempts) VALUES ('laceyenterprises/adversarial-review', 101,
+        '2026-05-15T12:00:00Z', 'claude', 'open', 'failed', 1, '["no-merge-hold"]',
+        'sha-happy-101', '2026-05-15T12:01:00Z', '[hcp-unavailable] fixture', 1)\`).run();
+    `,
+    verify: `
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+      assert.equal(row.review_status, 'reviewing');
+      assert.equal(row.reviewer_session_uuid, 'replacement-session');
+      assert.equal(row.infra_auto_recover_attempts, 2);
+      assert.equal(row.failed_at, null);
+      assert.equal(row.failure_message, null);
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(s => s.subjectContext.prNumber === 101));
+    `,
+  });
 });

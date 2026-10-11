@@ -3105,14 +3105,6 @@ export async function processReviewSubject(entry, ctx) {
             const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
             const attemptAt = new Date().toISOString();
             let reviewerSessionUuid = randomUUID();
-            const releaseUnexecutedHoldReviewClaim = () => db.transaction(() => {
-              db.prepare(`UPDATE reviewed_prs SET review_attempts = ?, infra_auto_recover_attempts = ?,
-                review_population_retry_attempts = ? WHERE repo = ? AND pr_number = ?
-                AND review_status = 'reviewing' AND reviewer_session_uuid = ?`).run(
-                current?.review_attempts || 0, current?.infra_auto_recover_attempts || 0,
-                current?.review_population_retry_attempts || 0, repoPath, prNumber, reviewerSessionUuid);
-              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
-            }).immediate();
             // After ARA-06's operator-surface carve, the per-PR loop iterates
             // typed `subject` (SubjectState) values from the subject adapter
             // — there is no `pr` GitHub-PR object in scope here. The handle
@@ -3125,9 +3117,30 @@ export async function processReviewSubject(entry, ctx) {
               ? resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000
               : resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
+            // Release-driven claims snapshot under the same write lock as
+            // their CAS, rather than using the older dispatch admission row.
+            let preClaimRow = null;
+            const releaseUnexecutedHoldReviewClaim = () => {
+              // Undo all claim and routing mutations in one session-guarded
+              // UPDATE. Releasing to plain pending would erase failure evidence
+              // and let the next tick bypass the bounded retry CAS.
+              const columns = [
+                'review_status', 'reviewer_head_sha', 'failed_at', 'failure_message',
+                'quota_reset_at_utc', 'last_attempted_at', 'revision_ref',
+                'review_population_retry_last_at', 'review_population_retry_head_sha',
+                'review_attempts', 'infra_auto_recover_attempts', 'review_population_retry_attempts',
+                'reviewer_session_uuid', 'reviewer_started_at', 'reviewer_timeout_ms',
+                'reviewer_lease_expires_at', 'reviewer_pgid',
+                'reviewer', 'linear_ticket', 'codex_broker_provider',
+              ];
+              return db.prepare(`UPDATE reviewed_prs SET ${columns.map(column => `${column} = ?`).join(', ')}
+                WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'
+                AND reviewer_session_uuid = ?`).run(
+                ...columns.map(column => preClaimRow[column]), repoPath, prNumber, reviewerSessionUuid);
+            };
             // TOKDZ-01: a token-refresh row is reclaimed by its own CAS, which
             // never checks or charges infra_auto_recover_attempts.
-            const claim = tokenRefreshRecovery
+            const claimReviewer = () => tokenRefreshRecovery
               ? stmtMarkTokenRefreshRecoveryAttemptStarted.run(
                 attemptAt,
                 reviewerSessionUuid,
@@ -3211,6 +3224,10 @@ export async function processReviewSubject(entry, ctx) {
                 repoPath,
                 prNumber
               );
+            const claim = holdReleaseId ? db.transaction(() => {
+              preClaimRow = stmtGetReviewRow.get(repoPath, prNumber);
+              return claimReviewer();
+            }).immediate() : claimReviewer();
             if (claim.changes === 0) {
               // Lost the cross-process compare-and-swap. Either another
               // watcher just claimed this row, or the row's status moved to
@@ -3307,8 +3324,8 @@ export async function processReviewSubject(entry, ctx) {
                 return { dispatched: false, reason: 'pr-closed-before-spawn' };
               }
               if (holdReleaseId && (!Array.isArray(freshPR.labels) || isOperatorHeld(freshPR.labels))) {
-                // This claim never executed. Restore only the counters this
-                // exact session could have charged, without granting a retry.
+                // This claim never executed. Restore the complete pre-claim
+                // state for this exact session, without granting a retry.
                 if (isOperatorHeld(freshPR.labels)) observeHoldRelease({ db, repo: repoPath, prNumber,
                   headSha: freshPR.headRefOid || subject.headSha, liveLabels: freshPR.labels });
                 releaseUnexecutedHoldReviewClaim();

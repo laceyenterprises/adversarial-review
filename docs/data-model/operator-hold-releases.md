@@ -61,7 +61,17 @@ hold toggles do not hide real review/remediation cycles from the breaker.
 Review routes retain label freshness checks before claim and spawn. The
 current pending/failed fallback lookup can retain a non-cancelled historical
 release ID on the same head; these claims remain fenced and defer on unreadable
-live labels. Cancelled intents are excluded, so a re-applied hold does not
+live labels. When the post-claim freshness read fails or observes a re-applied
+hold, the unexecuted claim restores every claim/routing-mutated column from a
+snapshot read in the same IMMEDIATE transaction as the claim CAS. A single
+UPDATE requires the
+row to remain `reviewing` under that exact session UUID; it restores the prior
+status, failure evidence, quota/attempt timestamps, revision, all three retry
+counters and population retry metadata, lease/process evidence and reviewer
+routing attribution. It leaves live label observations and release cancellation
+intact. The next tick must still pass the original bounded retry/park gates;
+rollback never converts a failed or upstream-held row into plain `pending`.
+Cancelled intents are excluded, so a re-applied hold does not
 prevent ordinary held reviews through old release history. This store does not
 yet clear a non-cancelled association when a review posts. The watcher and
 ordinary label mirror writers observe releases before refreshing labels.

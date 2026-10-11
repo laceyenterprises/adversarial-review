@@ -813,6 +813,9 @@ daemon clean-merge or hammer route without bypassing their gates or budgets.
 Missing captured review bodies select a current-head re-review unless an active
 remediation job already owns the head. Same-head failed reviews retain their
 failure evidence and counters; ordinary retry and park gates own recovery.
+If release-driven spawn freshness fails or a hold is re-applied after claim,
+the unexecuted session restores its complete pre-claim state with a session
+CAS, retaining the failure classification and retry gates for the next tick.
 Release-routing errors log a warning and continue ordinary PR processing while
 retaining the intent for retry. A live terminal PR settles the intent as
 `pr-terminal`/`none` and ends that subject's tick. A moved head, unknown labels

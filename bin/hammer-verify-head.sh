@@ -112,20 +112,46 @@ ham_acquire_merge_lease() {
   local ham_required_checks_green_args=()
   ham_lease_pr_view --json headRefOid,state,isDraft,labels,statusCheckRollup \
     > /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json || return 1
-  # Held/terminal PRs never occupy or queue for the serialized merge lane.
-  if ! HAM_ADMISSION_ROOT=<<ROOT_DIR>> HAM_ADMISSION_HQ=<<HQ_ROOT>> "$HAM_NODE_BIN" --input-type=module - "$POST_REMEDIATION_SHA" /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json <<'NODE'
+  # Live holds/terminal state fence the lane. Historical stops were already
+  # evaluated (and, on changed inputs, released) by the closer before dispatch.
+  local ham_admission_reason ham_admission_audit ham_admission_audit_exit
+  ham_admission_reason=$(HAM_ADMISSION_ROOT=<<ROOT_DIR>> "$HAM_NODE_BIN" --input-type=module - "$POST_REMEDIATION_SHA" /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json <<'NODE'
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const { mergeLeaseAdmissionReason } = await import(pathToFileURL(`${process.env.HAM_ADMISSION_ROOT}/src/ama/merge-lease-admission.mjs`));
-const { readHammerStopForHead } = await import(pathToFileURL(`${process.env.HAM_ADMISSION_ROOT}/src/ama/hammer-stop-hold.mjs`));
-const headSha = process.argv[2];
 const pr = JSON.parse(readFileSync(process.argv[3], 'utf8'));
-const stop = readHammerStopForHead({ hqRoot: process.env.HAM_ADMISSION_HQ, repo: '<<REPO>>',
-  prNumber: <<PR_NUMBER>>, headSha, reviewedSha: '<<REVIEWED_SHA>>' });
-const reason = mergeLeaseAdmissionReason(pr, headSha, stop);
-if (reason) { console.error(`HAM lease admission refused: ${reason}`); process.exitCode = 20; }
+console.log(mergeLeaseAdmissionReason(pr, process.argv[2]) || '');
 NODE
-  then
+  ) || return 1
+  if [ -n "$ham_admission_reason" ]; then
+    if [ "$ham_admission_reason" = pr-merged ]; then
+      HAM_PHASE_OUTCOME=already-merged
+      return 20
+    fi
+    echo "HAM lease admission refused: $ham_admission_reason" >&2
+    ham_admission_audit=$(mktemp "${TMPDIR:-/tmp}/ham-admission-audit.XXXXXX") || return 1
+    jq -n --arg reason "merge-lease-admission:$ham_admission_reason" \
+      --arg reviewedHead "<<REVIEWED_SHA>>" --arg validatedHead "$POST_REMEDIATION_SHA" \
+      '{reason: $reason, reviewedHead: $reviewedHead, validatedHead: $validatedHead,
+        attemptPhase: "hammer-lease-admission"}' > "$ham_admission_audit" || { rm -f "$ham_admission_audit"; return 1; }
+    if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append \
+      --hq-root <<HQ_ROOT>> --repo <<REPO>> --pr <<PR_NUMBER>> \
+      --head "$POST_REMEDIATION_SHA" --outcome failed-without-merge \
+      --closure-authority ham-terminal-remediation \
+      --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
+      --attempt-json "$ham_admission_audit"; then
+      ham_admission_audit_exit=0
+    else
+      ham_admission_audit_exit=$?
+    fi
+    rm -f "$ham_admission_audit"
+    if [ "$ham_admission_audit_exit" -eq 65 ]; then
+      # A sticky success may have won after the admission read.
+      [ "$(ham_lease_pr_view --json state --jq '.state')" = MERGED ] || return 1
+      HAM_PHASE_OUTCOME=already-merged
+      return 20
+    fi
+    [ "$ham_admission_audit_exit" -eq 0 ] || return "$ham_admission_audit_exit"
     HAM_PHASE_OUTCOME=merge-lease-admission-refused
     return 20
   fi

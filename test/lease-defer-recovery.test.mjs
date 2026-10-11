@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
+import { writeAmaAuditEntry, readAmaAuditEntry } from '../src/ama/audit.mjs';
+import { evaluateHammerStopHold, readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { mergeLeaseAdmissionReason } from '../src/ama/merge-lease-admission.mjs';
 import { isOrphanHeadReviewRequested } from '../src/first-pass-review-suppression.mjs';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -41,7 +43,7 @@ test('certified retry and explicit safety holds retain their existing owner', as
   }
 });
 
-test('lease admission refuses held, closed, draft, changed-head and operator-decision PRs', () => {
+test('lease admission uses live holds, terminal state, draft and head, without historical stops', () => {
   const pr = { state: 'OPEN', headRefOid: head, labels: [], isDraft: false };
   assert.equal(mergeLeaseAdmissionReason(pr, head), null);
   for (const label of ['no-merge-hold', 'do-not-merge', 'merge-agent-skip']) {
@@ -50,29 +52,140 @@ test('lease admission refuses held, closed, draft, changed-head and operator-dec
   assert.equal(mergeLeaseAdmissionReason({ ...pr, state: 'CLOSED' }, head), 'pr-not-open');
   assert.equal(mergeLeaseAdmissionReason({ ...pr, isDraft: true }, head), 'pr-is-draft');
   assert.equal(mergeLeaseAdmissionReason(pr, 'other'), 'head-changed');
-  assert.equal(mergeLeaseAdmissionReason(pr, head, { predicate: 'awaiting-operator-decision' }), 'operator-decision');
+  assert.equal(mergeLeaseAdmissionReason({ ...pr, state: 'MERGED' }, head), 'pr-merged');
+  assert.equal(mergeLeaseAdmissionReason({ ...pr, state: 'MERGED', headRefOid: 'other' }, head), 'pr-merged');
+  assert.equal(mergeLeaseAdmissionReason(pr, head, { predicate: 'awaiting-operator-decision' }), null);
   assert.equal(mergeLeaseAdmissionReason(pr, head, { predicate: 'merge-lease-timeout' }), null);
 });
 
-test('rendered hammer acquisition returns before the lease CLI for a held PR', t => {
+function acquisitionFixture(t) {
   const root = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
   const dir = mkdtempSync(join(tmpdir(), 'lease-defer-admission-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const source = readFileSync(join(root, 'bin/hammer-verify-head.sh'), 'utf8');
-  const values = { ROOT_DIR: root, HQ_ROOT: dir, PR_NUMBER: '42', REPO: 'fixture/repo', REVIEWED_SHA: 'b'.repeat(40) };
+  const values = { ROOT_DIR: root, HQ_ROOT: dir, PR_NUMBER: '42', REPO: 'fixture/repo',
+    REVIEWED_SHA: 'b'.repeat(40), REVIEWER: 'claude', RISK_CLASS: 'critical' };
   const helper = source.slice(source.indexOf('ham_acquire_merge_lease()'), source.indexOf('ham_update_branch_conflict()'))
     .replace(/<<([A-Z_]+)>>/g, (_, key) => values[key] || 'unused')
-    .replaceAll('/tmp/ham-42-', `${dir}/ham-42-`);
-  const pr = JSON.stringify({ headRefOid: head, state: 'OPEN', labels: [{ name: 'no-merge-hold' }] });
-  const run = spawnSync('/bin/bash', ['-c', `
+    .replaceAll('/tmp/ham-42-', `${dir}/ham-42-`)
+    .replace(' acquire \\', ` acquire --root-dir '${dir}' \\`);
+  return { dir, run(pr, probeState = pr.state) {
+    return spawnSync('/bin/bash', ['-c', `
 HAM_NODE_BIN='${process.execPath}'
 POST_REMEDIATION_SHA=${head}
-ham_lease_pr_view() { printf '%s' '${pr}'; }
+BASE_BRANCH=main
+HAM_MERGE_LEASE_WAIT_SECONDS=0
+ham_release_merge_lease() { :; }
+ham_lease_pr_view() {
+  if [[ "$*" == *--jq* ]]; then printf '%s' '${probeState}'; else printf '%s' '${JSON.stringify(pr)}'; fi
+}
 ${helper}
 ham_acquire_merge_lease
+printf '\nexit:%s outcome:%s held:%s' "$?" "$HAM_PHASE_OUTCOME" "$HAM_MERGE_LEASE_HELD"
 `], { encoding: 'utf8', timeout: 10_000 });
-  assert.equal(run.error, undefined);
-  assert.equal(run.status, 20, run.stderr);
-  assert.match(run.stderr, /operator-hold/);
+  } };
+}
+
+const openPr = { headRefOid: head, state: 'OPEN', labels: [], isDraft: false, statusCheckRollup: [] };
+
+for (const [reason, pr] of [
+  ['operator-hold', { ...openPr, labels: [{ name: 'no-merge-hold' }] }],
+  ['pr-not-open', { ...openPr, state: 'CLOSED' }],
+  ['pr-is-draft', { ...openPr, isDraft: true }],
+  ['head-changed', { ...openPr, headRefOid: 'c'.repeat(40) }],
+]) {
+  test(`rendered hammer admission audits ${reason} before acquiring a lease`, t => {
+    const { dir, run } = acquisitionFixture(t);
+    const result = run(pr);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /exit:20 outcome:merge-lease-admission-refused held:$/);
+    assert.match(result.stderr, new RegExp(reason));
+    assert.equal(existsSync(join(dir, 'data', 'merge-leases')), false);
+    const audit = readAmaAuditEntry(dir, 'fixture/repo', 42, head);
+    assert.equal(audit.status, 'failed-without-merge');
+    assert.equal(audit.attempts.at(-1).reason, `merge-lease-admission:${reason}`);
+    assert.equal(audit.attempts.at(-1).attemptPhase, 'hammer-lease-admission');
+  });
+}
+
+test('rendered admission recognizes a merge race without a refusal audit or lease', t => {
+  const { dir, run } = acquisitionFixture(t);
+  const result = run({ ...openPr, state: 'MERGED' });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /exit:20 outcome:already-merged held:$/);
+  assert.equal(readAmaAuditEntry(dir, 'fixture/repo', 42, head), null);
   assert.equal(existsSync(join(dir, 'data', 'merge-leases')), false);
+});
+
+test('admission audit failure cannot acquire a lease or report a successful refusal', t => {
+  const { dir, run } = acquisitionFixture(t);
+  writeFileSync(join(dir, 'dispatch'), 'not a directory');
+  const result = run({ ...openPr, isDraft: true });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /exit:70 outcome: held:$/);
+  assert.equal(existsSync(join(dir, 'data', 'merge-leases')), false);
+});
+
+for (const liveState of ['OPEN', 'MERGED']) {
+  test(`sticky-success admission audit verifies live ${liveState} state before reporting a merge race`, t => {
+    const { dir, run } = acquisitionFixture(t);
+    writeAmaAuditEntry({ hqRoot: dir, repo: 'fixture/repo', prNumber: 42, headSha: head,
+      attempt: { outcome: 'succeeded' } });
+    const result = run({ ...openPr, isDraft: true }, liveState);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, liveState === 'MERGED'
+      ? /exit:20 outcome:already-merged held:$/ : /exit:1 outcome: held:$/);
+    assert.equal(readAmaAuditEntry(dir, 'fixture/repo', 42, head).status, 'succeeded');
+    assert.equal(existsSync(join(dir, 'data', 'merge-leases')), false);
+  });
+}
+
+for (const change of ['base', 'conflicting']) {
+  test(`rendered same-head re-dispatch admits a prior operator-decision stop released by ${change}`, async t => {
+    const { dir, run } = acquisitionFixture(t);
+    const common = { hqRoot: dir, repo: 'fixture/repo', prNumber: 42, headSha: head };
+    writeAmaAuditEntry({ ...common, now: '2026-10-11T10:00:00Z',
+      attempt: { outcome: 'failed-without-merge', reason: 'awaiting-operator-decision' } });
+    const prMetadata = { headSha: head, baseSha: 'base-0', mergeableState: 'MERGEABLE', statusCheckRollup: [] };
+    const evaluate = (metadata, now) => evaluateHammerStopHold({ ...common, rootDir: dir,
+      prMetadata: metadata, now, logger: { log() {}, error() {} }, deliverAlertImpl: async () => {} });
+    assert.equal((await evaluate(prMetadata, '2026-10-11T10:01:00Z')).action, 'hold');
+    const released = await evaluate({ ...prMetadata,
+      ...(change === 'base' ? { baseSha: 'base-1' } : { mergeableState: 'CONFLICTING' }) }, '2026-10-11T10:02:00Z');
+    assert.equal(released.action, 'release');
+    writeAmaAuditEntry({ ...common, now: '2026-10-11T10:03:00Z', attempt: { outcome: 'in_progress' } });
+    assert.equal(readHammerStopForHead(common).predicate, 'awaiting-operator-decision', 'the old terminal stop is still readable');
+    const result = run(openPr);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /exit:0 outcome: held:1$/);
+    assert.equal(readAmaAuditEntry(dir, 'fixture/repo', 42, head).status, 'in_progress');
+  });
+}
+
+for (const reason of ['label-no-merge-hold', 'pr-not-open', 'risk-class-not-permitted',
+  'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'duplicate-family-hold', 'ci-not-green']) {
+  test(`exact-head recovery rejects co-occurring ${reason}`, async () => {
+    assert.equal(await recoverStrandedCloserHead({ result: { ...stale, reasons: [...stale.reasons, reason] },
+      closerAuthored: true, headSha: head, requestRereviewImpl: () => assert.fail('unexpected review') }), null);
+  });
+}
+
+for (const reason of ['comment-only-verdict-settled', 'comment-only-final-round-push-unproven',
+  'malformed-title-terminal', 'argus-security-queued', 'pr-not-open']) {
+  test(`refused exact-head request ${reason} leaves recovery to the watchdog`, async () => {
+    assert.equal(await recoverStrandedCloserHead({ result: stale, closerAuthored: true, headSha: head,
+      logger: { log: () => assert.fail('unexpected wait log') },
+      requestRereviewImpl: async () => ({ triggered: false, reason }) }), null);
+  });
+}
+
+test('already-pending exact-head review retains reviewer ownership', async () => {
+  const result = await recoverStrandedCloserHead({ result: stale, closerAuthored: true, headSha: head,
+    logger: { log() {} }, requestRereviewImpl: async () => ({ triggered: false, reason: 'already-pending' }) });
+  assert.equal(result.reason, 'closer-head-exact-review-requested');
 });

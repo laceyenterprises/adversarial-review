@@ -1511,6 +1511,10 @@ async function dispatchAmaClosureFor({
   // reviewable. This includes merge-agent rebases of worker-authored commits:
   // a closer committer stamp alone does not arm stale-head resume. Those heads
   // must complete review on the new SHA before ordinary closure can proceed.
+  // A recognized closer-trailer tip can arm HAM resume even when a rebase broke
+  // the closer-only chain. That flag admits a repair attempt; merge authority
+  // still requires the exact-head terminal-remediation validator, including its
+  // reviewed-head binding. An uncertified head needs an exact-head review.
   if (reviewedHeadIsStale) {
     try {
       throwIfAborted(signal);
@@ -1531,7 +1535,8 @@ async function dispatchAmaClosureFor({
       throwIfAborted(signal);
       liveHeadCloserAuthored = closerCommitSuppression?.suppressed === true
         && closerCommitSuppression?.reason === 'closer-commit-trailer';
-      if (liveHeadCloserAuthored && !closerOnlyHeadDelta && !closerHeadHasLiveReview) {
+      if (liveHeadCloserAuthored && !closerOnlyHeadDelta && !closerHeadHasLiveReview
+        && authoritativeReviewerLogins.length > 0) {
         const currentBodies = await runCoexistenceOperation(
           'rebased-closer-head-live-review',
           ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
@@ -2277,6 +2282,14 @@ async function dispatchAmaClosureFor({
       { amaEnabled: Boolean(cfg?.enabled) },
     );
   }
+  // Classify hard refusals before any exact-head review request can take ownership.
+  if (result?.reason === 'not-eligible') {
+    const hardReason = (result.reasons || []).find((reason) =>
+      ['pr-not-open', 'risk-class-not-permitted', 'branch-protection-missing-gate',
+        'fast-merge-state-unsupported'].includes(reason)
+      || String(reason).startsWith('label-') || String(reason).startsWith('duplicate-family'));
+    if (hardReason) result = { ...result, needsOperator: true, operatorReason: `not-eligible:${hardReason}` };
+  }
   const closerRecovery = await recoverStrandedCloserHeadImpl({ result,
     closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
     prNumber, headSha: currentPrHeadSha, logger });
@@ -2308,19 +2321,9 @@ async function dispatchAmaClosureFor({
   return withAmaDispatchMetadata(
     {
       ...result,
-      ...(result?.reason === 'not-eligible'
-        ? (() => {
-            const hardReason = (result.reasons || []).find((reason) =>
-              ['pr-not-open', 'risk-class-not-permitted', 'branch-protection-missing-gate',
-                'fast-merge-state-unsupported'].includes(reason)
-              || String(reason).startsWith('label-'));
-            return hardReason
-              ? { needsOperator: true, operatorReason: `not-eligible:${hardReason}` }
-              : {
-                retryAfterMs: 30_000,
-                ...(commentOnlyFinalRoundAwaitingCi ? { commentOnlyFinalRoundAwaitingCi: true } : {}),
-              };
-          })()
+      ...(result?.reason === 'not-eligible' && !result?.needsOperator
+        ? { retryAfterMs: 30_000,
+            ...(commentOnlyFinalRoundAwaitingCi ? { commentOnlyFinalRoundAwaitingCi: true } : {}) }
         : {}),
       ...(hamTerminalRemediationValidated ? { hamTerminalRemediationValidated: true } : {}),
     },

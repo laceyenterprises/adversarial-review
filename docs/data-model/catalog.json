@@ -57,6 +57,7 @@
         "templates/hammer-prompt.md",
         "src/ama/daemon-merge.mjs",
         "bin/hammer-merge.sh",
+        "bin/hammer-verify-head.sh",
         "src/ama/closing-keywords.mjs",
         "src/ama/no-ci-configured.mjs",
         "src/daemon-clean-merge.mjs",

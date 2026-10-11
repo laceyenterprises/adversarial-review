@@ -3,7 +3,7 @@
 **Owner:** AMA merge authority
 **Store:** `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/`
 **Source of truth:** `src/ama/audit.mjs`
-**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`, `src/ama/hammer-stop-hold.mjs`
+**Runtime surface:** `bin/ama-audit.mjs`, `templates/hammer-prompt.md`, `bin/hammer-merge.sh`, `bin/hammer-verify-head.sh`, `src/ama/daemon-merge.mjs`, `src/ama/closing-keywords.mjs`, `src/ama/no-ci-configured.mjs`, `src/daemon-clean-merge.mjs`, `src/ama/hammer-stop-hold.mjs`
 
 ## Purpose
 
@@ -23,7 +23,7 @@ at mode `0640`.
 | `attempts[].attemptNumber` | positive integer | Sequential, starting at `1`. |
 | `attempts[].startedAt` | ISO timestamp | Append time. |
 | `attempts[].outcome` | string | `in_progress`, `deferred`, `superseded`, `succeeded`, or `failed-without-merge`. Other attempt fields carry caller evidence, including `closingStatus` for gate-cap parks. |
-| `attempts[].attemptPhase`, `attempts[].path` | optional strings | Per-attempt producer provenance. Daemon phases are `daemon-pre-merge`, `daemon-merged`, and `daemon-failed`; `path` names its closure authority, including `ham-terminal-remediation` for a daemon call on a HAM-certified head. Hammer phases include `hammer-gh-pr-merge` and `hammer-gate-attempt-cap`. Document-level authority alone does not identify the producer of a marked attempt. |
+| `attempts[].attemptPhase`, `attempts[].path` | optional strings | Per-attempt producer provenance. Daemon phases are `daemon-pre-merge`, `daemon-merged`, and `daemon-failed`; `path` names its closure authority, including `ham-terminal-remediation` for a daemon call on a HAM-certified head. Hammer phases include `hammer-gh-pr-merge`, `hammer-gate-attempt-cap` and `hammer-lease-admission`. Document-level authority alone does not identify the producer of a marked attempt. |
 | `reconciliation.needsRepair` | boolean | Latest append's repair signal. Present on records auto-created by append. |
 | `reconciliation.lastVerifiedAt` | ISO timestamp | Latest append time. Present on records auto-created by append. |
 | `closingKeywordRewrites` | optional array | Title and body rewrites computed by the daemon; absent on older records. Each item is `{original, referencedNumber, referencedRepo, replacement}`. |
@@ -78,6 +78,14 @@ or a hammer path. Explicit hammer provenance wins over document metadata;
 daemon attempts never set or clear a hammer decision. A latest hammer
 `failed-without-merge` or legacy `no-merge` starts a hold; a later hammer defer
 or success clears it.
+
+Pre-acquire live admission refusals append `failed-without-merge` with
+`attemptPhase: hammer-lease-admission`, `reason: merge-lease-admission:<reason>`,
+`reviewedHead` and `validatedHead`. Reasons are `head-changed`, `pr-not-open`,
+`pr-is-draft` or `operator-hold`. Confirmed already-merged PRs produce no refusal
+record. These attempts use the existing audit fields and sticky-success guard.
+They provide stop evidence to the closer; the hammer itself never uses historical
+terminal stops as admission input after the closer releases a hold.
 
 `resumeOwed` / `resumeHead` have no runtime consumer. The watcher independently
 proves the closer-only ancestry from the reviewed head on each tick and reads

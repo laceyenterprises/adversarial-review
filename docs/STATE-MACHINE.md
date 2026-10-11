@@ -616,6 +616,22 @@ classification uses check/step names because rollups omit output; the operator
 must inspect the actual failure before applying an override. Unchanged delivered
 receipts skip writes and paging locks.
 
+LEASEDEFER-01 adds `closer-head-exact-review-requested` → `ama-pending` when
+an unheld closer-trailer stale head has only stale/unsettled/unknown-finding
+eligibility misses and its exact-head review request is triggered or already
+pending. Hard refusals retain `needsOperator`; refused requests continue to the
+bounded REMORPHAN-01 watchdog and its per-head SEV1 exhaustion/uncertainty page.
+A closer tip without a closer-only chain may admit a HAM repair attempt, while
+the exact-head terminal-remediation validator retains merge authority.
+
+Hammer lease admission checks live head/state/draft/labels before queuing.
+Refusals return `merge-lease-admission-refused` (exit 20) with a terminal
+`failed-without-merge` audit (`hammer-lease-admission`,
+`merge-lease-admission:<reason>`). Audit failures stop execution. A live merge
+race returns `already-merged` instead. Historical stop gating remains with the
+closer's `evaluateHammerStopHold`; released same-head stops cannot block the
+hammer from reaching its rebase, including REMCONFLICT-01 conflict repair.
+
 CIUNKNOWN-01 keeps empty rollups unknown. Bootstrap requires API-confirmed absence of repository workflows and base-branch required-check rules plus green managed pre-push evidence for the exact repository/head. It is limited to a settled clean review or a HAM-certified head, is revalidated before merge, and records `ciMode: no-ci-bootstrap` in the audit. All other authority and safety gates remain mandatory. Cancelled-only external CI requests one workflow rerun per check/head; a later cancelled attempt pages once.
 
 AMAFIND-01 recovery precedes any generic operator hand-off. Stale reviewed heads

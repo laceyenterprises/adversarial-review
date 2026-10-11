@@ -14,6 +14,7 @@ import {
   resolveAmaHammerDispatchMode,
 } from '../src/ama-hammer-background-dispatch.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { hammerWakeAuditPath, readHammerWakeAudit, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
 import { CLOSER_AUTHORED_STALE_WAKE_REASON, closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
 
@@ -973,6 +974,61 @@ test('LEASEDEFER-01 stale closer refusal reaches exact-head recovery on its firs
   const result = await maybeDispatchAmaClosureFor(args);
   assert.equal(requests, 1);
   assert.equal(result.reason, 'closer-head-exact-review-requested');
+});
+
+for (const hardReason of ['label-no-merge-hold', 'pr-not-open', 'risk-class-not-permitted',
+  'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'duplicate-family-hold']) {
+  test(`stale closer head preserves operator routing for ${hardReason}`, async t => {
+    const { args } = closerResumeFixture('green');
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+      reasons: ['stale-review-head', hardReason] });
+    args.recoverStrandedCloserHeadImpl = options => {
+      assert.equal(options.result.needsOperator, true, 'hard refusal is classified before recovery');
+      return recoverStrandedCloserHead({ ...options,
+        requestRereviewImpl: () => assert.fail('held head must not request review') });
+    };
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.operatorReason, `not-eligible:${hardReason}`);
+  });
+}
+
+test('refused stale closer review falls through coexistence to bounded orphan recovery', async t => {
+  const { args } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+    reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
+  let requests = 0;
+  args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+    requestRereviewImpl: async () => { requests++; return { triggered: false, reason: 'malformed-title-terminal' }; } });
+  let orphanCalls = 0;
+  const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+    maybeDispatchAmaClosureForImpl: () => maybeDispatchAmaClosureFor(args),
+    recoverOrphanImpl: async ({ result: refusal }) => {
+      orphanCalls++;
+      assert.equal(refusal.reason, 'not-eligible');
+      assert.ok(refusal.reasons.includes('stale-review-head'));
+      return { outcome: 'ama-pending', orphanRecovery: { disposition: 'exhausted' } };
+    },
+    recoverAmaAutomationImpl: () => assert.fail('orphan watchdog owns refusal'),
+  });
+  assert.equal(requests, 1);
+  assert.equal(orphanCalls, 1);
+  assert.equal(result.orphanRecovery.disposition, 'exhausted');
+});
+
+test('rebased closer head skips live-review fetch when authoritative identities are unavailable', async t => {
+  const { args, payloads } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  args.reviewStateRow.reviewer = 'unknown-model';
+  args.fetchHeadCloserVerifiedCommitImpl = async () => ({ sha: 'H1', parentSha: 'rebased-worker', message: 'Closed-By: hammer' });
+  args.resolveHeadCloserCommitSuppressionImpl = async ({ headSha }) => ({
+    suppressed: headSha === 'H1', reason: headSha === 'H1' ? 'closer-commit-trailer' : 'worker' });
+  args.fetchLatestHeadReviewBodiesImpl = () => assert.fail('no authoritative reviewer to fetch');
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
 });
 
 for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-pending', 'unknown', 'worker', 'blocking', 'live-blocking', 'live-clean']) {

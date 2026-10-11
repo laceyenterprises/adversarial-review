@@ -79,6 +79,7 @@
       "schemaSurface": "src/follow-up-jobs.mjs",
       "relatedSchemaSurfaces": [
         "src/follow-up-remediation.mjs",
+        "src/remediation-conflicted-base.mjs",
         "src/comment-only-final-round.mjs",
         "src/follow-up-job-write.mjs",
         "src/pollonce-phases.mjs",
@@ -93,6 +94,8 @@
         "src/github-auth-recovery.mjs"
       ],
       "owner": "follow-up remediation queue",
+      "conflictedBaseProbeRetryCode": "hq-conflicted-base-probe-transient",
+      "conflictedBaseProbeExhaustionCode": "hq-conflicted-base-probe-retries-exhausted",
       "pendingCiRereviewEvidenceFields": ["reReview.ciSettlement", "reReview.ciGate", "remediationPlan.rounds[].reReview.ciSettlement", "remediationPlan.rounds[].reReview.ciGate"],
       "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"]
     },

@@ -18,6 +18,7 @@
 // SPEC §5.1.3 documents this as the PR-side counterpart to the CLI.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { opendir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -304,6 +305,7 @@ async function postRetriggerAckComment({
       execFileImpl,
       revisionRef: requireRevisionRef(revisionRef, 'postRetriggerAckComment'),
       noticeRef: labelEventKey,
+      type: 'raised-round-cap',
       round: Math.max(0, Number(requeueResult?.job?.remediationPlan?.currentRound || 0)),
       reason,
       roundCap: bumpResult?.newMaxRounds ?? null,
@@ -320,7 +322,7 @@ async function postRetriggerAckComment({
 }
 
 async function deliverRetriggerOperatorNotice({
-  rootDir, repo, prNumber, execFileImpl, revisionRef, noticeRef, round, reason, roundCap = null, body,
+  rootDir, repo, prNumber, execFileImpl, revisionRef, noticeRef, type, round, reason, roundCap = null, body,
 }) {
   const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
   const adapter = createGitHubPRCommentsAdapter({
@@ -335,7 +337,7 @@ async function deliverRetriggerOperatorNotice({
   });
   return adapter.postOperatorNotice(
     {
-      type: 'raised-round-cap',
+      type,
       subjectRef: {
         domainId: subjectIdentity.domainId,
         subjectExternalId: subjectIdentity.subjectExternalId,
@@ -608,6 +610,9 @@ export const RETRIGGER_OUTCOME_TIMEOUT_ENV = 'ADVERSARIAL_RETRIGGER_OUTCOME_TIME
 export const DEFAULT_RETRIGGER_OUTCOME_TIMEOUT_MS = 10 * 60_000;
 const OUTCOME_COMMENT_MARKER_PREFIX = 'adversarial-review-retrigger-remediation-outcome';
 const OUTCOME_SWEEP_BUDGET_PER_TICK = 5;
+// Keep enumeration progress across ticks, including malformed and young files,
+// so the read budget cannot starve later records. Settled receipts are immutable.
+const outcomeScans = new Map();
 const OUTCOME_MAX_ATTEMPTS = 5;
 const OUTCOME_MAX_AGE_MS = 24 * 60 * 60_000;
 const PR_GONE_CODES = new Set(['operator-merged-pr', 'operator-closed-pr']);
@@ -736,18 +741,30 @@ export async function reportStalledRetriggerOutcomes({
   logger = console,
 } = {}) {
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'label-consumptions');
-  let names;
-  try {
-    names = readdirSync(dir).filter((name) => name.endsWith('.json')).sort();
-  } catch (err) {
-    if (err?.code === 'ENOENT') return { checked: 0, spawned: 0, reported: 0 };
-    throw err;
+  let scan = outcomeScans.get(dir);
+  if (!scan) {
+    scan = { iterator: null, done: new Set() };
+    outcomeScans.set(dir, scan);
+  }
+  if (!scan.iterator && budget > 0) {
+    try {
+      scan.iterator = (await opendir(dir, { bufferSize: OUTCOME_SWEEP_BUDGET_PER_TICK }))[Symbol.asyncIterator]();
+    } catch (err) {
+      if (err?.code === 'ENOENT') return { checked: 0, spawned: 0, reported: 0 };
+      throw err;
+    }
   }
   let checked = 0;
   let spawned = 0;
   let reported = 0;
-  for (const name of names) {
-    if (checked >= budget) break;
+  for (let scanned = 0; scanned < budget; scanned += 1) {
+    const entry = await scan.iterator.next();
+    if (entry.done) {
+      scan.iterator = null;
+      break;
+    }
+    const name = entry.value.name;
+    if (!name.endsWith('.json') || scan.done.has(name)) continue;
     let consumption;
     try {
       consumption = JSON.parse(readFileSync(join(dir, name), 'utf8'));
@@ -755,6 +772,7 @@ export async function reportStalledRetriggerOutcomes({
       continue;
     }
     const outcome = consumption?.outcomeReport || null;
+    if (outcome?.done === true) scan.done.add(name);
     if (
       consumption?.label !== RETRIGGER_REMEDIATION_LABEL
       || consumption?.auditStatus !== 'written'
@@ -770,7 +788,10 @@ export async function reportStalledRetriggerOutcomes({
     const ageMs = Date.parse(at) - consumedAtMs;
     if (!Number.isFinite(consumedAtMs) || ageMs < timeoutMs || ageMs > OUTCOME_MAX_AGE_MS + timeoutMs) continue;
     checked += 1;
-    const write = (next) => writeLabelConsumption(rootDir, consumption.labelEventKey, { ...consumption, outcomeReport: next });
+    const write = (next) => {
+      writeLabelConsumption(rootDir, consumption.labelEventKey, { ...consumption, outcomeReport: next });
+      if (next.done === true) scan.done.add(name);
+    };
 
     if (!outcome?.code) {
       const job = findFollowUpJobByFile(rootDir, consumption.jobPath);
@@ -847,6 +868,7 @@ export async function reportStalledRetriggerOutcomes({
           execFileImpl,
           revisionRef,
           noticeRef: `${consumption.labelEventKey}:outcome`,
+          type: 'retrigger-outcome',
           round: 0,
           reason: `retrigger outcome: ${report.code}`,
           body: buildRetriggerOutcomeCommentBody({ marker, report, timeoutMinutes: Math.round(timeoutMs / 60_000) }),

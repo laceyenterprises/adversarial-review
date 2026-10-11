@@ -5,6 +5,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -139,12 +141,12 @@ const helpProbes = (calls) => calls.filter((call) => call[0] === 'hq' && call[2]
 const mergeabilityReads = (calls) => calls.filter((call) => call[0] === 'gh' && call.includes('mergeable,mergeStateStatus'));
 const gate = (args) => gateRemediationConflictedBase({ ...args, sleepImpl: NO_SLEEP });
 
-async function consumeOnce(rootDir, hqRoot, { prNumber, mergeability, helpText, gateImpl = gate, postCommentImpl }) {
+async function consumeOnce(rootDir, hqRoot, { prNumber, mergeability, helpText, gateImpl = gate, postCommentImpl, at = '2026-10-10T23:30:00.000Z' }) {
   const calls = [];
   const result = await consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'You are a remediation worker.',
-    now: () => '2026-10-10T23:30:00.000Z',
+    now: () => at,
     execFileImpl: hqStub({ calls, hqRoot, prNumber, mergeability, helpText }),
     spawnImpl: () => {
       throw new Error('the local spawn path must not run in hq mode');
@@ -308,6 +310,87 @@ test('a failed hq dispatch --help probe is retried once and never cached; a CONF
     : { stdout: JSON.stringify({ mergeable: 'CONFLICTING' }), stderr: '' });
   const recovered = await resolveRemediationConflictedBase({ job, env: {}, execFileImpl: healthyHq, sleepImpl: NO_SLEEP });
   assert.equal(recovered.allowConflictedBase, true, 'a failed probe is not remembered as unsupported');
+});
+
+for (const diagnostic of [
+  { code: 'EIO' },
+  { code: 'ETIMEDOUT' },
+  { code: null, killed: true, signal: 'SIGTERM' },
+]) {
+  test(`transient help probe ${JSON.stringify(diagnostic)} propagates without caching an unsupported answer`, async () => {
+    _resetConflictedBaseSupportCacheForTests();
+    const error = Object.assign(new Error('help probe failed'), diagnostic);
+    let probes = 0;
+    const job = { repo: REPO, prNumber: 8017 };
+    const execFileImpl = async (command) => {
+      if (command === 'hq') {
+        probes += 1;
+        if (probes === 1) throw error;
+        return { stdout: HELP_WITH_FLAG };
+      }
+      return { stdout: JSON.stringify({ mergeable: 'CONFLICTING' }) };
+    };
+    await assert.rejects(resolveRemediationConflictedBase({ job, env: {}, execFileImpl, sleepImpl: NO_SLEEP }),
+      (err) => err === error && err.isConflictedBaseProbeTransientError === true);
+    assert.equal(probes, 1);
+    assert.equal((await resolveRemediationConflictedBase({ job, env: {}, execFileImpl, sleepImpl: NO_SLEEP })).allowConflictedBase, true);
+    assert.equal(probes, 2);
+  });
+}
+
+test('a transient probe requeues the same round with backoff and operator override; recovery dispatches', async (t) => {
+  _resetConflictedBaseSupportCacheForTests();
+  const rootDir = tmpRoot(t, 'remconflict-probe-retry-');
+  await withHqRemediationEnv(rootDir, {}, async (hqRoot) => {
+    const created = seedJob(rootDir, 8017);
+    writeFollowUpJob(created.jobPath, {
+      ...created.job,
+      remediationPlan: { ...created.job.remediationPlan, nextAction: { ...created.job.remediationPlan.nextAction, operatorOverride: true } },
+    });
+    const error = Object.assign(new Error('probe disk unavailable'), { code: 'EIO' });
+    const failed = await consumeOnce(rootDir, hqRoot, {
+      prNumber: 8017,
+      mergeability: { mergeable: 'CONFLICTING' },
+      gateImpl: (args) => gate({ ...args, execFileImpl: async (command, ...rest) => {
+        if (command === 'hq') throw error;
+        return args.execFileImpl(command, ...rest);
+      } }),
+    });
+    assert.equal(failed.result.reason, 'hq-conflicted-base-probe-transient');
+    assert.equal(failed.result.job.status, 'pending');
+    assert.equal(failed.result.job.remediationPlan.currentRound, 0);
+    assert.equal(failed.result.job.remediationPlan.transientRetries, 1);
+    assert.equal(failed.result.job.remediationPlan.nextAction.operatorOverride, true);
+    assert.equal(failed.result.job.remediationPlan.retryHistory.at(-1).retryMetadata.code, 'hq-conflicted-base-probe-transient');
+    assert.equal(hqLaunchArgv(failed.calls).length, 0);
+    const recovered = await consumeOnce(rootDir, hqRoot, {
+      prNumber: 8017, mergeability: { mergeable: 'CONFLICTING' }, at: failed.result.job.remediationPlan.retryAfter,
+    });
+    assert.equal(recovered.result.consumed, true);
+    assert.equal(recovered.result.job.remediationPlan.currentRound, 1);
+  });
+});
+
+test('transient probe exhaustion fails with its diagnostic instead of claiming hq is unsupported', async (t) => {
+  _resetConflictedBaseSupportCacheForTests();
+  const rootDir = tmpRoot(t, 'remconflict-probe-exhausted-');
+  await withHqRemediationEnv(rootDir, {}, async (hqRoot) => {
+    const created = seedJob(rootDir, 8017);
+    writeFollowUpJob(created.jobPath, { ...created.job, remediationPlan: { ...created.job.remediationPlan, transientRetries: 1000 } });
+    await assert.rejects(consumeOnce(rootDir, hqRoot, {
+      prNumber: 8017, mergeability: { mergeable: 'CONFLICTING' },
+      gateImpl: (args) => gate({ ...args, execFileImpl: async (command, ...rest) => {
+        if (command === 'hq') throw Object.assign(new Error('probe timed out'), { code: 'ETIMEDOUT' });
+        return args.execFileImpl(command, ...rest);
+      } }),
+      postCommentImpl: async () => ({ posted: true }),
+    }), /probe timed out/);
+    const failed = readFollowUpJob(path.join(getFollowUpJobDir(rootDir, 'failed'), path.basename(created.jobPath)));
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failure.code, 'hq-conflicted-base-probe-retries-exhausted');
+    assert.match(failed.failure.message, /probe timed out/);
+    assert.equal(failed.remediationWorker.state, 'never-spawned');
+  });
 });
 
 // ── Accepted retrigger outcome ───────────────────────────────────────────────
@@ -485,4 +568,48 @@ test('the outcome timeout is configurable and defaults to 10 minutes', () => {
   assert.equal(resolveRetriggerOutcomeTimeoutMs({}), 600_000);
   assert.equal(resolveRetriggerOutcomeTimeoutMs({ ADVERSARIAL_RETRIGGER_OUTCOME_TIMEOUT_MS: '120000' }), 120_000);
   assert.equal(resolveRetriggerOutcomeTimeoutMs({ ADVERSARIAL_RETRIGGER_OUTCOME_TIMEOUT_MS: 'soon' }), 600_000);
+});
+
+test('outcome scans bound every read, make progress past skipped records, and cache done files across ticks', async (t) => {
+  const rootDir = tmpRoot(t, 'remconflict-scan-budget-');
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'label-consumptions');
+  mkdirSync(dir, { recursive: true });
+  const recorder = commentRecorder();
+  for (let i = 0; i < 12; i += 1) {
+    writeFileSync(path.join(dir, `historical-${i}.json`), JSON.stringify({ outcomeReport: { done: true } }));
+  }
+  writeFileSync(path.join(dir, 'corrupt.json'), 'invalid json');
+  writeFileSync(path.join(dir, 'young.json'), JSON.stringify({
+    label: RETRIGGER_REMEDIATION_LABEL, auditStatus: 'written', auditRow: { outcome: 'bumped-and-requeued' },
+    jobPath: '/pending/young.json', consumedAt: minutesAfter(CONSUMED_AT, 11),
+  }));
+  seedStoppedJob(rootDir, 8022);
+  await acceptRetrigger(rootDir, 8022, recorder, []);
+  const original = fs.readFileSync;
+  let reads = 0;
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (typeof file === 'string' && path.dirname(file) === dir) reads += 1;
+    return original(file, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const sweep = () => reportStalledRetriggerOutcomes({
+    rootDir, budget: 2, execFileImpl: recorder.execFileImpl,
+    appendAuditRow() {}, now: () => minutesAfter(CONSUMED_AT, 12), logger: { log() {}, error() {} },
+  });
+  let reported = 0;
+  for (let tick = 0; tick < 10; tick += 1) {
+    reads = 0;
+    reported += (await sweep()).reported;
+    assert.ok(reads <= 2, `tick ${tick} read ${reads} consumption files`);
+  }
+  assert.equal(reported, 1, 'skipped files cannot starve the eligible receipt');
+  let repeatedReads = 0;
+  for (let tick = 0; tick < 10; tick += 1) {
+    reads = 0;
+    await sweep();
+    assert.ok(reads <= 2);
+    repeatedReads += reads;
+  }
+  assert.ok(repeatedReads <= 4, 'only the malformed and young receipts need another read per pass');
 });

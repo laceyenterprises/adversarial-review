@@ -69,7 +69,8 @@ async function readLivePrMergeability({ repo, prNumber, execFileImpl }) {
 
 /**
  * Whether the installed `hq dispatch` accepts `--allow-conflicted-base`.
- * Returns null when the probe itself failed (unknown, not unsupported).
+ * Returns null on permanent probe failures; transient failures retain their
+ * diagnostic and propagate to the consumer's bounded retry path.
  */
 export async function hqDispatchSupportsConflictedBase({ hqBin, execFileImpl, nowMs = Date.now() }) {
   const cached = supportCache.get(hqBin);
@@ -81,7 +82,12 @@ export async function hqDispatchSupportsConflictedBase({ hqBin, execFileImpl, no
       timeout: HELP_PROBE_TIMEOUT_MS,
     });
     output = `${result?.stdout || ''}${result?.stderr || ''}`;
-  } catch {
+  } catch (err) {
+    const detail = [err?.code, err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
+    if (err?.killed === true || /\b(EIO|ETIMEDOUT|EAGAIN|EMFILE|ENFILE|ENOMEM|ECONNRESET)\b|timed out|timeout/i.test(detail)) {
+      err.isConflictedBaseProbeTransientError = true;
+      throw err;
+    }
     return null;
   }
   const supported = output.includes(CONFLICTED_BASE_FLAG);

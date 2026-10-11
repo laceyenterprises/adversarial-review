@@ -2633,6 +2633,7 @@ function claimNextFollowUpJob({
           type: 'worker-spawn',
           round: nextRoundNumber,
           operatorVisibility: 'explicit',
+          ...(job.remediationPlan?.nextAction?.operatorOverride === true ? { operatorOverride: true } : {}),
         },
         rounds: [
           ...(job?.remediationPlan?.rounds || []),

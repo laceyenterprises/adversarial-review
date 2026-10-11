@@ -3828,6 +3828,25 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    if (err.isConflictedBaseProbeTransientError
+      && Number(claimed.job?.remediationPlan?.transientRetries || 0) < resolveMaxTransientRemediationRetries()) {
+      const requeued = requeueInProgressFollowUpJobForRetry({
+        rootDir,
+        jobPath: claimed.jobPath,
+        requeuedAt: now(),
+        retryReason: err.message,
+        retryMetadata: { code: 'hq-conflicted-base-probe-transient', recoverable: true },
+        allowDirectWorkerRetry: true,
+      });
+      // A pre-spawn retry must retain the one-shot operator authorization.
+      const override = claimed.job?.remediationPlan?.nextAction;
+      if (override?.operatorOverride === true) {
+        requeued.job.remediationPlan.nextAction = { ...override, ...requeued.job.remediationPlan.nextAction, operatorOverride: true };
+        writeFollowUpJob(requeued.jobPath, requeued.job);
+      }
+      log.warn?.(`[follow-up-remediation] transient conflicted-base probe for ${claimed.job.repo}#${claimed.job.prNumber}; requeued: ${err.message}`);
+      return { consumed: false, reason: 'hq-conflicted-base-probe-transient', ...requeued };
+    }
     if (err.isWorkflowPushPreflightTransientError) {
       const requeuedAt = now();
       const requeuedAtMs = Date.parse(requeuedAt);
@@ -3877,7 +3896,7 @@ async function consumeNextFollowUpJob({
     }
 
     let failure = {};
-    let failureCode = 'worker-failure';
+    let failureCode = err.isConflictedBaseProbeTransientError ? 'hq-conflicted-base-probe-retries-exhausted' : 'worker-failure';
 
     if (err.isOAuthError) {
       failureCode = 'oauth-preflight-failure';

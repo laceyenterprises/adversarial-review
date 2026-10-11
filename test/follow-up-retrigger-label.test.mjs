@@ -247,6 +247,7 @@ test('tryRetriggerRemediationFromLabel requeues stopped:review-settled jobs for 
     type: 'worker-spawn',
     round: 2,
     operatorVisibility: 'explicit',
+    operatorOverride: true,
   });
 });
 

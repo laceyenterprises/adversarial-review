@@ -515,15 +515,21 @@ export async function tryRetriggerReviewFromLabel({
   findAuditRow = findOperatorMutationAuditRow,
   rereviewImpl = requestReviewRereview,
   labelEvent = null,
+  labelControlReason = null,
   revisionRef = null,
 }) {
   const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
   if (!labelEventKey) {
-    await removeLabelFromPR({ repo, prNumber, execFileImpl });
+    // A missing scoped event can mean a lagging subject snapshot or timeline
+    // anchor, not missing attribution. Keep inconclusive requests retryable.
+    const labelRemoved = ['non-attributable', 'untrusted-actor'].includes(labelControlReason);
+    if (labelRemoved) await removeLabelFromPR({ repo, prNumber, execFileImpl });
     return {
       outcome: 'label-event-missing',
-      detail: 'removed unattributed retrigger-review label; apply it again to create a fresh labeled event',
-      labelRemoved: true,
+      detail: labelRemoved
+        ? `removed retrigger-review label (${labelControlReason}); apply it again with an attributable trusted actor`
+        : 'kept retrigger-review label pending a current-head attributable event',
+      labelRemoved,
     };
   }
   const normalizedRevisionRef = normalizeRevisionRef(

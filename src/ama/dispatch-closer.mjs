@@ -4121,6 +4121,7 @@ export async function maybeDispatchAmaCloser({
         reviewedSha: dispatchContext?.reviewedSha, prMetadata,
         fetchPrimaryChangeImpl, execFileImpl, deliverAlertImpl, logger,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+        now: dispatchContext?.dispatchedAt || new Date().toISOString(),
       });
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
         skipMergeAgent: true, recoveryWait: true, reason: HAMMER_STOP_HOLD_REASON,

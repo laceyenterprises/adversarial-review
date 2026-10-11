@@ -27,7 +27,7 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks }`. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. |
 | `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for subsequent stops on the same head. |
 | `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
-| `heads[sha].releasedBy` | optional string array | Changed dimensions: `head`, `base`, `mergeability`, `checks`. |
+| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01). |
 | `heads[sha].releasedInputs` | optional inputs object | Inputs at release; used as the next stop's baseline if another hammer stops on this head. |
 
 ## Recovery and retention
@@ -39,6 +39,19 @@ cannot prove change. Checks use the canonical latest-run and own-status
 exclusion helpers: only matching `StatusContext` entries (or legacy entries
 with `context` and no type) are excluded. A same-name external `CheckRun`
 remains an input. Missing/non-array rollups are represented as an empty string.
+
+CAPROUTE-01 includes legacy `primary-change-unknown` stops and
+`primary-change-read-failed` stops. On every closer evaluation of an open PR
+with one of these stops on the live head, a read-only primary-change probe runs
+before ordinary eligibility, including on CYCLECAPHAM-01 / CIBLOCKHAM-01
+hammer-owner routes and stale-review heads that are not closer-authored.
+While the answer remains unknown or unreadable, the hold remains active. Once
+the answer is computable, the store persists `primary-change-evidence` in
+`releasedBy`, even if the computable answer refuses merge (for example,
+`primary-change-reverted`). Release clears the evidence wait, not the merge
+predicate. There is one probe per pass while unreleased, no probe backoff in
+this store, and no further probe for the same released stop. Hold observation
+and release timestamps use the closer pass's `dispatchedAt` when supplied.
 
 Release permits ordinary eligibility, lease and retry-cap checks; it does not
 authorize dispatch or merge by itself. A new head starts its own entry. A new

@@ -13,7 +13,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -785,18 +785,24 @@ for (const predicate of ['primary-change-unknown', 'primary-change-read-failed']
       headSha: REMEDIATED_HEAD,
       attempt: { outcome: 'failed-without-merge', reason: predicate } });
     let probes = 0;
+    const firstObservedAt = '2026-10-10T05:05:00Z';
     for (const repaired of [false, false, true]) {
+      const dispatchedAt = repaired ? '2026-10-10T05:10:00Z' : firstObservedAt;
       const deps = closerDeps({ workerStatus: 'failed', nextLaunch: LRQ_SECOND });
       deps.fetchPrimaryChangeImpl = async ({ headSha }) => {
         probes++;
         return repaired ? primaryChangeFixture(headSha) : { headSha, hasHammerCommits: null };
       };
       const result = await maybeDispatchAmaCloser({
-        ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T05:05:00Z' }), ...deps,
+        ...closerArgs(rootDir, { dispatchedAt }), ...deps,
       });
       assert.equal(result.dispatched, repaired, JSON.stringify(result));
       assert.equal(deps.launches.length, repaired ? 1 : 0);
       if (!repaired) assert.equal(result.reason, 'hammer-stop-awaiting-input-change');
+      const hold = JSON.parse(readFileSync(join(rootDir, 'data', 'follow-up-jobs',
+        'hammer-stop-hold', 'laceyenterprises-agent-os-pr-7956.json'), 'utf8')).heads[REMEDIATED_HEAD];
+      assert.equal(hold.firstObservedAt, firstObservedAt);
+      if (repaired) assert.equal(hold.releasedAt, dispatchedAt);
     }
     assert.equal(probes, 3, 'one read-only probe per pass');
   });

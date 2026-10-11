@@ -1204,6 +1204,7 @@ export async function processReviewSubject(entry, ctx) {
             prNumber,
             labelActor: labelEvent?.actor || 'unknown',
             labelEvent,
+            labelControlReason: labelControl?.reason,
             revisionRef: subject.ref.revisionRef,
             execFileImpl: execFileAsync,
           });

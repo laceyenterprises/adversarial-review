@@ -424,14 +424,20 @@ test('background observations preserve the eligible tick streak', async t => {
   }
   assert.equal(calls.dispatch.length, 1);
 });
-test('unreadable primary-change evidence pages uncertainty without repair admission', async t => {
+test('PRIMARYEMPTY-01: deterministic unknown pages on the sixth observation exactly once', async t => {
   const { args, tick, calls } = setup(t, 7716);
   assert.equal(orphanDispatchReasonsCovered(['primary-change-unknown']), false);
-  for (let i = 0; i < 7; i++) await tick({ result: { ...args.result, reasons: ['primary-change-unknown', 'ci-not-green'] } });
+  const result = { ...args.result, reason: 'primary-change-needs-operator',
+    needsOperator: true, reasons: ['primary-change-unknown'] };
+  for (let i = 0; i < 5; i++) await tick({ result });
+  assert.equal(calls.pages.length, 0);
+  await tick({ result });
   assert.equal(calls.dispatch.length, 0);
   assert.equal(calls.pages.length, 1);
   assert.equal(calls.pages[0][1].event, 'ama.orphan_recovery.ownership-uncertain');
-  assert.ok(calls.pages[0][1].payload.ownershipReasons.includes('primary-change-unknown'));
+  assert.ok(calls.pages[0][1].payload.reasons.includes('primary-change-unknown'));
+  for (let i = 0; i < 6; i++) await tick({ result });
+  assert.equal(calls.pages.length, 1);
 });
 test('empty head observations leave real head streaks and rows intact', async t => {
   const { args, tick, calls } = setup(t);

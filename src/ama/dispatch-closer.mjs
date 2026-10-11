@@ -4153,11 +4153,6 @@ export async function maybeDispatchAmaCloser({
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
-  if (verdict.reasons.includes('primary-change-unknown')
-    && !verdict.reasons.includes('primary-change-reverted')) {
-    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      reason: 'gate-read-failed', reasons: verdict.reasons });
-  }
   const orphanAdmit = Boolean(dispatchContext?.orphanRecovery)
     && orphanDispatchReasonsCovered(verdict.reasons)
     && (!verdict.reasons.includes('stale-review-head')

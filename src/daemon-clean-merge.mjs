@@ -811,6 +811,7 @@ export async function runDaemonCleanMergeAttempt({
   // snapshot mismatch, so it must pass that proven closer head to the merge
   // executor rather than a HAM audit head that may be absent or stale.
   const readPrimaryChange = (headSha) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha, rootDir,
+    builderHead: workerIdentity.resolvedBy === 'head-attestation' ? null : workerIdentity.rowHeadSha,
     get: async (path) => {
       const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
       return JSON.parse(stdout);
@@ -1105,13 +1106,6 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
-  // PRIMARYCHG-01: missing evidence is retryable before and inside the lease.
-  // Retain merge refusal while the next pipeline tick recomputes it.
-  if (daemonResult?.reasons?.includes('primary-change-unknown')
-    && !daemonResult?.reasons?.includes('primary-change-reverted')) {
-    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-      reason: 'gate-read-failed', needsOperator: false };
-  }
   const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
   if (remediableGate && daemonResult?.reasons?.includes('primary-change-read-failed')) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,

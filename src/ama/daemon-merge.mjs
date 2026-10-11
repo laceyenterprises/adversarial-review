@@ -822,18 +822,19 @@ async function attemptDaemonCleanMergeInner({
       // made only of transient reads exhausts as `gate-read-failed`; any miss
       // carrying one stays NON-permanent so the next tick retries instead of
       // Gate 3 refusing the head forever on a half-read gate.
-      const transientReadOnly = elig.reasons.includes('primary-change-unknown')
-        || (elig.reasons.length > 0
-          && elig.reasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(reason)));
-      const hasTransientRead = elig.reasons.some((reason) => TRANSIENT_GATE_READ_REASONS.has(reason)
-        || reason === 'primary-change-unknown');
+      const transientReadOnly = elig.reasons.length > 0
+        && elig.reasons.every((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
+      const hasTransientRead = elig.reasons.some((reason) => TRANSIENT_GATE_READ_REASONS.has(reason));
       if (elig.reasons.includes('pr-mergeability-unknown') && attempts < retryCap) {
         await sleep(daemonMergeBackoffMs(attempts, { baseMs: backoffBaseMs, rng }));
         continue;
       }
       terminal = {
-        reason: transientReadOnly ? 'gate-read-failed' : 'gate-not-eligible',
-        permanent: !hasTransientRead && !noCiRevoked,
+        reason: elig.reasons.includes('primary-change-unknown') ? 'primary-change-unknown'
+          : transientReadOnly ? 'gate-read-failed' : 'gate-not-eligible',
+        // Evidence recovery can repair the same head; retain scoped escalation
+        // without writing the permanent failed-head marker.
+        permanent: !hasTransientRead && !noCiRevoked && !elig.reasons.includes('primary-change-unknown'),
         reasons: elig.reasons,
         liveGate: live,
       };
@@ -968,7 +969,7 @@ async function attemptDaemonCleanMergeInner({
   // failed-without-merge. This does NOT change the merge decision.
   // A terminal carrying a transient read is retried next tick, never paged.
   const terminalHasTransientRead = (terminal?.reasons || []).some((r) =>
-    TRANSIENT_GATE_READ_REASONS.has(r) || r === 'primary-change-unknown');
+    TRANSIENT_GATE_READ_REASONS.has(r));
   const cleanParkManualCloseRequired = !merged && terminal?.reason !== 'gate-read-failed' &&
     !(terminal?.reason === 'gate-not-eligible' && terminal?.permanent === false) &&
     !terminalHasTransientRead && isFullyCleanSettledReview(reviewState);

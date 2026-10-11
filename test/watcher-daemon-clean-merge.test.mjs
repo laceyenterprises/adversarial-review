@@ -3801,6 +3801,7 @@ test('primary-change operator park records the concrete reason and remains attri
     assert.equal(result.needsOperator, true);
     const [park] = readDaemonMergeParks({ rootDir });
     assert.equal(park.reason, 'primary-change-unknown');
+    assert.match(park.remedy, /primary-change-context/);
     assert.equal(park.headSha, 'head-live');
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
@@ -3891,7 +3892,7 @@ test('transient primary-change reads do not hide CI or conflict remediation', as
 });
 
 
-test('in-lease unknown evidence keeps the daemon retryable without an operator park', async () => {
+test('in-lease deterministic unknown evidence enters scoped escalation', async () => {
   const rootDir = tempRoot();
   const head = 'f'.repeat(40);
   try {
@@ -3905,9 +3906,9 @@ test('in-lease unknown evidence keeps the daemon retryable without an operator p
       attemptDaemonCleanMergeImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
         reason: 'not-eligible', reasons: ['primary-change-unknown'], permanent: false }),
     });
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
-    assert.equal(result.needsOperator, false);
-    assert.equal(result.reason, 'gate-read-failed');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.needsOperator, true);
+    assert.equal(result.reason, 'primary-change-needs-operator');
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 

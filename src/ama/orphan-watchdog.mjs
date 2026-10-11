@@ -197,7 +197,9 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   const reasons = result?.reasons || result?.daemonCleanMerge?.reasons || [];
   const primary = ['primary-change-repair-required', 'primary-change-needs-operator'].includes(result?.reason);
   const blocking = reasons.includes('blocking-findings-present');
-  const stale = reasons.includes('stale-review-head');
+  const hammerValidated = result?.hamTerminalRemediationValidated === true;
+  const closerMergeRetry = hammerValidated || result?.closerHeadMergeRetry === true;
+  const stale = reasons.includes('stale-review-head') || hammerValidated;
   const stopped = dispatchJob?.remediationStopCode || dispatchJob?.remediationPlan?.stop?.code;
   const round = dispatchJob?.remediationPlan?.currentRound ?? dispatchJob?.remediationPlan?.round ?? dispatchJob?.remediationRound;
   const maxRounds = dispatchJob?.remediationPlan?.maxRounds;
@@ -208,18 +210,18 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   const candidateAllowed = Boolean(headSha && candidate?.merged !== true && String(candidate?.prState || '').toLowerCase() === 'open'
     && !candidate?.isDraft && !isOperatorHeld(labels)
     && result?.amaEnabled && stopAllowed);
-  let closerHead = false;
+  let closerHead = closerMergeRetry;
   let closerProofChecked = false;
   // STALECLOSER-03: the closer already evaluated the shared predicate for this
   // exact head; reuse it. A transient-only miss (CI pending, mergeability
   // UNKNOWN) is the closer's recoveryWait that the hammer wake resolves: leave
   // it to that hold and keep this head's tick streak (no reset, no dispatch).
   const shared = result?.closerAuthoredStale?.currentHead === headSha ? result.closerAuthoredStale : null;
-  if (candidateAllowed && shared?.decision === 'retry') return null;
-  if (shared && ['eligible', 'not-eligible', 'rereview-exact-head'].includes(shared.decision)) {
+  if (!closerMergeRetry && candidateAllowed && shared?.decision === 'retry') return null;
+  if (!closerMergeRetry && shared && ['eligible', 'not-eligible', 'rereview-exact-head'].includes(shared.decision)) {
     closerProofChecked = true;
     closerHead = shared.decision !== 'rereview-exact-head';
-  } else if (candidateAllowed && stale) {
+  } else if (!closerMergeRetry && candidateAllowed && stale) {
     try {
       closerProofChecked = true;
       closerHead = await closerHeadImpl({ repoPath: repo, prNumber,
@@ -230,7 +232,8 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       return { outcome: 'ama-pending', amaClosureResult: { ...result, skipMergeAgent: true } };
     }
   }
-  const eligible = candidateAllowed && orphanDispatchReasonsCovered(reasons, { closerHead })
+  const eligible = candidateAllowed && (orphanDispatchReasonsCovered(reasons, { closerHead })
+    || (hammerValidated && reasons.length === 0 && ['merge-lease-timeout', 'ama-dispatch-failed', 'lease-held'].includes(result?.reason)))
     && (primary || stale || (blocking && (stopped === 'no-progress' || stopped === 'remediation-stopped' || belowMax)));
   const primaryUnknown = candidateAllowed && primary && !eligible;
   const dir = join(rootDir, 'data', 'follow-up-jobs', 'orphan-watchdog');
@@ -329,7 +332,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
         reviewStateRow, requestRereviewImpl, logger, db }); }
       catch (error) { holdExternalError(error, 're-review'); return null; }
     };
-    if (closerHead && state.attempts > 0 && !state.rereview && readEvidence(state.evidence)?.dispatched) {
+    if (!hammerValidated && primary && closerHead && state.attempts > 0 && !state.rereview && readEvidence(state.evidence)?.dispatched) {
       const review = await rereview();
       if (review?.triggered || isOrphanHeadReviewRequested(review?.reviewRow, headSha)) db.prepare('UPDATE heads SET rereview=1, ticks=0 WHERE head=?').run(headSha);
       return pending;
@@ -361,7 +364,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     if (abortedError) throw abortedError;
     if (refund) return pending;
     if (retry?.dispatched) return { outcome: 'ama-dispatched', amaClosureResult: retry };
-    if (closerHead && !state.rereview) {
+    if (!hammerValidated && primary && closerHead && !state.rereview) {
       const review = await rereview();
       if (review?.triggered || isOrphanHeadReviewRequested(review?.reviewRow, headSha)) db.prepare('UPDATE heads SET rereview=1 WHERE head=?').run(headSha);
     }

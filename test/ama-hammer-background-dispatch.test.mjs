@@ -1026,7 +1026,7 @@ for (const closer of [false, true]) {
   });
 }
 
-test('refused stale closer review falls through coexistence to bounded orphan recovery', async t => {
+test('stale closer skips review and reaches bounded merge recovery', async t => {
   const { args } = closerResumeFixture('green');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
@@ -1045,7 +1045,7 @@ test('refused stale closer review falls through coexistence to bounded orphan re
     },
     recoverAmaAutomationImpl: () => assert.fail('orphan watchdog owns refusal'),
   });
-  assert.equal(requests, 1);
+  assert.equal(requests, 0);
   assert.equal(orphanCalls, 1);
   assert.equal(result.orphanRecovery.disposition, 'exhausted');
 });

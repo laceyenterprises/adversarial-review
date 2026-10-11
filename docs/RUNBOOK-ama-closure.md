@@ -1962,9 +1962,13 @@ one of:
    only` verdict whose sole remaining refusal reason is
    `verdict-not-settled-success`, the closer may waive those reasons on an
    active HAM session only after the predicate verifies current-head HAM authority
-   from trusted inputs: HAM worker trailers, reviewed-parent/current-head match,
-   non-empty verified diff, allowlisted audit-comment author, matching
-   audit-comment body, and doc-currency evidence. The zero-finding path is
+   from trusted inputs. HAMFINAL-02 exact-head validation is final: an active
+   hammer records `HAM-Validated-Head` in its entitled audit and verifies every
+   commit after the review (or in the rebased branch) as fleet-authored or a
+   merge of the base. No reviewed-parent trailer or new HAM commit is required
+   when findings are already addressed. The watcher suppresses another review
+   of this exact head and bounded recovery retries the merge under the lease.
+   All structural merge gates remain in force. The zero-finding path is
    admitted only after the caller supplies a finite measured terminal-unmerged
    duration that meets the comment-only grace threshold. This active trust is
    intentionally narrower than strict `.ok`: it does not require the finding-count

@@ -1,3 +1,4 @@
+import { exactHammerValidation, hammerRangeMatches } from './hammer-head-validation.mjs';
 import { operatorLabelGateFailures } from './operator-label-gates.mjs';
 import { checkPrimaryChange } from './primary-change.mjs';
 import { HAMMER_WITHDRAWN_RESOLUTION, resolveHammerAdjudication } from './hammer-adjudication.mjs';
@@ -778,6 +779,7 @@ function validateHamTerminalRemediationEvidence(
     currentHead,
     verifiedCommit = null,
     verifiedAuditComment = null,
+    verifiedRange = null,
     blockingFindings = { known: false, count: 0 },
     strictNonBlockingRemediation = false,
     logger = null,
@@ -819,40 +821,19 @@ function validateHamTerminalRemediationEvidence(
     verifiedParentSha !== ''
     && verifiedParentSha === String(reviewedHead || '')
     && shaClaimMatches(parentSha, verifiedParentSha);
-  // HSC-01: the rebase-coverage branch must stay satisfiable for BOTH claim
-  // shapes, or it is dead code that re-creates the SEV1 "guard encoded an
-  // unsatisfiable condition" deadlock.
-  //
-  // Two callers build the claim:
-  //   1. the hammer worker, which reports `commit.parentSha = <REVIEWED_SHA>`
-  //      per templates/hammer-prompt.md ("if the mandatory rebase rewrites the
-  //      commit parent, the verified Reviewed-Head trailer must still match"), and
-  //   2. `buildHamTerminalRemediationEvidenceFromGroundTruth`, the closer's
-  //      reconstruction, which necessarily reports the commit's ACTUAL parent
-  //      because it rebuilds the claim FROM the verified commit.
-  //
-  // Requiring only `parentSha === reviewedHead` collapsed shape 2 back into
-  // `directReviewedParent`, so a hammer head with commits between it and the
-  // reviewed head could never self-certify. Accept either honest claim: the
-  // reviewed-head binding comes from the trailer (attested by a verified hammer
-  // identity and HAM provenance via `checks.commitIdentity`), and the claim
-  // must still agree with ground truth about the parent it names.
-  const parentClaimHonest =
-    shaClaimMatches(parentSha, String(reviewedHead || ''))
-    || (verifiedParentSha !== '' && shaClaimMatches(parentSha, verifiedParentSha));
-  const reviewedHeadTrailerCoversRebase =
-    String(reviewedHead || '') !== ''
-    && verifiedReviewedHeadSha !== ''
-    && shaClaimMatches(verifiedReviewedHeadSha, String(reviewedHead || ''))
-    && parentClaimHonest;
+  const exactValidation = exactHammerValidation(verifiedAuditComment, currentHead)
+    && hammerRangeMatches(verifiedRange, reviewedHead, currentHead)
+    && (verifiedTrailers['worker-class'] !== 'hammer'
+      || hamAuditCommentAuthorMatches(verifiedCommit?.committer));
   const checks = {
+    exactValidation,
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
     ticket: isHamWorkerTicket(ticket),
     head:
       verifiedCommitSha !== ''
       && verifiedCommitSha === String(currentHead || '')
       && shaClaimMatches(commitSha, verifiedCommitSha),
-    parent: directReviewedParent || reviewedHeadTrailerCoversRebase,
+    parent: exactValidation || directReviewedParent,
     commitIdentity: hamCommitIdentityMatches(verifiedCommit, { trailers: verifiedTrailers }),
     nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
     primaryChange: checkPrimaryChange(verifiedCommit?.primaryChange, currentHead, { strictNonBlockingRemediation }).ok,
@@ -871,12 +852,10 @@ function validateHamTerminalRemediationEvidence(
     remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
   };
   const activeClaimed = evidence?.enabled === true || evidence?.active === true;
+  const recordedValidation = /(?:^|\n)HAM-Validated-Head:/.test(verifiedAuditBody);
   const safetyCoreOk = activeClaimed === true
-    && checks.workerClass
     && checks.head
-    && checks.parent
-    && checks.commitIdentity
-    && checks.nonEmptyCommit
+    && (exactValidation || (!recordedValidation && checks.workerClass && checks.parent && checks.commitIdentity && checks.nonEmptyCommit))
     && checks.primaryChange;
   // HAMIDENT-02: diagnostic only; unlinked commits still fail the safety core.
   // Missing identity fields are not proof that GitHub explicitly returned null.
@@ -1031,6 +1010,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       currentHead,
       verifiedCommit: options?.hamTerminalRemediationGroundTruth?.commit || null,
       verifiedAuditComment: options?.hamTerminalRemediationGroundTruth?.auditComment || null,
+      verifiedRange: options?.hamTerminalRemediationGroundTruth?.range || null,
       blockingFindings,
       strictNonBlockingRemediation,
       logger: options?.logger || null,

@@ -400,7 +400,7 @@ test('hammer audit comment composes footer from validated inputs', () => {
   assert.doesNotMatch(bodyComposer, /<n>|<b>|<nb>/);
   assert.match(
     bodyComposer,
-    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
+    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nHAM-Validated-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
   );
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_TOTAL='<n>'/);
   assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$\{HAM_AUDIT_REMEDIATED_TOTAL:-\}"/);

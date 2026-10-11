@@ -733,3 +733,20 @@ test('a transient primary-change API failure recovers within the default gh retr
   assert.equal(prReads, 3);
   assert.equal(commit.primaryChange.hasHammerCommits, false);
 });
+
+test('HAMFINAL-02: no-diff hammer validation suppresses review of the exact fleet head', async () => {
+  const calls = [];
+  const invoke = headSha => getHeadCloserCommitSuppression({
+    repoPath: 'example/repo', prNumber: 1, headSha,
+    fetchVerifiedCommitFromLocalGitImpl: async () => null,
+    execGhWithRetryImpl: async ({ args }) => {
+      calls.push(args);
+      if (args[1].includes('/commits/')) return { stdout: JSON.stringify({ sha: headSha,
+        message: 'builder change', authorLogin: 'lacey-codex-agent[bot]', committerLogin: 'lacey-codex-agent[bot]' }) };
+      return { stdout: JSON.stringify([[{ user: { login: 'the-hammer-lacey[bot]' }, body: 'HAM-Validated-Head: validated' }]]) };
+    },
+  });
+  assert.equal((await invoke('validated')).reason, 'hammer-validated-head');
+  assert.equal((await invoke('moved')).suppressed, false);
+  assert.equal(calls.filter(args => args.includes('--slurp')).length, 2);
+});

@@ -1,3 +1,4 @@
+import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
@@ -4023,8 +4024,8 @@ export async function resolveHamTerminalRemediationEvidence({
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
   if (!reviewedHead || !currentHead || reviewedHead === currentHead) return null;
-  const suppression = closerCommitSuppression || null;
-  if (suppression && suppression.suppressed !== true) return null;
+  void closerCommitSuppression;
+  // HAMFINAL-02: a no-diff hammer validates a fleet head without adding a commit.
 
   const verifiedCommit = await fetchHeadCloserVerifiedCommitImpl({
     repoPath,
@@ -4038,11 +4039,15 @@ export async function resolveHamTerminalRemediationEvidence({
     logger,
   });
   const identity = isTerminalCloserCommitIdentity(verifiedCommit || {});
-  if (identity?.suppressed !== true) return null;
-
   const rollup = await fetchPullRequestRollupImpl(repoPath, prNumber, { execFileImpl });
   const verifiedAuditComment = selectLatestHamTerminalAuditComment(rollup?.comments);
   if (!verifiedAuditComment) return null;
+  const exactValidation = exactHammerValidation(verifiedAuditComment, currentHead);
+  if (!exactValidation && identity?.suppressed !== true) return null;
+  const range = exactValidation ? await fetchHammerHeadRange({ repo: repoPath,
+    reviewedHead, currentHead, baseRef: prMetadata.baseRefName || 'main', env,
+    get: async path => JSON.parse((await execFileImpl('gh', ['api', path],
+      { timeout: 15000, env, signal })).stdout) }) : null;
 
   return {
     hamTerminalRemediation: buildHamTerminalRemediationEvidenceFromGroundTruth({
@@ -4053,6 +4058,7 @@ export async function resolveHamTerminalRemediationEvidence({
     hamTerminalRemediationGroundTruth: {
       commit: verifiedCommit,
       auditComment: verifiedAuditComment,
+      range,
     },
   };
 }

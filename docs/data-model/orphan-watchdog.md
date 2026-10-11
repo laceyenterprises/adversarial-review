@@ -27,7 +27,9 @@ retry counters are set aside for this bounded recovery. The hammer and merge
 agent retain their live merge predicates, quota admission and operator holds.
 Pending/failed review rows visit the watchdog before ordinary retry admission;
 posted rows visit it through closure orchestration. Live PR reads guard both
-paths against already merged or closed targets.
+paths against already merged or closed targets. A daemon merge completed during
+closure settles the PR as terminal before recovery, even when the earlier live
+read still reported OPEN.
 
 Before the external action, `attempts` increments and `outcomes` appends an
 `outcome-unknown` record with action and timestamp. Settlement records the

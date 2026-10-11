@@ -106,7 +106,9 @@ test('AMA live review reconciliation uses Gemini reviewer authority for native G
       'gemini-reviewer-lacey',
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
-    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true });
+    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
+      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
+        verdict: 'comment-only', checks: [], mergeable: 'TRUE' } });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -142,6 +144,8 @@ test('AMA live review reconciliation retries a transient lookup and lets authori
       reason: 'request-changes',
       namedReason: 'request-changes',
       amaEnabled: true,
+      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
+        verdict: 'request-changes', checks: [], mergeable: 'TRUE' },
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -174,7 +178,9 @@ test('AMA live review reconciliation treats opencode as Codex reviewer authority
       'codex-reviewer-lacey',
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
-    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true });
+    assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
+      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
+        verdict: 'comment-only', checks: [], mergeable: 'TRUE' } });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -207,6 +213,8 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
       reason: 'fail-closed',
       namedReason: 'fail-closed',
       amaEnabled: true,
+      ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
+        verdict: null, checks: [], mergeable: 'TRUE' },
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

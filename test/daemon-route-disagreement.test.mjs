@@ -335,8 +335,7 @@ test('a non-remediable disagreement parks with an operator-visible alert past th
       'the park record keeps counting for review-pipeline-health',
     );
 
-    // The watcher's coexistence step turns the park into await-operator, not a
-    // silent ama-pending and not a merge-agent fall-through.
+    // Ownerless admission starts the elapsed clock before ordinary recovery.
     const coexistence = await resolveMergeAgentCoexistenceForWatcher({
       rootDir,
       reviewStateRow: args.reviewStateRow,
@@ -350,7 +349,8 @@ test('a non-remediable disagreement parks with an operator-visible alert past th
       maybeDispatchAmaClosureForImpl: (callArgs) => maybeDispatchAmaClosureFor({ ...args, ...callArgs, rootDir }),
     });
     assert.equal(coexistence.outcome, 'ama-pending');
-    assert.equal(coexistence.recovery.action, 'retry');
+    assert.equal(coexistence.recovery, undefined);
+    assert.equal(coexistence.amaClosureResult.skipMergeAgent, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -2445,6 +2445,11 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
+  // A merge completed during closure makes this tick's OPEN candidate stale.
+  // Settle before the ownerless watchdog can retain or redrive that PR.
+  if (amaClosureResult?.reason === 'daemon-merged') {
+    return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult };
+  }
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
   const safetyHold = isSafetyRecoveryHold(amaClosureResult);

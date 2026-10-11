@@ -503,7 +503,7 @@ test('watcher pollOnce parks reviewer-timeout exhaustion when AMA is enabled wit
   }
 });
 
-test('watcher pollOnce recovers reviewer-timeout exhaustion when AMA dispatch fails', () => {
+test('watcher pollOnce retains ownerless reviewer-timeout exhaustion when AMA dispatch fails', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-timeout-handoff-ama-recover-'));
   const loaderPath = path.join(tmp, 'fixture-loader.mjs');
   const registerPath = path.join(tmp, 'fixture-register.mjs');
@@ -540,8 +540,8 @@ test('watcher pollOnce recovers reviewer-timeout exhaustion when AMA dispatch fa
 
     assert.equal(summary.reviewStatus, 'pending-upstream');
     assert.equal(summary.reviewerSpawns.length, 0);
-    assert.equal(summary.dispatches.length, 1);
-    assert.equal(summary.dispatches[0].env.AMA_OPERATOR_MERGE_AGENT_OVERRIDE, 'true');
+    assert.equal(summary.dispatches.length, 0, 'ownerless grace must not fall through to merge-agent');
+    assert.match(output, /reviewer-timeout exhaustion awaiting AMA hammer/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

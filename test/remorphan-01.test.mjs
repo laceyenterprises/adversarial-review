@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS } from '../src/ama/orphan-watchdog.mjs';
 
 function setup(t) {
@@ -188,3 +189,37 @@ test('head movement cannot restart the PR-wide absence-of-owner bound', async t 
   await tick(14, next); assert.equal(calls.launches.length, 0);
   await tick(15, next); assert.equal(calls.launches.length, 1);
 });
+
+for (const reason of ['lease-held', 'not-eligible', 'dispatch-status-unknown']) {
+  test(`closure routes ownerless ${reason} through elapsed recovery and its two-attempt budget`, async t => {
+    const { args, calls } = setup(t);
+    const observations = [];
+    const run = minutes => resolveMergeAgentCoexistenceForWatcher({
+      rootDir: args.rootDir, repoPath: args.repo, prNumber: args.prNumber,
+      currentRevisionRef: args.headSha, candidate: args.candidate,
+      reviewStateRow: args.reviewStateRow, labelNames: [], logger: args.logger,
+      maybeDispatchAmaClosureForImpl: async options => {
+        if (options.orphanRecovery) {
+          observations.push(options.orphanRecovery);
+          return { dispatched: false, reason: 'test-admission-refused' };
+        }
+        return { amaEnabled: true, skipMergeAgent: true, reason };
+      },
+      recoverAmaAutomationImpl: () => assert.fail('ownerless watchdog retains this tick'),
+      orphanOptions: { hasOwnerImpl: args.hasOwnerImpl, pageImpl: args.pageImpl,
+        now: new Date(Date.UTC(2026, 9, 11, 16, minutes)).toISOString(), env: {} },
+    });
+    for (let poll = 0; poll < 8; poll += 1) assert.equal((await run(0)).outcome, 'ama-pending');
+    await run(14);
+    assert.equal(observations.length, 0, 'frequent polls cannot shorten the grace');
+    await run(15); await run(16);
+    assert.deepEqual(observations, [
+      { ownerProof: true, headSha: args.headSha }, { ownerProof: true, headSha: args.headSha },
+    ]);
+    assert.equal((await run(17)).outcome, 'recovery-exhausted');
+    await run(18);
+    assert.equal(calls.pages.length, 1);
+    assert.deepEqual(calls.pages[0][1].payload.outcomes.map(outcome => outcome.reason),
+      ['test-admission-refused', 'test-admission-refused']);
+  });
+}

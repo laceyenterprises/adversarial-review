@@ -84,7 +84,9 @@ for (const ownershipReason of ['remediation-pending', 'remediation-state-unknown
     const result = { amaEnabled: true, skipMergeAgent: true, reason: 'not-eligible', reasons };
     const { args, calls } = harness(t, result);
     assert.equal(automatedHammerReasonsCovered(reasons), false);
-    const input = { rootDir: args.rootDir, repoPath: args.repo, prNumber: 1, currentRevisionRef: 'head',
+    // Isolate ordinary recovery routing; elapsed ownerless admission is covered
+    // by remorphan-01 and the closure integration tests.
+    const input = { recoverOrphanImpl: async () => null, rootDir: args.rootDir, repoPath: args.repo, prNumber: 1, currentRevisionRef: 'head',
       reviewStateRow: { ...args.reviewStateRow, verdict: 'Request changes', remediation_pending: true },
       candidate: { prState: 'open' }, dispatchJob: {}, logger: args.logger,
       recoveryOptions: { pageImpl: args.pageImpl, requestRereviewImpl: args.requestRereviewImpl },
@@ -133,7 +135,9 @@ test('wall-clock exhaustion persists one SEV1 event independent of tick count', 
 test('watcher shared router retries closure with recovery flag and protects terminal PRs', async (t) => {
   const result = { amaEnabled: true, skipMergeAgent: true, reason: 'not-eligible', reasons: ['non-blocking-findings-present'] };
   const { args, calls } = harness(t, result);
-  const input = { rootDir: args.rootDir, repoPath: args.repo, prNumber: 1, currentRevisionRef: 'head',
+  // Isolate ordinary recovery routing; elapsed ownerless admission is covered
+  // by remorphan-01 and the closure integration tests.
+  const input = { recoverOrphanImpl: async () => null, rootDir: args.rootDir, repoPath: args.repo, prNumber: 1, currentRevisionRef: 'head',
     reviewStateRow: args.reviewStateRow, candidate: { prState: 'open' }, dispatchJob: {},
     logger: args.logger, recoveryOptions: { pageImpl: args.pageImpl, requestRereviewImpl: args.requestRereviewImpl },
     maybeDispatchAmaClosureForImpl: async (options) => {
@@ -153,7 +157,9 @@ test('phantom launch reclaimed, live or unreadable launches remain held', async 
   const dispatchPath = join(args.rootDir, 'record.json');
   const record = { repo: args.repo, prNumber: 1, headSha: 'head', launchRequestId: 'lrq', dispatchPath, state: 'dispatched' };
   writeFileSync(dispatchPath, JSON.stringify(record));
-  const input = { rootDir: args.rootDir, logger: args.logger, listActiveImpl: () => [record],
+  // Isolate ordinary recovery routing; elapsed ownerless admission is covered
+  // by remorphan-01 and the closure integration tests.
+  const input = { recoverOrphanImpl: async () => null, rootDir: args.rootDir, logger: args.logger, listActiveImpl: () => [record],
     isPhantomImpl: (row) => row.pid === 0,
     readStatusImpl: async () => ({ ok: true, row: { status: 'running', pid: 0 } }) };
   assert.deepEqual(await reconcileRecoveryLaunches(input), { reclaimed: 1, active: 0, uncertain: 0 });
@@ -196,7 +202,7 @@ test('concurrent recovery calls cannot duplicate a re-review or dispatch a hamme
 });
 
 function watcherInput(args, result, dispatchHammer = args.dispatchHammer) {
-  return { rootDir: args.rootDir, repoPath: args.repo, prNumber: args.prNumber,
+  return { recoverOrphanImpl: async () => null, rootDir: args.rootDir, repoPath: args.repo, prNumber: args.prNumber,
     currentRevisionRef: args.headSha, reviewStateRow: args.reviewStateRow,
     candidate: { prState: 'open' }, dispatchJob: {}, logger: args.logger,
     recoveryOptions: { pageImpl: args.pageImpl, requestRereviewImpl: args.requestRereviewImpl,

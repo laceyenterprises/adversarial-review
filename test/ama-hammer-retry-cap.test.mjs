@@ -3547,3 +3547,34 @@ test('HAMCIWAKE-01 green own-head resume dispatches under the H1 budget', async 
   assert.equal(capped.reason, 'dispatch-retry-exhausted');
   assert.equal(deps.execCalls.length, 1);
 });
+
+
+test('LABELGATE-01: typed hammer stop refunds a recorded launch once through PR 1261 path', async t => {
+  const { writeAmaAuditEntry } = await import('../src/ama/audit.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-refund-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = hammerDispatchArgs(rootDir, { prMetadata: { statusCheckRollup: [
+    { name: 'submodule-pointer-gate', conclusion: 'FAILURE' },
+  ] } });
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now: '2026-07-06T11:00:00Z' });
+  updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }, () => ({
+    ...identity, headSha: REVIEWED_HEAD, reviewedSha: REVIEWED_HEAD, workerClass: 'hammer',
+    launchRequestId: 'labelgate-launch', dispatchedAt: '2026-07-06T11:00:00Z',
+  }));
+  writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: REVIEWED_HEAD,
+    attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
+    now: '2026-07-06T11:30:00Z' });
+  for (let i = 0; i < 2; i++) {
+    const result = await maybeDispatchAmaCloser({ ...args,
+      deliverAlertImpl: async () => {}, logger: { warn() {} },
+      execFileImpl: async () => { throw new Error('must not dispatch'); } });
+    assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    assert.equal(ledger.attemptCount, 0);
+    assert.equal(ledger.targetAttemptCount, 0);
+    assert.equal(ledger.lifetimeAttemptCount, 1, 'PR 1261 preserves the lifetime ceiling');
+    assert.deepEqual(ledger.unexecutedLaunchRequestIds, ['labelgate-launch']);
+    assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount, 1);
+  }
+});

@@ -1155,7 +1155,13 @@ async function applyPreSpawnLifecycleGate({
     execFileImpl,
     log,
   });
-  if (isDirtyMergeState(lifecycle)) {
+  const lifecycleStop = lifecycleStopDecision(lifecycle, {
+    repo: job?.repo,
+    prNumber: job?.prNumber,
+    site: 'consume',
+    job,
+  });
+  if (isDirtyMergeState(lifecycle) && !lifecycleStop) {
     const nowIso = now();
     const resolvedBaseBranch = normalizeBranchName(baseBranch || lifecycle?.baseBranch || job?.baseBranch);
     const resolvedBranch = normalizeBranchName(job?.branch || lifecycle?.branch || lifecycle?.headRefName);
@@ -1327,12 +1333,6 @@ async function applyPreSpawnLifecycleGate({
       return { action: 'continue', reason: 'dirty-conflict-hammer', job: nextJob, jobPath };
     }
   }
-  const lifecycleStop = lifecycleStopDecision(lifecycle, {
-    repo: job?.repo,
-    prNumber: job?.prNumber,
-    site: 'consume',
-    job,
-  });
   if (!lifecycleStop) {
     return { action: 'continue', reason: 'pr-open' };
   }

@@ -123,6 +123,24 @@ installation; the merge phase retains its existing HQ merge-signal integration.
 
 Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. When true, required non-blocking findings may authorize specifically cited reversions. When false, advisory non-blocking findings never authorize reverting protected author code; preserve it and record the conflict rationale. The live predicate independently resolves policy.
 
+## Operator-label gates (LABELGATE-01)
+
+The repository's operator-only override registry is:
+<<OPERATOR_LABEL_GATES>>
+
+Before CI repair and during every check wait, inspect the latest failed checks
+and their failure output. If a registered label gate blocks the run, stop
+immediately with `operator-label-required:<label>`; do not rerun it, apply labels,
+weaken the guard, or ask another worker to clear it. For a composite check, name
+its failing guard and label from the output; do not infer a label gate from the
+composite job name. Advisory/successful checks are not blockers.
+Write the existing AMA audit for the **current live head** with outcome `deferred`
+and an attempt JSON containing `reason: "operator-label-required:<label>"` and
+`startedAt` set to the current ISO timestamp. Release any merge lease and include
+the check and label in the single no-merge closing-status comment. The closer
+holds that head, pages the operator once, and reconciles this launch through the
+PR 1261 refund path so it does not consume the retry cap (the lifetime ceiling remains intact).
+
 ## Preserve the PR primary change (HAMINTENT-02 / LAC-1833)
 
 The primary change is the actual author head immediately before the first hammer

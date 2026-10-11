@@ -989,3 +989,87 @@ test('withdrawal-only non-exhausted review follows the clean dispatch route', as
   assert.equal(result.reason, 'daemon-clean-route', JSON.stringify(result));
   assert.equal(result.dispatched, false);
 });
+
+test('LABELGATE-01: only label failures hold closure and page once per head', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const alerts = [];
+  const args = baseArgs(rootDir, { prMetadata: { statusCheckRollup: [
+    { name: 'submodule-pointer-gate', conclusion: 'FAILURE' },
+    { name: 'test', conclusion: 'SUCCESS' },
+  ] } });
+  const deps = { deliverAlertImpl: async (text, opts) => alerts.push({ text, opts }),
+    execFileImpl: async () => { throw new Error('must not launch'); },
+    logger: { log() {}, info() {}, warn() {}, error() {} } };
+  for (let i = 0; i < 2; i++) {
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+  }
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].text, /submodule-pointer-gate.*allow-submodule-pointer-bump/);
+  await maybeDispatchAmaCloser({ ...args, ...deps, prMetadata: { ...args.prMetadata, headSha: 'b'.repeat(40) } });
+  assert.equal(alerts.length, 2);
+});
+
+import { operatorLabelGateFailures } from '../src/ama/operator-label-gates.mjs';
+
+test('LABELGATE-01: latest runs, mixed failures, pending and advisory checks', () => {
+  const failure = { name: 'submodule-pointer-gate', conclusion: 'FAILURE', completedAt: '2026-10-11T01:00:00Z' };
+  assert.equal(operatorLabelGateFailures([failure]).length, 1);
+  assert.deepEqual(operatorLabelGateFailures([failure, { name: 'unit', conclusion: 'FAILURE' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([failure, { ...failure, conclusion: 'SUCCESS', completedAt: '2026-10-11T02:00:00Z' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([{ ...failure, status: 'IN_PROGRESS' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([{ ...failure, conclusion: 'CANCELLED' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([{ name: 'repo-guards', conclusion: 'FAILURE' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([]), []);
+  assert.equal(operatorLabelGateFailures([{ name: 'repo-guards', conclusion: 'FAILURE', output: { summary: "Override: apply the 'allow-submodule-pointer-bump' label" } }])[0].label, 'allow-submodule-pointer-bump');
+});
+
+import { resolveOperatorLabelGateFailures } from '../src/ama/operator-label-gates.mjs';
+
+test('LABELGATE-01: composite jobs require exact-head, exclusively label-gate failed steps', async () => {
+  const rollup = [{ name: 'repo-guards-code', conclusion: 'FAILURE',
+    detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/34' }];
+  const args = { repo: 'acme/repo', headSha: HEAD, rollup };
+  const job = { head_sha: HEAD, conclusion: 'failure', steps: [
+    { name: 'Gym freeze guard', conclusion: 'success' },
+    { name: 'CI-cost guard', conclusion: 'failure' },
+  ] };
+  const read = data => async (command, argv) => {
+    assert.equal(command, 'gh');
+    assert.deepEqual(argv, ['api', 'repos/acme/repo/actions/jobs/34']);
+    return { stdout: JSON.stringify(data) };
+  };
+  const gates = await resolveOperatorLabelGateFailures({ ...args, execFileImpl: read(job) });
+  assert.equal(gates[0].reason, 'operator-label-required:ci-cost-approved');
+  assert.match(gates[0].check, /repo-guards-code: CI-cost guard/);
+  assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, execFileImpl: read({ ...job, head_sha: 'stale' }) }), []);
+  assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, execFileImpl: read({ ...job, steps: [
+    ...job.steps, { name: 'Unit tests', conclusion: 'failure' },
+  ] }) }), []);
+  assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, execFileImpl: async () => { throw new Error('unreadable'); } }), []);
+});
+
+test('LABELGATE-01: page receipt survives restart and concurrent observations; transport failures retry', async t => {
+  const { holdForOperatorLabels } = await import('../src/ama/operator-label-gates.mjs');
+  const restarted = await import('../src/ama/operator-label-gates.mjs?labelgate-restart');
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-pages-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const gates = operatorLabelGateFailures([{ name: 'ci-cost-guard', conclusion: 'FAILURE' }]);
+  const args = { rootDir, repo: 'acme/repo', prNumber: 404, headSha: HEAD, gates, logger: { warn() {} } };
+  let pages = 0;
+  let release;
+  const delivered = new Promise(resolve => { release = resolve; });
+  const first = holdForOperatorLabels({ ...args, deliverAlertImpl: async () => { pages++; await delivered; } });
+  await restarted.holdForOperatorLabels({ ...args, deliverAlertImpl: async () => { pages++; } });
+  release();
+  await first;
+  await restarted.holdForOperatorLabels({ ...args, deliverAlertImpl: async () => { pages++; } });
+  assert.equal(pages, 1);
+  const otherHead = { ...args, headSha: 'another-head' };
+  await holdForOperatorLabels({ ...otherHead, deliverAlertImpl: async () => { pages++; throw new Error('transport'); } });
+  await holdForOperatorLabels({ ...otherHead, deliverAlertImpl: async () => { pages++; } });
+  assert.equal(pages, 3);
+});

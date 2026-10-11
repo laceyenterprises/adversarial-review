@@ -85,3 +85,15 @@ test('missing HQ workspace evidence does not cancel an active worker on a moved 
   });
   assert.equal(decision, null);
 });
+
+
+test('LABELGATE-01: consume stops before remediation, while mixed failures remain repairable', () => {
+  const lifecycle = { source: 'live', prState: 'open', headSha: job.revisionRef,
+    statusCheckRollup: [{ name: 'submodule-pointer-gate', conclusion: 'FAILURE' }] };
+  const opts = { ...job, job, site: 'consume' };
+  assert.equal(lifecycleStopDecision(lifecycle, opts).stopCode, 'operator-label-required:allow-submodule-pointer-bump');
+  assert.equal(lifecycleStopDecision({ ...lifecycle, statusCheckRollup: [...lifecycle.statusCheckRollup,
+    { name: 'unit', conclusion: 'FAILURE' }] }, opts), null);
+  assert.equal(lifecycleStopDecision({ ...lifecycle, source: 'mirror' }, opts), null);
+  assert.equal(lifecycleStopDecision({ ...lifecycle, prState: 'merged' }, opts).stopCode, 'operator-merged-pr');
+});

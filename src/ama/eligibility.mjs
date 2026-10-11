@@ -1,3 +1,4 @@
+import { operatorLabelGateFailures } from './operator-label-gates.mjs';
 import { checkPrimaryChange } from './primary-change.mjs';
 import { HAMMER_WITHDRAWN_RESOLUTION, resolveHammerAdjudication } from './hammer-adjudication.mjs';
 /**
@@ -1156,6 +1157,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const ci = classifyCiGreen(prMetadata, env);
   if (!ci.green) {
     reasons.push('ci-not-green');
+    for (const gate of operatorLabelGateFailures(prMetadata?.statusCheckRollup, { env })) reasons.push(gate.reason);
   }
 
   // SPEC §4.2 #9 — branch protection requires the configured gate, UNLESS the

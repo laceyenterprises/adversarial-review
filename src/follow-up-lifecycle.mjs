@@ -1,3 +1,4 @@
+import { operatorLabelGateFailures, resolveOperatorLabelGateFailures, holdForOperatorLabels } from './ama/operator-label-gates.mjs';
 import { staleDriftStopDecision } from './stale-drift.mjs';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,6 +10,7 @@ async function resolveJobPRLifecycleSafe({
   resolvePRLifecycleImpl,
   execFileImpl,
   log = console,
+  deliverAlertImpl,
 }) {
   try {
     const lifecycle = await resolvePRLifecycleImpl(rootDir, {
@@ -16,6 +18,15 @@ async function resolveJobPRLifecycleSafe({
       prNumber: job.prNumber,
       execFileImpl,
     });
+    if (lifecycle?.source === 'live' && lifecycle.prState === 'open' && lifecycle.headSha) {
+      const gates = await resolveOperatorLabelGateFailures({ rollup: lifecycle.statusCheckRollup,
+        repo: job.repo, headSha: lifecycle.headSha, execFileImpl });
+      lifecycle.operatorLabelGates = gates;
+      if (gates.length) {
+        await holdForOperatorLabels({ rootDir, repo: job.repo, prNumber: job.prNumber,
+          headSha: lifecycle.headSha, gates, logger: log, deliverAlertImpl });
+      }
+    }
     try {
       if (!existsSync(join(rootDir, 'data', 'reviews.db'))) return lifecycle;
       const db = openReviewStateDb(rootDir);
@@ -77,6 +88,11 @@ function lifecycleStopDecision(lifecycle, { repo, prNumber, site, job = null }) 
         workerState: 'never-spawned',
         stopReason: `A newer review is pending for ${repo}#${prNumber}; cancelling remediation for the prior verdict.`,
       };
+    }
+    if (!staleDriftStop && site === 'consume' && lifecycle.source === 'live' && currentHeadSha) {
+      const gates = lifecycle.operatorLabelGates || operatorLabelGateFailures(lifecycle.statusCheckRollup);
+      if (gates.length) return { stopCode: gates[0].reason, actionReason: gates[0].reason,
+        workerState: 'never-spawned', stopReason: gates.map(g => `${g.check} requires operator label ${g.label}`).join('; ') };
     }
     return staleDriftStop;
   }

@@ -1,3 +1,4 @@
+import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels } from './operator-label-gates.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
@@ -3816,6 +3817,7 @@ export function composeCloserPrompt({
   strictNonBlockingRemediation = true,
 }) {
   return substituteTemplate(templateBody, {
+    OPERATOR_LABEL_GATES: OPERATOR_LABEL_GATES.map(g => `- ${g.checks.join(" / ")}: ${g.label}`).join("\n"),
     PR_URL: prUrl,
     REPO: repo,
     PR_NUMBER: prNumber,
@@ -4128,6 +4130,43 @@ export async function maybeDispatchAmaCloser({
         hammerStop: evidenceStopHold.hammerStop });
       if (evidenceStopHold.action === 'release') hammerStopRelease = evidenceStopHold;
     }
+  }
+
+  const labelGates = await resolveOperatorLabelGateFailures({ rollup: prMetadata?.statusCheckRollup,
+    repo: dispatchContext?.repo, headSha: prMetadata?.headSha, execFileImpl, env });
+  if (prMetadata?.isOpen !== false && prMetadata?.headSha) {
+    const rootDir = dispatchContext?.rootDir || SUBMODULE_ROOT;
+    const repo = dispatchContext?.repo;
+    // Reconcile even after the operator clears the check. Match the latest
+    // charged launch and audit timestamp; never refund a different series.
+    let audit;
+    try { audit = readAmaAuditEntry(dispatchContext?.hqRoot || DEFAULT_HQ_ROOT, repo, prNumber, prMetadata.headSha); }
+    catch { /* An unreadable audit cannot authorize a refund; existing audit gates handle it. */ }
+    const attempt = audit?.attempts?.at(-1);
+    if (audit?.status === 'deferred' && OPERATOR_LABEL_GATES.some(g => `operator-label-required:${g.label}` === attempt?.reason)) {
+      const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
+      const record = listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber })
+        .filter(r => r.launchRequestId && isHammerWorkerClass(r.workerClass) && r.headSha === ledger?.lastDispatchedHeadSha
+          && r.reviewedSha === ledger?.jobKey)
+        .sort((a, b) => Date.parse(b.dispatchedAt) - Date.parse(a.dispatchedAt))[0];
+      if (record && Date.parse(attempt.startedAt) >= Date.parse(record.dispatchedAt)) {
+        const refund = refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
+          jobKey: ledger.jobKey, headSha: record.headSha,
+          launchRequestId: record.launchRequestId, now: dispatchContext.dispatchedAt,
+        });
+        if (refund.refunded || (refund.reason === 'already-refunded'
+          && ledger.unexecutedLaunchRequestIds?.includes(record.launchRequestId))) {
+          updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: record.headSha }, current => {
+            if (current?.launchRequestId !== record.launchRequestId
+              || current.labelGateRefundedLaunchRequestId === record.launchRequestId) return null;
+            return { ...current, labelGateRefundedLaunchRequestId: record.launchRequestId,
+              unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 };
+          });
+        }
+      }
+    }
+    if (labelGates.length) return noAmaDispatch(await holdForOperatorLabels({ rootDir, repo, prNumber,
+      headSha: prMetadata.headSha, gates: labelGates, deliverAlertImpl, logger, now: dispatchContext?.dispatchedAt }));
   }
 
   const eligibilityOptions = { ...(options || {}) };

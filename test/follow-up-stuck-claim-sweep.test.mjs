@@ -1418,3 +1418,24 @@ test('pushDirtyMergeWithRetry retries transient push failures but fails terminal
   assert.match(terminalErr?.message, /Permission denied/);
   assert.equal(terminalErr?.dirtyPushAttempts, 1);
 });
+
+test('LABELGATE-01: final pre-spawn label hold wins over dirty-conflict hammer dispatch', async t => {
+  const { holdForOperatorLabels, operatorLabelGateFailures } = await import('../src/ama/operator-label-gates.mjs');
+  const rootDir = makeRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { job, jobPath } = seedInProgressJob(rootDir, { jobUpdates: { revisionRef: 'label-head' } });
+  const lifecycle = { source: 'live', prState: 'open', headSha: 'label-head', mergeStateStatus: 'DIRTY',
+    statusCheckRollup: [{ name: 'submodule-pointer-gate', conclusion: 'FAILURE' }] };
+  // Seed the shared page receipt using a fixture transport, never the live pager.
+  await holdForOperatorLabels({ rootDir, repo: job.repo, prNumber: job.prNumber, headSha: lifecycle.headSha,
+    gates: operatorLabelGateFailures(lifecycle.statusCheckRollup), deliverAlertImpl: async () => {} });
+  const result = await applyPreSpawnLifecycleGate({ rootDir, job, jobPath,
+    resolvePRLifecycleImpl: async () => lifecycle,
+    dirtyMergeImpl: async () => { throw new Error('must not repair or launch a dirty-conflict hammer'); },
+    stopConsumedJobWithCommentImpl: async args => markFollowUpJobStopped({ ...args }),
+    log: { log() {}, warn() {}, error() {} },
+  });
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.job.remediationPlan.stop.code, 'operator-label-required:allow-submodule-pointer-bump');
+  assert.equal(result.job.remediationWorker.state, 'never-spawned');
+});

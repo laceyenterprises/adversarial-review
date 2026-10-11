@@ -424,7 +424,8 @@ export type OperatorEventType =
   | 'force-rereview'
   | 'operator-approved'
   | 'halted'
-  | 'raised-round-cap';
+  | 'raised-round-cap'
+  | 'retrigger-outcome';
 
 export interface OperatorEvent {
   type: OperatorEventType;

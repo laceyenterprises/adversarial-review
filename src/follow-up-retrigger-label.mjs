@@ -18,7 +18,8 @@
 // SPEC §5.1.3 documents this as the PR-side counterpart to the CLI.
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { opendir } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
@@ -38,6 +39,7 @@ import {
 } from './operator-mutation-audit.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
+import { findLiveAmaCloserLease, isHeldAmaCloserLease } from './ama/closer-lease.mjs';
 
 const VERB = 'hq.adversarial.retrigger-remediation';
 
@@ -296,47 +298,19 @@ async function postRetriggerAckComment({
     };
   }
   try {
-    const normalizedRevisionRef = requireRevisionRef(revisionRef, 'postRetriggerAckComment');
-    const subjectIdentity = buildCodePrSubjectIdentity({
+    const receipt = await deliverRetriggerOperatorNotice({
+      rootDir,
       repo,
       prNumber,
-      revisionRef: normalizedRevisionRef,
-    });
-    const deliveryRound = Math.max(0, Number(requeueResult?.job?.remediationPlan?.currentRound || 0));
-    const adapter = createGitHubPRCommentsAdapter({
-      rootDir,
       execFileImpl,
-      commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
-      resolveGhToken: () => ({
-        tokenEnvName: 'GITHUB_TOKEN',
-        fallbackTokenEnvNames: ['GH_TOKEN'],
-        allowGhAuthFallback: true,
-      }),
-    });
-    const receipt = await adapter.postOperatorNotice(
-      {
-        type: 'raised-round-cap',
-        subjectRef: {
-          domainId: subjectIdentity.domainId,
-          subjectExternalId: subjectIdentity.subjectExternalId,
-          revisionRef: subjectIdentity.revisionRef,
-        },
-        revisionRef: subjectIdentity.revisionRef,
-        eventExternalId: labelEventKey,
-        observedAt: new Date().toISOString(),
-        reason,
-        roundCap: bumpResult?.newMaxRounds ?? null,
-      },
+      revisionRef: requireRevisionRef(revisionRef, 'postRetriggerAckComment'),
+      noticeRef: labelEventKey,
+      type: 'raised-round-cap',
+      round: Math.max(0, Number(requeueResult?.job?.remediationPlan?.currentRound || 0)),
+      reason,
+      roundCap: bumpResult?.newMaxRounds ?? null,
       body,
-      {
-        domainId: subjectIdentity.domainId,
-        subjectExternalId: subjectIdentity.subjectExternalId,
-        revisionRef: subjectIdentity.revisionRef,
-        round: deliveryRound,
-        kind: 'operator-notice',
-        noticeRef: labelEventKey,
-      }
-    );
+    });
     return { posted: true, stdout: '', marker, commentId: receipt.deliveryExternalId };
   } catch (err) {
     return {
@@ -345,6 +319,46 @@ async function postRetriggerAckComment({
       error: err?.message || String(err),
     };
   }
+}
+
+async function deliverRetriggerOperatorNotice({
+  rootDir, repo, prNumber, execFileImpl, revisionRef, noticeRef, type, round, reason, roundCap = null, body,
+}) {
+  const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
+  const adapter = createGitHubPRCommentsAdapter({
+    rootDir,
+    execFileImpl,
+    commentTimeoutMs: ACK_COMMENT_TIMEOUT_MS,
+    resolveGhToken: () => ({
+      tokenEnvName: 'GITHUB_TOKEN',
+      fallbackTokenEnvNames: ['GH_TOKEN'],
+      allowGhAuthFallback: true,
+    }),
+  });
+  return adapter.postOperatorNotice(
+    {
+      type,
+      subjectRef: {
+        domainId: subjectIdentity.domainId,
+        subjectExternalId: subjectIdentity.subjectExternalId,
+        revisionRef: subjectIdentity.revisionRef,
+      },
+      revisionRef: subjectIdentity.revisionRef,
+      eventExternalId: noticeRef,
+      observedAt: new Date().toISOString(),
+      reason,
+      roundCap,
+    },
+    body,
+    {
+      domainId: subjectIdentity.domainId,
+      subjectExternalId: subjectIdentity.subjectExternalId,
+      revisionRef: subjectIdentity.revisionRef,
+      round,
+      kind: 'operator-notice',
+      noticeRef,
+    }
+  );
 }
 
 function buildPendingAckComment({
@@ -576,6 +590,317 @@ export async function retryPendingRetriggerAckComments({
     if (next?.ackComment?.posted === true) posted += 1;
   }
   return { attempted, posted };
+}
+
+// REMCONFLICT-01 (SEV1, 2026-10-10): an accepted retrigger always ends in a
+// visible outcome. Operator: "there are examples in this queue of accepted
+// retriggers that never got actioned". The label path above only re-arms a
+// pending job file. A refusal after that (closer lease held,
+// `max-rounds-reached`, `stale-review-head`, `round-budget-exhausted`, a failed
+// `hq dispatch`) was visible only in daemon logs. So once a label consumed
+// with `bumped-and-requeued` is older than the outcome timeout (default 10
+// minutes, `ADVERSARIAL_RETRIGGER_OUTCOME_TIMEOUT_MS`), the watcher checks
+// whether a worker was spawned for that job since. If none was, it appends one
+// operator-mutation audit row and posts ONE comment naming the refusal code and
+// what the operator can do. The marker and the consumption record make it
+// exactly one. This only reports; it gates nothing. Labels consumed more than
+// OUTCOME_MAX_AGE_MS ago are not reported, so the first deploy does not comment
+// on old PRs, and a PR that has since merged or closed is closed out silently.
+export const RETRIGGER_OUTCOME_TIMEOUT_ENV = 'ADVERSARIAL_RETRIGGER_OUTCOME_TIMEOUT_MS';
+export const DEFAULT_RETRIGGER_OUTCOME_TIMEOUT_MS = 10 * 60_000;
+const OUTCOME_COMMENT_MARKER_PREFIX = 'adversarial-review-retrigger-remediation-outcome';
+const OUTCOME_SWEEP_BUDGET_PER_TICK = 5;
+// Keep enumeration progress across ticks, including malformed and young files,
+// so the read budget cannot starve later records. Settled receipts are immutable.
+const outcomeScans = new Map();
+const OUTCOME_DONE_CACHE_LIMIT = 1024;
+
+function rememberDoneOutcome(scan, name) {
+  scan.done.delete(name);
+  scan.done.add(name);
+  if (scan.done.size > OUTCOME_DONE_CACHE_LIMIT) {
+    scan.done.delete(scan.done.values().next().value);
+  }
+}
+const OUTCOME_MAX_ATTEMPTS = 5;
+const OUTCOME_MAX_AGE_MS = 24 * 60 * 60_000;
+const PR_GONE_CODES = new Set(['operator-merged-pr', 'operator-closed-pr']);
+const JOB_STATUS_DIRS = ['pending', 'in-progress', 'completed', 'failed', 'stopped', 'stopped-archived'];
+const HEAD_MOVED_CODES = new Set(['stale-review-head', 'revision-superseded', 'newer-review-pending']);
+const ROUND_CAP_CODES = new Set(['max-rounds-reached', 'round-budget-exhausted']);
+
+export function resolveRetriggerOutcomeTimeoutMs(env = process.env) {
+  const configured = Number(env?.[RETRIGGER_OUTCOME_TIMEOUT_ENV]);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_RETRIGGER_OUTCOME_TIMEOUT_MS;
+}
+
+function findFollowUpJobByFile(rootDir, jobPath) {
+  const name = jobPath ? basename(jobPath) : '';
+  if (!name) return null;
+  for (const dir of JOB_STATUS_DIRS) {
+    const candidate = join(rootDir, 'data', 'follow-up-jobs', dir, name);
+    try {
+      return JSON.parse(readFileSync(candidate, 'utf8'));
+    } catch (err) {
+      // Only an absent record is evidence to try the next status directory.
+      if (err?.code !== 'ENOENT') throw err;
+    }
+  }
+  return null;
+}
+
+function firstSpawnSince(job, sinceMs) {
+  const spawns = [job?.remediationWorker?.spawnedAt, ...(job?.remediationPlan?.rounds || []).map((round) => round?.spawnedAt)]
+    .map((value) => Date.parse(value || ''))
+    .filter((ms) => Number.isFinite(ms) && ms >= sinceMs)
+    .sort((a, b) => a - b);
+  return spawns.length ? new Date(spawns[0]).toISOString() : null;
+}
+
+function closerLeaseHeldFor(rootDir, job, now) {
+  try {
+    const held = findLiveAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber });
+    return Boolean(held && isHeldAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber, headSha: held.headSha }, { now }));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What happened to the job an accepted retrigger re-armed: either a worker was
+ * spawned for it after `consumedAt`, or the code that kept one from starting.
+ */
+export function classifyRetriggerOutcome({ rootDir, job, consumedAt, now }) {
+  if (!job) return { spawned: false, code: 'job-not-found', detail: 'the requeued follow-up job record is gone' };
+  const spawnedAt = firstSpawnSince(job, Date.parse(consumedAt));
+  if (spawnedAt) return { spawned: true, spawnedAt };
+  const plan = job.remediationPlan || {};
+  if (job.status === 'stopped') {
+    return { spawned: false, code: plan.stop?.code || 'stopped', detail: plan.stop?.reason || null, status: 'stopped' };
+  }
+  if (job.status === 'failed') {
+    return { spawned: false, code: job.failure?.code || 'failed', detail: job.failure?.message || null, status: 'failed' };
+  }
+  if (job.status === 'completed') return { spawned: false, code: 'completed-without-worker', detail: null, status: 'completed' };
+  if (job.status === 'in_progress') return { spawned: false, code: 'claimed-not-spawned', detail: null, status: 'in_progress' };
+  const retryAfterMs = Date.parse(plan.retryAfter || '');
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > Date.parse(now)) {
+    const lastRetry = (plan.retryHistory || []).at(-1)?.retryMetadata || {};
+    return {
+      spawned: false,
+      code: lastRetry.code || job.lastWorkflowPushPreflightFailure?.code || 'retry-scheduled',
+      detail: `next attempt after ${plan.retryAfter}`,
+      status: 'pending',
+    };
+  }
+  if (closerLeaseHeldFor(rootDir, job, now)) {
+    return { spawned: false, code: 'closer-lease-held', detail: 'the AMA closer (hammer) holds this PR', status: 'pending' };
+  }
+  return { spawned: false, code: 'not-yet-claimed', detail: null, status: 'pending' };
+}
+
+function retriggerOutcomeNextStep({ code, status, retriggerable }) {
+  if (code === 'job-not-found') {
+    return 'The requeued job record is missing. Apply `retrigger-remediation` again to generate a new job record.';
+  }
+  if (code === 'closer-lease-held') {
+    return 'The hammer (AMA closer) owns this PR right now and remediation waits for its lease to end. It owns merge-conflict resolution too. If the lease does not end, check the closer dispatch for this PR.';
+  }
+  if (ROUND_CAP_CODES.has(code)) {
+    return 'The remediation round budget is spent, so the round-cap hammer handoff owns the final close. Apply `retrigger-remediation` again to grant one more round.';
+  }
+  if (HEAD_MOVED_CODES.has(code)) {
+    return 'The PR head moved after the review this job answers. Apply `retrigger-review` for a fresh review of the current head; remediation follows it.';
+  }
+  if (code === 'hq-conflicted-base-unsupported') {
+    return 'The PR has merge conflicts and the installed `hq dispatch` could not pass `--allow-conflicted-base`. Check or upgrade agent-os hq, then apply `retrigger-remediation`.';
+  }
+  if (status === 'failed') {
+    return 'The dispatch failed before a worker started. Inspect the job under `data/follow-up-jobs/failed/` and the follow-up daemon log, fix the cause, then apply `retrigger-remediation`.';
+  }
+  if (status === 'stopped') {
+    return retriggerable
+      ? 'Fix the cause named above, then apply `retrigger-remediation` again.'
+      : 'This stop is not retriggerable from the label; clear the operator hold it names before retriggering.';
+  }
+  return 'The job is queued but the remediation daemon has not started a worker (capacity, an active job on this PR, a scheduled retry, or the daemon is down). Check the follow-up daemon; the job will start when it is claimed.';
+}
+
+function buildRetriggerOutcomeCommentBody({ marker, report, timeoutMinutes }) {
+  const detail = report.detail ? sanitizeAckCommentText(report.detail, 400) : null;
+  const lines = [
+    `<!-- ${marker} -->`,
+    '### Remediation retrigger did not start a worker',
+    '',
+    `The \`${RETRIGGER_REMEDIATION_LABEL}\` label was accepted at ${report.consumedAt}, but no remediation worker had started for the requeued job ${timeoutMinutes} minutes later.`,
+    '',
+    `- Refusal: \`${sanitizeAckCommentText(report.code, 120)}\`${detail ? ` (${detail})` : ''}`,
+    `- Job state: \`${report.status || 'unknown'}\``,
+    '',
+    `Next: ${report.nextStep}`,
+  ];
+  return lines.join('\n');
+}
+
+export async function reportStalledRetriggerOutcomes({
+  rootDir,
+  execFileImpl,
+  auditRootDir = rootDir,
+  appendAuditRow = appendOperatorMutationAuditRow,
+  now = () => new Date().toISOString(),
+  env = process.env,
+  timeoutMs = resolveRetriggerOutcomeTimeoutMs(env),
+  budget = OUTCOME_SWEEP_BUDGET_PER_TICK,
+  logger = console,
+} = {}) {
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'label-consumptions');
+  let scan = outcomeScans.get(dir);
+  if (!scan) {
+    scan = { iterator: null, done: new Set() };
+    outcomeScans.set(dir, scan);
+  }
+  if (!scan.iterator && budget > 0) {
+    try {
+      scan.iterator = (await opendir(dir, { bufferSize: OUTCOME_SWEEP_BUDGET_PER_TICK }))[Symbol.asyncIterator]();
+    } catch (err) {
+      if (err?.code === 'ENOENT') return { checked: 0, spawned: 0, reported: 0 };
+      throw err;
+    }
+  }
+  let checked = 0;
+  let spawned = 0;
+  let reported = 0;
+  for (let scanned = 0; scanned < budget; scanned += 1) {
+    const entry = await scan.iterator.next();
+    if (entry.done) {
+      scan.iterator = null;
+      break;
+    }
+    const name = entry.value.name;
+    if (!name.endsWith('.json') || scan.done.has(name)) continue;
+    let consumption;
+    try {
+      consumption = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+    } catch {
+      continue;
+    }
+    const outcome = consumption?.outcomeReport || null;
+    if (outcome?.done === true) rememberDoneOutcome(scan, name);
+    if (
+      consumption?.label !== RETRIGGER_REMEDIATION_LABEL
+      || consumption?.auditStatus !== 'written'
+      || consumption?.auditRow?.outcome !== 'bumped-and-requeued'
+      || !consumption?.jobPath
+      || outcome?.done === true
+      || Number(outcome?.attempts || 0) >= OUTCOME_MAX_ATTEMPTS
+    ) {
+      continue;
+    }
+    const at = now();
+    const consumedAtMs = Date.parse(consumption.consumedAt || '');
+    const ageMs = Date.parse(at) - consumedAtMs;
+    if (!Number.isFinite(consumedAtMs) || ageMs < timeoutMs || ageMs > OUTCOME_MAX_AGE_MS + timeoutMs) continue;
+    checked += 1;
+    const write = (next) => {
+      writeLabelConsumption(rootDir, consumption.labelEventKey, { ...consumption, outcomeReport: next });
+      if (next.done === true) rememberDoneOutcome(scan, name);
+    };
+
+    if (!outcome?.code) {
+      const job = findFollowUpJobByFile(rootDir, consumption.jobPath);
+      const classified = classifyRetriggerOutcome({ rootDir, job, consumedAt: consumption.consumedAt, now: at });
+      if (classified.spawned) {
+        spawned += 1;
+        write({ done: true, state: 'spawned', spawnedAt: classified.spawnedAt, checkedAt: at });
+        continue;
+      }
+      if (PR_GONE_CODES.has(classified.code)) {
+        write({ done: true, state: 'pr-gone', code: classified.code, checkedAt: at });
+        continue;
+      }
+      // Freeze what is reported, so a retried post says the same thing.
+      const report = {
+        state: 'reporting',
+        code: classified.code,
+        detail: classified.detail ? sanitizeAckCommentText(classified.detail, 400) : null,
+        status: classified.status || null,
+        consumedAt: consumption.consumedAt,
+        nextStep: retriggerOutcomeNextStep({
+          ...classified,
+          retriggerable: Boolean(job && isRetriggerableStoppedFollowUpJob(job)),
+        }),
+        jobId: job?.jobId || null,
+        classifiedAt: at,
+        audited: false,
+        attempts: 0,
+      };
+      consumption.outcomeReport = report;
+      write(report);
+    }
+    const report = consumption.outcomeReport;
+    const repo = consumption.repo;
+    const prNumber = consumption.prNumber;
+    const revisionRef = normalizeRevisionRef(consumption.auditRow?.revisionRef || consumption.ackComment?.context?.revisionRef);
+    if (!report.audited) {
+      try {
+        appendAuditRow(auditRootDir, {
+          ts: at,
+          verb: VERB,
+          repo,
+          pr: prNumber,
+          revisionRef,
+          reason: consumption.auditRow?.reason || DEFAULT_REASON,
+          operator: 'system:retrigger-outcome-watch',
+          jobKey: consumption.auditRow?.jobKey || null,
+          idempotencyKey: `${consumption.idempotencyKey}:outcome`,
+          source: 'retrigger-outcome-watch',
+          labelEventKey: consumption.labelEventKey,
+          refusalCode: report.code,
+          jobStatus: report.status,
+          outcome: 'retrigger-not-actioned',
+        });
+        report.audited = true;
+        write(report);
+      } catch (err) {
+        logger?.error?.(`[retrigger-remediation-label] outcome audit append failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      }
+    }
+    const marker = `${OUTCOME_COMMENT_MARKER_PREFIX}:${digestSha256(consumption.labelEventKey).replace(/^sha256:/, '')}`;
+    let posted;
+    const existing = await findExistingAckComment({ repo, prNumber, marker, execFileImpl });
+    if (existing.found) {
+      posted = { posted: true, deduped: true, commentId: existing.commentId ?? null };
+    } else if (!revisionRef) {
+      posted = { posted: false, reason: 'missing-revision-ref' };
+    } else {
+      try {
+        const receipt = await deliverRetriggerOperatorNotice({
+          rootDir,
+          repo,
+          prNumber,
+          execFileImpl,
+          revisionRef,
+          noticeRef: `${consumption.labelEventKey}:outcome`,
+          type: 'retrigger-outcome',
+          round: 0,
+          reason: `retrigger outcome: ${report.code}`,
+          body: buildRetriggerOutcomeCommentBody({ marker, report, timeoutMinutes: Math.round(timeoutMs / 60_000) }),
+        });
+        posted = { posted: true, commentId: receipt.deliveryExternalId };
+      } catch (err) {
+        posted = { posted: false, reason: err?.killed === true ? 'gh-cli-timeout' : 'gh-cli-failure', error: err?.message || String(err) };
+      }
+    }
+    const attempts = Number(report.attempts || 0) + 1;
+    if (posted.posted) {
+      reported += 1;
+      write({ ...report, done: true, state: 'reported', reportedAt: at, attempts, commentId: posted.commentId ?? null });
+      logger?.log?.(`[retrigger-remediation-label] ${repo}#${prNumber}: accepted retrigger did not start a worker; reported ${report.code}`);
+    } else {
+      write({ ...report, attempts, lastError: posted.error || posted.reason, attemptedAt: at });
+    }
+  }
+  return { checked, spawned, reported };
 }
 
 export async function tryRetriggerRemediationFromLabel({

@@ -145,6 +145,10 @@ const RETRIGGERABLE_STOP_CODES = Object.freeze([
   // durable stop state. That reclamation is a transient recovery path,
   // so the normal operator retrigger surfaces must be able to requeue it.
   'stale-heartbeat',
+  // REMCONFLICT-01: a CONFLICTING PR whose installed hq dispatch lacks
+  // --allow-conflicted-base. Nothing was spawned; once hq is upgraded the
+  // operator's retrigger dispatches with the flag.
+  'hq-conflicted-base-unsupported',
   //
   // Intentionally NOT retriggerable — listed exhaustively per round-1
   // review N3 so a future contributor doesn't misread the asymmetry as
@@ -2629,6 +2633,7 @@ function claimNextFollowUpJob({
           type: 'worker-spawn',
           round: nextRoundNumber,
           operatorVisibility: 'explicit',
+          ...(job.remediationPlan?.nextAction?.operatorOverride === true ? { operatorOverride: true } : {}),
         },
         rounds: [
           ...(job?.remediationPlan?.rounds || []),

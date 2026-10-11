@@ -193,6 +193,7 @@ test('retrigger-remediation requeues stopped:review-settled jobs for explicit op
     type: 'worker-spawn',
     round: 2,
     operatorVisibility: 'explicit',
+    operatorOverride: true,
   });
 });
 

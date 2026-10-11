@@ -23,7 +23,9 @@ import {
 import {
   _resetHammerStopHoldPageDebounceForTests,
   changedHammerStopInputs,
+  evaluateHammerStopHold,
   hammerStopInputs,
+  hammerStopPrIsConflicting,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from '../src/ama/hammer-stop-hold.mjs';
@@ -569,7 +571,10 @@ test('Case 3: after a hammer no-merge on its own closer head the closer holds an
     repo: AOS, prNumber: 8022, reviewedSha: REVIEWED_8022, headSha: CLOSER_8022,
     reviewState: { verdict: 'comment-only' },
     prMetadata: {
-      mergeableState: 'CONFLICTING',
+      // 8022 was CONFLICTING on 2026-10-10; REMCONFLICT-01 never holds a
+      // conflicting PR (the REMCONFLICT-01 cases below). This case pins the hold
+      // for the non-conflict stop it still owns.
+      mergeableState: 'MERGEABLE',
       baseSha,
       statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }],
     },
@@ -592,6 +597,74 @@ test('Case 3: after a hammer no-merge on its own closer head the closer holds an
   const result = await maybeDispatchAmaCloser({ ...args('2026-10-10T21:00:00Z', 'ffee00112233'), ...released });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(hqLaunches(released).length, 1);
+});
+
+// REMCONFLICT-01 (SEV1): on 2026-10-10 PR 8022 was CONFLICTING and sat in this
+// hold. The only input change that helps a conflicting PR is a rebase, and the
+// hold was stopping the hammer, which owns merge-conflict resolution.
+test('REMCONFLICT-01: a CONFLICTING PR is never held; the closer re-dispatches the hammer without a hold page', async (t) => {
+  _resetHammerStopHoldPageDebounceForTests();
+  const rootDir = tmpRoot(t, 'remconflict-hold-');
+  writeAmaAuditEntry({
+    hqRoot: join(rootDir, 'hq-root'), repo: AOS, prNumber: 8022, headSha: CLOSER_8022, now: '2026-10-10T18:28:31Z',
+    attempt: {
+      outcome: 'failed-without-merge',
+      reason: 'unmerged-subrepo-parity-fix',
+      reviewedHead: REVIEWED_8022,
+      currentHead: CLOSER_8022,
+      closingStatus: 'HAM closing status — no merge. The fix lives in laceyenterprises/podium PR 15.',
+    },
+  });
+  const alerts = [];
+  const deps = closerDeps({ alerts });
+  const result = await maybeDispatchAmaCloser({
+    ...closerArgs(rootDir, {
+      repo: AOS, prNumber: 8022, reviewedSha: REVIEWED_8022, headSha: CLOSER_8022,
+      reviewState: { verdict: 'comment-only' },
+      prMetadata: {
+        mergeableState: 'CONFLICTING',
+        baseSha: '12badc0823fa',
+        statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      },
+      dispatchContext: { dispatchedAt: '2026-10-10T20:39:00Z', liveHeadCloserAuthored: true, dispatchRecordHeadSha: REVIEWED_8022 },
+    }),
+    ...deps,
+  });
+  assert.notEqual(result.reason, HAMMER_STOP_HOLD_REASON, JSON.stringify(result));
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(hqLaunches(deps).length, 1, 'the conflict owner runs');
+  assert.equal(alerts.filter((alert) => alert.options.event === 'ama_closer.hammer_stop_hold').length, 0,
+    'no "no further hammer run" page for a stop the hammer can fix');
+  const state = JSON.parse(readFileSync(
+    join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold', 'laceyenterprises-agent-os-pr-8022.json'), 'utf8'));
+  assert.deepEqual(state.heads[CLOSER_8022].releasedBy, ['conflicting']);
+});
+
+test('REMCONFLICT-01: the hold releases a conflicting stop (CONFLICTING or DIRTY) and still holds every non-conflict stop', async (t) => {
+  const stopDoc = { attempts: [{ outcome: 'failed-without-merge', reason: 'ci-not-green', head: PODIUM_HEAD, startedAt: '2026-10-10T19:25:52Z' }] };
+  const evaluate = (rootDir, prMetadata, now) => evaluateHammerStopHold({
+    rootDir, hqRoot: '/fixture', repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
+    prMetadata: { headSha: PODIUM_HEAD, baseSha: 'base-0', statusCheckRollup: [], ...prMetadata },
+    readAuditImpl: () => stopDoc, logger: SILENT, now,
+  });
+  for (const mergeableState of ['MERGEABLE', 'UNKNOWN', 'BLOCKED', '']) {
+    _resetHammerStopHoldPageDebounceForTests();
+    const rootDir = tmpRoot(t, 'remconflict-hold-nonconflict-');
+    assert.equal((await evaluate(rootDir, { mergeableState }, '2026-10-10T19:30:00Z')).action, 'hold', mergeableState);
+    assert.equal((await evaluate(rootDir, { mergeableState }, '2026-10-10T19:40:00Z')).action, 'hold', `${mergeableState}: next tick`);
+  }
+  for (const prMetadata of [{ mergeableState: 'CONFLICTING' }, { mergeableState: 'DIRTY' }, { mergeable: 'CONFLICTING' }]) {
+    const rootDir = tmpRoot(t, 'remconflict-hold-conflict-');
+    const decision = await evaluate(rootDir, prMetadata, '2026-10-10T19:30:00Z');
+    assert.equal(decision.action, 'release', JSON.stringify(prMetadata));
+    assert.deepEqual(decision.changed, ['conflicting']);
+  }
+  // A hold armed while mergeable releases once the PR becomes conflicting.
+  _resetHammerStopHoldPageDebounceForTests();
+  const rootDir = tmpRoot(t, 'remconflict-hold-turns-');
+  assert.equal((await evaluate(rootDir, { mergeableState: 'MERGEABLE' }, '2026-10-10T19:30:00Z')).action, 'hold');
+  assert.equal((await evaluate(rootDir, { mergeableState: 'DIRTY' }, '2026-10-10T19:45:00Z')).action, 'release');
+  assert.equal(hammerStopPrIsConflicting({ mergeableState: 'MERGEABLE', mergeStateStatus: 'BEHIND' }), false);
 });
 
 test('Case 3: a stale review on a worker-pushed head is not held; the exact-head re-review stays its owner', async (t) => {

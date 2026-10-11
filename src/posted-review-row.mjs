@@ -43,7 +43,7 @@ import { retryPendingMergeAgentLifecycleCleanups } from './merge-agent-lifecycle
 import { retryPendingCloserCancels } from './ama/closer-terminal-cancel.mjs';
 import { retryPendingDagAutowalkOnMerge } from './dag-autowalk-on-merge.mjs';
 import { retryPendingTriageSyncs } from './pending-triage-sync.mjs';
-import { retryPendingRetriggerAckComments } from './follow-up-retrigger-label.mjs';
+import { reportStalledRetriggerOutcomes, retryPendingRetriggerAckComments } from './follow-up-retrigger-label.mjs';
 import { retryPendingRetriggerReviewAckComments } from './follow-up-retrigger-review-label.mjs';
 import { db, stmtGetLatestPostedReviewBody, stmtGetReviewRow } from './review-state-db.mjs';
 import { rereviewWakeBacklog, sweepRereviewWakeQueue } from './rereview-wake.mjs';
@@ -1049,6 +1049,7 @@ export async function runQueuedReviewAdoptionPhase({
   retryPendingTriageSyncsImpl = retryPendingTriageSyncs,
   retryPendingMergeCloseoutsImpl = retryPendingMergeCloseouts,
   retryPendingRetriggerAckCommentsImpl = retryPendingRetriggerAckComments,
+  reportStalledRetriggerOutcomesImpl = reportStalledRetriggerOutcomes,
   retryPendingRetriggerReviewAckCommentsImpl = retryPendingRetriggerReviewAckComments,
   rootDir = ROOT,
   execFileImpl = execFileAsync,
@@ -1208,6 +1209,20 @@ export async function runQueuedReviewAdoptionPhase({
     }
   } catch (err) {
     logger.error('[watcher] retrigger-remediation ack retry failed:', err?.message || err);
+  }
+
+  // REMCONFLICT-01: an accepted retrigger that has not started a worker within
+  // the outcome timeout gets one comment naming the refusal.
+  try {
+    const outcomes = await reportStalledRetriggerOutcomesImpl({ rootDir, execFileImpl, logger });
+    if (outcomes.checked > 0) {
+      logger.log(
+        `[watcher] retrigger-remediation outcome watch: checked=${outcomes.checked} `
+        + `spawned=${outcomes.spawned} reported=${outcomes.reported}`
+      );
+    }
+  } catch (err) {
+    logger.error('[watcher] retrigger-remediation outcome watch failed:', err?.message || err);
   }
 
   try {

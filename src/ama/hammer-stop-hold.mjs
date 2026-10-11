@@ -28,12 +28,25 @@
 // ordinary gates, lease and per-PR retry cap decide the one re-dispatch. A new
 // no-merge on the same head starts a new hold. The page is sent once per head.
 //
+// REMCONFLICT-01 (SEV1, 2026-10-10): the hold never holds a CONFLICTING PR.
+// Operator: "What am I supposed to do with PRs that have merge conflicts? I
+// can't resolve them myself". On a conflicting PR the only input change that
+// helps is a rebase, and the hammer is the component that owns merge-conflict
+// resolution (templates/hammer-prompt.md). Holding it until the input changes
+// deadlocked agent-os PRs 8022 and 8017. So while GitHub reports a merge
+// conflict (mergeable CONFLICTING, or mergeStateStatus DIRTY) the stop
+// releases with `changed: ['conflicting']`, does not page, and the closer's
+// ordinary gates, lease and per-PR retry cap decide the re-dispatch. Every
+// non-conflict stop keeps the rule above: a stop the hammer cannot fix does not
+// spend another hammer attempt.
+//
 // State: data/follow-up-jobs/hammer-stop-hold/<repo>-pr-<n>.json, per head.
 
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { checkItemState, isAdversarialOwnStatusContext, latestCheckRollupItems } from '../checks-summary.mjs';
+import { isGithubMergeConflict } from '../github-mergeability.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
 
 export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
@@ -194,6 +207,19 @@ export function hammerStopInputs(prMetadata, { excludeContexts = [] } = {}) {
   };
 }
 
+/**
+ * REMCONFLICT-01: whether the live PR has a merge conflict, the one stop the
+ * hammer owns. Closer metadata carries the classified `mergeableState`
+ * (CONFLICTING, or DIRTY when `mergeable` was empty); raw fields win when set.
+ */
+export function hammerStopPrIsConflicting(prMetadata) {
+  const state = String(prMetadata?.mergeableState || '').trim().toUpperCase();
+  return isGithubMergeConflict({
+    mergeable: prMetadata?.mergeable || state,
+    mergeStateStatus: prMetadata?.mergeStateStatus || state,
+  });
+}
+
 // A missing current reading is not evidence of change; a newly available
 // reading does release a hold whose previous observation was unknown (null).
 export function changedHammerStopInputs(previous, current) {
@@ -250,6 +276,7 @@ export async function evaluateHammerStopHold({
   let dirty = !prior || prior.stopKey !== stop.stopKey;
   if (!entry.releasedAt) {
     const changed = changedHammerStopInputs(entry.inputs, inputs);
+    if (changed.length === 0 && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
     if (changed.length > 0) {
       entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };
       dirty = true;

@@ -27,6 +27,21 @@ Automatic failed-CI admission leaves a stopped `no-progress` job stopped and
 hands ownership to the hammer; it cannot reopen that job on a later CI probe.
 Explicit operator remediation retriggers retain their existing allowlist.
 
+## Conflicted-base probe retries (REMCONFLICT-01)
+
+A transient `hq dispatch --help` failure before spawn reuses the existing
+`remediationPlan.transientRetries`, `retryAfter`, and `retryHistory[]` fields.
+The retry history's `retryMetadata` contains
+`{ code: "hq-conflicted-base-probe-transient", recoverable: true }`, and
+`retryReason` retains the subprocess diagnostic. The claimed round is removed
+and `currentRound` decremented so the next claim retries the same round.
+`nextAction.operatorOverride=true` is retained on the claim's `worker-spawn`
+action and restored on the retry's `consume-pending-round` action when the
+pending job carried it. Successful spawn replaces that action normally.
+The shared transient retry limit applies; exhaustion records
+`failure.code="hq-conflicted-base-probe-retries-exhausted"` with the original
+error message and `remediationWorker.state="never-spawned"`.
+
 ## Native workflow publication evidence (WFDRIFT-01)
 
 `operationalBlockerRecovery` records `{ category: "github-auth", classification,

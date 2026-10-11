@@ -1,700 +1,190 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Database from 'better-sqlite3';
-import { createHash } from 'node:crypto';
-import { amaCloserLeaseFilePath } from '../src/ama/closer-lease.mjs';
-import { recoverOrphan, hasOrphanOwner, orphanDispatchReasonsCovered, probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
+import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS } from '../src/ama/orphan-watchdog.mjs';
 
-function setup(t, pr = 7707) {
-  const rootDir = mkdtempSync(join(tmpdir(), 'remorphan-'));
+function setup(t) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ownerproof-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const fixture = JSON.parse(readFileSync(new URL(`./fixtures/remorphan/${pr}.json`, import.meta.url)));
-  const calls = { dispatch: [], pages: [], reviews: [] };
-  const args = { ...fixture, rootDir, repo: 'example/repo', headSha: 'current-head',
-    candidate: { prState: 'open', headSha: 'current-head' }, reviewStateRow: { review_status: 'posted' },
-    hasOwnerImpl: async () => false,
-    closerHeadImpl: async () => true,
-    dispatchHammer: async evidence => { calls.dispatch.push(evidence); return { dispatched: true }; },
+  const calls = { launches: [], reviews: [], pages: [], logs: [] };
+  const args = { rootDir, repo: 'example/repo', prNumber: 8086, headSha: 'current',
+    candidate: { prState: 'open', headSha: 'current' }, labels: [],
+    result: { amaEnabled: true, reason: 'lease-held' },
+    reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'current' },
+    hasOwnerImpl: async () => ({ owned: false }),
+    dispatchHammer: async evidence => { calls.launches.push(evidence); return { dispatched: true, reason: 'launched' }; },
+    requestRereviewImpl: async evidence => { calls.reviews.push(evidence); return { triggered: true, reason: 'requested' }; },
     pageImpl: async (...page) => calls.pages.push(page),
-    requestRereviewImpl: async request => { calls.reviews.push(request); return { triggered: true }; } };
-  return { args, calls, tick: overrides => recoverOrphan({ ...args, ...overrides }) };
-}
-for (const pr of [7707, 7716, 7704]) test(`#${pr} replay waits six observations and launches one HAM`, async t => {
-  const { tick, calls } = setup(t, pr);
-  for (let i = 0; i < 5; i++) { await tick(); assert.equal(calls.dispatch.length, 0); }
-  assert.equal((await tick()).outcome, 'ama-dispatched');
-  assert.equal(calls.dispatch.length, 1);
-  assert.equal(calls.dispatch[0].primaryRepair, pr === 7716);
-  assert.equal(calls.dispatch[0].closerHead, pr === 7704);
-  await tick({ hasOwnerImpl: async () => true });
-  assert.equal(calls.dispatch.length, 1);
-});
-for (const owner of ['remediator', 'closer', 'merge-agent', 'reviewer']) test(`live ${owner} resets consecutive ticks`, async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 5; i++) await tick();
-  await tick({ hasOwnerImpl: async () => true });
-  for (let i = 0; i < 5; i++) await tick();
-  assert.equal(calls.dispatch.length, 0);
-});
-for (const label of ['do-not-merge', 'no-merge-hold', 'merge-agent-skip']) test(`${label} forbids dispatch`, async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 8; i++) await tick({ labels: [label] });
-  assert.equal(calls.dispatch.length, 0);
-});
-test('two failed attempts exhaust durably and page once with evidence', async t => {
-  const { tick, calls } = setup(t);
-  const failure = { dispatchHammer: async () => { calls.dispatch.push('failed'); return { dispatched: false, reason: 'failed' }; } };
-  for (let i = 0; i < 25; i++) await tick(failure);
-  assert.equal(calls.dispatch.length, 2);
-  assert.equal(calls.pages.length, 1);
-  assert.equal(calls.pages[0][1].payload.attempts, 2);
-  assert.equal(calls.pages[0][1].payload.lastAttempt.reason, 'failed');
-});
-test('uncertifiable closer head retains bounded merge retries', async t => {
-  const { tick, calls } = setup(t, 7704);
-  for (let i = 0; i < 20; i++) await tick({ dispatchHammer: async () => ({ dispatched: false, reason: 'cannot-recertify' }) });
-  assert.equal(calls.reviews.length, 0);
-});
-test('stranded closer does not request an already-pending review', async t => {
-  const { tick, calls } = setup(t, 7704);
-  for (let i = 0; i < 20; i++) await tick({
-    dispatchHammer: async () => ({ dispatched: false, reason: 'cannot-recertify' }),
-    requestRereviewImpl: async request => {
-      calls.reviews.push(request);
-      return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
-    },
-  });
-  assert.equal(calls.reviews.length, 0);
-});
-test('stopped HAM retries merge instead of requesting another review', async t => {
-  const { tick, calls } = setup(t, 7704);
-  for (let i = 0; i < 6; i++) await tick();
-  for (let i = 0; i < 20; i++) await tick({
-    requestRereviewImpl: async request => {
-      calls.reviews.push(request);
-      return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
-    },
-  });
-  assert.equal(calls.reviews.length, 0);
-});
-test('external stale head cannot enter orphan HAM route', async t => {
-  const { tick, calls } = setup(t, 7704);
-  for (let i = 0; i < 8; i++) await tick({ closerHeadImpl: async () => false });
-  assert.equal(calls.dispatch.length, 0);
-});
-for (const override of [{ candidate: { prState: 'closed' } }, { candidate: { prState: 'merged' } },
-  { candidate: { prState: 'open', isDraft: true } }, { result: { amaEnabled: true, reasons: ['security-hold'] } }]) {
-  test(`terminal/draft/safety state: ${JSON.stringify(override)}`, async t => {
-    const { tick, calls } = setup(t);
-    for (let i = 0; i < 8; i++) await tick(override);
-    assert.equal(calls.dispatch.length, 0);
-  });
-}
-test('cross-head closer and merge-agent ledger probes fail closed', async t => {
-  const { args } = setup(t);
-  for (const bucket of ['ama-closer-dispatches', 'merge-agent-dispatches']) {
-    const dir = join(args.rootDir, 'data', 'follow-up-jobs', bucket);
+    logger: { log: line => calls.logs.push(line), info() {}, warn() {} } };
+  const tick = (minutes, overrides = {}) => recoverOrphan({ ...args,
+    now: new Date(Date.UTC(2026, 9, 11, 16, minutes)).toISOString(), ...overrides });
+  const record = (bucket, value) => {
+    const dir = join(rootDir, 'data', 'follow-up-jobs', bucket);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'example__repo-pr-7707-old.json'), JSON.stringify({ repo: args.repo, prNumber: args.prNumber,
-      headSha: 'older-head', launchRequestId: 'lrq-live' }));
-    assert.equal(await hasOrphanOwner({ ...args, readStatusImpl: async () => ({ ok: true, row: { status: 'running' } }) }), true);
-    assert.equal(await hasOrphanOwner({ ...args, readStatusImpl: async () => ({ ok: false }) }), true);
-    rmSync(dir, { recursive: true });
-  }
-});
-test('pending remediation job and reviewer queue retain ownership', async t => {
-  const { args } = setup(t);
-  assert.equal(await hasOrphanOwner({ ...args, reviewStateRow: { review_status: 'reviewing' } }), true);
-  const dir = join(args.rootDir, 'data', 'follow-up-jobs', 'pending');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'job.json'), JSON.stringify({ repo: args.repo, prNumber: args.prNumber }));
-  assert.equal(await hasOrphanOwner(args), true);
-});
-test('concurrent observers serialize dispatch and restart preserves attempt budget', async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 5; i++) await tick();
-  await Promise.all([tick(), tick(), tick()]);
-  assert.equal(calls.dispatch.length, 1);
-});
-
-test('watcher coexistence invokes orphan recovery on sixth tick', async t => {
-  const { resolveMergeAgentCoexistenceForWatcher } = await import('../src/ama-closure-orchestration.mjs');
-  for (const pr of [7707, 7716, 7704]) {
-    const { args, calls } = setup(t, pr);
-    const input = { rootDir: args.rootDir, repoPath: args.repo, prNumber: pr,
-      candidate: args.candidate, currentRevisionRef: args.headSha,
-      reviewStateRow: args.reviewStateRow, dispatchJob: args.dispatchJob,
-      maybeDispatchAmaClosureForImpl: async options => {
-        if (options.orphanRecovery) { calls.dispatch.push(options.orphanRecovery); return { dispatched: true }; }
-        return args.result;
-      },
-      orphanOptions: { hasOwnerImpl: args.hasOwnerImpl, closerHeadImpl: args.closerHeadImpl,
-        pageImpl: args.pageImpl, requestRereviewImpl: args.requestRereviewImpl },
-      logger: { info() {}, warn() {} } };
-    for (let i = 0; i < 5; i++) await resolveMergeAgentCoexistenceForWatcher(input);
-    assert.equal(calls.dispatch.length, 0);
-    assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'ama-dispatched');
-    assert.equal(calls.dispatch.length, 1);
-  }
-});
-test('head change resets tick streak and never refunds a previous head budget', async t => {
-  const { tick, calls } = setup(t);
-  const fail = { dispatchHammer: async () => { calls.dispatch.push('failed'); return { dispatched: false }; } };
-  for (let i = 0; i < 12; i++) await tick(fail);
-  await tick({ ...fail, headSha: 'new-head', candidate: { prState: 'open', headSha: 'new-head' } });
-  await tick(fail);
-  assert.equal(calls.dispatch.length, 2);
-  assert.equal(calls.pages.length, 1);
-});
-test('exhaustion still pages when ordinary HAM retry cap takes over', async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 12; i++) await tick({ dispatchHammer: async () => ({ dispatched: false }) });
-  await tick({ result: { amaEnabled: true, reason: 'dispatch-retry-exhausted' } });
-  assert.equal(calls.pages.length, 1);
-});
-test('page enqueue failure retries delivery without another HAM', async t => {
-  const { args, tick, calls } = setup(t);
-  for (let i = 0; i < 12; i++) await tick({ dispatchHammer: async () => { calls.dispatch.push('failed'); return { dispatched: false }; } });
-  await tick({ pageImpl: async () => { throw new Error('outbox unavailable'); }, logger: { warn() {} } });
-  assert.equal(readWatchdog(args).pageError, 'outbox unavailable');
-  await tick();
-  await tick();
-  assert.equal(calls.pages.length, 1);
-  assert.equal(calls.dispatch.length, 2);
-});
-test('raced live-owner refusal refunds reserved attempt', async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 18; i++) await tick({ dispatchHammer: async () => ({ dispatched: false, reason: 'active-remediation-job' }) });
-  assert.equal(calls.pages.length, 0);
-  for (let i = 0; i < 6; i++) await tick();
-  assert.equal(calls.dispatch.length, 1);
-});
-test('terminal merge-agent ledger defeats stale dispatched label', async t => {
-  const { args } = setup(t);
-  const dir = join(args.rootDir, 'data', 'follow-up-jobs', 'merge-agent-dispatches');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'example__repo-pr-7707-old.json'), JSON.stringify({ repo: args.repo, prNumber: args.prNumber, launchRequestId: 'terminal-lrq' }));
-  assert.equal(await hasOrphanOwner({ ...args, labels: ['merge-agent-dispatched'],
-    readStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }) }), false);
-});
-
-function watchdogPath(args) {
-  const key = createHash('sha256').update(`${args.repo}#${args.prNumber}`).digest('hex');
-  return join(args.rootDir, 'data', 'follow-up-jobs', 'orphan-watchdog', `${key}.db`);
-}
-function readWatchdog(args) {
-  const db = new Database(watchdogPath(args));
-  try { return db.prepare('SELECT * FROM heads WHERE head=?').get(args.headSha); }
-  finally { db.close(); }
-}
-for (const dispatchJob of [
-  { remediationStopCode: 'operator-stop', remediationRound: 1, remediationPlan: { maxRounds: 2 } },
-  { remediationStopCode: 'unknown-stop', remediationRound: 1, remediationPlan: { maxRounds: 2 } },
-  {}, { remediationRound: 1 }, { remediationPlan: { currentRound: '', maxRounds: 2 } },
-]) test(`explicit stops and missing round budgets forbid orphan dispatch: ${JSON.stringify(dispatchJob)}`, async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 15; i++) assert.equal(await tick({ dispatchJob }), null);
-  assert.equal(calls.dispatch.length, 0);
-  assert.equal(calls.pages.length, 0);
-});
-test('an explicit persisted round below max remains eligible', async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 6; i++) await tick({ dispatchJob: { remediationPlan: { currentRound: 1, maxRounds: 2 } } });
-  assert.equal(calls.dispatch.length, 1);
-});
-test('proven pre-launch gate refusal refunds the reservation', async t => {
-  const { args, tick, calls } = setup(t);
-  for (let i = 0; i < 18; i++) await tick({ dispatchHammer: async () => ({ dispatched: false, reason: 'gate-read-failed' }) });
-  assert.equal(readWatchdog(args).attempts, 0);
-  assert.equal(readWatchdog(args).reserved, 0);
-  assert.equal(calls.pages.length, 0);
-});
-for (const failure of ['timeout', 'github-transient', 'abort']) test(`${failure} after launch retains the charged attempt`, async t => {
-  const { args, tick, calls } = setup(t);
-  for (let i = 0; i < 5; i++) await tick();
-  await tick({ dispatchHammer: async () => {
-    dispatchRecord(args, { dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z') });
-    throw Object.assign(new Error('launch accepted but follow-up failed'), failure === 'timeout'
-      ? { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' } : failure === 'abort' ? { name: 'AbortError' } : { code: 'ECONNRESET' });
-  } });
-  assert.equal(readWatchdog(args).attempts, 1);
-  assert.equal(readWatchdog(args).reserved, 1);
-  const probe = options => probeOrphanOwnership({ ...options,
-    readStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }) });
-  await tick({ hasOwnerImpl: probe });
-  assert.equal(readWatchdog(args).attempts, 1);
-  assert.equal(readWatchdog(args).reserved, 0);
-  assert.equal(calls.dispatch.length, 0);
-});
-test('signal abort after dispatch begins preserves reservation before propagating cancellation', async t => {
-  const { args, tick } = setup(t);
-  const controller = new AbortController();
-  for (let i = 0; i < 5; i++) await tick();
-  await assert.rejects(tick({ signal: controller.signal, dispatchHammer: async () => {
-    controller.abort(new Error('watcher bounce')); throw controller.signal.reason;
-  } }), /watcher bounce/);
-  assert.equal(readWatchdog(args).attempts, 1);
-  assert.equal(readWatchdog(args).reserved, 1);
-});
-test('signal abort before dispatch starts refunds without invoking HAM', async t => {
-  const { args, tick, calls } = setup(t);
-  const controller = new AbortController();
-  for (let i = 0; i < 5; i++) await tick();
-  await assert.rejects(tick({ signal: controller.signal, hasOwnerImpl: async () => {
-    controller.abort(new Error('watcher bounce')); return false;
-  } }), /watcher bounce/);
-  assert.equal(readWatchdog(args).attempts, 0);
-  assert.equal(readWatchdog(args).reserved, 0);
-  assert.equal(calls.dispatch.length, 0);
-});
-function dispatchRecord(args, record, bucket = 'ama-closer-dispatches', suffix = 'old') {
-  const dir = join(args.rootDir, 'data', 'follow-up-jobs', bucket);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `example__repo-pr-${args.prNumber}-${suffix}.json`), JSON.stringify({
-    repo: args.repo, prNumber: args.prNumber, headSha: args.headSha, state: 'dispatched', launchRequestId: 'lrq-old', ...record,
-  }));
-}
-for (const status of ['operator_triage_required', 'reaped_stuck_requested', 'reaped', 'completed', 'rejected']) {
-  test(`${status} is terminal ownership evidence`, async t => {
-    const { args, tick, calls } = setup(t);
-    dispatchRecord(args, {});
-    const probe = options => probeOrphanOwnership({ ...options, readStatusImpl: async () => ({ ok: true, row: { status } }) });
-    assert.equal(await hasOrphanOwner({ ...args, readStatusImpl: async () => ({ ok: true, row: { status } }) }), false);
-    for (let i = 0; i < 6; i++) await tick({ hasOwnerImpl: probe });
-    assert.equal(calls.dispatch.length, 1);
-  });
-}
-for (const kind of ['missing-row', 'corrupt-record', 'missing-id']) test(`${kind} ownership pages after six ticks without dispatch`, async t => {
-  const { args, tick, calls } = setup(t);
-  dispatchRecord(args, kind === 'missing-id' ? { launchRequestId: null } : {});
-  if (kind === 'corrupt-record') writeFileSync(join(args.rootDir, 'data/follow-up-jobs/ama-closer-dispatches', `example__repo-pr-${args.prNumber}-old.json`), '{bad');
-  const probe = options => probeOrphanOwnership({ ...options, readStatusImpl: async () => ({ ok: false, reason: 'missing-launch-request-row' }) });
-  for (let i = 0; i < 5; i++) await tick({ hasOwnerImpl: probe });
-  assert.equal(calls.pages.length, 0);
-  for (let i = 0; i < 5; i++) await tick({ hasOwnerImpl: probe });
-  assert.equal(calls.pages.length, 1);
-  assert.equal(calls.pages[0][1].event, 'ama.orphan_recovery.ownership-uncertain');
-  assert.equal(calls.dispatch.length, 0);
-  assert.equal(readWatchdog(args).attempts, 0);
-});
-test('terminal successor lease releases an unrepaired historical source record', async t => {
-  const { args } = setup(t);
-  dispatchRecord(args, { headSha: 'old-head' });
-  const dir = join(args.rootDir, 'data/ama-closer-leases');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `example__repo-pr-${args.prNumber}-successor.json`), JSON.stringify({
-    repo: args.repo, prNumber: args.prNumber, headSha: 'successor', status: 'terminal', supersededHeads: ['old-head'],
-  }));
-  assert.equal(await hasOrphanOwner({ ...args, readStatusImpl: () => { throw new Error('obsolete source must not probe'); } }), false);
-});
-test('fleet history is filtered before parsing or probing', async t => {
-  const { args } = setup(t);
-  dispatchRecord(args, {});
-  const dir = join(args.rootDir, 'data/follow-up-jobs/ama-closer-dispatches');
-  for (let i = 0; i < 100; i++) writeFileSync(join(dir, `other__repo-pr-${i}-old.json`), '{bad');
-  let probes = 0;
-  const ownership = await probeOrphanOwnership({ ...args, readStatusImpl: async () => {
-    probes++; return { ok: true, row: { status: 'failed' } };
-  } });
-  assert.equal(probes, 1);
-  assert.equal(ownership.uncertain, false);
-});
-for (const launched of [false, true]) test(`interrupted reservation reconciles ${launched ? 'launch evidence' : 'no launch'}`, async t => {
-  const { args, tick, calls } = setup(t);
-  await tick();
-  const db = new Database(watchdogPath(args));
-  db.prepare('UPDATE heads SET attempts=1,reserved=1,evidence=? WHERE head=?').run(JSON.stringify({
-    reservationStartedAt: '2026-10-04T00:00:00Z', reason: 'reserved-outcome-unknown',
-  }), args.headSha);
-  db.close();
-  if (launched) dispatchRecord(args, { dispatchedAt: '2026-10-04T00:01:00Z' });
-  await tick({ hasOwnerImpl: options => probeOrphanOwnership({ ...options,
-    readStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }) }) });
-  assert.equal(readWatchdog(args).reserved, 0);
-  assert.equal(readWatchdog(args).attempts, launched ? 1 : 0);
-  assert.equal(calls.dispatch.length, 0);
-});
-test('exhaustion payload contains bounded summaries without review bodies', async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 13; i++) await tick({
-    reviewStateRow: { review_status: 'posted', review_body: 'untrusted-review'.repeat(10000) },
-    dispatchHammer: async () => ({ dispatched: false, reason: 'failure', reviewBody: 'untrusted-worker'.repeat(10000) }),
-  });
-  const payload = calls.pages[0][1].payload;
-  assert.equal(payload.reviewStateRow, undefined);
-  assert.equal(payload.dispatchJob, undefined);
-  assert.equal(payload.result, undefined);
-  assert.ok(JSON.stringify(payload).length < 2000);
-});
-test('operator merge-agent request preempts watchdog recovery through exhaustion', async t => {
-  const { resolveMergeAgentCoexistenceForWatcher } = await import('../src/ama-closure-orchestration.mjs');
-  const { args, tick, calls } = setup(t, 7716);
-  for (let i = 0; i < 12; i++) await tick({ dispatchHammer: async () => ({ dispatched: false }) });
-  const input = { rootDir: args.rootDir, repoPath: args.repo, prNumber: args.prNumber,
-    candidate: args.candidate, currentRevisionRef: args.headSha, reviewStateRow: args.reviewStateRow,
-    dispatchJob: args.dispatchJob, labelNames: ['merge-agent-requested'],
-    mergeAgentRequestEvent: { id: 'event', headSha: args.headSha, actor: 'operator', createdAt: '2026-10-04T00:00:00Z' },
-    maybeDispatchAmaClosureForImpl: async () => ({ ...args.result, needsOperator: true, skipMergeAgent: true }),
-    recoverOrphanImpl: () => { throw new Error('operator request must bypass watchdog'); },
-    logger: { info() {}, warn() {}, log() {} },
+    writeFileSync(join(dir, 'example__repo-pr-8086-current.json'), JSON.stringify({ repo: args.repo, prNumber: args.prNumber, headSha: args.headSha, ...value }));
   };
-  for (let i = 0; i < 8; i++) assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'dispatch-merge-agent');
-  assert.equal(calls.dispatch.length, 0);
-  assert.equal(calls.pages.length, 0);
-});
-test('watchdog migrates legacy head rows without resetting their attempt budgets', async t => {
-  const { args, tick } = setup(t);
-  mkdirSync(join(args.rootDir, 'data/follow-up-jobs/orphan-watchdog'), { recursive: true });
-  const db = new Database(watchdogPath(args));
-  db.exec('CREATE TABLE heads (head TEXT PRIMARY KEY, ticks INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, paged INTEGER DEFAULT 0, rereview INTEGER DEFAULT 0, evidence TEXT)');
-  db.prepare('INSERT INTO heads(head,attempts) VALUES (?,2)').run(args.headSha);
-  db.close();
-  assert.equal((await tick()).outcome, 'recovery-exhausted');
-  assert.equal(readWatchdog(args).attempts, 2);
-  assert.equal(readWatchdog(args).reserved, 0);
-  assert.equal(readWatchdog(args).paged, 1);
-});
-test('synchronous ledger subprocess timeout honors the ownership budget', async t => {
-  const { args } = setup(t);
-  dispatchRecord(args, {});
-  const start = Date.now();
-  const ownership = await probeOrphanOwnership({ ...args, timeoutMs: 50,
-    readStatusImpl: ({ spawnSyncImpl }) => {
-      const child = spawnSyncImpl(process.execPath, ['-e', 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000)'],
-        { timeout: 30000, killSignal: 'SIGKILL' });
-      assert.equal(child.error?.code, 'ETIMEDOUT');
-      return { ok: false, reason: 'ledger-read-timeout' };
-    },
-  });
-  assert.equal(ownership.uncertain, true);
-  assert.ok(Date.now() - start < 1500, 'probe must not inherit the 30s ledger timeout');
-});
-test('coexistence ownership operation timeout holds dispatch and pages uncertainty', async t => {
-  const { resolveMergeAgentCoexistenceForWatcher } = await import('../src/ama-closure-orchestration.mjs');
-  const { args, calls } = setup(t);
-  const input = { rootDir: args.rootDir, repoPath: args.repo, prNumber: args.prNumber,
-    candidate: args.candidate, currentRevisionRef: args.headSha,
-    reviewStateRow: args.reviewStateRow, dispatchJob: args.dispatchJob, operationTimeoutMs: 5,
-    maybeDispatchAmaClosureForImpl: async () => args.result,
-    orphanOptions: { hasOwnerImpl: () => new Promise(() => {}), pageImpl: args.pageImpl },
-    logger: { info() {}, warn() {} } };
-  for (let i = 0; i < 6; i++) assert.equal((await resolveMergeAgentCoexistenceForWatcher(input)).outcome, 'ama-pending');
-  assert.equal(calls.pages.length, 1);
-  assert.equal(calls.dispatch.length, 0);
-});
-
-for (const head of ['old-head', 'current-head']) test(`stale dispatching on ${head} pages uncertainty and retains reservations`, async t => {
-  const { args, tick, calls } = setup(t, 7716);
-  await tick();
-  const db = new Database(watchdogPath(args));
-  db.prepare('UPDATE heads SET attempts=1,reserved=1,evidence=? WHERE head=?').run(JSON.stringify({
-    reservationStartedAt: '2026-10-04T00:00:00.123Z', reason: 'reserved-outcome-unknown',
-  }), args.headSha);
-  db.close();
-  dispatchRecord(args, { headSha: head, state: 'dispatching', launchRequestId: null, lastAttemptedAt: '2026-10-04T00:00:00Z' });
-  const leasePath = amaCloserLeaseFilePath(args.rootDir, { ...args, headSha: head });
-  mkdirSync(join(args.rootDir, 'data/ama-closer-leases'), { recursive: true });
-  writeFileSync(leasePath, JSON.stringify({ ...args, headSha: head, status: 'pending', watcherPid: 42,
-    acquiredAt: '2026-10-04T00:00:00Z' }));
-  const probe = options => probeOrphanOwnership({ ...options, now: '2026-10-04T01:00:00Z',
-    processKillImpl: () => { throw Object.assign(new Error('dead'), { code: 'ESRCH' }); },
-    readStatusImpl: () => { throw new Error('no launch id to probe'); } });
-  assert.equal((await probe(args)).owned, false);
-  for (let i = 0; i < 7; i++) await tick({ hasOwnerImpl: probe });
-  assert.equal(calls.dispatch.length, 0);
-  assert.equal(calls.pages.length, 1);
-  assert.equal(calls.pages[0][1].event, 'ama.orphan_recovery.ownership-uncertain');
-  assert.equal(readWatchdog(args).attempts, 1);
-  assert.equal(readWatchdog(args).reserved, 1);
-});
-for (const kind of ['live', 'dead-pid', 'expired', 'missing', 'corrupt']) test(`${kind} pending lease classifies dispatching ownership`, async t => {
-  const { args } = setup(t);
-  const now = '2026-10-04T01:00:00Z';
-  dispatchRecord(args, { state: 'dispatching', launchRequestId: null, lastAttemptedAt: now });
-  mkdirSync(join(args.rootDir, 'data/ama-closer-leases'), { recursive: true });
-  if (kind !== 'missing') writeFileSync(amaCloserLeaseFilePath(args.rootDir, args), kind === 'corrupt' ? '{bad'
-    : JSON.stringify({ status: 'pending', watcherPid: 42, acquiredAt: kind === 'expired' ? '2026-10-04T00:00:00Z' : now }));
-  const ownership = await probeOrphanOwnership({ ...args, now: kind === 'missing' ? '2026-10-04T01:01:00Z' : now,
-    processKillImpl: () => { if (kind === 'dead-pid') throw Object.assign(new Error('dead'), { code: 'ESRCH' }); } });
-  assert.equal(ownership.owned, kind === 'live');
-  assert.equal(ownership.uncertain, kind !== 'live');
-});
-for (const state of ['dispatched', 'no-dispatch']) test(`second-truncated ${state} receipt reconciles before live-owner return`, async t => {
-  const { args, tick } = setup(t);
-  await tick();
-  const db = new Database(watchdogPath(args));
-  db.prepare('UPDATE heads SET attempts=1,reserved=1,evidence=? WHERE head=?').run(JSON.stringify({
-    reservationStartedAt: '2026-10-04T00:00:00.789Z',
-  }), args.headSha);
-  db.close();
-  dispatchRecord(args, { state, dispatchedAt: state === 'dispatched' ? '2026-10-04T00:00:00Z' : null,
-    lastAttemptedAt: '2026-10-04T00:00:00Z' });
-  await tick({ hasOwnerImpl: options => probeOrphanOwnership({ ...options,
-    readStatusImpl: async () => ({ ok: true, row: { status: 'running' } }) }) });
-  assert.equal(readWatchdog(args).reserved, 0);
-  assert.equal(readWatchdog(args).attempts, 1);
-});
-test('background observations preserve the eligible tick streak', async t => {
-  const { tick, calls } = setup(t);
-  for (let i = 0; i < 6; i++) {
-    await tick({ result: { amaEnabled: true, reason: 'ama-closer-dispatch-backgrounded', skipMergeAgent: true } });
-    await tick();
-  }
-  assert.equal(calls.dispatch.length, 1);
-});
-test('PRIMARYEMPTY-01: deterministic unknown pages on the sixth observation exactly once', async t => {
-  const { args, tick, calls } = setup(t, 7716);
-  assert.equal(orphanDispatchReasonsCovered(['primary-change-unknown']), false);
-  const result = { ...args.result, reason: 'primary-change-needs-operator',
-    needsOperator: true, reasons: ['primary-change-unknown'] };
-  for (let i = 0; i < 5; i++) await tick({ result });
-  assert.equal(calls.pages.length, 0);
-  await tick({ result });
-  assert.equal(calls.dispatch.length, 0);
-  assert.equal(calls.pages.length, 1);
-  assert.equal(calls.pages[0][1].event, 'ama.orphan_recovery.ownership-uncertain');
-  assert.ok(calls.pages[0][1].payload.reasons.includes('primary-change-unknown'));
-  for (let i = 0; i < 6; i++) await tick({ result });
-  assert.equal(calls.pages.length, 1);
-});
-test('empty head observations leave real head streaks and rows intact', async t => {
-  const { args, tick, calls } = setup(t);
-  for (let i = 0; i < 5; i++) await tick();
-  assert.equal(await tick({ headSha: '' }), null);
-  assert.equal(readWatchdog(args).ticks, 5);
-  const db = new Database(watchdogPath(args));
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM heads').get().count, 1);
-  db.close();
-  await tick();
-  assert.equal(calls.dispatch.length, 1);
-});
-for (const failure of ['mkdir-EACCES', 'open-ENOSPC', 'flock-EACCES', 'database-EACCES', 'update-ENOSPC', 'corrupt-database', 'malformed-evidence']) {
-  for (const eligible of failure === 'malformed-evidence' ? [true] : [true, false]) test(`${failure} on ${eligible ? 'eligible' : 'ineligible'} tick retains coexistence hold`, async t => {
-    const { resolveMergeAgentCoexistenceForWatcher } = await import('../src/ama-closure-orchestration.mjs');
-    const { args, tick, calls } = setup(t, 7716);
-    await tick();
-    const warnings = [];
-    const options = { ...args, logger: { info() {}, warn: message => warnings.push(message) } };
-    const fail = code => { throw Object.assign(new Error(`injected ${code}`), { code }); };
-    if (failure === 'mkdir-EACCES' || failure === 'open-ENOSPC') options.fsImpl = { existsSync, mkdirSync, openSync, closeSync,
-      ...(failure === 'mkdir-EACCES' ? { mkdirSync: () => fail('EACCES') } : { openSync: () => fail('ENOSPC') }) };
-    if (failure === 'flock-EACCES') options.flockSyncImpl = () => fail('EACCES');
-    if (failure === 'database-EACCES') options.DatabaseImpl = class { constructor() { fail('EACCES'); } };
-    if (failure === 'update-ENOSPC') options.DatabaseImpl = class {
-      constructor(path) {
-        const db = new Database(path);
-        const prepare = db.prepare.bind(db);
-        db.prepare = sql => sql.startsWith('UPDATE heads') ? { run: () => fail('ENOSPC') } : prepare(sql);
-        return db;
-      }
-    };
-    if (failure === 'corrupt-database') writeFileSync(watchdogPath(args), 'not a sqlite database');
-    if (failure === 'malformed-evidence') {
-      const db = new Database(watchdogPath(args));
-      db.prepare('UPDATE heads SET evidence=?').run('{bad');
-      db.close();
-    }
-    const result = eligible ? { ...args.result, skipMergeAgent: false } : { amaEnabled: false, reason: 'not-eligible' };
-    const output = await resolveMergeAgentCoexistenceForWatcher({ rootDir: args.rootDir, repoPath: args.repo,
-      prNumber: args.prNumber, candidate: args.candidate, currentRevisionRef: args.headSha,
-      dispatchJob: args.dispatchJob, reviewStateRow: args.reviewStateRow, logger: options.logger,
-      maybeDispatchAmaClosureForImpl: async () => result, orphanOptions: { ...options, result },
-      recoverAmaAutomationImpl: () => { throw new Error('failed store must retain hold'); } });
-    assert.equal(output.outcome, 'ama-pending');
-    assert.equal(output.amaClosureResult.skipMergeAgent, true);
-    assert.equal(calls.dispatch.length, 0);
-    assert.equal(calls.pages.length, 1);
-    assert.equal(calls.pages[0][1].event, 'ama.orphan_recovery.store-error');
-    assert.ok(warnings.some(message => message.includes('Orphan recovery failed')));
-    if (!['corrupt-database', 'malformed-evidence'].includes(failure)) {
-      // The failed path closed both DB and flock, so an ordinary tick can resume.
-      await tick();
-      assert.equal(readWatchdog(args).ticks, 2);
-    }
-  });
+  return { args, calls, tick, record };
 }
-test('store error plus pager failure remains held and logs both failures', async t => {
-  const { tick } = setup(t);
-  const warnings = [];
-  const output = await tick({ DatabaseImpl: class { constructor() { throw new Error('database corrupt'); } },
-    pageImpl: async () => { throw new Error('pager unavailable'); }, logger: { warn: message => warnings.push(message) } });
-  assert.equal(output.outcome, 'ama-pending');
-  assert.equal(output.amaClosureResult.skipMergeAgent, true);
-  assert.equal(warnings.length, 2);
-});
 
-
-test('external stale head bypasses uncertain historical ownership and reaches ordinary recovery', async t => {
-  const { resolveMergeAgentCoexistenceForWatcher } = await import('../src/ama-closure-orchestration.mjs');
-  const { args, calls } = setup(t, 7704);
-  let ordinary = 0;
-  const output = await resolveMergeAgentCoexistenceForWatcher({ rootDir: args.rootDir, repoPath: args.repo,
-    prNumber: args.prNumber, candidate: args.candidate, currentRevisionRef: args.headSha,
-    reviewStateRow: args.reviewStateRow, dispatchJob: args.dispatchJob,
-    maybeDispatchAmaClosureForImpl: async () => args.result,
-    orphanOptions: { closerHeadImpl: async () => false,
-      hasOwnerImpl: () => { throw new Error('inadmissible head must not probe historical ledger'); }, pageImpl: args.pageImpl },
-    recoverAmaAutomationImpl: async () => { ordinary++; return { outcome: 'ordinary-recovery' }; },
-    logger: { info() {}, warn() {} } });
-  assert.equal(ordinary, 1);
-  assert.equal(output.outcome, 'ordinary-recovery');
-  assert.equal(calls.pages.length, 0);
+test('one elapsed-time bound, with a positive environment override', () => {
+  assert.equal(OWNERLESS_BOUND_MS, 900000);
+  assert.equal(ownerlessBoundMs({}), 900000);
+  assert.equal(ownerlessBoundMs({ OWNERPROOF_IDLE_MINUTES: '2' }), 120000);
+  for (const value of ['0', '-1', 'bad']) assert.equal(ownerlessBoundMs({ OWNERPROOF_IDLE_MINUTES: value }), 900000);
 });
-test('foreign corrupt queues are skipped; matching corrupt queues hold and repo casing retains owners', async t => {
-  const { args } = setup(t);
-  const dir = join(args.rootDir, 'data/follow-up-jobs/pending');
+test('PR 8086: terminal lease on current head cannot prove ownership', async t => {
+  const { args, calls, tick } = setup(t);
+  const dir = join(args.rootDir, 'data', 'ama-closer-leases');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'foreign__repo-pr-1-job.json'), '{bad');
-  const options = { ...args, logger: { warn() {} } };
-  assert.equal((await probeOrphanOwnership(options)).uncertain, false);
-  writeFileSync(join(dir, 'example__repo-pr-7707-job.json'), '{bad');
-  assert.equal((await probeOrphanOwnership(options)).uncertain, true);
-  writeFileSync(join(dir, 'example__repo-pr-7707-job.json'), JSON.stringify({ repo: 'EXAMPLE/REPO', prNumber: 7707 }));
+  writeFileSync(join(dir, 'example__repo-pr-8086-current.json'), JSON.stringify({ status: 'terminal', terminalOutcome: 'failed-without-merge' }));
+  const overrides = { hasOwnerImpl: probeOrphanOwnership };
+  await tick(0, overrides);
+  await tick(14, overrides);
+  assert.equal(calls.launches.length, 0);
+  await tick(15, overrides);
+  assert.deepEqual(calls.launches, [{ ownerProof: true, headSha: 'current' }]);
+  assert.match(calls.logs[0], /^\[watcher\] ownerless-recovery repo=example\/repo pr=8086 head=current idle_minutes=15 last_reason=lease-held action=hammer$/);
+});
+test('PR 8089: closer-authored stale head and not-eligible hammer requests current review', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
+    result: { amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'], closerHeadMergeRetry: true } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.launches.length, 0);
+  assert.equal(calls.reviews[0].targetRevisionRef, 'current');
+  assert.equal(calls.reviews[0].ownerlessRecovery, true);
+});
+test('PR 8088: settled comment-only review with findings and conflict launches hammer', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { candidate: { prState: 'open', mergeable: 'CONFLICTING' },
+    result: { amaEnabled: true, reason: 'not-eligible', ownerProofFacts: { headSha: 'current', reviewedHeadSha: 'current', verdict: 'comment-only', checks: [], mergeable: 'CONFLICTING' } },
+    dispatchJob: { nonBlockingFindingCount: 10, remediationStopCode: 'comment-only-final-round' } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.launches.length, 1); assert.equal(calls.reviews.length, 0);
+});
+test('PR 8085: exhausted re-arm counter requests undispatched review', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { reviewStateRow: { review_status: 'pending', revision_ref: 'current', rereview_requested_at: '2026-10-11T15:00:00Z', watchdog_rearm_count: 100 },
+    result: { amaEnabled: true, reason: 'watchdog-rearm-cap-exhausted' } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.reviews.length, 1);
+});
+test('arbitrary new refusal reasons do not strand PRs', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { result: { amaEnabled: true, reason: 'a-future-stop', reasons: ['unrecognized'] } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.launches.length, 1);
+});
+test('live ledger run prevents recovery and resets the idle timer', async t => {
+  const { args, record, tick, calls } = setup(t);
+  record('ama-closer-dispatches', { launchRequestId: 'lrq' });
+  const live = await probeOrphanOwnership({ ...args, readStatusImpl: async () => ({ ok: true, row: { status: 'running' } }) });
+  assert.equal(live.owned, true);
+  await tick(0); await tick(15, { hasOwnerImpl: async () => live }); await tick(16); await tick(30);
+  assert.equal(calls.launches.length, 0); await tick(31); assert.equal(calls.launches.length, 1);
+});
+for (const label of ['do-not-merge', 'no-merge-hold', 'merge-agent-skip']) test(`held PR ${label} ignored`, async t => {
+  const { tick, calls } = setup(t);
+  await tick(0, { labels: [label] }); await tick(60, { labels: [label] });
+  assert.equal(calls.launches.length + calls.reviews.length + calls.pages.length, 0);
+});
+for (const state of ['closed', 'merged']) test(`terminal ${state} PR ignored`, async t => {
+  const { tick, calls } = setup(t);
+  await tick(0, { candidate: { prState: state } }); await tick(60, { candidate: { prState: state } });
+  assert.equal(calls.launches.length, 0);
+});
+test('third recovery pages once with both outcomes and never launches', async t => {
+  const { tick, calls } = setup(t);
+  await tick(0); await tick(15); await tick(30);
+  assert.equal((await tick(45)).outcome, 'recovery-exhausted'); await tick(60);
+  assert.equal(calls.launches.length, 2); assert.equal(calls.pages.length, 1);
+  const payload = calls.pages[0][1].payload;
+  assert.equal(payload.headSha, 'current'); assert.equal(payload.prNumber, 8086);
+  assert.deepEqual(payload.outcomes.map(a => a.reason), ['launched', 'launched']);
+});
+test('unknown ledger evidence becomes ownerless after the same bound', async t => {
+  const { args, record, tick, calls } = setup(t);
+  record('ama-closer-dispatches', { launchRequestId: 'lrq' });
+  const unknown = await probeOrphanOwnership({ ...args, readStatusImpl: async () => ({ ok: false, reason: 'ledger-unavailable' }) });
+  assert.equal(unknown.owned, false); assert.equal(unknown.uncertain, true);
+  await tick(0, { hasOwnerImpl: async () => unknown }); await tick(14, { hasOwnerImpl: async () => unknown });
+  assert.equal(calls.launches.length, 0); await tick(15, { hasOwnerImpl: async () => unknown }); assert.equal(calls.launches.length, 1);
+});
+test('queue row, remediation flag and reviewing status alone are not ownership', async t => {
+  const { args, record } = setup(t);
+  record('pending', {});
+  const owner = await probeOrphanOwnership({ ...args, reviewStateRow: { review_status: 'reviewing', remediation_pending: true } });
+  assert.equal(owner.owned, false);
+});
+test('live remediation process proves ownership', async t => {
+  const { args, record } = setup(t);
+  record('in-progress', { remediationWorker: { processId: 123 } });
+  assert.equal((await probeOrphanOwnership({ ...args, processKillImpl: () => {} })).owned, true);
+});
+test('review request ownership is bounded and head-specific', async t => {
+  const { args } = setup(t);
+  const row = { review_status: 'pending', revision_ref: 'current', rereview_requested_at: '2026-10-11T16:00:00Z' };
+  const probe = (now, revision_ref = 'current') => probeOrphanOwnership({ ...args, reviewStateRow: { ...row, revision_ref }, now });
+  assert.equal((await probe('2026-10-11T16:14:00Z')).owned, true);
+  assert.equal((await probe('2026-10-11T16:15:00Z')).owned, false);
+  assert.equal((await probe('2026-10-11T16:01:00Z', 'old')).owned, false);
+});
+test('concurrent recoveries serialize and a moved head gets its own budget', async t => {
+  const { tick, calls } = setup(t);
+  await tick(0); await Promise.all([tick(15), tick(15), tick(15)]);
+  assert.equal(calls.launches.length, 1);
+  await tick(30); await tick(45);
+  const moved = { headSha: 'next', reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'next' } };
+  await tick(46, moved); assert.equal(calls.launches.length, 3);
+  await tick(61, moved); assert.equal(calls.launches.length, 4);
+});
+test('thrown launches consume a bounded attempt with a durable outcome', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { dispatchHammer: async () => { throw new Error('timeout after admission'); } };
+  await tick(0, overrides); await tick(15, overrides); await tick(30, overrides); await tick(45, overrides);
+  assert.equal(calls.pages[0][1].payload.outcomes.length, 2);
+  assert.equal(calls.pages[0][1].payload.outcomes[0].reason, 'timeout after admission');
+});
+
+test('live reviewer process for current head prevents recovery; a different head does not', async t => {
+  const { args } = setup(t);
+  const options = { ...args, processKillImpl: () => {}, now: '2026-10-11T16:00:00Z',
+    reviewStateRow: { review_status: 'reviewing', reviewer_head_sha: 'current', reviewer_pgid: 123 } };
   assert.equal((await probeOrphanOwnership(options)).owned, true);
-});
-test('historical missing ledger rows expire only after bounded age and use their recorded HQ', async t => {
-  const { args } = setup(t);
-  dispatchRecord(args, { headSha: 'old-head', hqRoot: '/fixture/owner-hq', lastAttemptedAt: '2020-01-01T00:00:00Z' });
-  const ownership = await probeOrphanOwnership({ ...args, readStatusImpl: async options => {
-    assert.equal(options.hqRoot, '/fixture/owner-hq');
-    return { ok: false, reason: 'missing-launch-request-row' };
-  } });
-  assert.equal(ownership.uncertain, false);
-  assert.equal(ownership.owned, false);
-});
-test('terminal historical launch is probed only once across ticks', async t => {
-  const { args } = setup(t);
-  dispatchRecord(args, { headSha: 'old-head' });
-  let probes = 0;
-  const options = { ...args, readStatusImpl: async () => { probes++; return { ok: true, row: { status: 'completed' } }; } };
-  for (let i = 0; i < 8; i++) assert.equal((await probeOrphanOwnership(options)).owned, false);
-  assert.equal(probes, 1);
-});
-for (const operation of ['identity', 'rereview']) test(`transient ${operation} failure holds without store-error paging`, async t => {
-  const { tick, calls } = setup(t, 7704);
-  const failure = async () => { throw new Error('TLS handshake timeout'); };
-  const overrides = { logger: { warn() {} }, ...(operation === 'identity' ? { closerHeadImpl: failure }
-    : { dispatchHammer: async () => ({ dispatched: false, reason: 'cannot-recertify' }), requestRereviewImpl: failure }) };
-  for (let i = 0; i < 7; i++) assert.equal((await tick(overrides)).outcome, 'ama-pending');
-  assert.equal(calls.pages.length, 0);
-});
-for (const owned of [false, true]) test(`uncovered primary refusal pages once even when owned=${owned}`, async t => {
-  const { args, tick, calls } = setup(t, 7716);
-  for (let i = 0; i < 8; i++) await tick({ result: { ...args.result, reasons: ['primary-change-reverted', 'pr-mergeability-unknown'] },
-    hasOwnerImpl: async () => owned });
-  assert.equal(calls.pages.length, 1);
-  assert.equal(calls.dispatch.length, 0);
-});
-test('reservation records the reviewed dispatch head and never refunds a proven terminal launch', async t => {
-  const { args, tick } = setup(t, 7704);
-  await tick();
-  const db = new Database(watchdogPath(args));
-  db.prepare('UPDATE heads SET attempts=1,reserved=1,evidence=? WHERE head=?').run(JSON.stringify({
-    reservationStartedAt: '2026-10-04T00:00:00.789Z', recordHeadSha: 'reviewed-head',
-  }), args.headSha);
-  db.close();
-  dispatchRecord(args, { headSha: 'reviewed-head', targetRemediationSha: 'reviewed-head', dispatchedAt: '2026-10-04T00:00:00Z' });
-  await tick({ hasOwnerImpl: options => probeOrphanOwnership({ ...options,
-    readStatusImpl: async () => ({ ok: true, row: { status: 'completed' } }) }) });
-  assert.equal(readWatchdog(args).reserved, 0);
-  assert.equal(readWatchdog(args).attempts, 1);
+  assert.equal((await probeOrphanOwnership({ ...options, headSha: 'different' })).owned, false);
 });
 
-for (const proven of [true, false]) test(`HAMCIWAKE-01 unknown findings require closer proof (${proven})`, async t => {
-  const { tick, calls } = setup(t, 7704);
-  const overrides = { result: { amaEnabled: true, reasons: ['stale-review-head',
-    'verdict-not-settled-success', 'blocking-findings-unknown', 'ci-not-green'] },
-    closerHeadImpl: async () => proven };
-  for (let i = 0; i < 6; i++) await tick(overrides);
-  assert.equal(calls.dispatch.length, proven ? 1 : 0);
-  assert.equal(calls.reviews.length, 0);
+test('page enqueue failure retries without an extra recovery', async t => {
+  const { tick, calls } = setup(t);
+  await tick(0); await tick(15); await tick(30);
+  await tick(45, { pageImpl: async () => { throw new Error('pager unavailable'); } });
+  await tick(60);
+  assert.equal(calls.launches.length, 2);
+  assert.equal(calls.pages.filter(p => p[1].event === 'ama.orphan_recovery.exhausted').length, 1);
 });
 
-// STALECLOSER-03: the watchdog reuses the closer's shared closer-authored-stale
-// decision for this exact head instead of re-deriving its own.
-const sharedDecision = (decision, currentHead = 'current-head') => ({
-  amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head', 'ci-not-green'],
-  closerAuthoredStale: { decision, eligible: decision === 'eligible', currentHead, reviewedHead: 'reviewed-head' },
-});
-const noProbe = async () => { throw new Error('the shared decision must be reused'); };
-test('STALECLOSER-03 shared retry holds without probing, dispatching or re-reviewing', async t => {
-  const { tick, calls } = setup(t, 7704);
-  for (let i = 0; i < 8; i++) assert.equal(await tick({ result: sharedDecision('retry'), closerHeadImpl: noProbe }), null);
-  assert.equal(calls.dispatch.length, 0);
-  assert.equal(calls.reviews.length, 0);
-});
-for (const decision of ['eligible', 'not-eligible']) {
-  test(`STALECLOSER-03 shared ${decision} proves the closer head without a second proof`, async t => {
-    const { tick, calls } = setup(t, 7704);
-    for (let i = 0; i < 6; i++) await tick({ result: sharedDecision(decision), closerHeadImpl: noProbe });
-    assert.equal(calls.dispatch.length, 1);
-    assert.equal(calls.dispatch[0].closerHead, true);
+for (const status of ['succeeded', 'failed', 'operator_triage_required', 'reaped_stuck_requested', 'reaped', 'cancelled', 'completed', 'rejected']) {
+  test(`terminal ${status} launch cannot retain ownership through a dispatch record`, async t => {
+    const { args, record } = setup(t);
+    record('ama-closer-dispatches', { launchRequestId: 'terminal' });
+    assert.equal((await probeOrphanOwnership({ ...args, readStatusImpl: async () => ({ ok: true, row: { status } }) })).owned, false);
   });
 }
-test('STALECLOSER-03 shared rereview-exact-head (non-closer commit) never enters the HAM route', async t => {
-  const { tick, calls } = setup(t, 7704);
-  for (let i = 0; i < 8; i++) await tick({ result: sharedDecision('rereview-exact-head'), closerHeadImpl: noProbe });
-  assert.equal(calls.dispatch.length, 0);
-});
-test('STALECLOSER-03 a shared decision for another head is ignored; stale heads are proven directly', async t => {
-  const { tick, calls } = setup(t, 7704);
-  const proofs = [];
-  const closerHeadImpl = async options => { proofs.push(options); return true; };
-  for (let i = 0; i < 6; i++) await tick({ result: sharedDecision('retry', 'older-head'), closerHeadImpl });
-  assert.ok(proofs.length > 0, 'a stale head is proven even without blocking-findings-unknown');
-  assert.equal(proofs[0].currentHead, 'current-head');
-  assert.equal(calls.dispatch.length, 1);
-  assert.equal(calls.dispatch[0].closerHead, true);
+test('terminal ledger evidence is cached without caching live runs', async t => {
+  const { args, record } = setup(t);
+  record('merge-agent-dispatches', { launchRequestId: 'cached-terminal' });
+  let reads = 0;
+  const readStatusImpl = async () => { reads += 1; return { ok: true, row: { status: 'failed' } }; };
+  await probeOrphanOwnership({ ...args, readStatusImpl }); await probeOrphanOwnership({ ...args, readStatusImpl });
+  assert.equal(reads, 1);
 });
 
-for (const label of ['do-not-merge', 'no-merge-hold', 'merge-agent-skip']) {
-  test(`${label} resets pre-hold dispatch and uncertainty streaks`, async t => {
-    const { args, tick, calls } = setup(t);
-    for (let i = 0; i < 5; i++) await tick();
-    await tick({ candidate: { ...args.candidate, labels: [{ name: label }] } });
-    for (let i = 0; i < 5; i++) await tick();
-    assert.equal(calls.dispatch.length, 0);
-    assert.equal((await tick()).outcome, 'ama-dispatched');
-    const uncertain = { hasOwnerImpl: async () => ({ uncertain: true }) };
-    for (let i = 0; i < 5; i++) await tick(uncertain);
-    await tick({ ...uncertain, labels: [label] });
-    for (let i = 0; i < 5; i++) await tick(uncertain);
-    assert.equal(calls.pages.length, 0);
-    await tick(uncertain);
-    assert.equal(calls.pages.length, 1);
-  });
-}
-for (const label of ['no-merge', 'no-auto-merge', 'hold']) {
-  test(`${label} preserves orphan dispatch admission`, async t => {
-    const { tick, calls } = setup(t);
-    for (let i = 0; i < 6; i++) await tick({ labels: [label] });
-    assert.equal(calls.dispatch.length, 1);
-  });
-}
-
-test('HAMFINAL-02: lease timeout after validation retries merge twice without any review', async t => {
-  const { tick, calls, args } = setup(t, 7704);
-  const result = { ...args.result, hamTerminalRemediationValidated: true,
-    reason: 'merge-lease-timeout', reasons: [] };
-  for (let i = 0; i < 25; i++) await tick({ result,
-    dispatchHammer: async evidence => { calls.dispatch.push(evidence); return { dispatched: false, reason: 'merge-lease-timeout' }; },
-    closerHeadImpl: async () => { throw new Error('validated head needs no closer-chain proof'); } });
-  assert.equal(calls.dispatch.length, 2);
-  assert.equal(calls.dispatch[0].closerHead, true);
-  assert.equal(calls.reviews.length, 0);
-  assert.equal(calls.pages.length, 1);
-});
-
-test('HAMFINAL-02: stranded HAM tip above fleet commits retries without a closer-only chain', async t => {
-  const { tick, calls, args } = setup(t, 7704);
-  for (let i = 0; i < 6; i++) await tick({
-    result: { ...args.result, closerHeadMergeRetry: true,
-      closerAuthoredStale: { currentHead: args.headSha, decision: 'rereview-exact-head' } },
-    closerHeadImpl: () => assert.fail('merge retry is admission, not a fresh review or merge certificate'),
-  });
-  assert.equal(calls.dispatch.length, 1);
-  assert.equal(calls.reviews.length, 0);
+test('head movement cannot restart the PR-wide absence-of-owner bound', async t => {
+  const { tick, calls } = setup(t);
+  await tick(0);
+  const next = { headSha: 'next', reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'next' } };
+  await tick(14, next); assert.equal(calls.launches.length, 0);
+  await tick(15, next); assert.equal(calls.launches.length, 1);
 });

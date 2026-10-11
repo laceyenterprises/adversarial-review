@@ -1112,6 +1112,8 @@ function requestReviewRereview({
   automaticMalformedRecovery = false,
   automaticWithheldHeadRecovery = false,
   preserveBudgets = false,
+  ownerlessRecovery = false,
+  expectedOwnerlessReviewer = null,
   inTransaction = false,
   reviewerFamily = null,
 }) {
@@ -1127,7 +1129,7 @@ function requestReviewRereview({
     if (!inTransaction) {
       return db.transaction(() => requestReviewRereview({
         rootDir, repo, prNumber, requestedAt, reason, targetRevisionRef,
-        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, preserveBudgets, reviewerFamily, inTransaction: true,
+        allowFastMergeSkipped, db, logger, expectedFailedHead, automaticMalformedRecovery, automaticWithheldHeadRecovery, preserveBudgets, ownerlessRecovery, expectedOwnerlessReviewer, reviewerFamily, inTransaction: true,
       })).immediate();
     }
 
@@ -1136,6 +1138,17 @@ function requestReviewRereview({
     // resetting it here would let that pass overwrite the terminal verdict.
     // Read the captured pass body, not the mutable row's reviewer label.
     const currentRow = getReviewRow(db, { repo, prNumber });
+    let resetDeadReviewer = false;
+    if (ownerlessRecovery && expectedOwnerlessReviewer && currentRow?.review_status === 'reviewing'
+      && currentRow.reviewer_pgid === expectedOwnerlessReviewer.pgid
+      && currentRow.reviewer_started_at === expectedOwnerlessReviewer.startedAt) {
+      const pgid = Number(currentRow.reviewer_pgid);
+      resetDeadReviewer = !Number.isInteger(pgid) || pgid <= 0;
+      if (!resetDeadReviewer) {
+        try { process.kill(-pgid, 0); }
+        catch (error) { resetDeadReviewer = error.code === 'ESRCH'; }
+      }
+    }
     const operatorRequestedRereview = isExplicitOperatorRetriggerReason(reason);
     const targetHead = normalizedTargetRevisionRef;
     if (targetHead && !operatorRequestedRereview) {
@@ -1154,12 +1167,12 @@ function requestReviewRereview({
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }
     }
-    if (targetHead && !operatorRequestedRereview &&
+    if (targetHead && !operatorRequestedRereview && !ownerlessRecovery &&
         hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }
-    if (targetHead && !operatorRequestedRereview && !automaticWithheldHeadRecovery &&
+    if (targetHead && !operatorRequestedRereview && !ownerlessRecovery && !automaticWithheldHeadRecovery &&
         hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: unproven comment-only final-round push`);
       return buildBlockedRereviewResult('comment-only-final-round-push-unproven', currentRow);
@@ -1210,7 +1223,7 @@ function requestReviewRereview({
              ${reviewerFamily ? 'reviewer = ?,' : ''}
              ${buildReviewStateResetAssignments({
                overrides: {
-                 review_attempts: expectedFailedHead && !preserveBudgets ? '0' : 'review_attempts',
+                 review_attempts: ownerlessRecovery || (expectedFailedHead && !preserveBudgets) ? '0' : 'review_attempts',
                  ...(preserveBudgets ? {
                    infra_auto_recover_attempts: 'infra_auto_recover_attempts',
                    review_population_retry_attempts: 'review_population_retry_attempts',
@@ -1225,9 +1238,10 @@ function requestReviewRereview({
        WHERE repo = ?
          AND pr_number = ?
          AND ${allowedPrStatePredicate}
-         AND review_status NOT IN ('reviewing', 'malformed', 'unroutable-bot-author', 'argus-security-queued', 'pending')
+         AND review_status NOT IN (${resetDeadReviewer ? '' : "'reviewing', "}'malformed', 'unroutable-bot-author', 'argus-security-queued'${ownerlessRecovery ? '' : ", 'pending'"})
+         ${resetDeadReviewer ? 'AND reviewer_pgid IS ? AND reviewer_started_at IS ?' : ''}
          ${expectedFailedHead ? "AND review_status = 'failed' AND reviewer_head_sha = ?" : ''}`
-    ).run(...resetParams, ...(expectedFailedHead ? [expectedFailedHead] : []));
+    ).run(...resetParams, ...(resetDeadReviewer ? [currentRow.reviewer_pgid, currentRow.reviewer_started_at] : []), ...(expectedFailedHead ? [expectedFailedHead] : []));
 
     if (updateResult.changes === 1) {
       if (currentRow?.review_status === 'failed') {

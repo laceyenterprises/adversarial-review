@@ -743,10 +743,12 @@ export async function maybeDispatchAmaClosureFor({
   // closer-authored-stale decision, so the orphan watchdog and rescue read the
   // closer's own answer.
   const closerAuthoredStaleSink = {};
-  const result = await dispatchAmaClosureFor({
+  const ownerProofFactsSink = {};
+  let result = await dispatchAmaClosureFor({
     ...options, orphanRecovery, runDaemonCleanMergeAttemptImpl, maybeDispatchAmaCloserImpl,
-    closerAuthoredStaleSink,
+    closerAuthoredStaleSink, ownerProofFactsSink,
   });
+  if (result && ownerProofFactsSink.value) result = { ...result, ownerProofFacts: ownerProofFactsSink.value };
   const decision = closerAuthoredStaleSink.value?.decision;
   return decision && decision !== 'not-applicable' && result && typeof result === 'object'
     && !result.closerAuthoredStale
@@ -756,6 +758,7 @@ export async function maybeDispatchAmaClosureFor({
 
 async function dispatchAmaClosureFor({
   closerAuthoredStaleSink = null,
+  ownerProofFactsSink = null,
   automatedRecovery = false,
   orphanRecovery = null,
   priorDaemonCleanMerge = null,
@@ -1327,6 +1330,11 @@ async function dispatchAmaClosureFor({
     body: String(candidate?.body ?? candidate?.prBody ?? ''),
   };
 
+  if (ownerProofFactsSink) ownerProofFactsSink.value = {
+    headSha: currentPrHeadSha, reviewedHeadSha: gateSnapshot?.reviewedHeadSha,
+    verdict: gateSnapshot?.settledReview?.verdict || null,
+    checks: prMetadata.statusCheckRollup, mergeable: prMetadata.mergeableState,
+  };
   const strictMode = cfg?.strictMode !== false;
   const autonomousMergeExecutionEnabled = cfg?.autonomousMergeExecutionEnabled !== false;
   const branchProtectionRequired = cfg?.branchProtection?.required !== false;
@@ -1480,7 +1488,7 @@ async function dispatchAmaClosureFor({
   // The snapshot above uses evaluateMergeEligibility, with validatedHead carried
   // forward even for retry. Its head matches; isEligibleForAmaClosure's
   // stale-review-head reason is not part of this snapshot.
-  if (closerOnlyHeadDelta && closerAuthoredStale.decision === 'retry'
+  if (!orphanRecovery?.ownerProof && closerOnlyHeadDelta && closerAuthoredStale.decision === 'retry'
     && disabledEligibility.reasons.length > 0
     && disabledEligibility.reasons.every((reason) => ['ci-not-green', 'pr-mergeability-unknown'].includes(reason))) {
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
@@ -1515,7 +1523,7 @@ async function dispatchAmaClosureFor({
   // the closer-only chain. That flag admits a repair attempt; merge authority
   // still requires the exact-head terminal-remediation validator, including its
   // reviewed-head binding. An uncertified head needs an exact-head review.
-  if (reviewedHeadIsStale && !(isOrphanHeadReviewRequested(reviewStateRow, currentPrHeadSha)
+  if (!orphanRecovery?.ownerProof && reviewedHeadIsStale && !(isOrphanHeadReviewRequested(reviewStateRow, currentPrHeadSha)
     && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))) {
     try {
       throwIfAborted(signal);
@@ -1736,7 +1744,9 @@ async function dispatchAmaClosureFor({
       eligible: !wouldUseDaemonPath && isEligibleForAmaClosure(reviewState, prMetadata, cfg).eligible,
       sloMs: cfg.closureLagSloMs, logger });
   } catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
-  const daemonCleanMerge = priorDaemonCleanMerge && priorDaemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.DEFERRED
+  const daemonCleanMerge = orphanRecovery?.ownerProof
+    ? { disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'ownerless-hammer-recovery' }
+    : priorDaemonCleanMerge && priorDaemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.DEFERRED
     ? priorDaemonCleanMerge : await runCoexistenceOperation(
     'daemon-clean-merge-attempt',
     ({ signal: operationSignal }) => runDaemonCleanMergeAttemptImpl({
@@ -1799,7 +1809,7 @@ async function dispatchAmaClosureFor({
     return daemonCleanMerge?.ciMergePathPending === true;
   };
 
-  if (!(orphanRecovery && daemonCleanMerge?.reason === 'primary-change-needs-operator') && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
+  if (!orphanRecovery?.ownerProof && !(orphanRecovery && daemonCleanMerge?.reason === 'primary-change-needs-operator') && daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
       `[watcher] AMA daemon clean-merge ${daemonCleanMerge.disposition} for ${repoPath}#${prNumber}` +
@@ -2435,9 +2445,6 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
-  if (amaClosureResult?.reason === 'closer-head-exact-review-requested') {
-    return { outcome: 'ama-pending', amaClosureResult };
-  }
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';
   const safetyHold = isSafetyRecoveryHold(amaClosureResult);
@@ -2497,7 +2504,8 @@ export async function resolveMergeAgentCoexistenceForWatcher({
       && !safetyHold && !amaClosureEligibilityMiss,
     mergeAgentRequestedScoped,
   });
-  if (amaCloserLeaseHeld) return { outcome: 'ama-pending', amaClosureResult, coexistence };
+
+  if (amaCloserLeaseHeld && mergeAgentRequestedScoped) return { outcome: 'ama-pending', amaClosureResult, coexistence };
   if (coexistence.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
     && amaClosureOperatorPreemptable) {
     amaHammerBackgroundQueueImpl().abort?.(amaHammerBackgroundKey({

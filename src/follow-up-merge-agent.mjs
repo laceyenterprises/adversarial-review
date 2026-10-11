@@ -1,3 +1,4 @@
+import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { fetchMergeAgentCandidate, normalizeLabelNames, extractOperatorNotes } from './merge-agent-candidate.mjs';
 import { execFile, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -123,11 +124,10 @@ import {
 } from './merge-agent-hq-exec.mjs';
 import { collectStuckMergeAgentCandidateHeads } from './merge-agent-stuck-scan-candidates.mjs';
 import { isRecordedDispatchAtLeastStuckMinAge } from './merge-agent-stuck-age.mjs';
-
 const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
-const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', MERGE_AGENT_STUCK_LABEL, 'do-not-merge', NO_MERGE_HOLD_LABEL]);
+const OPERATOR_SKIP_LABELS = new Set([...OPERATOR_HOLD_LABELS, MERGE_AGENT_STUCK_LABEL]);
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;

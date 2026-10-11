@@ -30,7 +30,8 @@ function freshDb() {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE reviewed_prs (
-      repo TEXT, pr_number INTEGER, pr_state TEXT, review_status TEXT
+      repo TEXT, pr_number INTEGER, pr_state TEXT, review_status TEXT,
+      labels_json TEXT DEFAULT '[]'
     );
     CREATE TABLE reviewer_passes (
       repo TEXT, pr_number INTEGER, pass_kind TEXT, status TEXT, gh_comment_id TEXT
@@ -39,9 +40,9 @@ function freshDb() {
   return db;
 }
 
-function addPr(db, { pr, state = 'open', status = 'pending', commentId = null }) {
-  db.prepare('INSERT INTO reviewed_prs (repo, pr_number, pr_state, review_status) VALUES (?,?,?,?)')
-    .run('laceyenterprises/agent-os', pr, state, status);
+function addPr(db, { pr, state = 'open', status = 'pending', commentId = null, labels = [] }) {
+  db.prepare('INSERT INTO reviewed_prs (repo, pr_number, pr_state, review_status, labels_json) VALUES (?,?,?,?,?)')
+    .run('laceyenterprises/agent-os', pr, state, status, JSON.stringify(labels));
   if (commentId !== null) {
     db.prepare('INSERT INTO reviewer_passes (repo, pr_number, pass_kind, status, gh_comment_id) VALUES (?,?,?,?,?)')
       .run('laceyenterprises/agent-os', pr, 'first-pass', 'completed', commentId);
@@ -88,6 +89,16 @@ test('a genuinely pending PR still counts', () => {
   const db = freshDb();
   addPr(db, { pr: 1, status: 'pending' });
   assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
+});
+
+test('an enforced hold suppresses first-pass pressure until removed', t => {
+  const db = freshDb();
+  t.after(() => db.close());
+  addPr(db, { pr: 1, labels: ['do-not-merge'] });
+  addPr(db, { pr: 2, labels: ['merge-agent-stuck'] });
+  assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);
+  db.prepare("UPDATE reviewed_prs SET labels_json='[]' WHERE pr_number=1").run();
+  assert.equal(countOpenPrsAwaitingFirstPassReview(db), 2);
 });
 
 test('a NULL review_status still counts', () => {

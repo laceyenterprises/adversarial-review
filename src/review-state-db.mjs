@@ -1,3 +1,4 @@
+import { SQL_COUNT_HELD_OPEN_PRS } from './operator-hold-labels.mjs';
 // review-state-db.mjs — shared review-state SQLite handle + prepared statements.
 //
 // ARC-18: extracted verbatim from watcher.mjs. This module owns the single
@@ -482,6 +483,10 @@ export function latestPostedReviewAtMs(handle = db) {
     if (candidate !== null && (latest === null || candidate > latest)) latest = candidate;
   }
   return latest;
+}
+
+export function countHeldOpenPrs(handle = db) {
+  return Number(handle.prepare(SQL_COUNT_HELD_OPEN_PRS).get()?.n || 0);
 }
 
 // Count of currently-open PRs with no genuine posted review. Keying off

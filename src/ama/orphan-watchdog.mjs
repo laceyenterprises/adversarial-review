@@ -1,3 +1,4 @@
+import { isOperatorHeld } from '../operator-hold-labels.mjs';
 // REMORPHAN-01: dispatch admission only. HAM retains all live merge predicates.
 import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
@@ -182,7 +183,7 @@ export async function recoverOrphan(options) {
   }
 }
 
-async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate, labels = [],
+async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate, labels = candidate?.labels || [],
   result, reviewStateRow, dispatchJob, dispatchHammer, ticks = 6, maxAttempts = 2,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = 5000,
@@ -203,7 +204,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   const belowMax = validRound(round) && validRound(maxRounds) && Number(round) < Number(maxRounds);
   const stopAllowed = !stopped || ['no-progress', 'remediation-stopped'].includes(stopped);
   const candidateAllowed = Boolean(headSha && candidate?.merged !== true && String(candidate?.prState || '').toLowerCase() === 'open'
-    && !candidate?.isDraft && !labels.some(label => ['do-not-merge', 'no-merge-hold', 'merge-agent-skip'].includes(label))
+    && !candidate?.isDraft && !isOperatorHeld(labels)
     && result?.amaEnabled && stopAllowed);
   let closerHead = false;
   let closerProofChecked = false;

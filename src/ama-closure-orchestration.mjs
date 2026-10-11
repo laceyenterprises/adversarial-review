@@ -1,3 +1,4 @@
+import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { recoverOrphan } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
@@ -2409,7 +2410,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     ? amaClosureResult.daemonCleanMerge : amaClosureResult;
   const amaClosureOperatorPreemptable = operatorHoldPath !== null;
   const mergeAgentRequestedScoped = !labelNames?.some((label) =>
-    ['merge-agent-skip', 'do-not-merge', 'no-merge-hold', 'adversarial-merge-blocked',
+    [...OPERATOR_HOLD_LABELS, 'adversarial-merge-blocked',
       'merge-agent-stuck', 'duplicate-family-hold'].includes(label))
     && !reviewStateRow?.remediation_pending
     && labelNames?.includes('merge-agent-requested')

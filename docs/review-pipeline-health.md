@@ -14,6 +14,21 @@ The live `gh pr view` terminal-state probe uses bounded transient retries for
 timeouts, TLS/network drops, and HTTP 5xx-style failures; non-transient failures
 are still reported immediately in the reconciliation summary.
 
+Operator-held accounting uses only the merge-enforced labels `no-merge-hold`,
+`do-not-merge`, and `merge-agent-skip`. Open PRs with those labels are omitted
+from queue depth, open-row failure/stall classifiers, conflict findings, TTM
+pressure and imported dirty-backlog counts. `no-merge`, `no-auto-merge`, and
+`hold` do not suppress accounting or orphan watchdog admission. Pipeline-owned
+labels such as `merge-agent-stuck` remain visible.
+
+Hold filtering is explicit on counting reads. Terminal reconciliation still
+probes held pending and posted PRs, and lifecycle outcome totals retain every
+row. The shared PR map retains held rows so their merge-park records remain
+subject to normal freshness cleanup rather than being deleted as absent PRs;
+held parks and stale closer leases do not raise stall findings. If a legacy
+ledger lacks `labels_json`, counting reads keep their unfiltered population and
+`held` is unknown (`null`), rather than silently reporting an empty queue.
+
 Run locally:
 
 ```sh
@@ -126,6 +141,8 @@ The Grafana dashboard lives at
 - `review_pipeline_duplicate_family_oldest_held_age_seconds`: age of the oldest
   active duplicate-family hold, or zero when none are active. This metric also
   has no high-cardinality labels.
+- `review_pipeline_operator_held_open_prs`: open PRs deliberately held by an
+  operator and excluded from queue and stall counters.
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` or
   `no-remediation-required` verdict jobs whose PR row remains open past the
   merge-stall tick threshold.

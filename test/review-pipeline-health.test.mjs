@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 
+import { recordDaemonMergePark, parkRecordPath } from '../src/daemon-merge-park-log.mjs';
 import { writePrTerminalReconcileState } from '../src/pr-terminal-reconcile.mjs';
 import {
   chmodSync,
@@ -6201,3 +6202,201 @@ test('DUPTERM-01: natural terminal census clears stale family health findings', 
     [{ status: 'inactive' }, { status: 'inactive' }]);
   db.close();
 });
+
+
+test('operator holds are excluded from queue, conflicts and ownerless findings with held totals', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    insertReviewRow(rootDir, { prNumber: 1 });
+    insertReviewRow(rootDir, { prNumber: 2 });
+    const db = openDb(rootDir);
+    db.prepare('UPDATE reviewed_prs SET labels_json=? WHERE pr_number=1').run(JSON.stringify(['do-not-merge']));
+    db.prepare('UPDATE reviewed_prs SET labels_json=? WHERE pr_number=2').run(JSON.stringify(['merge-agent-stuck']));
+    db.close();
+    const snapshot = collectHealth({ rootDir, hqRoot, now: () => new Date(NOW), env: {},
+      config: { hostChecksEnabled: false, conflictingPrChecksEnabled: true, conflictingPrRepo: REPO, conflictingPrRepoRoot: null },
+      listOpenPrsSyncImpl: () => [conflictPrFixture({ number: 1, labels: [{ name: 'do-not-merge' }] }), conflictPrFixture({ number: 2, labels: [{ name: 'merge-agent-stuck' }] })],
+    });
+    assert.equal(snapshot.held, 1);
+    assert.equal(snapshot.firstPassQueue.pendingDepth, 1);
+    assert.equal(snapshot.conflictingOpenPrs.held, 1);
+    assert.equal(snapshot.conflictingOpenPrs.count, 1);
+    assert.deepEqual(snapshot.conflictingOpenPrs.prs.map(pr => pr.number), [2]);
+    assert.match(renderReviewPipelinePrometheus(snapshot), /# held: 1/);
+    for (const finding of snapshot.findings.filter(f => f.code === 'review:conflicting_pr_unowned')) {
+      assert.ok(finding.details.prs.every(pr => pr.number === 2));
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); }
+});
+
+test('held PRs in imported dirty backlog do not trigger hammer stall findings', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    insertReviewRow(rootDir, { prNumber: 1 });
+    const db = openDb(rootDir);
+    db.prepare('UPDATE reviewed_prs SET labels_json=?').run(JSON.stringify(['do-not-merge']));
+    db.close();
+    const stateDir = path.join(hqRoot, 'dispatch', '_auto_merge-fixture');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(path.join(stateDir, 'daemon-state.json'), JSON.stringify({ dirtyPrBacklog: {
+      dirtyPrCount: 1, recordedAt: '2026-05-25T15:00:00.000Z', signature: [`${REPO}#1@head`],
+    } }));
+    const snapshot = collectHealth({ rootDir, hqRoot, now: () => new Date(NOW),
+      env: { USER: 'fixture' }, config: { hostChecksEnabled: true },
+      execFileSyncImpl: () => { throw new Error('fixture: host command unavailable'); },
+      listOpenPrsSyncImpl: () => [],
+    });
+    assert.equal(snapshot.hammerDispatchStall.backlog.held, 1);
+    assert.equal(snapshot.hammerDispatchStall.backlog.dirtyPrCount, 0);
+    assert.equal(snapshot.hammerDispatchStall.active, false);
+    assert.ok(!snapshot.findings.some(f => f.code === 'review:hammer_dispatch_stalled_with_conflicts'));
+  } finally { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); }
+});
+
+test('all health row counters exclude held PRs and report a shared held total', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const db = openDb(rootDir);
+    db.close();
+    const options = { rootDir, hqRoot, env: {}, now: () => new Date(NOW), config: { hostChecksEnabled: false }, listOpenPrsSyncImpl: () => [] };
+    const before = collectHealth(options);
+    const labels = ['no-merge-hold', 'do-not-merge', 'merge-agent-skip'];
+    const statuses = ['pending', 'posted', 'failed', 'malformed', 'ci-blocked', 'pending-upstream'];
+    for (let index = 0; index < statuses.length; index++) {
+      insertReviewRow(rootDir, { prNumber: index + 1, reviewStatus: statuses[index] });
+      const fixtureDb = openDb(rootDir);
+      fixtureDb.prepare('UPDATE reviewed_prs SET labels_json=? WHERE pr_number=?').run(JSON.stringify([labels[index % labels.length]]), index + 1);
+      fixtureDb.close();
+    }
+    const after = collectHealth(options);
+    assert.equal(after.held, 6);
+    for (const counter of ['firstPassQueue', 'queuedRereviews', 'deferredRereviews', 'ciBlockedRereviews', 'malformedPrTitles', 'terminalReviewFailures', 'mergeStalls', 'stuckReviewLoops']) {
+      assert.deepEqual(after[counter], before[counter], counter);
+    }
+    assert.deepEqual(after.mergeOutcomes, [{ outcome: 'open', count: 6 }]);
+    assert.equal(after.ttm.budget.openPrCount, 0);
+    assert.equal(after.ttm.budget.held, 6);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); }
+});
+
+for (const reviewStatus of ['pending', 'posted']) {
+  for (const liveState of ['merged', 'closed']) {
+    test(`held ${reviewStatus} PR reconciles a live ${liveState} outcome without TTM flags`, t => {
+      const rootDir = tempRoot();
+      const hqRoot = tempRoot();
+      t.after(() => { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); });
+      insertReviewRow(rootDir, { prNumber: 1, reviewStatus, postedAt: reviewStatus === 'posted' ? NOW : null });
+      const db = openDb(rootDir);
+      db.prepare('UPDATE reviewed_prs SET labels_json=?').run('["do-not-merge"]');
+      assert.equal(db.prepare('SELECT COUNT(*) AS n FROM ttm_flag_state').get().n, 0);
+      db.close();
+      const snapshot = collectHealth({ rootDir, hqRoot, env: {}, now: () => new Date(NOW),
+        config: { hostChecksEnabled: false }, listOpenPrsSyncImpl: () => [], reconcileTerminalState: true,
+        fetchPRTerminalStateSyncImpl: (repo, prNumber) => {
+          assert.equal(repo, REPO); assert.equal(prNumber, 1);
+          return { state: 'CLOSED', mergedAt: liveState === 'merged' ? NOW : null, closedAt: NOW };
+        },
+      });
+      assert.equal(snapshot.terminalReconciliation.reconciled, 1);
+      assert.equal(snapshot.held, 0);
+      assert.deepEqual(snapshot.mergeOutcomes, [{ outcome: liveState, count: 1 }]);
+      const verify = new Database(path.join(rootDir, 'data', 'reviews.db'), { readonly: true });
+      assert.equal(verify.prepare('SELECT pr_state FROM reviewed_prs').get().pr_state, liveState);
+      verify.close();
+    });
+  }
+}
+
+test('held PR diagnostics survive collection while parks, merge stalls and stale leases stay quiet', t => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  t.after(() => { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); });
+  insertReviewRow(rootDir, { prNumber: 1 });
+  const db = openDb(rootDir);
+  db.prepare('UPDATE reviewed_prs SET labels_json=?').run('["do-not-merge"]');
+  db.close();
+  writeJob(rootDir, 'stopped', 'held-clean', { repo: REPO, prNumber: 1,
+    stoppedAt: '2026-05-25T15:00:00.000Z', remediationPlan: { stop: { code: 'review-settled' } } });
+  const parkArgs = { rootDir, repo: REPO, prNumber: 1, reason: 'worker-identity-unresolved' };
+  recordDaemonMergePark({ ...parkArgs, observedAt: '2026-05-25T17:59:00.000Z' });
+  recordDaemonMergePark({ ...parkArgs, observedAt: NOW });
+  const parkPath = parkRecordPath(rootDir, REPO, 1);
+  const parkBefore = readFileSync(parkPath, 'utf8');
+  const leaseDir = path.join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(leaseDir, { recursive: true });
+  const leasePath = path.join(leaseDir, 'held.json');
+  writeFileSync(leasePath, JSON.stringify({ repo: REPO, prNumber: 1, headSha: 'head',
+    acquiredAt: '2026-05-25T15:00:00.000Z', status: 'dispatched' }));
+  const options = { rootDir, hqRoot, env: {}, now: () => new Date(NOW),
+    config: { hostChecksEnabled: false }, listOpenPrsSyncImpl: () => [] };
+  const held = collectHealth(options);
+  assert.equal(readFileSync(parkPath, 'utf8'), parkBefore);
+  assert.ok(existsSync(leasePath));
+  assert.equal(held.daemonMergeParks.length, 0);
+  assert.equal(held.mergeStalls.candidates.length, 0);
+  assert.equal(held.amaCloserLeases.total, 1);
+  assert.equal(held.amaCloserLeases.stale.length, 0);
+  assert.ok(!findingCodes(held).includes('review:ama_closer_lease_stale'));
+  const releasedDb = openDb(rootDir);
+  releasedDb.prepare("UPDATE reviewed_prs SET labels_json='[]'").run();
+  releasedDb.close();
+  const released = collectHealth(options);
+  assert.equal(released.daemonMergeParks[0].observationCount, 2);
+  assert.equal(released.daemonMergeParks[0].firstObservedAt, '2026-05-25T17:59:00.000Z');
+  assert.equal(released.mergeStalls.candidates.length, 1);
+  assert.equal(released.amaCloserLeases.stale.length, 1);
+});
+
+for (const label of ['no-merge', 'no-auto-merge', 'hold']) {
+  test(`${label} remains visible in health accounting and conflict recovery`, t => {
+    const rootDir = tempRoot();
+    const hqRoot = tempRoot();
+    t.after(() => { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); });
+    insertReviewRow(rootDir, { prNumber: 1 });
+    const db = openDb(rootDir);
+    db.prepare('UPDATE reviewed_prs SET labels_json=?').run(JSON.stringify([label]));
+    db.close();
+    const snapshot = collectHealth({ rootDir, hqRoot, env: {}, now: () => new Date(NOW),
+      config: { hostChecksEnabled: false, conflictingPrChecksEnabled: true, conflictingPrRepo: REPO },
+      listOpenPrsSyncImpl: () => [conflictPrFixture({ number: 1, labels: [{ name: label }] })],
+    });
+    assert.equal(snapshot.held, 0);
+    assert.equal(snapshot.firstPassQueue.pendingDepth, 1);
+    assert.equal(snapshot.conflictingOpenPrs.count, 1);
+    assert.equal(snapshot.ttm.budget.openPrCount, 1);
+  });
+}
+
+for (const schema of ['missing-table', 'missing-labels']) {
+  for (const dirtyPrCount of [0, 1]) {
+    test(`legacy ${schema} ledger retains counters and tolerates dirty backlog=${dirtyPrCount}`, t => {
+      const rootDir = tempRoot();
+      const hqRoot = tempRoot();
+      t.after(() => { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); });
+      const db = openDb(rootDir);
+      if (schema === 'missing-labels') {
+        insertReviewRow(rootDir, { prNumber: 1 });
+        db.exec('ALTER TABLE reviewed_prs DROP COLUMN labels_json');
+      } else db.exec('DROP TABLE reviewed_prs');
+      db.close();
+      const stateDir = path.join(hqRoot, 'dispatch', '_auto_merge-fixture');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(path.join(stateDir, 'daemon-state.json'), JSON.stringify({ dirtyPrBacklog: {
+        dirtyPrCount, recordedAt: '2026-05-25T15:00:00.000Z', signature: dirtyPrCount ? [`${REPO}#1@head`] : [],
+      } }));
+      const snapshot = collectHealth({ rootDir, hqRoot, env: { USER: 'fixture' }, now: () => new Date(NOW),
+        config: { hostChecksEnabled: true }, listOpenPrsSyncImpl: () => [],
+        execFileSyncImpl: () => { throw new Error('fixture: host command unavailable'); },
+      });
+      assert.equal(snapshot.held, null);
+      assert.equal(snapshot.hammerDispatchStall.backlog.dirtyPrCount, dirtyPrCount);
+      if (schema === 'missing-labels') assert.equal(snapshot.firstPassQueue.pendingDepth, 1);
+      const verify = new Database(path.join(rootDir, 'data', 'reviews.db'), { readonly: true });
+      assert.ok(!verify.prepare('PRAGMA table_info(reviewed_prs)').all().some(row => row.name === 'labels_json'));
+      verify.close();
+    });
+  }
+}

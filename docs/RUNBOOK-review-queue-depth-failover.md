@@ -93,6 +93,13 @@ the review-cycle cap do not count. When the re-review threshold inherits the
 first-pass threshold, the watcher logs that the lanes can spend separate spill
 slots.
 
+Both queue-depth lanes exclude open PRs carrying `no-merge-hold`,
+`do-not-merge`, or `merge-agent-skip`, matching enforced merge-action holds.
+`no-merge`, `no-auto-merge`, `hold`, and pipeline-owned state labels remain
+countable. Engage/disengage and spill logs include `held: N`, read once per
+armed lane plan and reused for that tick. An unreadable held count logs a
+specific warning and `held: unknown` without disabling depth pressure.
+
 The classes it may spill to are the pre-existing
 `ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK` list (default `['codex']`)
 — this ticket did not introduce a second roster. `claude-code` is intentionally

@@ -628,3 +628,28 @@ test('STALECLOSER-03 a shared decision for another head is ignored; stale heads 
   assert.equal(calls.dispatch.length, 1);
   assert.equal(calls.dispatch[0].closerHead, true);
 });
+
+for (const label of ['do-not-merge', 'no-merge-hold', 'merge-agent-skip']) {
+  test(`${label} resets pre-hold dispatch and uncertainty streaks`, async t => {
+    const { args, tick, calls } = setup(t);
+    for (let i = 0; i < 5; i++) await tick();
+    await tick({ candidate: { ...args.candidate, labels: [{ name: label }] } });
+    for (let i = 0; i < 5; i++) await tick();
+    assert.equal(calls.dispatch.length, 0);
+    assert.equal((await tick()).outcome, 'ama-dispatched');
+    const uncertain = { hasOwnerImpl: async () => ({ uncertain: true }) };
+    for (let i = 0; i < 5; i++) await tick(uncertain);
+    await tick({ ...uncertain, labels: [label] });
+    for (let i = 0; i < 5; i++) await tick(uncertain);
+    assert.equal(calls.pages.length, 0);
+    await tick(uncertain);
+    assert.equal(calls.pages.length, 1);
+  });
+}
+for (const label of ['no-merge', 'no-auto-merge', 'hold']) {
+  test(`${label} preserves orphan dispatch admission`, async t => {
+    const { tick, calls } = setup(t);
+    for (let i = 0; i < 6; i++) await tick({ labels: [label] });
+    assert.equal(calls.dispatch.length, 1);
+  });
+}

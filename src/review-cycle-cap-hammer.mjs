@@ -7,9 +7,10 @@
 //
 // The cap label stays on (so first-pass suppression never spawns another
 // reviewer) and the PR never re-enters the posted-review phase. The `failed`
-// cap row itself is re-armed to `pending` once the head has moved past the
-// last reviewed head, so the durable cap signal is the label backed by the
-// watcher's own escalation marker. This hook runs on every watcher tick for a
+// cap row stays intact when the head moves: CAPROUTE-01 reconciles its hammer
+// before generic stale-head retry admission. Rows already reset to `pending`
+// retain the cap signal through the label backed by the watcher's escalation
+// marker. This hook runs on every watcher tick for a
 // capped PR and hands it to the ordinary AMA closer with `reviewCycleCapReached`,
 // through the hammer-owner route it shares with CIBLOCKHAM-01
 // (src/hammer-owner-route.mjs). The closer owns the hammer: lease, per-head

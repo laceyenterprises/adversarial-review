@@ -54,6 +54,7 @@ function fileUrl(...parts) {
 const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pending: 'pending', inProgress: 'in-progress', completed: 'completed', failed: 'failed', stopped: 'stopped', workspaces: 'workspaces', stoppedArchived: 'stopped-archived' }; export function classifyFollowUpCriticality() { return { critical: false, blockingFindingCount: 0, blockingFindingState: 'known', verdict: 'comment-only' }; } export function createFollowUpJob() { return { jobPath: '/tmp/watcher-claim-loop-follow-up.json' }; } export function listFollowUpJobsInDir() { return []; } export function listInProgressFollowUpJobs() { return []; } export function resolveRoundBudgetForJob() { return { roundBudget: 1, riskClass: 'medium' }; } export function summarizePRRemediationLedger() { return { completedRoundsForPR: 0, latestRiskClass: 'medium', latestMaxRounds: 1 }; } export const PUBLIC_REPLY_MAX_CHARS = 1200; export function detectPublicReplyNoiseSignal() { return null; } export function isActiveFollowUpJobStatus(status) { return ['pending','inProgress','in-progress','in_progress'].includes(status); } export function isSettledReviewJob() { return false; } export function markFollowUpJobStopped() { return { status: 'stopped' }; } export function requeueFollowUpJobForNextRound() { return { requeued: false }; } export function markFollowUpJobFailed() { return { status: 'failed' }; } export function requeueInProgressFollowUpJobForRetry() { return { requeued: false }; } export function stopPendingNoRemediationJobs() { return []; } export function writeFollowUpJob() {} export function voidSingleReviewCredit() { return { voided: false }; }";
 
 function buildLoaderSource({
+  capRouteSource = null,
   subjectHeads = {},
   subjectRevisionRefs = {},
   followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE,
@@ -66,6 +67,7 @@ function buildLoaderSource({
   const packageParentUrl = fileUrl('package.json');
 
   const stubs = {
+    ...(capRouteSource ? { [fileUrl('src', 'review-cycle-cap-hammer.mjs')]: 'fixture:cap-route' } : {}),
     [reviewStateUrl]: 'fixture:review-state',
     [subjectAdapterUrl]: 'fixture:subject-adapter',
     [fileUrl('src', 'adapters', 'operator', 'index.mjs')]: 'fixture:operator-surface',
@@ -97,6 +99,7 @@ function buildLoaderSource({
   };
 
   return `
+const capRouteSource = ${JSON.stringify(capRouteSource)};
 const stubs = new Map(${JSON.stringify(Object.entries(stubs))});
 
 export async function resolve(specifier, context, nextResolve) {
@@ -110,6 +113,7 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url === 'fixture:cap-route') return { format: 'module', shortCircuit: true, source: capRouteSource };
   if (url === 'fixture:heldhead') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
       export function hasInProgressCommentOnlyFinalRound() { return false; }
@@ -251,7 +255,10 @@ export async function load(url, context, nextLoad) {
                   observedAt: '2026-05-15T12:00:05.000Z',
                 };
               }
-              return { ...subject, ref: { ...subject.ref } };
+              const nextHead = globalThis.__watcherClaimLoopSubjectHead;
+              return nextHead && ref.subjectExternalId.endsWith('#101')
+                ? { ...subject, headSha: nextHead, ref: { ...subject.ref, revisionRef: nextHead } }
+                : { ...subject, ref: { ...subject.ref } };
             },
           };
         }
@@ -2392,4 +2399,38 @@ test('REVIEWAGE-02 production saturation spills an overdue request below depth t
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);
   assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews || 0, 0);
+});
+
+test('CAPROUTE-01: failed capped row with an old revision reaches the hammer before retry admission on every new head', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'caproute-claim-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource({ capRouteSource: `
+      globalThis.capRoutes = [];
+      export async function maybeRouteReviewCycleCapToHammer(args) {
+        if (!args.existing?.failure_message?.startsWith('[review-cycle-cap]')) return { handled: false };
+        globalThis.capRoutes.push(args.currentRevisionRef);
+        return { handled: true, outcome: 'ama-dispatched' };
+      }` }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `db.prepare(\`INSERT INTO reviewed_prs
+        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+         reviewer_head_sha, revision_ref, failure_message)
+        VALUES (?, 101, ?, 'codex', 'open', 'failed', 9, 'old-head', 'old-head', '[review-cycle-cap] capped')\`)
+        .run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00Z');`,
+      afterFirstPoll: `
+        assert.deepEqual(globalThis.capRoutes, ['sha-happy-101']);
+        globalThis.__watcherClaimLoopSubjectHead = 'next-head';
+        await pollOnce(octokit, pollOptions);
+        assert.deepEqual(globalThis.capRoutes, ['sha-happy-101', 'next-head']);
+        assert.ok(!claims.some((claim) => claim.prNumber === 101));`,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 30000 });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

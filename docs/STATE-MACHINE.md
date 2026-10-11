@@ -1085,7 +1085,15 @@ A merged daemon result remains terminal for dispatch and never sends this clean
 head to the hammer's non-empty-remediation contract.
 
 PRIMARYCHG-01: unknown primary-change evidence defers merge and is recomputed
-on each pipeline tick. It does not establish a final hammer no-merge judgment
-or require operator recovery. Old `primary-change-unknown` stop audits do not
-hold redispatch once ordinary live-head gates pass. A proven primary-change
-reversal remains refused. Launch records alone cannot establish a baseline.
+on each pipeline tick. CAPROUTE-01 treats a live-head hammer stop for
+`primary-change-unknown` (including legacy audits) or
+`primary-change-read-failed` as an evidence hold, rather than a final no-merge
+judgment. Before ordinary eligibility, each closer pass on an open PR probes
+that evidence once, including CYCLECAPHAM-01 / CIBLOCKHAM-01 owner routes and
+non-closer-authored stale-review heads. The closer returns
+`hammer-stop-awaiting-input-change` with `recoveryWait` and pages once per
+head while evidence remains unknown or unreadable. A computable answer
+persists `releasedBy: ['primary-change-evidence']`; head, base, mergeability,
+checks changes or a conflict can also release the hold. Release resumes
+ordinary gates, leases and retry caps. A proven primary-change reversal remains
+refused. Launch records alone cannot establish a baseline.

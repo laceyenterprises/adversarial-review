@@ -151,6 +151,7 @@ import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
 import { maybeRearmInfraDeadHammer, unexecutedHammerReason } from './dead-hammer-rearm.mjs';
 import {
   evaluateHammerStopHold,
+  HAMMER_EVIDENCE_FAILURES,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from './hammer-stop-hold.mjs';
@@ -4102,6 +4103,33 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  // CAPROUTE-01: evidence holds must be probed even when ordinary eligibility
+  // would return early. Keep this result for later reconciliation in this pass.
+  let evidenceStopHold = null;
+  let hammerStopRelease = null;
+  if (prMetadata?.isOpen === true) {
+    const stop = readHammerStopForHead({
+      hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
+      repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha,
+      reviewedSha: dispatchContext?.reviewedSha, logger,
+    });
+    if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) {
+      evidenceStopHold = await evaluateHammerStopHoldImpl({
+        rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
+        hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
+        repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha,
+        reviewedSha: dispatchContext?.reviewedSha, prMetadata,
+        fetchPrimaryChangeImpl, execFileImpl, deliverAlertImpl, logger,
+        excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+        now: dispatchContext?.dispatchedAt || new Date().toISOString(),
+      });
+      if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
+        skipMergeAgent: true, recoveryWait: true, reason: HAMMER_STOP_HOLD_REASON,
+        hammerStop: evidenceStopHold.hammerStop });
+      if (evidenceStopHold.action === 'release') hammerStopRelease = evidenceStopHold;
+    }
+  }
+
   const eligibilityOptions = { ...(options || {}) };
   // STALECLOSER-03: the closer judges a closer-authored stale head with the same
   // predicate rescue and the hammer wake used (computed by the orchestrator).
@@ -4189,7 +4217,6 @@ export async function maybeDispatchAmaCloser({
   const repairCertifiedPark = certifiedContentionPark && !resumeCertifiedPark
     && parkRepairReasons.length > 0
     && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
-  let hammerStopRelease = null;
   if (!resumeCertifiedPark && (!verdict.eligible || eligibleHammerRouteReasons.length > 0)) {
     if (!verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark) {
       return noAmaDispatch({
@@ -4235,7 +4262,7 @@ export async function maybeDispatchAmaCloser({
     // their own final no-merge decision.
     if (hammerOwnerRouteOf(dispatchContext) === null
       && (!verdict.reasons.includes('stale-review-head') || dispatchContext?.liveHeadCloserAuthored === true)) {
-      const hammerStopHold = await evaluateHammerStopHoldImpl({
+      const hammerStopHold = evidenceStopHold || await evaluateHammerStopHoldImpl({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
         hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
         repo: dispatchContext?.repo,
@@ -4243,6 +4270,8 @@ export async function maybeDispatchAmaCloser({
         headSha: prMetadata?.headSha || dispatchContext?.targetRemediationSha || null,
         reviewedSha: dispatchContext?.reviewedSha || null,
         prMetadata,
+        fetchPrimaryChangeImpl,
+        execFileImpl,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
         deliverAlertImpl,
         logger,
@@ -4903,6 +4932,8 @@ export async function maybeDispatchAmaCloser({
       if (!livePr || !['OPEN', 'CLOSED', 'MERGED'].includes(livePr.state) || noMergeDecision === null) {
         return retainExistingAmaCloserDispatch(existingRecord, workerClass, observedStatus);
       }
+      if (noMergeDecision && evidenceStopHold?.action === 'release'
+        && (livePr.headRefOid || targetRemediationSha) === prMetadata.headSha) return null;
       if (!noMergeDecision) return null;
       finalizeAmaCloserLeaseBestEffort({
         rootDir, leaseIdentity: existingRecordLeaseIdentity,

@@ -1000,3 +1000,22 @@ test('parse-failed files are not surfaced for unrelated PRs', async (t) => {
     }
   }
 });
+
+// The local watchdog requests the ledger/wake directly; GitHub label presence
+// must never make another request a no-op (external label producers are separate).
+test('CAPROUTE-01: watchdog request takes effect with retrigger-review already present', (t) => {
+  const rootDir = makeRoot(t);
+  const old = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(rootDir, { rereview_requested_at: old,
+    rereview_reason: 'worker requested rereview', reviewer_head_sha: 'label-head', revision_ref: 'label-head' });
+  const db = openReviewStateDb(rootDir);
+  try {
+    const results = applyStuckRereviewRows({ db, rootDir,
+      stuckRows: [{ row: { repo: 'laceyenterprises/agent-os', pr_number: 1000,
+        review_status: 'pending', rereview_requested_at: old,
+        reviewer_head_sha: 'label-head', revision_ref: 'label-head', labels: ['retrigger-review'] } }],
+      requestedAt: '2026-05-29T23:00:00.000Z', thresholdMs: 5 * 60_000 });
+    assert.equal(results[0].applied, true);
+    assert.equal(results[0].wakeRequested, true);
+  } finally { db.close(); }
+});

@@ -1269,8 +1269,9 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   latest terminal audit for the live head is `failed-without-merge`, the closer
   does not dispatch another hammer on that head until the head, base SHA,
   mergeability (MERGEABLE/CONFLICTING) or the external check rollup differs from
-  what it first saw. A newly available head/base SHA or a known mergeability
-  reading after `UNKNOWN` counts as a change; missing current SHA readings and
+  what it first saw, or primary-change evidence becomes computable after an
+  evidence-collection stop (CAPROUTE-01). A newly available head/base SHA or a
+  known mergeability reading after `UNKNOWN` counts as a change; missing current SHA readings and
   current `UNKNOWN` mergeability do not release the hold. Own gate exclusion
   follows the canonical CI rule: only matching status contexts are ignored;
   external check runs with that name remain inputs. Per-attempt producer
@@ -1286,11 +1287,31 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   and the ordinary gates, lease and per-PR retry cap decide the one re-dispatch;
   on a hammer-rebased closer head with a stale review it re-admits the hammer
   (never on standing blocking findings, never while remediation is pending). A
-  stale review on a head whose tip is not a closer commit is never held: its
-  exact-head re-review stays the owner. The hammer-owner routes (CYCLECAPHAM-01,
-  CIBLOCKHAM-01) keep their own final no-merge decision. The retry-cap page now
+  stale review on a head whose tip is not a closer commit normally keeps its
+  exact-head re-review as owner. CAPROUTE-01 is the evidence-stop exception:
+  `primary-change-unknown` (including legacy audits) and
+  `primary-change-read-failed` are held and probed before ordinary eligibility
+  on every closer evaluation of an open PR, including non-closer stale heads
+  and hammer-owner routes (CYCLECAPHAM-01, CIBLOCKHAM-01). The read-only probe
+  runs once per pass while unreleased. An unknown or unreadable answer retains
+  the hold; a computable answer persists `releasedBy: ['primary-change-evidence']`
+  and lets ordinary gates decide closure, even if that answer refuses merge.
+  Other observed input changes and merge conflicts also release the hold.
+  Hammer-owner routes retain their final no-merge decision for non-evidence
+  stops on the live head; an older head's no-merge does not terminate ownership
+  of a newer head. The retry-cap page now
   ends with `Last hammer stop on head <sha>: <predicate>`. State:
   `data/follow-up-jobs/hammer-stop-hold/<repo>-pr-<n>.json`.
+- **Cycle-cap ownership before drain** (CAPROUTE-01). The watcher reconciles
+  the capped PR's hammer owner before generic failed-row retry admission and
+  before the watcher drain gate, including when the row's `revision_ref` lags
+  the live head. A handled route preserves the automatic `failed` cap row
+  across head moves instead of re-arming it as `pending`. Previously reset
+  rows still route through the cap label and escalation marker. Like
+  posted-review closure handling, this may launch a hammer
+  during watcher drain; drain stops new reviewer admission, not this closure
+  handoff. The closer's eligibility, lease, retry cap and lifetime ceiling
+  remain authoritative.
 - **Closer-head re-review decline** (`src/closer-head-rereview-decline.mjs`).
   An `AMA automated recovery:` re-review on a head whose tip carries the closer
   trailer is never spawned. The watcher restores the row to `posted` at the last
@@ -1451,7 +1472,7 @@ reasons:
 | `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
 | `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
 | `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and the finding authorization described below. The closer pages once per refused head after three observations; both daemon and closer expose scoped operator recovery described below. |
-| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Retain the merge hold while recovering evidence. Deterministic unknown evidence enters the existing scoped escalation route immediately; it never masquerades as `gate-read-failed`. The daemon park records `reason: primary-change-unknown` with an inspection remedy. The recovery router pages after its existing six observations for the same head, deduplicating subsequent pages. Hammer context and stop output include the missing-evidence reason. Legacy unknown no-merge audits do not hold redispatch. |
+| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Retain the merge hold while recovering evidence. Deterministic unknown evidence enters the existing scoped escalation route immediately; it never masquerades as `gate-read-failed`. The daemon park records `reason: primary-change-unknown` with an inspection remedy. The recovery router pages after its existing six observations for the same head, deduplicating subsequent pages. Hammer context and stop output include the missing-evidence reason. CAPROUTE-01 holds legacy unknown hammer stops on the live head, including hammer-owner routes, and probes evidence once per closer pass. A computable answer releases the evidence hold through `primary-change-evidence`; ordinary merge gates still apply. |
 | `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permanent permission, missing compare and malformed JSON errors are structural unknowns requiring evidence recovery. An actual in-lease read failure remains non-permanent; a structural unknown is a scoped primary-change refusal. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
@@ -2448,5 +2469,5 @@ identities in a blocker list are ambiguous and grant no withdrawal authority.
 Eligibility routing uses standing blocker counts; original counts remain in
 `trace.verdict.originalBlockingFindings` for audit.
 
-PRIMARYEMPTY-01: `primary-change-unknown` is a deterministic evidence refusal, not a transient read. Daemon and closer enter the existing scoped recovery/escalation route; the durable park names `primary-change-unknown` and its remedy. After six observations the existing router pages once for that head. Genuine `primary-change-read-failed` outages still retry. Legacy unknown hammer stop audits do not hold redispatch. Proven
+PRIMARYEMPTY-01: `primary-change-unknown` is a deterministic evidence refusal, not a transient read. Daemon and closer enter the existing scoped recovery/escalation route; the durable park names `primary-change-unknown` and its remedy. After six observations the existing router pages once for that head. Genuine `primary-change-read-failed` outages still retry. CAPROUTE-01 includes legacy unknown hammer stop audits in the live-head evidence hold, including CYCLECAPHAM-01 and CIBLOCKHAM-01 routes. Each closer pass probes once; unknown or unreadable evidence keeps the hold, while a computable answer persists `primary-change-evidence` and resumes ordinary gates. The hold pages once per head through `ama_closer.hammer_stop_hold`, independently of the daemon recovery router. Proven
 `primary-change-reverted` decisions retain their existing recovery contract.

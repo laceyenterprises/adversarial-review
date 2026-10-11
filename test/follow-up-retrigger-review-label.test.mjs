@@ -10,6 +10,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import {
+  createGitHubPRLabelControlsAdapter,
+  legacyLabelEventFromControlResult,
+} from '../src/adapters/operator/github-pr-label-controls/index.mjs';
+import { latestMatchingScopedTimelineLabelEvent } from '../src/github-label-events.mjs';
 
 import {
   RETRIGGER_REVIEW_LABEL,
@@ -73,13 +78,85 @@ function defaultArgs(rootDir, overrides = {}) {
 
 test('label-event-missing when no labelEvent passed', async () => {
   const root = makeTempRoot();
+  const calls = [];
   const result = await tryRetriggerReviewFromLabel({
     ...defaultArgs(root),
+    execFileImpl: makeStubExec({ recordedCalls: calls }),
     labelEvent: null,
     rereviewImpl: () => assert.fail('should not call rereview when labelEvent missing'),
   });
   assert.equal(result.outcome, 'label-event-missing');
+  assert.equal(result.labelRemoved, false);
+  assert.equal(calls.length, 0);
 });
+
+for (const firstObservation of ['stale-snapshot', 'missing-anchor']) {
+  test(`CAPROUTE-01: ${firstObservation} keeps the request for the next current-head tick`, async () => {
+    const root = makeTempRoot();
+    const calls = [];
+    const audit = stubAuditAppender();
+    const headB = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const anchor = { __typename: 'PullRequestCommit', id: 'commit-B',
+      commit: { oid: headB, committedDate: '2026-10-11T10:00:00Z' } };
+    const labeled = { __typename: 'LabeledEvent', id: 'label-B',
+      label: { name: RETRIGGER_REVIEW_LABEL }, actor: { login: 'merge-agent' },
+      createdAt: '2026-10-11T10:01:00Z' };
+    let nodes = firstObservation === 'missing-anchor' ? [labeled] : [anchor, labeled];
+    const adapter = createGitHubPRLabelControlsAdapter({
+      // The live PR is already at B; the tick snapshot or timeline can lag.
+      fetchLatestLabelEventImpl: async () => latestMatchingScopedTimelineLabelEvent(nodes, RETRIGGER_REVIEW_LABEL, headB),
+    });
+    let resets = 0;
+    const tick = async (revisionRef) => {
+      const subjectRef = { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/agent-os#527', revisionRef };
+      const control = await adapter.observeLabelControl(subjectRef, revisionRef, RETRIGGER_REVIEW_LABEL);
+      const result = await tryRetriggerReviewFromLabel(defaultArgs(root, {
+        labelEvent: legacyLabelEventFromControlResult(control, RETRIGGER_REVIEW_LABEL),
+        labelControlReason: control.reason,
+        revisionRef,
+        execFileImpl: makeStubExec({ recordedCalls: calls }),
+        appendAuditRow: audit.appendAuditRow,
+        findAuditRow: audit.findAuditRow,
+        rereviewImpl: () => { resets++; return { triggered: true, status: 'pending' }; },
+      }));
+      return { control, result };
+    };
+    const first = await tick(firstObservation === 'stale-snapshot' ? defaultArgs(root).revisionRef : headB);
+    assert.equal(first.control.applied, false);
+    assert.ok(firstObservation === 'stale-snapshot'
+      ? first.control.reason.startsWith('stale:')
+      : first.control.reason === 'missing-label-event');
+    assert.equal(first.result.labelRemoved, false);
+    assert.equal(calls.length, 0);
+    assert.equal(resets, 0);
+    assert.equal(audit.rows.length, 0);
+    assert.deepEqual(readdirSync(path.join(root, 'data', 'follow-up-jobs', 'label-consumptions')), []);
+
+    nodes = [anchor, labeled];
+    const second = await tick(headB);
+    assert.equal(second.control.applied, true);
+    assert.equal(second.result.outcome, 'review-retriggered');
+    assert.equal(resets, 1);
+    assert.equal(audit.rows.length, 1);
+    assert.ok(calls.some((call) => call.args.includes('--remove-label')));
+  });
+}
+
+for (const labelControlReason of ['non-attributable', 'untrusted-actor', 'missing-audit-fields']) {
+  test(`CAPROUTE-01: ${labelControlReason} removes only conclusively rejected requests`, async () => {
+    const root = makeTempRoot();
+    const calls = [];
+    const result = await tryRetriggerReviewFromLabel(defaultArgs(root, {
+      labelEvent: null, labelControlReason,
+      execFileImpl: makeStubExec({ recordedCalls: calls }),
+      rereviewImpl: () => assert.fail('rejected or incomplete evidence must not reset review'),
+    }));
+    const expectedRemoval = labelControlReason !== 'missing-audit-fields';
+    assert.equal(result.labelRemoved, expectedRemoval);
+    assert.equal(calls.length, expectedRemoval ? 1 : 0);
+    if (expectedRemoval) assert.ok(calls[0].args.includes('--remove-label'));
+  });
+}
 
 test('missing-revision-ref when revisionRef cannot be resolved', async () => {
   const root = makeTempRoot();
@@ -258,4 +335,15 @@ test('retryPendingRetriggerReviewAckComments only attempts records that need ret
   });
   assert.equal(empty.attempted, 0);
   assert.equal(empty.posted, 0);
+});
+
+test('CAPROUTE-01: removal failure leaves an unattributed label retryable without resetting review', async () => {
+  const root = makeTempRoot();
+  const args = defaultArgs(root, { labelEvent: null,
+    labelControlReason: 'non-attributable',
+    rereviewImpl: () => assert.fail('unattributed label must not reset review') });
+  await assert.rejects(tryRetriggerReviewFromLabel({ ...args,
+    execFileImpl: async () => { throw new Error('remove failed'); } }), /remove failed/);
+  const result = await tryRetriggerReviewFromLabel(args);
+  assert.equal(result.labelRemoved, true);
 });

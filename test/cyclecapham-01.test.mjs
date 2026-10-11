@@ -13,11 +13,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import {
   _resetHammerRetryCapAlertDebounceForTests,
@@ -662,6 +663,8 @@ test('a hammer no-merge decision pages the operator through the real coexistence
   assert.equal(alerts[0].payload.outcome, 'hammer-no-merge');
   assert.equal(alerts[0].payload.headSha, REMEDIATED_HEAD);
   assert.match(alerts[0].text, /hammer's final adjudication is NO MERGE/);
+  assert.match(alerts[0].text, /neither a reviewer nor a hammer/);
+  assert.match(alerts[0].text, /operator-approved, merge-agent-requested, paused-for-redesign/);
 });
 
 test('the review-cycle-cap page is a SEV1 page with one outbox identity per PR head', async (t) => {
@@ -772,4 +775,48 @@ test('dispatched, in-flight and waiting outcomes are not operator pages', () => 
   ]) {
     assert.equal(reviewCycleCapHammerFinalOutcome(result), null, JSON.stringify(result));
   }
+});
+
+for (const predicate of ['primary-change-unknown', 'primary-change-read-failed']) {
+  test(`CAPROUTE-01: capped hammer's ${predicate} hold re-probes and resumes after collector repair`, async (t) => {
+    const rootDir = tempRoot(t, 'caproute-cap-evidence-');
+    await seedFinishedCapHammer(rootDir);
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), repo: REPO, prNumber: PR_NUMBER,
+      headSha: REMEDIATED_HEAD,
+      attempt: { outcome: 'failed-without-merge', reason: predicate } });
+    let probes = 0;
+    const firstObservedAt = '2026-10-10T05:05:00Z';
+    for (const repaired of [false, false, true]) {
+      const dispatchedAt = repaired ? '2026-10-10T05:10:00Z' : firstObservedAt;
+      const deps = closerDeps({ workerStatus: 'failed', nextLaunch: LRQ_SECOND });
+      deps.fetchPrimaryChangeImpl = async ({ headSha }) => {
+        probes++;
+        return repaired ? primaryChangeFixture(headSha) : { headSha, hasHammerCommits: null };
+      };
+      const result = await maybeDispatchAmaCloser({
+        ...closerArgs(rootDir, { dispatchedAt }), ...deps,
+      });
+      assert.equal(result.dispatched, repaired, JSON.stringify(result));
+      assert.equal(deps.launches.length, repaired ? 1 : 0);
+      if (!repaired) assert.equal(result.reason, 'hammer-stop-awaiting-input-change');
+      const hold = JSON.parse(readFileSync(join(rootDir, 'data', 'follow-up-jobs',
+        'hammer-stop-hold', 'laceyenterprises-agent-os-pr-7956.json'), 'utf8')).heads[REMEDIATED_HEAD];
+      assert.equal(hold.firstObservedAt, firstObservedAt);
+      if (repaired) assert.equal(hold.releasedAt, dispatchedAt);
+    }
+    assert.equal(probes, 3, 'one read-only probe per pass');
+  });
+}
+
+test('CAPROUTE-01: a final no-merge on an older head does not end ownership of a new head', async (t) => {
+  const rootDir = tempRoot(t, 'caproute-new-head-');
+  await seedFinishedCapHammer(rootDir);
+  const deps = closerDeps({ workerStatus: 'failed', comments: [noMergeClosingStatus(REMEDIATED_HEAD)], nextLaunch: LRQ_SECOND });
+  const args = closerArgs(rootDir, { headSha: HAM_HEAD, dispatchedAt: '2026-10-10T05:05:00Z' });
+  args.dispatchContext.livePrProbeImpl = async () => ({ state: 'OPEN', headRefOid: HAM_HEAD, headBranchExists: true });
+  deps.fetchPullRequestRollupImpl = async () => ({ state: 'OPEN', headSha: HAM_HEAD, comments: [noMergeClosingStatus(REMEDIATED_HEAD)] });
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(deps.launches.length, 1);
+  assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 2);
 });

@@ -1204,6 +1204,7 @@ export async function processReviewSubject(entry, ctx) {
             prNumber,
             labelActor: labelEvent?.actor || 'unknown',
             labelEvent,
+            labelControlReason: labelControl?.reason,
             revisionRef: subject.ref.revisionRef,
             execFileImpl: execFileAsync,
           });
@@ -1255,6 +1256,30 @@ export async function processReviewSubject(entry, ctx) {
             err?.message || err
           );
         }
+      }
+
+      const cycleCapConfig = resolveReviewCycleCapConfig({
+        loadConfigImpl: loadConfigCached,
+        logger: console,
+      });
+      // CYCLECAPHAM-01: a capped PR goes to the hammer for final adjudication on
+      // every tick, instead of waiting on an operator label.
+      const routeReviewCycleCapToHammer = (row) => maybeRouteReviewCycleCapToHammer({
+        rootDir: ROOT,
+        db,
+        repoPath,
+        prNumber,
+        existing: row,
+        subjectRef: subject.ref,
+        currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
+        labelNames: prLabelNames,
+        cap: cycleCapConfig.cap,
+        execFileImpl: execFileAsync,
+      });
+      // CAPROUTE-01: route before generic failed-row retry admission. A cap
+      // failure is an ownership handoff, including when revision_ref is stale.
+      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)) {
+        if ((await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber))).handled) return;
       }
 
       // Auto-refresh stale posted reviews when the PR HEAD has moved.
@@ -2693,24 +2718,6 @@ export async function processReviewSubject(entry, ctx) {
         });
       };
 
-      const cycleCapConfig = resolveReviewCycleCapConfig({
-        loadConfigImpl: loadConfigCached,
-        logger: console,
-      });
-      // CYCLECAPHAM-01: a capped PR goes to the hammer for final adjudication on
-      // every tick, instead of waiting on an operator label.
-      const routeReviewCycleCapToHammer = (row) => maybeRouteReviewCycleCapToHammer({
-        rootDir: ROOT,
-        db,
-        repoPath,
-        prNumber,
-        existing: row,
-        subjectRef: subject.ref,
-        currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,
-        labelNames: prLabelNames,
-        cap: cycleCapConfig.cap,
-        execFileImpl: execFileAsync,
-      });
       if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)) {
         // The HAM head suppresses reviewers, not reconciliation of its owner.
         // The cap route still passes through the closer's eligibility/lease gates.

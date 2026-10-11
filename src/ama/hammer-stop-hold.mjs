@@ -22,6 +22,7 @@
 //   - the PR head SHA,
 //   - the base branch SHA (a dependency merged, main moved),
 //   - mergeability (MERGEABLE / CONFLICTING; UNKNOWN is not a reading), or
+//   - computable primary-change evidence after an evidence-collection failure, or
 //   - the external check rollup (each check's latest state; the pipeline's own
 //     gate context is excluded because the watcher writes it).
 // Once an input changes, the hold releases for that stop and the closer's
@@ -42,6 +43,9 @@
 //
 // State: data/follow-up-jobs/hammer-stop-hold/<repo>-pr-<n>.json, per head.
 
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { checkPrimaryChange, fetchPrimaryChange } from './primary-change.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
@@ -51,6 +55,9 @@ import { readAmaAuditEntry } from './audit.mjs';
 
 export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
 export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
+
+export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed']);
+const execFileAsync = promisify(execFile);
 
 const STOP_OUTCOMES = new Set(['failed-without-merge', 'no-merge']);
 // Process-local page debounce for a state file that cannot be written.
@@ -173,9 +180,6 @@ export function readHammerStopForHead({
   terminal.sort((a, b) => (a.at - b.at) || (a.order - b.order));
   const latest = terminal.at(-1);
   if (!STOP_OUTCOMES.has(latest.outcome)) return null;
-  // PRIMARYCHG-01: missing evidence is not the hammer's final judgment.
-  // This also releases legacy no-merge audits once the collector is repaired.
-  if (latest.attempt?.reason === 'primary-change-unknown') return null;
   const { attempt } = latest;
   return {
     headSha,
@@ -258,6 +262,8 @@ export async function evaluateHammerStopHold({
   logger = console,
   now = new Date().toISOString(),
   readAuditImpl = readAmaAuditEntry,
+  fetchPrimaryChangeImpl = fetchPrimaryChange,
+  execFileImpl = execFileAsync,
 } = {}) {
   if (!rootDir || !headSha) return { action: 'none' };
   const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, readAuditImpl, logger });
@@ -279,6 +285,23 @@ export async function evaluateHammerStopHold({
   let dirty = !prior || prior.stopKey !== stop.stopKey;
   if (!entry.releasedAt) {
     const changed = changedHammerStopInputs(entry.inputs, inputs);
+    // Probe only evidence failures, once per evaluation/pass. A computable
+    // refusal (e.g. reverted primary change) releases ownership, not merge gates.
+    if (HAMMER_EVIDENCE_FAILURES.has(stop.predicate)) {
+      try {
+        const evidence = await fetchPrimaryChangeImpl({
+          repo, prNumber, headSha, rootDir,
+          get: async (path) => {
+            const { stdout } = await execFileImpl('gh', ['api', path], { timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
+            return JSON.parse(stdout);
+          },
+        });
+        const answer = checkPrimaryChange(evidence, headSha);
+        if (!HAMMER_EVIDENCE_FAILURES.has(answer.reason)) changed.push('primary-change-evidence');
+      } catch (err) {
+        logger?.warn?.(`[ama-closer] hammer evidence probe failed for ${repo}#${prNumber}: ${err?.message || err}`);
+      }
+    }
     if (changed.length === 0 && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
     if (changed.length > 0) {
       entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };
@@ -304,7 +327,8 @@ export async function evaluateHammerStopHold({
     const text = `Adversarial-review hammer stopped without merging ${repo}#${prNumber} on head `
       + `${String(headSha).slice(0, 12)}: ${stop.predicate}. `
       + (stop.closingStatus ? `Hammer said: ${stop.closingStatus} ` : '')
-      + 'No further hammer run on this head until its head, base, mergeability or checks change; '
+      + 'The PR has neither a reviewer nor a hammer. Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. '
+      + 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; '
       + 'the watcher re-checks every tick and re-dispatches once when one does.';
     try {
       await deliverAlertImpl(text, {

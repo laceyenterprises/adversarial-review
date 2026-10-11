@@ -350,6 +350,12 @@ await pollOnce(octokit, {
 });
 
 const ciSnapshots = [];
+if (capScenario === 'paused' || capScenario === 'ham') {
+  const snapshot = () => db.prepare('SELECT review_status, review_attempts, failure_message, reviewer_head_sha FROM reviewed_prs WHERE pr_number = 164').get();
+  const cappedRow = snapshot();
+  await pollOnce(octokit);
+  assert.deepEqual(snapshot(), cappedRow, 'hammer reconciliation preserves the cap row across ticks');
+}
 if (process.env.FIXTURE_CI_PRE_PUSH) {
   const snapshot = () => db.prepare('SELECT review_status, reviewer_head_sha FROM reviewed_prs WHERE pr_number = 164').get();
   ciSnapshots.push(snapshot());
@@ -699,12 +705,13 @@ for (const scenario of ['escalate', 'paused', 'ham']) {
         assert.equal(summary.reviewStatus, 'failed');
         assert.match(summary.failureMessage, /^\[review-cycle-cap\] .*routed to the hammer for final adjudication/);
       } else {
-        // The head moved past the last reviewed head, so the existing re-arm
-        // made the row `pending`; the cap label still holds the review.
-        assert.equal(summary.reviewStatus, 'pending');
+        // CAPROUTE-01 hands off before stale-head retry admission. Keep the
+        // cap failure intact while the hammer owns the moved (including HAM) head.
+        assert.equal(summary.reviewStatus, 'failed');
+        assert.match(summary.failureMessage, /^\[review-cycle-cap\] .*routed to the hammer for final adjudication/);
       }
-      assert.equal(summary.closerCalls.length, 1, output);
-      assert.deepEqual(summary.closerCalls[0], {
+      assert.equal(summary.closerCalls.length, scenario === 'escalate' ? 1 : 2, output);
+      for (const call of summary.closerCalls) assert.deepEqual(call, {
         reviewCycleCapReached: true,
         reviewCycleExhausted: true,
         reviewCycleCap: 5,

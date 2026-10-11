@@ -845,9 +845,33 @@ test('JSON error: a hammer line appended after the pretty audit document no long
   assert.equal(rewritten.attempts.length, 2);
   assert.equal(rewritten.appendedRecords[0].reason, 'primary-change-unknown');
   // And the hammer stop reader sees the hand-written no-merge.
-  assert.equal(readHammerStopForHead({ hqRoot, repo: AOS, prNumber: 7991, headSha: HEAD_7991 }), null);
+  assert.equal(readHammerStopForHead({ hqRoot, repo: AOS, prNumber: 7991, headSha: HEAD_7991 })?.predicate, 'primary-change-unknown');
   // A genuinely corrupt file still fails closed.
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, '{"status": ');
   assert.throws(() => readAmaAuditEntry(hqRoot, AOS, 7991, HEAD_7991), SyntaxError);
 });
+
+for (const predicate of ['primary-change-unknown', 'primary-change-read-failed']) {
+  test(`CAPROUTE-01: ${predicate} probes once per pass and releases when evidence is computable`, async (t) => {
+    const rootDir = tmpRoot(t, 'caproute-evidence-');
+    const hqRoot = join(rootDir, 'hq-root');
+    writeAmaAuditEntry({ hqRoot, repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
+      attempt: { outcome: 'failed-without-merge', reason: predicate } });
+    let probes = 0;
+    let evidence = { headSha: PODIUM_HEAD, hasHammerCommits: null };
+    const tick = () => evaluateHammerStopHold({ rootDir, hqRoot, repo: PODIUM, prNumber: 15,
+      headSha: PODIUM_HEAD, prMetadata: { headSha: PODIUM_HEAD }, logger: SILENT,
+      fetchPrimaryChangeImpl: async () => { probes++; return evidence; } });
+    assert.equal((await tick()).action, 'hold');
+    assert.equal((await tick()).action, 'hold');
+    assert.equal(probes, 2);
+    evidence = { headSha: PODIUM_HEAD, hasHammerCommits: false };
+    const released = await tick();
+    assert.equal(released.action, 'release');
+    assert.deepEqual(released.changed, ['primary-change-evidence']);
+    assert.equal(probes, 3);
+    assert.equal((await tick()).action, 'release');
+    assert.equal(probes, 3, 'released stop does not keep probing');
+  });
+}

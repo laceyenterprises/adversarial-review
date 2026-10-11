@@ -945,6 +945,36 @@ function closerResumeFixture(scenario) {
   return { args, wakes, payloads, liveHeads };
 }
 
+test('LEASEDEFER-01 HAM rebase resolves exact-head certification without a chain to the old review', async () => {
+  const { args, payloads } = closerResumeFixture('green');
+  args.fetchHeadCloserVerifiedCommitImpl = async () => ({ sha: 'H1', parentSha: 'rebased-worker', message: 'Closed-By: hammer' });
+  args.resolveHeadCloserCommitSuppressionImpl = async ({ headSha }) => ({
+    suppressed: headSha === 'H1', reason: headSha === 'H1' ? 'closer-commit-trailer' : 'worker' });
+  let evidenceReads = 0;
+  args.resolveHamTerminalRemediationEvidenceImpl = async () => { evidenceReads++; return null; };
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(evidenceReads, 1);
+  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
+});
+
+test('LEASEDEFER-01 stale closer refusal reaches exact-head recovery on its first tick', async () => {
+  const { args } = closerResumeFixture('green');
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+    reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
+  let requests = 0;
+  args.recoverStrandedCloserHeadImpl = async options => {
+    assert.equal(options.closerAuthored, true);
+    assert.equal(options.headSha, 'H1');
+    assert.ok(options.result.reasons.includes('stale-review-head'));
+    requests++;
+    return { dispatched: false, skipMergeAgent: true, recoveryWait: true,
+      reason: 'closer-head-exact-review-requested' };
+  };
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(requests, 1);
+  assert.equal(result.reason, 'closer-head-exact-review-requested');
+});
+
 for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-pending', 'unknown', 'worker', 'blocking', 'live-blocking', 'live-clean']) {
   test(`HAMCIWAKE-01 watcher reviewed H0 -> closer H1: ${scenario}`, async t => {
     const { args, wakes, payloads, liveHeads } = closerResumeFixture(scenario);

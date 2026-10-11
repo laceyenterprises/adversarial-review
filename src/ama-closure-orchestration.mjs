@@ -1,4 +1,5 @@
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
+import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
 import { recoverOrphan } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
@@ -788,6 +789,7 @@ async function dispatchAmaClosureFor({
     dismissSupersededBlockingVerdictAtRemediatedHead,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   requestEligibleHammerWakeImpl = requestEligibleHammerWake,
+  recoverStrandedCloserHeadImpl = recoverStrandedCloserHead,
   fetchMergedProtectiveDependentsImpl = fetchMergedProtectiveDependentsForPr,
   fetchProtectivePredecessorStateImpl = fetchProtectivePredecessorStateForPr,
   emitProtectivePredecessorFindingImpl = null,
@@ -1050,6 +1052,7 @@ async function dispatchAmaClosureFor({
     }
   }
   let closerOnlyHeadDelta = closerHeadProof?.proven === true;
+  let closerHeadHasLiveReview = false;
   let evidenceHeadSha = closerOnlyHeadDelta ? closerHeadProof.anchorHead : settledReviewHeadSha;
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
@@ -1108,6 +1111,7 @@ async function dispatchAmaClosureFor({
           { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
         );
         if (currentBodies.length > 0) {
+          closerHeadHasLiveReview = true;
           closerOnlyHeadDelta = false;
           evidenceHeadSha = settledReviewHeadSha;
           liveReviewHeadSha = settledReviewHeadSha;
@@ -1527,7 +1531,21 @@ async function dispatchAmaClosureFor({
       throwIfAborted(signal);
       liveHeadCloserAuthored = closerCommitSuppression?.suppressed === true
         && closerCommitSuppression?.reason === 'closer-commit-trailer';
-      allowStaleReviewHeadHammerResume = closerOnlyHeadDelta && liveHeadCloserAuthored;
+      if (liveHeadCloserAuthored && !closerOnlyHeadDelta && !closerHeadHasLiveReview) {
+        const currentBodies = await runCoexistenceOperation(
+          'rebased-closer-head-live-review',
+          ({ signal: operationSignal }) => fetchLatestHeadReviewBodiesWithRetry({
+            repoPath, prNumber, headSha: currentPrHeadSha, authoritativeReviewerLogins,
+            fetchLatestHeadReviewBodiesImpl, retryDelaysMs: liveReviewRetryDelaysMs,
+            logger, signal: operationSignal,
+          }),
+          { timeoutMs: operationTimeoutMs, parentSignal: signal, operationTracker, logger, repoPath, prNumber },
+        );
+        closerHeadHasLiveReview = currentBodies.length > 0;
+      }
+      // A HAM rebase can break the chain to the reviewed SHA. Its exact-head
+      // ground-truth certificate below remains authoritative independently.
+      allowStaleReviewHeadHammerResume = liveHeadCloserAuthored && !closerHeadHasLiveReview;
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
@@ -2259,6 +2277,11 @@ async function dispatchAmaClosureFor({
       { amaEnabled: Boolean(cfg?.enabled) },
     );
   }
+  const closerRecovery = await recoverStrandedCloserHeadImpl({ result,
+    closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
+    prNumber, headSha: currentPrHeadSha, logger });
+  if (closerRecovery) return withAmaDispatchMetadata(closerRecovery, { amaEnabled: true });
+
   // CIDEDUPE-01: the closer handed this PR to the daemon, but the daemon declined
   // it this tick. Never silent: log the daemon's reason, count it per head, and
   // past the bound park for the operator when the hammer cannot take over.
@@ -2400,6 +2423,9 @@ export async function resolveMergeAgentCoexistenceForWatcher({
       : amaClosureResult?.daemonCleanMerge?.reason || amaClosureResult?.reason || 'closure-pending' }));
   if (amaClosureResult?.dispatched) {
     return { outcome: 'ama-dispatched', amaClosureResult };
+  }
+  if (amaClosureResult?.reason === 'closer-head-exact-review-requested') {
+    return { outcome: 'ama-pending', amaClosureResult };
   }
   const amaEnabled = Boolean(amaClosureResult?.amaEnabled);
   const amaClosureEligibilityMiss = amaClosureResult?.reason === 'not-eligible';

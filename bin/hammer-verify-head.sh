@@ -110,8 +110,25 @@ ham_acquire_merge_lease() {
     return 1
   fi
   local ham_required_checks_green_args=()
-  ham_lease_pr_view --json headRefOid,statusCheckRollup \
+  ham_lease_pr_view --json headRefOid,state,isDraft,labels,statusCheckRollup \
     > /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json || return 1
+  # Held/terminal PRs never occupy or queue for the serialized merge lane.
+  if ! HAM_ADMISSION_ROOT=<<ROOT_DIR>> HAM_ADMISSION_HQ=<<HQ_ROOT>> "$HAM_NODE_BIN" --input-type=module - "$POST_REMEDIATION_SHA" /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json <<'NODE'
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const { mergeLeaseAdmissionReason } = await import(pathToFileURL(`${process.env.HAM_ADMISSION_ROOT}/src/ama/merge-lease-admission.mjs`));
+const { readHammerStopForHead } = await import(pathToFileURL(`${process.env.HAM_ADMISSION_ROOT}/src/ama/hammer-stop-hold.mjs`));
+const headSha = process.argv[2];
+const pr = JSON.parse(readFileSync(process.argv[3], 'utf8'));
+const stop = readHammerStopForHead({ hqRoot: process.env.HAM_ADMISSION_HQ, repo: '<<REPO>>',
+  prNumber: <<PR_NUMBER>>, headSha, reviewedSha: '<<REVIEWED_SHA>>' });
+const reason = mergeLeaseAdmissionReason(pr, headSha, stop);
+if (reason) { console.error(`HAM lease admission refused: ${reason}`); process.exitCode = 20; }
+NODE
+  then
+    HAM_PHASE_OUTCOME=merge-lease-admission-refused
+    return 20
+  fi
   if jq -e --arg head "$POST_REMEDIATION_SHA" '
     .headRefOid == $head and
     (.statusCheckRollup | type == "array" and length > 0 and all(.[];

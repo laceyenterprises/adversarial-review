@@ -28,7 +28,7 @@ function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launch
   const overlapHelper = render(verify.slice(verify.indexOf('ham_base_touches_pr_files()'), verify.indexOf('# Resolve whether')));
   const finalGate = merge.slice(merge.indexOf('  if ! ham_required_gate_ok; then', merge.indexOf('HAM_MERGE_ATTEMPTS=0')), merge.indexOf('\n  HAM_MERGE_CAPABILITY_ENFORCEMENT='));
   writeFileSync(join(dir, 'gh'), `#!/bin/bash
-printf '{"headRefOid":"%s","statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"
+printf '{"headRefOid":"%s","state":"OPEN","isDraft":false,"labels":[],"statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"
 `, { mode: 0o755 });
   const script = `
 export PATH=${quote(dir)}:"$PATH"
@@ -44,7 +44,7 @@ HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1
 ${render(release).replace(' release \\', ' release --root-dir "$TEST_ROOT" \\')}
 ${helpers}
 ${acquire}
-gh() { printf '{"headRefOid":"%s","statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"; }
+gh() { printf '{"headRefOid":"%s","state":"OPEN","isDraft":false,"labels":[],"statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"; }
 ham_is_full_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
 HAM_MERGE_LEASE_WAIT_SECONDS=0
 ${fixture ? `${overlapHelper}

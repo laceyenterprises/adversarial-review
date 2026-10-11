@@ -2105,6 +2105,8 @@ async function dispatchAmaClosureFor({
     // Skipping a fresh run here would erase a consumed safety refusal on the
     // next tick, letting the same label bypass risk policy or a dispatch cap.
     if (!backgroundSettled) {
+      let mergeabilitySamples = 0;
+      let mergeabilityElapsedMs = 0;
       const submission = backgroundQueue.submit({
         key: backgroundKey,
         // Detached from this step's deadline on purpose: the whole point is that
@@ -2124,6 +2126,28 @@ async function dispatchAmaClosureFor({
             );
             return { dispatched: false, reason: 'background-pr-state-unavailable' };
           }
+          mergeabilitySamples = 1;
+          const mergeabilityStartedAt = Date.now();
+          if (normalizeGithubMergeability(live || {}) === 'UNKNOWN') {
+            await resolveMergeabilityWithSampling(live, async () => {
+              throwIfAborted(backgroundSignal);
+              mergeabilitySamples += 1;
+              const sampled = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+              if (sampled && typeof sampled === 'object') live = sampled;
+              return sampled;
+            }, {
+              attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
+              delayMs: mergeabilitySampleDelayMs,
+              sleepImpl: (ms) => abortableSleep(ms, backgroundSignal),
+              // Stop sampling immediately on a safety refusal. Check it below
+              // before allowing any dispatch, including after the final read.
+              classify: (state) => state?.state !== 'OPEN'
+                || state?.headSha !== dispatchContext.targetRemediationSha || state?.isDraft
+                ? 'CONFLICTING' : normalizeGithubMergeability(state),
+            });
+            throwIfAborted(backgroundSignal);
+          }
+          mergeabilityElapsedMs = Date.now() - mergeabilityStartedAt;
           // COMMENTCLOSE-01: name what blocked. A draft or an unmergeable PR is not
           // a state change; agent-os#7311 (a worker-opened draft) spent four hammer
           // attempts reported only as `background-pr-state-changed`.
@@ -2132,8 +2156,8 @@ async function dispatchAmaClosureFor({
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
           // DIRTYOWN-01: a CONFLICTING PR is the hammer's job (it resolves the
-          // conflict), so it dispatches. GitHub's transient UNKNOWN waits for the
-          // next cycle; UNKNOWN+CLEAN launches here because the hammer re-reads
+          // conflict), so it dispatches. UNKNOWN surviving the bounded sampling
+          // window waits for the next cycle; UNKNOWN+CLEAN launches because the hammer re-reads
           // mergeability itself (the eligibility gate stays strict on it).
           const liveMergeability = normalizeGithubMergeability(live || {});
           if (liveMergeability === 'UNKNOWN') {
@@ -2151,7 +2175,7 @@ async function dispatchAmaClosureFor({
                 ? `dispatched=${Boolean(settledResult?.dispatched)} reason=${settledResult?.reason || 'none'}` +
                   formatAmaResultReasons(settledResult)
                 : `error=${error?.message || error}`) +
-              ` elapsed_ms=${elapsedMs}`,
+              ` elapsed_ms=${elapsedMs} mergeability_samples=${mergeabilitySamples} mergeability_elapsed_ms=${mergeabilityElapsedMs}`,
           );
         },
       });

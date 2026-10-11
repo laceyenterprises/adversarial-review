@@ -74,6 +74,12 @@ Directory: `data/alert-delivery/`
   series can page again on the same head. If record persistence fails, no series
   ID is supplied and the normal outbox identity applies; the lane debounce still
   suppresses repeats. Legacy payloads without a series ID also use normal IDs.
+- AMA automated recovery exhaustion pages use
+  `ama-recovery-<sha256(JSON.stringify([repo, pr, head, reason]))>`. Same-reason
+  retries reuse pending, inflight, delivered and dead-letter documents; a later
+  different exhaustion reason can page on the same head. Pre-upgrade IDs hashed
+  `repo#pr@head` without the reason. Those legacy documents are reused only when
+  their event and payload reason match; a different reason gets the new ID.
 - The scheduled drain is best-effort fire-and-forget work. It must contain its
   own rejections so a drain failure cannot terminate the long-lived watcher
   daemon through Node's unhandled-rejection policy.
@@ -127,3 +133,5 @@ Directory: `data/alert-delivery/`
   leave wrong-UID subdirectories behind and prevents shared-root WAL/rename
   ownership races. Different worker UIDs get distinct default roots under their
   own home directories.
+
+An unreadable or corrupt legacy recovery receipt is retained conservatively for deduplication and logged; it does not prevent enqueue through a thrown read error.

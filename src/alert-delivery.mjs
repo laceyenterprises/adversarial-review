@@ -1395,6 +1395,28 @@ async function deliverAlert(text, {
     // identity, even if the alert has already moved to a terminal directory.
     doc.id = event === 'ama.closure_lag.slo_breach' ? closureLagAlertId(payload)
       : `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
+    const legacyRecoveryId = event === 'ama.automated_recovery.exhausted' ? doc.id : null;
+    if (legacyRecoveryId) {
+      doc.id = `ama-recovery-${crypto.createHash('sha256').update(JSON.stringify([
+        payload?.repo, payload?.pr, payload?.head, payload?.reason,
+      ])).digest('hex')}`;
+      // Honor pre-upgrade enqueue receipts only for the same exhaustion reason.
+      // A crash after enqueue but before recovery saves its receipt must not
+      // duplicate that page; a different reason must get a fresh identity.
+      for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
+        const existingPath = alertDocPath(rootDir, state, legacyRecoveryId);
+        let existing;
+        try { existing = JSON.parse(readFileSync(existingPath, 'utf8')); }
+        catch (err) {
+          if (err.code === 'ENOENT') continue;
+          console.error?.(`[alert-delivery] legacy recovery receipt unreadable at ${existingPath}: ${err.message}; retaining deduplication`);
+          return { status: state, queued: false, id: legacyRecoveryId, queuePath: existingPath };
+        }
+        if (existing.event !== event || existing.payload?.reason !== payload?.reason) continue;
+        if (state === 'pending' || state === 'inflight') scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
+        return { status: state, queued: false, id: legacyRecoveryId, queuePath: existingPath };
+      }
+    }
     if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')
       || HAMMER_OWNER_PAGE_EVENTS.includes(event)) {
       doc.id = `${event}-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex')}`;

@@ -327,8 +327,9 @@
       "path": "docs/data-model/alert-delivery-state.md",
       "store": "data/alert-delivery/",
       "schemaSurface": "src/alert-delivery.mjs",
-      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs"],
-      "owner": "adversarial-review alert delivery"
+      "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs", "src/ama/automated-recovery.mjs"],
+      "owner": "adversarial-review alert delivery",
+      "automatedRecoveryIdentityFields": ["repo", "pr", "head", "reason"]
     },
     {
       "id": "daemon-merge-parks",
@@ -591,11 +592,14 @@
       "store": "data/follow-up-jobs/ama-automated-recovery/<sha256>.{json,lock}",
       "schemaSurface": "src/ama/automated-recovery.mjs",
       "relatedSchemaSurfaces": [
+        "src/posted-review-row.mjs",
         "src/ama-closure-orchestration.mjs",
         "src/ama/dispatch-closer.mjs",
         "src/ama/recovery-launch-reconciliation.mjs"
       ],
-      "owner": "AMA watcher recovery router"
+      "owner": "AMA watcher recovery router",
+      "pageReceiptFields": ["paged", "pagedReasons"],
+      "pageDeduplication": "per head and exhaustion event.reason; legacy paged receipt migrates before event clearing"
     },
     {
       "id": "orphan-watchdog",

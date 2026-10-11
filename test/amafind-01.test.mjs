@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -377,4 +378,244 @@ test('per-head launch reconciliation ignores unrelated active and uncertain laun
     listActiveImpl: () => records, isPhantomImpl: () => false,
     readStatusImpl: async () => { throw new Error('unrelated launch probed'); },
   }), { reclaimed: 0, active: 0, uncertain: 0 });
+});
+
+test('HAMUNKNOWN-01 needs both the settled UNKNOWN budget and wall-clock deadline before escalation', async t => {
+  const reason = 'background-pr-mergeable-unknown';
+  let clock = 0;
+  const { args, calls } = harness(t, { reason, skipMergeAgent: true }, { now: () => clock });
+  for (let cycle = 1; cycle <= 2; cycle += 1) {
+    const result = await recoverAmaAutomation(args);
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(result.recovery.mergeabilityUnknownCycles, cycle);
+    await recoverAmaAutomation({ ...args, result: { reason: 'ama-closer-dispatch-backgrounded' } });
+  }
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-pending', 'fast polls cannot page');
+  clock = args.stuckDeadlineMs ?? 30 * 60 * 1000;
+  const result = await recoverAmaAutomation(args);
+  assert.equal(result.outcome, 'recovery-exhausted');
+  assert.equal(result.recovery.event.reason, reason);
+  assert.equal(calls.page.length, 1);
+  assert.equal(calls.hammer, 0);
+  assert.equal(calls.rereview.length, 0);
+  await recoverAmaAutomation(args);
+  assert.equal(calls.page.length, 1);
+});
+
+test('HAMUNKNOWN-01 elapsed deadline alone cannot exhaust a low-risk cycle budget', async t => {
+  let clock = 0;
+  const { args, calls } = harness(t, { reason: 'background-pr-mergeable-unknown' },
+    { maxAttempts: 1, now: () => clock });
+  await recoverAmaAutomation({ ...args, result: { reason: 'ama-closer-dispatch-backgrounded' } });
+  clock = 2_000_000;
+  const first = await recoverAmaAutomation(args);
+  assert.equal(first.outcome, 'ama-pending');
+  assert.equal(first.recovery.mergeabilityUnknownSince, clock);
+  clock += 2_000_000;
+  await recoverAmaAutomation({ ...args, result: { reason: 'ama-closer-dispatch-backgrounded' } });
+  assert.equal(calls.page.length, 0, 'queue ticks never spend the cycle budget');
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+});
+
+test('HAMUNKNOWN-01 transient probe failures preserve the UNKNOWN series across store reloads', async t => {
+  let clock = 0;
+  const { args, calls } = harness(t, { reason: 'background-pr-mergeable-unknown' }, { now: () => clock });
+  await recoverAmaAutomation(args);
+  for (const reason of ['background-pr-state-unavailable', 'ama-coexistence-operation-timeout',
+    'ama-closer-launch-in-progress', 'ama-closer-dispatch-backgrounded']) {
+    clock += 100;
+    const neutral = await recoverAmaAutomation({ ...args, result: { reason }, reclaimLaunch: async () => ({ active: 1 }) });
+    assert.equal(neutral.recovery.mergeabilityUnknownCycles, 1);
+    assert.equal(neutral.recovery.mergeabilityUnknownSince, 0);
+  }
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-pending');
+  clock = 2_000_000;
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+  assert.equal(calls.page.length, 1);
+});
+
+test('HAMUNKNOWN-01 gate UNKNOWN and transient-only declines preserve a flapping series and its event', async t => {
+  let clock = 0;
+  const { args, calls } = harness(t, { reason: 'background-pr-mergeable-unknown' },
+    { now: () => clock, maxAttempts: 2, stuckDeadlineMs: 1000 });
+  const gateResults = [
+    { reason: 'closer-head-mergeability-unknown', recoveryWait: true },
+    { reason: 'not-eligible', reasons: ['pr-mergeability-unknown'] },
+    { reason: 'not-eligible', reasons: ['pr-mergeability-unknown', 'labels-unavailable'] },
+    { reason: 'not-eligible', reasons: ['labels-unavailable'] },
+  ];
+  for (let cycle = 1; cycle <= 3; cycle += 1) {
+    const settled = await recoverAmaAutomation(args);
+    assert.equal(settled.outcome, 'ama-pending', 'cycle cap alone must not page');
+    assert.equal(settled.recovery.mergeabilityUnknownCycles, cycle);
+    assert.equal(settled.urgent, cycle <= 2, 'urgency ends at the cycle budget');
+    for (const result of gateResults) {
+      const gate = await recoverAmaAutomation({ ...args, result });
+      assert.equal(gate.outcome, 'ama-pending');
+      assert.equal(gate.recovery.mergeabilityUnknownCycles, cycle);
+      assert.equal(gate.recovery.mergeabilityUnknownSince, 0);
+    }
+    const queued = await recoverAmaAutomation({ ...args, result: { reason: 'ama-closer-dispatch-backgrounded' } });
+    assert.equal(queued.urgent, cycle <= 2);
+  }
+  clock = 1000;
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+  for (const result of gateResults) {
+    const gate = await recoverAmaAutomation({ ...args, result });
+    assert.equal(gate.recovery.event.reason, 'background-pr-mergeable-unknown');
+  }
+  await recoverAmaAutomation(args);
+  assert.equal(calls.page.length, 1);
+  assert.equal(calls.hammer, 0);
+  assert.equal(calls.rereview.length, 0);
+});
+
+for (const reasons of [[], ['pr-mergeability-unknown', 'ci-not-green']]) {
+  test(`HAMUNKNOWN-01 substantive or unspecified eligibility miss resets UNKNOWN: ${reasons}`, async t => {
+    const { args } = harness(t, { reason: 'background-pr-mergeable-unknown' });
+    await recoverAmaAutomation(args);
+    const next = await recoverAmaAutomation({ ...args, result: { reason: 'not-eligible', reasons } });
+    assert.equal(next.recovery.mergeabilityUnknownCycles, 0);
+    assert.equal(next.recovery.mergeabilityUnknownSince, undefined);
+  });
+}
+
+for (const legacy of [false, true, 'cleared-event']) {
+  test(`HAMUNKNOWN-01 later hammer-cap exhaustion pages a different reason, legacy receipt=${legacy}`, async t => {
+    let clock = 0;
+    const { args, calls } = harness(t, { reason: 'background-pr-mergeable-unknown' },
+      { now: () => clock, maxAttempts: 1, stuckDeadlineMs: 1000 });
+    await recoverAmaAutomation(args);
+    clock = 1000;
+    await recoverAmaAutomation(args);
+    if (legacy) {
+      const key = createHash('sha256').update(`${args.repo}#${args.prNumber}@${args.headSha}`).digest('hex');
+      const path = join(args.rootDir, 'data', 'follow-up-jobs', 'ama-automated-recovery', `${key}.json`);
+      const state = JSON.parse(readFileSync(path, 'utf8'));
+      delete state.pagedReasons;
+      if (legacy === 'cleared-event') delete state.event;
+      writeFileSync(path, JSON.stringify(state));
+    }
+    const hammer = { ...args, result: { reason: 'not-eligible', reasons: ['ci-not-green'] } };
+    assert.equal((await recoverAmaAutomation(hammer)).outcome, 'ama-dispatched');
+    assert.equal((await recoverAmaAutomation(hammer)).recovery.action, 'attempt-cap');
+    clock = 1999;
+    assert.equal((await recoverAmaAutomation(hammer)).outcome, 'ama-pending');
+    clock = 2000;
+    const exhausted = await recoverAmaAutomation(hammer);
+    assert.equal(exhausted.outcome, 'recovery-exhausted');
+    assert.deepEqual(exhausted.recovery.pagedReasons, ['background-pr-mergeable-unknown', 'not-eligible']);
+    assert.equal(calls.page.length, 2);
+    assert.equal(calls.page[1][1].payload.reason, 'not-eligible');
+    assert.deepEqual(calls.page[1][1].payload.reasons, ['ci-not-green']);
+    assert.match(calls.page[1][0], /: not-eligible$/);
+    await recoverAmaAutomation(hammer);
+    assert.equal(calls.page.length, 2, 'same reason remains deduplicated');
+    assert.equal(calls.hammer, 1);
+  });
+}
+
+test('HAMUNKNOWN-01 a failed second-reason page retries despite an earlier successful page', async t => {
+  const { args, calls } = harness(t, { reason: 'background-pr-mergeable-unknown' },
+    { stuckDeadlineMs: 0, maxAttempts: 1 });
+  await recoverAmaAutomation(args);
+  await recoverAmaAutomation(args);
+  const hammer = { ...args, result: { reason: 'not-eligible', reasons: ['ci-not-green'] } };
+  await recoverAmaAutomation(hammer);
+  const failed = await recoverAmaAutomation({ ...hammer,
+    pageImpl: async () => { throw new Error('enqueue unavailable'); } });
+  assert.deepEqual(failed.recovery.pagedReasons, ['background-pr-mergeable-unknown']);
+  assert.equal(failed.recovery.pageError, 'enqueue unavailable');
+  const retried = await recoverAmaAutomation(hammer);
+  assert.equal(calls.page.length, 2);
+  assert.deepEqual(retried.recovery.pagedReasons, ['background-pr-mergeable-unknown', 'not-eligible']);
+});
+
+test('HAMUNKNOWN-01 legacy UNKNOWN cycle counts acquire a fresh wall-clock floor', async t => {
+  const { args, calls } = harness(t, { reason: 'background-pr-mergeable-unknown' }, { now: () => 2_000_000 });
+  await recoverAmaAutomation(args);
+  const key = createHash('sha256').update(`${args.repo}#${args.prNumber}@${args.headSha}`).digest('hex');
+  const path = join(args.rootDir, 'data', 'follow-up-jobs', 'ama-automated-recovery', `${key}.json`);
+  const legacy = JSON.parse(readFileSync(path, 'utf8'));
+  legacy.mergeabilityUnknownCycles = 5;
+  delete legacy.mergeabilityUnknownSince;
+  writeFileSync(path, JSON.stringify(legacy));
+  const result = await recoverAmaAutomation(args);
+  assert.equal(result.outcome, 'ama-pending');
+  assert.equal(result.recovery.mergeabilityUnknownSince, 2_000_000);
+  assert.equal(calls.page.length, 0);
+});
+
+test('HAMUNKNOWN-01 resolving UNKNOWN preserves exhaustion from an unrelated refusal', async t => {
+  const { args, calls } = harness(t, { reason: 'worker-identity-unresolved' }, { stuckDeadlineMs: 0 });
+  await recoverAmaAutomation(args);
+  await recoverAmaAutomation({ ...args, result: { reason: 'background-pr-mergeable-unknown' } });
+  const result = await recoverAmaAutomation({ ...args, result: { reason: 'not-eligible', reasons: ['ci-not-green'] } });
+  assert.equal(result.outcome, 'recovery-exhausted');
+  assert.equal(result.recovery.event.reason, 'worker-identity-unresolved');
+  assert.equal(calls.hammer, 0);
+  assert.equal(calls.page.length, 1);
+});
+
+for (const [name, resolved, expected] of [
+  ['hammer', { reason: 'not-eligible', reasons: ['ci-not-green'] }, 'ama-dispatched'],
+  ['rereview', { reason: 'not-eligible', reasons: ['stale-review-head'] }, 'ama-pending'],
+]) {
+  test(`HAMUNKNOWN-01 resolving UNKNOWN releases its exhaustion event for ${name} and keeps page deduplication`, async t => {
+    const { args, calls } = harness(t, { reason: 'background-pr-mergeable-unknown' }, { stuckDeadlineMs: 0, maxAttempts: 1 });
+    await recoverAmaAutomation(args);
+    assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+    const resolvedResult = await recoverAmaAutomation({ ...args, result: resolved });
+    assert.equal(resolvedResult.outcome, expected);
+    assert.equal(resolvedResult.recovery.event, undefined);
+    assert.equal(resolvedResult.recovery.mergeabilityUnknownCycles, 0);
+    assert.equal(resolvedResult.recovery.mergeabilityUnknownSince, undefined);
+    assert.equal(resolvedResult.recovery.paged, true);
+    assert.equal(name === 'hammer' ? calls.hammer : calls.rereview.length, 1);
+    await recoverAmaAutomation(args);
+    assert.equal((await recoverAmaAutomation(args)).outcome, name === 'rereview' ? 'ama-pending' : 'recovery-exhausted');
+    assert.equal(calls.page.length, 1);
+  });
+}
+
+test('HAMUNKNOWN-01 changed blocker or head resets UNKNOWN cycle budget', async t => {
+  const { args } = harness(t, { reason: 'background-pr-mergeable-unknown' });
+  await recoverAmaAutomation(args);
+  await recoverAmaAutomation({ ...args, result: { reason: 'pr-is-draft', needsOperator: true } });
+  // A safety hold is not a completed UNKNOWN cycle; a resolved ordinary wait resets it.
+  await recoverAmaAutomation({ ...args, result: { reason: 'closer-head-ci-not-green', recoveryWait: true } });
+  assert.equal((await recoverAmaAutomation(args)).recovery.mergeabilityUnknownCycles, 1);
+  assert.equal((await recoverAmaAutomation({ ...args, headSha: 'new-head' })).recovery.mergeabilityUnknownCycles, 1);
+});
+
+for (const reasons of [['pr-mergeability-unknown'], ['labels-unavailable'], ['pr-mergeability-unknown', 'labels-unavailable']]) {
+  test(`transient gate declines retain bounded stall paging: ${reasons}`, async t => {
+    let clock = 0;
+    const { args, calls } = harness(t, { reason: 'not-eligible', reasons }, { now: () => clock, stuckDeadlineMs: 1000 });
+    assert.equal((await recoverAmaAutomation(args)).outcome, 'ama-pending');
+    clock = 1000;
+    assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+    assert.equal(calls.page.length, 1);
+  });
+}
+test('alternating transient declines never erase another refusal stall', async t => {
+  let clock = 0;
+  const { args, calls } = harness(t, { reason: 'worker-identity-unresolved' }, { now: () => clock, stuckDeadlineMs: 1000 });
+  await recoverAmaAutomation(args);
+  clock = 500;
+  const transient = await recoverAmaAutomation({ ...args, result: { reason: 'not-eligible', reasons: ['labels-unavailable'] } });
+  assert.equal(transient.recovery.blockedSince, 0);
+  clock = 1000;
+  assert.equal((await recoverAmaAutomation(args)).outcome, 'recovery-exhausted');
+  assert.equal(calls.page.length, 1);
+});
+test('pending re-review deadline precedes settled UNKNOWN', async t => {
+  let clock = 0;
+  const { args, calls } = harness(t, { reason: 'not-eligible', reasons: ['stale-review-head'] }, { now: () => clock, rereviewDeadlineMs: 1000 });
+  await recoverAmaAutomation(args);
+  clock = 1000;
+  const result = await recoverAmaAutomation({ ...args, result: { reason: 'background-pr-mergeable-unknown' } });
+  assert.equal(result.outcome, 'recovery-exhausted');
+  assert.equal(result.recovery.mergeabilityUnknownCycles, undefined);
+  assert.equal(calls.page.length, 1);
 });

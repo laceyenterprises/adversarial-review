@@ -631,7 +631,22 @@ Every retry retains all ordinary safety, identity and merge gates. Safety and
 explicit configuration/operator holds await adjudication. Active owners, lease
 contention, background dispatch, grace and proven final-round CI waits do not
 spend recovery attempts. A per-head durable recovery budget exhausts into a
-structured SEV1 event and one deduplicated page, never a silent operator wait.
+structured SEV1 event and one deduplicated page per exhaustion reason, never a
+silent operator wait.
+Background mergeability UNKNOWN is sampled in the same queue slot (three probes,
+2.5 seconds apart by default). Settled UNKNOWN cycles retain a separate per-head
+count and first-observation timestamp across queue/in-progress ticks and
+transient probe failures. Gate-level `closer-head-mergeability-unknown` and
+nonempty `not-eligible` declines containing only `pr-mergeability-unknown` or
+`labels-unavailable` preserve the series and its event. Exceeding the recovery
+cap pages only after the 30-minute stall floor. UNKNOWN waits and queued probes
+remain active through K cycles; beyond K, normal backoff applies even before
+exhaustion. The handler exposes only lane urgency for retained ownership,
+keeping ordinary background decision fingerprints stable. A resolved different
+blocker clears the
+UNKNOWN series and its exhaustion event, allowing ordinary recovery to resume
+while keeping successful `pagedReasons` receipts for per-reason deduplication.
+A different exhaustion reason on the same head pages again.
 The action cap follows the job's convergence budget; exhausted actions and
 non-progressing refusals page only after a 30-minute wall-clock stall. A requested
 pass owns its row until a new posting is observed. Active reviewer queue states

@@ -613,6 +613,15 @@ const OUTCOME_SWEEP_BUDGET_PER_TICK = 5;
 // Keep enumeration progress across ticks, including malformed and young files,
 // so the read budget cannot starve later records. Settled receipts are immutable.
 const outcomeScans = new Map();
+const OUTCOME_DONE_CACHE_LIMIT = 1024;
+
+function rememberDoneOutcome(scan, name) {
+  scan.done.delete(name);
+  scan.done.add(name);
+  if (scan.done.size > OUTCOME_DONE_CACHE_LIMIT) {
+    scan.done.delete(scan.done.values().next().value);
+  }
+}
 const OUTCOME_MAX_ATTEMPTS = 5;
 const OUTCOME_MAX_AGE_MS = 24 * 60 * 60_000;
 const PR_GONE_CODES = new Set(['operator-merged-pr', 'operator-closed-pr']);
@@ -632,8 +641,9 @@ function findFollowUpJobByFile(rootDir, jobPath) {
     const candidate = join(rootDir, 'data', 'follow-up-jobs', dir, name);
     try {
       return JSON.parse(readFileSync(candidate, 'utf8'));
-    } catch {
-      // Not in this status directory (or mid-rename); keep looking.
+    } catch (err) {
+      // Only an absent record is evidence to try the next status directory.
+      if (err?.code !== 'ENOENT') throw err;
     }
   }
   return null;
@@ -690,6 +700,9 @@ export function classifyRetriggerOutcome({ rootDir, job, consumedAt, now }) {
 }
 
 function retriggerOutcomeNextStep({ code, status, retriggerable }) {
+  if (code === 'job-not-found') {
+    return 'The requeued job record is missing. Apply `retrigger-remediation` again to generate a new job record.';
+  }
   if (code === 'closer-lease-held') {
     return 'The hammer (AMA closer) owns this PR right now and remediation waits for its lease to end. It owns merge-conflict resolution too. If the lease does not end, check the closer dispatch for this PR.';
   }
@@ -772,7 +785,7 @@ export async function reportStalledRetriggerOutcomes({
       continue;
     }
     const outcome = consumption?.outcomeReport || null;
-    if (outcome?.done === true) scan.done.add(name);
+    if (outcome?.done === true) rememberDoneOutcome(scan, name);
     if (
       consumption?.label !== RETRIGGER_REMEDIATION_LABEL
       || consumption?.auditStatus !== 'written'
@@ -790,7 +803,7 @@ export async function reportStalledRetriggerOutcomes({
     checked += 1;
     const write = (next) => {
       writeLabelConsumption(rootDir, consumption.labelEventKey, { ...consumption, outcomeReport: next });
-      if (next.done === true) scan.done.add(name);
+      if (next.done === true) rememberDoneOutcome(scan, name);
     };
 
     if (!outcome?.code) {

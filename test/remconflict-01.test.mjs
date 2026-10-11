@@ -613,3 +613,74 @@ test('outcome scans bound every read, make progress past skipped records, and ca
   }
   assert.ok(repeatedReads <= 4, 'only the malformed and young receipts need another read per pass');
 });
+
+
+test('settled outcome cache evicts old entries while each scan stays bounded', async (t) => {
+  const rootDir = tmpRoot(t, 'remconflict-cache-cap-');
+  const dir = path.join(rootDir, 'data', 'follow-up-jobs', 'label-consumptions');
+  mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 1030; i += 1) {
+    writeFileSync(path.join(dir, `${i}.json`), JSON.stringify({ outcomeReport: { done: true } }));
+  }
+  const original = fs.readFileSync;
+  let reads = 0;
+  t.mock.method(fs, 'readFileSync', (file, ...args) => {
+    if (typeof file === 'string' && path.dirname(file) === dir) reads += 1;
+    return original(file, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const sweep = () => reportStalledRetriggerOutcomes({ rootDir, budget: 5 });
+  for (let tick = 0; tick < 207; tick += 1) await sweep();
+  assert.equal(reads, 1030);
+  reads = 0;
+  for (let tick = 0; tick < 207; tick += 1) {
+    const before = reads;
+    await sweep();
+    assert.ok(reads - before <= 5);
+  }
+  assert.ok(reads > 0, 'old settled entries are evicted instead of retained forever');
+});
+
+test('missing jobs give recovery advice and read failures leave the outcome retryable', async (t) => {
+  for (const code of ['ENOENT', 'EIO', 'EMFILE']) {
+    const rootDir = tmpRoot(t, `remconflict-job-read-${code}-`);
+    seedStoppedJob(rootDir, 8022);
+    const recorder = commentRecorder();
+    const auditRows = [];
+    const accepted = await acceptRetrigger(rootDir, 8022, recorder, auditRows);
+    const original = fs.readFileSync;
+    const mock = t.mock.method(fs, 'readFileSync', (file, ...args) => {
+      if (typeof file === 'string' && path.basename(file) === path.basename(accepted.jobPath)) {
+        throw Object.assign(new Error(`read failed: ${code}`), { code });
+      }
+      return original(file, ...args);
+    });
+    syncBuiltinESMExports();
+    const sweep = () => reportStalledRetriggerOutcomes({
+      rootDir, execFileImpl: recorder.execFileImpl,
+      appendAuditRow: (_root, row) => auditRows.push(row),
+      now: () => minutesAfter(CONSUMED_AT, 12),
+    });
+    try {
+      if (code === 'ENOENT') {
+        assert.equal((await sweep()).reported, 1);
+        const body = recorder.posts().at(-1).at(-1);
+        assert.match(body, /Refusal: `job-not-found`/);
+        assert.match(body, /Apply `retrigger-remediation` again to generate a new job record/);
+        assert.doesNotMatch(body, /job is queued/);
+      } else {
+        await assert.rejects(sweep, { code });
+        assert.equal(recorder.posts().length, 1, 'no false job-loss notice');
+        assert.equal(auditRows.filter((row) => row.outcome === 'retrigger-not-actioned').length, 0);
+      }
+    } finally {
+      mock.mock.restore();
+      syncBuiltinESMExports();
+    }
+    if (code !== 'ENOENT') {
+      await sweep(); // Finish the interrupted directory pass.
+      assert.equal((await sweep()).reported, 1, 'next pass retries the unchanged receipt');
+    }
+  }
+});

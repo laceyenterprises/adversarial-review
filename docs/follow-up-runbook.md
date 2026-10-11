@@ -61,6 +61,12 @@ Use this when a review has already been posted to GitHub and you need to inspect
   entries per tick, including malformed, young and completed receipts in its
   scan budget. It resumes that enumeration on later ticks and caches filenames
   with `outcomeReport.done=true` in memory to avoid rereading settled receipts.
+  This cache retains at most 1,024 filenames per directory; evicted receipts
+  remain settled on disk and their rereads still obey the per-tick scan budget.
+  Only `ENOENT` while reading a job means it is absent from that status directory;
+  other read or parse failures leave the outcome watch unresolved for retry.
+  A genuinely missing job notice advises applying `retrigger-remediation` again
+  to generate a new job record.
   After a full pass it starts another pass, admitting new records and revisiting
   young or failed deliveries. A daemon restart rebuilds the cursor and cache
   from the durable receipts. Notices use event type `retrigger-outcome`;

@@ -114,7 +114,7 @@ ham_acquire_merge_lease() {
     > /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json || return 1
   # Live holds/terminal state fence the lane. Historical stops were already
   # evaluated (and, on changed inputs, released) by the closer before dispatch.
-  local ham_admission_reason ham_admission_audit ham_admission_audit_exit
+  local ham_admission_reason ham_admission_outcome ham_admission_audit ham_admission_audit_exit
   ham_admission_reason=$(HAM_ADMISSION_ROOT=<<ROOT_DIR>> "$HAM_NODE_BIN" --input-type=module - "$POST_REMEDIATION_SHA" /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json <<'NODE'
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -129,6 +129,13 @@ NODE
       return 20
     fi
     echo "HAM lease admission refused: $ham_admission_reason" >&2
+    # Live closure gates are not terminal hammer judgements. Removing a hold or
+    # leaving draft must not require an unrelated base/check change to resume.
+    ham_admission_outcome=failed-without-merge
+    case "$ham_admission_reason" in
+      operator-hold|pr-is-draft) ham_admission_outcome=deferred ;;
+      head-changed) ham_admission_outcome=superseded ;;
+    esac
     ham_admission_audit=$(mktemp "${TMPDIR:-/tmp}/ham-admission-audit.XXXXXX") || return 1
     jq -n --arg reason "merge-lease-admission:$ham_admission_reason" \
       --arg reviewedHead "<<REVIEWED_SHA>>" --arg validatedHead "$POST_REMEDIATION_SHA" \
@@ -136,7 +143,7 @@ NODE
         attemptPhase: "hammer-lease-admission"}' > "$ham_admission_audit" || { rm -f "$ham_admission_audit"; return 1; }
     if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append \
       --hq-root <<HQ_ROOT>> --repo <<REPO>> --pr <<PR_NUMBER>> \
-      --head "$POST_REMEDIATION_SHA" --outcome failed-without-merge \
+      --head "$POST_REMEDIATION_SHA" --outcome "$ham_admission_outcome" \
       --closure-authority ham-terminal-remediation \
       --reviewer <<REVIEWER>> --risk-class <<RISK_CLASS>> \
       --attempt-json "$ham_admission_audit"; then

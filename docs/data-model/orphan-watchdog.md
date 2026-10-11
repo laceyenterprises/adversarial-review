@@ -65,7 +65,8 @@ alert-outbox identities scoped to repo/PR/head, so a crash before updating a
 page guard cannot enqueue a duplicate. Failures persist `pageError` and retry
 on later ticks without another launch. Pages contain bounded reason/round/stop/launch summaries, never
 whole review or job objects. `rereview` guards the one exact-head review request
-for an uncertifiable closer-authored head.
+for an uncertifiable closer-authored head. A triggered request or the review API's
+`status: already-pending` / `reason: review-already-pending` persists this guard.
 
 Ineligibility or a known owner resets consecutive observation streaks. An
 empty head or unsettled background-dispatch result is neutral: no store write,

@@ -67,6 +67,7 @@
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
       "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
       "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
+      "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },
       "compatibilityFields": ["appendedRecords"]
     },
     {

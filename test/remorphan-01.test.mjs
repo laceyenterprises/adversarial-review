@@ -59,6 +59,28 @@ test('uncertifiable closer head requests one exact-head review', async t => {
   assert.equal(calls.reviews.length, 1);
   assert.equal(calls.reviews[0].targetRevisionRef, 'current-head');
 });
+test('already-pending API result persists the watchdog rereview marker', async t => {
+  const { tick, calls } = setup(t, 7704);
+  for (let i = 0; i < 20; i++) await tick({
+    dispatchHammer: async () => ({ dispatched: false, reason: 'cannot-recertify' }),
+    requestRereviewImpl: async request => {
+      calls.reviews.push(request);
+      return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
+    },
+  });
+  assert.equal(calls.reviews.length, 1);
+});
+test('already-pending API result persists rereview after a previously dispatched HAM stops', async t => {
+  const { tick, calls } = setup(t, 7704);
+  for (let i = 0; i < 6; i++) await tick();
+  for (let i = 0; i < 20; i++) await tick({
+    requestRereviewImpl: async request => {
+      calls.reviews.push(request);
+      return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
+    },
+  });
+  assert.equal(calls.reviews.length, 1);
+});
 test('external stale head cannot enter orphan HAM route', async t => {
   const { tick, calls } = setup(t, 7704);
   for (let i = 0; i < 8; i++) await tick({ closerHeadImpl: async () => false });

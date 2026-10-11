@@ -1757,17 +1757,24 @@ LEASEDEFER-01 lets the closure orchestrator request an immediate
 `system-orphan-head-review:<headSha>` for a recognized closer-trailer tip when
 HAM returns `not-eligible` and every reason is one of `stale-review-head`,
 `verdict-not-settled-success` or `blocking-findings-unknown`, including the stale
-head reason. Hard refusals are classified first: labels, terminal PRs, disallowed
-risk classes, branch-protection/fast-merge failures and duplicate-family holds
-retain `needsOperator` routing without requesting review. Only a triggered or
-`already-pending` request returns `closer-head-exact-review-requested`, mapped to
+head reason. Before requesting review, recovery requires no held AMA closer
+lease for the PR at any head and a negative `probeOrphanOwnership` result for
+queued/running launches and remediation. Live or uncertain ownership returns to
+ordinary retry and the bounded watchdog. Hard refusals are classified first:
+labels, terminal PRs, disallowed risk classes and branch-protection/fast-merge
+failures retain `needsOperator` routing without requesting review. The watcher-owned
+`duplicate-family-unresolved` census hold retains its 30-second automatic retry.
+Only a triggered or `already-pending` request (API status `already-pending`,
+reason `review-already-pending`) returns `closer-head-exact-review-requested`, mapped to
 `ama-pending` while the watcher owns that review. A refused request falls through
 to REMORPHAN-01 with its existing per-head attempts/ticks and SEV1 exhaustion or
 ownership-uncertainty page; refusal never creates an unconditional wait.
 A closer-trailer tip can arm stale-head HAM resume after a rebase breaks the
-closer-only chain. This admits repair only: the terminal-remediation validator
-still proves the exact head and its `reviewed-head` binding before merge.
-The additional live-review probe is skipped without authoritative reviewer identities.
+closer-only chain only after an authoritative live-review probe finds no review
+on the new head. Without chain proof or authoritative reviewer identity, resume
+stays off and an ownerless head can request exact-head review. This admits repair
+only: the terminal-remediation validator still proves the exact head and its
+`reviewed-head` binding before merge.
 
 STALECLOSER-03 shares `closerAuthoredStaleEligible` across the closer, eligible
 hammer wake and orphan watchdog (also exposed to agent-os rescue). A proven
@@ -1975,9 +1982,14 @@ closer lease is separate and remains available for recovery.
 
 Before acquiring or queuing for the base merge lease, `ham_acquire_merge_lease`
 reads live PR head/state/draft/labels. A changed head, closed PR, draft or operator
-hold returns `merge-lease-admission-refused` (exit 20) and appends a
-`failed-without-merge` audit with phase `hammer-lease-admission` and reason
-`merge-lease-admission:<reason>`. Audit-write failure is fatal. A live `MERGED`
+hold returns `merge-lease-admission-refused` (exit 20) and appends an audit with
+phase `hammer-lease-admission` and reason `merge-lease-admission:<reason>`.
+Operator holds and drafts use `deferred`; changed heads use `superseded`;
+closed PRs use `failed-without-merge`. Transient live gates do not create
+NOOWNER-01 stop holds: labels and draft state remain closure-owned gates.
+Pre-lease admission produces no merge-action receipt because no held-lease merge
+decision or execution occurred; the admission audit is its durable evidence.
+Audit-write failure is fatal. A live `MERGED`
 state returns `already-merged` (exit 20), without a refusal audit. The closer's
 `evaluateHammerStopHold` owns historical terminal stops and their release;
 the hammer does not re-read them for lane admission. Thus NOOWNER-01 releases

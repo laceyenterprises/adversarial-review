@@ -619,15 +619,24 @@ receipts skip writes and paging locks.
 LEASEDEFER-01 adds `closer-head-exact-review-requested` → `ama-pending` when
 an unheld closer-trailer stale head has only stale/unsettled/unknown-finding
 eligibility misses and its exact-head review request is triggered or already
-pending. Hard refusals retain `needsOperator`; refused requests continue to the
+pending (`status: already-pending`, `reason: review-already-pending`). Recovery
+first proves no held PR-wide closer lease and no queued/running or uncertain
+launch ownership. Live/uncertain owners retain retry/watchdog routing.
+Hard refusals retain `needsOperator`; the watcher-owned duplicate-family census
+hold retains its 30-second retry. Refused requests continue to the
 bounded REMORPHAN-01 watchdog and its per-head SEV1 exhaustion/uncertainty page.
-A closer tip without a closer-only chain may admit a HAM repair attempt, while
+A closer tip without a closer-only chain may admit a HAM repair attempt only
+after an authoritative probe proves no live review on the new head. Unknown
+reviewer identity without chain proof leaves resume off. In either case,
 the exact-head terminal-remediation validator retains merge authority.
 
 Hammer lease admission checks live head/state/draft/labels before queuing.
-Refusals return `merge-lease-admission-refused` (exit 20) with a terminal
-`failed-without-merge` audit (`hammer-lease-admission`,
-`merge-lease-admission:<reason>`). Audit failures stop execution. A live merge
+Refusals return `merge-lease-admission-refused` (exit 20) with a
+`hammer-lease-admission` audit and `merge-lease-admission:<reason>`.
+Holds/drafts record `deferred`, changed heads record `superseded`, and closed PRs
+record `failed-without-merge`. Transient admission gates cannot create a hammer
+stop hold. Admission has no held-lease merge decision and emits no merge-action
+receipt. Audit failures stop execution. A live merge
 race returns `already-merged` instead. Historical stop gating remains with the
 closer's `evaluateHammerStopHold`; released same-head stops cannot block the
 hammer from reaching its rebase, including REMCONFLICT-01 conflict repair.

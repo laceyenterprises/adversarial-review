@@ -79,12 +79,16 @@ daemon attempts never set or clear a hammer decision. A latest hammer
 `failed-without-merge` or legacy `no-merge` starts a hold; a later hammer defer
 or success clears it.
 
-Pre-acquire live admission refusals append `failed-without-merge` with
+Pre-acquire live admission refusals append an attempt with
 `attemptPhase: hammer-lease-admission`, `reason: merge-lease-admission:<reason>`,
 `reviewedHead` and `validatedHead`. Reasons are `head-changed`, `pr-not-open`,
 `pr-is-draft` or `operator-hold`. Confirmed already-merged PRs produce no refusal
-record. These attempts use the existing audit fields and sticky-success guard.
-They provide stop evidence to the closer; the hammer itself never uses historical
+record. `operator-hold` and `pr-is-draft` outcomes are `deferred`; `head-changed`
+is `superseded`; `pr-not-open` is `failed-without-merge`. Thus transient live gates
+do not create hammer stop holds. These attempts use the existing audit fields
+and sticky-success guard. Admission has no held-lease merge decision and is
+exempt from merge-action receipts; its audit records the refusal.
+The hammer itself never uses historical
 terminal stops as admission input after the closer releases a hold.
 
 `resumeOwed` / `resumeHead` have no runtime consumer. The watcher independently

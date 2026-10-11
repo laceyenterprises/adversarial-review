@@ -329,7 +329,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     };
     if (closerHead && state.attempts > 0 && !state.rereview && readEvidence(state.evidence)?.dispatched) {
       const review = await rereview();
-      if (review?.triggered || review?.reason === 'already-pending') db.prepare('UPDATE heads SET rereview=1, ticks=0 WHERE head=?').run(headSha);
+      if (review?.triggered || review?.status === 'already-pending' || review?.reason === 'review-already-pending') db.prepare('UPDATE heads SET rereview=1, ticks=0 WHERE head=?').run(headSha);
       return pending;
     }
     const reservation = JSON.stringify({ reservationStartedAt: new Date().toISOString(), recordHeadSha: result?.targetRemediationSha || reviewStateRow?.head_sha || headSha, reason: 'reserved-outcome-unknown' });
@@ -361,7 +361,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     if (retry?.dispatched) return { outcome: 'ama-dispatched', amaClosureResult: retry };
     if (closerHead && !state.rereview) {
       const review = await rereview();
-      if (review?.triggered || review?.reason === 'already-pending') db.prepare('UPDATE heads SET rereview=1 WHERE head=?').run(headSha);
+      if (review?.triggered || review?.status === 'already-pending' || review?.reason === 'review-already-pending') db.prepare('UPDATE heads SET rereview=1 WHERE head=?').run(headSha);
     }
     return pending;
   } finally { try { db?.close(); } finally { fsImpl.closeSync(fd); } }

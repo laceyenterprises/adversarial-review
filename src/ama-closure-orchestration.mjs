@@ -1489,8 +1489,8 @@ async function dispatchAmaClosureFor({
   }
 
   let allowStaleReviewHeadHammerResume = false;
-  // NOOWNER-01: the live head's tip carries the closer trailer, so policy never
-  // re-reviews it and a hammer stop hold may stand in for the re-review.
+  // NOOWNER-01: a closer tip suppresses ordinary automatic review refresh;
+  // ownerless, uncertified heads can use the explicit exact-head recovery.
   let liveHeadCloserAuthored = false;
   let hamTerminalRemediationEvidenceOptions = null;
   let hamTerminalRemediationValidated = false;
@@ -1506,11 +1506,10 @@ async function dispatchAmaClosureFor({
   // review also advances the head -> `stale-review-head` -> the eligibility miss
   // was never self-certifiable, so the no-dispatch "retain" tick spun unbounded (a
   // live 50-min stall). Dropping the `reviewCycleExhausted &&` guard lets the
-  // own-commit proof arm for that case too. The SAFETY INVARIANT is unchanged: an
-  // head without closer trailers or linked closer/HAM author provenance stays
-  // reviewable. This includes merge-agent rebases of worker-authored commits:
-  // a closer committer stamp alone does not arm stale-head resume. Those heads
-  // must complete review on the new SHA before ordinary closure can proceed.
+  // own-commit proof arm for that case too. A head without closer trailers or
+  // linked closer/HAM author provenance stays reviewable. Resume requires a
+  // closer-only chain proof or an authoritative live-review probe; unknown
+  // reviewer identity without a chain leaves the head for exact-head review.
   // A recognized closer-trailer tip can arm HAM resume even when a rebase broke
   // the closer-only chain. That flag admits a repair attempt; merge authority
   // still requires the exact-head terminal-remediation validator, including its
@@ -1550,7 +1549,8 @@ async function dispatchAmaClosureFor({
       }
       // A HAM rebase can break the chain to the reviewed SHA. Its exact-head
       // ground-truth certificate below remains authoritative independently.
-      allowStaleReviewHeadHammerResume = liveHeadCloserAuthored && !closerHeadHasLiveReview;
+      allowStaleReviewHeadHammerResume = liveHeadCloserAuthored && !closerHeadHasLiveReview
+        && (closerOnlyHeadDelta || authoritativeReviewerLogins.length > 0);
       if (
         allowStaleReviewHeadHammerResume &&
         closerCommitSuppression?.reason === 'closer-commit-trailer'
@@ -2287,12 +2287,13 @@ async function dispatchAmaClosureFor({
     const hardReason = (result.reasons || []).find((reason) =>
       ['pr-not-open', 'risk-class-not-permitted', 'branch-protection-missing-gate',
         'fast-merge-state-unsupported'].includes(reason)
-      || String(reason).startsWith('label-') || String(reason).startsWith('duplicate-family'));
+      || String(reason).startsWith('label-'));
     if (hardReason) result = { ...result, needsOperator: true, operatorReason: `not-eligible:${hardReason}` };
   }
   const closerRecovery = await recoverStrandedCloserHeadImpl({ result,
     closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
-    prNumber, headSha: currentPrHeadSha, logger });
+    prNumber, headSha: currentPrHeadSha, labels: labelNames || [], signal,
+    timeoutMs: operationTimeoutMs, logger });
   if (closerRecovery) return withAmaDispatchMetadata(closerRecovery, { amaEnabled: true });
 
   // CIDEDUPE-01: the closer handed this PR to the daemon, but the daemon declined

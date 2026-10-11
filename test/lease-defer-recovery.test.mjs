@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
+import { recoverStrandedCloserHead as recoverCloserHead } from '../src/ama/closer-head-recovery.mjs';
+import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { writeAmaAuditEntry, readAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold, readHammerStopForHead } from '../src/ama/hammer-stop-hold.mjs';
 import { mergeLeaseAdmissionReason } from '../src/ama/merge-lease-admission.mjs';
 import { isOrphanHeadReviewRequested } from '../src/first-pass-review-suppression.mjs';
-import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,6 +15,9 @@ import { spawnSync } from 'node:child_process';
 const head = 'a'.repeat(40);
 const stale = { dispatched: false, reason: 'not-eligible',
   reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] };
+const recoverStrandedCloserHead = options => recoverCloserHead({ rootDir: '/fixture',
+  repo: 'fixture/repo', prNumber: 42, probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
+  ...options });
 
 test('pushed HAM head stranded after lease timeout requests an admissible exact-head review in one tick', async () => {
   const requests = [];
@@ -54,8 +59,6 @@ test('lease admission uses live holds, terminal state, draft and head, without h
   assert.equal(mergeLeaseAdmissionReason(pr, 'other'), 'head-changed');
   assert.equal(mergeLeaseAdmissionReason({ ...pr, state: 'MERGED' }, head), 'pr-merged');
   assert.equal(mergeLeaseAdmissionReason({ ...pr, state: 'MERGED', headRefOid: 'other' }, head), 'pr-merged');
-  assert.equal(mergeLeaseAdmissionReason(pr, head, { predicate: 'awaiting-operator-decision' }), null);
-  assert.equal(mergeLeaseAdmissionReason(pr, head, { predicate: 'merge-lease-timeout' }), null);
 });
 
 function acquisitionFixture(t) {
@@ -103,9 +106,28 @@ for (const [reason, pr] of [
     assert.match(result.stderr, new RegExp(reason));
     assert.equal(existsSync(join(dir, 'data', 'merge-leases')), false);
     const audit = readAmaAuditEntry(dir, 'fixture/repo', 42, head);
-    assert.equal(audit.status, 'failed-without-merge');
+    const outcome = reason === 'head-changed' ? 'superseded'
+      : reason === 'pr-not-open' ? 'failed-without-merge' : 'deferred';
+    assert.equal(audit.status, outcome);
+    assert.equal(audit.attempts.at(-1).outcome, outcome);
     assert.equal(audit.attempts.at(-1).reason, `merge-lease-admission:${reason}`);
     assert.equal(audit.attempts.at(-1).attemptPhase, 'hammer-lease-admission');
+    if (reason !== 'pr-not-open') assert.equal(readHammerStopForHead({ hqRoot: dir,
+      repo: 'fixture/repo', prNumber: 42, headSha: head }), null);
+  });
+}
+
+for (const gate of ['operator-hold', 'pr-is-draft']) {
+  test(`clearing admission ${gate} leaves no hammer stop or false ownerless page`, async t => {
+    const { dir, run } = acquisitionFixture(t);
+    const refusedPr = gate === 'operator-hold'
+      ? { ...openPr, labels: [{ name: 'no-merge-hold' }] } : { ...openPr, isDraft: true };
+    assert.equal(run(refusedPr).status, 0);
+    const decision = await evaluateHammerStopHold({ rootDir: dir, hqRoot: dir,
+      repo: 'fixture/repo', prNumber: 42, headSha: head, prMetadata: openPr,
+      logger: { log() {}, error() {} }, deliverAlertImpl: () => assert.fail('false SEV1 page') });
+    assert.equal(decision.action, 'none');
+    assert.match(run(openPr).stdout, /exit:0 outcome: held:1$/);
   });
 }
 
@@ -144,21 +166,25 @@ for (const liveState of ['OPEN', 'MERGED']) {
   });
 }
 
-for (const change of ['base', 'conflicting']) {
-  test(`rendered same-head re-dispatch admits a prior operator-decision stop released by ${change}`, async t => {
+for (const change of ['base', 'conflicting', 'lease-timeout']) {
+  test(`rendered same-head re-dispatch ignores a historical stop after ${change}`, async t => {
     const { dir, run } = acquisitionFixture(t);
     const common = { hqRoot: dir, repo: 'fixture/repo', prNumber: 42, headSha: head };
     writeAmaAuditEntry({ ...common, now: '2026-10-11T10:00:00Z',
-      attempt: { outcome: 'failed-without-merge', reason: 'awaiting-operator-decision' } });
+      attempt: { outcome: change === 'lease-timeout' ? 'deferred' : 'failed-without-merge',
+        reason: change === 'lease-timeout' ? 'merge-lease-timeout' : 'awaiting-operator-decision' } });
     const prMetadata = { headSha: head, baseSha: 'base-0', mergeableState: 'MERGEABLE', statusCheckRollup: [] };
     const evaluate = (metadata, now) => evaluateHammerStopHold({ ...common, rootDir: dir,
       prMetadata: metadata, now, logger: { log() {}, error() {} }, deliverAlertImpl: async () => {} });
-    assert.equal((await evaluate(prMetadata, '2026-10-11T10:01:00Z')).action, 'hold');
-    const released = await evaluate({ ...prMetadata,
-      ...(change === 'base' ? { baseSha: 'base-1' } : { mergeableState: 'CONFLICTING' }) }, '2026-10-11T10:02:00Z');
-    assert.equal(released.action, 'release');
+    if (change !== 'lease-timeout') {
+      assert.equal((await evaluate(prMetadata, '2026-10-11T10:01:00Z')).action, 'hold');
+      const released = await evaluate({ ...prMetadata,
+        ...(change === 'base' ? { baseSha: 'base-1' } : { mergeableState: 'CONFLICTING' }) }, '2026-10-11T10:02:00Z');
+      assert.equal(released.action, 'release');
+    }
     writeAmaAuditEntry({ ...common, now: '2026-10-11T10:03:00Z', attempt: { outcome: 'in_progress' } });
-    assert.equal(readHammerStopForHead(common).predicate, 'awaiting-operator-decision', 'the old terminal stop is still readable');
+    assert.equal(readHammerStopForHead(common)?.predicate || null,
+      change === 'lease-timeout' ? null : 'awaiting-operator-decision');
     const result = run(openPr);
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
@@ -168,7 +194,7 @@ for (const change of ['base', 'conflicting']) {
 }
 
 for (const reason of ['label-no-merge-hold', 'pr-not-open', 'risk-class-not-permitted',
-  'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'duplicate-family-hold', 'ci-not-green']) {
+  'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'duplicate-family-unresolved', 'ci-not-green']) {
   test(`exact-head recovery rejects co-occurring ${reason}`, async () => {
     assert.equal(await recoverStrandedCloserHead({ result: { ...stale, reasons: [...stale.reasons, reason] },
       closerAuthored: true, headSha: head, requestRereviewImpl: () => assert.fail('unexpected review') }), null);
@@ -186,6 +212,44 @@ for (const reason of ['comment-only-verdict-settled', 'comment-only-final-round-
 
 test('already-pending exact-head review retains reviewer ownership', async () => {
   const result = await recoverStrandedCloserHead({ result: stale, closerAuthored: true, headSha: head,
-    logger: { log() {} }, requestRereviewImpl: async () => ({ triggered: false, reason: 'already-pending' }) });
+    logger: { log() {} }, requestRereviewImpl: async () => ({ triggered: false,
+      status: 'already-pending', reason: 'review-already-pending' }) });
   assert.equal(result.reason, 'closer-head-exact-review-requested');
+});
+
+for (const leaseHead of [head, 'b'.repeat(40)]) {
+  test(`live closer lease on ${leaseHead === head ? 'current' : 'prior'} head prevents review takeover`, async t => {
+    const { dir } = acquisitionFixture(t);
+    acquireAmaCloserLease({ rootDir: dir, repo: 'fixture/repo', prNumber: 42,
+      headSha: leaseHead, watcherPid: process.pid });
+    assert.equal(await recoverStrandedCloserHead({ rootDir: dir, result: stale,
+      closerAuthored: true, headSha: head,
+      requestRereviewImpl: () => assert.fail('live hammer must retain ownership') }), null);
+  });
+}
+
+for (const status of ['queued', 'running', 'unknown', 'succeeded']) {
+  test(`${status} hammer dispatch evidence gates exact-head recovery`, async t => {
+    const { dir } = acquisitionFixture(t);
+    const records = join(dir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
+    mkdirSync(records, { recursive: true });
+    writeFileSync(join(records, `fixture__repo-pr-42-${head}.json`), JSON.stringify({
+      repo: 'fixture/repo', prNumber: 42, headSha: head, state: 'dispatched', launchRequestId: `launch-${status}` }));
+    let requests = 0;
+    const result = await recoverStrandedCloserHead({ rootDir: dir, result: stale,
+      closerAuthored: true, headSha: head, logger: { log() {} },
+      probeOwnershipImpl: options => probeOrphanOwnership({ ...options,
+        readStatusImpl: async () => status === 'unknown' ? { ok: false }
+          : { ok: true, row: { status } } }),
+      requestRereviewImpl: () => { requests++; return { triggered: true }; } });
+    assert.equal(requests, status === 'succeeded' ? 1 : 0);
+    assert.equal(result?.reason || null, status === 'succeeded' ? 'closer-head-exact-review-requested' : null);
+  });
+}
+
+test('unreadable ownership evidence defers exact-head recovery', async () => {
+  assert.equal(await recoverStrandedCloserHead({ result: stale, closerAuthored: true,
+    headSha: head, logger: { warn() {} },
+    probeOwnershipImpl: () => { throw new Error('unreadable'); },
+    requestRereviewImpl: () => assert.fail('uncertain ownership') }), null);
 });

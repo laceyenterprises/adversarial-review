@@ -976,8 +976,24 @@ test('LEASEDEFER-01 stale closer refusal reaches exact-head recovery on its firs
   assert.equal(result.reason, 'closer-head-exact-review-requested');
 });
 
+test('LEASEDEFER-01 stale eligibility miss cannot transfer a live hammer lease to review', async t => {
+  const { args } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repoPath,
+    prNumber: args.prNumber, headSha: 'H1', watcherPid: process.pid });
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+    reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
+  args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+    requestRereviewImpl: () => assert.fail('hammer still owns H1') });
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(result.reason, 'not-eligible');
+  assert.equal(result.retryAfterMs, 30_000);
+  assert.equal(isHeldAmaCloserLease(args.rootDir, { repo: args.repoPath,
+    prNumber: args.prNumber, headSha: 'H1' }), true);
+});
+
 for (const hardReason of ['label-no-merge-hold', 'pr-not-open', 'risk-class-not-permitted',
-  'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'duplicate-family-hold']) {
+  'branch-protection-missing-gate', 'fast-merge-state-unsupported']) {
   test(`stale closer head preserves operator routing for ${hardReason}`, async t => {
     const { args } = closerResumeFixture('green');
     t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
@@ -992,6 +1008,21 @@ for (const hardReason of ['label-no-merge-hold', 'pr-not-open', 'risk-class-not-
     assert.equal(result.reason, 'not-eligible');
     assert.equal(result.needsOperator, true);
     assert.equal(result.operatorReason, `not-eligible:${hardReason}`);
+  });
+}
+
+for (const closer of [false, true]) {
+  test(`duplicate-family census hold retains automatic retry on ${closer ? 'closer' : 'worker'} head`, async t => {
+    const { args } = closerResumeFixture(closer ? 'green' : 'worker');
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
+      reasons: [...(closer ? ['stale-review-head'] : []), 'duplicate-family-unresolved'] });
+    args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+      requestRereviewImpl: () => assert.fail('census hold must not request review') });
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(result.needsOperator, undefined);
+    assert.equal(result.retryAfterMs, 30_000);
+    assert.ok(result.reasons.includes('duplicate-family-unresolved'));
   });
 }
 
@@ -1019,7 +1050,7 @@ test('refused stale closer review falls through coexistence to bounded orphan re
   assert.equal(result.orphanRecovery.disposition, 'exhausted');
 });
 
-test('rebased closer head skips live-review fetch when authoritative identities are unavailable', async t => {
+test('rebased closer head without authoritative identities cannot arm HAM resume', async t => {
   const { args, payloads } = closerResumeFixture('green');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   args.reviewStateRow.reviewer = 'unknown-model';
@@ -1027,8 +1058,9 @@ test('rebased closer head skips live-review fetch when authoritative identities 
   args.resolveHeadCloserCommitSuppressionImpl = async ({ headSha }) => ({
     suppressed: headSha === 'H1', reason: headSha === 'H1' ? 'closer-commit-trailer' : 'worker' });
   args.fetchLatestHeadReviewBodiesImpl = () => assert.fail('no authoritative reviewer to fetch');
+  args.resolveHamTerminalRemediationEvidenceImpl = () => assert.fail('no authority to certify this head');
   await maybeDispatchAmaClosureFor(args);
-  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
+  assert.equal(payloads[0].dispatchContext.allowStaleReviewHeadHammerResume, false);
 });
 
 for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-pending', 'unknown', 'worker', 'blocking', 'live-blocking', 'live-clean']) {

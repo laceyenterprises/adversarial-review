@@ -1,3 +1,5 @@
+import { isOperatorHeld } from './operator-hold-labels.mjs';
+import { summarizeChecksConclusion } from './checks-summary.mjs';
 // HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
 // ARC-18: extracted per-PR processing phase of pollOnce (watcher.mjs).
 //
@@ -46,7 +48,10 @@ import {
 
   routeSubject,
 } from './adapters/subject/github-pr/routing.mjs';
-import { projectAdversarialGateStatus } from './adversarial-gate-status.mjs';
+import { observeHoldRelease, ensureHoldReleaseSchema, holdReleaseRoute, markHoldReleaseRouted } from './operator-hold-release.mjs';
+import { clearNoProgressLane } from './watcher-no-progress-lane.mjs';
+import { queueFollowUpForRecoveredPostedReview } from './reviewer-pass-reaper.mjs';
+import { projectAdversarialGateStatus, resolveSettledReviewVerdict } from './adversarial-gate-status.mjs';
 import { labelsContainDuplicateFamilyHold } from './duplicate-family-gate.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { runDaemonCleanMergeAttempt } from './daemon-clean-merge.mjs';
@@ -776,10 +781,6 @@ export async function processReviewSubject(entry, ctx) {
       if (prLabelNames.includes(MERGE_AGENT_DISPATCHED_LABEL)) {
         activeMergeAgentPRs.push({ repo: repoPath, prNumber, headSha: subject.headSha || null });
       }
-      if (staleDriftSkip) {
-        console.log(staleDriftSkip.message);
-        return;
-      }
       let existing = cachedCurrent ?? stmtGetReviewRow.get(repoPath, prNumber);
       // ARC-03 review finding: review rows are keyed (repo, pr) but carry a
       // domain identity. Only the owning domain may process a row — without
@@ -790,6 +791,87 @@ export async function processReviewSubject(entry, ctx) {
         existing &&
         String(existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID) !== String(domainId)
       ) {
+        return;
+      }
+      let holdReleaseId = null;
+      let holdObservationFailed = false;
+      const observeRelease = args => {
+        try { return observeHoldRelease(args); }
+        catch (err) { holdObservationFailed = true; throw err; }
+      };
+      // Compare before any early return or label refresh. Retain unrouted
+      // release intent across read errors; the ordinary handlers own execution.
+      // Routing is best-effort and must never suppress those handlers on error.
+      try {
+        const release = !subject.terminal && observeRelease({
+          db, repo: repoPath, prNumber, headSha: subject.headSha, liveLabels: subject.labelsKnown === false ? undefined : subject.labels,
+        });
+        if (!release && existing && ['pending', 'pending-upstream', 'failed'].includes(existing.review_status)) {
+          ensureHoldReleaseSchema(db);
+          holdReleaseId = db.prepare(`SELECT id FROM operator_hold_releases WHERE repo = ? AND pr_number = ?
+            AND head_sha = ? AND cancelled_at IS NULL
+            AND (routed_at IS NULL OR routed_at > COALESCE(?, '')) ORDER BY id DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha, existing.reviewer_started_at)?.id || null;
+        }
+        if (release && !staleDriftSkip) {
+          holdReleaseId = release.id;
+          const settled = resolveSettledReviewVerdict(ROOT, {
+            repo: repoPath, prNumber, reviewRow: existing, currentHeadSha: subject.headSha,
+          });
+          let candidate = {};
+          {
+            const { stdout } = await withApiTelemetry('hold-release-routing', { repo: repoPath, prNumber }, () => execFileAsync('gh', ['pr', 'view', String(prNumber), '--repo', repoPath,
+              '--json', 'state,headRefOid,labels,mergeable,mergeStateStatus,statusCheckRollup'],
+            { timeout: 15000, maxBuffer: 5 * 1024 * 1024 }));
+            const live = JSON.parse(stdout);
+            if (['CLOSED', 'MERGED'].includes(String(live.state).toUpperCase())) {
+              markHoldReleaseRouted({ db, release, route: { stage: 'pr-terminal', action: 'none' } });
+              return;
+            }
+            // A re-applied hold cancels this intent before any action is armed.
+            observeRelease({ db, repo: repoPath, prNumber, headSha: live.headRefOid, liveLabels: live.labels });
+            if (!Array.isArray(live.labels) || String(live.state).toUpperCase() !== 'OPEN' || live.headRefOid !== subject.headSha
+              || isOperatorHeld(live.labels)) return;
+            candidate = { ...live, checksConclusion: summarizeChecksConclusion(live.statusCheckRollup) };
+          }
+          const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
+          const budget = resolveRoundBudgetForJob({ linearTicketId, riskClass: ledger.latestRiskClass }, { rootDir: ROOT });
+          let route = holdReleaseRoute({ row: existing, headSha: subject.headSha, settled, candidate,
+            roundsLeft: ledger.completedRoundsForPR < Math.max(budget.roundBudget, Number(ledger.latestMaxRounds) || 0),
+            cycleCapped: isReviewCycleCapFailedRow(existing) || prLabelNames.includes('reviewer-cycle-cap-reached'),
+          });
+          if (route.action === 'remediation' && !settled.remediationPending) {
+            const pass = db.prepare(`SELECT * FROM reviewer_passes WHERE repo = ? AND pr_number = ?
+              AND head_sha = ? AND status = 'completed' AND pass_kind IN ('first-pass', 'rereview')
+              ORDER BY ended_at DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha);
+            // Settled findings can come from a job or posted review before body
+            // capture succeeds. Re-review that head instead of retrying forever.
+            if (!pass?.body_md) route = { stage: 'rereview', action: 'review', unknown: true };
+            else queueFollowUpForRecoveredPostedReview({ rootDir: ROOT, row: pass, reviewRow: existing,
+              reviewPostedAt: existing.posted_at, defaultBaseBranch: subject.baseRefName || 'main' });
+          }
+          // Keep same-head failure evidence for the ordinary bounded retry
+          // gates, including infrastructure recovery. A label toggle is not
+          // an operator retrigger and must never reset a failed attempt.
+          if (route.action === 'review' && reviewRowInTerminalFailureState(existing, subject.headSha)) {
+            route = { stage: 'review-failed', action: 'none' };
+          }
+          // CI-parked rows remain owned by the existing CI-admission path.
+          if (route.action === 'review' && ['posted', 'failed'].includes(existing?.review_status)) {
+            requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber,
+              targetRevisionRef: subject.headSha, requestedAt: release.released_at, preserveBudgets: true,
+              reason: `hold-release:${release.id}: current-head review stage unknown`,
+            });
+            existing = stmtGetReviewRow.get(repoPath, prNumber);
+          }
+          if (route.action !== 'none') clearNoProgressLane(ROOT, { repo: repoPath, prNumber }, { logger: console });
+          markHoldReleaseRouted({ db, release, route });
+        }
+      } catch (err) {
+        console.warn(`[watcher] hold-release read/route deferred for ${repoPath}#${prNumber}; continuing ordinary handlers: ${err?.message || err}`);
+        holdReleaseId = null;
+      }
+      if (staleDriftSkip) {
+        console.log(staleDriftSkip.message);
         return;
       }
       async function projectGateStatusSafe(reviewRow) {
@@ -1616,7 +1698,7 @@ export async function processReviewSubject(entry, ctx) {
         }
         // Store normalized label names in reviewed_prs.labels_json. Readers
         // still accept the older GitHub label-object shape for historical rows.
-        stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
+        if (!holdObservationFailed && subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
         await projectGateStatusSafe(stmtGetReviewRow.get(repoPath, prNumber));
         return;
       }
@@ -2680,7 +2762,7 @@ export async function processReviewSubject(entry, ctx) {
       }
       // Store normalized label names in reviewed_prs.labels_json. Readers
       // still accept the older GitHub label-object shape for historical rows.
-      stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
+      if (!holdObservationFailed && subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
 
       const roundBudgetDecision = evaluateRoundBudgetForReview({
         rootDir: ROOT,
@@ -2923,6 +3005,24 @@ export async function processReviewSubject(entry, ctx) {
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         async run() {
+          // Pool admission can defer a release for several ticks. Fence the
+          // release-driven review before the claim spends any attempt budget.
+          if (holdReleaseId) {
+            try {
+              const live = await fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync });
+              if (isOperatorHeld(live.labels)) observeHoldRelease({ db, repo: repoPath, prNumber,
+                headSha: live.headRefOid || subject.headSha, liveLabels: live.labels });
+              const intent = db.prepare('SELECT cancelled_at FROM operator_hold_releases WHERE id = ?').get(holdReleaseId);
+              if (intent?.cancelled_at || !Array.isArray(live.labels) || isOperatorHeld(live.labels)) {
+                this.refundDepthSpill();
+                return { dispatched: false, reason: 'hold-release-cancelled' };
+              }
+            } catch (err) {
+              this.refundDepthSpill();
+              console.warn(`[watcher] hold-release freshness read deferred for ${repoPath}#${prNumber}: ${err.message}`);
+              return { dispatched: false, reason: 'hold-release-read-deferred' };
+            }
+          }
           const releaseAdmissionCapacity = this.admissionReleaseCapacity || null;
           // REVIEW-DEDUP (idempotency lease): one (pr, head) dispatch per
           // window. A second pool worker racing the same head is turned away
@@ -3025,9 +3125,30 @@ export async function processReviewSubject(entry, ctx) {
               ? resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000
               : resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
+            // Release-driven claims snapshot under the same write lock as
+            // their CAS, rather than using the older dispatch admission row.
+            let preClaimRow = null;
+            const releaseUnexecutedHoldReviewClaim = () => {
+              // Undo all claim and routing mutations in one session-guarded
+              // UPDATE. Releasing to plain pending would erase failure evidence
+              // and let the next tick bypass the bounded retry CAS.
+              const columns = [
+                'review_status', 'reviewer_head_sha', 'failed_at', 'failure_message',
+                'quota_reset_at_utc', 'last_attempted_at', 'revision_ref',
+                'review_population_retry_last_at', 'review_population_retry_head_sha',
+                'review_attempts', 'infra_auto_recover_attempts', 'review_population_retry_attempts',
+                'reviewer_session_uuid', 'reviewer_started_at', 'reviewer_timeout_ms',
+                'reviewer_lease_expires_at', 'reviewer_pgid',
+                'reviewer', 'linear_ticket', 'codex_broker_provider',
+              ];
+              return db.prepare(`UPDATE reviewed_prs SET ${columns.map(column => `${column} = ?`).join(', ')}
+                WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'
+                AND reviewer_session_uuid = ?`).run(
+                ...columns.map(column => preClaimRow[column]), repoPath, prNumber, reviewerSessionUuid);
+            };
             // TOKDZ-01: a token-refresh row is reclaimed by its own CAS, which
             // never checks or charges infra_auto_recover_attempts.
-            const claim = tokenRefreshRecovery
+            const claimReviewer = () => tokenRefreshRecovery
               ? stmtMarkTokenRefreshRecoveryAttemptStarted.run(
                 attemptAt,
                 reviewerSessionUuid,
@@ -3111,6 +3232,10 @@ export async function processReviewSubject(entry, ctx) {
                 repoPath,
                 prNumber
               );
+            const claim = holdReleaseId ? db.transaction(() => {
+              preClaimRow = stmtGetReviewRow.get(repoPath, prNumber);
+              return claimReviewer();
+            }).immediate() : claimReviewer();
             if (claim.changes === 0) {
               // Lost the cross-process compare-and-swap. Either another
               // watcher just claimed this row, or the row's status moved to
@@ -3175,10 +3300,6 @@ export async function processReviewSubject(entry, ctx) {
                 );
               }
             }
-            await operatorSurface.syncTriageStatus(
-              subjectRefWithLinearTicket(subject.ref, linearTicketId, subject.labels),
-              'in-review'
-            );
 
             // Freshness re-check (2026-05-18): `subject` was populated from the
             // per-adapter snapshot cache that `discoverSubjects` warmed at the
@@ -3206,6 +3327,15 @@ export async function processReviewSubject(entry, ctx) {
                 stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
                 return { dispatched: false, reason: 'pr-closed-before-spawn' };
               }
+              if (holdReleaseId && (!Array.isArray(freshPR.labels) || isOperatorHeld(freshPR.labels))) {
+                // This claim never executed. Restore the complete pre-claim
+                // state for this exact session, without granting a retry.
+                if (isOperatorHeld(freshPR.labels)) observeHoldRelease({ db, repo: repoPath, prNumber,
+                  headSha: freshPR.headRefOid || subject.headSha, liveLabels: freshPR.labels });
+                releaseUnexecutedHoldReviewClaim();
+                reviewerHeadDispatchLease.release(dispatchLeaseKey);
+                return { dispatched: false, reason: 'hold-reapplied-before-spawn' };
+              }
               const freshHeadSha = freshPR.headRefOid || null;
               if (
                 reviewerHeadSha &&
@@ -3221,6 +3351,11 @@ export async function processReviewSubject(entry, ctx) {
                 return { dispatched: false, reason: 'head-moved-before-spawn' };
               }
             } catch (err) {
+              if (holdReleaseId) {
+                releaseUnexecutedHoldReviewClaim();
+                reviewerHeadDispatchLease.release(dispatchLeaseKey);
+                return { dispatched: false, reason: 'hold-release-read-deferred' };
+              }
               // Non-fatal — proceed with spawn rather than block. A failed
               // freshness check is no worse than not having one at all.
               console.warn(
@@ -3228,6 +3363,10 @@ export async function processReviewSubject(entry, ctx) {
                 err?.message || err
               );
             }
+            await operatorSurface.syncTriageStatus(
+              subjectRefWithLinearTicket(subject.ref, linearTicketId, subject.labels),
+              'in-review'
+            );
             const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({
               repoPath,
               prNumber,

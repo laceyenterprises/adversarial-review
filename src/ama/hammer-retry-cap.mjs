@@ -363,6 +363,8 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     ...deferralFieldsForSeries(existing, decision.jobKeyChanged),
     ...transientRetryFields(existing),
     ...(existing?.unexecutedLaunchRequestIds ? { unexecutedLaunchRequestIds: existing.unexecutedLaunchRequestIds } : {}),
+    ...(existing?.operatorHoldRefundStopKeys ? { operatorHoldRefundStopKeys: existing.operatorHoldRefundStopKeys } : {}),
+    ...(existing?.operatorHoldRefundedAt ? { operatorHoldRefundedAt: existing.operatorHoldRefundedAt } : {}),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     // A dispatch clears any stale PER-SERIES suppression from a prior series (the
@@ -444,6 +446,8 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     ...deferralFieldsForSeries(existing, jobKeyChanged),
     ...transientRetryFields(existing),
     ...(existing?.unexecutedLaunchRequestIds ? { unexecutedLaunchRequestIds: existing.unexecutedLaunchRequestIds } : {}),
+    ...(existing?.operatorHoldRefundStopKeys ? { operatorHoldRefundStopKeys: existing.operatorHoldRefundStopKeys } : {}),
+    ...(existing?.operatorHoldRefundedAt ? { operatorHoldRefundedAt: existing.operatorHoldRefundedAt } : {}),
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,

@@ -875,3 +875,33 @@ for (const predicate of ['primary-change-unknown', 'primary-change-read-failed']
     assert.equal(probes, 3, 'released stop does not keep probing');
   });
 }
+
+test('HOLDRELEASE-01: removal on an unchanged stopped head dispatches one hammer through the closer', async t => {
+  const { observeHoldRelease } = await import('../src/operator-hold-release.mjs');
+  const rootDir = tmpRoot(t, 'hold-release-closer-');
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, labels_json)
+      VALUES (?, 15, ?, 'codex', 'open', 'posted', '["no-merge-hold"]')`).run(PODIUM, '2026-10-11T15:00:00Z');
+    recordHammerRetryDispatch(rootDir, { repo: PODIUM, prNumber: 15 }, {
+      jobKey: PODIUM_HEAD, headSha: PODIUM_HEAD, now: '2026-10-11T16:00:00Z',
+    });
+    recordPodiumStop(rootDir, '2026-10-11T16:01:00Z');
+    const held = closerDeps();
+    await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-11T16:02:00Z' }), ...held });
+    assert.equal(hqLaunches(held).length, 0);
+    observeHoldRelease({ db, repo: PODIUM, prNumber: 15, headSha: PODIUM_HEAD,
+      liveLabels: [], now: '2026-10-11T17:00:00Z' });
+    const released = closerDeps();
+    const result = await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-11T17:01:00Z' }), ...released });
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(hqLaunches(released).length, 1);
+    const state = JSON.parse(readFileSync(join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold', 'laceyenterprises-podium-pr-15.json'), 'utf8'));
+    assert.deepEqual(state.heads[PODIUM_HEAD].releasedBy, ['hold-released']);
+    const next = closerDeps();
+    await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-11T17:02:00Z' }), ...next });
+    assert.equal(hqLaunches(next).length, 0);
+  } finally { db.close(); }
+});

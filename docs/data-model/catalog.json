@@ -11,6 +11,21 @@
       "owner": "Gemini reviewer quota routing"
     },
     {
+      "id": "operator-hold-releases",
+      "title": "Operator Hold Releases",
+      "path": "docs/data-model/operator-hold-releases.md",
+      "store": "data/reviews.db: operator_hold_releases",
+      "schemaSurface": "src/operator-hold-release.mjs",
+      "relatedSchemaSurfaces": [
+        "src/pollonce-phases.mjs",
+        "src/review-state.mjs",
+        "src/ama/hammer-stop-hold.mjs",
+        "src/ama/operator-hold-refund.mjs"
+      ],
+      "owner": "watcher operator-hold release routing",
+      "stageValues": ["first-review", "rereview", "blocking-findings", "clean-review", "code-work", "closeout", "cycle-cap", "review-failed", "pr-terminal"]
+    },
+    {
       "id": "ci-recovery-reservations",
       "title": "CI Recovery Reservations",
       "path": "docs/data-model/ci-recovery-reservations.md",
@@ -408,11 +423,13 @@
       "path": "docs/data-model/hammer-retry-cap.md",
       "store": "data/follow-up-jobs/hammer-retry-cap/",
       "schemaSurface": "src/ama/hammer-retry-cap.mjs",
-      "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs", "src/ama/operator-hold-refund.mjs"],
       "owner": "AMA hammer dispatch retry and redrive caps",
       "nonExecutionRefundFields": ["unexecutedLaunchRequestIds"],
       "nonExecutionRefundHistoryLimit": 10,
-      "nonExecutionRefundsLifetime": false
+      "nonExecutionRefundsLifetime": false,
+      "operatorHoldRefundFields": ["operatorHoldRefundStopKeys", "operatorHoldRefundedAt"],
+      "operatorHoldRefundsLifetime": true
     },
     {
       "id": "closer-authored-stale",
@@ -459,10 +476,12 @@
         "src/ama/dispatch-closer.mjs",
         "src/ama/audit.mjs",
         "src/checks-summary.mjs",
-        "src/ama/primary-change.mjs"
+        "src/ama/primary-change.mjs",
+        "src/operator-hold-release.mjs",
+        "src/ama/operator-hold-refund.mjs"
       ],
       "owner": "AMA closer retry admission",
-      "releaseDimensions": ["head", "base", "mergeability", "checks", "conflicting", "primary-change-evidence"]
+      "releaseDimensions": ["head", "base", "mergeability", "checks", "conflicting", "primary-change-evidence", "hold-released"]
     },
     {
       "id": "ama-closer-leases",

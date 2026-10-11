@@ -806,6 +806,30 @@ merge-agent dispatch is launched. If GitHub reports the held PR is already
 terminal (`merged` or `closed`), the watcher clears the no-progress lane and
 drops ownership instead of retaining the hold forever.
 
+Removing the last of `no-merge-hold`, `do-not-merge` and `merge-agent-skip`
+creates a durable HOLDRELEASE-01 intent in `reviews.db`. The watcher verifies
+live state, head and labels, then arms the existing review, remediation,
+daemon clean-merge or hammer route without bypassing their gates or budgets.
+Missing captured review bodies select a current-head re-review unless an active
+remediation job already owns the head. Same-head failed reviews retain their
+failure evidence and counters; ordinary retry and park gates own recovery.
+If release-driven spawn freshness fails or a hold is re-applied after claim,
+the unexecuted session restores its complete pre-claim state with a session
+CAS, retaining the failure classification and retry gates for the next tick.
+Release-routing errors log a warning and continue ordinary PR processing while
+retaining the intent for retry. A live terminal PR settles the intent as
+`pr-terminal`/`none` and ends that subject's tick. A moved head, unknown labels
+or re-applied hold also ends the tick before gate projection and closeout;
+ordinary processing resumes on the next discovery. The closer can
+unlock a prior hammer stop on an exact-head release: removing a hold re-arms
+a stopped hammer on an unchanged head, even when its stop was not hold-only.
+Retry caps and every merge predicate still apply. Hold-only refunds
+require explicit non-execution evidence and a launch ID. Current hammer audit
+producers do not supply that evidence, so operators should not expect refunds
+from them. See [Operator Hold Releases](data-model/operator-hold-releases.md),
+[Hammer Stop Hold](data-model/hammer-stop-hold.md) and
+[Hammer Retry Cap](data-model/hammer-retry-cap.md) for persistence and timing.
+
 The posted-review handler also admits explicit pending re-review rows when a
 follow-up worker has just requested another adversarial pass. Those rows are
 held while the gate remains `review-queued`, `review-in-progress`,

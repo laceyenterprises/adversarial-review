@@ -87,6 +87,7 @@ function normalizePRSnapshot(repoPath, pr) {
     headRefName: pr?.head?.ref || pr?.headRefName || undefined,
     baseRefName: pr?.base?.ref || pr?.baseRefName || undefined,
     baseSha: pr?.base?.sha || pr?.baseRefOid || undefined,
+    labelsKnown: Array.isArray(pr?.labels),
     labels: Array.isArray(pr?.labels)
       ? pr.labels
         .map((label) => (typeof label === 'string' ? label : label?.name))
@@ -118,6 +119,7 @@ function stateFromSnapshot(snapshot, {
     authorRef: snapshot.authorRef,
     builderClass: snapshot.builderClass || undefined,
     labels: snapshot.labels,
+    labelsKnown: snapshot.labelsKnown,
     createdAt: snapshot.createdAt,
     updatedAt: snapshot.updatedAt,
     headSha: snapshot.headSha,

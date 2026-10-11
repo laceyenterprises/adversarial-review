@@ -1493,3 +1493,55 @@ test('fetchLivePRLifecycle requests lifecycle fields without unused check rollup
   assert.equal(result.prState, 'open');
   assert.equal(Object.hasOwn(result, 'statusCheckRollup'), false);
 });
+
+test('HOLDRELEASE-01: release re-review preserves every unrelated attempt budget', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'hold-release-budgets-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  insertReviewRow(rootDir);
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.prepare(`UPDATE reviewed_prs SET infra_auto_recover_attempts = 3,
+      review_population_retry_attempts = 2, review_population_retry_last_at = '2026-10-11T12:00:00Z',
+      review_population_retry_head_sha = 'prior'`).run();
+    const result = requestReviewRereview({ rootDir, db, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+      preserveBudgets: true, reason: 'hold-release:1: unknown stage', targetRevisionRef: 'current' });
+    assert.equal(result.triggered, true);
+    assert.equal(result.reviewRow.review_attempts, 1);
+    assert.equal(result.reviewRow.infra_auto_recover_attempts, 3);
+    assert.equal(result.reviewRow.review_population_retry_attempts, 2);
+    assert.equal(result.reviewRow.review_population_retry_last_at, '2026-10-11T12:00:00Z');
+    assert.equal(result.reviewRow.review_population_retry_head_sha, 'prior');
+  } finally { db.close(); }
+});
+
+test('HOLDRELEASE-01: lifecycle mirror refresh preserves the release edge for discovery', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'hold-release-mirror-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  insertReviewRow(rootDir);
+  let db = openReviewStateDb(rootDir);
+  db.prepare(`UPDATE reviewed_prs SET labels_json = '["no-merge-hold"]'`).run();
+  db.close();
+  persistPRStateToMirror(rootDir, { repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    prState: 'open', headSha: 'current', labels: [] });
+  db = openReviewStateDb(rootDir);
+  try {
+    const release = db.prepare('SELECT * FROM operator_hold_releases').get();
+    assert.equal(release.head_sha, 'current');
+    assert.equal(release.routed_at, null);
+    assert.deepEqual(JSON.parse(release.removed_json), ['no-merge-hold']);
+    assert.equal(db.prepare('SELECT labels_json FROM reviewed_prs').get().labels_json, '[]');
+  } finally { db.close(); }
+});
+
+test('HOLDRELEASE-01: incomplete lifecycle observation cannot erase a held snapshot', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'hold-release-incomplete-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  insertReviewRow(rootDir);
+  let db = openReviewStateDb(rootDir);
+  db.prepare(`UPDATE reviewed_prs SET labels_json = '["no-merge-hold"]'`).run();
+  db.close();
+  persistPRStateToMirror(rootDir, { repo: 'laceyenterprises/adversarial-review', prNumber: 10, prState: 'open', labels: [] });
+  db = openReviewStateDb(rootDir);
+  try { assert.equal(db.prepare('SELECT labels_json FROM reviewed_prs').get().labels_json, '["no-merge-hold"]'); }
+  finally { db.close(); }
+});

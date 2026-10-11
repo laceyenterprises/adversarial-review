@@ -138,7 +138,7 @@ import {
   stmtMarkMerged,
   stmtMarkClosed,
   latestPostedReviewAtMs,
-  countOpenPrsAwaitingFirstPassReview, countOpenPrsAwaitingRereview, readBurstScopedReviewerSpendUsd,
+  countHeldOpenPrs, countOpenPrsAwaitingFirstPassReview, countOpenPrsAwaitingRereview, readBurstScopedReviewerSpendUsd,
 } from './review-state-db.mjs';
 import {
   retryPendingMergeCloseouts,
@@ -1247,7 +1247,7 @@ async function pollOnce(
   console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
-  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
+  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
   const postReviewMaintenanceHandlers = [], reviewerMemoryReservationState = { reservedMb: 0 }, reviewerTickCaches = { fleetQuotaStatus: new Map() };
@@ -1572,6 +1572,7 @@ async function pollOnce(
       await maybeFireReviewStalledAlert({
         deliverAlertFn: defaultDeliverAlert,
         pendingReviewCount: countOpenPrsAwaitingFirstPassReview(),
+        held: countHeldOpenPrs(),
         lastPostedReviewMs: latestPostedReviewAtMs(),
         logger: console,
       });

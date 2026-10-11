@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { SQL_COUNT_HELD_OPEN_PRS } from '../src/operator-hold-labels.mjs';
 // RSP-01 operator surface — "is the depth failover lever engaged right now, and
 // what has it cost?"
 //
@@ -46,8 +47,10 @@ function main() {
 
   // Read-only, so this is safe to point at a live deployed tree.
   let depth = null;
+  let held = 0;
   const db = new Database(join(root, 'data', 'reviews.db'), { readonly: true });
   try {
+    held = Number(db.prepare(SQL_COUNT_HELD_OPEN_PRS).get()?.n || 0);
     depth = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n ?? 0);
   } finally {
     db.close();
@@ -57,6 +60,7 @@ function main() {
   const plan = firstPassSpilloverPlan({ depth, threshold });
   const report = readReviewQueueDepthFailoverReport(root);
   const payload = {
+    held,
     knob: REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
     depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
     reportPath: reviewQueueDepthFailoverReportPath(root),
@@ -74,7 +78,7 @@ function main() {
 
   const state = !plan.armed ? 'DISARMED' : plan.engaged ? 'ENGAGED' : 'ARMED (not engaged)';
   process.stdout.write(
-    `first-pass review queue depth : ${depth}\n`
+    `first-pass review queue depth : ${depth} (held: ${held})\n`
     + `unit                          : ${FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT}\n`
     + `knob                          : ${REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY}\n`
     + `threshold                     : ${threshold === null ? '(unset — disarmed)' : threshold}\n`

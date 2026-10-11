@@ -1,3 +1,4 @@
+import { operatorHeldSql } from './operator-hold-labels.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
 export const UPDATE_REVIEW_ROUTING_SQL = `UPDATE reviewed_prs
@@ -429,6 +430,7 @@ export function prepareMarkMergedPendingReviewSkipped(db) {
 export const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
+  `AND NOT ${operatorHeldSql()} ` +
   // Malformed-title, legacy unroutable-bot, and Argus-routed PRs are not
   // awaiting a first pass: the dispatch loop returns early on all three, so
   // none can receive one. Counting them kept the "Reviews stalled" pager above
@@ -483,6 +485,7 @@ export const SQL_HAS_COMPLETED_REVIEW_FOR_PR =
 export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
+  `AND NOT ${operatorHeldSql()} ` +
   // Only rows awaiting reviewer admission contribute pressure. Failed and
   // artifact/terminal states cannot spend a reviewer slot until rearmed.
   "AND review_status IN ('pending', 'pending-upstream') " +

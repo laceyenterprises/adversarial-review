@@ -87,6 +87,7 @@ export async function maybeFireReviewStalledAlert({
   deliverAlertFn,
   now = Date.now(),
   pendingReviewCount,
+  held = 0,
   lastPostedReviewMs,
   stallThresholdMs = REVIEW_STALL_THRESHOLD_MS,
   debounceMs = REVIEW_STALL_ALERT_DEBOUNCE_MS,
@@ -123,7 +124,7 @@ export async function maybeFireReviewStalledAlert({
   // Delivery applies the canonical page headline and action. Keep this durable
   // text concise as the incident record, with the evidence in the payload.
   const text =
-    `No review posted for ${ageMin}m while ${pendingReviewCount} open PR(s) await ` +
+    `No review posted for ${ageMin}m while ${pendingReviewCount} open PR(s) (held: ${held}) await ` +
     'first-pass review.';
   try {
     await deliverAlertFn(text, {
@@ -132,6 +133,7 @@ export async function maybeFireReviewStalledAlert({
         reason: 'no-posted-review-within-threshold-while-prs-await',
         age_ms: ageMs,
         pending_review_count: pendingReviewCount,
+        held,
         threshold_ms: stallThresholdMs,
         last_posted_review_at: new Date(lastPosted).toISOString(),
       },

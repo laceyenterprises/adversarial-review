@@ -1,3 +1,4 @@
+import { isOperatorHeld } from '../operator-hold-labels.mjs';
 // REMORPHAN-01: dispatch admission only. HAM retains all live merge predicates.
 import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
@@ -164,6 +165,10 @@ function readEvidence(value) {
 }
 
 export async function recoverOrphan(options) {
+  if (isOperatorHeld(options.labels || options.candidate?.labels)) {
+    options.logger?.log?.(`Orphan watchdog held: 1 (${options.repo}#${options.prNumber})`);
+    return null;
+  }
   try { return await recoverOrphanWithStore(options); }
   catch (error) {
     if (options.signal?.aborted) throw error;
@@ -203,7 +208,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
   const belowMax = validRound(round) && validRound(maxRounds) && Number(round) < Number(maxRounds);
   const stopAllowed = !stopped || ['no-progress', 'remediation-stopped'].includes(stopped);
   const candidateAllowed = Boolean(headSha && candidate?.merged !== true && String(candidate?.prState || '').toLowerCase() === 'open'
-    && !candidate?.isDraft && !labels.some(label => ['do-not-merge', 'no-merge-hold', 'merge-agent-skip'].includes(label))
+    && !candidate?.isDraft && !isOperatorHeld(labels)
     && result?.amaEnabled && stopAllowed);
   let closerHead = false;
   let closerProofChecked = false;

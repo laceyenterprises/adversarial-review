@@ -6201,3 +6201,81 @@ test('DUPTERM-01: natural terminal census clears stale family health findings', 
     [{ status: 'inactive' }, { status: 'inactive' }]);
   db.close();
 });
+
+
+test('operator holds are excluded from queue, conflicts and ownerless findings with held totals', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    insertReviewRow(rootDir, { prNumber: 1 });
+    insertReviewRow(rootDir, { prNumber: 2 });
+    const db = openDb(rootDir);
+    db.prepare('UPDATE reviewed_prs SET labels_json=? WHERE pr_number=1').run(JSON.stringify(['hold']));
+    db.prepare('UPDATE reviewed_prs SET labels_json=? WHERE pr_number=2').run(JSON.stringify(['merge-agent-stuck']));
+    db.close();
+    const snapshot = collectHealth({ rootDir, hqRoot, now: () => new Date(NOW), env: {},
+      config: { hostChecksEnabled: false, conflictingPrChecksEnabled: true, conflictingPrRepo: REPO, conflictingPrRepoRoot: null },
+      listOpenPrsSyncImpl: () => [conflictPrFixture({ number: 1, labels: [{ name: 'hold' }] }), conflictPrFixture({ number: 2, labels: [{ name: 'merge-agent-stuck' }] })],
+    });
+    assert.equal(snapshot.held, 1);
+    assert.equal(snapshot.firstPassQueue.pendingDepth, 1);
+    assert.equal(snapshot.conflictingOpenPrs.held, 1);
+    assert.equal(snapshot.conflictingOpenPrs.count, 1);
+    assert.deepEqual(snapshot.conflictingOpenPrs.prs.map(pr => pr.number), [2]);
+    assert.match(renderReviewPipelinePrometheus(snapshot), /# held: 1/);
+    for (const finding of snapshot.findings.filter(f => f.code === 'review:conflicting_pr_unowned')) {
+      assert.ok(finding.details.prs.every(pr => pr.number === 2));
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); }
+});
+
+test('held PRs in imported dirty backlog do not trigger hammer stall findings', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    insertReviewRow(rootDir, { prNumber: 1 });
+    const db = openDb(rootDir);
+    db.prepare('UPDATE reviewed_prs SET labels_json=?').run(JSON.stringify(['no-auto-merge']));
+    db.close();
+    const stateDir = path.join(hqRoot, 'dispatch', '_auto_merge-fixture');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(path.join(stateDir, 'daemon-state.json'), JSON.stringify({ dirtyPrBacklog: {
+      dirtyPrCount: 1, recordedAt: '2026-05-25T15:00:00.000Z', signature: [`${REPO}#1@head`],
+    } }));
+    const snapshot = collectHealth({ rootDir, hqRoot, now: () => new Date(NOW),
+      env: { USER: 'fixture' }, config: { hostChecksEnabled: true },
+      execFileSyncImpl: () => { throw new Error('fixture: host command unavailable'); },
+      listOpenPrsSyncImpl: () => [],
+    });
+    assert.equal(snapshot.hammerDispatchStall.backlog.held, 1);
+    assert.equal(snapshot.hammerDispatchStall.backlog.dirtyPrCount, 0);
+    assert.equal(snapshot.hammerDispatchStall.active, false);
+    assert.ok(!snapshot.findings.some(f => f.code === 'review:hammer_dispatch_stalled_with_conflicts'));
+  } finally { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); }
+});
+
+test('all health row counters exclude held PRs and report a shared held total', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  try {
+    const db = openDb(rootDir);
+    db.close();
+    const options = { rootDir, hqRoot, env: {}, now: () => new Date(NOW), config: { hostChecksEnabled: false }, listOpenPrsSyncImpl: () => [] };
+    const before = collectHealth(options);
+    const labels = ['no-merge-hold', 'do-not-merge', 'merge-agent-skip', 'no-merge', 'no-auto-merge', 'hold'];
+    const statuses = ['pending', 'posted', 'failed', 'malformed', 'ci-blocked', 'pending-upstream'];
+    for (let index = 0; index < labels.length; index++) {
+      insertReviewRow(rootDir, { prNumber: index + 1, reviewStatus: statuses[index] });
+      const fixtureDb = openDb(rootDir);
+      fixtureDb.prepare('UPDATE reviewed_prs SET labels_json=? WHERE pr_number=?').run(JSON.stringify([labels[index]]), index + 1);
+      fixtureDb.close();
+    }
+    const after = collectHealth(options);
+    assert.equal(after.held, 6);
+    for (const counter of ['firstPassQueue', 'queuedRereviews', 'deferredRereviews', 'ciBlockedRereviews', 'malformedPrTitles', 'terminalReviewFailures', 'mergeStalls', 'stuckReviewLoops', 'mergeOutcomes']) {
+      assert.deepEqual(after[counter], before[counter], counter);
+    }
+    assert.equal(after.ttm.budget.openPrCount, 0);
+    assert.equal(after.ttm.budget.held, 6);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); rmSync(hqRoot, { recursive: true, force: true }); }
+});

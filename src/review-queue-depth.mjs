@@ -432,6 +432,7 @@ export function readReviewQueueDepthFailoverReport(rootDir, { readFileImpl = rea
  * the cheap primary, which is the pre-RSP-01 behaviour.
  */
 export function createFirstPassSpilloverController({
+  readHeld = null,
   readDepth = null,
   readRereviewDepth = null,
   env = process.env,
@@ -541,7 +542,7 @@ export function createFirstPassSpilloverController({
       report = summarizeReport(report);
       logger?.warn?.(
         `[watcher] review-queue-depth-failover ${event} pass_kind=${kind} `
-        + `depth=${plan.depth} threshold=${plan.threshold} spill_slots=${plan.spillSlots} `
+        + `depth=${plan.depth} held: ${readFirstPassReviewQueueDepth(readHeld) ?? 0} threshold=${plan.threshold} spill_slots=${plan.spillSlots} `
         + `engagement_spillover_reviews=${transition.engagementSpilloverReviews} `
         + `unit="${FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT}"`
       );
@@ -631,7 +632,7 @@ export function createFirstPassSpilloverController({
       report = summarizeReport(report);
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
-        + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} threshold=${current.threshold} `
+        + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} held: ${readFirstPassReviewQueueDepth(readHeld) ?? 0} threshold=${current.threshold} `
         + `slot=${grantedByKind.get(kind)}/${current.spillSlots} `
         + `engagement_spillover_reviews=${lane.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`

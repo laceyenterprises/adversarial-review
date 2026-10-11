@@ -1,3 +1,4 @@
+import { operatorHeldSql, readHeldOpenPrCount } from './operator-hold-labels.mjs';
 /**
  * Time-to-merge tracking, split into SLOW and STUCK.
  *
@@ -536,7 +537,7 @@ function readTtmTimelines(db, { nowIso, mergeAuthorityStrictMode }) {
       `SELECT repo, pr_number, reviewed_at, pr_state, merged_at, closed_at,
               review_status, posted_at, rereview_requested_at,
               reviewer_lease_expires_at
-         FROM reviewed_prs`
+         FROM reviewed_prs WHERE pr_state IS NOT 'open' OR NOT ${operatorHeldSql()}`
     ).all();
     passRows = db.prepare(
       `SELECT repo, pr_number, attempt_number, pass_kind, started_at, ended_at,
@@ -920,15 +921,16 @@ function readRecentTtmFlagEvents(db, { observedAt, config }) {
  * must not present the seeds as a measured budget.
  */
 function applyMeasuredTtmBudget(db, config, timelines) {
+  const held = readHeldOpenPrCount(db);
   const openPrCount = timelines.filter((row) => row.prState === 'open').length;
   const pinned = config.budgetPinned || { base: false, perRound: false };
   if (pinned.base && pinned.perRound) {
     return {
       config: {
         ...config,
-        budgetProvenance: { source: 'pinned', blind: false, openPrCount },
+        budgetProvenance: { source: 'pinned', blind: false, openPrCount, held },
       },
-      budget: { blind: false, source: 'pinned', model: null, pressure: null, openPrCount },
+      budget: { blind: false, source: 'pinned', model: null, pressure: null, openPrCount, held },
     };
   }
 
@@ -941,7 +943,7 @@ function applyMeasuredTtmBudget(db, config, timelines) {
       source: 'blind',
       blind: true,
       blindReason: error.message,
-      openPrCount,
+      openPrCount, held,
     };
     return {
       config: { ...config, budgetProvenance: provenance },
@@ -951,7 +953,7 @@ function applyMeasuredTtmBudget(db, config, timelines) {
         blindReason: error.message,
         model: null,
         pressure: null,
-        openPrCount,
+        openPrCount, held,
       },
     };
   }
@@ -980,7 +982,7 @@ function applyMeasuredTtmBudget(db, config, timelines) {
     queuePressureRaw: derived.pressure.rawPressure,
     queuePressureSaturated: derived.pressure.saturated,
     referenceOpenPrCount: derived.pressure.referenceOpenPrCount,
-    openPrCount,
+    openPrCount, held,
     pinnedBase: pinned.base,
     pinnedPerRound: pinned.perRound,
   };
@@ -996,7 +998,7 @@ function applyMeasuredTtmBudget(db, config, timelines) {
       source,
       model: derived.model,
       pressure: derived.pressure,
-      openPrCount,
+      openPrCount, held,
     },
   };
 }
@@ -1064,7 +1066,7 @@ function runTtmTrackerWatcherTick({ db, logger = console } = {}) {
         `[watcher] ttm-tracker active=${ttm.sync.active} activated=${ttm.sync.activated} `
         + `resolved=${ttm.sync.resolved} terminal_unmerged_open=${ttm.rollup.terminalButUnmergedOpenCount} `
         + `terminal_clean_rereview_blocked_open=${ttm.rollup.terminalCleanRereviewBlockedOpenCount} `
-        + `stuck=${ttm.rollup.stuckOpenPrs} budget_breaches=${ttm.rollup.openPrsBreachingBudget} `
+        + `held: ${ttm.budget?.held ?? 'unknown'} stuck=${ttm.rollup.stuckOpenPrs} budget_breaches=${ttm.rollup.openPrsBreachingBudget} `
         + `budget=${ttm.rollup.budgetSource}:`
         + `${ttm.rollup.baseBudgetMinutes === null ? 'blind' : Math.round(ttm.rollup.baseBudgetMinutes)}m`
         + `+${ttm.rollup.perRoundBudgetMinutes === null ? 'blind' : Math.round(ttm.rollup.perRoundBudgetMinutes)}m/round`

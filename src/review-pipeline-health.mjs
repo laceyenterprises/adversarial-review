@@ -1,3 +1,4 @@
+import { excludingHeldOpenRows, isOperatorHeld, readHeldOpenPrCount } from './operator-hold-labels.mjs';
 import Database from 'better-sqlite3';
 import { listPipelineOpenPrs, readPipelineGithub } from './pipeline-health-github.mjs';
 import { collectDagAutowalkHealth } from './dag-autowalk-health.mjs';
@@ -279,6 +280,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_remediation_oldest_pending_age_seconds',
   'review_pipeline_remediation_throughput_jobs',
   'review_pipeline_merge_outcomes_total',
+  'review_pipeline_operator_held_open_prs',
   'review_pipeline_merge_stalled_jobs',
   'review_pipeline_conflicting_open_prs',
   'review_pipeline_conflicting_open_prs_collected',
@@ -348,6 +350,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_remediation_oldest_pending_age_seconds: 'Age in seconds of the oldest pending remediation job.',
   review_pipeline_remediation_throughput_jobs: 'Terminal remediation jobs observed in the configured throughput window.',
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
+  review_pipeline_operator_held_open_prs: 'Open PRs deliberately held by an operator and excluded from queue and stall counters.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
   review_pipeline_conflicting_open_prs: 'Current count of open non-draft PRs GitHub reports as CONFLICTING.',
   review_pipeline_conflicting_open_prs_collected: 'Whether the conflicting-open-PR collector reached GitHub for every configured repo.',
@@ -1306,7 +1309,7 @@ function isMissingSchemaError(error) {
 
 function safeAll(db, sql, params = []) {
   try {
-    return db.prepare(sql).all(...params);
+    return db.prepare(/\b(?:FROM|JOIN)\s+reviewed_prs\b/i.test(sql) ? excludingHeldOpenRows(sql) : sql).all(...params);
   } catch (error) {
     if (isMissingSchemaError(error)) return [];
     throw error;
@@ -3651,7 +3654,8 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
   }
 
   const grouped = new Map();
-  const prs = rows.map((row) => {
+  const held = rows.filter(row => isOperatorHeld(row.labels)).length;
+  const prs = rows.filter(row => !isOperatorHeld(row.labels)).map((row) => {
     const normalized = normalizeConflictingPrRow(row);
     return normalized ? { ...normalized, repo: row.repo } : null;
   }).filter(Boolean);
@@ -3665,6 +3669,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
       enabled: true,
       detailedProbesEnabled: false,
       collected: listingErrors.length === 0,
+      held,
       count: prs.length,
       probedPrs: 0,
       unprobedPrs: prs.length,
@@ -3695,6 +3700,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
     } catch (error) {
       return {
         repo, repos, repoRoot, enabled: true, detailedProbesEnabled: true, collected: listingErrors.length === 0,
+        held,
         count: prs.length, probedPrs: 0, unprobedPrs: prs.length,
         probeCoverage: prs.length > 0 ? 0 : 1,
         prs: prs.map((pr) => ({ ...pr, conflictingPaths: [], probeOk: false })),
@@ -3757,6 +3763,7 @@ function summarizeConflictingOpenPrs({ config, execFileSyncImpl, env, rootDir, l
     enabled: true,
     detailedProbesEnabled: true,
     collected: listingErrors.length === 0,
+    held,
     count: prs.length,
     probedPrs,
     unprobedPrs: prs.length - probedPrs,
@@ -4467,7 +4474,7 @@ function hammerDispatchPattern() {
   return /\b(?:cwp\.daemon\s+spawned|spawn(?:ed)?)\b[\s\S]{0,180}\bworker_class=hammer\b/i;
 }
 
-function readDirtyPrBacklogState(hqRoot, { env = process.env, nowMs }) {
+function readDirtyPrBacklogState(hqRoot, { env = process.env, nowMs, db = null }) {
   const owner = env.AUTO_MERGE_OWNER_USER
     || env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_OWNER_USER
     || currentUserName(env);
@@ -4484,25 +4491,30 @@ function readDirtyPrBacklogState(hqRoot, { env = process.env, nowMs }) {
       continue;
     }
     const backlog = state?.dirtyPrBacklog;
-    const dirtyPrCount = Number(backlog?.dirtyPrCount || 0);
+    const signature = Array.isArray(backlog?.signature) ? backlog.signature : [];
+    const heldKeys = new Set(db ? db.prepare("SELECT repo, pr_number, labels_json FROM reviewed_prs WHERE pr_state='open'").all()
+      .filter(row => isOperatorHeld(row.labels_json)).map(row => `${row.repo}#${row.pr_number}`) : []);
+    const held = signature.filter(key => heldKeys.has(String(key).split('@')[0])).length;
+    const dirtyPrCount = Math.max(0, Number(backlog?.dirtyPrCount || 0) - held);
     if (!backlog || !Number.isFinite(dirtyPrCount) || dirtyPrCount <= 0) {
-      return { present: false, statePath, dirtyPrCount: 0, prs: [] };
+      return { present: false, statePath, dirtyPrCount: 0, held, prs: [] };
     }
     const recordedAt = backlog.recordedAt || null;
     return {
       present: true,
       statePath,
       dirtyPrCount,
+      held,
       recordedAt,
       ageMs: recordedAt ? ageMs(nowMs, recordedAt) : null,
-      prs: Array.isArray(backlog.signature) ? backlog.signature : [],
+      prs: signature.filter(key => !heldKeys.has(String(key).split('@')[0])),
     };
   }
   return { present: false, statePath: statePaths[0], dirtyPrCount: 0, prs: [] };
 }
 
-function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config }) {
-  const backlog = readDirtyPrBacklogState(hqRoot, { env, nowMs });
+function summarizeHammerDispatchStall(hqRoot, { env = process.env, nowMs, config, db = null }) {
+  const backlog = readDirtyPrBacklogState(hqRoot, { env, nowMs, db });
   const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
   const log = tailRecentLines(logPath);
   let hammerDispatchSeen = false;
@@ -6249,7 +6261,7 @@ function collectReviewPipelineHealth({
       ? summarizeDispatchSpawnFailures(hqRoot, { nowMs, config })
       : { logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'), logExists: false, logAgeMs: null, windowMs: config.dispatchSpawnFailureWindowMs, matches: [] };
     const hammerDispatchStall = config.hostChecksEnabled
-      ? summarizeHammerDispatchStall(hqRoot, { env, nowMs, config })
+      ? summarizeHammerDispatchStall(hqRoot, { env, nowMs, config, db })
       : {
           active: false,
           thresholdMs: config.hammerDispatchStallMaxAgeMs,
@@ -6313,6 +6325,7 @@ function collectReviewPipelineHealth({
           alarmed: [],
         };
     const snapshot = {
+      held: readHeldOpenPrCount(db),
       observedAt,
       rootDir,
       hqRoot,
@@ -6391,7 +6404,7 @@ function metricLine(name, labels, value) {
 }
 
 function renderReviewPipelinePrometheus(snapshot) {
-  const lines = [];
+  const lines = [`# held: ${snapshot.held ?? 'unknown'}`];
   const emittedMetricMetadata = new Set();
   const withDefault = (value, fallback = 0) => (value === undefined ? fallback : value);
   const pushMetric = (name, labels, value) => {
@@ -6466,6 +6479,7 @@ function renderReviewPipelinePrometheus(snapshot) {
     snapshot.afhFallbackSupermajority?.active ? 1 : 0
   );
   pushMetric('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth);
+  pushMetric('review_pipeline_operator_held_open_prs', {}, snapshot.held ?? null);
   pushMetric('review_pipeline_pending_queue_depth', {}, snapshot.firstPassQueue.pendingDepth);
   pushMetric(
     'review_pipeline_first_pass_wait_seconds',

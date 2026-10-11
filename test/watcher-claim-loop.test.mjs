@@ -285,7 +285,7 @@ export async function load(url, context, nextLoad) {
   const simpleStubs = {
     'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenance({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
-    'fixture:adversarial-gate-status': "export function resolveSettledReviewVerdict() { return { verdict: '', remediationPending: false }; } export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",
+    'fixture:adversarial-gate-status': "export function resolveSettledReviewVerdict() { return globalThis.__holdReleaseSettled || { verdict: '', remediationPending: false }; } export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { globalThis.__holdReleaseGateProjections = (globalThis.__holdReleaseGateProjections || 0) + 1; return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",
     'fixture:adversarial-gate-context': "export function resolveGateStatusContext() { return {}; }",
     'fixture:duplicate-family-state': "export function duplicateFamilySchemaTableNames() { return []; } export function ensureDuplicateFamilySchema() {} export async function runDuplicateFamilyCensusForWatcher() { return { families: [], familyIds: [] }; } export async function reconcileDuplicateFamilyLabels() { return { inspected: 0, changed: 0 }; }",
     'fixture:follow-up-jobs': ${JSON.stringify(followUpJobsSource)},
@@ -2508,3 +2508,72 @@ fi
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+for (const scenario of ['missing-pass', 'null-body', 'budget-error', 'invalid-gh-json', 'gh-error', 'terminal']) {
+  test(`HOLDRELEASE-01: ${scenario} does not wedge ordinary PR processing`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-release-failure-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      const bodyMissing = ['missing-pass', 'null-body'].includes(scenario);
+      const followUpJobsSource = scenario === 'budget-error'
+        ? DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace("return { roundBudget: 1, riskClass: 'medium' };", "if (globalThis.__holdReleaseBudgetReadFail) { globalThis.__holdReleaseBudgetReadFail = false; throw new Error('fixture budget read failure'); } return { roundBudget: 1, riskClass: 'medium' };")
+        : DEFAULT_FOLLOW_UP_JOBS_SOURCE;
+      writeFileSync(loaderPath, buildLoaderSource({ followUpJobsSource }));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({ prePollSetup: `
+        globalThis.__holdReleaseBudgetReadFail = true;
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+          review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref, posted_at)
+          VALUES (?, 101, ?, 'claude', 'open', ?, 0, '["no-merge-hold"]', ?, 'sha-happy-101', ?)\`).run(
+          'laceyenterprises/adversarial-review', '2026-10-11T16:00:00Z',
+          ${bodyMissing ? "'posted'" : "'pending'"}, ${bodyMissing ? "'sha-happy-101'" : 'null'},
+          ${bodyMissing ? "'2026-10-11T16:01:00Z'" : 'null'});
+        ${bodyMissing ? `globalThis.__holdReleaseSettled = { verdict: 'changes_requested',
+          reviewedHeadSha: 'sha-happy-101', blockingFindingState: 'known',
+          blockingFindingCount: 1, nonBlockingFindingCount: 0, remediationPending: false };` : ''}
+        ${scenario === 'null-body' ? `db.prepare(\`INSERT INTO reviewer_passes
+          (repo, pr_number, head_sha, attempt_number, reviewer_class, pass_kind, status, started_at, ended_at, body_md)
+          VALUES (?, 101, 'sha-happy-101', 1, 'claude', 'first-pass', 'completed', ?, ?, NULL)\`).run(
+          'laceyenterprises/adversarial-review', '2026-10-11T16:00:00Z', '2026-10-11T16:01:00Z');` : ''}
+      `, afterFirstPoll: `
+        const release = db.prepare('SELECT * FROM operator_hold_releases WHERE pr_number = 101').get();
+        assert.ok(release);
+        ${scenario === 'terminal' ? `
+          assert.equal(release.stage, 'pr-terminal');
+          assert.equal(release.action, 'none');
+          assert.ok(release.routed_at);
+          assert.ok(!claims.some(claim => claim.prNumber === 101));
+        ` : `
+          assert.ok(claims.some(claim => claim.prNumber === 101));
+          assert.ok(globalThis.__holdReleaseGateProjections > 0);
+          if (${bodyMissing}) {
+            assert.equal(release.stage, 'rereview');
+            assert.equal(release.action, 'review');
+            assert.ok(release.routed_at);
+          } else {
+            assert.equal(release.routed_at, null);
+          }
+          const spawns = globalThis.__watcherClaimLoopReviewerSpawns.length;
+          globalThis.__holdReleaseBudgetReadFail = true;
+          await pollOnce(octokit, pollOptions);
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, spawns);
+          assert.equal(db.prepare('SELECT count(*) n FROM operator_hold_releases WHERE pr_number = 101').get().n, 1);
+        `}
+      ` }));
+      const env = fixtureEnv(installGhFixture(tmp));
+      writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
+if [[ "$1" == pr && "$2" == view ]]; then
+  ${scenario === 'gh-error' ? "echo 'fixture gh read failed' >&2; exit 1" : scenario === 'invalid-gh-json' ? "printf 'invalid-json\\n'" : `printf '{"state":"${scenario === 'terminal' ? 'CLOSED' : 'OPEN'}","headRefOid":"sha-happy-%s","labels":[],"mergeable":"MERGEABLE","statusCheckRollup":[{"name":"fixture-ci","conclusion":"SUCCESS"}]}\\n' "$3"`}
+else
+  printf '{"sha":"fixture","message":"Fixture commit"}\\n'
+fi
+`);
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env, timeout: 60000 });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}

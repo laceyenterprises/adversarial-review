@@ -796,6 +796,7 @@ export async function processReviewSubject(entry, ctx) {
       let holdReleaseId = null;
       // Compare before any early return or label refresh. Retain unrouted
       // release intent across read errors; the ordinary handlers own execution.
+      // Routing is best-effort and must never suppress those handlers on error.
       try {
         const release = !subject.terminal && observeHoldRelease({
           db, repo: repoPath, prNumber, headSha: subject.headSha, liveLabels: subject.labelsKnown === false ? undefined : subject.labels,
@@ -815,6 +816,10 @@ export async function processReviewSubject(entry, ctx) {
               '--json', 'state,headRefOid,labels,mergeable,mergeStateStatus,statusCheckRollup'],
             { timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
             const live = JSON.parse(stdout);
+            if (['CLOSED', 'MERGED'].includes(String(live.state).toUpperCase())) {
+              markHoldReleaseRouted({ db, release, route: { stage: 'pr-terminal', action: 'none' } });
+              return;
+            }
             // A re-applied hold cancels this intent before any action is armed.
             observeHoldRelease({ db, repo: repoPath, prNumber, headSha: live.headRefOid, liveLabels: live.labels });
             if (!Array.isArray(live.labels) || String(live.state).toUpperCase() !== 'OPEN' || live.headRefOid !== subject.headSha
@@ -823,10 +828,20 @@ export async function processReviewSubject(entry, ctx) {
           }
           const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
           const budget = resolveRoundBudgetForJob({ linearTicketId, riskClass: ledger.latestRiskClass }, { rootDir: ROOT });
-          const route = holdReleaseRoute({ row: existing, headSha: subject.headSha, settled, candidate,
+          let route = holdReleaseRoute({ row: existing, headSha: subject.headSha, settled, candidate,
             roundsLeft: ledger.completedRoundsForPR < Math.max(budget.roundBudget, Number(ledger.latestMaxRounds) || 0),
             cycleCapped: isReviewCycleCapFailedRow(existing) || prLabelNames.includes('reviewer-cycle-cap-reached'),
           });
+          if (route.action === 'remediation') {
+            const pass = db.prepare(`SELECT * FROM reviewer_passes WHERE repo = ? AND pr_number = ?
+              AND head_sha = ? AND status = 'completed' AND pass_kind IN ('first-pass', 'rereview')
+              ORDER BY ended_at DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha);
+            // Settled findings can come from a job or posted review before body
+            // capture succeeds. Re-review that head instead of retrying forever.
+            if (!pass?.body_md) route = { stage: 'rereview', action: 'review', unknown: true };
+            else queueFollowUpForRecoveredPostedReview({ rootDir: ROOT, row: pass, reviewRow: existing,
+              reviewPostedAt: existing.posted_at, defaultBaseBranch: subject.baseRefName || 'main' });
+          }
           if (route.action === 'review' && ['posted', 'failed', 'rereview-ci-blocked'].includes(existing?.review_status)) {
             requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber,
               targetRevisionRef: subject.headSha, requestedAt: release.released_at, preserveBudgets: true,
@@ -834,20 +849,12 @@ export async function processReviewSubject(entry, ctx) {
             });
             existing = stmtGetReviewRow.get(repoPath, prNumber);
           }
-          if (route.action === 'remediation') {
-            const pass = db.prepare(`SELECT * FROM reviewer_passes WHERE repo = ? AND pr_number = ?
-              AND head_sha = ? AND status = 'completed' AND pass_kind IN ('first-pass', 'rereview')
-              ORDER BY ended_at DESC LIMIT 1`).get(repoPath, prNumber, subject.headSha);
-            if (!pass?.body_md) throw new Error('released review body unavailable; retry next tick');
-            queueFollowUpForRecoveredPostedReview({ rootDir: ROOT, row: pass, reviewRow: existing,
-              reviewPostedAt: existing.posted_at, defaultBaseBranch: subject.baseRefName || 'main' });
-          }
           clearNoProgressLane(ROOT, { repo: repoPath, prNumber }, { logger: console });
           markHoldReleaseRouted({ db, release, route });
         }
       } catch (err) {
-        console.warn(`[watcher] hold-release read/route deferred for ${repoPath}#${prNumber}: ${err?.message || err}`);
-        if (holdReleaseId) return;
+        console.warn(`[watcher] hold-release read/route deferred for ${repoPath}#${prNumber}; continuing ordinary handlers: ${err?.message || err}`);
+        holdReleaseId = null;
       }
       if (staleDriftSkip) {
         console.log(staleDriftSkip.message);

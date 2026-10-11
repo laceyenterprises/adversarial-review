@@ -38,7 +38,7 @@ export function refundOperatorHeldHammerStop(rootDir, identity, stop, { now = ne
     // Share no-execution identities with ordinary refund consumers. PR 1268
     // also checks these in the bounded exit-refund path.
     unexecutedLaunchRequestIds: [...(ledger.unexecutedLaunchRequestIds || []),
-      ...refundable.filter(item => refundKeys.includes(item.stopKey)).map(item => item.launchRequestId)],
+      ...refundable.filter(item => refundKeys.includes(item.stopKey)).map(item => item.launchRequestId)].slice(-10),
     operatorHoldRefundedAt: now,
   }, null, 2)}\n`);
   return true;

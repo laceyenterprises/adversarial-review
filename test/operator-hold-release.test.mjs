@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { observeHoldRelease, holdReleaseRoute, markHoldReleaseRouted, readLatestHoldRelease } from '../src/operator-hold-release.mjs';
 import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
-import { recordHammerRetryDispatch, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
+import { recordHammerRetryDispatch, readHammerRetryCapLedger, markHammerRetryCapExhausted, hammerRetryCapFilePath } from '../src/ama/hammer-retry-cap.mjs';
 import { refundOperatorHeldHammerStop } from '../src/ama/operator-hold-refund.mjs';
 import { recordReviewCycleVerdict } from '../src/review-cycle-cap.mjs';
 
@@ -127,9 +127,33 @@ test('hold-only refunds preserve real attempts and their durable keys survive th
   let ledger = readHammerRetryCapLedger(rootDir, identity);
   assert.equal(ledger.attemptCount, 1);
   assert.equal(ledger.lifetimeAttemptCount, 1);
+  const refundedAt = ledger.operatorHoldRefundedAt;
+  markHammerRetryCapExhausted(rootDir, identity, { jobKey: headSha, headSha, attemptCount: 1 });
+  ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.deepEqual(ledger.operatorHoldRefundStopKeys, ['held-1', 'held-2']);
+  assert.equal(ledger.operatorHoldRefundedAt, refundedAt);
   recordHammerRetryDispatch(rootDir, identity, { jobKey: headSha, headSha, now: '2026-10-11T18:00:00Z' });
   assert.equal(refundOperatorHeldHammerStop(rootDir, identity, { ...stop, recordedAt: '2026-10-11T18:01:00Z' }), false);
   ledger = readHammerRetryCapLedger(rootDir, identity);
   assert.equal(ledger.attemptCount, 2);
   assert.deepEqual(ledger.operatorHoldRefundStopKeys, ['held-1', 'held-2']);
+  assert.equal(ledger.operatorHoldRefundedAt, refundedAt);
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: 'fresh-review', headSha, now: '2026-10-11T19:00:00Z' });
+  ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.deepEqual(ledger.operatorHoldRefundStopKeys, ['held-1', 'held-2']);
+  assert.equal(ledger.operatorHoldRefundedAt, refundedAt);
+});
+
+test('hold-only refund retains only the newest ten unexecuted launch IDs', t => {
+  const { rootDir } = fixture(t);
+  const identity = { repo, prNumber };
+  const ledger = recordHammerRetryDispatch(rootDir, identity, { jobKey: headSha, headSha, now: heldAt });
+  const oldIds = Array.from({ length: 10 }, (_, i) => `old-launch-${i}`);
+  writeFileSync(hammerRetryCapFilePath(rootDir, identity), JSON.stringify({ ...ledger, unexecutedLaunchRequestIds: oldIds }));
+  const stop = { headSha, recordedAt: releasedAt, stopKey: 'new-stop', predicate: 'label-no-merge-hold',
+    noExecution: true, launchRequestId: 'new-launch' };
+  assert.equal(refundOperatorHeldHammerStop(rootDir, identity, stop), true);
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity).unexecutedLaunchRequestIds,
+    [...oldIds.slice(1), 'new-launch']);
+  assert.equal(refundOperatorHeldHammerStop(rootDir, identity, stop), false);
 });

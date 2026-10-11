@@ -27,10 +27,21 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks }`. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. |
 | `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for subsequent stops on the same head. |
 | `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
-| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01). |
+| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01). |
 | `heads[sha].releasedInputs` | optional inputs object | Inputs at release; used as the next stop's baseline if another hammer stops on this head. |
 
 ## Recovery and retention
+
+HOLDRELEASE-01 reads the latest non-cancelled operator release for this exact
+head from [operator_hold_releases](operator-hold-releases.md), only when the
+stored labels are readable and no longer held. A `released_at` strictly later
+than the stop's `recordedAt` (the attempt's `startedAt`, then `timestamp`, then
+`recordedAt`; otherwise the hold's `firstObservedAt`) releases with
+`releasedBy: ['hold-released']`. This is deliberately independent of the stop
+predicate; ordinary eligibility and retry caps still apply. Because legacy
+comparison uses attempt start time, a release during an attempt can also unlock
+its later terminal stop. Only proven hold-only non-execution stops qualify for
+the separate [retry-cap refund](hammer-retry-cap.md).
 
 The closer reads fresh audit evidence on each tick; the hold file alone cannot
 create a decision. Known current SHA or mergeability readings can release an

@@ -84,7 +84,8 @@ function reviewerSignalAwareFailureClass(err, classificationText, exitCode, deta
   const stderrTail = tailText(err?.stderr || '');
   const messageTail = tailText(err?.message || '');
   const quotaText = [stdoutTail, stderrTail, messageTail].filter(Boolean).join('\n');
-  if (detectQuotaExhaustion(quotaText).isQuotaExhausted) return QUOTA_EXHAUSTED_FAILURE_CLASS;
+  if (detectQuotaExhaustion(quotaText).isQuotaExhausted ||
+      detectQuotaExhaustion([stderrTail, messageTail].join('\n'), { providerDiagnostic: true }).isQuotaExhausted) return QUOTA_EXHAUSTED_FAILURE_CLASS;
   const providerSignalText = [classificationText, stdoutTail].filter(Boolean).join('\n');
   if (hasProviderOverloadedSignal(providerSignalText)) return PROVIDER_OVERLOADED_FAILURE_CLASS;
   return classifyReviewerFailure(classificationText, exitCode, err?.code, details);

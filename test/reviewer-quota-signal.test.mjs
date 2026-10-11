@@ -264,3 +264,56 @@ test('quotaFallbackDecision: not exhausted -> no fallback', () => {
   assert.equal(d.fallbackToPrimary, false);
   assert.equal(d.reason, 'not-exhausted');
 });
+
+test('GEMINIQUOTA-01: cooldown persists, expires once, and explicit reset wins', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { startGeminiQuotaCooldown, readGeminiQuotaCooldown, GEMINI_QUOTA_COOLDOWN_MS } = await import('../src/gemini-quota-cooldown.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'gemini-quota-state-'));
+  const events = [];
+  const options = { rootDir, env: {}, nowMs: NOW, log: { info: s => events.push(s) } };
+  try {
+    const signal = parseReviewerQuotaExhaustion({ stderr: 'Gemini credential checkout deferred: quota_exhausted', nowMs: NOW });
+    assert.equal(signal.exhausted, true);
+    assert.equal(signal.resetAt, null);
+    const state = startGeminiQuotaCooldown({ ...options, signal });
+    assert.equal(Date.parse(state.resetAt), NOW + GEMINI_QUOTA_COOLDOWN_MS);
+    assert.deepEqual(readGeminiQuotaCooldown(options), state);
+    startGeminiQuotaCooldown({ ...options, signal });
+    assert.equal(events.length, 1);
+    assert.equal(readGeminiQuotaCooldown({ ...options, nowMs: NOW + GEMINI_QUOTA_COOLDOWN_MS }), null);
+    readGeminiQuotaCooldown({ ...options, nowMs: NOW + GEMINI_QUOTA_COOLDOWN_MS });
+    assert.equal(events.length, 2);
+    const resetAt = new Date(NOW + 60000).toISOString();
+    assert.equal(startGeminiQuotaCooldown({ ...options, signal: { exhausted: true, resetAt }, env: { AGENT_OS_GEMINI_QUOTA_COOLDOWN_MS: '10000' } }).resetAt, resetAt);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cooldown bounds explicit resets and overrides, and replaces invalid/past resets', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { startGeminiQuotaCooldown, MAX_GEMINI_QUOTA_COOLDOWN_MS, GEMINI_QUOTA_COOLDOWN_MS } = await import('../src/gemini-quota-cooldown.mjs');
+  for (const [resetAt, override, duration, clamped] of [
+    ['2099-01-01T00:00:00Z', undefined, MAX_GEMINI_QUOTA_COOLDOWN_MS, true],
+    ['2000-01-01T00:00:00Z', undefined, GEMINI_QUOTA_COOLDOWN_MS, false],
+    ['invalid', '10000', 10000, false],
+    [null, '1e30', MAX_GEMINI_QUOTA_COOLDOWN_MS, true],
+    [null, '-1', GEMINI_QUOTA_COOLDOWN_MS, false],
+  ]) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'gemini-bounded-reset-'));
+    const warnings = [];
+    try {
+      const state = startGeminiQuotaCooldown({
+        rootDir, nowMs: NOW, signal: { exhausted: true, resetAt },
+        env: { AGENT_OS_GEMINI_QUOTA_COOLDOWN_MS: override },
+        log: { warn: message => warnings.push(message) },
+      });
+      assert.equal(Date.parse(state.resetAt), NOW + duration);
+      assert.equal(warnings.length, clamped ? 1 : 0);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  }
+});

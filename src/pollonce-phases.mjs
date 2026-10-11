@@ -14,6 +14,8 @@
 // helpers/constants). Leaf helpers and prepared statements are imported directly
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
+import { transferGeminiFallbackSession } from './gemini-fallback-session.mjs';
+import { readGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
@@ -1626,10 +1628,12 @@ export async function processReviewSubject(entry, ctx) {
       // gemini-on-gemini route that an operator `roles.reviewer=gemini` pin
       // could otherwise produce.
       const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
-      const geminiReviewerMode = geminiModeResolution.mode;
+      const geminiCooldown = readGeminiQuotaCooldown({ rootDir: ROOT });
+      const geminiReviewerMode = geminiCooldown ? 'off' : geminiModeResolution.mode;
       console.log(
         `[watcher] gemini-mode resolved=${geminiReviewerMode} ` +
-          `source=${geminiModeResolution.source || 'unknown'} ` +
+          `source=${geminiCooldown ? 'quota-cooldown' : geminiModeResolution.source || 'unknown'} ` +
+          (geminiCooldown ? `resetAt=${geminiCooldown.resetAt} ` : '') +
           `topPath=${geminiModeResolution.topPath || '<unknown>'}`
       );
       if (geminiModeResolution.error) {
@@ -3008,7 +3012,7 @@ export async function processReviewSubject(entry, ctx) {
 
             const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
             const attemptAt = new Date().toISOString();
-            const reviewerSessionUuid = randomUUID();
+            let reviewerSessionUuid = randomUUID();
             // After ARA-06's operator-surface carve, the per-PR loop iterates
             // typed `subject` (SubjectState) values from the subject adapter
             // — there is no `pr` GitHub-PR object in scope here. The handle
@@ -3545,6 +3549,33 @@ export async function processReviewSubject(entry, ctx) {
                 repo: repoPath,
                 prNumber,
                 reviewerModel: route.reviewerModel,
+                geminiQuotaFallbackRoute: selectReviewerRouteForAttempt({
+                  subject,
+                  baseRoute: applyAfhReviewerRouteForAttempt({
+                    subject,
+                    baseRoute: applyEffectiveReviewerRoute({
+                      builderClass: baseRoute.builderClass, baseRoute, mode: 'off',
+                      primaryReviewerQuotaCapped: false, routeTable: baseRoute.routeTable,
+                    }),
+                    grounding: afhGrounding, geminiReviewerMode: 'off', routeTable: baseRoute.routeTable,
+                  }).route,
+                  rootDir: ROOT, repoPath, prNumber, currentRow: existing,
+                  headSha: reviewerHeadSha, afhGrounding, emitCacheEvent,
+                }),
+                onGeminiQuotaFallback: ({ reviewerModel, codexBrokerProvider, reviewerSessionUuid: nextSessionUuid, quotaBlocked }) => {
+                  if (quotaBlocked) throw new Error('Gemini fallback route is quota blocked');
+                  transferGeminiFallbackSession(db, {
+                    repo: repoPath, prNumber, previousSessionUuid: reviewerSessionUuid,
+                    reviewerSessionUuid: nextSessionUuid, reviewerModel, codexBrokerProvider,
+                  });
+                  reviewerSessionUuid = nextSessionUuid;
+                  reviewerProcessStarted = false;
+                  if (credentialProbeReservation?.probe) {
+                    releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                    credentialProbeReservation = null;
+                  }
+                },
+                rootDir: ROOT,
                 codexBrokerProvider: route.codexBrokerProvider || 'codex',
                 botTokenEnv: route.botTokenEnv,
                 linearTicketId,
@@ -3596,7 +3627,7 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
-                  reviewerModel: route.reviewerModel,
+                  reviewerModel: postedResult.effectiveReviewerModel || route.reviewerModel,
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
                 reviewRowSettled = true;
@@ -3656,7 +3687,7 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
-                  reviewerModel: route.reviewerModel,
+                  reviewerModel: result.effectiveReviewerModel || route.reviewerModel,
                   // ARC-18: watcher owns the heartbeat singleton; thread it in.
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });

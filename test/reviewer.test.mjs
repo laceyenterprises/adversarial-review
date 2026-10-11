@@ -6398,3 +6398,20 @@ test('resolveAgyCliPath prefers AGY_CLI_PATH / AGY_CLI overrides', () => {
   assert.equal(resolveAgyCliPath({ AGY_CLI: '/b/agy', PATH: '' }), '/b/agy');
   assert.equal(resolveAgyCliPath({ PATH: '' }), 'agy');
 });
+
+test('GEMINIQUOTA-01: checkout quota_exhausted preserves an optional broker reset in diagnostics', async () => {
+  for (const resetAt of [null, '2026-10-12T00:00:00.000Z']) {
+    await assert.rejects(
+      () => checkoutGeminiCredentialFromBroker({
+        env: { CQP_BROKER_URL: 'http://broker.local' },
+        fetchImpl: async () => ({
+          ok: false, status: 409,
+          json: async () => ({ reason: 'quota_exhausted', ...(resetAt ? { reset_at: resetAt } : {}) }),
+        }),
+      }),
+      err => err instanceof GeminiCredentialPoolNoCreditError
+        && err.resetAt === resetAt
+        && (!resetAt || err.message.includes(`resets at ${resetAt}`)),
+    );
+  }
+});

@@ -63,3 +63,10 @@ Directory: `data/reviewer-credential-outages/`
   `[outage-transient:reviewer-credential:<model>]`.
 - The files contain transient credential failure diagnostics and no secrets or
   review bodies.
+
+Same-pass Gemini quota fallback also reserves/checks the fallback model's hold
+before runtime dispatch. If held, it returns the Gemini quota disposition
+without charging attempts or recording a synthetic OAuth failure. A reserved
+probe is released if runtime dispatch is never reached. Results carry
+`effectiveReviewerModel`; both early and ordinary settlement prefer that model
+for clearing credential outages, recording OAuth failures and cascade attribution.

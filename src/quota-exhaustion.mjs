@@ -41,6 +41,7 @@ const CLAUDE_QUOTA_PATTERNS = [
 // Shared / provider-agnostic hard-cap markers.
 const GENERIC_QUOTA_PATTERNS = [
   /resource_exhausted/i,
+  /^Gemini credential checkout deferred:.*(?:quota_exhausted|no[_ -]?credit)/im,
   /\bquota (?:exceeded|exhausted|reached)\b/i,
   /\bplan_limit\b/i,
   /would exceed your account['’]s rate limit/i,
@@ -236,12 +237,13 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
 // Detect a hard provider usage cap in arbitrary reviewer/worker output.
 // Returns { isQuotaExhausted, harness, resetAt } where harness is
 // 'codex' | 'claude' | 'unknown' and resetAt is an ISO string or null.
-function detectQuotaExhaustion(text, { nowMs = null } = {}) {
+function detectQuotaExhaustion(text, { nowMs = null, providerDiagnostic = false } = {}) {
   const t = String(text || '');
   if (!t) return { isQuotaExhausted: false, harness: null, resetAt: null };
   const codex = _matches(t, CODEX_QUOTA_PATTERNS);
   const claude = _matches(t, CLAUDE_QUOTA_PATTERNS);
-  const generic = _matches(t, GENERIC_QUOTA_PATTERNS);
+  const generic = _matches(t, GENERIC_QUOTA_PATTERNS) || (providerDiagnostic &&
+    /\bquota_exhausted\b|GeminiCredentialPoolNoCreditError|Gemini credential checkout deferred:.*no[_ -]?credit/i.test(t));
   if (!codex && !claude && !generic) {
     return { isQuotaExhausted: false, harness: null, resetAt: null };
   }

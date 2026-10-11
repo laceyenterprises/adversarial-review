@@ -498,3 +498,40 @@ CCX-08 final closeout notes:
   it does not maintain an independent schema for this key. Node keeps its own
   matching schema. The shell's optional-key allowlist does not reject extra
   validated leaves, so no separate shell schema entry is required.
+
+## Provider-wide quota cooldown
+
+An unsuccessful Gemini review classified by the runtime as `quota-exhausted`
+starts a durable routing hold in `data/gemini-quota-cooldown.json` (or directly
+under `ADVERSARIAL_REVIEW_STATE_DIR`). The watcher logs
+`source=quota-cooldown resetAt=...` and routes around Gemini across PRs and
+restarts until that timestamp. GitHub posting failures and stale-head review
+prose do not trigger this hold.
+
+If an eligible base route exists, the triggering review immediately falls back
+with a new reviewer-pass ledger attempt number, retaining the logical review
+round and delivery session. The fallback uses its own broker, bot identity and
+credential-outage gate. Its result settles under the model that actually ran.
+If the fallback's credentials are held, the review remains quota-held without
+charging either retry budget.
+
+A valid future provider reset wins over the default 30-minute window. Missing,
+invalid or past reset times use `AGENT_OS_GEMINI_QUOTA_COOLDOWN_MS` when positive,
+or 30 minutes otherwise. Both provider reset and override durations are capped
+at seven days; a clamp emits a warning. Expired records are removed on read.
+
+To clear the provider hold manually, first verify quota is available, then
+remove the resolved `gemini-quota-cooldown.json` file. No restart is required.
+Per-PR quota and OAuth holds are independent and may still defer dispatch.
+See [the store contract](data-model/gemini-quota-cooldown.md) for path and schema.
+
+Same-pass quota fallback transfers the session-fenced review claim to a fresh
+runtime UUID and records the effective reviewer and broker before spawn. Bounce
+recovery therefore searches the fallback bot. The Gemini credential probe is
+released on transfer; the fallback uses the AFH and timeout routing chain with
+Gemini disabled. The fallback spawn carries zero Gemini seats and does not lease
+an AGY identity. Queue admission and depth spill remain charged to the original
+Gemini worker class for this one logical pass: a provider-wide outage can
+temporarily overshoot Claude/Codex per-class capacity by the number of already
+admitted Gemini passes. New admissions use the durable cooldown and are charged
+to their effective class normally.

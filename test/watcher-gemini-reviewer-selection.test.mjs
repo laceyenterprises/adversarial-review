@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 
 import {
   primaryReviewerQuotaCappedForRow,
@@ -267,9 +268,27 @@ test('CFGDRIFT-01 watcher: selection source logging is present', () => {
   // processReviewSubject (src/pollonce-phases.mjs); read from its new home.
   const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   assert.match(source, /gemini-mode resolved=\$\{geminiReviewerMode\} /);
-  assert.match(source, /source=\$\{geminiModeResolution\.source \|\| 'unknown'\} /);
   assert.match(source, /topPath=\$\{geminiModeResolution\.topPath \|\| '<unknown>'\}/);
   assert.match(source, /mode-source=\$\{geminiModeResolution\.source \|\| 'unknown'\}/);
+});
+
+test('CFGDRIFT-01 watcher: mode log attributes configuration and quota cooldown correctly', () => {
+  const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
+  // Execute the production log expression so conditional source attribution is
+  // checked by its emitted text rather than a particular template spelling.
+  const logExpression = source.match(/console\.log\(\s*(`\[watcher\] gemini-mode[\s\S]*?)\n\s*\);/)?.[1];
+  assert.ok(logExpression, 'watcher Gemini mode log must be present');
+  const resolution = { source: 'file', topPath: '/fixture/config.yaml' };
+  for (const [geminiModeResolution, geminiCooldown, geminiReviewerMode, expected] of [
+    [resolution, null, 'always-on', '[watcher] gemini-mode resolved=always-on source=file topPath=/fixture/config.yaml'],
+    [{ ...resolution, source: 'env' }, null, 'off', '[watcher] gemini-mode resolved=off source=env topPath=/fixture/config.yaml'],
+    [{}, null, 'off', '[watcher] gemini-mode resolved=off source=unknown topPath=<unknown>'],
+    [resolution, { resetAt: '2026-10-11T18:00:00.000Z' }, 'off', '[watcher] gemini-mode resolved=off source=quota-cooldown resetAt=2026-10-11T18:00:00.000Z topPath=/fixture/config.yaml'],
+  ]) {
+    assert.equal(runInNewContext(logExpression, {
+      geminiModeResolution, geminiCooldown, geminiReviewerMode,
+    }), expected);
+  }
 });
 
 test('GMW-02 watcher: existing-row routing updates happen only after spawn claim', () => {

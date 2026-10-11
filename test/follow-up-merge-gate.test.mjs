@@ -665,6 +665,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     mergedAt: '2026-05-02T10:30:00.000Z',
     closedAt: null,
     labels: [{ name: 'stale-drift' }],
+    labelsKnown: true,
     headSha: 'merged-head-sha',
   });
 });
@@ -689,6 +690,7 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
     mergedAt: null,
     closedAt: '2026-05-02T10:45:00.000Z',
     labels: [],
+    labelsKnown: true,
     headSha: 'closed-head-sha',
   });
 });

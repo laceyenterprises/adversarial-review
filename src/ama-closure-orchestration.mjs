@@ -2124,6 +2124,23 @@ async function dispatchAmaClosureFor({
             );
             return { dispatched: false, reason: 'background-pr-state-unavailable' };
           }
+          if (normalizeGithubMergeability(live || {}) === 'UNKNOWN') {
+            await resolveMergeabilityWithSampling(live, async () => {
+              throwIfAborted(backgroundSignal);
+              live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+              return live;
+            }, {
+              attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
+              delayMs: mergeabilitySampleDelayMs,
+              sleepImpl: (ms) => abortableSleep(ms, backgroundSignal),
+              // Stop sampling immediately on a safety refusal. Check it below
+              // before allowing any dispatch, including after the final read.
+              classify: (state) => state?.state !== 'OPEN'
+                || state?.headSha !== dispatchContext.targetRemediationSha || state?.isDraft
+                ? 'CONFLICTING' : normalizeGithubMergeability(state),
+            });
+            throwIfAborted(backgroundSignal);
+          }
           // COMMENTCLOSE-01: name what blocked. A draft or an unmergeable PR is not
           // a state change; agent-os#7311 (a worker-opened draft) spent four hammer
           // attempts reported only as `background-pr-state-changed`.
@@ -2132,8 +2149,8 @@ async function dispatchAmaClosureFor({
           }
           if (live?.isDraft) return { dispatched: false, reason: 'background-pr-draft' };
           // DIRTYOWN-01: a CONFLICTING PR is the hammer's job (it resolves the
-          // conflict), so it dispatches. GitHub's transient UNKNOWN waits for the
-          // next cycle; UNKNOWN+CLEAN launches here because the hammer re-reads
+          // conflict), so it dispatches. UNKNOWN surviving the bounded sampling
+          // window waits for the next cycle; UNKNOWN+CLEAN launches because the hammer re-reads
           // mergeability itself (the eligibility gate stays strict on it).
           const liveMergeability = normalizeGithubMergeability(live || {});
           if (liveMergeability === 'UNKNOWN') {

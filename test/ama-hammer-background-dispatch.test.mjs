@@ -228,6 +228,7 @@ function closureArgs(overrides = {}) {
         return { enabled: true };
       },
     }),
+    mergeabilitySampleDelayMs: 0,
     ...overrides,
   };
 }
@@ -1091,5 +1092,38 @@ for (const [scenario, decision] of [['green', 'eligible'], ['worker', 'rereview-
     assert.equal(result.closerAuthoredStale.eligible, decision === 'eligible');
     assert.deepEqual(payloads, []);
     assert.deepEqual(wakes, []);
+  });
+}
+
+for (const scenario of ['MERGEABLE', 'CONFLICTING', 'UNKNOWN', 'head-moved', 'closed', 'draft']) {
+  test(`HAMUNKNOWN-01 background re-read: ${scenario}`, async t => {
+    const queue = createAmaHammerBackgroundQueue();
+    let reads = 0;
+    let dispatches = 0;
+    const args = closureArgs({
+      resolveAmaHammerDispatchModeImpl: () => 'background',
+      amaHammerBackgroundQueueImpl: () => queue,
+      fetchCurrentPrStateImpl: async () => {
+        reads += 1;
+        return { state: reads > 1 && scenario === 'closed' ? 'CLOSED' : 'OPEN',
+          headSha: reads > 1 && scenario === 'head-moved' ? 'new-head' : HEAD,
+          isDraft: reads > 1 && scenario === 'draft',
+          mergeable: reads === 1 || ['head-moved', 'closed', 'draft'].includes(scenario) ? 'UNKNOWN' : scenario };
+      },
+      maybeDispatchAmaCloserImpl: async () => { dispatches += 1; return { dispatched: true }; },
+    });
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    await maybeDispatchAmaClosureFor(args);
+    await queue.drain();
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(reads, scenario === 'UNKNOWN' ? 3 : 2);
+    assert.equal(dispatches, ['MERGEABLE', 'CONFLICTING'].includes(scenario) ? 1 : 0);
+    if (scenario === 'UNKNOWN') {
+      assert.equal(result.reason, 'background-pr-mergeable-unknown');
+      assert.equal(result.retryAfterMs, 30_000);
+    } else if (['head-moved', 'closed'].includes(scenario)) {
+      assert.equal(result.reason, 'background-pr-state-changed');
+    } else if (scenario === 'draft') assert.equal(result.reason, 'background-pr-draft');
+    else assert.equal(result.dispatched, true);
   });
 }

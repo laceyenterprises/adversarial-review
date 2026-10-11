@@ -3350,3 +3350,25 @@ test('LANESTARVE-01: a decision-only reset re-arms the operator-decision alert',
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('HAMUNKNOWN-01 mergeability waits stay active across unchanged review rows', async () => {
+  const rootDir = tempRoot();
+  try {
+    const gate = createNoProgressLaneGate({ rootDir,
+      readReviewRow: () => ({ review_status: 'posted', pr_state: 'open', reviewer_head_sha: HEAD_A }),
+      deliverAlertFn: async () => assert.fail('mergeability wait is not an operator decision'),
+      logger: silentLogger });
+    const handler = { repoPath: REPO, prNumber: 999, headSha: HEAD_A };
+    for (let tick = 0; tick < 12; tick += 1) {
+      for (const reason of ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded']) {
+        await gate.record(handler, { value: { outcome: 'ama-pending', amaClosureResult: { reason } } });
+        assert.equal(gate.evaluate(handler).run, true);
+      }
+    }
+    for (let tick = 0; tick < 12; tick += 1) {
+      await gate.record(handler, { value: { outcome: 'recovery-exhausted',
+        amaClosureResult: { reason: 'background-pr-mergeable-unknown' } } });
+    }
+    assert.equal(gate.evaluate(handler).run, false, 'escalated wait returns to ordinary lane policy');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

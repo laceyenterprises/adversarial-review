@@ -91,6 +91,12 @@ async function recoverAmaAutomationLocked({
     || value?.recoveryWait || value?.commentOnlyFinalRoundAwaitingCi === true
     || FOLLOW_UP_REASONS.has(value?.reason)
     || (value?.reasons || []).some((item) => FOLLOW_UP_REASONS.has(item));
+  if (reason !== 'background-pr-mergeable-unknown' && !IN_PROGRESS_REASONS.has(reason)) {
+    if (state.mergeabilityUnknownCycles) {
+      state.mergeabilityUnknownCycles = 0;
+      save();
+    }
+  }
   // Ownership and ordinary time gates are progress, not failed recovery.
   if (reason === 'daemon-merged') return { outcome: 'pr-terminal', terminalReason: 'merged', amaClosureResult: result };
   if (isSafetyRecoveryHold(result)) {
@@ -125,6 +131,16 @@ async function recoverAmaAutomationLocked({
     }
     return { outcome: 'recovery-exhausted', amaClosureResult: result, recovery: state };
   };
+  // HAMUNKNOWN-01: count settled UNKNOWN cycles, not queue/in-flight ticks.
+  // Reuse the recovery budget and SEV1 route; never ask for a stale-head review
+  // or consume hammer launch attempts merely because GitHub is recomputing.
+  if (reason === 'background-pr-mergeable-unknown') {
+    state.mergeabilityUnknownCycles = (state.mergeabilityUnknownCycles || 0) + 1;
+    state.lastReason = reason;
+    save();
+    if (state.mergeabilityUnknownCycles > maxAttempts) return exhausted();
+    return waiting('await-mergeability');
+  }
   const stalled = async (action, amaClosureResult = result) => {
     state.blockedSince ??= now();
     state.lastReason = amaClosureResult?.reason || reason;

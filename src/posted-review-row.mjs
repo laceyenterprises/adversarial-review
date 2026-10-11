@@ -930,6 +930,11 @@ export function createNoProgressLaneGate({
         decisionFingerprint,
         progressClass,
         operatorReason: value?.amaClosureResult?.operatorReason || null,
+        // HAMUNKNOWN-01: GitHub can finish computing without any review-row
+        // change. Keep its bounded recovery cycles (and queued probe) active.
+        urgent: value?.outcome !== 'recovery-exhausted'
+          && ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded']
+            .includes(value?.amaClosureResult?.reason),
         // A starvation-floor admission is a walk the lane did not schedule.
         // Recording it as escalating would charge the PR for a look it never
         // asked for and push its next real walk twice as far away — the exact

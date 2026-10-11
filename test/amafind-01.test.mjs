@@ -378,3 +378,32 @@ test('per-head launch reconciliation ignores unrelated active and uncertain laun
     readStatusImpl: async () => { throw new Error('unrelated launch probed'); },
   }), { reclaimed: 0, active: 0, uncertain: 0 });
 });
+
+test('HAMUNKNOWN-01 tolerates two settled UNKNOWN cycles then escalates with real reason', async t => {
+  const reason = 'background-pr-mergeable-unknown';
+  const { args, calls } = harness(t, { reason, skipMergeAgent: true });
+  for (let cycle = 1; cycle <= 2; cycle += 1) {
+    const result = await recoverAmaAutomation(args);
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(result.recovery.mergeabilityUnknownCycles, cycle);
+    await recoverAmaAutomation({ ...args, result: { reason: 'ama-closer-dispatch-backgrounded' } });
+  }
+  const result = await recoverAmaAutomation(args);
+  assert.equal(result.outcome, 'recovery-exhausted');
+  assert.equal(result.recovery.event.reason, reason);
+  assert.equal(calls.page.length, 1);
+  assert.equal(calls.hammer, 0);
+  assert.equal(calls.rereview.length, 0);
+  await recoverAmaAutomation(args);
+  assert.equal(calls.page.length, 1);
+});
+
+test('HAMUNKNOWN-01 changed blocker or head resets UNKNOWN cycle budget', async t => {
+  const { args } = harness(t, { reason: 'background-pr-mergeable-unknown' });
+  await recoverAmaAutomation(args);
+  await recoverAmaAutomation({ ...args, result: { reason: 'pr-is-draft', needsOperator: true } });
+  // A safety hold is not a completed UNKNOWN cycle; a resolved ordinary wait resets it.
+  await recoverAmaAutomation({ ...args, result: { reason: 'closer-head-ci-not-green', recoveryWait: true } });
+  assert.equal((await recoverAmaAutomation(args)).recovery.mergeabilityUnknownCycles, 1);
+  assert.equal((await recoverAmaAutomation({ ...args, headSha: 'new-head' })).recovery.mergeabilityUnknownCycles, 1);
+});

@@ -758,7 +758,16 @@ Key control points:
   by default). Each reviewer family supplies its own latest final review; multiple
   final reviewers on the same head can be cited together. Split HAM commits by
   reviewed head when reviews differ; each commit binds one `Reviewed-Head` to its
-  citations. Missing and unrelated citations remain refused.
+  citations. Missing and unrelated citations remain refused. After a rebase
+  (cited review head `diverged` from the HAM parent) a citation is still accepted
+  by the protected hunk's identical patch lines, unique in both primary and
+  reviewed diffs (REVERSALREBASE-01). A superseded citation additionally requires
+  the original HAM reversal, with the same complete patch and valid original
+  authorization, in the first superseding GitHub review's immutable head.
+  Commit dates cannot prove freshness. A refusal names collector and evaluator
+  rejection reasons in its
+  `missingEvidence` and a HAM head missing only that authorization gets one
+  exact-head re-review rather than an operator hold.
   A blocking finding the hammer disputes with concrete exact-head evidence is
   withdrawn through `bin/dispute-finding.mjs` as `withdrawn-by-hammer` (HAMFINAL-01:
   "Hammers judgement is final"). No re-review is requested; the gate, closer and

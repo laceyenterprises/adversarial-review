@@ -719,7 +719,9 @@ export async function handlePostedReviewRow({
         : '(inspect and resolve the named safety hold under its existing approval policy; see RUNBOOK-ama-closure)';
       logger.log(
         `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
-        `(${namedReason}; reasons: ${reasonsHint}); safety hold requires operator action ` +
+        `(${namedReason}; reasons: ${reasonsHint}` +
+        `${amaClosureResult?.missingEvidence?.summary ? `; missing evidence: ${amaClosureResult.missingEvidence.summary}` : ''}` +
+        '); safety hold requires operator action ' +
         recoveryHint
       );
       return {

@@ -268,7 +268,7 @@ are withdrawn. Reviews with standing findings and unrelated review vetoes remain
 a dismissal failure refuses merge. No administrative bypass is used.
 Neither finding-anchored reversal nor dispute uses `hq decision raise`.
 A predicate refusal `primary-change-reverted` requires
-no-merge closing status. Repair the branch or recover the evidence; a scoped
+no-merge closing status quoting the gate's missing-evidence line. Repair the branch or recover the evidence; a scoped
 operator `merge-agent-requested` can dispatch the recovery lane, without waiving
 this predicate. A proven reversal does not automatically dispatch another hammer.
 `primary-change-unknown` and `primary-change-read-failed` defer: evidence is

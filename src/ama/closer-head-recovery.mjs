@@ -7,6 +7,10 @@ import { probeOrphanOwnership } from './orphan-watchdog.mjs';
 const EXACT_REVIEW_REASONS = new Set([
   'stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown',
 ]);
+const PRIMARY_EVIDENCE_REVIEW_REASONS = new Set([
+  'primary-change-reverted', 'blocking-findings-present',
+  'non-blocking-findings-present', 'non-blocking-findings-unknown',
+]);
 
 // Use the existing exact-head orphan request: admission honors it even when
 // the tip has closer trailers. Ordinary automatic refresh would be suppressed.
@@ -15,9 +19,15 @@ export async function recoverStrandedCloserHead({ result, closerAuthored, rootDi
   logger = console, reviewStateRow = null, requestRereviewImpl = requestReviewRereview,
   requestBoundedReviewImpl = requestBoundedOrphanReview,
   probeOwnershipImpl = probeOrphanOwnership }) {
-  if (!closerAuthored || !headSha || result?.dispatched || result?.needsOperator
-    || result?.reason !== 'not-eligible' || !result?.reasons?.includes('stale-review-head')
-    || !result.reasons.every(reason => EXACT_REVIEW_REASONS.has(reason))) return null;
+  // REVERSALREBASE-01: a HAM head that failed self-certification only on a
+  // missing reversal authorization keeps its merge hold, but the closer names
+  // that evidence and the exact-head review is the action that can supply it.
+  const primaryEvidence = result?.reason === 'primary-change-repair-required'
+    && result.exactHeadReview === true && result.missingEvidence?.evidence === 'reversal-authorization';
+  if (!closerAuthored || !headSha || result?.dispatched || (result?.needsOperator && !primaryEvidence)
+    || (result?.reason !== 'not-eligible' && !primaryEvidence) || !result?.reasons?.includes('stale-review-head')
+    || !result.reasons.every(reason => EXACT_REVIEW_REASONS.has(reason)
+      || (primaryEvidence && PRIMARY_EVIDENCE_REVIEW_REASONS.has(reason)))) return null;
   if (reviewStateRow?.review_status === 'failed' && reviewStateRow.reviewer_head_sha === headSha) return null;
   // A hammer may still own an older dispatch head after pushing this tip.
   // Check the PR-wide lease and durable launches before transferring ownership.
@@ -46,7 +56,9 @@ export async function recoverStrandedCloserHead({ result, closerAuthored, rootDi
   // A refused reset has no reviewer owner. Let the bounded orphan watchdog
   // observe it, account for recovery attempts and page on exhaustion.
   if (!request?.triggered && !isOrphanHeadReviewRequested(request?.reviewRow, headSha)) return null;
-  logger.log?.(`[watcher] LEASEDEFER-01 exact-head re-review requested for ${repo}#${prNumber} head=${headSha} result=${request?.reason || (request?.triggered ? 'triggered' : 'refused')}`);
+  logger.log?.(`[watcher] LEASEDEFER-01 exact-head re-review requested for ${repo}#${prNumber} head=${headSha} result=${request?.reason || (request?.triggered ? 'triggered' : 'refused')}`
+    + (primaryEvidence ? ` missing-evidence=${result.missingEvidence.summary}` : ''));
   return { ...result, skipMergeAgent: true, recoveryWait: true,
+    ...(primaryEvidence ? { needsOperator: false, operatorReason: null } : {}),
     reason: 'closer-head-exact-review-requested', rereview: request };
 }

@@ -1629,6 +1629,40 @@ Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
+**Rebased reversals (REVERSALREBASE-01).** A rebase or conflict-owner rebase
+rewrites the HAM commit, so its parent no longer descends from the cited
+`Reviewed-Head` and the reviewed head keeps an older merge base. When the
+compare from the cited review head to the HAM parent is exactly `diverged`, the
+collector still accepts the citation if the trailer is on a HAM commit in the
+current history, the review is on this pull request and contains that finding
+and kind, and the protected hunk has the same patch lines in the reviewed diff
+(`<base>...<review head>`) as in the current primary diff. The matching segment
+must be unique in both diffs; one reviewed segment cannot authorize repeated
+primary segments. A citation with no later superseding authoritative review
+remains current by GitHub review order. If a later review supersedes it (same
+family, or another family on another head), the first such review's immutable
+head must contain the original HAM commit with the same message and complete
+reversal patch, ignoring only hunk coordinates. The collector verifies original
+HAM identity, citation freshness at its original parent, and the parent's merge
+base. The evaluator rechecks finding coverage and HAM touch against that original
+patch as well as the rebased patch. Author and committer dates supply no freshness
+evidence. Missing, capped or diverged snapshot history cannot establish that
+original authorization and refuses the waiver. Coordinates are translated through that
+matched hunk; File/Lines coverage and the HAM commit's own touch are checked as
+before. A changed, ambiguous or missing hunk, an unknown review or finding, or
+a review superseded before the reversal stays refused. Every refusal carries
+`missingEvidence` (with collector and evaluator rejection reasons, including
+missing findings and failed patch or File/Lines coverage; verified counts include
+only citations that passed evaluation) into the hammer gate
+JSON (`primaryChangeMissingEvidence`), the hammer's closing status and the
+watcher's hold log. When a HAM head's own exact-head self-certification failed
+only on that authorization (`stale-review-head`, `verdict-not-settled-success`
+and `blocking-findings-unknown` are its cascade), the closer marks the
+`primary-change-repair-required` refusal `exactHeadReview: true` and the
+LEASEDEFER-01 leaf requests one bounded exact-head re-review instead of an
+operator hold. The merge stays refused by the predicate until the evidence is
+valid.
+
 **The hammer's dispute adjudication is final (HAMFINAL-01).** Operator decision,
 2026-10-10, after agent-os PR 7987:
 
@@ -2623,3 +2657,8 @@ PRIMARYEMPTY-01: `primary-change-unknown` is a deterministic evidence refusal, n
 Transient-only eligibility declines retain the ordinary stall clock and page after `stuckDeadlineMs`, while remaining neutral to the UNKNOWN series. Pending re-review ownership and its expiry are evaluated before settled UNKNOWN recovery.
 
 Background mergeability probes log sample count and elapsed milliseconds; null re-reads retain the previous live snapshot. Sampling remains bounded to three probes.
+
+The qualified missing-reversal-authorization recovery lane also admits standing
+finding refusals inherited from the stale review (blocking or non-blocking).
+This permits only a bounded exact-head review request; merge remains refused.
+CI, protection, labels and live ownership refusals still prevent recovery.

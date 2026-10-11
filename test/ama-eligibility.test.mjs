@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 
 import { isEligibleForAmaClosure, __testables__ } from '../src/ama/eligibility.mjs';
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
+import { primaryChangeExactReviewEvidence } from '../src/ama/primary-change.mjs';
+import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { parseCommitTrailers } from '../src/ama/ham-provenance.mjs';
 import { isTerminalCloserCommitIdentity } from '../src/head-closer-commit-suppression.mjs';
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
@@ -3388,4 +3390,49 @@ test('LABELGATE-01: label-only CI misses carry typed ineligibility', () => {
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes('operator-label-required:allow-submodule-pointer-bump'));
   assert.ok(result.reasons.includes('ci-not-green'));
+});
+
+
+test('qualified primary-evidence refusal recovers stale known findings without authorizing merge', async () => {
+  const currentHead = 'c'.repeat(40);
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: { verdict: 'request-changes', blockingFindingCount: 1,
+      nonBlockingFindingCount: 1 },
+    prMetadata: { headSha: currentHead },
+  });
+  const evidence = hamEvidence({ headSha: currentHead });
+  const groundTruth = hamGroundTruth({ headSha: currentHead });
+  const primary = { ...primaryChangeFixture(currentHead), finalFiles: [] };
+  evidence.commit.primaryChange = primary;
+  groundTruth.commit.primaryChange = primary;
+  const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV, hamTerminalRemediation: evidence,
+    hamTerminalRemediationGroundTruth: groundTruth,
+  });
+  assert.equal(verdict.eligible, false);
+  assert.equal(verdict.trace.hamTerminalRemediation.activeAuthorized, false);
+  assert.ok(verdict.reasons.includes('blocking-findings-present'));
+  const missingEvidence = primaryChangeExactReviewEvidence(verdict.trace);
+  assert.equal(missingEvidence?.evidence, 'reversal-authorization');
+  const refusal = { dispatched: false, skipMergeAgent: true, needsOperator: true,
+    reason: 'primary-change-repair-required', reasons: verdict.reasons,
+    missingEvidence, exactHeadReview: true };
+  let requests = 0;
+  const recover = (result, owned = false) => recoverStrandedCloserHead({
+    result, closerAuthored: true, rootDir: '/fixture', repo: 'fixture/repo',
+    prNumber: 1234, headSha: currentHead, logger: { log() {}, warn() {} },
+    probeOwnershipImpl: async () => ({ owned, uncertain: false }),
+    requestBoundedReviewImpl: async () => { requests++; return { triggered: true }; },
+  });
+  const recovered = await recover(refusal);
+  assert.equal(recovered.reason, 'closer-head-exact-review-requested');
+  assert.equal(recovered.skipMergeAgent, true);
+  assert.equal(recovered.recoveryWait, true);
+  assert.equal(verdict.eligible, false);
+  assert.equal(await recover({ ...refusal, exactHeadReview: false }), null);
+  assert.equal(await recover(refusal, true), null);
+  for (const reason of ['ci-not-green', 'pr-not-mergeable', 'blocking-label-present']) {
+    assert.equal(await recover({ ...refusal, reasons: [...refusal.reasons, reason] }), null);
+  }
+  assert.equal(requests, 1);
 });

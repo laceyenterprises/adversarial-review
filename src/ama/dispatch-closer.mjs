@@ -10,7 +10,7 @@ import {
   composeReviewCycleCapHammerPrompt,
   hammerOwnerRouteOf,
 } from './review-cycle-cap-route.mjs';
-import { fetchPrimaryChange } from './primary-change.mjs';
+import { fetchPrimaryChange, primaryChangeExactReviewEvidence } from './primary-change.mjs';
 /**
  * AMA-03 — Adversarial Merge Authority closer dispatch path.
  *
@@ -4193,8 +4193,10 @@ export async function maybeDispatchAmaCloser({
     && (!verdict.reasons.includes('stale-review-head')
       || (dispatchContext.orphanRecovery.closerHead === true && dispatchContext.allowStaleReviewHeadHammerResume === true));
   if (!orphanAdmit && verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
+    const missingEvidence = primaryChangeExactReviewEvidence(verdict.trace);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-      reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true });
+      reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true,
+      ...(missingEvidence ? { missingEvidence, exactHeadReview: true } : {}) });
   }
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;

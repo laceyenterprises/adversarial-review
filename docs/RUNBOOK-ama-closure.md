@@ -2657,3 +2657,8 @@ PRIMARYEMPTY-01: `primary-change-unknown` is a deterministic evidence refusal, n
 Transient-only eligibility declines retain the ordinary stall clock and page after `stuckDeadlineMs`, while remaining neutral to the UNKNOWN series. Pending re-review ownership and its expiry are evaluated before settled UNKNOWN recovery.
 
 Background mergeability probes log sample count and elapsed milliseconds; null re-reads retain the previous live snapshot. Sampling remains bounded to three probes.
+
+The qualified missing-reversal-authorization recovery lane also admits standing
+finding refusals inherited from the stale review (blocking or non-blocking).
+This permits only a bounded exact-head review request; merge remains refused.
+CI, protection, labels and live ownership refusals still prevent recovery.

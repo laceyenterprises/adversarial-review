@@ -7,6 +7,10 @@ import { probeOrphanOwnership } from './orphan-watchdog.mjs';
 const EXACT_REVIEW_REASONS = new Set([
   'stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown',
 ]);
+const PRIMARY_EVIDENCE_REVIEW_REASONS = new Set([
+  'primary-change-reverted', 'blocking-findings-present',
+  'non-blocking-findings-present', 'non-blocking-findings-unknown',
+]);
 
 // Use the existing exact-head orphan request: admission honors it even when
 // the tip has closer trailers. Ordinary automatic refresh would be suppressed.
@@ -23,7 +27,7 @@ export async function recoverStrandedCloserHead({ result, closerAuthored, rootDi
   if (!closerAuthored || !headSha || result?.dispatched || (result?.needsOperator && !primaryEvidence)
     || (result?.reason !== 'not-eligible' && !primaryEvidence) || !result?.reasons?.includes('stale-review-head')
     || !result.reasons.every(reason => EXACT_REVIEW_REASONS.has(reason)
-      || (primaryEvidence && reason === 'primary-change-reverted'))) return null;
+      || (primaryEvidence && PRIMARY_EVIDENCE_REVIEW_REASONS.has(reason)))) return null;
   if (reviewStateRow?.review_status === 'failed' && reviewStateRow.reviewer_head_sha === headSha) return null;
   // A hammer may still own an older dispatch head after pushing this tip.
   // Check the PR-wide lease and durable launches before transferring ownership.

@@ -347,7 +347,8 @@ function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompt
     writeFileImpl: (_dir, path, content) => { prompts.push({ path, content: String(content) }); },
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
-    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    // A missing PR signal is authoritative only when the repo producer is readable.
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
     deliverAlertImpl: async (text, options) => {
       alerts.push({ text, ...options });
       return { ok: true };
@@ -528,6 +529,28 @@ test('(e) the CI-blocked page is a SEV1 page with one outbox identity per PR hea
 });
 
 // ── (d) the existing hammer retry cap bounds attempts ────────────────────────
+
+for (const evidenceReason of ['missing-build-completion-producer-evidence', 'ledger-read-failed']) {
+  test(`ciblockham: succeeded hammer retains ownership with unknown merged evidence (${evidenceReason})`, async (t) => {
+    const rootDir = tempRoot(t, 'ciblockham-success-hold-');
+    await seedFinishedCiBlockedHammer(rootDir);
+    const deps = closerDeps({ nextLaunch: LRQ_SECOND });
+    for (let tick = 0; tick < 2; tick += 1) {
+      const result = await maybeDispatchAmaCloser({
+        ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T17:35:00Z' }), ...deps,
+        readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: evidenceReason }),
+      });
+      assert.equal(result.reason, 'existing-dispatch-succeeded', JSON.stringify(result));
+      assert.equal(result.launchRequestId, LRQ_FIRST);
+      assert.equal(deps.launches.length, 0, 'unknown evidence cannot authorize a second hammer');
+      const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+      assert.equal(ledger.attemptCount, 1);
+      assert.equal(ledger.lifetimeAttemptCount, 1);
+      assert.equal(ledger.retryable, undefined);
+      assert.equal(ledger.unexecutedLaunchRequestIds, undefined);
+    }
+  });
+}
 
 test('(d) the existing hammer retry cap bounds CI-blocked attempts per head, then pages', async (t) => {
   _resetHammerRetryCapAlertDebounceForTests();

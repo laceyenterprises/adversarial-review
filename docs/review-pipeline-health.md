@@ -126,6 +126,8 @@ The Grafana dashboard lives at
 - `review_pipeline_duplicate_family_oldest_held_age_seconds`: age of the oldest
   active duplicate-family hold, or zero when none are active. This metric also
   has no high-cardinality labels.
+- `review_pipeline_operator_held_open_prs`: open PRs deliberately held by an
+  operator and excluded from queue and stall counters.
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` or
   `no-remediation-required` verdict jobs whose PR row remains open past the
   merge-stall tick threshold.

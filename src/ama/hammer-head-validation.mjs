@@ -6,7 +6,8 @@ const login = identity => String(typeof identity === 'object' ? identity?.login 
 const DEFAULT_FLEET_LOGINS = ['lacey-codex-agent', 'lacey-claude-agent', 'lacey-gemini-agent', 'lacey-clio-agent'];
 export function fleetCommitIdentityMatches(commit, fleetLogins = DEFAULT_FLEET_LOGINS) {
   const trusted = new Set([...fleetLogins, ...HAM_AUDIT_COMMENT_AUTHOR_LOGINS].filter(identity => login(identity) !== 'clio-airlock').map(login));
-  return trusted.has(login(commit?.committer))
+  // Email-to-login mapping alone is forgeable; bind fleet identity to a verified signature.
+  return commit?.commit?.verification?.verified === true && trusted.has(login(commit?.committer))
     && (!login(commit?.author) || trusted.has(login(commit.author)));
 }
 
@@ -58,6 +59,8 @@ export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, ba
     || !Array.isArray(commits) || selected.total_commits !== commits.length
     || (commits.length && commits.at(-1)?.sha !== currentHead)) return null;
   for (const commit of commits.filter(commit => headOnly.has(commit.sha))) {
+    // Base-merge ancestry cannot waive signature verification either.
+    if (commit?.commit?.verification?.verified !== true) return null;
     if (fleetCommitIdentityMatches(commit, fleetLogins)) continue;
     // A merge of the verified base branch is permitted, but never a foreign
     // side branch: its second parent must already be reachable from the base.

@@ -4046,8 +4046,8 @@ export async function resolveHamTerminalRemediationEvidence({
   if (!exactValidation && identity?.suppressed !== true) return null;
   const range = exactValidation ? await fetchHammerHeadRange({ repo: repoPath,
     reviewedHead, currentHead, baseRef: prMetadata.baseRefName || 'main', env,
-    get: async path => JSON.parse((await execFileImpl('gh', ['api', path],
-      { timeout: 15000, env, signal })).stdout) }) : null;
+    get: async path => JSON.parse((await execGhWithRetry({ execFileImpl, args: ['api', path],
+      timeoutMs: 15000, env, signal })).stdout) }) : null;
 
   return {
     hamTerminalRemediation: buildHamTerminalRemediationEvidenceFromGroundTruth({

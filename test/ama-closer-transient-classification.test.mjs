@@ -140,7 +140,7 @@ test('resolveHamTerminalRemediationEvidence does not build evidence for an exter
   });
 
   assert.equal(result, null);
-  assert.equal(fetchedRollup, false);
+  assert.equal(fetchedRollup, true, 'no-diff validation needs the live audit even without a HAM tip');
 });
 
 test('resolveHamTerminalRemediationEvidence rejects linked foreign provenance despite terminal trailers', async () => {
@@ -154,7 +154,7 @@ test('resolveHamTerminalRemediationEvidence rejects linked foreign provenance de
         ...VERIFIED_HAM_COMMIT,
         [field]: 'some-human-contributor',
       }),
-      fetchPullRequestRollupImpl: async () => assert.fail('foreign provenance must not fetch audit evidence'),
+      fetchPullRequestRollupImpl: async () => ({ comments: [] }),
     });
     assert.equal(result, null, field);
   }
@@ -175,6 +175,63 @@ test('resolveHamTerminalRemediationEvidence propagates transient commit fetch er
     }),
     /TLS handshake timeout/,
   );
+});
+
+function exactHeadOptions(execFileImpl, signal) {
+  return {
+    reviewState: { headSha: VERIFIED_HAM_COMMIT.parentSha },
+    prMetadata: { headSha: VERIFIED_HAM_COMMIT.sha, baseRefName: 'release' },
+    repoPath: 'fixture/repo', prNumber: 5270, env: { PATH: process.env.PATH, GH_TOKEN: 'fixture-token' },
+    execFileImpl, signal,
+    fetchHeadCloserVerifiedCommitImpl: async () => VERIFIED_HAM_COMMIT,
+    fetchPullRequestRollupImpl: async () => ({ comments: [{
+      author: 'the-hammer-lacey[bot]',
+      body: `${VERIFIED_HAM_AUDIT_BODY}\nHAM-Validated-Head: ${VERIFIED_HAM_COMMIT.sha}`,
+    }] }),
+  };
+}
+
+test('exact-head daemon range reads retry TLS failures and retain timeout, auth and cancellation', async () => {
+  const calls = new Map();
+  const controller = new AbortController();
+  const range = await resolveHamTerminalRemediationEvidence(exactHeadOptions(async (command, args, options) => {
+    assert.equal(command, 'gh');
+    assert.equal(options.timeout, 15000);
+    assert.equal(options.env.GH_TOKEN, 'fixture-token');
+    assert.equal(options.signal, controller.signal);
+    const path = args[1];
+    calls.set(path, (calls.get(path) || 0) + 1);
+    if (calls.get(path) === 1) throw Object.assign(new Error('TLS handshake timeout'), { stderr: 'TLS handshake timeout' });
+    return { stdout: JSON.stringify(path.endsWith('/commits/release') ? { sha: 'base' } : {
+      status: 'ahead', total_commits: 1, commits: [{ sha: VERIFIED_HAM_COMMIT.sha,
+        author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'lacey-codex-agent[bot]' },
+        commit: { verification: { verified: true } } }],
+    }) };
+  }, controller.signal));
+  assert.equal(range.hamTerminalRemediationGroundTruth.range.verified, true);
+  assert.equal(calls.size, 3);
+  assert.deepEqual([...calls.values()], [2, 2, 2]);
+});
+
+for (const transient of [true, false]) {
+  test(`exact-head daemon range fails closed after ${transient ? 'bounded transient retries' : 'one permanent permission error'}`, async () => {
+    let attempts = 0;
+    const error = Object.assign(new Error(transient ? 'HTTP 503' : 'HTTP 403 Forbidden'), {
+      stderr: transient ? 'HTTP 503' : 'HTTP 403 Forbidden',
+    });
+    await assert.rejects(resolveHamTerminalRemediationEvidence(exactHeadOptions(async () => {
+      attempts++;
+      throw error;
+    })), caught => caught === error);
+    assert.equal(attempts, transient ? 3 : 1);
+  });
+}
+
+test('exact-head daemon range cancellation prevents any GitHub subprocess', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(resolveHamTerminalRemediationEvidence(exactHeadOptions(
+    async () => assert.fail('aborted range must not call gh'), controller.signal)), { name: 'AbortError' });
 });
 
 // ---------------------------------------------------------------------------

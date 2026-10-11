@@ -700,13 +700,22 @@ is not needed for exact-head validation.
 Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the active claim.
 The entitled hammer audit must record `HAM-Validated-Head: <exact SHA>`;
 `ama-check` verifies its body and author against the live timeline. Fetch the
-complete fleet ancestry using the versioned helper (read failures refuse this
-head-match proof):
+complete fleet ancestry using the versioned helper. Every head-only delta commit
+requires a GitHub-verified signature, including base merges; email-mapped fleet
+logins alone are insufficient. The helper retries PR-base discovery and each
+ancestry read on transient transport failures at most three times with 500/1000ms
+backoff and a 15-second per-attempt timeout. Exhausted reads refuse this proof:
 
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
-  <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" "$(gh pr view <<PR_URL>> --json baseRefName --jq .baseRefName)" \
-  > /tmp/ham-<<PR_NUMBER>>-range.json || exit 1
+  <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
+  > /tmp/ham-<<PR_NUMBER>>-range.json || {
+    HAM_HEAD_CONTEXT_EXIT=$?
+    if [ "$HAM_HEAD_CONTEXT_EXIT" -ne 65 ]; then
+      ham_mark_merge_lease_retryable_abort hammer-head-context-read-failed
+    fi
+    exit "$HAM_HEAD_CONTEXT_EXIT"
+  }
 ```
 
 ```json

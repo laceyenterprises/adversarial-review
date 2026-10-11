@@ -85,7 +85,7 @@ test('same-head hammer stop is released by label removal and refunds only a hold
   recordHammerRetryDispatch(rootDir, { repo, prNumber }, { jobKey: headSha, headSha, now: heldAt });
   const args = { rootDir, hqRoot: rootDir, repo, prNumber, headSha, logger: silent,
     prMetadata: { headSha, baseSha: 'base', mergeableState: 'MERGEABLE', statusCheckRollup: [] },
-    readAuditImpl: () => ({ attempts: [{ outcome: 'failed-without-merge', reason: 'label-no-merge-hold', head: headSha, startedAt: '2026-10-11T16:01:00Z' }] }),
+    readAuditImpl: () => ({ attempts: [{ outcome: 'failed-without-merge', reason: 'label-no-merge-hold', noExecution: true, launchRequestId: 'held-launch', head: headSha, startedAt: '2026-10-11T16:01:00Z' }] }),
     now: '2026-10-11T16:02:00Z' };
   assert.equal((await evaluateHammerStopHold(args)).action, 'hold');
   observe([]);
@@ -119,9 +119,9 @@ test('hold-only refunds preserve real attempts and their durable keys survive th
     recordHammerRetryDispatch(rootDir, identity, { jobKey: headSha, headSha, now });
   }
   const stop = { headSha, recordedAt: '2026-10-11T16:01:00Z', refundStops: [
-    { auditHead: headSha, stopKey: 'held-1', predicate: 'label-no-merge-hold', recordedAt: '2026-10-11T14:01:00Z' },
-    { auditHead: headSha, stopKey: 'real', predicate: 'ci-not-green', recordedAt: '2026-10-11T15:01:00Z' },
-    { auditHead: headSha, stopKey: 'held-2', predicate: 'label-do-not-merge', recordedAt: '2026-10-11T16:01:00Z' },
+    { auditHead: headSha, stopKey: 'held-1', noExecution: true, launchRequestId: 'held-launch-1', predicate: 'label-no-merge-hold', recordedAt: '2026-10-11T14:01:00Z' },
+    { auditHead: headSha, stopKey: 'real', predicate: 'label-no-merge-hold', recordedAt: '2026-10-11T15:01:00Z' },
+    { auditHead: headSha, stopKey: 'held-2', noExecution: true, launchRequestId: 'held-launch-2', predicate: 'label-do-not-merge', recordedAt: '2026-10-11T16:01:00Z' },
   ] };
   assert.equal(refundOperatorHeldHammerStop(rootDir, identity, stop), true);
   let ledger = readHammerRetryCapLedger(rootDir, identity);

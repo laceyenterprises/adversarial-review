@@ -174,6 +174,7 @@ export function readHammerStopForHead({
         attempt,
         outcome,
         fileHead,
+        launchRequestId: attempt?.launchRequestId || doc?.launchRequestId || null,
         order: index,
         at: Date.parse(attempt?.startedAt || attempt?.timestamp || attempt?.recordedAt || '') || 0,
       });
@@ -188,9 +189,11 @@ export function readHammerStopForHead({
     headSha,
     // Auditable stops in this review series let release refund multiple
     // hold-only runs without handing back any genuine code-work attempt.
-    refundStops: terminal.filter(item => STOP_OUTCOMES.has(item.outcome)
-      && !String(item.attempt?.attemptPhase || '').startsWith('before-')).map(item => ({
+    refundStops: terminal.filter(item => STOP_OUTCOMES.has(item.outcome)).map(item => ({
       auditHead: item.fileHead,
+      launchRequestId: item.launchRequestId,
+      noExecution: item.attempt?.noExecution === true || item.attempt?.workerState === 'never-spawned'
+        || item.attempt?.executionStarted === false,
       predicate: oneLine(item.attempt?.reason, 120),
       recordedAt: item.attempt?.startedAt || item.attempt?.timestamp || item.attempt?.recordedAt || null,
       stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || ''}`,

@@ -2551,3 +2551,7 @@ Eligibility routing uses standing blocker counts; original counts remain in
 
 PRIMARYEMPTY-01: `primary-change-unknown` is a deterministic evidence refusal, not a transient read. Daemon and closer enter the existing scoped recovery/escalation route; the durable park names `primary-change-unknown` and its remedy. After six observations the existing router pages once for that head. Genuine `primary-change-read-failed` outages still retry. CAPROUTE-01 includes legacy unknown hammer stop audits in the live-head evidence hold, including CYCLECAPHAM-01 and CIBLOCKHAM-01 routes. Each closer pass probes once; unknown or unreadable evidence keeps the hold, while a computable answer persists `primary-change-evidence` and resumes ordinary gates. The hold pages once per head through `ama_closer.hammer_stop_hold`, independently of the daemon recovery router. Proven
 `primary-change-reverted` decisions retain their existing recovery contract.
+
+Transient-only eligibility declines retain the ordinary stall clock and page after `stuckDeadlineMs`, while remaining neutral to the UNKNOWN series. Pending re-review ownership and its expiry are evaluated before settled UNKNOWN recovery.
+
+Background mergeability probes log sample count and elapsed milliseconds; null re-reads retain the previous live snapshot. Sampling remains bounded to three probes.

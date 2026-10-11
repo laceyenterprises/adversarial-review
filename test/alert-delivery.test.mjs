@@ -1127,3 +1127,17 @@ test('REVIEWLINE-01: decision page outbox identity survives a lost watcher debou
   });
   assert.notEqual(first.id, nextSeries.id);
 });
+
+test('corrupt legacy receipt suppresses duplicate recovery page', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = { env, event: 'ama.automated_recovery.exhausted', payload: { repo: 'fixture/repo', pr: 42, head: 'abc', reason: 'unknown' }, requestText: async () => ({ statusCode: 200, body: '{}' }) };
+  const initial = await deliverAlert('exhausted', options);
+  const legacyId = `ama-recovery-${createHash('sha256').update('fixture/repo#42@abc').digest('hex')}`;
+  const legacyPath = sinkPath(rootDir, 'delivered', `${legacyId}.json`);
+  renameSync(initial.queuePath, legacyPath);
+  writeFileSync(legacyPath, '{broken');
+  const retry = await deliverAlert('exhausted', options);
+  assert.equal(retry.queued, false);
+  assert.equal(retry.id, legacyId);
+});

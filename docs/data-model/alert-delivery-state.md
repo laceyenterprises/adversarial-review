@@ -133,3 +133,5 @@ Directory: `data/alert-delivery/`
   leave wrong-UID subdirectories behind and prevents shared-root WAL/rename
   ownership races. Different worker UIDs get distinct default roots under their
   own home directories.
+
+An unreadable or corrupt legacy recovery receipt is retained conservatively for deduplication and logged; it does not prevent enqueue through a thrown read error.

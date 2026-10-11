@@ -2105,6 +2105,8 @@ async function dispatchAmaClosureFor({
     // Skipping a fresh run here would erase a consumed safety refusal on the
     // next tick, letting the same label bypass risk policy or a dispatch cap.
     if (!backgroundSettled) {
+      let mergeabilitySamples = 0;
+      let mergeabilityElapsedMs = 0;
       const submission = backgroundQueue.submit({
         key: backgroundKey,
         // Detached from this step's deadline on purpose: the whole point is that
@@ -2124,11 +2126,15 @@ async function dispatchAmaClosureFor({
             );
             return { dispatched: false, reason: 'background-pr-state-unavailable' };
           }
+          mergeabilitySamples = 1;
+          const mergeabilityStartedAt = Date.now();
           if (normalizeGithubMergeability(live || {}) === 'UNKNOWN') {
             await resolveMergeabilityWithSampling(live, async () => {
               throwIfAborted(backgroundSignal);
-              live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
-              return live;
+              mergeabilitySamples += 1;
+              const sampled = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+              if (sampled && typeof sampled === 'object') live = sampled;
+              return sampled;
             }, {
               attempts: MERGEABILITY_SAMPLE_ATTEMPTS,
               delayMs: mergeabilitySampleDelayMs,
@@ -2141,6 +2147,7 @@ async function dispatchAmaClosureFor({
             });
             throwIfAborted(backgroundSignal);
           }
+          mergeabilityElapsedMs = Date.now() - mergeabilityStartedAt;
           // COMMENTCLOSE-01: name what blocked. A draft or an unmergeable PR is not
           // a state change; agent-os#7311 (a worker-opened draft) spent four hammer
           // attempts reported only as `background-pr-state-changed`.
@@ -2168,7 +2175,7 @@ async function dispatchAmaClosureFor({
                 ? `dispatched=${Boolean(settledResult?.dispatched)} reason=${settledResult?.reason || 'none'}` +
                   formatAmaResultReasons(settledResult)
                 : `error=${error?.message || error}`) +
-              ` elapsed_ms=${elapsedMs}`,
+              ` elapsed_ms=${elapsedMs} mergeability_samples=${mergeabilitySamples} mergeability_elapsed_ms=${mergeabilityElapsedMs}`,
           );
         },
       });

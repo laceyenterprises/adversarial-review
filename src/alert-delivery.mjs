@@ -1407,7 +1407,11 @@ async function deliverAlert(text, {
         const existingPath = alertDocPath(rootDir, state, legacyRecoveryId);
         let existing;
         try { existing = JSON.parse(readFileSync(existingPath, 'utf8')); }
-        catch (err) { if (err.code === 'ENOENT' || err instanceof SyntaxError) continue; throw err; }
+        catch (err) {
+          if (err.code === 'ENOENT') continue;
+          console.error?.(`[alert-delivery] legacy recovery receipt unreadable at ${existingPath}: ${err.message}; retaining deduplication`);
+          return { status: state, queued: false, id: legacyRecoveryId, queuePath: existingPath };
+        }
         if (existing.event !== event || existing.payload?.reason !== payload?.reason) continue;
         if (state === 'pending' || state === 'inflight') scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
         return { status: state, queued: false, id: legacyRecoveryId, queuePath: existingPath };

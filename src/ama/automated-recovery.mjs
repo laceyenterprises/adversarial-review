@@ -125,11 +125,11 @@ async function recoverAmaAutomationLocked({
     return { outcome: 'await-operator', amaClosureResult: result };
   }
   if (/autonomous-merge.*disabled|ama-disabled/.test(reason)) return waiting('disabled');
-  if (transientGateRead) return waiting('await-mergeability');
+  if (transientGateRead) return stalled('await-mergeability');
   if (ordinaryWait(result)) return waiting(
     FOLLOW_UP_REASONS.has(reason) || reasons.some((item) => FOLLOW_UP_REASONS.has(item))
       ? 'await-remediation' : 'in-progress');
-  const exhausted = async () => {
+  async function exhausted() {
     const event = state.event || { event: 'ama.automated_recovery.exhausted', severity: 'SEV1',
       reason, reasons, repo, pr: prNumber, head: headSha, attempts: state.attempts };
     if (!state.event) {
@@ -153,7 +153,20 @@ async function recoverAmaAutomationLocked({
       }
     }
     return { outcome: 'recovery-exhausted', amaClosureResult: result, recovery: state };
-  };
+  }
+  // While a requested pass owns the row, don't consume retries or start HAM.
+  const reviewStamp = String(reviewStateRow?.posted_at || reviewStateRow?.reviewer_session_uuid || 'unobserved');
+  if (state.rereviewPending && ['pending', 'reviewing', 'pending-upstream'].includes(reviewStateRow?.review_status)) {
+    return waiting('await-review');
+  }
+  if (state.rereviewPending && reviewStamp === state.rereviewBaseline) {
+    if (now() - state.rereviewRequestedAt >= rereviewDeadlineMs) return exhausted();
+    return { outcome: 'ama-pending', amaClosureResult: result, recovery: state };
+  }
+  if (state.rereviewPending) {
+    state.rereviewPending = false;
+    save();
+  }
   // HAMUNKNOWN-01: count settled UNKNOWN cycles, not queue/in-flight ticks.
   // Reuse the recovery budget and SEV1 route; never ask for a stale-head review
   // or consume hammer launch attempts merely because GitHub is recomputing.
@@ -166,13 +179,13 @@ async function recoverAmaAutomationLocked({
       && now() - state.mergeabilityUnknownSince >= stuckDeadlineMs)) return exhausted();
     return waiting('await-mergeability');
   }
-  const stalled = async (action, amaClosureResult = result) => {
+  async function stalled(action, amaClosureResult = result) {
     state.blockedSince ??= now();
     state.lastReason = amaClosureResult?.reason || reason;
     save();
     if (state.event || now() - state.blockedSince >= stuckDeadlineMs) return exhausted();
     return { outcome: 'ama-pending', amaClosureResult, recovery: { ...state, action } };
-  };
+  }
   const charge = () => {
     state.attempts += 1;
     state.lastReason = reason;
@@ -188,19 +201,6 @@ async function recoverAmaAutomationLocked({
   }
   const stale = reasons.includes('stale-review-head') || reasons.includes('stale-head');
   const malformed = reasons.some((item) => /findings-unknown$/.test(item));
-  // While a requested pass owns the row, don't consume retries or start HAM.
-  const reviewStamp = String(reviewStateRow?.posted_at || reviewStateRow?.reviewer_session_uuid || 'unobserved');
-  if (state.rereviewPending && ['pending', 'reviewing', 'pending-upstream'].includes(reviewStateRow?.review_status)) {
-    return waiting('await-review');
-  }
-  if (state.rereviewPending && reviewStamp === state.rereviewBaseline) {
-    if (now() - state.rereviewRequestedAt >= rereviewDeadlineMs) return exhausted();
-    return { outcome: 'ama-pending', amaClosureResult: result, recovery: state };
-  }
-  if (state.rereviewPending) {
-    state.rereviewPending = false;
-    save();
-  }
   if (state.event) return exhausted();
   if (state.attempts >= maxAttempts || /(?:retry-cap|lifetime-cap).*exhausted/.test(reason)) return stalled('attempt-cap');
   // NOOWNER-01: the watcher declined this head's re-review (its tip is a closer

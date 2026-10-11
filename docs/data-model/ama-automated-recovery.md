@@ -108,3 +108,5 @@ concurrently with a watcher, and do not reset the independent closer caps as a
 side effect of this procedure.
 
 Launch reconciliation invoked by per-head recovery is scoped to the same repository, PR number and head SHA; unrelated dispatches neither delay recovery nor get reclaimed by it. Both `verdict-not-eligible` (daemon) and `verdict-not-settled-success` (closer) authorize remediation dispatch, while independent safety holds remain fail closed.
+
+Transient-only eligibility declines retain the ordinary stall clock and page after `stuckDeadlineMs`, while remaining neutral to the UNKNOWN series. Pending re-review ownership and its expiry are evaluated before settled UNKNOWN recovery.

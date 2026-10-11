@@ -1030,6 +1030,54 @@ default `observe` enforcement honors a known actor even if that actor is not
 allowlisted; `enforce` requires an allowlisted operator login. The substitution emits
 `ama.daemon_clean_merge.operator_accountability_substituted`.
 
+### Operator-label closure holds (LABELGATE-01)
+
+After hammer-route admission, hammer-stop release handling, terminal-worker and
+lease reconciliation, and same-PR remediation ownership checks, the closer
+classifies the latest exact-head external CI failures against
+`src/ama/operator-label-gates.mjs`. All failures must map to
+registered label gates and no external sibling may still be pending or unknown.
+Production rollups omit failure output, so registered check names and composite
+step names are name-based paging heuristics: they cannot distinguish a label
+refusal from a guard script crash. Supplemental output, when supplied, must
+contain matching refusal text. Only the `repo-guards` composite job family
+(`repo-guards` or names beginning `repo-guards-`, `repo-guards/`, or
+`repo-guards `) is expanded; reads require exact-head, exclusively registered
+failed steps. Pending/unknown siblings or unrelated failures skip all job reads.
+Results are cached per reader/repo/job/head (512 entries); completed responses
+are reused, and unreadable responses retry after 60 seconds. Each pass reads at
+most two uncached jobs, with a 3-second subprocess timeout, a 5-second total read
+budget, and caller cancellation. Read-cap, deadline and transport failures return
+a non-paging classification-pending recovery wait. Missing required contexts
+prevent label-only paging. Transient job reads retry once within that budget. Advisory or green checks do not hold. Required-check greenness remains an independent merge gate,
+including in advisory CI-cost mode; a label cannot waive red CI.
+
+Drafts, disallowed risk classes, and PRs still owned by review remediation do
+not enter this paging path. A hold suppresses hammer/merge-agent dispatch and
+pages through
+`ama_closer.operator_label_required`, with a durable once-per-head delivery
+receipt in `data/operator-label-holds/`. Unchanged delivered receipts skip writes
+and paging locks. Inspect the actual refusal first; a script crash requires
+repair, not an override label. For an intended guarded delta, apply the appropriate operator label and rerun the named
+check. For an unintended delta, review remediation remains available to restore
+its base state. Consumption never terminally stops review jobs for this CI
+state. A running hammer may perform a review-authorized guard-preserving
+reversion before deferring; it cannot apply labels or weaken a guard. SUBSYNC-01
+still forbids gitlink changes in HAM commits, so pointer restoration belongs to
+review remediation rather than an operator override for an accidental bump.
+
+The next closer pass releases the hold when live CI no longer classifies as
+label-only, without deleting historical receipts. A deferred hammer audit with
+a matching typed label reason can receive PR 1261 series/target retry credit
+only when corroborated by a matching live gate on its recorded head and an audit
+timestamp at or after launch. `labelGateRefundedLaunchRequestId` dedupes the
+record credit; HAMREFUND-01 and ordinary exit refunds cannot credit it again.
+Lifetime charges remain intact. Terminal-worker cleanup, lease finalization
+and token accounting run before the label hold. Hammer-stop releases are
+persisted before paging. Receipt locking is best effort and there is no
+automatic retention sweep; see
+[Operator Label Holds](data-model/operator-label-holds.md) for those limits.
+
 ### Durable signal/tool-host refunds (HAMREFUND-01)
 
 `maybeDispatchAmaCloser` reconciles a terminal hammer before stale-lease

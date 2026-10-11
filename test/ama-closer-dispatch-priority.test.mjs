@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
@@ -988,4 +988,287 @@ test('withdrawal-only non-exhausted review follows the clean dispatch route', as
   const result = await maybeDispatchAmaCloser({ ...args, ...testDeps() });
   assert.equal(result.reason, 'daemon-clean-route', JSON.stringify(result));
   assert.equal(result.dispatched, false);
+});
+
+test('LABELGATE-01: only label failures hold closure and page once per head', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const alerts = [];
+  const args = findingsRemediationArgs(rootDir, { prMetadata: { statusCheckRollup: [
+    { name: 'submodule-pointer-gate', conclusion: 'FAILURE' },
+    { name: 'test', conclusion: 'SUCCESS' },
+  ] } });
+  const deps = { ...testDeps(), deliverAlertImpl: async (text, opts) => alerts.push({ text, opts }),
+    execFileImpl: async () => { throw new Error('must not launch'); },
+    logger: { log() {}, info() {}, warn() {}, error() {} } };
+  for (let i = 0; i < 2; i++) {
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+  }
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].text, /apply the label, then rerun the named check/);
+  assert.match(alerts[0].text, /submodule-pointer-gate.*allow-submodule-pointer-bump/);
+  await maybeDispatchAmaCloser({ ...args, ...deps, prMetadata: { ...args.prMetadata, headSha: 'b'.repeat(40) },
+    reviewState: { ...args.reviewState, headSha: 'b'.repeat(40) },
+    dispatchContext: { ...args.dispatchContext, reviewedSha: 'b'.repeat(40) } });
+  assert.equal(alerts.length, 2);
+});
+
+import { operatorLabelGateFailures } from '../src/ama/operator-label-gates.mjs';
+
+test('LABELGATE-01: latest runs, mixed failures, pending and advisory checks', () => {
+  const failure = { name: 'submodule-pointer-gate', conclusion: 'FAILURE', completedAt: '2026-10-11T01:00:00Z' };
+  assert.equal(operatorLabelGateFailures([failure]).length, 1);
+  assert.deepEqual(operatorLabelGateFailures([failure, { name: 'unit', conclusion: 'FAILURE' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([failure, { name: 'unit', status: 'IN_PROGRESS' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([failure, { name: 'unit' }]), []);
+  for (const state of ['EXPECTED', 'QUEUED', 'WAITING', 'REQUESTED']) {
+    assert.deepEqual(operatorLabelGateFailures([failure, { __typename: 'StatusContext', context: 'unit', state }]), []);
+  }
+  // Production normalizes to name/status/detailsUrl/conclusion/completedAt.
+  // Without output, a registered name is deliberately a paging heuristic.
+  assert.equal(operatorLabelGateFailures([{ ...failure, status: 'COMPLETED', detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/34' }]).length, 1);
+  assert.deepEqual(operatorLabelGateFailures([failure, { ...failure, conclusion: 'SUCCESS', completedAt: '2026-10-11T02:00:00Z' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([{ ...failure, status: 'IN_PROGRESS' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([{ ...failure, conclusion: 'CANCELLED' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([{ name: 'repo-guards', conclusion: 'FAILURE' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([]), []);
+  assert.equal(operatorLabelGateFailures([{ name: 'repo-guards', conclusion: 'FAILURE', output: { summary: "Override: apply the 'allow-submodule-pointer-bump' label" } }])[0].label, 'allow-submodule-pointer-bump');
+});
+
+import { resolveOperatorLabelGateFailures as resolveClassification } from '../src/ama/operator-label-gates.mjs';
+const resolveOperatorLabelGateFailures = async args => (await resolveClassification(args)).gates;
+
+test('LABELGATE-01: composite jobs require exact-head, exclusively label-gate failed steps', async () => {
+  const rollup = [{ name: 'repo-guards-code', conclusion: 'FAILURE',
+    detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/34' }];
+  const args = { repo: 'acme/repo', headSha: HEAD, rollup };
+  const job = { head_sha: HEAD, conclusion: 'failure', steps: [
+    { name: 'Gym freeze guard', conclusion: 'success' },
+    { name: 'CI-cost guard', conclusion: 'failure' },
+  ] };
+  const read = data => async (command, argv) => {
+    assert.equal(command, 'gh');
+    assert.deepEqual(argv, ['api', 'repos/acme/repo/actions/jobs/34']);
+    return { stdout: JSON.stringify(data) };
+  };
+  const gates = await resolveOperatorLabelGateFailures({ ...args, execFileImpl: read(job) });
+  assert.equal(gates[0].reason, 'operator-label-required:ci-cost-approved');
+  assert.match(gates[0].check, /repo-guards-code: CI-cost guard/);
+  assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, execFileImpl: read({ ...job, head_sha: 'stale' }) }), []);
+  assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, execFileImpl: read({ ...job, steps: [
+    ...job.steps, { name: 'Unit tests', conclusion: 'failure' },
+  ] }) }), []);
+  assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, execFileImpl: async () => { throw new Error('unreadable'); } }), []);
+});
+
+test('LABELGATE-01: page receipt survives restart and concurrent observations; transport failures retry', async t => {
+  const { holdForOperatorLabels } = await import('../src/ama/operator-label-gates.mjs');
+  const restarted = await import('../src/ama/operator-label-gates.mjs?labelgate-restart');
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-pages-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const gates = operatorLabelGateFailures([{ name: 'ci-cost-guard', conclusion: 'FAILURE' }]);
+  const args = { rootDir, repo: 'acme/repo', prNumber: 404, headSha: HEAD, gates, logger: { warn() {} } };
+  let pages = 0;
+  let release;
+  const delivered = new Promise(resolve => { release = resolve; });
+  const first = holdForOperatorLabels({ ...args, deliverAlertImpl: async () => { pages++; await delivered; } });
+  await restarted.holdForOperatorLabels({ ...args, deliverAlertImpl: async () => { pages++; } });
+  release();
+  await first;
+  const path = join(rootDir, 'data', 'operator-label-holds', readdirSync(join(rootDir, 'data', 'operator-label-holds'))[0]);
+  const before = statSync(path);
+  await restarted.holdForOperatorLabels({ ...args, deliverAlertImpl: async () => { pages++; } });
+  assert.equal(statSync(path).ino, before.ino, 'matching receipt avoids atomic replacement');
+  assert.equal(statSync(path).mtimeMs, before.mtimeMs);
+  assert.equal(pages, 1);
+  await restarted.holdForOperatorLabels({ ...args, gates: [...gates, { ...gates[0], check: 'another gate' }], deliverAlertImpl: async () => { pages++; } });
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).gates.length, 2);
+  assert.equal(pages, 1, 'changed gates update receipt without repaging');
+  const otherHead = { ...args, headSha: 'another-head' };
+  await holdForOperatorLabels({ ...otherHead, deliverAlertImpl: async () => { pages++; throw new Error('transport'); } });
+  await holdForOperatorLabels({ ...otherHead, deliverAlertImpl: async () => { pages++; } });
+  assert.equal(pages, 3);
+});
+
+
+test('LABELGATE-01: pending and unrelated failures bypass composite reads', async () => {
+  const composite = { name: 'repo-guards-code', conclusion: 'FAILURE',
+    detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/234' };
+  let calls = 0;
+  const args = { repo: 'acme/repo', headSha: HEAD, execFileImpl: async () => { calls++; throw new Error('unexpected read'); } };
+  for (const sibling of [
+    { name: 'unit', conclusion: 'FAILURE' },
+    { name: 'unit', conclusion: 'FAILURE', detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/235' },
+    { name: 'unit', status: 'IN_PROGRESS' },
+    { name: 'unit' },
+  ]) {
+    assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, rollup: [composite,
+      { name: 'submodule-pointer-gate', conclusion: 'FAILURE' }, sibling] }), []);
+  }
+  assert.equal(calls, 0);
+});
+
+test('LABELGATE-01: job cache keys include head/repo/job and retain negative completed reads', async () => {
+  let calls = 0;
+  const execFileImpl = async () => {
+    calls++;
+    return { stdout: JSON.stringify({ head_sha: HEAD, conclusion: 'failure', steps: [{ name: 'CI-cost guard', conclusion: 'failure' }] }) };
+  };
+  const args = { repo: 'acme/repo', headSha: HEAD, execFileImpl,
+    rollup: [{ name: 'repo-guards-code', conclusion: 'FAILURE', detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/334' }] };
+  for (let i = 0; i < 2; i++) assert.equal((await resolveOperatorLabelGateFailures(args)).length, 1);
+  assert.equal(calls, 1);
+  for (let i = 0; i < 2; i++) assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, headSha: 'new-head' }), []);
+  assert.equal(calls, 2);
+  await resolveOperatorLabelGateFailures({ ...args, rollup: [{ ...args.rollup[0], detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/335' }] });
+  await resolveOperatorLabelGateFailures({ ...args, repo: 'acme/other', rollup: [{ ...args.rollup[0], detailsUrl: 'https://github.com/acme/other/actions/runs/12/job/334' }] });
+  assert.equal(calls, 4);
+  let failures = 0;
+  const failedRead = async () => { failures++; throw new Error('unreadable'); };
+  for (let i = 0; i < 2; i++) assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, execFileImpl: failedRead }), []);
+  assert.equal(failures, 1, 'transport errors cool down instead of reading every tick');
+});
+
+test('LABELGATE-01: per-pass read cap and cancellation bound composite expansion', async () => {
+  const rollup = [434, 435, 436].map(id => ({ name: `repo-guards-${id}`, conclusion: 'FAILURE',
+    detailsUrl: `https://github.com/acme/repo/actions/runs/12/job/${id}` }));
+  const controller = new AbortController();
+  let calls = 0;
+  const execFileImpl = async (command, argv, options) => {
+    calls++;
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.ok(options.timeout > 0 && options.timeout <= 3000);
+    return { stdout: JSON.stringify({ head_sha: HEAD, conclusion: 'failure', steps: [{ name: 'CI-cost guard', conclusion: 'failure' }] }) };
+  };
+  const args = { repo: 'acme/repo', headSha: HEAD, rollup, signal: controller.signal, execFileImpl };
+  assert.deepEqual(await resolveClassification(args), { gates: [], inconclusive: true });
+  assert.equal(calls, 2);
+  assert.equal((await resolveOperatorLabelGateFailures(args)).length, 3, 'next pass reuses cached results');
+  assert.equal(calls, 3);
+  controller.abort();
+  assert.deepEqual(await resolveOperatorLabelGateFailures(args), []);
+  assert.equal(calls, 3);
+  const running = new AbortController();
+  assert.deepEqual(await resolveOperatorLabelGateFailures({ ...args, signal: running.signal,
+    execFileImpl: async (command, argv, options) => { assert.ok(options.signal instanceof AbortSignal); running.abort(); throw new Error('aborted'); } }), []);
+});
+
+test('LABELGATE-01: ineligible PRs neither read jobs nor page', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-ineligible-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let reads = 0;
+  let pages = 0;
+  for (const overrides of [
+    { prMetadata: { isOpen: false } }, { prMetadata: { headSha: null } },
+    { prMetadata: { isDraft: true } }, { reviewState: { riskClass: 'critical' } },
+    { reviewState: { remediationPending: true } }, { reviewState: { reviewCycleExhausted: false } },
+  ]) {
+    const args = findingsRemediationArgs(rootDir);
+    const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+      reviewState: { ...args.reviewState, ...overrides.reviewState },
+      prMetadata: { ...args.prMetadata, statusCheckRollup: [
+        { name: 'submodule-pointer-gate', conclusion: 'FAILURE' },
+        { name: 'repo-guards-code', conclusion: 'FAILURE', detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/534' },
+      ], ...overrides.prMetadata },
+      execFileImpl: async () => { reads++; throw new Error('unexpected read or dispatch'); },
+      deliverAlertImpl: async () => { pages++; },
+    });
+    assert.equal(result.dispatched, false);
+    assert.notEqual(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+  }
+  assert.equal(reads, 0);
+  assert.equal(pages, 0);
+});
+
+
+test('LABELGATE-01: evidence-stop releases persist before label paging', async t => {
+  const { writeAmaAuditEntry } = await import('../src/ama/audit.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-release-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir, { prMetadata: { statusCheckRollup: [
+    { name: 'submodule-pointer-gate', conclusion: 'FAILURE' },
+  ] } });
+  writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, repo: 'acme/repo', prNumber: 404, headSha: HEAD,
+    attempt: { outcome: 'failed-without-merge', reason: 'primary-change-unknown' } });
+  const path = join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold', 'acme-repo-pr-404.json');
+  let pages = 0;
+  let observedStop;
+  const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+    fetchPrimaryChangeImpl: async () => ({ headSha: HEAD, hasHammerCommits: false }),
+    deliverAlertImpl: async () => {
+      pages++;
+      observedStop = JSON.parse(readFileSync(path, 'utf8')).heads[HEAD];
+    },
+  });
+  assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+  assert.equal(pages, 1);
+  assert.equal(observedStop?.releasedAt, args.dispatchContext.dispatchedAt);
+  assert.deepEqual(observedStop?.releasedBy, ['primary-change-evidence']);
+});
+
+
+test('LABELGATE-01: missing required contexts prevent a label-only page', async () => {
+  const rollup = [{ name: 'ci-cost-guard', conclusion: 'FAILURE' }];
+  assert.deepEqual(operatorLabelGateFailures(rollup, { requiredContexts: ['unit'] }), []);
+  let reads = 0;
+  assert.deepEqual(await resolveClassification({ rollup, repo: 'acme/repo', headSha: HEAD,
+    requiredContexts: ['unit'], execFileImpl: async () => { reads++; } }), { gates: [], inconclusive: false });
+  assert.equal(reads, 0);
+});
+
+test('LABELGATE-01: exhausted transport retries hold without paging or dispatch', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-transport-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let reads = 0;
+  let pages = 0;
+  const args = findingsRemediationArgs(rootDir, { prMetadata: { statusCheckRollup: [{
+    name: 'repo-guards-core', conclusion: 'FAILURE',
+    detailsUrl: 'https://github.com/acme/repo/actions/runs/12/job/34',
+  }] } });
+  const result = await maybeDispatchAmaCloser({ ...args, ...testDeps(),
+    execFileImpl: async () => { reads++; throw new Error('TLS handshake timeout'); },
+    deliverAlertImpl: async () => { pages++; },
+  });
+  assert.equal(result.reason, 'operator-label-classification-pending');
+  assert.equal(result.recoveryWait, true);
+  assert.equal(result.dispatched, false);
+  assert.equal(reads, 2);
+  assert.equal(pages, 0);
+});
+
+test('LABELGATE-01: live repo-guards name and alternate workflow names expand', async () => {
+  // Captured from agent-os Repo Guards run 38159836521 on 2026-10-11.
+  const fixture = { name: 'repo-guards-core', conclusion: 'FAILURE',
+    detailsUrl: 'https://github.com/laceyenterprises/agent-os/actions/runs/38159836521/job/114530330298' };
+  const execFileImpl = async () => ({ stdout: JSON.stringify({ head_sha: HEAD, conclusion: 'failure',
+    steps: [{ name: 'CI-cost guard', conclusion: 'failure' }] }) });
+  for (const item of [fixture, { ...fixture, name: 'guards', workflowName: 'Repo Guards' }]) {
+    const result = await resolveClassification({ repo: 'laceyenterprises/agent-os', headSha: HEAD,
+      rollup: [item], execFileImpl });
+    assert.equal(result.inconclusive, false);
+    assert.equal(result.gates[0].label, 'ci-cost-approved');
+  }
+});
+
+test('LABELGATE-01: sweep removes superseded and closed receipts, preserving active claims', async t => {
+  const { holdForOperatorLabels, sweepOperatorLabelHolds } = await import('../src/ama/operator-label-gates.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-retention-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = { rootDir, repo: 'acme/repo', prNumber: 404,
+    gates: operatorLabelGateFailures([{ name: 'ci-cost-guard', conclusion: 'FAILURE' }]),
+    deliverAlertImpl: async () => {} };
+  await holdForOperatorLabels({ ...args, headSha: HEAD });
+  await holdForOperatorLabels({ ...args, headSha: 'next-head' });
+  const dir = join(rootDir, 'data', 'operator-label-holds');
+  assert.equal(readdirSync(dir).length, 1);
+  const path = join(dir, readdirSync(dir)[0]);
+  writeFileSync(`${path}.lock`, '');
+  sweepOperatorLabelHolds({ ...args, closed: true });
+  assert.ok(existsSync(path));
+  rmSync(`${path}.lock`);
+  sweepOperatorLabelHolds({ ...args, closed: true });
+  assert.deepEqual(readdirSync(dir), []);
 });

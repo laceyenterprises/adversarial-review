@@ -3366,7 +3366,7 @@ test('LEASEPARK-01 certified lease park resumes daemon merge without remediation
   assert.equal(merges, 1);
 });
 
-for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI becomes conflicting', 'stale park timestamp', 'stale park pending CI', 'stale park active repair', 'pending CI remains pending', 'corrupt audit', 'missing head']) {
+for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI turns label-only', 'pending CI becomes conflicting', 'stale park timestamp', 'stale park pending CI', 'stale park active repair', 'pending CI remains pending', 'corrupt audit', 'missing head']) {
   test(`certified park preserves eligibility gates: ${scenario}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-policy-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -3388,8 +3388,8 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
         dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: ADVANCED_HEAD },
         prMetadata: { headSha: scenario === 'missing head' ? null : ADVANCED_HEAD,
           mergeableState: scenario === 'pending CI becomes conflicting' ? 'CONFLICTING' : 'MERGEABLE',
-          statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? 'IN_PROGRESS' : 'COMPLETED',
-            conclusion: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? null : scenario === 'pending CI turns red' ? 'FAILURE' : 'SUCCESS' }] },
+          statusCheckRollup: [{ __typename: 'CheckRun', name: scenario === 'pending CI turns label-only' ? 'submodule-pointer-gate' : 'test', status: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? 'IN_PROGRESS' : 'COMPLETED',
+            conclusion: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? null : ['pending CI turns red', 'pending CI turns label-only'].includes(scenario) ? 'FAILURE' : 'SUCCESS' }] },
       }),
       options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
       ...hammerDispatchDeps({
@@ -3402,7 +3402,7 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
       }),
     });
     let result = await run('2026-07-06T12:05:00Z');
-    if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
+    if (['pending CI turns red', 'pending CI turns label-only', 'pending CI becomes conflicting'].includes(scenario)) {
       assert.equal(result.reason, 'hammer-deferral-backoff');
       result = await run('2026-07-06T12:08:00Z');
     }
@@ -3410,6 +3410,10 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
     if (scenario === 'risk class changes') {
       assert.equal(result.dispatched, false);
       assert.ok(result.reasons.includes('risk-class-not-permitted'));
+    } else if (scenario === 'pending CI turns label-only') {
+      assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+      assert.equal(result.dispatched, false);
+      assert.equal(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'), false);
     } else if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
       assert.equal(result.dispatched, true, JSON.stringify(result));
       assert.ok(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'));
@@ -3546,4 +3550,64 @@ test('HAMCIWAKE-01 green own-head resume dispatches under the H1 budget', async 
   assert.equal(capped.dispatched, false);
   assert.equal(capped.reason, 'dispatch-retry-exhausted');
   assert.equal(deps.execCalls.length, 1);
+});
+
+
+test('LABELGATE-01: typed hammer stop refunds a recorded launch once through PR 1261 path', async t => {
+  const { writeAmaAuditEntry } = await import('../src/ama/audit.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-refund-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = hammerDispatchArgs(rootDir, { prMetadata: { statusCheckRollup: [
+    { name: 'submodule-pointer-gate', conclusion: 'FAILURE' },
+  ] } });
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now: '2026-07-06T11:00:00Z' });
+  updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }, () => ({
+    ...identity, headSha: REVIEWED_HEAD, reviewedSha: REVIEWED_HEAD, workerClass: 'hammer',
+    launchRequestId: 'labelgate-launch', dispatchedAt: '2026-07-06T11:00:00Z',
+  }));
+  writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: REVIEWED_HEAD,
+    attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
+    now: '2026-07-06T11:30:00Z' });
+  let cleanups = 0;
+  for (let i = 0; i < 2; i++) {
+    const result = await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps({
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }),
+    }),
+      deliverAlertImpl: async () => {}, logger: { warn() {} },
+      execFileImpl: async (command, argv) => {
+        if (argv[0] === 'worker' && argv[1] === 'tear-down') { cleanups++; return { stdout: '{}' }; }
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"failed"}' };
+        throw new Error('must not dispatch');
+      } });
+    assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+    assert.equal(cleanups, i + 1, 'terminal worker cleanup precedes the label hold');
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    assert.equal(ledger.attemptCount, 0);
+    assert.equal(ledger.targetAttemptCount, 0);
+    assert.equal(ledger.lifetimeAttemptCount, 1, 'PR 1261 preserves the lifetime ceiling');
+    assert.deepEqual(ledger.unexecutedLaunchRequestIds, ['labelgate-launch']);
+    assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount, 1);
+  }
+});
+
+
+test('LABELGATE-01: a hammer-written refusal without a matching live gate stays charged', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-unproven-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = hammerDispatchArgs(rootDir, { reviewState: { remediationPending: true },
+    prMetadata: { statusCheckRollup: [{ name: 'unit', conclusion: 'FAILURE' }] },
+  });
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now: '2026-07-06T11:00:00Z' });
+  updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }, () => ({
+    ...identity, headSha: REVIEWED_HEAD, reviewedSha: REVIEWED_HEAD, workerClass: 'hammer',
+    launchRequestId: 'unproven-label-launch', dispatchedAt: '2026-07-06T11:00:00Z',
+  }));
+  writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: REVIEWED_HEAD,
+    attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
+    now: '2026-07-06T11:30:00Z' });
+  await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps() });
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 1);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount, undefined);
 });

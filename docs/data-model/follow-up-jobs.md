@@ -344,3 +344,18 @@ files are never rewritten. An unreadable marker is logged and ignored. A void
 write that fails is retried up to 3 times. If it still fails, `selectReviewMode`
 throws and the reviewer exits non-zero before dispatch. The review pass fails retryable instead of running the
 lenient stage while the credit is still spent.
+
+## Operator-label CI failures (LABELGATE-01)
+
+Review-findings consumption and the final pre-spawn lifecycle gate do not stop
+jobs for operator-label CI checks. A finding that requests reverting a guarded
+change can still spawn remediation to restore the base state without granting
+an override. `operator-label-required:<label>` is a closer hold/audit reason,
+not a follow-up job stop code; this PR does not add it to
+`RETRIGGERABLE_STOP_CODES` or persist it in `remediationPlan.stop`. No retrigger
+is needed for label-gate CI state because review remediation is not stopped.
+
+The final pre-spawn gate evaluates existing lifecycle stops before DIRTY
+conflict repair. In particular `stale-drift` and `stale-review-head` win over a
+DIRTY merge state, preventing a stale job from repairing or launching a
+conflict hammer. Their existing stop and retrigger rules remain applicable.

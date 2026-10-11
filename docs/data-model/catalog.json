@@ -297,6 +297,17 @@
       "owner": "watcher posted-review dispatch fairness"
     },
     {
+      "id": "operator-label-holds",
+      "title": "Operator Label Holds",
+      "path": "docs/data-model/operator-label-holds.md",
+      "store": "data/operator-label-holds/",
+      "schemaSurface": "src/ama/operator-label-gates.mjs",
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs"],
+      "owner": "AMA closer operator-label paging",
+      "receiptWritePolicy": "Unchanged delivered identity/reason/gates skip paging locks and atomic replacement",
+      "retentionPolicy": "Sweep closed/superseded heads and receipts older than 30 days; skip active claims; delivery memory capped at 512 entries"
+    },
+    {
       "id": "operator-label-wakes",
       "title": "Operator Label Wakes",
       "path": "docs/data-model/operator-label-wakes.md",
@@ -416,6 +427,8 @@
       ],
       "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery",
       "nonExecutionRefundFields": ["unexecutedRefundCount", "previousUnexecutedLaunchRequestId"],
+      "operatorLabelRefundFields": ["labelGateRefundedLaunchRequestId"],
+      "operatorLabelRefundsLifetime": false,
       "prelaunchRetryKinds": ["branch-holder", "dispatch-refused", "non-execution"],
       "prelaunchRetryFields": [
         "prelaunchRefusalSlowRetry.startedAt",

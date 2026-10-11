@@ -597,6 +597,25 @@ down exactly one of two paths:
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head, returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |
 | **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — or a current-head `operator-approved` overrides the verdict and finding gates; green required checks (or explicit no-CI bootstrap evidence), a MERGEABLE PR, and a live validated head remain mandatory | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). An approval override records operator evidence and distinct closure authority in the audit. No agent is spawned. Dispositions: `merged`, `failed-closed` (conflicts, real CI failures and stale heads fall through to capped HAM; a current MERGEABLE clean head waiting on empty/no-CI evidence or cancelled recovery returns to the merge-agent path), `deferred` (lease contention; retry next tick), `not-taken` (a current MERGEABLE zero-finding settled head waiting on empty/no-CI evidence or cancelled recovery returns to the merge path; remediable failures and reviews with findings fall through to HAM). Protective predecessor and revoked-approval holds remain authoritative. |
 
+LABELGATE-01 adds a non-terminal closure hold after hammer-route admission and
+terminal-worker/lease reconciliation, before dispatch, when latest live
+external CI failures are exclusively registered operator-label gates and no
+external sibling is pending or unknown. The closer pages once per head through
+`data/operator-label-holds/`; labels alone do not release red CI, so the operator
+must inspect the refusal and rerun the check after applying an appropriate
+label. Review-findings remediation remains available to restore guarded deltas;
+no follow-up `operator-label-required:<label>` stop transition is emitted.
+A typed deferred hammer audit plus a matching live exact-head gate can refund
+series/target admission credit once per launch, retaining lifetime charges.
+`labelGateRefundedLaunchRequestId` prevents duplicate record/ordinary exit
+credits. Stop releases are persisted before the label hold; ordinary
+terminal-launch cleanup and lease finalization are not deferred by it. Job reads
+are limited to the registered repo-guards composite family, cached by
+repo/job/head, bounded per pass, and cancelled with the closer. Production
+classification uses check/step names because rollups omit output; the operator
+must inspect the actual failure before applying an override. Unchanged delivered
+receipts skip writes and paging locks.
+
 CIUNKNOWN-01 keeps empty rollups unknown. Bootstrap requires API-confirmed absence of repository workflows and base-branch required-check rules plus green managed pre-push evidence for the exact repository/head. It is limited to a settled clean review or a HAM-certified head, is revalidated before merge, and records `ciMode: no-ci-bootstrap` in the audit. All other authority and safety gates remain mandatory. Cancelled-only external CI requests one workflow rerun per check/head; a later cancelled attempt pages once.
 
 AMAFIND-01 recovery precedes any generic operator hand-off. Stale reviewed heads

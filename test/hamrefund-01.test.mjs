@@ -468,3 +468,41 @@ for (const [label, signalRead, producerRead] of [
     assert.ok(ledger.lifetimeAttemptCount >= 1);
   });
 }
+
+
+test('LABELGATE-01: later signal reconciliation cannot credit the same launch twice', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-signal-refund-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedDeadHammer(rootDir, { retryCount: 3 });
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const refund = refundUnexecutedHammerDispatch(rootDir, identity, {
+    jobKey: HEAD, headSha: HEAD, launchRequestId: DEAD_LRQ, now: '2026-10-10T23:06:00Z',
+  });
+  assert.equal(refund.refunded, true);
+  updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha: HEAD }, current => ({
+    ...current, labelGateRefundedLaunchRequestId: DEAD_LRQ, unexecutedRefundCount: 1,
+  }));
+  const deps = closerDeps({ launchRows: {
+    [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' },
+  } });
+  const result = await maybeDispatchAmaCloser({
+    ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
+  });
+  assert.equal(result.reason, 'dispatch-refusal-slow-retry-wait');
+  assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: HEAD }).unexecutedRefundCount, 1);
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 0);
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 1);
+});
+
+
+test('LABELGATE-01: ordinary exit refund cannot reuse durable label/non-execution credit', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-cross-refund-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedDeadHammer(rootDir, { chargedDispatches: 2 });
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const args = { jobKey: HEAD, headSha: HEAD, launchRequestId: DEAD_LRQ };
+  assert.equal(refundUnexecutedHammerDispatch(rootDir, identity, args).refunded, true);
+  assert.equal(refundHammerRetryDispatch(rootDir, identity, args).reason, 'already-refunded');
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 1);
+  assert.equal(refundHammerRetryDispatch(rootDir, identity, { ...args, launchRequestId: NEXT_LRQ }).refunded, true);
+});

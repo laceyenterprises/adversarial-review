@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { activeRemediationStopDecision, lifecycleStopDecision, resolveJobPRLifecycleSafe } from '../src/follow-up-lifecycle.mjs';
@@ -84,4 +84,23 @@ test('missing HQ workspace evidence does not cancel an active worker on a moved 
     parseHqWorkerWorkspaceFromPayloadImpl: () => null,
   });
   assert.equal(decision, null);
+});
+
+
+test('LABELGATE-01: review remediation remains available to revert a guarded change', async t => {
+  const lifecycle = { source: 'live', prState: 'open', headSha: job.revisionRef,
+    statusCheckRollup: [{ name: 'submodule-pointer-gate', conclusion: 'FAILURE' }] };
+  const opts = { ...job, job, site: 'consume' };
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-remediation-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const resolved = await resolveJobPRLifecycleSafe({ rootDir, job,
+    resolvePRLifecycleImpl: async () => lifecycle,
+    execFileImpl: async () => { throw new Error('review remediation must not inspect guard jobs'); },
+  });
+  for (const observation of [resolved, { ...resolved, operatorLabelGates: [
+    { reason: 'operator-label-required:allow-submodule-pointer-bump' }],
+  }, { ...resolved, statusCheckRollup: [...resolved.statusCheckRollup,
+    { name: 'unit', status: 'IN_PROGRESS' }],
+  }]) assert.equal(lifecycleStopDecision(observation, opts), null);
+  assert.equal(lifecycleStopDecision({ ...lifecycle, prState: 'merged' }, opts).stopCode, 'operator-merged-pr');
 });

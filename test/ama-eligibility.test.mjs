@@ -3378,3 +3378,14 @@ test('HAM committer identity cannot treat terminal ticket and Closed-By as advis
     assert.equal(result.eligible, false);
   }
 });
+
+
+test('LABELGATE-01: label-only CI misses carry typed ineligibility', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({ prMetadata: {
+    statusCheckRollup: [{ name: 'submodule-pointer-gate', conclusion: 'FAILURE' }],
+  } });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('operator-label-required:allow-submodule-pointer-bump'));
+  assert.ok(result.reasons.includes('ci-not-green'));
+});

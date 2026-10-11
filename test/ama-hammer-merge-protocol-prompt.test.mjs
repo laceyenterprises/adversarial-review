@@ -608,3 +608,16 @@ for (const auditFails of [false, true]) {
     ]);
   });
 }
+
+// A guard-preserving reversion is an authorized review repair, even when the
+// unchanged guarded delta would need an operator override.
+test('LABELGATE-01: hammer can restore review-flagged guarded changes before deferring', () => {
+  const section = HAMMER_TEMPLATE.split('## Operator-label gates (LABELGATE-01)')[1]
+    .split('## Preserve the PR primary change')[0];
+  assert.match(section, /cited\nreview finding authorizes restoring the guarded change to its base state/);
+  assert.match(section, /restore pack files or remove an unintended workflow cost delta/);
+  assert.match(section, /HAM commits cannot\nchange gitlinks/);
+  assert.match(section, /Leave that code repair to review remediation/);
+  assert.match(section, /make that repair and validate the\nnew head normally/);
+  assert.match(section, /If the remaining refusal requires an operator override, stop/);
+});

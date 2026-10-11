@@ -2,8 +2,53 @@
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/github-auth-recovery.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
+
+## Infrastructure round refunds (REMREFUND-01)
+
+Reconcile can return an exited worker's job to `pending/` without charging the
+round or `remediationPlan.transientRetries`. It requires known, equal start and
+authoritative live end heads, no lifecycle stop, and a recorded reason:
+`codex-tool-host-unavailable`, `publish-blocked`, `boot-failed` or `boot-failure`.
+Narrative text and bare signal exits (including 137/143) cannot qualify;
+`cancelled`/`canceled` HQ status cannot qualify either. Operator and supervisor
+cancels therefore do not earn a refund from their signal exit alone.
+
+The persisted accounting fields are:
+
+- `remediationPlan.rounds[].startHeadSha`: the job's `revisionRef` captured when
+  the round is claimed. Legacy rounds fall back to `revisionRef` at settlement.
+- `remediationPlan.rounds[].publishedHeadSha`: the different authoritative live
+  head observed when the round settles. This records head movement, not proof
+  that the worker authored the commit; legacy settled rounds may lack it.
+- `remediationWorker.recordedOutcome`: optional `failureReason`, `exitCode` and
+  `signal` captured from local child error/exit events. HQ outcomes instead come
+  from dispatch status; failed terminal events must confirm that status first.
+- `remediationPlan.publishedRoundsForPR`: the ledger's count of rounds with
+  `publishedHeadSha`, plus any newly observed movement for the current round.
+  It feeds budget-stop comments and cannot reconstruct historical publications.
+
+The retry transition removes the claimed round and decrements `currentRound`;
+the next claim reuses that round number. `retryHistory[]` retains the removed
+round's worker outcome in `worker`, plus `retryMetadata` with
+`code: "infrastructure-refund"`, `reason`, `startHead`, `endHead`, `workerClass`
+and `harnessSpecific`. `retryReason` is `not charged: <reason>` and `retryAfter`
+is the settlement timestamp. Only one refund is allowed per charged round on
+the job; a failed retry stays charged. The PR-wide limit is two, including
+other jobs and archived stopped jobs. `ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS`
+can lower the limit to a non-negative integer, including zero, but cannot raise
+it above two. Invalid overrides use the default. Eligibility and requeue share
+the job-write lock. A declined refund retains existing HQ transient retry rules
+and their separate bounded budget.
+
+`harnessSpecific` is true for `codex-tool-host-unavailable` or a local
+`boot-failed` outcome. The retry prefers an eligible configured fallback with
+the existing quota and next-round reviewer diversity checks. If none qualifies,
+it uses the uncapped primary; an infrastructure failure alone cannot create a
+`quota-exhausted` hold. A chosen fallback records
+`fallbackResolution.reason: "infrastructure-fallback"` and its infrastructure
+reason as `capSource`; ordinary quota holds retain REMFALLBACK-01 semantics.
 
 ## Re-review accepted with CI pending at timeout (CIBLOCKHAM-01)
 

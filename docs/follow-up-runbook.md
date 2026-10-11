@@ -26,6 +26,27 @@ Use this when a review has already been posted to GitHub and you need to inspect
 
 ---
 
+## Infrastructure refunds (REMREFUND-01)
+
+An exited remediation worker can retry its charged round once when an
+independent recorded infrastructure reason accompanies a known unchanged live
+PR head: `codex-tool-host-unavailable`, `publish-blocked`, `boot-failed` or
+`boot-failure`. Bare SIGTERM/SIGKILL or exit 143/137 cannot earn a refund, and a
+cancelled HQ status is ineligible. Failed HQ terminal events still query dispatch
+status so a running recovery cannot trigger a duplicate worker. Missing live
+head evidence also prevents a refund. Declined refunds retain the ordinary HQ
+transient retry path and its separate budget.
+
+There are at most two refunds across the PR's jobs, including archives. Set
+`ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS=0` to disable refunds or `=1` to lower
+the limit; larger integers are clamped to two and invalid values use two.
+No config-schema key is added. Retry comments say `not charged: <reason>` and
+`retryHistory[].retryMetadata.code` is `infrastructure-refund`. Harness-specific
+failures prefer an eligible fallback but run the uncapped primary when none is
+eligible; they do not create quota holds. See the
+[job data model](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01)
+for durable evidence and publication-count limitations.
+
 ## Scope and current contract
 
 - This is a **bounded loop** with operator override. It is not an unbounded autonomous retry daemon.

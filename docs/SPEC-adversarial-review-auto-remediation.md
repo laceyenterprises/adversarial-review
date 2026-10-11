@@ -728,11 +728,35 @@ remediated, plus the route reviewer selection gives the builder with and without
 its primary reviewer capped (the gemini fallback layer). The check is the same
 `isCrossModelReviewWaived` rule that keeps a builder from reviewing its own
 work. The routed primary (builder-tag route or operator pin) is not
-second-guessed. If no candidate survives, the claim holds as described below.
+second-guessed. If no candidate survives for a capped primary, the claim holds
+as described below.
 This availability fallback may select the PR builder's family as a remediator;
 the normal builder-tag route resumes automatically when its provider recovers.
 Unknown and degraded states alone do not authorize fallback, and an unreadable
 status with no job-local evidence keeps the primary.
+
+REMREFUND-01 also prefers that fallback chain after a harness-specific
+infrastructure refund (`codex-tool-host-unavailable` or local `boot-failed`).
+That preference does not ground the primary: if no eligible fallback survives,
+the uncapped primary runs again. Genuine quota caps and reset-window holds
+retain their existing behavior.
+
+Reconcile refunds only an exited worker with an independent recorded reason
+(`codex-tool-host-unavailable`, `publish-blocked`, `boot-failed`/`boot-failure`),
+known unchanged authoritative live head evidence and no lifecycle stop.
+Bare signals or exit 137/143 cannot prove infrastructure provenance, and
+cancelled HQ statuses are ineligible. Failed terminal events require an HQ
+status probe before any settlement, including while HQ recovery is active.
+The existing retry transition removes the charged round, retains the outcome
+in `retryHistory[]` with `retryMetadata.code: "infrastructure-refund"` and queues
+the same round immediately without spending the transient budget. One refund
+is allowed per charged round on the job and at most two across the PR's ledger,
+including archived jobs. `ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS` can lower
+that ceiling (zero disables it); non-negative integers are clamped to two and
+invalid values use two. Eligibility and requeue share the job-write lock.
+An ineligible refund continues through existing HQ transient retry handling.
+The [follow-up job data model](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01)
+defines the persisted fields and publication-count limitations.
 
 Code-PR reviewer and remediator stage prompts share the same canonical
 doc-currency contract. Reviewer stages must flag stale in-repo data-model docs

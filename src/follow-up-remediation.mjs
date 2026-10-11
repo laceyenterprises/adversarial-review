@@ -2934,8 +2934,7 @@ async function reconcileFollowUpJob({
   }
 
   const dispatchFailureDetail = liveness?.dispatchStatus?.failureDetail || null;
-  if (worker?.dispatchMode === 'hq' && !recordedInfrastructureReason(liveness?.dispatchStatus)
-    && classifyHqDispatchFailure(liveness?.dispatchStatus) === 'transient') {
+  if (worker?.dispatchMode === 'hq' && classifyHqDispatchFailure(liveness?.dispatchStatus) === 'transient') {
     const nextTransientRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
     const maxTransientRetries = resolveMaxTransientRemediationRetries();
     const currentRound = Number(job?.remediationPlan?.currentRound || 0);

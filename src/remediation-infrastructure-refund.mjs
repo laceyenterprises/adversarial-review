@@ -2,13 +2,13 @@
 export const MAX_INFRASTRUCTURE_REFUNDS = 2;
 
 export function recordedInfrastructureReason(outcome) {
+  if (['cancelled', 'canceled'].includes(outcome?.status)) return null;
   const reasons = [outcome?.failureReason, outcome?.failure_reason, outcome?.failureClass, outcome?.failure_class,
     outcome?.failureCode, outcome?.failure_code];
   const reason = reasons.find((value) => ['codex-tool-host-unavailable', 'publish-blocked', 'boot-failed', 'boot-failure'].includes(value));
-  if (reason) return reason;
-  const exit = outcome?.exitCode ?? outcome?.exit_code;
-  if ([137, 143].includes(exit)) return `worker-signal-${exit}`;
-  return null;
+  // A signal/exit code has no provenance: operators and supervisors use these
+  // same signals. Require an independent infrastructure reason even for 137/143.
+  return reason || null;
 }
 
 export function infrastructureRefundReason({ outcome, startHead, endHead, refunds = 0, env = process.env }) {

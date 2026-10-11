@@ -215,7 +215,7 @@ export async function resolveRemediationWorkerClassWithFallback({
     && (lastRetry.retryMetadata.workerClass === primaryClass
       || (lastRetry.retryMetadata.reason === 'codex-tool-host-unavailable'
         && ['codex', 'remediator-codex-corp'].includes(primaryClass)));
-  if (!primaryCap.capped && !infrastructureFallback) {
+  if (!primaryCap.capped && (!infrastructureFallback || primaryCap.resetsWithinHoldWindow)) {
     if (primaryCap.resetsWithinHoldWindow) {
       return {
         ...base,
@@ -285,6 +285,12 @@ export async function resolveRemediationWorkerClassWithFallback({
       candidateState: statuses ? cap.state : 'unverified',
       skipped,
     };
+  }
+
+  // Infrastructure fallback is a preference. An uncapped primary may have
+  // recovered; never create a quota hold solely because its harness failed.
+  if (infrastructureFallback && !primaryCap.capped && !primaryCap.resetsWithinHoldWindow) {
+    return { ...base, reason: 'infrastructure-fallback-unavailable', primaryState: primaryCap.state, skipped };
   }
 
   // Nothing can take the job. Respawning the capped primary is a guaranteed

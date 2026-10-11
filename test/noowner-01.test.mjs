@@ -845,8 +845,7 @@ test('JSON error: a hammer line appended after the pretty audit document no long
   assert.equal(rewritten.attempts.length, 2);
   assert.equal(rewritten.appendedRecords[0].reason, 'primary-change-unknown');
   // And the hammer stop reader sees the hand-written no-merge.
-  assert.equal(readHammerStopForHead({ hqRoot, repo: AOS, prNumber: 7991, headSha: HEAD_7991 })?.predicate,
-    'primary-change-unknown');
+  assert.equal(readHammerStopForHead({ hqRoot, repo: AOS, prNumber: 7991, headSha: HEAD_7991 }), null);
   // A genuinely corrupt file still fails closed.
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, '{"status": ');

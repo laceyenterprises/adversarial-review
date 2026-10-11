@@ -80,7 +80,7 @@ try {
     }
     primaryChange = {
       status: evidence.readFailed ? 'read-failed' : evidence.hasHammerCommits === null ? 'unknown' : 'available',
-      primaryHead: evidence.primaryHead, mergeBase: evidence.mergeBase,
+      reason: evidence.reason ? compact(evidence.reason, 300) : undefined, primaryHead: evidence.primaryHead, mergeBase: evidence.mergeBase,
       fullEvidenceCommand: `node bin/primary-change-context.mjs ${repo} ${number} ${head}`,
       files: [], truncated: false,
     };
@@ -92,7 +92,7 @@ try {
       }
       primaryChange.files.push(item);
     }
-  } catch { primaryChange = { status: 'read-failed' }; }
+  } catch (error) { primaryChange = { status: 'read-failed', reason: compact(String(error.message || error), 300) }; }
   const output = {
     primaryChange,
     statedIntent: compact(pr.body, 800),
@@ -111,7 +111,7 @@ try {
   if (Buffer.byteLength(serialized) >= 8192) {
     output.snapshotTruncated = true;
     output.statedIntent = '';
-    output.primaryChange = { status: primaryChange.status, fullEvidenceCommand: primaryChange.fullEvidenceCommand, truncated: true };
+    output.primaryChange = { status: primaryChange.status, reason: primaryChange.reason, fullEvidenceCommand: primaryChange.fullEvidenceCommand, truncated: true };
     output.checks = output.checks.slice(0, 10).map((c) => ({ name: compact(c.name, 100), conclusion: compact(c.conclusion, 30) }));
     output.requiredChecks = output.requiredChecks.slice(0, 10).map((c) => compact(c, 100));
     serialized = JSON.stringify(output);

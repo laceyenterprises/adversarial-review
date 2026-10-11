@@ -11,13 +11,19 @@ import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parse
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
   parseCommitTrailers(commit?.commit?.message || '')['worker-class'] || '');
+const isHammerCommit = (commit) => {
+  const trailers = parseCommitTrailers(commit?.commit?.message || '');
+  // Keep legacy tagged repairs protected; identity also catches untagged pushes.
+  // Reversal authorization still requires the stricter worker-class provenance.
+  return isHammer(commit) || hamCommitIdentityMatches(commit)
+    || trailers['closed-by'] === 'hammer (adversarial-pipe-mode)';
+};
 
 export function primaryChangeRoot({ rootDir, env = process.env } = {}) {
   return resolve(rootDir || env.HAM_ROOT_DIR || fileURLToPath(new URL('../../', import.meta.url)));
 }
 
-// Dispatch records are daemon-owned evidence. The earliest launch protects
-// untagged repairs too; a later launch must never narrow the author baseline.
+// Legacy dispatch-record reader. Launches alone do not establish commit provenance.
 export function readPrimaryChangeLaunchHead(rootDir, repo, prNumber) {
   const directory = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
   let names;
@@ -240,7 +246,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     const cost = checkCiCost(evidence.ciCost, headSha);
     if (!cost.ok) return cost;
   }
-  if (!evidence) return { ok: false, reason: 'primary-change-unknown' };
+  if (!evidence) return { ok: false, reason: 'primary-change-unknown', detail: 'missing primary-change evidence' };
   if (evidence.headSha !== headSha || evidence.headMismatch) return { ok: false, reason: 'primary-change-read-failed' };
   if (evidence.readFailed === true) return { ok: false, reason: 'primary-change-read-failed' };
   if (evidence.hasHammerCommits === false) return { ok: true, applicable: false };
@@ -267,7 +273,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       if (!actual) continue;
       if (change.opaque) {
         if (actual.sha !== change.sha || actual.status !== change.status) {
-          return { ok: false, reason: 'primary-change-unknown', path, testRegionsChanged: testChanges };
+          return { ok: false, reason: 'primary-change-unknown', detail: 'opaque file changed without readable patch', path, testRegionsChanged: testChanges };
         }
         continue;
       }
@@ -301,65 +307,45 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       }
     }
     return { ok: true, applicable: true, testRegionsChanged: testChanges };
-  } catch {
-    return { ok: false, reason: 'primary-change-unknown' };
+  } catch (error) {
+    return { ok: false, reason: 'primary-change-unknown', detail: evidence.reason || error.message };
   }
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
-async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, dispatchedHead = null,
-  rootDir, env = process.env }) {
-  rootDir = primaryChangeRoot({ rootDir, env });
+async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
   const read = (path) => {
     if (!responses.has(path)) responses.set(path, Promise.resolve().then(() => get(path)));
     return responses.get(path);
   };
-  const unknown = { headSha, hasHammerCommits: null };
+  const unknown = (reason, extra = {}) => ({ headSha, hasHammerCommits: null, reason, ...extra });
   try {
-    if (!SHA.test(headSha || '')) return unknown;
+    if (!SHA.test(headSha || '')) return unknown('invalid head SHA');
     const pr = await read(`repos/${repo}/pulls/${prNumber}`);
-    if (pr.head?.sha !== headSha) return { ...unknown, headMismatch: true };
-    if (!SHA.test(pr.base?.sha || '')) return unknown;
+    if (pr.head?.sha !== headSha) return unknown('live head changed during history read', { headMismatch: true });
+    if (!SHA.test(pr.base?.sha || '')) return unknown('missing base SHA');
     const history = await read(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
     if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
       || history.commits.length >= 250
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
-        || typeof commit?.commit?.message !== 'string')) return unknown;
-    const first = history.commits.find(isHammer);
-    dispatchedHead ||= readPrimaryChangeLaunchHead(rootDir, repo, prNumber);
-    // A trusted dispatch launch SHA covers untagged CI/conflict repairs before
-    // the first tagged HAM commit. Never accept this value from a HAM claim.
-    if (dispatchedHead && !SHA.test(dispatchedHead)) return unknown;
-    if (!first && !dispatchedHead) return { headSha, hasHammerCommits: false };
+        || typeof commit?.commit?.message !== 'string')) return unknown('missing, malformed or capped commit history');
+    const first = history.commits.find(isHammerCommit);
+    if (!first) return { headSha, hasHammerCommits: false };
     if (first && (!first.parents?.length || first.parents.length > 2
-      || !SHA.test(first.parents[0].sha))) return unknown;
+      || !SHA.test(first.parents[0].sha))) return unknown('missing or unsupported first hammer parents');
     if (first && first.parents.length === 2) {
       const baseParent = await read(`repos/${repo}/compare/${first.parents[1].sha}...${pr.base.sha}`);
-      if (!['ahead', 'identical'].includes(baseParent.status)) return unknown;
+      if (!['ahead', 'identical'].includes(baseParent.status)) return unknown('hammer merge second parent is not in base ancestry');
     }
     // The actual first hammer parent includes every author commit, including
     // rebased author commits. A hammer-authored trailer cannot narrow it.
-    let primaryHead = dispatchedHead || first.parents[0].sha;
-    if (dispatchedHead) {
-      const ancestry = await read(`repos/${repo}/compare/${dispatchedHead}...${headSha}`);
-      if (!['ahead', 'identical'].includes(ancestry.status)) {
-        if (!first) return unknown;
-        primaryHead = first.parents[0].sha;
-      }
-    }
-    let primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
-    const final = await read(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
-    // A base merge can retain launch ancestry while advancing the merge base.
-    // Use the same verified rebased HAM parent as the diverged-launch path.
-    if (final.merge_base_commit?.sha !== primary.merge_base_commit?.sha
-      && dispatchedHead && first && primaryHead !== first.parents[0].sha) {
-      primaryHead = first.parents[0].sha;
-      primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
-    }
+    const primaryHead = first.parents[0].sha;
+    const primary = await read(`repos/${repo}/compare/${pr.base.sha}...${primaryHead}`);
+    const final = history;
     const mergeBase = primary.merge_base_commit?.sha;
-    if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown;
+    if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown('primary and final merge bases are missing or differ');
     const reversalAuthorizations = [];
     const authorizedPairs = new Set();
     const closure = history.commits.slice(history.commits.findIndex((commit) => commit.sha === primaryHead) + 1);
@@ -418,7 +404,8 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, dispatc
       primaryFiles: primary.files, finalFiles: final.files };
   } catch (error) { return error?.primaryChangeReadFailed === true || error?.authOutage === true || error?.name === 'AbortError'
     || error?.code === 'ABORT_ERR' || isTransientGhError(error)
-    ? { ...unknown, readFailed: true } : unknown; }
+    ? unknown(`history read failed: ${error.message || error}`, { readFailed: true })
+    : unknown(`history read failed: ${error.message || error}`); }
 }
 
 // Every production primary-change read also proves the independent cost gate.

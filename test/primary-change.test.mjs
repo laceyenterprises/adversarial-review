@@ -71,6 +71,7 @@ test('collector distinguishes read failure from unsupported history', async () =
     async (path) => path.includes('/pulls/')
       ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } } : { total_commits: 1, commits: [{}] }]) {
     const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get });
+    assert.ok(result.reason);
     assert.equal(checkPrimaryChange(result, head).reason, result.readFailed ? 'primary-change-read-failed' : 'primary-change-unknown');
   }
 });
@@ -178,7 +179,7 @@ test('insertion coordinates agree with and without surrounding diff context', ()
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
-test('closer dispatch defers failed reads and exposes scoped recovery for unsupported evidence', async () => {
+test('closer dispatch defers failed reads and unknown evidence without an operator park', async () => {
   const { maybeDispatchAmaCloser } = await import('../src/ama/dispatch-closer.mjs');
   for (const readFailed of [true, false]) {
     const result = await maybeDispatchAmaCloser({
@@ -192,8 +193,8 @@ test('closer dispatch defers failed reads and exposes scoped recovery for unsupp
       dispatchContext: { repo: 'fixture/repo' },
     });
     assert.equal(result.skipMergeAgent, true);
-    assert.equal(result.reason, readFailed ? 'gate-read-failed' : 'primary-change-repair-required');
-    assert.equal(result.needsOperator === true, !readFailed);
+    assert.equal(result.reason, 'gate-read-failed');
+    assert.equal(result.needsOperator === true, false);
   }
 });
 
@@ -220,7 +221,7 @@ test('renamed primary paths normalize subsequent previous_filename keys', () => 
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
-test('trusted dispatch head covers untagged repairs and login names do not establish HAM authority', async () => {
+test('a launch without a hammer commit does not anchor remediation repairs', async () => {
   const baseline = 'a'.repeat(40), base = 'b'.repeat(40);
   const file = primaryChangeFixture(head).primaryFiles;
   const get = async (path) => {
@@ -233,8 +234,8 @@ test('trusted dispatch head covers untagged repairs and login names do not estab
   const input = { repo: 'fixture/repo', prNumber: 1, headSha: head, get };
   assert.equal((await fetchPrimaryChange(input)).hasHammerCommits, false);
   const evidence = await fetchPrimaryChange({ ...input, dispatchedHead: baseline });
-  assert.equal(evidence.primaryHead, baseline);
-  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  assert.equal(evidence.hasHammerCommits, false);
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
 test('all HAM classes and verified base merges preserve the first-parent author baseline', async () => {
@@ -440,7 +441,7 @@ test('quoted HAM trailer outside terminal trailer block is not HAM authority', a
 });
 
 
-test('daemon dispatch records anchor untagged repairs at earliest trusted launch', async (t) => {
+test('launch records alone do not anchor a primary change', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-launch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const directory = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
@@ -457,10 +458,12 @@ test('daemon dispatch records anchor untagged repairs at earliest trusted launch
     get: async (path) => {
       if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: base } };
       if (path.endsWith(`${baseline}...${head}`)) return { status: 'ahead' };
-      return { total_commits: 1, commits: [{ sha: head, commit: { message: 'untagged repair' } }],
+      return { total_commits: 2, commits: [
+        { sha: 'e'.repeat(40), commit: { message: 'builder change' } },
+        { sha: head, commit: { message: 'remediation worker repair after no-op launch' } }],
         merge_base_commit: { sha: base }, files: primaryChangeFixture(head).primaryFiles };
     } });
-  assert.equal(evidence.primaryHead, baseline);
+  assert.equal(evidence.hasHammerCommits, false);
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
@@ -473,7 +476,7 @@ test('HAM-like subject without a provenance trailer is not HAM authority', async
 });
 
 
-test('dispatch baseline skips malformed and legacy records but defers I/O errors', async (t) => {
+test('legacy record reader skips malformed records and unused launch I/O cannot poison history', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-record-errors-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const directory = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
@@ -491,7 +494,7 @@ test('dispatch baseline skips malformed and legacy records but defers I/O errors
     headSha: head, get: async (path) => path.includes('/pulls/')
       ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } }
       : { total_commits: 0, commits: [] } });
-  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-read-failed');
+  assert.equal(evidence.hasHammerCommits, false);
 });
 
 test('compare cache is evaluation-local and runtime roots honor explicit and environment values', async () => {
@@ -513,11 +516,32 @@ test('compare cache is evaluation-local and runtime roots honor explicit and env
   assert.equal(primaryChangeRoot({ rootDir: '/explicit', env: { HAM_ROOT_DIR: '/runtime' } }), '/explicit');
 });
 
-test('a diverged trusted launch cannot waive untagged automation without actor evidence', async () => {
+test('a remediation rebase after a launch with no hammer commit remains known', async () => {
   const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
     dispatchedHead: 'd'.repeat(40), get: async (path) => path.includes('/pulls/')
       ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } }
       : path.includes('d'.repeat(40)) ? { status: 'diverged' }
         : { total_commits: 1, commits: [{ sha: head, commit: { message: 'untagged repair' } }] } });
-  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-unknown');
+  assert.equal(evidence.hasHammerCommits, false);
+});
+
+
+test('PRIMARYCHG-01: remediation after hammer and second launch preserve the first hammer parent', async () => {
+  const base = 'b'.repeat(40), author = 'a'.repeat(40), hammer = 'e'.repeat(40);
+  const files = primaryChangeFixture(head).primaryFiles;
+  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+    dispatchedHead: hammer, get: async (path) => {
+      if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: base } };
+      if (path.endsWith(`${base}...${author}`)) return { merge_base_commit: { sha: base }, files };
+      return { total_commits: 3, commits: [
+        { sha: author, commit: { message: 'builder and remediation changes' } },
+        { sha: hammer, author: { login: 'merge-agent-lacey' }, parents: [{ sha: author }],
+          commit: { message: 'repair\n\nClosed-By: hammer (adversarial-pipe-mode)' } },
+        { sha: head, parents: [{ sha: hammer }], commit: { message: 'remediation worker repair' } },
+      ], merge_base_commit: { sha: base }, files };
+    } });
+  assert.equal(evidence.hasHammerCommits, true);
+  assert.equal(evidence.primaryHead, author);
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  assert.equal(checkPrimaryChange({ ...evidence, finalFiles: [] }, head).reason, 'primary-change-reverted');
 });

@@ -1105,12 +1105,12 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
-  // The in-lease gate has already classified a partial evidence re-read as
-  // retryable. Preserve that classification rather than creating an operator park.
-  if (daemonResult?.reason === 'gate-read-failed'
-    && daemonResult?.reasons?.includes('primary-change-unknown')) {
+  // PRIMARYCHG-01: missing evidence is retryable before and inside the lease.
+  // Retain merge refusal while the next pipeline tick recomputes it.
+  if (daemonResult?.reasons?.includes('primary-change-unknown')
+    && !daemonResult?.reasons?.includes('primary-change-reverted')) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-      needsOperator: false };
+      reason: 'gate-read-failed', needsOperator: false };
   }
   const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
   if (remediableGate && daemonResult?.reasons?.includes('primary-change-read-failed')) {

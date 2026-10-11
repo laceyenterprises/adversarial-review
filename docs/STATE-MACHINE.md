@@ -711,7 +711,7 @@ Key control points:
   opening the existing database, the helper checks effective UID ownership of
   daemon state and the configured pager sink. Only the latest authoritative
   review in live-head ancestry may be disputed.
-  Neither reversal authorization nor dispute raises `hq decision raise`. Predicate
+  Neither reversal authorization nor dispute raises `hq decision raise`. Proven reversal
   refusals hold merge with `needsOperator: true`; an attributable current-head
   `merge-agent-requested` event can dispatch the existing operator recovery lane.
   The closer returns `primary-change-repair-required`; the daemon returns
@@ -1074,3 +1074,9 @@ inner transient retries. Revoked proof or new CI fails closed without permanentl
 locking the head or requiring manual close; later ticks evaluate real CI again.
 A merged daemon result remains terminal for dispatch and never sends this clean
 head to the hammer's non-empty-remediation contract.
+
+PRIMARYCHG-01: unknown primary-change evidence defers merge and is recomputed
+on each pipeline tick. It does not establish a final hammer no-merge judgment
+or require operator recovery. Old `primary-change-unknown` stop audits do not
+hold redispatch once ordinary live-head gates pass. A proven primary-change
+reversal remains refused. Launch records alone cannot establish a baseline.

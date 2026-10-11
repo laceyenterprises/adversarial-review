@@ -1,4 +1,5 @@
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
+import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
 import { recoverOrphan } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
@@ -1514,7 +1515,8 @@ async function dispatchAmaClosureFor({
   // the closer-only chain. That flag admits a repair attempt; merge authority
   // still requires the exact-head terminal-remediation validator, including its
   // reviewed-head binding. An uncertified head needs an exact-head review.
-  if (reviewedHeadIsStale) {
+  if (reviewedHeadIsStale && !(isOrphanHeadReviewRequested(reviewStateRow, currentPrHeadSha)
+    && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))) {
     try {
       throwIfAborted(signal);
       const closerCommitSuppression = await runCoexistenceOperation(
@@ -2292,7 +2294,7 @@ async function dispatchAmaClosureFor({
   }
   const closerRecovery = await recoverStrandedCloserHeadImpl({ result,
     closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
-    prNumber, headSha: currentPrHeadSha, labels: labelNames || [], signal,
+    prNumber, headSha: currentPrHeadSha, reviewStateRow, labels: labelNames || [], signal,
     timeoutMs: operationTimeoutMs, logger });
   if (closerRecovery) return withAmaDispatchMetadata(closerRecovery, { amaEnabled: true });
 

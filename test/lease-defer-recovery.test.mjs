@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { recoverStrandedCloserHead as recoverCloserHead } from '../src/ama/closer-head-recovery.mjs';
+import { requestBoundedOrphanReview } from '../src/ama/orphan-review-request.mjs';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { probeOrphanOwnership } from '../src/ama/orphan-watchdog.mjs';
 import { writeAmaAuditEntry, readAmaAuditEntry } from '../src/ama/audit.mjs';
@@ -16,7 +17,10 @@ const head = 'a'.repeat(40);
 const stale = { dispatched: false, reason: 'not-eligible',
   reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] };
 const recoverStrandedCloserHead = options => recoverCloserHead({ rootDir: '/fixture',
-  repo: 'fixture/repo', prNumber: 42, probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
+  repo: 'fixture/repo', prNumber: 42,
+  requestBoundedReviewImpl: options => options.requestRereviewImpl({ ...options,
+    targetRevisionRef: options.headSha, reason: `system-orphan-head-review:${options.headSha}` }),
+  probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
   ...options });
 
 test('pushed HAM head stranded after lease timeout requests an admissible exact-head review in one tick', async () => {
@@ -112,7 +116,7 @@ for (const [reason, pr] of [
     assert.equal(audit.attempts.at(-1).outcome, outcome);
     assert.equal(audit.attempts.at(-1).reason, `merge-lease-admission:${reason}`);
     assert.equal(audit.attempts.at(-1).attemptPhase, 'hammer-lease-admission');
-    if (reason !== 'pr-not-open') assert.equal(readHammerStopForHead({ hqRoot: dir,
+    assert.equal(readHammerStopForHead({ hqRoot: dir,
       repo: 'fixture/repo', prNumber: 42, headSha: head }), null);
   });
 }
@@ -213,7 +217,8 @@ for (const reason of ['comment-only-verdict-settled', 'comment-only-final-round-
 test('already-pending exact-head review retains reviewer ownership', async () => {
   const result = await recoverStrandedCloserHead({ result: stale, closerAuthored: true, headSha: head,
     logger: { log() {} }, requestRereviewImpl: async () => ({ triggered: false,
-      status: 'already-pending', reason: 'review-already-pending' }) });
+      status: 'already-pending', reason: 'review-already-pending',
+      reviewRow: { rereview_requested_at: 'now', rereview_reason: `system-orphan-head-review:${head}`, revision_ref: head } }) });
   assert.equal(result.reason, 'closer-head-exact-review-requested');
 });
 
@@ -253,3 +258,38 @@ test('unreadable ownership evidence defers exact-head recovery', async () => {
     probeOwnershipImpl: () => { throw new Error('unreadable'); },
     requestRereviewImpl: () => assert.fail('uncertain ownership') }), null);
 });
+
+
+test('pending without exact-head request has no reviewer owner', async () => {
+  assert.equal(await recoverStrandedCloserHead({ result: stale, closerAuthored: true,
+    headSha: head, requestRereviewImpl: async () => ({ status: 'already-pending',
+      reviewRow: { review_status: 'pending', revision_ref: head, rereview_requested_at: null } }) }), null);
+});
+
+test('timeout-exhausted head cannot be reset repeatedly after closer recovery', async t => {
+  const { dir } = acquisitionFixture(t);
+  let calls = 0;
+  const options = { rootDir: dir, result: stale, closerAuthored: true, headSha: head,
+    requestBoundedReviewImpl: requestBoundedOrphanReview, logger: { log() {} },
+    requestRereviewImpl: async () => { calls++; return { triggered: true }; } };
+  assert.equal((await recoverStrandedCloserHead(options)).recoveryWait, true);
+  const failed = { ...options, reviewStateRow: { review_status: 'failed', reviewer_head_sha: head } };
+  assert.equal(await recoverStrandedCloserHead(failed), null);
+  assert.equal(await recoverStrandedCloserHead(failed), null);
+  assert.equal(await recoverStrandedCloserHead(options), null, 'durable guard survives missing review row');
+  assert.equal(calls, 1);
+});
+
+for (const reason of ['operator-hold', 'pr-is-draft', 'pr-not-open']) {
+  test(`admission ${reason} neither sets nor clears a prior hammer decision`, t => {
+    const { dir, run } = acquisitionFixture(t);
+    writeAmaAuditEntry({ hqRoot: dir, repo: 'fixture/repo', prNumber: 42, headSha: head,
+      attempt: { outcome: 'failed-without-merge', reason: 'operator-decision',
+        attemptPhase: 'hammer-gh-pr-merge', startedAt: '2026-10-11T00:00:00Z' } });
+    const pr = reason === 'operator-hold' ? { ...openPr, labels: [{ name: 'no-merge-hold' }] }
+      : reason === 'pr-is-draft' ? { ...openPr, isDraft: true } : { ...openPr, state: 'CLOSED' };
+    assert.equal(run(pr).status, 0);
+    assert.equal(readHammerStopForHead({ hqRoot: dir, repo: 'fixture/repo', prNumber: 42,
+      headSha: head }).predicate, 'operator-decision');
+  });
+}

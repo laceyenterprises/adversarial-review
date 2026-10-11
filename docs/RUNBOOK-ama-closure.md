@@ -1764,16 +1764,21 @@ ordinary retry and the bounded watchdog. Hard refusals are classified first:
 labels, terminal PRs, disallowed risk classes and branch-protection/fast-merge
 failures retain `needsOperator` routing without requesting review. The watcher-owned
 `duplicate-family-unresolved` census hold retains its 30-second automatic retry.
-Only a triggered or `already-pending` request (API status `already-pending`,
-reason `review-already-pending`) returns `closer-head-exact-review-requested`, mapped to
+The leaf and watchdog share the durable per-head `heads.rereview` reservation
+and lock, set before attempting the request. Failed current-head review rows
+never reset through this leaf. Only a triggered request, or a returned row
+with the exact `system-orphan-head-review:<head>` marker and revision, returns `closer-head-exact-review-requested`, mapped to
 `ama-pending` while the watcher owns that review. A refused request falls through
 to REMORPHAN-01 with its existing per-head attempts/ticks and SEV1 exhaustion or
 ownership-uncertainty page; refusal never creates an unconditional wait.
 A closer-trailer tip can arm stale-head HAM resume after a rebase breaks the
 closer-only chain only after an authoritative live-review probe finds no review
 on the new head. Without chain proof or authoritative reviewer identity, resume
-stays off and an ownerless head can request exact-head review. This admits repair
-only: the terminal-remediation validator still proves the exact head and its
+stays off and an ownerless head can request exact-head review. This intentionally widens dispatch beyond ancestry-proven closer-only chains:
+intervening worker commits may enter the hammer repair lane. The hammer owns
+final adjudication of that head; dispatch admission is not merge certification.
+While an exact-head review is pending/reviewing, the stale-tip path skips the
+additional live-review/commit/certificate probes. This admits repair only: the terminal-remediation validator still proves the exact head and its
 `reviewed-head` binding before merge.
 
 STALECLOSER-03 shares `closerAuthoredStaleEligible` across the closer, eligible

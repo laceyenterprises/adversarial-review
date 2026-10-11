@@ -1249,3 +1249,15 @@ for (const scenario of ['MERGEABLE', 'CONFLICTING', 'UNKNOWN', 'null', 'head-mov
     else assert.equal(result.dispatched, true);
   });
 }
+
+
+test('pending exact-head orphan request skips repeated stale-tip review and certificate reads', async t => {
+  const { args } = closerResumeFixture('green');
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  args.reviewStateRow = { ...args.reviewStateRow, review_status: 'pending',
+    rereview_requested_at: '2026-10-11T00:00:00Z',
+    rereview_reason: 'system-orphan-head-review:H1', revision_ref: 'H1' };
+  args.fetchHeadCloserVerifiedCommitImpl = async () => assert.fail('pending review owns this tip');
+  args.resolveHamTerminalRemediationEvidenceImpl = async () => assert.fail('pending review owns this tip');
+  await maybeDispatchAmaClosureFor(args);
+});

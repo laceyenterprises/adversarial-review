@@ -3,6 +3,7 @@
 **Owner:** AMA owner-of-last-resort recovery
 **Store:** `data/follow-up-jobs/orphan-watchdog/<sha256(repo#prNumber)>.db` and sibling `.lock`
 **Source of truth:** `src/ama/orphan-watchdog.mjs`
+**Related schema surface:** `src/ama/orphan-review-request.mjs`
 **Runtime surface:** `src/ama-closure-orchestration.mjs`
 
 ## Schema and lifecycle
@@ -64,9 +65,13 @@ successful enqueue. Exhaustion and uncertainty pages also use deterministic
 alert-outbox identities scoped to repo/PR/head, so a crash before updating a
 page guard cannot enqueue a duplicate. Failures persist `pageError` and retry
 on later ticks without another launch. Pages contain bounded reason/round/stop/launch summaries, never
-whole review or job objects. `rereview` guards the one exact-head review request
-for an uncertifiable closer-authored head. A triggered request or the review API's
-`status: already-pending` / `reason: review-already-pending` persists this guard.
+whole review or job objects. `rereview` reserves the one exact-head review request
+for an uncertifiable closer-authored head before the external request. The
+recovery leaf and watchdog share this row and its lock. Failures and interruption
+retain the reservation; bounded hammer attempts and exhaustion paging retain
+ownership. An already-pending response counts as reviewer ownership only when
+its returned row contains the exact-head orphan request marker and revision.
+Failed review rows already attempted on this head cannot be reset by either path.
 
 Ineligibility or a known owner resets consecutive observation streaks. An
 empty head or unsettled background-dispatch result is neutral: no store write,

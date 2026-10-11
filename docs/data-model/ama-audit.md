@@ -132,3 +132,7 @@ transient configuration lookup errors write `reason: gate-read-failed`,
 proof instead of deferring. Revoked proof or newly appearing CI records
 `reason: gate-not-eligible`, `permanent: false` with the real eligibility reasons
 and omits `manualCloseRequired`, permitting a later same-head retry.
+
+Lease-admission attempts (`attemptPhase: hammer-lease-admission`) record live
+head/state/draft/label refusals but neither set nor clear a hammer stop decision.
+The stop reader skips them even when their outcome is deferred or failed.

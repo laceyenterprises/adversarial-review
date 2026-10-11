@@ -455,7 +455,11 @@ test('#1178: the re-armed hammer is the one observed next, and the retry budget 
   // The second hammer exits the same way. Before HAMBG-02 the closer kept
   // reading the reviewed-head record, re-observed LRQ_FIRST, and every tick
   // died on `refusing to reuse terminal reviewer_passes row`.
-  const secondDeps = closerDeps({ nextLaunch: LRQ_THIRD, alerts });
+  const secondDeps = {
+    ...closerDeps({ nextLaunch: LRQ_THIRD, alerts }),
+    // Proven missing merged evidence permits bounded exit-without-close retry.
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
+  };
   const again = await maybeDispatchAmaCloser({
     ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T04:05:00Z' }),
     ...secondDeps,
@@ -473,7 +477,10 @@ test('#1178: the re-armed hammer is the one observed next, and the retry budget 
   assert.equal(ledger.attemptCount, 2);
 
   // The third exit meets the normal cap: suppressed, and the operator is paged.
-  const thirdDeps = closerDeps({ nextLaunch: 'lrq_unexpected', alerts });
+  const thirdDeps = {
+    ...closerDeps({ nextLaunch: 'lrq_unexpected', alerts }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
+  };
   const capped = await maybeDispatchAmaCloser({
     ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T04:10:00Z' }),
     ...thirdDeps,

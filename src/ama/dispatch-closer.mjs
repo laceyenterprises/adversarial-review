@@ -148,7 +148,7 @@ import { DUPLICATE_FAMILY_UNRESOLVED_REASON } from '../duplicate-family-gate.mjs
 import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 import { resolveNodeBin } from '../node-interpreter.mjs';
 import { resolveCloserPassAttempt } from './closer-pass-attempt.mjs';
-import { classifyDeadHammerCause, maybeRearmInfraDeadHammer, unexecutedHammerReason } from './dead-hammer-rearm.mjs';
+import { maybeRearmInfraDeadHammer, unexecutedHammerReason } from './dead-hammer-rearm.mjs';
 import {
   evaluateHammerStopHold,
   HAMMER_STOP_HOLD_REASON,
@@ -4584,11 +4584,7 @@ export async function maybeDispatchAmaCloser({
     prefetchedLaunchRequestProbe = probe;
     throwIfAborted(signal);
     const terminal = probe?.ok && ['failed', 'succeeded'].includes(probe.row?.status);
-    const reason = terminal
-      ? unexecutedHammerReason(probe.row) || (probe.row.status === 'succeeded'
-        && !classifyDeadHammerCause({ failureClass: probe.row.failure_class, failureDetail: probe.row.failure_detail }).infra
-        ? 'unverified-terminal-success' : null)
-      : null;
+    const reason = terminal ? unexecutedHammerReason(probe.row) : null;
     if (reason && !auditTerminalOutcome) {
       const live = await probeAmaLivePrForMergeDispatch({ dispatchContext, execFileImpl, repo, prNumber, signal });
       const noMerge = live?.state === 'OPEN' && live.headRefOid === existingRecord.headSha
@@ -4600,7 +4596,7 @@ export async function maybeDispatchAmaCloser({
         readBuildCompletionProducerEvidenceImpl, readBuildCompletionSignalForPrImpl,
       });
       throwIfAborted(signal);
-      if (noMerge === false && !merged.ok) {
+      if (noMerge === false && isCleanMissingMergedSignal(merged)) {
         const reconciledLaunchRequestId = existingRecord.launchRequestId;
         const refund = refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
           jobKey: existingRecord.reviewedSha || reviewedSha,
@@ -4628,8 +4624,11 @@ export async function maybeDispatchAmaCloser({
           });
           // Preserve retryCount as the monotonic reviewer-pass identity. Only
           // admission subtracts these refunds; reusing a pass number is unsafe.
-          existingRecord = updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
-            current?.launchRequestId === reconciledLaunchRequestId ? {
+          let dispatchRecordReconciled = false;
+          existingRecord = updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => {
+            if (current?.launchRequestId !== reconciledLaunchRequestId) return null;
+            dispatchRecordReconciled = true;
+            return {
               ...current,
               previousUnexecutedLaunchRequestId: current.launchRequestId,
               launchRequestId: null, dispatchId: null,
@@ -4638,8 +4637,15 @@ export async function maybeDispatchAmaCloser({
               prelaunchRefusalSlowRetry: {
                 ...current.prelaunchRefusalSlowRetry, kind: 'non-execution',
               },
-            } : null));
-          if (!existingRecord) return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'dispatch-record-changed' });
+            };
+          });
+          if (!dispatchRecordReconciled) {
+            logger?.warn?.(JSON.stringify({
+              event: 'ama_closer.unexecuted_refund_dispatch_record_changed',
+              repo, prNumber, launchRequestId: reconciledLaunchRequestId, refund,
+            }));
+            return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'dispatch-record-changed' });
+          }
           existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
         }
       }
@@ -5007,6 +5013,13 @@ export async function maybeDispatchAmaCloser({
         // fell through to treating the hammer as merged without asking GitHub.
         && !certifiedPark
         && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
+        // Preserve the terminal-success hold below before HAMBG-02 can infer
+        // an exit without close from an OPEN PR whose merge may be queued.
+        && !(mergedSignalUnknown && !existingDispatchHeadAdvanced
+          && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
+          && !isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
+            now: dispatchContext.dispatchedAt,
+          }))
       ) {
         const terminalLivePr = await probeAmaLivePrForMergeDispatch({
           dispatchContext,

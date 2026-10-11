@@ -354,7 +354,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     prNumber: Number(identity.prNumber),
     jobKey: incomingJobKey || normalizeKey(existing?.jobKey),
     attemptCount: decision.nextAttemptCount,
-    // Lifetime count survives fresh reviews; deferrals and HAMREFUND-01 non-execution refunds reduce it.
+    // Lifetime count survives fresh reviews; only bounded deferral refunds reduce it.
     lifetimeAttemptCount: decision.nextLifetimeCount,
     targetRemediationSha: head || existingTargetSha,
     targetAttemptCount: targetShaChanged ? 1 : decision.nextTargetAttemptCount,
@@ -525,7 +525,8 @@ export function refundHammerRetryDispatch(rootDir, identity, {
 }
 
 // HAMREFUND-01: no execution is a separate refund, with no per-series grant.
-// Keep launch identities for idempotency across subsequent dispatches/reviews.
+// Lifetime charges and suppression remain intact so head churn cannot bypass
+// the PR-wide ceiling. Keep bounded launch history across dispatches/reviews.
 export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, headSha, launchRequestId, now } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt) return { refunded: false, reason: 'no-ledger' };
@@ -543,13 +544,11 @@ export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, head
   writeHammerRetryCapLedger(rootDir, identity, {
     ...ledger,
     attemptCount: down(ledger.attemptCount),
-    lifetimeAttemptCount: down(ledger.lifetimeAttemptCount ?? ledger.attemptCount),
     targetAttemptCount: normalizeKey(ledger.targetRemediationSha) === normalizeKey(headSha)
       ? down(ledger.targetAttemptCount) : ledger.targetAttemptCount,
-    unexecutedLaunchRequestIds: [...launches, launch],
+    unexecutedLaunchRequestIds: [...launches, launch].slice(-RETRYABLE_LAUNCH_HISTORY),
     suppressed: false,
     targetSuppressed: false,
-    lifetimeSuppressed: false,
     updatedAt: now || ledger.updatedAt,
   });
   return { refunded: true, reason: 'unexecuted' };

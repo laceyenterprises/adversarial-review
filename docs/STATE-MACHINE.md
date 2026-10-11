@@ -611,6 +611,21 @@ are exempt from the 30-minute unchanged-posting deadline. Live terminal PRs neve
 redrive. See [AMA Automated Recovery](data-model/ama-automated-recovery.md) for
 state fields, retention and reset.
 
+HAMREFUND-01 recognizes durable session-ledger signal/tool-host failures only:
+`worker_killed` plus `SIGTERM`/`SIGKILL` in `failure_detail`, or exact
+`codex-tool-host-unavailable` in `failure_class`/`failure_detail`. An unchanged
+live OPEN head, readable absence of closing no-merge evidence, no local terminal
+audit and a cleanly missing merged signal with repo producer evidence are
+required. Reconciliation refunds series/target charges, retains lifetime charges
+and suppression, settles the failed lease/pass and clears launch IDs into a
+six-hour `non-execution` slow-retry window. The window survives replacement
+admission; fresh heads reset it but cannot bypass the PR-wide lifetime ceiling.
+Only bounded LEASEPARK-01 contention refunds reduce lifetime charges. Bare
+`succeeded` rows retain ordinary success reconciliation and the one-refund-per-series
+exit grant. Unknown merged evidence with a live same-head `DISPATCHED` lease
+keeps the success hold before exit classification. See the [retry ledger](data-model/hammer-retry-cap.md)
+and [dispatch records](data-model/ama-closer-dispatches.md) for fields and retention.
+
 The background hammer queue rechecks the live PR state, head, draft flag, and
 mergeability when each queued entry gets a slot. Changed or unreadable state
 settles without launching a hammer; the next tick applies that outcome.

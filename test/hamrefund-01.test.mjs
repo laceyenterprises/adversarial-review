@@ -18,10 +18,18 @@ import {
   deleteAmaCloserLease,
   acquireAmaCloserLease,
   AMA_CLOSER_LEASE_STATUS,
+  readAmaCloserLease,
   updateAmaCloserLease,
 } from '../src/ama/closer-lease.mjs';
-import { readHammerRetryCapLedger, recordHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
-import { refundUnexecutedHammerDispatch, refundHammerRetryDispatch } from '../src/ama/hammer-retry-cap.mjs';
+import {
+  HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
+  evaluateHammerRetryCap,
+  markHammerRetryCapExhausted,
+  readHammerRetryCapLedger,
+  recordHammerRetryDispatch,
+  refundHammerRetryDispatch,
+  refundUnexecutedHammerDispatch,
+} from '../src/ama/hammer-retry-cap.mjs';
 import { unexecutedHammerReason } from '../src/ama/dead-hammer-rearm.mjs';
 import { selectNewerHammerLaunchRecord } from '../src/ama/hammer-outcome-truth.mjs';
 
@@ -132,7 +140,7 @@ function closerDeps({ nextLaunch = NEXT_LRQ, launchStatus = 'failed', launchRows
     writeFileImpl: () => {},
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
-    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
     readLaunchRequestStatusImpl: async ({ launchRequestId }) => (launchRows[launchRequestId]
       ? { ok: true, row: launchRows[launchRequestId] }
       : launchRequestId === DEAD_LRQ
@@ -210,20 +218,14 @@ function seedDeadHammer(rootDir, {
 
 
 for (const [label, launchRequestId, row] of [
-  ['failed signal (PR 8035)', 'lrq_58bbdea0', { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM', exit_code: 143 }],
-  ['legacy succeeded signal (PR 8025)', 'lrq_2e92fd9c', { status: 'succeeded' }],
-  ['Codex tool host (PR 8047)', 'lrq_556cc4da', { status: 'failed', reason: 'codex-tool-host-unavailable' }],
-  ['SIGKILL exit 137', 'lrq_sigkill', { status: 'failed', failure_class: 'worker_killed', exit_code: 137 }],
+  ['failed signal (PR 8035)', 'lrq_58bbdea0', { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' }],
+  ['Codex tool host (PR 8047)', 'lrq_556cc4da', { status: 'failed', failure_class: 'codex-tool-host-unavailable' }],
+  ['SIGKILL harness detail', 'lrq_sigkill', { status: 'failed', failure_class: 'worker_killed', failure_detail: 'worker killed by SIGKILL' }],
 ]) {
   test(`HAMREFUND-01: ${label} refunds and waits, even at the per-head bound`, async (t) => {
     const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     seedDeadHammer(rootDir, { launchRequestId, retryCount: 3 });
-    if (row.status === 'succeeded') {
-      deleteAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: HEAD });
-      acquireAmaCloserLease({ rootDir, repo: REPO, prNumber: PR_NUMBER, headSha: HEAD, now: '2026-10-10T21:00:00Z' });
-      updateAmaCloserLease({ rootDir, repo: REPO, prNumber: PR_NUMBER, headSha: HEAD, status: AMA_CLOSER_LEASE_STATUS.DISPATCHED, lrqId: launchRequestId, now: '2026-10-10T21:00:00Z' });
-    }
     const deps = closerDeps({ launchStatus: row.status, launchRows: { [launchRequestId]: row } });
     const result = await maybeDispatchAmaCloser({
       ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
@@ -231,18 +233,18 @@ for (const [label, launchRequestId, row] of [
     assert.equal(result.reason, 'dispatch-refusal-slow-retry-wait');
     assert.equal(deps.launches.length, 0);
     assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).attemptCount, 0);
-    assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).lifetimeAttemptCount, 0);
+    assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).lifetimeAttemptCount, 1);
     assert.equal(deps.alerts.length, 1);
-    assert.match(deps.alerts[0], /SIGTERM|SIGKILL|codex-tool-host-unavailable|unverified-terminal-success/);
+    assert.match(deps.alerts[0], /SIGTERM|SIGKILL|codex-tool-host-unavailable/);
   });
 }
 
-test('HAMREFUND-01: three deaths are uncharged; cadence and both pages persist across launches', async (t) => {
+test('HAMREFUND-01: three deaths retain lifetime charges; cadence and both pages persist across launches', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-series-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   seedDeadHammer(rootDir, { retryCount: 1 });
   const alerts = [];
-  const rows = { [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', exit_code: 143 } };
+  const rows = { [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' } };
   let now = Date.parse('2026-10-10T23:07:00Z');
   const tick = async (at, nextLaunch) => {
     const deps = closerDeps({ launchRows: rows, alerts, nextLaunch });
@@ -257,12 +259,13 @@ test('HAMREFUND-01: three deaths are uncharged; cadence and both pages persist a
     now += 32 * 60_000;
     const due = await tick(now, nextLaunch);
     assert.equal(due.result.dispatched, true, JSON.stringify(due.result));
-    rows[nextLaunch] = { status: 'failed', failure_class: 'worker_killed', exit_code: 143 };
+    rows[nextLaunch] = { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' };
     now += 60_000;
     const died = await tick(now);
     assert.equal(died.result.reason, 'dispatch-refusal-slow-retry-wait');
     const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
     assert.equal(ledger.attemptCount, 0);
+    assert.equal(ledger.lifetimeAttemptCount, index + 2);
     assert.equal(ledger.unexecutedLaunchRequestIds.length, index + 2);
     const wait = await tick(now + 60_000);
     assert.equal(wait.deps.launches.length, 0);
@@ -278,7 +281,11 @@ test('HAMREFUND-01: three deaths are uncharged; cadence and both pages persist a
 });
 
 test('HAMREFUND-01: only exact durable host/signal evidence earns the new refund', () => {
-  assert.equal(unexecutedHammerReason({ failure_class: 'worker_crashed', exit_code: 143 }), null);
+  assert.equal(unexecutedHammerReason({ failure_class: 'worker_crashed', failure_detail: 'SIGTERM' }), null);
+  assert.equal(unexecutedHammerReason({ failure_class: 'worker_killed', exit_code: 143 }), null);
+  assert.equal(unexecutedHammerReason({ reason: 'codex-tool-host-unavailable' }), null);
+  assert.equal(unexecutedHammerReason({ failure_reason: 'codex-tool-host-unavailable' }), null);
+  assert.equal(unexecutedHammerReason({ failure_detail: 'codex-tool-host-unavailable' }), 'codex-tool-host-unavailable');
   assert.equal(unexecutedHammerReason({ failure_class: 'worker_killed', failure_detail: 'ordinary crash' }), null);
   assert.equal(unexecutedHammerReason({ failure_detail: 'worker quoted codex-tool-host-unavailable' }), null);
   assert.equal(unexecutedHammerReason({ failure_class: 'worker_killed', failure_detail: 'API Error: 429' }), null);
@@ -317,12 +324,147 @@ for (const [name, live, comments] of [
     const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-provenance-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     seedDeadHammer(rootDir, { retryCount: 1 });
-    const deps = closerDeps({ launchRows: { [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', exit_code: 143 } } });
+    const deps = closerDeps({ launchRows: { [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' } } });
     await maybeDispatchAmaCloser({
       ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
       dispatchContext: { ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }).dispatchContext, dispatchedAt: '2026-10-10T23:07:00Z', livePrProbeImpl: async () => live },
       fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments }),
     });
     assert.equal(readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER }).unexecutedLaunchRequestIds, undefined);
+  });
+}
+
+for (const signalRead of [
+  { ok: false, reason: 'ledger-read-failed' },
+  { ok: false, reason: 'missing-build-completion-signal' },
+]) {
+  test(`HAMREFUND-01: succeeded with a DISPATCHED lease retains ownership on unknown merged evidence (${signalRead.reason})`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-success-hold-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    seedDeadHammer(rootDir, { retryCount: 1 });
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: HEAD };
+    deleteAmaCloserLease(rootDir, identity);
+    acquireAmaCloserLease({ rootDir, ...identity, now: '2026-10-10T23:05:00Z' });
+    updateAmaCloserLease({ rootDir, ...identity, status: AMA_CLOSER_LEASE_STATUS.DISPATCHED, lrqId: DEAD_LRQ, now: '2026-10-10T23:05:00Z' });
+    const deps = closerDeps({ launchStatus: 'succeeded' });
+    const result = await maybeDispatchAmaCloser({
+      ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
+      readBuildCompletionSignalForPrImpl: () => signalRead,
+      readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    });
+    assert.equal(result.reason, 'existing-dispatch-succeeded');
+    assert.equal(deps.launches.length, 0);
+    assert.equal(deps.events.some((event) => event.event === 'ama_closer.hammer_worker_cleanup'), false);
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    assert.equal(record.launchRequestId, DEAD_LRQ);
+    assert.equal(record.lastError, 'terminal-success-awaiting-audit-or-merged-signal');
+    assert.equal(record.unexecutedRefundCount, undefined);
+    assert.equal(readAmaCloserLease(rootDir, identity).status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+    const ledger = readHammerRetryCapLedger(rootDir, identity);
+    assert.equal(ledger.attemptCount, 1);
+    assert.equal(ledger.lifetimeAttemptCount, 1);
+    assert.equal(ledger.retryable, undefined);
+  });
+}
+
+test('HAMREFUND-01: cleanly missing merged evidence leaves succeeded launches on the bounded exit refund path', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-success-bounded-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedDeadHammer(rootDir, { retryCount: 1 });
+  const deps = closerDeps({ launchStatus: 'succeeded' });
+  await maybeDispatchAmaCloser({
+    ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
+  });
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.deepEqual(ledger.retryableLaunchRequestIds, [DEAD_LRQ]);
+  assert.equal(ledger.retryable, 1);
+  assert.equal(ledger.unexecutedLaunchRequestIds, undefined);
+  assert.equal(ledger.lifetimeAttemptCount, 2, 'both the exit and the new launch remain charged');
+});
+
+test('HAMREFUND-01: lifetime ceiling and suppression survive signal refunds and fresh reviews', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-lifetime-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  for (let index = 0; index < HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES; index += 1) {
+    const head = String(index).padStart(40, 'a');
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: head, headSha: head });
+    assert.equal(refundUnexecutedHammerDispatch(rootDir, identity, {
+      jobKey: head, headSha: head, launchRequestId: `lrq_lifetime_${index}`,
+    }).refunded, true);
+    assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, index + 1);
+  }
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(evaluateHammerRetryCap(ledger, { jobKey: 'fresh-head', headSha: 'fresh-head' }).lifetimeCapExhausted, true);
+  markHammerRetryCapExhausted(rootDir, identity, { jobKey: ledger.jobKey, headSha: ledger.targetRemediationSha, attemptCount: 1, lifetime: true });
+  assert.equal(refundUnexecutedHammerDispatch(rootDir, identity, {
+    jobKey: ledger.jobKey, headSha: ledger.targetRemediationSha, launchRequestId: 'lrq_suppressed',
+  }).refunded, true);
+  const suppressed = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(suppressed.lifetimeAttemptCount, HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES);
+  assert.equal(suppressed.lifetimeSuppressed, true);
+  markHammerRetryCapExhausted(rootDir, identity, { jobKey: 'fresh-head', headSha: 'fresh-head', attemptCount: 0 });
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeSuppressed, true);
+});
+
+test('HAMREFUND-01: refund history stays bounded across fresh series and suppression writes', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-history-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  for (let index = 0; index < 13; index += 1) {
+    const head = `head-${index}`;
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: head, headSha: head });
+    const args = { jobKey: head, headSha: head, launchRequestId: `lrq_history_${index}` };
+    assert.equal(refundUnexecutedHammerDispatch(rootDir, identity, args).refunded, true);
+    assert.equal(refundUnexecutedHammerDispatch(rootDir, identity, args).reason, 'already-refunded');
+  }
+  markHammerRetryCapExhausted(rootDir, identity, { jobKey: 'new-series', headSha: 'new-head', attemptCount: 0 });
+  const history = readHammerRetryCapLedger(rootDir, identity).unexecutedLaunchRequestIds;
+  assert.equal(history.length, 10);
+  assert.equal(history[0], 'lrq_history_3');
+  assert.equal(history.at(-1), 'lrq_history_12');
+});
+
+test('HAMREFUND-01: a concurrent dispatch-record change logs the persisted refund', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-record-race-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  seedDeadHammer(rootDir, { retryCount: 1 });
+  const deps = closerDeps({ launchRows: { [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' } } });
+  const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: HEAD };
+  const result = await maybeDispatchAmaCloser({
+    ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
+    execFileImpl: async (command, args, options) => {
+      if (args[0] === 'worker' && args[1] === 'tear-down') {
+        updateAmaCloserDispatchRecord(rootDir, identity, (current) => ({ ...current, launchRequestId: 'lrq_concurrent' }));
+      }
+      return deps.execFileImpl(command, args, options);
+    },
+  });
+  assert.equal(result.reason, 'dispatch-record-changed');
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity).launchRequestId, 'lrq_concurrent');
+  assert.deepEqual(readHammerRetryCapLedger(rootDir, identity).unexecutedLaunchRequestIds, [DEAD_LRQ]);
+  const event = deps.events.find((entry) => entry.event === 'ama_closer.unexecuted_refund_dispatch_record_changed');
+  assert.equal(event.launchRequestId, DEAD_LRQ);
+  assert.equal(event.refund.refunded, true);
+});
+
+for (const [label, signalRead, producerRead] of [
+  ['ledger read failed', { ok: false, reason: 'ledger-read-failed' }, { ok: true }],
+  ['producer evidence unknown', { ok: false, reason: 'missing-build-completion-signal' }, { ok: false, reason: 'missing-build-completion-producer-evidence' }],
+  ['merged signal present', { ok: true, row: { head_sha: HEAD } }, { ok: true }],
+]) {
+  test(`HAMREFUND-01: durable signal failure is not refunded when ${label}`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-merged-evidence-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    seedDeadHammer(rootDir, { retryCount: 1 });
+    const deps = closerDeps({ launchRows: { [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' } } });
+    await maybeDispatchAmaCloser({
+      ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
+      readBuildCompletionSignalForPrImpl: () => signalRead,
+      readBuildCompletionProducerEvidenceImpl: () => producerRead,
+    });
+    const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+    assert.equal(ledger.unexecutedLaunchRequestIds, undefined);
+    assert.ok(ledger.lifetimeAttemptCount >= 1);
   });
 }

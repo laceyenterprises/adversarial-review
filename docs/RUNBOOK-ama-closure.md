@@ -1030,6 +1030,34 @@ default `observe` enforcement honors a known actor even if that actor is not
 allowlisted; `enforce` requires an allowlisted operator login. The substitution emits
 `ama.daemon_clean_merge.operator_accountability_substituted`.
 
+### Durable signal/tool-host refunds (HAMREFUND-01)
+
+`maybeDispatchAmaCloser` reconciles a terminal hammer before stale-lease
+settlement only when the session ledger reports `worker_killed` with `SIGTERM`
+or `SIGKILL` in `failure_detail`, or an exact `codex-tool-host-unavailable` in
+`failure_class` or `failure_detail`. A bare `succeeded` status is not
+non-execution evidence. It remains on the normal terminal-success path,
+including the live `DISPATCHED` lease hold when merged evidence is unknown,
+and the one-refund-per-series HAMBG-02 grant when an exit without close is proven.
+
+The non-execution refund additionally requires the same live OPEN head, no
+terminal local audit, readable absence of a no-merge closing comment, and a
+cleanly missing merged signal with repository-level producer evidence.
+Unreadable signals cannot authorize it. It lowers series and matching target
+charges, preserving lifetime charges and `lifetimeSuppressed`; only LEASEPARK-01
+contention refunds may lower lifetime charges, within their PR-wide budget.
+
+The closer cleans up the worker, records a failed pass and settles its lease
+before clearing the launch IDs and setting `prelaunchRefusalSlowRetry.kind` to
+`non-execution`. This uses the existing six-hour slow cadence and two alert
+markers. The window survives replacement admission and repeated deaths on the
+same head. A new head resets the window and `unexecutedRefundCount`, but cannot
+reset the lifetime ceiling. `retryCount` remains the pass identity; admission
+subtracts reconciled refunds without reusing pass numbers. The ledger retains
+the newest ten `unexecutedLaunchRequestIds` across review resets. A record race
+logs `ama_closer.unexecuted_refund_dispatch_record_changed` with the refunded
+launch; the refund remains durable for idempotent reconciliation.
+
 ### A succeeded hammer must have closed its PR (HAMBG-02)
 
 A hammer LRQ that ends `succeeded` has only proven that its process exited 0.
@@ -1061,7 +1089,8 @@ On `hammer-exited-without-close` the closer:
   the counter is this ledger's own; the merge gate's `retryable` in
   `data/merge-leases/` is separate and has its own budget. One exit per reviewed-head
   series is refunded. Past that, an exit stays charged and the normal cap
-  suppresses and pages. The lifetime count is never refunded;
+  suppresses and pages. This exit refund never reduces the lifetime count; only the bounded
+  LEASEPARK-01 contention refund does (§ certified-head contention queue);
 - re-dispatches in the same tick, subject to every existing gate.
 
 The closer reconciles the newest launch in the review series. A hammer that

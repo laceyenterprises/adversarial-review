@@ -375,7 +375,10 @@
       "store": "data/follow-up-jobs/hammer-retry-cap/",
       "schemaSurface": "src/ama/hammer-retry-cap.mjs",
       "relatedSchemaSurfaces": ["src/ama/dead-hammer-rearm.mjs", "src/ama/dispatch-closer.mjs", "src/ama-closure-orchestration.mjs", "src/closer-authored-stale.mjs"],
-      "owner": "AMA hammer dispatch retry and redrive caps"
+      "owner": "AMA hammer dispatch retry and redrive caps",
+      "nonExecutionRefundFields": ["unexecutedLaunchRequestIds"],
+      "nonExecutionRefundHistoryLimit": 10,
+      "nonExecutionRefundsLifetime": false
     },
     {
       "id": "closer-authored-stale",
@@ -401,6 +404,8 @@
         "src/ama/prelaunch-refusal-retry.mjs"
       ],
       "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery",
+      "nonExecutionRefundFields": ["unexecutedRefundCount", "previousUnexecutedLaunchRequestId"],
+      "prelaunchRetryKinds": ["branch-holder", "dispatch-refused", "non-execution"],
       "prelaunchRetryFields": [
         "prelaunchRefusalSlowRetry.startedAt",
         "prelaunchRefusalSlowRetry.kind",

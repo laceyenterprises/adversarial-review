@@ -17,14 +17,16 @@ paging heuristic in production, whose normalized rollups omit failure output;
 check/step names cannot distinguish a refusal from a guard script crash. When
 supplemental output is present it must contain matching refusal/override text.
 Only the registered `repo-guards` composite family (`repo-guards` and names
-starting with `repo-guards-`, `repo-guards/`, or `repo-guards `) is expanded
+starting with `repo-guards-`, `repo-guards/`, or `repo-guards `), or
+matching workflow names (including `Repo Guards`), is expanded
 through the GitHub jobs API, and only when its head matches and every failed
 step is a registered gate. Pending or unrelated failures skip all job reads.
 A per-reader, bounded 512-entry cache keys responses by repo/job/head, retaining
 completed responses and cooling down unreadable responses for 60 seconds. At
 most two uncached jobs are read per pass with a 3-second subprocess timeout, a
-5-second total read budget, and the closer abort signal. Unreadable jobs create
-no hold. The registry currently maps
+5-second total read budget, and the closer abort signal. Read-cap, deadline and transport failures create a non-paging
+`operator-label-classification-pending` recovery wait; transient reads retry once
+within the budget. Missing required contexts prevent label-only paging. The registry currently maps
 CI cost, submodule pointers, live-pack cross edits and historical gym freeze
 checks to their operator labels. Advisory/successful checks create no hold.
 
@@ -56,7 +58,7 @@ and is removed in `finally`. The receipt is re-read under the claim. Delivered
 receipts matching the current
 identity, reason and gates bypass both the lock and atomic rewrite; changed
 gates update the receipt without paging that head again. A process-local successful-delivery set also suppresses repeat pages if a receipt
-write fails, but does not survive restart.
+write fails, but does not survive restart and is capped at 512 entries.
 
 ## Lifecycle and retention
 
@@ -71,6 +73,8 @@ The alert event is `ama_closer.operator_label_required` with payload
 `{ repo, prNumber, headSha, reason, gates }`. Failed delivery is retried on later
 observations. The lock's stale reclaim is best effort; slow delivery beyond its
 stale interval and concurrent stale-claim reclamation can duplicate pages.
-Receipts are retained indefinitely; no automatic TTL or closed-head sweep is
-implemented. Archive only heads confirmed closed or superseded. These retention
+The successful-delivery set is capped at 512 entries. A best-effort sweep removes
+superseded-head receipts when a new hold is observed, closed-PR receipts when
+closure observes the closed PR, and unrelated receipts older than 30 days.
+Active claim files are excluded from the sweep. These retention
 and claim limitations do not grant merge authority or stop review remediation.

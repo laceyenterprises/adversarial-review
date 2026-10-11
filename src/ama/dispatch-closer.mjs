@@ -1,4 +1,4 @@
-import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels } from './operator-label-gates.mjs';
+import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
@@ -4175,6 +4175,11 @@ export async function maybeDispatchAmaCloser({
     }
   }
 
+  if (prMetadata?.isOpen === false && dispatchContext?.repo) sweepOperatorLabelHolds({
+    rootDir: dispatchContext.rootDir || SUBMODULE_ROOT, repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber, headSha: prMetadata.headSha, closed: true,
+  });
+
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
   const primaryReadRepair = verdict.reasons.includes('primary-change-read-failed')
@@ -4184,7 +4189,7 @@ export async function maybeDispatchAmaCloser({
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
   const orphanAdmit = Boolean(dispatchContext?.orphanRecovery)
-    && orphanDispatchReasonsCovered(verdict.reasons)
+    && orphanDispatchReasonsCovered(verdict.reasons.filter(reason => !reason.startsWith('operator-label-required:')))
     && (!verdict.reasons.includes('stale-review-head')
       || (dispatchContext.orphanRecovery.closerHead === true && dispatchContext.allowStaleReviewHeadHammerResume === true));
   if (!orphanAdmit && verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
@@ -4215,7 +4220,8 @@ export async function maybeDispatchAmaCloser({
   const resumeCertifiedPark = certifiedContentionPark
     && parkRouteReasons.length === 0
     && (verdict.eligible || isPendingCiMechanicalGateMiss(verdict, verdict.reasons));
-  const parkRepairReasons = verdict.eligible ? parkRouteReasons : verdict.reasons;
+  const parkRepairReasons = (verdict.eligible ? parkRouteReasons : verdict.reasons)
+    .filter(reason => !reason.startsWith('operator-label-required:'));
   const repairCertifiedPark = certifiedContentionPark && !resumeCertifiedPark
     && parkRepairReasons.length > 0
     && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
@@ -5966,9 +5972,13 @@ export async function maybeDispatchAmaCloser({
   // Resolve label holds only after route admission, stop releases, terminal
   // launch/lease reconciliation and same-PR remediation ownership checks.
   if (prMetadata?.isOpen === true && prMetadata?.headSha) {
-    const labelGates = await resolveOperatorLabelGateFailures({ rollup: prMetadata.statusCheckRollup,
-      repo: dispatchContext?.repo, headSha: prMetadata.headSha, execFileImpl, env, signal });
+    const classification = await resolveOperatorLabelGateFailures({ rollup: prMetadata.statusCheckRollup,
+      repo: dispatchContext?.repo, headSha: prMetadata.headSha, execFileImpl, env, signal,
+      requiredContexts: prMetadata.branchProtection?.requiredContexts });
     throwIfAborted(signal);
+    if (classification.inconclusive) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      recoveryWait: true, reason: 'operator-label-classification-pending' });
+    const labelGates = classification.gates;
     const rootDir = dispatchContext?.rootDir || SUBMODULE_ROOT;
     const repo = dispatchContext?.repo;
     // Require independent exact-head CI evidence as well as the typed audit.

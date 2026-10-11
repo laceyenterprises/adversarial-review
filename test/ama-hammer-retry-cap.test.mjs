@@ -3366,7 +3366,7 @@ test('LEASEPARK-01 certified lease park resumes daemon merge without remediation
   assert.equal(merges, 1);
 });
 
-for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI becomes conflicting', 'stale park timestamp', 'stale park pending CI', 'stale park active repair', 'pending CI remains pending', 'corrupt audit', 'missing head']) {
+for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI turns label-only', 'pending CI becomes conflicting', 'stale park timestamp', 'stale park pending CI', 'stale park active repair', 'pending CI remains pending', 'corrupt audit', 'missing head']) {
   test(`certified park preserves eligibility gates: ${scenario}`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-policy-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -3388,8 +3388,8 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
         dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: ADVANCED_HEAD },
         prMetadata: { headSha: scenario === 'missing head' ? null : ADVANCED_HEAD,
           mergeableState: scenario === 'pending CI becomes conflicting' ? 'CONFLICTING' : 'MERGEABLE',
-          statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? 'IN_PROGRESS' : 'COMPLETED',
-            conclusion: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? null : scenario === 'pending CI turns red' ? 'FAILURE' : 'SUCCESS' }] },
+          statusCheckRollup: [{ __typename: 'CheckRun', name: scenario === 'pending CI turns label-only' ? 'submodule-pointer-gate' : 'test', status: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? 'IN_PROGRESS' : 'COMPLETED',
+            conclusion: ['stale park pending CI', 'pending CI remains pending'].includes(scenario) ? null : ['pending CI turns red', 'pending CI turns label-only'].includes(scenario) ? 'FAILURE' : 'SUCCESS' }] },
       }),
       options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
       ...hammerDispatchDeps({
@@ -3402,7 +3402,7 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
       }),
     });
     let result = await run('2026-07-06T12:05:00Z');
-    if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
+    if (['pending CI turns red', 'pending CI turns label-only', 'pending CI becomes conflicting'].includes(scenario)) {
       assert.equal(result.reason, 'hammer-deferral-backoff');
       result = await run('2026-07-06T12:08:00Z');
     }
@@ -3410,6 +3410,10 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
     if (scenario === 'risk class changes') {
       assert.equal(result.dispatched, false);
       assert.ok(result.reasons.includes('risk-class-not-permitted'));
+    } else if (scenario === 'pending CI turns label-only') {
+      assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+      assert.equal(result.dispatched, false);
+      assert.equal(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'), false);
     } else if (['pending CI turns red', 'pending CI becomes conflicting'].includes(scenario)) {
       assert.equal(result.dispatched, true, JSON.stringify(result));
       assert.ok(calls.some(args => args[0] === 'dispatch' && args[1] !== 'status'));

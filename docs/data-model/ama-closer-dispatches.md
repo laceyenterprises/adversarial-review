@@ -163,7 +163,7 @@ lifetime charges and suppression. The record's marker and
 `unexecutedRefundCount` are updated once; later signal/non-execution or
 exited-without-close reconciliation cannot grant another credit to that launch.
 
-The early label hold currently defers ordinary terminal-worker cleanup, lease
-settlement and pass/token accounting until closure proceeds beyond that hold.
+Terminal-worker cleanup, lease settlement and pass/token accounting run before
+the label refund and hold.
 The label refund itself does not perform those operations. Its receipt is
 separate from dispatch ownership; see [Operator Label Holds](operator-label-holds.md).

@@ -1047,7 +1047,9 @@ failed steps. Pending/unknown siblings or unrelated failures skip all job reads.
 Results are cached per reader/repo/job/head (512 entries); completed responses
 are reused, and unreadable responses retry after 60 seconds. Each pass reads at
 most two uncached jobs, with a 3-second subprocess timeout, a 5-second total read
-budget, and caller cancellation. Advisory or green checks do not hold. Required-check greenness remains an independent merge gate,
+budget, and caller cancellation. Read-cap, deadline and transport failures return
+a non-paging classification-pending recovery wait. Missing required contexts
+prevent label-only paging. Transient job reads retry once within that budget. Advisory or green checks do not hold. Required-check greenness remains an independent merge gate,
 including in advisory CI-cost mode; a label cannot waive red CI.
 
 Drafts, disallowed risk classes, and PRs still owned by review remediation do

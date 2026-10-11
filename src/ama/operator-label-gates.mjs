@@ -1,8 +1,9 @@
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { adversarialOwnCheckContexts, isAdversarialOwnStatusContext, checkItemState, latestCheckRollupItems, classifyCheckRollup } from '../checks-summary.mjs';
+import { adversarialOwnCheckContexts, isAdversarialOwnStatusContext, checkItemState, latestCheckRollupItems, classifyCheckRollup, summarizeChecksConclusion } from '../checks-summary.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { execGhWithRetry } from '../gh-cli.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 
 // LABELGATE-01: label names come from these guards' refusal messages, not
@@ -14,9 +15,13 @@ export const OPERATOR_LABEL_GATES = Object.freeze([
   { label: 'gym-freeze-port', checks: ['gym-freeze-guard', 'gym-freeze', 'gym freeze guard'], source: 'agent-os/scripts/check-gym-freeze.py (historical blocking mode)' },
 ].map(gate => Object.freeze({ ...gate, checks: Object.freeze(gate.checks) })));
 
-export function operatorLabelGateFailures(rollup, { env = process.env } = {}) {
+export function operatorLabelGateFailures(rollup, { env = process.env, cfg = null, requiredContexts = [] } = {}) {
   const external = latestCheckRollupItems(rollup).filter(item =>
     !isAdversarialOwnStatusContext(item, adversarialOwnCheckContexts(env)));
+  const reported = external.map(item => ({ name: item.context || item.name, conclusion: 'SUCCESS' }));
+  if (summarizeChecksConclusion(reported, { env, cfg }) === 'PENDING'
+    || classifyCheckRollup(reported, { requiredContexts: (requiredContexts || []).filter(context =>
+      !isAdversarialOwnStatusContext({ context }, adversarialOwnCheckContexts(env))) }) === 'PENDING') return [];
   // A pending sibling can still report a repairable failure. Wait for it before
   // treating this as an exclusively operator-label closure hold.
   if (external.some(item => [null, 'PENDING', 'UNKNOWN'].includes(classifyCheckRollup([item])))) return [];
@@ -49,20 +54,28 @@ const FAILED_JOB_READ_TTL_MS = 60_000;
 // Scope caches to the reader (including injected offline readers). Completed
 // steps are immutable per repo/job/head; negative transport reads retry later.
 const jobCaches = new WeakMap();
-export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, execFileImpl, env, signal }) {
+export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, execFileImpl, env, signal, cfg = null, requiredContexts = [] }) {
+  const none = { gates: [], inconclusive: false };
+  const pending = { gates: [], inconclusive: true };
   const external = latestCheckRollupItems(rollup).filter(item =>
     !isAdversarialOwnStatusContext(item, adversarialOwnCheckContexts(env)));
-  if (!repo || !headSha || signal?.aborted
-    || external.some(item => [null, 'PENDING', 'UNKNOWN'].includes(classifyCheckRollup([item])))) return [];
+  if (signal?.aborted) return pending;
+  if (!repo || !headSha
+    || external.some(item => [null, 'PENDING', 'UNKNOWN'].includes(classifyCheckRollup([item])))) return none;
+  const reported = external.map(item => ({ name: item.context || item.name, conclusion: 'SUCCESS' }));
+  if (summarizeChecksConclusion(reported, { env, cfg }) === 'PENDING'
+    || classifyCheckRollup(reported, { requiredContexts: (requiredContexts || []).filter(context =>
+      !isAdversarialOwnStatusContext({ context }, adversarialOwnCheckContexts(env))) }) === 'PENDING') return none;
   const candidates = new Map();
   for (const item of external) {
-    if (classifyCheckRollup([item]) === 'SUCCESS' || operatorLabelGateFailures([item], { env }).length) continue;
+    if (classifyCheckRollup([item]) === 'SUCCESS' || operatorLabelGateFailures([item], { env, cfg: { requiredCheckContexts: [] } }).length) continue;
     const match = String(item.detailsUrl || '').match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/\d+\/job\/(\d+)(?:\?.*)?$/);
-    if (checkItemState(item) !== 'FAILURE' || !/^repo-guards(?:[-/ ].*)?$/i.test(String(item.name || ''))
-      || !match || match[1] !== repo || !execFileImpl) return [];
+    if (checkItemState(item) !== 'FAILURE' || ![/^repo-guards(?:[-/ ].*)?$/i, /^repo guards$/i].some(pattern =>
+        pattern.test(String(item.name || '')) || pattern.test(String(item.workflowName || '')))
+      || !match || match[1] !== repo || !execFileImpl) return none;
     candidates.set(item, match[2]);
   }
-  if (!candidates.size) return operatorLabelGateFailures(external, { env });
+  if (!candidates.size) return { gates: operatorLabelGateFailures(external, { env }), inconclusive: false };
   let cache = jobCaches.get(execFileImpl);
   if (!cache) { cache = new Map(); jobCaches.set(execFileImpl, cache); }
   const expanded = [];
@@ -71,46 +84,74 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
   for (const item of external) {
     const jobId = candidates.get(item);
     if (!jobId) { expanded.push(item); continue; }
-    if (signal?.aborted) return [];
+    if (signal?.aborted) return pending;
     const key = JSON.stringify([repo, jobId, headSha]);
     let entry = cache.get(key);
     if (entry && entry.expiresAt <= Date.now()) { cache.delete(key); entry = null; }
     if (!entry) {
       const remaining = deadline - Date.now();
-      if (reads >= MAX_JOB_READS_PER_PASS || remaining <= 0) return [];
+      if (reads >= MAX_JOB_READS_PER_PASS || remaining <= 0) return pending;
       reads++;
       try {
-        const { stdout } = await execFileImpl('gh', ['api', `repos/${repo}/actions/jobs/${jobId}`], {
-          timeout: Math.min(JOB_READ_TIMEOUT_MS, remaining), maxBuffer: 1024 * 1024, signal,
+        const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', `repos/${repo}/actions/jobs/${jobId}`],
+          env, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(remaining)]) : AbortSignal.timeout(remaining),
+          timeoutMs: Math.min(JOB_READ_TIMEOUT_MS, remaining), retries: 1, backoffMs: 100,
+          refreshGhAuthImpl: async () => ({ skipped: 'bounded label classification' }),
         });
-        if (signal?.aborted) return [];
+        if (signal?.aborted) return pending;
         const job = JSON.parse(stdout);
         const failures = Array.isArray(job.steps) ? job.steps.filter(step => step.conclusion === 'failure') : [];
         const steps = failures.map(step => ({ name: step.name, conclusion: 'FAILURE' }));
         const gates = job.head_sha === headSha && job.conclusion === 'failure'
-          ? operatorLabelGateFailures(steps, { env }) : [];
+          ? operatorLabelGateFailures(steps, { env, cfg: { requiredCheckContexts: [] } }) : [];
         entry = { gates, expiresAt: Infinity };
       } catch {
-        if (signal?.aborted) return [];
-        entry = { gates: [], expiresAt: Date.now() + FAILED_JOB_READ_TTL_MS };
+        if (signal?.aborted) return pending;
+        entry = { gates: [], inconclusive: true, expiresAt: Date.now() + FAILED_JOB_READ_TTL_MS };
       }
       if (cache.size >= MAX_JOB_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
       cache.set(key, entry);
     }
-    if (!entry.gates.length) return [];
+    if (entry.inconclusive) return pending;
+    if (!entry.gates.length) return none;
     expanded.push(...entry.gates.map(gate => ({ name: `${item.name}: ${gate.check}`, conclusion: 'FAILURE',
       description: gate.reason })));
   }
-  return operatorLabelGateFailures(expanded, { env });
+  return { gates: operatorLabelGateFailures(expanded, { env, cfg: { requiredCheckContexts: [] } }), inconclusive: false };
 }
 
 // Separate from dispatch records: this hold must never look like a launch.
 // Persist successful delivery across daemon restarts, once per PR head.
 const alerted = new Set();
+const MAX_ALERTED_ENTRIES = 512;
+const RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Superseded heads and closed PRs need no paging receipt. Old unrelated receipts
+// expire after 30 days. Active claims are excluded from this best-effort sweep.
+export function sweepOperatorLabelHolds({ rootDir, repo, prNumber, headSha, closed = false }) {
+  const dir = join(rootDir, 'data', 'operator-label-holds');
+  let names;
+  try { names = readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    const path = join(dir, name);
+    try {
+      try { statSync(`${path}.lock`); continue; } catch (error) { if (error.code !== 'ENOENT') continue; }
+      const receipt = JSON.parse(readFileSync(path, 'utf8'));
+      const obsolete = receipt.repo === repo && receipt.prNumber === prNumber
+        && (closed || receipt.headSha !== headSha);
+      if (obsolete || Date.now() - statSync(path).mtimeMs > RECEIPT_RETENTION_MS) {
+        unlinkSync(path);
+        alerted.delete(path);
+      }
+    } catch { /* A corrupt or concurrently replaced receipt grants no authority. */ }
+  }
+}
 const PAGE_LOCK_STALE_MS = Math.max(1_000, Number(process.env.OPERATOR_LABEL_PAGE_LOCK_STALE_MS) || 60_000);
 export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, gates,
   deliverAlertImpl = deliverAlert, logger = console, now = new Date().toISOString() }) {
   if (!headSha || !gates.length) return null;
+  sweepOperatorLabelHolds({ rootDir, repo, prNumber, headSha });
   const key = JSON.stringify([repo, prNumber, headSha]);
   const dir = join(rootDir, 'data', 'operator-label-holds');
   const path = join(dir, `${createHash('sha256').update(key).digest('hex')}.json`);
@@ -118,7 +159,7 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
   const reason = gates[0].reason;
   const result = { dispatched: false, skipMergeAgent: true, recoveryWait: true,
     needsOperator: true, reason, operatorLabelGates: gates };
-  // Closer and remediation run in different processes. Claim paging with an
+  // Only the closer pages; concurrent closer observations claim paging with an
   // exclusive file, then re-read the receipt under the claim. Crash recovery
   // retries after the bounded stale-lock window; failed transport also retries.
   let claimed = false;
@@ -141,6 +182,7 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
         await deliverAlertImpl(`${repo} PR ${prNumber} head ${headSha}: ${gates.map(g => `${g.check} requires operator label ${g.label}`).join('; ')}. Closure held; review remediation remains available. Inspect the refusal; if an override is appropriate, apply the label, then rerun the named check. Otherwise restore the guarded change to its base state.`, {
           event: 'ama_closer.operator_label_required', payload: { repo, prNumber, headSha, reason, gates },
         });
+        if (alerted.size >= MAX_ALERTED_ENTRIES) alerted.delete(alerted.values().next().value);
         alerted.add(path);
         alertedAt = now;
       } catch (error) { logger.warn?.(`Operator-label page failed: ${error.message}`); }

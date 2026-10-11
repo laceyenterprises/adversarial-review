@@ -304,7 +304,8 @@
       "schemaSurface": "src/ama/operator-label-gates.mjs",
       "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs"],
       "owner": "AMA closer operator-label paging",
-      "receiptWritePolicy": "Unchanged delivered identity/reason/gates skip paging locks and atomic replacement"
+      "receiptWritePolicy": "Unchanged delivered identity/reason/gates skip paging locks and atomic replacement",
+      "retentionPolicy": "Sweep closed/superseded heads and receipts older than 30 days; skip active claims; delivery memory capped at 512 entries"
     },
     {
       "id": "operator-label-wakes",

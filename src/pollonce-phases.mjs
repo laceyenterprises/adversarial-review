@@ -1832,7 +1832,7 @@ export async function processReviewSubject(entry, ctx) {
                   fromWorkerClass: rwfDecision.from,
                   toWorkerClass: rwfDecision.to,
                   passKind: getDepthPassKind(),
-                  waitSeconds: Math.max(0, Date.now() - Date.parse(current?.rereview_requested_at || current?.reviewed_at)) / 1000,
+                  waitSeconds: Math.max(0, Date.now() - Date.parse(current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at)) / 1000,
                 }) === true;
               }
               console.warn(
@@ -2886,8 +2886,8 @@ export async function processReviewSubject(entry, ctx) {
           prNumber,
           headSha: subject?.headSha,
         }),
-        pendingSince: current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
-        enqueuedAt: current?.rereview_requested_at || current?.reviewed_at || null,
+        pendingSince: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
+        enqueuedAt: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || null,
         preferredRoute: route,
         refundDepthSpill() {
           if (!depthSpillReserved) return;
@@ -2908,7 +2908,7 @@ export async function processReviewSubject(entry, ctx) {
         async reevaluateDepthSpill(waitPressure = null) {
           if (depthSpillReserved) return;
           await applyWorkerFallback(waitPressure || firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) || null);
-          this.syncDepthSpillRoute('queue-depth-pressure');
+          this.syncDepthSpillRoute(waitPressure?.reason || 'queue-depth-pressure');
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         async run() {

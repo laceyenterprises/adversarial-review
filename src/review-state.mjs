@@ -125,6 +125,7 @@ const REVIEW_STATE_RESET_ASSIGNMENTS = Object.freeze([
   ['failure_message', 'NULL'],
   ['rereview_requested_at', 'NULL'],
   ['rereview_reason', 'NULL'],
+  ['head_wait_started_at', 'NULL'],
   ['reviewer_session_uuid', 'NULL'],
   ['reviewer_pgid', 'NULL'],
   ['reviewer_started_at', 'NULL'],
@@ -204,6 +205,7 @@ function ensureReviewStateSchema(db) {
       failure_message   TEXT,
       rereview_requested_at TEXT,
       rereview_reason   TEXT,
+      head_wait_started_at TEXT,
       labels_json       TEXT,
       fast_merge_audit_status TEXT,
       fast_merge_audit_payload_json TEXT,
@@ -237,6 +239,7 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN failure_message TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_requested_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN rereview_reason TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN head_wait_started_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN labels_json TEXT`);
   // `fast_merge_authorized_head_sha` is intentionally migration-owned by
   // 20260520_fast_merge_authorization.sql. The audit retry columns stay here
@@ -1299,13 +1302,17 @@ function requestReviewRereview({
         const pendingParams = [];
         // REVIEWAGE-02: a moved head starts a new admission wait. Same-head
         // polling must retain the durable timestamp rather than restarting it.
+        // Discovery time (reviewed_at) remains the TTM/latency history anchor.
         if (pendingRevisionRefMoved) {
-          pendingAssignments.push('reviewed_at = ?');
+          pendingAssignments.push('head_wait_started_at = ?');
           pendingParams.push(requestedAt);
         }
         if (normalizedTargetRevisionRef) {
           pendingAssignments.push('revision_ref = ?');
           pendingParams.push(normalizedTargetRevisionRef);
+        }
+        if (operatorRequestedRereview && !pendingRevisionRefMoved) {
+          pendingAssignments.push('head_wait_started_at = NULL');
         }
         if (operatorRequestedRereview || automaticWithheldHeadRecovery) {
           pendingAssignments.push('rereview_requested_at = ?');

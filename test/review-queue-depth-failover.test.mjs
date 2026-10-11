@@ -1268,6 +1268,34 @@ for (const [kind, age, expected, builder, env] of [
 }
 
 
+for (const kind of ['first-pass', 'rereview']) {
+  test(`moved-head ${kind} wait uses its durable marker instead of discovery history`, async () => {
+    const nowMs = Date.parse('2026-10-11T06:00:00Z');
+    const bound = resolveReviewMaxWaitSeconds(kind, {});
+    const candidate = {
+      reviewerModel: 'gemini', depthPassKind: kind,
+      current: {
+        reviewed_at: '2026-04-24T12:00:00.000Z',
+        rereview_requested_at: kind === 'rereview' ? '2026-10-10T06:00:00Z' : null,
+        head_wait_started_at: new Date(nowMs - (bound - 1) * 1000).toISOString(),
+      },
+      async reevaluateDepthSpill(pressure) {
+        assert.equal(pressure.reason, 'review-max-wait');
+        this.reviewerModel = 'codex';
+      },
+    };
+    await prepareQueueDepthSpillover([candidate], { now: () => nowMs, env: {}, logger: {} });
+    await candidate.prepareForGeminiSaturation();
+    assert.equal(candidate.reviewerModel, 'gemini');
+    assert.equal(reviewWaitPressure(candidate, { nowMs, env: {} }).waitSeconds, bound - 1);
+    const overdueMs = nowMs + 2000;
+    await prepareQueueDepthSpillover([candidate], { now: () => overdueMs, env: {}, logger: {} });
+    await candidate.prepareForGeminiSaturation();
+    assert.equal(candidate.reviewerModel, 'codex');
+    assert.equal(candidate.current.reviewed_at, '2026-04-24T12:00:00.000Z');
+  });
+}
+
 test('wait spill respects quota and reviewer entitlement', async () => {
   for (const [env, rows] of [[ENTITLED_ENV, CODEX_OK_CLAUDE_EXHAUSTED], [{}, CODEX_OK_CLAUDE_OK]]) {
     const result = await resolveReviewerWorkerClassWithFallback({

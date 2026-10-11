@@ -2387,6 +2387,7 @@ test('REVIEWAGE-02 production saturation spills an overdue request below depth t
   const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false });
   assert.match(output, /review-wait-spill repo=.* pr=102 pass_kind=first-pass wait_seconds=[\d.]+ to=claude-code/);
   assert.equal((output.match(/review-wait-spill /g) || []).length, 1);
+  assert.match(output, /review-queue-depth-route repo=.* pr=102 from=gemini to=claude reason=review-max-wait/);
   const spill = summary.reviewerSpawns.find(spawn => spawn.subjectContext.reviewerModel === 'claude');
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);

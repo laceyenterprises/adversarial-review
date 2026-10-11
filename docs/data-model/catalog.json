@@ -182,6 +182,7 @@
         "src/reviewer-spawn-settle.mjs",
         "src/ama/closer-pass-attempt.mjs"
       ],
+      "deliveryHeadWaitFields": ["head_wait_started_at"],
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {

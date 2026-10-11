@@ -119,7 +119,7 @@ export function resolveReviewMaxWaitSeconds(passKind, env = process.env) {
 export function reviewWaitPressure(candidate, { nowMs = Date.now(), env = process.env } = {}) {
   const passKind = candidate.depthPassKind || 'first-pass';
   const bound = resolveReviewMaxWaitSeconds(passKind, env);
-  const requestedAt = candidate.current?.rereview_requested_at || candidate.current?.reviewed_at;
+  const requestedAt = candidate.current?.head_wait_started_at || candidate.current?.rereview_requested_at || candidate.current?.reviewed_at;
   const requestedMs = Date.parse(requestedAt);
   const waitSeconds = Number.isFinite(requestedMs) ? Math.max(0, nowMs - requestedMs) / 1000 : null;
   return { engaged: bound > 0 && waitSeconds !== null && waitSeconds > bound,

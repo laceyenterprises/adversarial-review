@@ -123,3 +123,16 @@ watcher. The `config/watcher-op.env` ref does not change.
 - `scripts/lib/reviewer-broker.sh` — the bash broker fetch contract.
 - `src/gemini-reviewer-preflight.mjs` — the node-side preflight guards.
 - `config/watcher-op.env` — the 1Password secret-ref mapping.
+
+## Gemini quota routing hold
+
+Provider quota exhaustion is independent of this App's GitHub rate limit.
+A runtime-classified Gemini quota failure creates
+`data/gemini-quota-cooldown.json` (or directly under
+`ADVERSARIAL_REVIEW_STATE_DIR`) and routes reviews through the eligible base
+reviewer using that reviewer's bot token. Missing, invalid or past reset times
+use a 30-minute window, configurable with positive
+`AGENT_OS_GEMINI_QUOTA_COOLDOWN_MS`; all durations are capped at seven days.
+After verifying quota has recovered, remove the resolved cooldown file to
+resume configured Gemini selection on the next routing read without restart.
+See [the runtime recovery procedure](RUNBOOK-antigravity-gemini-reviewer.md#provider-wide-quota-cooldown).

@@ -1,4 +1,3 @@
-import { readGeminiQuotaCooldown } from './reviewer-quota-signal.mjs';
 // HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
 // ARC-18: extracted per-PR processing phase of pollOnce (watcher.mjs).
 //
@@ -15,6 +14,7 @@ import { readGeminiQuotaCooldown } from './reviewer-quota-signal.mjs';
 // helpers/constants). Leaf helpers and prepared statements are imported directly
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
+import { readGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
@@ -1631,7 +1631,8 @@ export async function processReviewSubject(entry, ctx) {
       const geminiReviewerMode = geminiCooldown ? 'off' : geminiModeResolution.mode;
       console.log(
         `[watcher] gemini-mode resolved=${geminiReviewerMode} ` +
-          `source=${geminiModeResolution.source || 'unknown'} ` +
+          `source=${geminiCooldown ? 'quota-cooldown' : geminiModeResolution.source || 'unknown'} ` +
+          (geminiCooldown ? `resetAt=${geminiCooldown.resetAt} ` : '') +
           `topPath=${geminiModeResolution.topPath || '<unknown>'}`
       );
       if (geminiModeResolution.error) {
@@ -3600,7 +3601,7 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
-                  reviewerModel: route.reviewerModel,
+                  reviewerModel: postedResult.effectiveReviewerModel || route.reviewerModel,
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
                 reviewRowSettled = true;
@@ -3660,7 +3661,7 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerHeadSha,
                   env: process.env,
                   maxRemediationRounds,
-                  reviewerModel: route.reviewerModel,
+                  reviewerModel: result.effectiveReviewerModel || route.reviewerModel,
                   // ARC-18: watcher owns the heartbeat singleton; thread it in.
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });

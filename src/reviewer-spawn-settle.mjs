@@ -1,4 +1,3 @@
-import { parseReviewerQuotaExhaustion, readGeminiQuotaCooldown, startGeminiQuotaCooldown } from './reviewer-quota-signal.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
 // spawnReviewer + the gated pipeline entry point + settleReviewerAttempt +
@@ -20,6 +19,8 @@ import { parseReviewerQuotaExhaustion, readGeminiQuotaCooldown, startGeminiQuota
 //    watcherHeartbeat singleton and is used elsewhere) and is threaded into
 //    settleReviewerAttempt as the injected `markReviewHeartbeat` param.
 import { randomUUID } from 'node:crypto';
+import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
+import { readGeminiQuotaCooldown, startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -52,6 +53,7 @@ import {
   beginReviewerPass,
   completeReviewerPass,
   normalizeReviewerClass,
+  nextReviewerPassAttemptNumber,
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
 } from './reviewer-pass-tokens.mjs';
@@ -97,6 +99,8 @@ import {
   recordCascadeFailure,
   recordReviewerCredentialFailure,
   recordTokenRefreshHold,
+  shouldPauseReviewerModel,
+  releaseReviewerCredentialProbe,
 } from './reviewer-cascade.mjs';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
@@ -513,25 +517,66 @@ async function spawnReviewer(args) {
   const env = args.quotaCheckEnv || process.env;
   const fallback = args.geminiQuotaFallbackRoute;
   const canFallback = fallback && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
+  const runFallback = async (quotaResult = null) => {
+    const gate = shouldPauseReviewerModel(rootDir, fallback.reviewerModel);
+    if (gate.paused) {
+      // Keep the triggering quota hold (and both retry budgets) while the
+      // fallback credential is held. Do not manufacture an OAuth failure.
+      return quotaResult || {
+        ok: false,
+        failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+        effectiveReviewerModel: args.reviewerModel,
+        error: `Gemini quota cooldown active; ${fallback.reviewerModel} credential outage hold`,
+      };
+    }
+    let runtimeStarted = false;
+    try {
+      return await spawnReviewerOnce({
+        ...args,
+        reviewerModel: fallback.reviewerModel,
+        botTokenEnv: fallback.botTokenEnv,
+        codexBrokerProvider: fallback.codexBrokerProvider || 'codex',
+        afhReviewerFallback: fallback.afhReviewerFallback || null,
+        crossModelReviewWaived: isCrossModelReviewWaived(args.builderTag, fallback.reviewerModel),
+        crossModelReviewWaiverReason: fallback.crossModelReviewWaiverReason || null,
+        // The Gemini row is terminal by now. Allocate only a ledger attempt;
+        // the logical review/remediation round and delivery claim stay intact.
+        ...(quotaResult ? {
+          reviewDbAttemptNumber: nextReviewerPassAttemptNumber(rootDir, {
+            repo: args.repo,
+            prNumber: args.prNumber,
+            passKind: args.passKind || 'first-pass',
+            fallbackReviewAttempts: args.reviewDbAttemptNumber ?? args.reviewAttemptNumber ?? 0,
+          }),
+        } : {}),
+        onReviewerRuntimeStarted: () => { runtimeStarted = true; },
+      });
+    } finally {
+      if (gate.probe && !runtimeStarted) {
+        releaseReviewerCredentialProbe(rootDir, fallback.reviewerModel, gate);
+      }
+    }
+  };
   if (canFallback && readGeminiQuotaCooldown({ rootDir, env })) {
-    return spawnReviewerOnce({ ...args, reviewerModel: fallback.reviewerModel, botTokenEnv: fallback.botTokenEnv });
+    return runFallback();
   }
   const result = await spawnReviewerOnce({
     ...args,
     onPostOperationSettled: canFallback ? (result) => {
-      const text = [result.error, result.stdout, result.stderr].filter(Boolean).join('\n');
-      if (!result.ok && (result.failureClass === 'quota-exhausted' || parseReviewerQuotaExhaustion({ stderr: text }).exhausted)) return;
+      if (!result.ok && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) return;
       args.onPostOperationSettled?.(result);
     } : args.onPostOperationSettled,
   });
-  const diagnostic = [result.error, result.stdout, result.stderr].filter(Boolean).join('\n');
-  const signal = parseReviewerQuotaExhaustion({ stderr: diagnostic });
-  if (!result.ok && (signal.exhausted || result.failureClass === 'quota-exhausted')) {
+  if (!result.ok && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+    // The runtime owns classification. Text here is used only to recover a
+    // reset timestamp after typed quota evidence, never to select fallback.
+    const diagnostic = [result.error, result.stderr].filter(Boolean).join('\n');
+    const signal = parseReviewerQuotaExhaustion({ stderr: diagnostic });
     signal.resetAt ||= resolveQuotaResetIso(diagnostic);
     startGeminiQuotaCooldown({ rootDir, env, signal });
     if (canFallback) {
       console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
-      return spawnReviewerOnce({ ...args, reviewerModel: fallback.reviewerModel, botTokenEnv: fallback.botTokenEnv });
+      return runFallback(result);
     }
     return { ...result, failureClass: 'quota-exhausted' };
   }
@@ -564,6 +609,7 @@ async function spawnReviewerOnce({
   afhReviewerFallback = null,
   codexBrokerProvider = 'codex',
   onReviewerPgid = () => {},
+  onReviewerRuntimeStarted = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
   postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
@@ -579,7 +625,7 @@ async function spawnReviewerOnce({
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
   if (normalizeReviewerModel(reviewerModel) === 'codex' && isCrossModelReviewWaived(builderTag, reviewerModel)) {
-    return { ok: false, failureClass: 'bug', error: 'Codex-family reviewer cannot review a Codex-family builder' };
+    return { ok: false, effectiveReviewerModel: reviewerModel, failureClass: 'bug', error: 'Codex-family reviewer cannot review a Codex-family builder' };
   }
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
@@ -649,6 +695,7 @@ async function spawnReviewerOnce({
     );
     return {
       ok: false,
+      effectiveReviewerModel: reviewerModel,
       reason: 'primary-reviewer-quota-capped',
       failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
       transient: true,
@@ -717,41 +764,45 @@ async function spawnReviewerOnce({
       reviewerModel,
       adapter: activeReviewerRuntimeAdapter,
       pool: agyReviewerIdentityPool,
-    }, (agyIdentity, agyIdentityLease) => activeReviewerRuntimeAdapter.spawnReviewer({
-      model: reviewerModel,
-      prompt: '',
-      subjectContext: {
-        domainId,
-        repo,
-        prNumber,
-        reviewerModel,
-        botTokenEnv,
-        linearTicketId,
-        labels,
-        builderTag,
-        reviewerHeadSha,
-        reviewAttemptNumber,
-        reviewDbAttemptNumber,
-        completedRemediationRounds,
-        passKind,
-        maxRemediationRounds,
-        advisoryFindings,
-        reviewerSessionUuid,
-        reviewerSpawnToken,
-        crossModelReviewWaived,
-        crossModelReviewWaiverReason,
-        afhReviewerFallback,
-        codexBrokerProvider,
-        ...(agyIdentity ? { agyIdentity } : {}),
-        // Persisted in the run record so a restarted watcher keeps this
-        // identity out while this review still runs.
-        ...(agyIdentityLease ? { agyIdentityLease } : {}),
-      },
-      timeoutMs: effectiveReviewerTimeoutMs,
-      sessionUuid: reviewerSessionUuid,
-      forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
-      onReviewerPgid,
-    }));
+    }, (agyIdentity, agyIdentityLease) => {
+      onReviewerRuntimeStarted();
+      return activeReviewerRuntimeAdapter.spawnReviewer({
+        model: reviewerModel,
+        prompt: '',
+        subjectContext: {
+          domainId,
+          repo,
+          prNumber,
+          reviewerModel,
+          botTokenEnv,
+          linearTicketId,
+          labels,
+          builderTag,
+          reviewerHeadSha,
+          reviewAttemptNumber,
+          reviewDbAttemptNumber,
+          completedRemediationRounds,
+          passKind,
+          maxRemediationRounds,
+          advisoryFindings,
+          reviewerSessionUuid,
+          reviewerSpawnToken,
+          crossModelReviewWaived,
+          crossModelReviewWaiverReason,
+          afhReviewerFallback,
+          codexBrokerProvider,
+          ...(agyIdentity ? { agyIdentity } : {}),
+          // Persisted in the run record so a restarted watcher keeps this
+          // identity out while this review still runs.
+          ...(agyIdentityLease ? { agyIdentityLease } : {}),
+        },
+        timeoutMs: effectiveReviewerTimeoutMs,
+        sessionUuid: reviewerSessionUuid,
+        forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
+        onReviewerPgid,
+      });
+    });
+    result = { ...result, effectiveReviewerModel: reviewerModel };
     if (
       result.ok &&
       shouldPostAdapterReviewBody(result) &&
@@ -1169,6 +1220,7 @@ function settleReviewerAttempt({
   // The no-op default matches production behavior when the heartbeat is unset.
   markReviewHeartbeat = () => {},
 }) {
+  reviewerModel = result.effectiveReviewerModel || reviewerModel;
   if (result.ok) {
     const postedAt = new Date().toISOString();
     let recoveredOutage = null;

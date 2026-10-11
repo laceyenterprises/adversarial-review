@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "gemini-quota-cooldown",
+      "title": "Gemini Quota Cooldown",
+      "path": "docs/data-model/gemini-quota-cooldown.md",
+      "store": "data/gemini-quota-cooldown.json",
+      "schemaSurface": "src/gemini-quota-cooldown.mjs",
+      "relatedSchemaSurfaces": ["src/reviewer-quota-signal.mjs", "src/pollonce-phases.mjs", "src/reviewer-spawn-settle.mjs"],
+      "owner": "Gemini reviewer quota routing"
+    },
+    {
       "id": "ci-recovery-reservations",
       "title": "CI Recovery Reservations",
       "path": "docs/data-model/ci-recovery-reservations.md",

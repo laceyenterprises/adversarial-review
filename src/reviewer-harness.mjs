@@ -1,5 +1,3 @@
-import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
-import { createHash } from 'node:crypto';
 // Reviewer model-execution harness.
 //
 // ARC-10: the bespoke per-harness spawn surface (Claude/Codex/Gemini/Antigravity
@@ -14,6 +12,8 @@ import { createHash } from 'node:crypto';
 // this module is the OS-independent local-review lifeline that keeps the review
 // pipeline alive when the OS dispatch contract is unavailable.
 
+import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   chmodSync,

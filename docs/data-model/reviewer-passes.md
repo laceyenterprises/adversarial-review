@@ -104,6 +104,13 @@ remain unchanged.
 SQLite considers NULLs distinct for this key, so observations with a missing
 `limit_id` or `window_kind` are not deduplicated by that constraint.
 
+For same-pass Gemini quota fallback, the failed/skipped Gemini row remains
+terminal. The base reviewer gets the next unused `attempt_number` from
+`nextReviewerPassAttemptNumber` for the same PR and `pass_kind`; the logical
+`reviewAttemptNumber` and claim session UUID remain unchanged. Review capture,
+token evidence and completion all use the fallback's new ledger number and
+actual model. Subsequent polls allocate beyond both rows normally.
+
 For remediation passes, `attempt_number` is the next unused remediation
 attempt for the PR (`MAX(attempt_number) + 1`), assigned when the worker is
 spawned. It is monotonic across retries and is not the bounded remediation

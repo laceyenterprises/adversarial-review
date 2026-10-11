@@ -188,3 +188,24 @@ test('hold-only refund retains only the newest ten unexecuted launch IDs', t => 
     [...oldIds.slice(1), 'new-launch']);
   assert.equal(refundOperatorHeldHammerStop(rootDir, identity, stop), false);
 });
+
+ test('unchanged snapshots perform no DDL or writes after initialization', t => {
+  const { db, observe } = fixture(t);
+  observe(['no-merge-hold']);
+  const before = db.prepare('SELECT total_changes() n').get().n;
+  const exec = db.exec.bind(db);
+  db.exec = () => { throw new Error('unexpected repeated DDL'); };
+  try {
+    observe(['no-merge-hold']);
+    assert.equal(db.prepare('SELECT total_changes() n').get().n, before);
+  } finally { db.exec = exec; }
+});
+ test('failed release transaction preserves the held snapshot for retry', t => {
+  const { db, observe } = fixture(t);
+  observe(['no-merge-hold']);
+  db.exec("CREATE TRIGGER fail_release BEFORE INSERT ON operator_hold_releases BEGIN SELECT RAISE(ABORT, 'fixture failure'); END");
+  assert.throws(() => observe([]), /fixture failure/);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT labels_json FROM reviewed_prs').get().labels_json), ['no-merge-hold']);
+  db.exec('DROP TRIGGER fail_release');
+  assert.ok(observe([]));
+});

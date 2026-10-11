@@ -11,7 +11,10 @@ function labels(value) {
   } catch { return null; }
 }
 
+const initializedDatabases = new WeakSet();
+
 export function ensureHoldReleaseSchema(db) {
+  if (initializedDatabases.has(db)) return;
   db.exec(`CREATE TABLE IF NOT EXISTS operator_hold_releases (
     id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL,
     pr_number INTEGER NOT NULL, head_sha TEXT NOT NULL, released_at TEXT NOT NULL,
@@ -19,12 +22,21 @@ export function ensureHoldReleaseSchema(db) {
     routed_at TEXT, cancelled_at TEXT
   ); CREATE INDEX IF NOT EXISTS idx_operator_hold_releases_pr
     ON operator_hold_releases(repo, pr_number, id DESC);`);
+  initializedDatabases.add(db);
 }
 
 export function observeHoldRelease({ db, repo, prNumber, headSha, liveLabels, now = new Date().toISOString() }) {
   const live = labels(liveLabels);
   if (!live || !headSha) return null;
   ensureHoldReleaseSchema(db);
+  const snapshot = db.prepare('SELECT labels_json FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber);
+  if (!snapshot) return null;
+  const pending = () => db.prepare(`SELECT * FROM operator_hold_releases WHERE repo = ? AND pr_number = ?
+    AND routed_at IS NULL AND cancelled_at IS NULL ORDER BY id DESC LIMIT 1`).get(repo, prNumber) || null;
+  const storedLabels = labels(snapshot.labels_json);
+  const needsCancellation = isOperatorHeld(live) && db.prepare(`SELECT 1 FROM operator_hold_releases
+    WHERE repo = ? AND pr_number = ? AND cancelled_at IS NULL LIMIT 1`).get(repo, prNumber);
+  if (JSON.stringify(storedLabels) === JSON.stringify(live) && !needsCancellation) return pending();
   return db.transaction(() => {
     const row = db.prepare('SELECT labels_json FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(repo, prNumber);
     if (!row) return null;

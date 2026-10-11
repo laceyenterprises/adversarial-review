@@ -821,7 +821,9 @@ retaining the intent for retry. A live terminal PR settles the intent as
 `pr-terminal`/`none` and ends that subject's tick. A moved head, unknown labels
 or re-applied hold also ends the tick before gate projection and closeout;
 ordinary processing resumes on the next discovery. The closer can
-unlock a prior hammer stop on an exact-head release, but hold-only refunds
+unlock a prior hammer stop on an exact-head release: removing a hold re-arms
+a stopped hammer on an unchanged head, even when its stop was not hold-only.
+Retry caps and every merge predicate still apply. Hold-only refunds
 require explicit non-execution evidence and a launch ID. Current hammer audit
 producers do not supply that evidence, so operators should not expect refunds
 from them. See [Operator Hold Releases](data-model/operator-hold-releases.md),

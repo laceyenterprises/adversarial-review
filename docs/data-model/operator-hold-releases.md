@@ -32,7 +32,10 @@ idempotent and currently occurs from `observeHoldRelease`.
 
 ## Routing and recovery
 
-The watcher observes release before ordinary per-PR early returns. The newest
+The watcher observes release before ordinary per-PR early returns. Stale-drift
+subjects retain unrouted intent until stale-drift clears. Observation failures
+preserve the held label snapshot by suppressing ordinary label refreshes. Schema
+creation is cached per connection; unchanged hold state avoids a write transaction. The newest
 unrouted, non-cancelled intent for the PR is retried across ticks and restarts;
 this lookup is not restricted to its original head. Before arming a route, a
 live `gh pr view` checks state, head and holds. Re-applying any hold cancels
@@ -59,8 +62,8 @@ Held verdicts with standing blockers still accrue the ordinary cycle-cap count;
 hold toggles do not hide real review/remediation cycles from the breaker.
 
 Review routes retain label freshness checks before claim and spawn. The
-current pending/failed fallback lookup can retain a non-cancelled historical
-release ID on the same head; these claims remain fenced and defer on unreadable
+current pending/failed fallback lookup retains only unrouted releases or releases
+routed after the last reviewer attempt on the same head; these claims remain fenced and defer on unreadable
 live labels. When the post-claim freshness read fails or observes a re-applied
 hold, the unexecuted claim restores every claim/routing-mutated column from a
 snapshot read in the same IMMEDIATE transaction as the claim CAS. A single
@@ -70,10 +73,11 @@ status, failure evidence, quota/attempt timestamps, revision, all three retry
 counters and population retry metadata, lease/process evidence and reviewer
 routing attribution. It leaves live label observations and release cancellation
 intact. The next tick must still pass the original bounded retry/park gates;
-rollback never converts a failed or upstream-held row into plain `pending`.
+Rollback releases the in-process head dispatch lease, and triage sync runs only
+after the freshness fence. Rollback never converts a failed or upstream-held row into plain `pending`.
 Cancelled intents are excluded, so a re-applied hold does not
 prevent ordinary held reviews through old release history. This store does not
-yet clear a non-cancelled association when a review posts. The watcher and
+clear historical release rows; attempt timestamps bound their claim association. The watcher and
 ordinary label mirror writers observe releases before refreshing labels.
 `recoverFastMergeVetoes` in `src/fast-merge-audit-recovery.mjs` is an exception:
 its `fast_merge_skipped` label refresh writes directly and can lose a release

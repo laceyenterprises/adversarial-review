@@ -2813,3 +2813,40 @@ test('HOLDRELEASE-01: rollback cannot overwrite a replacement session', () => {
     `,
   });
 });
+
+test('HOLDRELEASE-01: observation failure retains held snapshot and retries next tick', () => {
+  runHoldReleaseRegression({ setup: `
+    db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+      review_status, review_attempts, labels_json, revision_ref)
+      VALUES (?, 101, '2026-10-11T16:00:00Z', 'claude', 'open', 'pending', 0,
+        '["no-merge-hold"]', 'sha-happy-101')\`).run('laceyenterprises/adversarial-review');
+    const { ensureHoldReleaseSchema } = await import(${JSON.stringify(fileUrl('src', 'operator-hold-release.mjs'))});
+    ensureHoldReleaseSchema(db);
+    db.exec("CREATE TRIGGER fail_release BEFORE INSERT ON operator_hold_releases BEGIN SELECT RAISE(ABORT, 'fixture observation failure'); END");
+  `, verify: `
+    assert.deepEqual(JSON.parse(db.prepare('SELECT labels_json FROM reviewed_prs WHERE pr_number = 101').get().labels_json), ['no-merge-hold']);
+    assert.equal(db.prepare('SELECT count(*) n FROM operator_hold_releases').get().n, 0);
+    db.exec('DROP TRIGGER fail_release');
+    await pollOnce(octokit, pollOptions);
+    assert.equal(db.prepare('SELECT count(*) n FROM operator_hold_releases WHERE pr_number = 101').get().n, 1);
+  ` });
+});
+test('HOLDRELEASE-01: stale drift captures release without routing until cleared', () => {
+  runHoldReleaseRegression({
+    transformLoader: source => source.replace('export function shouldSkipReviewerForStaleDrift() { return null; }',
+      "export function shouldSkipReviewerForStaleDrift() { return globalThis.__staleRelease ? { message: 'fixture stale drift' } : null; }"),
+    setup: `
+      globalThis.__staleRelease = true;
+      db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+        review_status, review_attempts, labels_json, revision_ref)
+        VALUES (?, 101, '2026-10-11T16:00:00Z', 'claude', 'open', 'pending', 0,
+          '["no-merge-hold"]', 'sha-happy-101')\`).run('laceyenterprises/adversarial-review');
+    `, verify: `
+      assert.equal(db.prepare('SELECT routed_at FROM operator_hold_releases WHERE pr_number = 101').get().routed_at, null);
+      assert.ok(!claims.some(c => c.prNumber === 101));
+      globalThis.__staleRelease = false;
+      await pollOnce(octokit, pollOptions);
+      assert.ok(db.prepare('SELECT routed_at FROM operator_hold_releases WHERE pr_number = 101').get().routed_at);
+    `,
+  });
+});

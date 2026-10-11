@@ -11,11 +11,11 @@ import { hamCommitIdentityMatches, isHamWorkerTicket, parseCommitTrailers, parse
 const SHA = /^[0-9a-f]{40}$/i;
 const isHammer = (commit) => /^hammer(?:-corp|-claude)?$/i.test(
   parseCommitTrailers(commit?.commit?.message || '')['worker-class'] || '');
-const isHammerCommit = (commit) => {
+const isHammerCommit = (commit, loginProvenance = false) => {
   const trailers = parseCommitTrailers(commit?.commit?.message || '');
-  // Keep legacy tagged repairs protected; identity also catches untagged pushes.
+  // A comment-author login alone cannot distinguish a builder from a hammer.
   // Reversal authorization still requires the stricter worker-class provenance.
-  return isHammer(commit) || hamCommitIdentityMatches(commit)
+  return isHammer(commit) || (loginProvenance && hamCommitIdentityMatches(commit))
     || trailers['closed-by'] === 'hammer (adversarial-pipe-mode)';
 };
 
@@ -23,7 +23,7 @@ export function primaryChangeRoot({ rootDir, env = process.env } = {}) {
   return resolve(rootDir || env.HAM_ROOT_DIR || fileURLToPath(new URL('../../', import.meta.url)));
 }
 
-// Legacy dispatch-record reader. Launches alone do not establish commit provenance.
+// Trusted dispatcher records establish the pre-push boundary, never commit trailers.
 export function readPrimaryChangeLaunchHead(rootDir, repo, prNumber) {
   const directory = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
   let names;
@@ -313,7 +313,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
-async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get }) {
+async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir, builderHead }) {
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
   const read = (path) => {
@@ -331,7 +331,33 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get }) {
       || history.commits.length >= 250
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
         || typeof commit?.commit?.message !== 'string')) return unknown('missing, malformed or capped commit history');
-    const first = history.commits.find(isHammerCommit);
+    let launchIndex = -1;
+    const untagged = history.commits.some((commit) => !isHammerCommit(commit)
+      && hamCommitIdentityMatches(commit));
+    if (untagged) {
+      const launchHead = readPrimaryChangeLaunchHead(primaryChangeRoot({ rootDir }), repo, prNumber);
+      if (launchHead) {
+        // The opening identity is pinned by the build-completion ledger. CLI /
+        // sibling callers fall back to the earliest GitHub review, not a head
+        // named by a hammer-authored commit trailer or a later review.
+        let boundary = builderHead;
+        if (!SHA.test(boundary || '')) {
+          const reviews = await read(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
+          if (!Array.isArray(reviews) || reviews.length >= 100) return unknown('missing or capped builder review history');
+          boundary = reviews.filter((review) => amaAllAuthoritativeReviewerLogins().includes(
+            String(review.user?.login || '').replace(/\[bot\]$/, ''))).sort((a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)))[0]?.commit_id;
+        }
+        if (!SHA.test(boundary || '')) return unknown('missing builder head for untagged hammer provenance');
+        const ancestry = boundary === launchHead ? { status: 'identical' }
+          : await read(`repos/${repo}/compare/${boundary}...${launchHead}`);
+        launchIndex = history.commits.findIndex((commit) => commit.sha === launchHead);
+        if (!['ahead', 'identical'].includes(ancestry.status) || launchIndex < 0) {
+          return unknown('untagged hammer launch is outside builder history');
+        }
+      }
+    }
+    const first = history.commits.find((commit, index) => isHammerCommit(commit,
+      launchIndex >= 0 && index > launchIndex));
     if (!first) return { headSha, hasHammerCommits: false };
     if (first && (!first.parents?.length || first.parents.length > 2
       || !SHA.test(first.parents[0].sha))) return unknown('missing or unsupported first hammer parents');

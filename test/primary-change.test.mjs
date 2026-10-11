@@ -4,6 +4,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
+import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 const head = 'c'.repeat(40);
@@ -179,7 +180,7 @@ test('insertion coordinates agree with and without surrounding diff context', ()
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
 });
 
-test('closer dispatch defers failed reads and unknown evidence without an operator park', async () => {
+test('closer dispatch retries failed reads and escalates deterministic unknown evidence', async () => {
   const { maybeDispatchAmaCloser } = await import('../src/ama/dispatch-closer.mjs');
   for (const readFailed of [true, false]) {
     const result = await maybeDispatchAmaCloser({
@@ -193,8 +194,8 @@ test('closer dispatch defers failed reads and unknown evidence without an operat
       dispatchContext: { repo: 'fixture/repo' },
     });
     assert.equal(result.skipMergeAgent, true);
-    assert.equal(result.reason, 'gate-read-failed');
-    assert.equal(result.needsOperator === true, false);
+    assert.equal(result.reason, readFailed ? 'gate-read-failed' : 'primary-change-repair-required');
+    assert.equal(result.needsOperator === true, !readFailed);
   }
 });
 
@@ -542,6 +543,54 @@ test('PRIMARYCHG-01: remediation after hammer and second launch preserve the fir
     } });
   assert.equal(evidence.hasHammerCommits, true);
   assert.equal(evidence.primaryHead, author);
+  assert.equal(checkPrimaryChange(evidence, head).ok, true);
+  assert.equal(checkPrimaryChange({ ...evidence, finalFiles: [] }, head).reason, 'primary-change-reverted');
+});
+
+test('PRIMARYEMPTY-01: PR 8064 owner-lane builder and unlinked remediation remain merge eligible', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'primaryempty-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const builder = '679e1d8a' + '1'.repeat(32), base = '9bc619416fda58408a31082f71ebde94f24d533a';
+  const evidence = await fetchPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 8064,
+    headSha: head, builderHead: builder, get: async path => path.includes('/pulls/')
+      ? { head: { sha: head }, base: { sha: base } }
+      : { total_commits: 2, commits: [
+        { sha: builder, parents: [{ sha: base }], author: { login: 'clio-airlock' },
+          committer: { login: 'clio-airlock' }, commit: { message: 'Stand up paddock',
+            author: { name: 'Clio-airlock' }, committer: { name: 'Clio-airlock' } } },
+        { sha: head, parents: [{ sha: builder }], author: null, committer: null,
+          commit: { message: 'Review repair\n\nWorker-Class: codex-remediation',
+            author: { name: 'Codex Remediation Worker' } } },
+      ], merge_base_commit: { sha: base }, files: primaryChangeFixture(head).primaryFiles } });
+  assert.equal(evidence.hasHammerCommits, false);
+  assert.equal(predicate(evidence).eligible, true);
+});
+
+for (const useLedger of [true, false]) test(`PRIMARYEMPTY-01: launch-proven untagged HAM after builder protects primary (ledger=${useLedger})`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'primaryempty-launch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const directory = join(rootDir, 'data/follow-up-jobs/ama-closer-dispatches');
+  mkdirSync(directory, { recursive: true });
+  const builder = 'a'.repeat(40), base = 'b'.repeat(40);
+  writeFileSync(join(directory, 'fixture__repo-pr-1-first.json'), JSON.stringify({
+    repo: 'fixture/repo', prNumber: 1, workerClass: 'hammer',
+    dispatchedAt: '2026-10-11T08:40:00Z', targetRemediationSha: builder,
+  }));
+  const files = primaryChangeFixture(head).primaryFiles;
+  const evidence = await fetchPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 1,
+    headSha: head, ...(useLedger ? { builderHead: builder } : {}), get: async path => {
+      if (path.includes('/reviews?')) return [
+        { user: { login: 'clio-airlock' }, commit_id: base, submitted_at: '2026-10-11T08:30:00Z' },
+        { user: { login: amaAllAuthoritativeReviewerLogins()[0] }, commit_id: builder, submitted_at: '2026-10-11T08:35:00Z' },
+      ];
+      if (path.includes('/pulls/')) return { head: { sha: head }, base: { sha: base } };
+      if (path.endsWith(`${base}...${builder}`)) return { merge_base_commit: { sha: base }, files };
+      return { total_commits: 2, commits: [
+        { sha: builder, parents: [{ sha: base }], author: { login: 'clio-airlock' }, commit: { message: 'builder' } },
+        { sha: head, parents: [{ sha: builder }], author: { login: 'clio-airlock' }, commit: { message: `untagged hammer push\n\nReviewed-Head: ${base}` } },
+      ], merge_base_commit: { sha: base }, files };
+    } });
+  assert.equal(evidence.primaryHead, builder);
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
   assert.equal(checkPrimaryChange({ ...evidence, finalFiles: [] }, head).reason, 'primary-change-reverted');
 });

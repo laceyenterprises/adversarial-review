@@ -485,7 +485,7 @@ export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
   "WHERE pr_state = 'open' " +
   // Only rows awaiting reviewer admission contribute pressure. Failed and
   // artifact/terminal states cannot spend a reviewer slot until rearmed.
-  "AND review_status = 'pending' " +
+  "AND review_status IN ('pending', 'pending-upstream') " +
   "AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL) " +
   "AND EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +

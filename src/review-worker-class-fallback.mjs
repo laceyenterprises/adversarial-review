@@ -427,7 +427,9 @@ export async function resolveReviewerWorkerClassWithFallback({
     : (burstEngaged
       ? { burstLeaseId: burstPressure.leaseId ?? null, burstSlots: burstPressure.slots ?? null }
       : {});
-  const elevatedSpendReason = depthEngaged ? 'queue-depth-pressure' : 'burst-lease-pressure';
+  const elevatedSpendReason = depthEngaged
+    ? (depthPressure.reason === 'review-max-wait' ? 'review-max-wait' : 'queue-depth-pressure')
+    : 'burst-lease-pressure';
 
   if (!primaryClass || fallbacks.length === 0) {
     return { ...base, reason: 'no-fallback-configured' };

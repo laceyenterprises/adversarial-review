@@ -1188,10 +1188,11 @@ test("requestReviewRereview refreshes an already-pending row's revision_ref for 
   const verify = openReviewStateDb(rootDir);
   try {
     const row = verify.prepare(
-      'SELECT review_status, revision_ref, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+      'SELECT review_status, revision_ref, reviewed_at, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
     ).get('laceyenterprises/adversarial-review', 10);
     assert.equal(row.review_status, 'pending');
     assert.equal(row.revision_ref, 'head-current-238');
+    assert.equal(row.reviewed_at, '2026-09-11T02:30:00.000Z');
     assert.equal(row.rereview_requested_at, null);
     assert.equal(row.rereview_reason, null);
   } finally {

@@ -1297,6 +1297,12 @@ function requestReviewRereview({
           'review_population_retry_head_sha = NULL',
         ];
         const pendingParams = [];
+        // REVIEWAGE-02: a moved head starts a new admission wait. Same-head
+        // polling must retain the durable timestamp rather than restarting it.
+        if (pendingRevisionRefMoved) {
+          pendingAssignments.push('reviewed_at = ?');
+          pendingParams.push(requestedAt);
+        }
         if (normalizedTargetRevisionRef) {
           pendingAssignments.push('revision_ref = ?');
           pendingParams.push(normalizedTargetRevisionRef);

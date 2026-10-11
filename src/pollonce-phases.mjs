@@ -1756,7 +1756,10 @@ export async function processReviewSubject(entry, ctx) {
         const rwfDecision = await resolveReviewerWorkerClassWithFallback({
           authorClass: reviewerAuthorClass,
           primary: primaryReviewerWorkerClass,
-          fallbackWorkerClasses: reviewWorkerClassFallback(process.env),
+          fallbackWorkerClasses: depthPressure?.reason === 'review-max-wait'
+            ? [route.geminiReviewerSelection?.replacedReviewerModel === 'claude' ? 'claude-code'
+              : route.geminiReviewerSelection?.replacedReviewerModel || (reviewerAuthorClass === 'codex' ? 'claude-code' : 'codex')]
+            : reviewWorkerClassFallback(process.env),
           depthPressure,
           // Discovery must leave an engaged depth lane on its preferred route
           // until the pool checks saturation. Spending burst here would bypass
@@ -1818,6 +1821,10 @@ export async function processReviewSubject(entry, ctx) {
               // Charge the depth lever's budget/cost ledger only for a spill that
               // really landed on a route — the operator is owed the number of
               // non-primary reviews the lever BOUGHT, not the number it attempted.
+              if (rwfDecision.reason === 'review-max-wait') {
+                console.warn(`[watcher] review-wait-spill repo=${repoPath} pr=${prNumber} `
+                  + `pass_kind=${getDepthPassKind()} wait_seconds=${depthPressure.waitSeconds} to=${rwfDecision.to}`);
+              }
               if (rwfDecision.reason === 'queue-depth-pressure') {
                 depthSpillReserved = firstPassSpilloverController?.recordSpill?.({
                   repo: repoPath,
@@ -1825,6 +1832,7 @@ export async function processReviewSubject(entry, ctx) {
                   fromWorkerClass: rwfDecision.from,
                   toWorkerClass: rwfDecision.to,
                   passKind: getDepthPassKind(),
+                  waitSeconds: Math.max(0, Date.now() - Date.parse(current?.rereview_requested_at || current?.reviewed_at)) / 1000,
                 }) === true;
               }
               console.warn(
@@ -2879,7 +2887,7 @@ export async function processReviewSubject(entry, ctx) {
           headSha: subject?.headSha,
         }),
         pendingSince: current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
-        enqueuedAtMs: Date.now(),
+        enqueuedAt: current?.rereview_requested_at || current?.reviewed_at || null,
         preferredRoute: route,
         refundDepthSpill() {
           if (!depthSpillReserved) return;
@@ -2897,9 +2905,9 @@ export async function processReviewSubject(entry, ctx) {
             + `from=${from} to=${this.reviewerModel} reason=${reason}`
           );
         },
-        async reevaluateDepthSpill() {
+        async reevaluateDepthSpill(waitPressure = null) {
           if (depthSpillReserved) return;
-          await applyWorkerFallback(firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) ?? null);
+          await applyWorkerFallback(waitPressure || firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) || null);
           this.syncDepthSpillRoute('queue-depth-pressure');
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },

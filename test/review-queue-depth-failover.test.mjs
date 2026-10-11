@@ -19,6 +19,8 @@ import path from 'node:path';
 
 import {
   FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
+  resolveReviewMaxWaitSeconds,
+  reviewWaitPressure,
   REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
   createFirstPassSpilloverController,
@@ -848,7 +850,8 @@ test('production rereview depth counts only open, eligible, durably requested re
     seed(12); // a delivered review already exists on the current head
     db.prepare("UPDATE reviewed_prs SET revision_ref = 'current-head' WHERE repo = 'o/r' AND pr_number = 12").run();
     db.prepare("UPDATE reviewer_passes SET head_sha = 'current-head' WHERE repo = 'o/r' AND pr_number = 12").run();
-    assert.equal(countOpenPrsAwaitingRereview(db), 3);
+    seed(13, { status: 'pending-upstream' }); // deferred admission still competes for Gemini
+    assert.equal(countOpenPrsAwaitingRereview(db), 4);
   } finally {
     db.close();
     rmSync(dbRoot, { recursive: true, force: true });
@@ -908,7 +911,7 @@ test('watcher REVSLOT gate uses the delivered-pass-aware first-pass depth counte
 
 test('pollonce-phases passes depth pressure in and charges the cost ledger back', () => {
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(src, /applyWorkerFallback\(firstPassSpilloverController\?\.depthPressure\?\.\(getDepthPassKind\(\)\) \?\? null\)/);
+  assert.match(src, /applyWorkerFallback\(waitPressure \|\| firstPassSpilloverController\?\.depthPressure\?\.\(getDepthPassKind\(\)\) \|\| null\)/);
   assert.match(src, /passKind: getDepthPassKind\(\)/);
   // Cost is charged only for a spill that actually landed on a route, and only
   // for the depth trigger — a quota fallback must not spend the depth budget.
@@ -1204,4 +1207,75 @@ test('spill pressure uses the explicit charge lane when row markers have been cl
     assert.equal(readReviewQueueDepthFailoverReport(root).lanes.rereview.cost.spilloverReviewsTotal, 1);
     assert.equal(readReviewQueueDepthFailoverReport(root).lanes['first-pass'].cost.spilloverReviewsTotal, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// REVIEWAGE-02: exercise the production saturation hook and quota resolver.
+test('wait bounds parse overrides, disable at zero, and reject invalid values', () => {
+  assert.equal(resolveReviewMaxWaitSeconds('first-pass', {}), 480);
+  assert.equal(resolveReviewMaxWaitSeconds('rereview', {}), 900);
+  for (const [kind, key, defaultValue] of [
+    ['first-pass', 'ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS', 480],
+    ['rereview', 'ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS', 900],
+  ]) {
+    assert.equal(resolveReviewMaxWaitSeconds(kind, { [key]: '12' }), 12);
+    assert.equal(resolveReviewMaxWaitSeconds(kind, { [key]: '0' }), 0);
+    for (const invalid of ['nope', '12garbage', '-1', 'Infinity']) {
+      assert.equal(resolveReviewMaxWaitSeconds(kind, { [key]: invalid }), defaultValue);
+    }
+  }
+});
+
+for (const [kind, age, expected, builder, env] of [
+  ['first-pass', 481, 'claude-code', 'codex', {}],
+  ['first-pass', 479, 'gemini', 'codex', {}],
+  ['first-pass', 480, 'gemini', 'codex', {}],
+  ['rereview', 901, 'codex', 'claude-code', {}],
+  ['rereview', 899, 'gemini', 'claude-code', {}],
+  ['first-pass', 20, 'claude-code', 'codex', { ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: '10' }],
+  ['first-pass', 9999, 'gemini', 'codex', { ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: '0', ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS: '0' }],
+  ['rereview', 9999, 'gemini', 'claude-code', { ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: '0', ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS: '0' }],
+]) {
+  test(`lone saturated ${kind} age=${age} builder=${builder} spills to ${expected}`, async () => {
+    const nowMs = Date.parse('2026-10-11T06:00:00Z');
+    const requested = new Date(nowMs - age * 1000).toISOString();
+    const candidate = {
+      repoPath: 'o/r', prNumber: 1, reviewerModel: 'gemini', depthPassKind: kind,
+      subject: { createdAt: '2020-01-01T00:00:00Z' }, hasPriorPostedReview: kind === 'rereview',
+      current: { reviewed_at: requested, ...(kind === 'rereview' ? { rereview_requested_at: requested } : {}) },
+      async reevaluateDepthSpill(pressure) {
+        const decision = await resolveReviewerWorkerClassWithFallback({
+          primary: 'gemini', authorClass: builder, depthPressure: pressure,
+          fallbackWorkerClasses: ['codex', 'claude-code'], env: ENTITLED_ENV,
+          execFileImpl: fleetStatusStub(CODEX_OK_CLAUDE_OK),
+        });
+        if (decision.fellBack) this.reviewerModel = decision.workerClass;
+      },
+      async run() { return { dispatched: true }; },
+    };
+    const ordered = await prepareQueueDepthSpillover([candidate], {
+      controller: { depthPressure: () => ({ engaged: false, depth: 1, threshold: 2 }) },
+      now: () => nowMs, env, logger: {},
+    });
+    const result = await runBoundedReviewerDispatchQueue(ordered, {
+      maxConcurrent: 6, geminiCredentialConcurrency: 1,
+      activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]), logger: {},
+    });
+    assert.equal(candidate.reviewerModel, expected);
+    assert.notEqual(candidate.reviewerModel, builder);
+    assert.equal(result.dispatched, expected === 'gemini' ? 0 : 1);
+    assert.equal(reviewWaitPressure(candidate, { nowMs, env }).waitSeconds, age);
+  });
+}
+
+
+test('wait spill respects quota and reviewer entitlement', async () => {
+  for (const [env, rows] of [[ENTITLED_ENV, CODEX_OK_CLAUDE_EXHAUSTED], [{}, CODEX_OK_CLAUDE_OK]]) {
+    const result = await resolveReviewerWorkerClassWithFallback({
+      authorClass: 'codex', primary: 'gemini', fallbackWorkerClasses: ['claude-code'],
+      depthPressure: { engaged: true, reason: 'review-max-wait', waitSeconds: 481 },
+      env, execFileImpl: fleetStatusStub(rows),
+    });
+    assert.equal(result.fellBack, false);
+    assert.equal(result.workerClass, 'gemini');
+  }
 });

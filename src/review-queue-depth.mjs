@@ -16,7 +16,8 @@
 // matter how deep the backlog — and `gemini` is not even a tracked quota harness
 // (`QUOTA_HARNESS_PROVIDER` covers openai/anthropic only), so that path returns
 // `primary-provider-untracked` and does nothing at all. This module supplies the
-// missing trigger: QUEUE DEPTH.
+// missing trigger: QUEUE DEPTH. REVIEWAGE-02 adds a separate wait bound at
+// credential saturation; disarming depth alone does not disable that bound.
 //
 // ── This is a COST lever, not a parallelism tuning knob ──────────────────────
 // `agy` is serialized on purpose: it is cheap, and keeping review on it
@@ -100,6 +101,30 @@ export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.first_pass_review_queue_depth_failover_threshold';
 export const REREVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.rereview_queue_depth_failover_threshold';
+
+// REVIEWAGE-02: mechanism bounds, deliberately outside the shared config schema.
+export const FIRST_PASS_REVIEW_MAX_WAIT_SECONDS = 480;
+export const REREVIEW_MAX_WAIT_SECONDS = 900;
+
+export function resolveReviewMaxWaitSeconds(passKind, env = process.env) {
+  const rereview = passKind === 'rereview';
+  const fallback = rereview ? REREVIEW_MAX_WAIT_SECONDS : FIRST_PASS_REVIEW_MAX_WAIT_SECONDS;
+  const raw = env[rereview ? 'ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS'
+    : 'ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS'];
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export function reviewWaitPressure(candidate, { nowMs = Date.now(), env = process.env } = {}) {
+  const passKind = candidate.depthPassKind || 'first-pass';
+  const bound = resolveReviewMaxWaitSeconds(passKind, env);
+  const requestedAt = candidate.current?.rereview_requested_at || candidate.current?.reviewed_at;
+  const requestedMs = Date.parse(requestedAt);
+  const waitSeconds = Number.isFinite(requestedMs) ? Math.max(0, nowMs - requestedMs) / 1000 : null;
+  return { engaged: bound > 0 && waitSeconds !== null && waitSeconds > bound,
+    waitSeconds, maxWaitSeconds: bound, reason: 'review-max-wait' };
+}
 
 const REPORT_RELATIVE_PATH = ['data', 'review-queue-depth-failover.json'];
 const REPORT_SCHEMA_VERSION = 1;
@@ -585,7 +610,7 @@ export function createFirstPassSpilloverController({
      * Consume one slot and charge the cost ledger. Call ONLY once a depth-driven
      * fallback has actually been applied to a route.
      */
-    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass' } = {}) {
+    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass', waitSeconds = null } = {}) {
       const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
       const current = evaluate(kind);
       let remaining = remainingByKind.get(kind) || 0;
@@ -606,7 +631,7 @@ export function createFirstPassSpilloverController({
       report = summarizeReport(report);
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
-        + `from=${fromWorkerClass} to=${to} pass_kind=${kind} depth=${current.depth} threshold=${current.threshold} `
+        + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} threshold=${current.threshold} `
         + `slot=${grantedByKind.get(kind)}/${current.spillSlots} `
         + `engagement_spillover_reviews=${lane.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`
@@ -646,7 +671,7 @@ export function createFirstPassSpilloverController({
  * Repeated drains reuse the controller's unspent/refunded per-tick budget.
  */
 export async function prepareQueueDepthSpillover(candidates, {
-  controller, compareCandidates, nowMs = Date.now(), logger = console,
+  controller, compareCandidates, nowMs = Date.now(), logger = console, env = process.env, now = () => Date.now(),
 } = {}) {
   const ordered = [...candidates].sort(compareCandidates);
   const passKind = (candidate) => candidate.depthPassKind ?? (
@@ -659,11 +684,15 @@ export async function prepareQueueDepthSpillover(candidates, {
   logger.log?.(`[watcher] review-queue-depth-wait oldest_first_pass_age_ms=${Number.isFinite(oldestMs) ? Math.max(0, nowMs - oldestMs) : 0} first_pass_waiting=${firstPass.length}`);
   for (const candidate of ordered) {
     candidate.prepareForGeminiSaturation = async () => {
-      if (candidate.reviewerModel === 'gemini'
-        // Changing the main route cannot release seats required by a pipeline.
-        && !(candidate.pipelineGeminiSeats > 0)
-        && controller?.depthPressure(passKind(candidate))?.engaged) {
+      // Changing the main route cannot release seats required by a pipeline.
+      if (candidate.reviewerModel !== 'gemini' || candidate.pipelineGeminiSeats > 0) return;
+      const pressure = reviewWaitPressure(candidate, { nowMs: now(), env });
+      // Preserve the depth lever's reservation/refund accounting when armed.
+      if (controller?.depthPressure(passKind(candidate))?.engaged) {
         await candidate.reevaluateDepthSpill?.();
+      }
+      if (candidate.reviewerModel === 'gemini' && pressure.engaged) {
+        await candidate.reevaluateDepthSpill?.(pressure);
       }
     };
   }

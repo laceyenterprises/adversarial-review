@@ -2066,15 +2066,22 @@ from charged recovery actions. K cycles are tolerated, using the same
 remediation-derived cap; more than K cycles exhaust only after 30 minutes
 (`stuckDeadlineMs`) since the first UNKNOWN in that series. Queue/in-flight
 observations, probe-unavailable results and coexistence timeouts neither spend
-nor reset this series. A different resolved blocker resets its count and clock.
-The handler preserves the closure result and recovery snapshot for lane
-scheduling: UNKNOWN waits and backgrounded probes with an unexhausted UNKNOWN
-series remain urgent despite an unchanged review row. Ordinary background
-submissions and exhausted series retain normal lane backoff and the
-decision-reset cap. UNKNOWN exhaustion names `background-pr-mergeable-unknown`
+nor reset this series. Gate-level `closer-head-mergeability-unknown` and nonempty
+`not-eligible` results containing only `pr-mergeability-unknown` or
+`labels-unavailable` are also neutral, preserving the series and any UNKNOWN
+event. A different resolved blocker resets its count and clock.
+Recovery supplies a lane-only `urgent` boolean: UNKNOWN waits and backgrounded
+probes remain urgent only through K settled cycles, with no exhaustion event.
+Beyond K, normal backoff applies while the wall-clock floor runs; scheduled
+probes still escalate. Ordinary `ama-pending` returns carry no closure reason
+or recovery snapshot, so submission/settlement alternation does not change
+the lane decision fingerprint or spend its reset cap.
+UNKNOWN exhaustion names `background-pr-mergeable-unknown`
 in the existing SEV1 event and page. When a different resolved blocker arrives,
 its UNKNOWN-origin event clears so hammer/re-review recovery can resume;
-the successful page receipt remains for per-head deduplication.
+successful `pagedReasons` receipts remain for per-head, per-reason deduplication.
+A later different exhaustion reason pages again on the same head. Legacy
+`paged` receipts migrate before clearing the event; see the data-model doc.
 
 A refused action or exhausted action cap must remain non-progressing for 30
 minutes (`stuckDeadlineMs`), independent of tick count. Re-review queue states
@@ -2083,7 +2090,9 @@ re-review deadline; their own stall monitoring owns queue latency. An unchanged
 posted snapshot without an active review expires after 30 minutes. At either
 non-progress deadline the watcher returns `recovery-exhausted`, persists and logs
 `ama.automated_recovery.exhausted` with severity SEV1, reason, PR, head and
-attempts, and queues one page with a stable outbox identity. Failed page enqueue
+attempts, and queues one page per head and reason with a stable outbox identity.
+The outbox also deduplicates by reason and honors matching legacy receipts.
+Failed page enqueue
 retries without duplicating a successfully queued page. A new head starts a new
 recovery budget. The merge kill switch continues to disable execution.
 Store fields, lock semantics, retention, and safe reset procedure are documented

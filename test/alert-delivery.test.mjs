@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -1051,7 +1052,38 @@ test('AMA recovery page outbox identity deduplicates retries before and after de
   assert.equal(afterDelivery.status, 'delivered');
   assert.equal(afterDelivery.queued, false);
   assert.equal(readdirSync(pendingDir(rootDir)).filter((name) => name.endsWith('.json')).length, 0);
+  const differentReason = { ...options, payload: { ...options.payload, reason: 'hammer-refused' } };
+  const later = await deliverAlert('Different recovery exhausted', differentReason);
+  assert.equal(later.queued, true);
+  assert.notEqual(later.id, first.id);
+  assert.equal((await deliverAlert('Different recovery exhausted', differentReason)).queued, false);
 });
+
+for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
+  test(`AMA recovery reason identities honor legacy ${state} receipts without suppressing a new reason`, async t => {
+    const { env, rootDir } = makeEnv();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const options = { env, event: 'ama.automated_recovery.exhausted',
+      payload: { repo: 'fixture/repo', pr: 42, head: 'abc', reason: 'background-pr-mergeable-unknown' },
+      requestText: async () => ({ statusCode: 200, body: '{}' }) };
+    const initial = await deliverAlert('UNKNOWN exhausted', options);
+    const legacyId = `ama-recovery-${createHash('sha256').update('fixture/repo#42@abc').digest('hex')}`;
+    const doc = JSON.parse(readFileSync(initial.queuePath, 'utf8'));
+    doc.id = legacyId;
+    const legacyPath = sinkPath(rootDir, state, `${legacyId}.json`);
+    renameSync(initial.queuePath, legacyPath);
+    writeFileSync(legacyPath, JSON.stringify(doc));
+    const retry = await deliverAlert('UNKNOWN exhausted', options);
+    assert.equal(retry.queued, false);
+    assert.equal(retry.id, legacyId);
+    assert.equal(retry.status, state);
+    const later = await deliverAlert('Hammer exhausted', {
+      ...options, payload: { ...options.payload, reason: 'hammer-refused' },
+    });
+    assert.equal(later.queued, true);
+    assert.notEqual(later.id, legacyId);
+  });
+}
 
 test('HAM exhaustion pages reuse deterministic identities after uncertain enqueue', async (t) => {
   const { env, rootDir } = makeEnv();

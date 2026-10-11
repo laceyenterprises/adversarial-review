@@ -30,7 +30,10 @@ const IN_PROGRESS_REASONS = new Set([
 const MERGEABILITY_UNKNOWN_NEUTRAL_REASONS = new Set([
   ...IN_PROGRESS_REASONS, 'ama-closer-launch-in-progress',
   'background-pr-state-unavailable', 'ama-coexistence-operation-timeout',
+  'closer-head-mergeability-unknown',
 ]);
+
+const TRANSIENT_GATE_READ_REASONS = new Set(['pr-mergeability-unknown', 'labels-unavailable']);
 
 const CONFIG_HOLD_REASONS = new Set([
   'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'pr-is-draft',
@@ -80,6 +83,9 @@ async function recoverAmaAutomationLocked({
   try { state = JSON.parse(readFileSync(path, 'utf8')); }
   catch (err) { if (err.code !== 'ENOENT') throw err; }
   state ||= { repo, pr: prNumber, head: headSha, attempts: 0, rereviewRequested: false, paged: false };
+  // Migrate the legacy receipt before a resolved UNKNOWN can clear its event.
+  // A legacy paged head without an event could only have cleared UNKNOWN.
+  state.pagedReasons ??= state.paged ? [state.event?.reason || 'background-pr-mergeable-unknown'] : [];
   const save = () => writeFileAtomic(path, `${JSON.stringify(state, null, 2)}\n`);
   const clearStall = () => {
     if (state.blockedSince != null) {
@@ -89,20 +95,25 @@ async function recoverAmaAutomationLocked({
   };
   const waiting = (action, amaClosureResult = result) => {
     clearStall();
-    return { outcome: 'ama-pending', amaClosureResult, recovery: { ...state, action } };
+    return { outcome: 'ama-pending', amaClosureResult, recovery: { ...state, action },
+      urgent: state.mergeabilityUnknownCycles > 0 && state.mergeabilityUnknownCycles <= maxAttempts
+        && !state.event && ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded'].includes(reason) };
   };
   const ordinaryWait = (value) => IN_PROGRESS_REASONS.has(value?.reason)
     || value?.daemonCleanMerge?.disposition === 'deferred'
     || value?.recoveryWait || value?.commentOnlyFinalRoundAwaitingCi === true
     || FOLLOW_UP_REASONS.has(value?.reason)
     || (value?.reasons || []).some((item) => FOLLOW_UP_REASONS.has(item));
-  if (reason !== 'background-pr-mergeable-unknown' && !MERGEABILITY_UNKNOWN_NEUTRAL_REASONS.has(reason)) {
+  const transientGateRead = reason === 'not-eligible' && reasons.length > 0
+    && reasons.every((item) => TRANSIENT_GATE_READ_REASONS.has(item));
+  if (reason !== 'background-pr-mergeable-unknown' && !MERGEABILITY_UNKNOWN_NEUTRAL_REASONS.has(reason)
+    && !transientGateRead) {
     if (state.mergeabilityUnknownCycles || state.mergeabilityUnknownSince != null
       || state.event?.reason === 'background-pr-mergeable-unknown') {
       state.mergeabilityUnknownCycles = 0;
       delete state.mergeabilityUnknownSince;
       // A resolved UNKNOWN must not suppress later hammer/rereview recovery.
-      // Preserve the per-head page receipt so a second stall cannot page twice.
+      // Preserve per-reason receipts while allowing a different stall to page.
       if (state.event?.reason === 'background-pr-mergeable-unknown') delete state.event;
       save();
     }
@@ -114,6 +125,7 @@ async function recoverAmaAutomationLocked({
     return { outcome: 'await-operator', amaClosureResult: result };
   }
   if (/autonomous-merge.*disabled|ama-disabled/.test(reason)) return waiting('disabled');
+  if (transientGateRead) return waiting('await-mergeability');
   if (ordinaryWait(result)) return waiting(
     FOLLOW_UP_REASONS.has(reason) || reasons.some((item) => FOLLOW_UP_REASONS.has(item))
       ? 'await-remediation' : 'in-progress');
@@ -125,12 +137,13 @@ async function recoverAmaAutomationLocked({
       save();
       logger.error?.(JSON.stringify(event));
     }
-    if (!state.paged) {
+    if (!state.pagedReasons.includes(event.reason)) {
       try {
-        await pageImpl(`SEV1 AMA automated recovery exhausted: ${repo}#${prNumber}@${headSha}: ${reason}`, {
+        await pageImpl(`SEV1 AMA automated recovery exhausted: ${repo}#${prNumber}@${headSha}: ${event.reason}`, {
           event: event.event, payload: event,
         });
         state.paged = true;
+        state.pagedReasons.push(event.reason);
         save();
       } catch (err) {
         state.pageError = String(err?.message || err);

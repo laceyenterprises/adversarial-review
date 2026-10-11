@@ -74,6 +74,12 @@ Directory: `data/alert-delivery/`
   series can page again on the same head. If record persistence fails, no series
   ID is supplied and the normal outbox identity applies; the lane debounce still
   suppresses repeats. Legacy payloads without a series ID also use normal IDs.
+- AMA automated recovery exhaustion pages use
+  `ama-recovery-<sha256(JSON.stringify([repo, pr, head, reason]))>`. Same-reason
+  retries reuse pending, inflight, delivered and dead-letter documents; a later
+  different exhaustion reason can page on the same head. Pre-upgrade IDs hashed
+  `repo#pr@head` without the reason. Those legacy documents are reused only when
+  their event and payload reason match; a different reason gets the new ID.
 - The scheduled drain is best-effort fire-and-forget work. It must contain its
   own rejections so a drain failure cannot terminate the long-lived watcher
   daemon through Node's unhandled-rejection policy.

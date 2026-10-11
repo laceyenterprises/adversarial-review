@@ -3352,12 +3352,12 @@ test('LANESTARVE-01: a decision-only reset re-arms the operator-decision alert',
   }
 });
 
-function mergeabilityLaneFixture(rootDir) {
+function mergeabilityLaneFixture(rootDir, logger = silentLogger) {
   const row = { body_md: null, review_status: 'posted', pr_state: 'open', reviewer_head_sha: HEAD_A };
   const handler = { repoPath: REPO, prNumber: 999, headSha: HEAD_A };
   const gate = createNoProgressLaneGate({ rootDir, readReviewRow: () => row,
     deliverAlertFn: async () => assert.fail('mergeability wait is not an operator decision'),
-    logger: silentLogger });
+    logger });
   const run = async (reason, recoveryOptions = {}) => {
     const value = await handlePostedReviewRow({ rootDir, ...handler, existing: row,
       subjectRef: null, currentRevisionRef: HEAD_A, labelNames: [],
@@ -3370,25 +3370,36 @@ function mergeabilityLaneFixture(rootDir) {
         repo: REPO, prNumber: handler.prNumber, headSha: HEAD_A, result: { reason },
         now: () => 0, pageImpl: async () => {}, logger: silentLogger, ...recoveryOptions }),
       logger: silentLogger });
-    assert.equal(value.amaClosureResult.reason, reason, 'production handler retains the closure reason');
+    if (value.outcome === 'ama-pending') {
+      assert.equal(value.amaClosureResult, undefined, 'retained ownership exposes only lane urgency');
+      assert.equal(value.recovery, undefined);
+    } else assert.equal(value.amaClosureResult.reason, reason);
     await gate.record(handler, { value });
     return value;
   };
   return { gate, handler, run };
 }
 
-test('HAMUNKNOWN-01 real handler keeps UNKNOWN probes active and demotes after exhaustion', async () => {
+test('HAMUNKNOWN-01 real handler keeps K UNKNOWN probes active then backs off before the deadline', async () => {
   const rootDir = tempRoot();
   try {
     const { gate, handler, run } = mergeabilityLaneFixture(rootDir);
-    for (let tick = 0; tick < 12; tick += 1) {
+    for (let tick = 0; tick < 2; tick += 1) {
       for (const reason of ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded']) {
         const value = await run(reason);
         assert.equal(value.outcome, 'ama-pending');
-        assert.ok(value.recovery.mergeabilityUnknownCycles > 0, 'handler retains recovery series');
+        assert.equal(value.urgent, true);
         assert.equal(gate.evaluate(handler).run, true);
       }
     }
+    for (let tick = 0; tick < 12; tick += 1) {
+      for (const reason of ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded']) {
+        const value = await run(reason);
+        assert.equal(value.outcome, 'ama-pending', 'time floor still prevents exhaustion');
+        assert.equal(value.urgent, false);
+      }
+    }
+    assert.equal(gate.evaluate(handler).run, false, 'spent cycle budget cannot retain the active lane');
     for (let tick = 0; tick < 12; tick += 1) {
       assert.equal((await run('background-pr-mergeable-unknown', { stuckDeadlineMs: 0 })).outcome,
         'recovery-exhausted');
@@ -3408,9 +3419,28 @@ test('HAMUNKNOWN-01 background permanent refusals still demote after decision-re
     for (let tick = 0; tick < 12; tick += 1) {
       await run('not-eligible');
       const queued = await run('ama-closer-dispatch-backgrounded');
-      assert.equal(queued.recovery.mergeabilityUnknownCycles, 0);
+      assert.equal(queued.urgent, false);
     }
     assert.equal(gate.evaluate(handler).run, false);
     assert.equal(readNoProgressLane(rootDir, { repo: REPO, prNumber: handler.prNumber }).lane, LANE_SLOW);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('HAMUNKNOWN-01 ordinary background ownership alternation demotes on the original schedule without warnings', async () => {
+  const rootDir = tempRoot();
+  try {
+    const warnings = [];
+    const { handler, run } = mergeabilityLaneFixture(rootDir,
+      { ...silentLogger, warn: (message) => warnings.push(message) });
+    for (let tick = 0; tick <= DEFAULT_NO_PROGRESS_LANE_CAP + 12; tick += 1) {
+      const reason = ['ama-closer-dispatch-backgrounded', 'lease-held',
+        'ama-closer-dispatch-backgrounded', 'hammer-closer-in-flight'][tick % 4];
+      assert.equal((await run(reason)).urgent, false);
+      const ledger = readNoProgressLane(rootDir, { repo: REPO, prNumber: handler.prNumber });
+      assert.equal(ledger.decisionResets, 0);
+      assert.equal(ledger.noProgressTicks, tick);
+      assert.equal(ledger.lane, tick < DEFAULT_NO_PROGRESS_LANE_CAP ? LANE_ACTIVE : LANE_SLOW);
+    }
+    assert.equal(warnings.some(message => /handler decision changed again/.test(message)), false);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

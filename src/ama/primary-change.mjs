@@ -1,5 +1,5 @@
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
-import { amaAllAuthoritativeReviewerLogins, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
+import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -131,15 +131,15 @@ function changes(files, paths = null, aliases = new Map()) {
   return result;
 }
 
-// Project a base-coordinate region into a reviewed/parent head. Missing or
-// truncated diffs cannot authorize anything. Findings use inclusive head lines.
-function projectRegion(files, path, region, cache) {
+// Patch segments are maximal -/+ runs in base (old) and head (next) lines.
+// Each keeps its patch lines so a rebase can match the same protected change.
+function patchSegments(files, path, cache) {
   if (!cache.has(files)) cache.set(files, { changes: changes(files), paths: new Map() });
   const parsed = cache.get(files);
   // Completeness is checked once per comparison in this evaluation.
 
   const file = files.find((entry) => (entry.previous_filename || entry.filename) === path);
-  if (!file) return { ...region, filename: path };
+  if (!file) return { file: null, segments: [] };
   if (typeof file.patch !== 'string') throw new Error('opaque authorization');
   let segments = parsed.paths.get(path);
   if (!segments) {
@@ -154,15 +154,24 @@ function projectRegion(files, path, region, cache) {
         next = Number(hunk[3]) + (hunk[4] === '0' ? 1 : 0);
         segment = null;
       } else if (line.startsWith('-') || line.startsWith('+')) {
-        if (!segment) { segment = { old, next, oldEnd: old, nextEnd: next }; segments.push(segment); }
+        if (!segment) { segment = { old, next, oldEnd: old, nextEnd: next, lines: [] }; segments.push(segment); }
         if (line.startsWith('-')) old += 1;
         else next += 1;
         segment.oldEnd = old;
         segment.nextEnd = next;
+        segment.lines.push(line);
       } else if (line.startsWith(' ')) { old += 1; next += 1; segment = null; }
     }
     parsed.paths.set(path, segments);
   }
+  return { file, segments };
+}
+
+// Project a base-coordinate region into a reviewed/parent head. Missing or
+// truncated diffs cannot authorize anything. Findings use inclusive head lines.
+function projectRegion(files, path, region, cache) {
+  const { file, segments } = patchSegments(files, path, cache);
+  if (!file) return { ...region, filename: path };
   const project = (line, end) => {
     let offset = 0;
     for (const segment of segments) {
@@ -183,6 +192,22 @@ function projectRegion(files, path, region, cache) {
   return { start: project(region.start, false), end: project(Math.max(region.start, region.end - 1), true), filename: file.filename };
 }
 
+// REVERSALREBASE-01: a rebase moves the reviewed head onto an older base, so
+// base coordinates differ. Find the protected hunk in the reviewed diff by its
+// exact patch lines, never by SHA, and project the unit from that hunk. A
+// changed or ambiguous hunk is a different change and authorizes nothing.
+function projectRebasedRegion(primaryFiles, reviewedFiles, path, region, cache) {
+  const segment = patchSegments(primaryFiles, path, cache).segments.find((entry) => region.start === region.end
+    ? entry.old === entry.oldEnd && entry.old === region.start
+    : entry.old <= region.start && region.end <= entry.oldEnd);
+  if (!segment) throw new Error('protected region outside the primary patch');
+  const matches = patchSegments(reviewedFiles, path, cache).segments.filter((entry) =>
+    entry.lines.length === segment.lines.length && entry.lines.every((line, index) => line === segment.lines[index]));
+  if (matches.length !== 1) throw new Error('rebased protected region patch differs');
+  const shift = matches[0].old - segment.old;
+  return projectRegion(reviewedFiles, path, { start: region.start + shift, end: region.end + shift }, cache);
+}
+
 const overlaps = (a, b) => a.start <= b.end && b.start <= a.end;
 
 function regionUnits(region) {
@@ -198,10 +223,29 @@ function reversalCitations(message) {
     .filter(Boolean);
 }
 
+// REVERSALREBASE-01: after a rebase no review head is an ancestor of the HAM
+// parent. Rebase keeps the author date, so a citation stays current when it
+// was submitted before the reversal and no authoritative review that would
+// supersede it in ancestry (same family, or another family on another head)
+// was submitted between them. Unparseable times fail closed.
+function reviewCurrentAtAuthoring(review, reviews, commit) {
+  const authored = Date.parse(commit?.commit?.author?.date || '');
+  const family = amaReviewerFamilyForLogin(review?.user?.login);
+  const index = reviews.indexOf(review);
+  if (!family || index < 0 || !Number.isFinite(authored)
+    || !(Date.parse(review.submitted_at || '') <= authored)) return false;
+  return reviews.slice(index + 1).every((entry) => {
+    const other = amaReviewerFamilyForLogin(entry.user?.login);
+    if (!other || !['CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'APPROVED'].includes(entry.state)) return true;
+    if (other !== family && entry.commit_id === review.commit_id) return true;
+    return Date.parse(entry.submitted_at || '') > authored;
+  });
+}
+
 function reversalAuthorized(evidence, path, region, cache, strictNonBlockingRemediation) {
   return (evidence.reversalAuthorizations || []).some((authorization) => {
     try {
-      const { commit, review, reviewedFiles, parentFiles } = authorization;
+      const { commit, review, reviewedFiles, parentFiles, rebased } = authorization;
       if (!cache.has(review)) cache.set(review, {
         verdict: normalizeEffectiveReviewVerdict(review.body),
         findings: { blocking: parseBlockingFindingsSection(review.body),
@@ -229,7 +273,9 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
         if (!lines) return false;
         const cited = { start: Number(lines[1]), end: Number(lines[2] || lines[1]) };
         if (cited.start < 1 || cited.end < cited.start) return false;
-        const reviewed = projectRegion(reviewedFiles, path, region, cache);
+        const reviewed = rebased === true
+          ? projectRebasedRegion(evidence.primaryFiles, reviewedFiles, path, region, cache)
+          : projectRegion(reviewedFiles, path, region, cache);
         if ((finding.file || '').replace(/^`|`$/g, '') !== reviewed.filename || !(cited.start <= reviewed.start && cited.end >= reviewed.end)) return false;
         const parent = projectRegion(parentFiles, path, region, cache);
         if (!cache.has(commit.files)) cache.set(commit.files, { changes: changes(commit.files), paths: new Map() });
@@ -238,6 +284,30 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
       });
     } catch { return false; }
   });
+}
+
+// REVERSALREBASE-01: a refusal names the one piece of evidence it lacks, and
+// every trailer citation the collector found but could not verify.
+function missingReversalEvidence(evidence, path, missing) {
+  const rejected = (evidence.rejectedReversalAuthorizations || []).slice(0, 10);
+  const accepted = (evidence.reversalAuthorizations || []).length;
+  const summary = missing === 'reversal-authorization'
+    ? `no verified Reversal-Authorized-By covers the reverted ${path} region (${accepted} verified`
+      + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason})`).join(', ')}` : ''})`
+    : `the reverted ${path} change cannot be authorized by a finding (${missing})`;
+  return { evidence: missing, path, accepted, rejected, summary };
+}
+
+// The exact-head re-review is the one automatic action that can supply a
+// missing finding citation: it is requested only for a HAM head whose own
+// exact-head self-certification failed on nothing but that authorization.
+export function primaryChangeExactReviewEvidence(trace) {
+  const missing = trace?.primaryChange?.missingEvidence;
+  const ham = trace?.hamTerminalRemediation;
+  if (trace?.primaryChange?.reason !== 'primary-change-reverted' || missing?.evidence !== 'reversal-authorization'
+    || ham?.active !== true || ham.checks?.primaryChange !== false) return null;
+  return ['workerClass', 'head', 'parent', 'commitIdentity', 'nonEmptyCommit']
+    .every((name) => ham.checks[name] === true) ? missing : null;
 }
 
 // Non-blocking waivers require an explicit effective strict-mode policy.
@@ -261,6 +331,8 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       throw new Error('empty primary change');
     }
     const testChanges = testRegionsChanged(primary, final);
+    const reverted = (path, missing = 'reversal-authorization') => ({ ok: false, reason: 'primary-change-reverted', path,
+      testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing) });
     for (const [path, change] of primary) {
       const actual = final.get(path);
       if (isTestPath(path) && isTestPath(change.filename)
@@ -268,7 +340,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       if ((change.renamed && actual?.filename === path) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
           && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)))))) {
-        return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
+        return reverted(path, change.renamed ? 'rename-preservation' : change.opaque ? 'opaque-file-preservation' : 'reversal-authorization');
       }
       if (!actual) continue;
       if (change.opaque) {
@@ -292,7 +364,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       for (const [line, count] of change.removed) {
         const authorizedCount = authorizedByText.get(line) || 0;
         if ((actual.removed.get(line) || 0) + authorizedCount < count) {
-          return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
+          return reverted(path);
         }
       }
       for (const region of change.regions) {
@@ -301,7 +373,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
             ? other.start <= unit.start && other.end >= unit.start
             : other.start < unit.end && other.end > unit.start)
             && !reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)) {
-            return { ok: false, reason: 'primary-change-reverted', path, testRegionsChanged: testChanges };
+            return reverted(path);
           }
         }
       }
@@ -373,6 +445,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     const mergeBase = primary.merge_base_commit?.sha;
     if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown('primary and final merge bases are missing or differ');
     const reversalAuthorizations = [];
+    const rejectedReversalAuthorizations = [];
     const authorizedPairs = new Set();
     const closure = history.commits.slice(history.commits.findIndex((commit) => commit.sha === primaryHead) + 1);
     const candidates = closure.filter((candidate) => isHammer(candidate)
@@ -386,32 +459,55 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     for (const candidate of candidates) {
       const trailers = parseCommitTrailers(candidate.commit.message);
       for (const cite of reversalCitations(candidate.commit.message)) {
+        const reject = (reason) => {
+          if (rejectedReversalAuthorizations.length < 10) rejectedReversalAuthorizations.push({
+            commit: candidate.sha, review: cite[1], finding: Number(cite[2]), kind: cite[3] || 'blocking', reason });
+        };
         try {
           const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
-          if (!review || review.commit_id !== trailers['reviewed-head']) continue;
+          if (!review) { reject(reviews === reviewList ? 'review-not-on-this-pull-request' : 'review-list-unreadable'); continue; }
+          if (review.commit_id !== trailers['reviewed-head']) { reject('reviewed-head-mismatch'); continue; }
           const pair = `${candidate.sha}:${review.node_id || review.html_url}`;
           if (authorizedPairs.has(pair)) continue;
           authorizedPairs.add(pair);
           const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
             || !hamCommitIdentityMatches(commit)
-            || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) continue;
+            || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) { reject('commit-provenance'); continue; }
           const parentSha = commit.parents[0].sha;
+          let rebased = false;
           if (!await isCurrentAuthoritativeFamilyReview(review, reviews, parentSha,
-            (from, to) => read(`repos/${repo}/compare/${from}...${to}`))) continue;
-          const inClosure = await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`);
-          const reviewInClosure = await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`);
-          const reviewAncestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
-          if (![inClosure, reviewInClosure, reviewAncestry].every((entry) => ['ahead', 'identical'].includes(entry.status))) continue;
-          const reviewed = await read(`repos/${repo}/compare/${mergeBase}...${review.commit_id}`);
+            (from, to) => read(`repos/${repo}/compare/${from}...${to}`))) {
+            // REVERSALREBASE-01: a rebase rewrites the HAM commit, so its parent
+            // no longer descends from the cited review head. Only that diverged
+            // shape may fall back to submission order; patch content must then
+            // prove the covered change in reversalAuthorized.
+            const ancestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
+            if (ancestry.status !== 'diverged') { reject('review-not-current'); continue; }
+            if (!reviewCurrentAtAuthoring(review, reviews, commit)) { reject('review-superseded-before-reversal'); continue; }
+            rebased = true;
+          }
+          // The HAM parent stays inside the protected closure either way.
+          const chain = [await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`)];
+          if (!rebased) chain.push(await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`),
+            await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`));
+          if (!chain.every((entry) => ['ahead', 'identical'].includes(entry.status))) {
+            reject('review-outside-closure');
+            continue;
+          }
+          // The rebased review head keeps its own (older) merge base with the current base.
+          const reviewed = await read(`repos/${repo}/compare/${rebased ? pr.base.sha : mergeBase}...${review.commit_id}`);
           const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
-          if (reviewed.merge_base_commit?.sha !== mergeBase || parent.merge_base_commit?.sha !== mergeBase) continue;
+          if ((rebased ? !SHA.test(reviewed.merge_base_commit?.sha || '') : reviewed.merge_base_commit?.sha !== mergeBase)
+            || parent.merge_base_commit?.sha !== mergeBase) { reject('merge-base-mismatch'); continue; }
           if (!Array.isArray(reviewed.files) || reviewed.files.length >= 300
-            || !Array.isArray(parent.files) || parent.files.length >= 300) continue;
-          reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files });
+            || !Array.isArray(parent.files) || parent.files.length >= 300) { reject('capped-file-list'); continue; }
+          reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
+            ...(rebased ? { rebased: true } : {}) });
         } catch (error) {
           if (error?.primaryChangeReadFailed === true || error?.authOutage === true
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
+          reject('unverifiable');
           // A stale/deleted citation refuses only this waiver, never the whole
           // protected author diff. Later candidates can still be evaluated.
         }
@@ -427,6 +523,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
       testRegionsChanged: testChanges,
       ...(reversalAuthorizations.length ? { reversalAuthorizations } : {}),
+      ...(rejectedReversalAuthorizations.length ? { rejectedReversalAuthorizations } : {}),
       primaryFiles: primary.files, finalFiles: final.files };
   } catch (error) { return error?.primaryChangeReadFailed === true || error?.authOutage === true || error?.name === 'AbortError'
     || error?.code === 'ABORT_ERR' || isTransientGhError(error)

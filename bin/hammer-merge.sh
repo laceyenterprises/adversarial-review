@@ -318,12 +318,15 @@ const eligibility = evaluateMergeEligibility({
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
 });
+const primaryIntent = checkPrimaryChange(primaryChange, expectedHead, {
+  strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
+});
 console.log(JSON.stringify({
   ok: eligibility.eligible,
   reasons: eligibility.reasons,
-  primaryChangeReason: primaryChange.reason || checkPrimaryChange(primaryChange, expectedHead, {
-    strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
-  }).detail || null,
+  primaryChangeReason: primaryChange.reason || primaryIntent.detail || null,
+  // REVERSALREBASE-01: the closing status names the one missing piece.
+  primaryChangeMissingEvidence: primaryIntent.missingEvidence || null,
   state,
   open,
   headMatches,
@@ -440,6 +443,7 @@ while :; do
       ham_append_terminal_audit deferred "$HAM_PRIMARY_REFUSAL" || true
       ham_mark_merge_lease_retryable_abort "$HAM_PRIMARY_REFUSAL"
     else
+      echo "HAM primary-change refusal; missing evidence: $(jq -r '.primaryChangeMissingEvidence.summary // "unnamed"' "$HAM_GATE_JSON")" >&2
       ham_append_terminal_audit failed-without-merge "$HAM_PRIMARY_REFUSAL" || true
     fi
     ham_release_merge_lease

@@ -1629,6 +1629,29 @@ Unrelated regions, missing trailers and old reviews outside
 the closure cannot authorize a reversal. Opaque files and rename checks remain
 fail-closed. Other merge safety checks remain unchanged.
 
+**Rebased reversals (REVERSALREBASE-01).** A rebase or conflict-owner rebase
+rewrites the HAM commit, so its parent no longer descends from the cited
+`Reviewed-Head` and the reviewed head keeps an older merge base. When the
+compare from the cited review head to the HAM parent is exactly `diverged`, the
+collector still accepts the citation if the trailer is on a HAM commit in the
+current history, the review is on this pull request and contains that finding
+and kind, no authoritative review that would supersede it was submitted between
+the review and the HAM commit's (rebase-preserved) author date, and the
+protected hunk has the same patch lines in the reviewed diff (`<base>...<review
+head>`) as in the current primary diff. Coordinates are translated through that
+matched hunk; File/Lines coverage and the HAM commit's own touch are checked as
+before. A changed, ambiguous or missing hunk, an unknown review or finding, or
+a review superseded before the reversal stays refused. Every refusal carries
+`missingEvidence` (with each unverified citation and why) into the hammer gate
+JSON (`primaryChangeMissingEvidence`), the hammer's closing status and the
+watcher's hold log. When a HAM head's own exact-head self-certification failed
+only on that authorization (`stale-review-head`, `verdict-not-settled-success`
+and `blocking-findings-unknown` are its cascade), the closer marks the
+`primary-change-repair-required` refusal `exactHeadReview: true` and the
+LEASEDEFER-01 leaf requests one bounded exact-head re-review instead of an
+operator hold. The merge stays refused by the predicate until the evidence is
+valid.
+
 **The hammer's dispute adjudication is final (HAMFINAL-01).** Operator decision,
 2026-10-10, after agent-os PR 7987:
 

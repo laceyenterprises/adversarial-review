@@ -131,7 +131,8 @@ includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk sum
 `statedIntent` from the PR body (including Why or Operator decision sections).
 Use `bin/primary-change-context.mjs` for full patches. Use this context to understand intent; it does not suppress real blocking findings.
 If primary evidence is missing or unsupported, stop with a no-merge audit and
-retain the hold for evidence recovery; repeated closer refusals page once per head with SEV1. Never substitute the latest hammer head for the original change.
+print `primaryChange.reason` in the stop message, record `deferred` with reason
+`primary-change-unknown`, and retain the merge hold for automatic evidence recovery; repeated closer refusals page once per head with SEV1. Never substitute the latest hammer head for the original change.
 
 The syntactic preservation gate covers production and config paths only. Test
 paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
@@ -237,10 +238,12 @@ authoritative same-head `CHANGES_REQUESTED` reviews whose complete blocker lists
 are withdrawn. Reviews with standing findings and unrelated review vetoes remain;
 a dismissal failure refuses merge. No administrative bypass is used.
 Neither finding-anchored reversal nor dispute uses `hq decision raise`.
-A predicate refusal `primary-change-reverted` or `primary-change-unknown` requires
+A predicate refusal `primary-change-reverted` requires
 no-merge closing status. Repair the branch or recover the evidence; a scoped
 operator `merge-agent-requested` can dispatch the recovery lane, without waiving
-this predicate. The refusal branch does not automatically dispatch another hammer. `primary-change-read-failed` is a read outage: defer.
+this predicate. A proven reversal does not automatically dispatch another hammer.
+`primary-change-unknown` and `primary-change-read-failed` defer: evidence is
+recomputed on the next pipeline tick, and ordinary gates must pass before redispatch.
 
 ## Mandate
 

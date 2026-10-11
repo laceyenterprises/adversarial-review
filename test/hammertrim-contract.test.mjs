@@ -143,7 +143,7 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME"
   const stale = run('/bin/bash', ['-c', shell.replace(`HAM_VERDICT_READY_FILE=${verdictPath}`, 'HAM_VERDICT_READY_FILE=') , '_', script], env);
   assert.match(stale.stdout, /STATUS=20 HELD=0/);
 });
-test('merge immediately records structural primary-change refusal and releases the lease', (t) => {
+test('merge defers unknown primary-change evidence and releases the lease', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-merge-verdict-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const prNumber = '424243';
@@ -155,7 +155,7 @@ test('merge immediately records structural primary-change refusal and releases t
   writeFileSync(gh, '#!/bin/sh\necho GH_CALLED >&2\nexit 1\n');
   chmodSync(gh, 0o755);
   const nodeStub = join(bin, 'audit-node');
-  writeFileSync(nodeStub, '#!/bin/sh\nif [ \"$1\" = --input-type=module ]; then cat >/dev/null; echo \'{\"ok\":false,\"headMatches\":true,\"state\":\"OPEN\",\"checksConclusion\":\"SUCCESS\",\"reasons\":[\"primary-change-unknown\"]}\'; fi\nexit 0\n');
+  writeFileSync(nodeStub, '#!/bin/sh\nif [ \"$1\" = --input-type=module ]; then cat >/dev/null; echo \'{\"ok\":false,\"headMatches\":true,\"state\":\"OPEN\",\"checksConclusion\":\"SUCCESS\",\"reasons\":[\"primary-change-unknown\"]}\'; fi\nif [ \"$2\" = append ]; then echo \"AUDIT_ARGS=$*\"; fi\nexit 0\n');
   chmodSync(nodeStub, 0o755);
   const env = {
     HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424243', HAM_REPO: 'acme/repo',
@@ -178,6 +178,8 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OUTCOME=$HAM_PHASE_OUTCOME REMOTE=$HA
   assert.match(result.stdout, /LEASE_RELEASED/);
   assert.match(result.stdout, /STATUS=20 HELD=0 OUTCOME=/);
   assert.match(result.stdout, /REMOTE=primary-change-unknown/);
+  assert.match(result.stderr, /primary-change evidence unknown/);
+  assert.match(result.stdout, /AUDIT_ARGS=.*--outcome deferred/);
   assert.doesNotMatch(result.stderr, /GH_CALLED|github-gate-timeout/);
 });
 test('rendered hammer prompt stays under a 60 KiB byte budget', () => {

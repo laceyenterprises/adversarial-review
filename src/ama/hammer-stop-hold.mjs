@@ -173,6 +173,9 @@ export function readHammerStopForHead({
   terminal.sort((a, b) => (a.at - b.at) || (a.order - b.order));
   const latest = terminal.at(-1);
   if (!STOP_OUTCOMES.has(latest.outcome)) return null;
+  // PRIMARYCHG-01: missing evidence is not the hammer's final judgment.
+  // This also releases legacy no-merge audits once the collector is repaired.
+  if (latest.attempt?.reason === 'primary-change-unknown') return null;
   const { attempt } = latest;
   return {
     headSha,

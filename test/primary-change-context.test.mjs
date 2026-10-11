@@ -83,7 +83,9 @@ test('primary-change CLI exhausts transient reads after three attempts and fails
   })));
   assert.equal(result.status, 0, result.stderr);
   const parsed = JSON.parse(result.stdout);
-  assert.deepEqual(parsed, { headSha: head, hasHammerCommits: null, readFailed: true });
+  assert.match(parsed.reason, /history read failed/);
+  const { reason: _reason, ...flags } = parsed;
+  assert.deepEqual(flags, { headSha: head, hasHammerCommits: null, readFailed: true });
   assert.equal(checkPrimaryChange(parsed, head).reason, 'primary-change-read-failed');
   assert.deepEqual(result.calls, Array.from({ length: 3 }, () => ['api', prPath]));
 });

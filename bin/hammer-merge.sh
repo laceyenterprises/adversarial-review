@@ -124,7 +124,13 @@ fi
 if ! jq -e --arg head "$POST_REMEDIATION_SHA" \
   '.eligible == true and .trace.headMatch.current == $head' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
   echo "HAM hard-blocker: predicate is not eligible for the validated head" >&2
-  ham_append_terminal_audit failed-without-merge predicate-not-eligible || true
+  if jq -e '.reasons | index("primary-change-unknown") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
+    cat "$HAM_VERDICT_FILE" >&2
+    ham_append_terminal_audit deferred primary-change-unknown || true
+    ham_mark_merge_lease_retryable_abort primary-change-unknown
+  else
+    ham_append_terminal_audit failed-without-merge predicate-not-eligible || true
+  fi
   ham_release_merge_lease
   return 20
 fi
@@ -252,7 +258,7 @@ ham_refresh_github_gate_once() {
   HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
-import { fetchPrimaryChange } from '<<ROOT_DIR>>/src/ama/primary-change.mjs';
+import { fetchPrimaryChange, checkPrimaryChange } from '<<ROOT_DIR>>/src/ama/primary-change.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '<<ROOT_DIR>>/src/ama/effective-policy.mjs';
 import { execGhWithRetry } from '<<ROOT_DIR>>/src/gh-cli.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
@@ -315,6 +321,9 @@ const eligibility = evaluateMergeEligibility({
 console.log(JSON.stringify({
   ok: eligibility.eligible,
   reasons: eligibility.reasons,
+  primaryChangeReason: primaryChange.reason || checkPrimaryChange(primaryChange, expectedHead, {
+    strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
+  }).detail || null,
   state,
   open,
   headMatches,
@@ -425,7 +434,14 @@ while :; do
   HAM_PRIMARY_REFUSAL=$(jq -r '[.reasons[]? | select(. == "primary-change-reverted" or . == "primary-change-unknown")][0] // empty' "$HAM_GATE_JSON")
   if [ -n "$HAM_PRIMARY_REFUSAL" ]; then
     HAM_REMOTE_CI_STATUS="$HAM_PRIMARY_REFUSAL"
-    ham_append_terminal_audit failed-without-merge "$HAM_PRIMARY_REFUSAL" || true
+    if [ "$HAM_PRIMARY_REFUSAL" = primary-change-unknown ]; then
+      echo "HAM primary-change evidence unknown; defer for evidence recovery" >&2
+      cat "$HAM_GATE_JSON" >&2
+      ham_append_terminal_audit deferred "$HAM_PRIMARY_REFUSAL" || true
+      ham_mark_merge_lease_retryable_abort "$HAM_PRIMARY_REFUSAL"
+    else
+      ham_append_terminal_audit failed-without-merge "$HAM_PRIMARY_REFUSAL" || true
+    fi
     ham_release_merge_lease
     return 20
   fi

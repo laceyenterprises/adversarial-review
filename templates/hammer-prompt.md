@@ -398,7 +398,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    another repo/submodule, open the subrepo PR for that parity fix (or stop with
    the exact owed change) and map the red parity check to that PR/report in the
    audit comment.
-3. Commit the remediation. The commit must have provenance trailers in ONE
+3. Commit the remediation when there are changes. If every finding is already
+   addressed, record validation of the current head and continue to merge;
+   create no empty commit and request no fresh verdict. A remediation commit
+   must have provenance trailers in ONE
    contiguous block (no blank lines between them) including:
 
    ```text
@@ -469,8 +472,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    required check bar is green may proceed to merge while still holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
-   prove the HAM-authored remediation commit, provenance trailers, PR audit
-   comment, reviewed-parent coverage, non-empty verified diff, successful
+   prove the active hammer exact-head validation, verified fleet ancestry, PR audit
+   comment from the entitled hammer identity, successful
    live-head checks, and non-waived gates, and it must record
    `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
    where the only HAM-waived reasons are `non-blocking-findings-present` or
@@ -567,13 +570,15 @@ rm -f "$HAM_STAGED_GITLINKS_FILE"
 # then recovers only the last trailer and the head can never self-certify
 # (agent-os#5908 parked on `stale-review-head` for hours). The parser now
 # tolerates the old shape, but emit the correct one.
-git commit -m "HAM remediate final adversarial findings" -m "Worker-Class: hammer
+if ! git diff --cached --quiet; then
+  git commit -m "HAM remediate final adversarial findings" -m "Worker-Class: hammer
 Worker-Ticket: HAM
 Reviewed-Head: <<REVIEWED_SHA>>
 Closed-By: hammer (adversarial-pipe-mode)
 Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
 # Verify the block is contiguous before moving on:
-git log -1 --format=%B | tail -n 6
+  git log -1 --format=%B | tail -n 6
+fi
 ```
 
 Refresh and validate the live head:
@@ -684,12 +689,34 @@ gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR
 gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
 ```
 
-Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the claim to verify. `ama-check`
-must confirm the commit parent/trailers from `/tmp/ham-<<PR_NUMBER>>-commit.json` and confirm
-the audit comment body and author exist in `/tmp/ham-<<PR_NUMBER>>-timeline.json`; the raw
-commit payload must include a non-empty `files[]` diff. If the mandatory rebase
-rewrites the commit parent, the verified `Reviewed-Head` trailer must still
-match `<<REVIEWED_SHA>>`. The JSON claim alone does not satisfy the predicate.
+The hammer's judgement is final: remediate every valid finding, rebase, validate
+and merge the exact head under the lease. Never request a fresh verdict or apply
+`retrigger-review` to a head you validated. When all findings are already
+addressed, validate the existing head; do not create an empty HAM commit.
+Fleet builder, remediation and conflict-rebase commits below your head are your
+responsibility. Foreign commits remain refused. A reviewed-head parent or trailer
+is not needed for exact-head validation.
+
+Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the active claim.
+The entitled hammer audit must record `HAM-Validated-Head: <exact SHA>`;
+`ama-check` verifies its body and author against the live timeline. Fetch the
+complete fleet ancestry using the versioned helper. Every head-only delta commit
+requires a GitHub-verified signature, including base merges; email-mapped fleet
+logins alone are insufficient. The helper retries PR-base discovery and each
+ancestry read on transient transport failures at most three times with 500/1000ms
+backoff and a 15-second per-attempt timeout. Exhausted reads refuse this proof:
+
+```bash
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
+  <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
+  > /tmp/ham-<<PR_NUMBER>>-range.json || {
+    HAM_HEAD_CONTEXT_EXIT=$?
+    if [ "$HAM_HEAD_CONTEXT_EXIT" -ne 65 ]; then
+      ham_mark_merge_lease_retryable_abort hammer-head-context-read-failed
+    fi
+    exit "$HAM_HEAD_CONTEXT_EXIT"
+  }
+```
 
 ```json
 {
@@ -744,6 +771,7 @@ HAM_VERDICT_READY_FILE=""
   --risk-class <<RISK_CLASS>> \
   --ham-terminal-remediation /tmp/ham-<<PR_NUMBER>>-terminal-remediation.json \
   --ham-commit /tmp/ham-<<PR_NUMBER>>-commit.json \
+  --ham-range /tmp/ham-<<PR_NUMBER>>-range.json \
   --primary-change "$HAM_PRIMARY_CHANGE_FILE" \
   > "$HAM_VERDICT_FILE" || exit 1
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"

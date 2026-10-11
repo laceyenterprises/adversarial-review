@@ -1962,9 +1962,26 @@ one of:
    only` verdict whose sole remaining refusal reason is
    `verdict-not-settled-success`, the closer may waive those reasons on an
    active HAM session only after the predicate verifies current-head HAM authority
-   from trusted inputs: HAM worker trailers, reviewed-parent/current-head match,
-   non-empty verified diff, allowlisted audit-comment author, matching
-   audit-comment body, and doc-currency evidence. The zero-finding path is
+   from trusted inputs. HAMFINAL-02 exact-head validation is final: an active
+   hammer records `HAM-Validated-Head` in its entitled audit and verifies every
+   head-only delta commit after the review (or in the rebased branch) as
+   fleet-authored or a merge of the base. Every such commit must also carry
+   `commit.verification.verified === true` from GitHub, including base merges;
+   email-mapped author/committer logins alone cannot establish fleet provenance.
+   `bin/hammer-head-context.mjs` accepts either a base ref or `--pr <PR_URL>`;
+   the latter discovers the PR base through the shared `execGhWithRetry` helper.
+   Both that helper and the daemon's exact-head range collector retry each
+   transient transport, timeout, rate-limit or HTTP 5xx read at most three
+   times with 500/1000ms backoff and a 15-second per-attempt timeout.
+   Permanent permission errors are not retried; rejected credentials retain
+   the shared helper's single forced token-refresh attempt. Exhausted reads
+   fail closed. The prompt bounds the complete collection to 90 seconds and
+   marks read failures as retryable lease aborts; exit 65 means unverified or
+   incomplete ancestry and is a structural refusal, not a retryable read.
+   No reviewed-parent trailer or new HAM commit is required
+   when findings are already addressed. The watcher suppresses another review
+   of this exact head and bounded recovery retries the merge under the lease.
+   All structural merge gates remain in force. The zero-finding path is
    admitted only after the caller supplies a finite measured terminal-unmerged
    duration that meets the comment-only grace threshold. This active trust is
    intentionally narrower than strict `.ok`: it does not require the finding-count

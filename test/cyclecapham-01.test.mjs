@@ -445,6 +445,7 @@ function hamCertification({ findings, remediated }) {
     '# pass 12',
     '```',
     'Doc-currency: not applicable for changed files src/lease.mjs.',
+    `HAM-Validated-Head: ${HAM_HEAD}`,
   ].join('\n');
   const trailers = {
     'Worker-Class': 'hammer',
@@ -458,7 +459,7 @@ function hamCertification({ findings, remediated }) {
       active: true,
       ticket: 'HAM',
       // The hammer's commit sits on the last remediation push, not on the
-      // reviewed head; the Reviewed-Head trailer binds it to the review.
+      // reviewed head; the exact-head audit and verified range bind its authority.
       commit: { sha: HAM_HEAD, primaryChange: primaryChangeFixture(HAM_HEAD), parentSha: REMEDIATED_HEAD, trailers },
       auditComment: { body: auditBody, docCurrency: { status: 'not_applicable', changedFiles: ['src/lease.mjs'] }, findings },
     },
@@ -468,10 +469,13 @@ function hamCertification({ findings, remediated }) {
         primaryChange: primaryChangeFixture(HAM_HEAD),
         parentSha: REMEDIATED_HEAD,
         author: 'hammer-worker',
+        committer: 'hammer-worker',
         changedFiles: ['src/lease.mjs'],
         trailers,
       },
       auditComment: { body: auditBody, author: 'hammer-worker', createdAt: '2026-10-10T05:20:00Z', id: 'IC_ham_audit' },
+      range: { verified: true, reviewedHead: REVIEWED_HEAD, currentHead: HAM_HEAD,
+        baseSha: 'verified-base', commits: [REMEDIATED_HEAD, HAM_HEAD] },
     },
   };
 }
@@ -495,6 +499,7 @@ test('the hammer merges its adjudicated head when it fixes one finding and withd
     }),
   });
   assert.equal(result.eligible, true, JSON.stringify(result.reasons));
+  assert.equal(result.trace.hamTerminalRemediation.checks.exactValidation, true);
   assert.deepEqual(result.reasons, []);
   assert.equal(result.trace.headMatch.current, HAM_HEAD, 'the merge predicate binds the hammer head, with no new review');
   assert.equal(result.trace.finalHammer.active, true);
@@ -512,6 +517,7 @@ test('the hammer merges its adjudicated head when it judges every remaining find
     }),
   });
   assert.equal(result.eligible, true, JSON.stringify(result.reasons));
+  assert.equal(result.trace.hamTerminalRemediation.checks.exactValidation, true);
   assert.equal(result.trace.headMatch.current, HAM_HEAD);
 });
 

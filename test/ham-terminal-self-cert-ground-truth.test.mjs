@@ -103,7 +103,11 @@ function liveReviewState() {
   };
 }
 
-function evaluate({ verifiedCommit, verifiedAuditComment, reviewState }) {
+function evaluate({ verifiedCommit, verifiedAuditComment, reviewState, exactHeadValidation = false }) {
+  // Keep the historical captured audit intact; modern rebased-head authority
+  // additionally needs the entitled exact-head audit and independently verified range.
+  if (exactHeadValidation) verifiedAuditComment = { ...verifiedAuditComment,
+    body: `${verifiedAuditComment.body}\nHAM-Validated-Head: ${CURRENT_HEAD}` };
   const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({
     reviewedHead: reviewState.headSha,
     verifiedCommit,
@@ -126,6 +130,8 @@ function evaluate({ verifiedCommit, verifiedAuditComment, reviewState }) {
       hamTerminalRemediationGroundTruth: {
         commit: verifiedCommit,
         auditComment: verifiedAuditComment,
+        range: exactHeadValidation ? { verified: true, reviewedHead: REVIEWED_HEAD,
+          currentHead: CURRENT_HEAD, baseSha: 'verified-base', commits: [ACTUAL_PARENT, CURRENT_HEAD] } : null,
       },
     },
   );
@@ -156,11 +162,12 @@ test('HSC-01: trailer scan still stops at prose and never consumes the subject l
   assert.deepEqual(parseCommitTrailers(''), {});
 });
 
-test('HSC-01: the Reviewed-Head trailer covers a remediation whose parent is not the reviewed head', () => {
+test('HSC-01: exact-head validation covers a remediation whose parent is not the reviewed head', () => {
   const { ham } = evaluate({
     verifiedCommit: liveVerifiedCommit(),
     verifiedAuditComment: liveAuditComment(),
     reviewState: liveReviewState(),
+    exactHeadValidation: true,
   });
   assert.equal(
     ham.actualParent,
@@ -169,6 +176,7 @@ test('HSC-01: the Reviewed-Head trailer covers a remediation whose parent is not
   );
   assert.notEqual(ham.actualParent, REVIEWED_HEAD);
   assert.equal(ham.reviewedHeadTrailer, REVIEWED_HEAD);
+  assert.equal(ham.checks.exactValidation, true);
   assert.equal(ham.checks.parent, true, 'the rebase-coverage branch must be satisfiable');
 });
 
@@ -228,6 +236,7 @@ test('HSC-01: the hammer head self-certifies end to end and stale-review-head no
     verifiedCommit: liveVerifiedCommit(),
     verifiedAuditComment: liveAuditComment(),
     reviewState: liveReviewState(),
+    exactHeadValidation: true,
   });
   assert.equal(ham.ok, true, `expected self-certification; checks=${JSON.stringify(ham.checks)}`);
   assert.equal(ham.safetyCoreOk, true);
@@ -333,6 +342,7 @@ test('HSC-01: a settled comment-only head waives non-blocking findings the hamme
   const { ham, verdict } = evaluate({
     verifiedCommit: liveVerifiedCommit(),
     verifiedAuditComment: liveAuditComment(),
+    exactHeadValidation: true,
     reviewState: settledCommentOnlyReviewState([
       'First-cycle state loss on clean starts',
       'Loss of strand shape fidelity on cap file expiry',
@@ -350,6 +360,7 @@ test('HSC-01 safety: an uncovered standing non-blocking finding still blocks the
   const { ham, verdict } = evaluate({
     verifiedCommit: liveVerifiedCommit(),
     verifiedAuditComment: liveAuditComment(),
+    exactHeadValidation: true,
     reviewState: settledCommentOnlyReviewState([
       'First-cycle state loss on clean starts',
       'Loss of strand shape fidelity on cap file expiry',

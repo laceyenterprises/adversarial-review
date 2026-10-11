@@ -53,13 +53,12 @@ test('two failed attempts exhaust durably and page once with evidence', async t 
   assert.equal(calls.pages[0][1].payload.attempts, 2);
   assert.equal(calls.pages[0][1].payload.lastAttempt.reason, 'failed');
 });
-test('uncertifiable closer head requests one exact-head review', async t => {
+test('uncertifiable closer head retains bounded merge retries', async t => {
   const { tick, calls } = setup(t, 7704);
   for (let i = 0; i < 20; i++) await tick({ dispatchHammer: async () => ({ dispatched: false, reason: 'cannot-recertify' }) });
-  assert.equal(calls.reviews.length, 1);
-  assert.equal(calls.reviews[0].targetRevisionRef, 'current-head');
+  assert.equal(calls.reviews.length, 0);
 });
-test('already-pending API result persists the watchdog rereview marker', async t => {
+test('stranded closer does not request an already-pending review', async t => {
   const { tick, calls } = setup(t, 7704);
   for (let i = 0; i < 20; i++) await tick({
     dispatchHammer: async () => ({ dispatched: false, reason: 'cannot-recertify' }),
@@ -68,9 +67,9 @@ test('already-pending API result persists the watchdog rereview marker', async t
       return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
     },
   });
-  assert.equal(calls.reviews.length, 1);
+  assert.equal(calls.reviews.length, 0);
 });
-test('already-pending API result persists rereview after a previously dispatched HAM stops', async t => {
+test('stopped HAM retries merge instead of requesting another review', async t => {
   const { tick, calls } = setup(t, 7704);
   for (let i = 0; i < 6; i++) await tick();
   for (let i = 0; i < 20; i++) await tick({
@@ -79,7 +78,7 @@ test('already-pending API result persists rereview after a previously dispatched
       return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
     },
   });
-  assert.equal(calls.reviews.length, 1);
+  assert.equal(calls.reviews.length, 0);
 });
 test('external stale head cannot enter orphan HAM route', async t => {
   const { tick, calls } = setup(t, 7704);
@@ -675,3 +674,27 @@ for (const label of ['no-merge', 'no-auto-merge', 'hold']) {
     assert.equal(calls.dispatch.length, 1);
   });
 }
+
+test('HAMFINAL-02: lease timeout after validation retries merge twice without any review', async t => {
+  const { tick, calls, args } = setup(t, 7704);
+  const result = { ...args.result, hamTerminalRemediationValidated: true,
+    reason: 'merge-lease-timeout', reasons: [] };
+  for (let i = 0; i < 25; i++) await tick({ result,
+    dispatchHammer: async evidence => { calls.dispatch.push(evidence); return { dispatched: false, reason: 'merge-lease-timeout' }; },
+    closerHeadImpl: async () => { throw new Error('validated head needs no closer-chain proof'); } });
+  assert.equal(calls.dispatch.length, 2);
+  assert.equal(calls.dispatch[0].closerHead, true);
+  assert.equal(calls.reviews.length, 0);
+  assert.equal(calls.pages.length, 1);
+});
+
+test('HAMFINAL-02: stranded HAM tip above fleet commits retries without a closer-only chain', async t => {
+  const { tick, calls, args } = setup(t, 7704);
+  for (let i = 0; i < 6; i++) await tick({
+    result: { ...args.result, closerHeadMergeRetry: true,
+      closerAuthoredStale: { currentHead: args.headSha, decision: 'rereview-exact-head' } },
+    closerHeadImpl: () => assert.fail('merge retry is admission, not a fresh review or merge certificate'),
+  });
+  assert.equal(calls.dispatch.length, 1);
+  assert.equal(calls.reviews.length, 0);
+});

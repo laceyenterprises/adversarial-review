@@ -124,7 +124,6 @@ import {
 } from './merge-agent-hq-exec.mjs';
 import { collectStuckMergeAgentCandidateHeads } from './merge-agent-stuck-scan-candidates.mjs';
 import { isRecordedDispatchAtLeastStuckMinAge } from './merge-agent-stuck-age.mjs';
-
 const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;

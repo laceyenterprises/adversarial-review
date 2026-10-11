@@ -73,12 +73,17 @@ function defaultArgs(rootDir, overrides = {}) {
 
 test('label-event-missing when no labelEvent passed', async () => {
   const root = makeTempRoot();
+  const calls = [];
   const result = await tryRetriggerReviewFromLabel({
     ...defaultArgs(root),
+    execFileImpl: makeStubExec({ recordedCalls: calls }),
     labelEvent: null,
     rereviewImpl: () => assert.fail('should not call rereview when labelEvent missing'),
   });
   assert.equal(result.outcome, 'label-event-missing');
+  assert.equal(result.labelRemoved, true);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].args.includes('--remove-label'));
 });
 
 test('missing-revision-ref when revisionRef cannot be resolved', async () => {
@@ -258,4 +263,14 @@ test('retryPendingRetriggerReviewAckComments only attempts records that need ret
   });
   assert.equal(empty.attempted, 0);
   assert.equal(empty.posted, 0);
+});
+
+test('CAPROUTE-01: removal failure leaves an unattributed label retryable without resetting review', async () => {
+  const root = makeTempRoot();
+  const args = defaultArgs(root, { labelEvent: null,
+    rereviewImpl: () => assert.fail('unattributed label must not reset review') });
+  await assert.rejects(tryRetriggerReviewFromLabel({ ...args,
+    execFileImpl: async () => { throw new Error('remove failed'); } }), /remove failed/);
+  const result = await tryRetriggerReviewFromLabel(args);
+  assert.equal(result.labelRemoved, true);
 });

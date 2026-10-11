@@ -519,9 +519,11 @@ export async function tryRetriggerReviewFromLabel({
 }) {
   const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
   if (!labelEventKey) {
+    await removeLabelFromPR({ repo, prNumber, execFileImpl });
     return {
       outcome: 'label-event-missing',
-      detail: 'cannot attribute retrigger-review to a GitHub labeled event',
+      detail: 'removed unattributed retrigger-review label; apply it again to create a fresh labeled event',
+      labelRemoved: true,
     };
   }
   const normalizedRevisionRef = normalizeRevisionRef(

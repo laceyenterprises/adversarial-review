@@ -36,11 +36,14 @@ async function defaultDeliverAlert(text, options) {
 function hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reason }) {
   const head = String(headSha || 'unknown').slice(0, 12);
   const { summary } = HAMMER_OWNER_ROUTES[route];
-  return outcome === 'hammer-no-merge'
+  const next = ' The PR has neither a reviewer nor a hammer; no automatic step remains on this head. '
+    + 'Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. '
+    + 'A new head is adjudicated again subject to the hammer retry cap and lifetime ceiling.';
+  return (outcome === 'hammer-no-merge'
     ? `SEV1 ${repoPath}#${prNumber}: ${summary} and the hammer's final adjudication is NO MERGE `
       + `(head ${head}). Read its closing-status comment on the PR.`
     : `SEV1 ${repoPath}#${prNumber}: ${summary} and the hammer retry cap is exhausted `
-      + `(${reason}, head ${head}) without a merge.`;
+      + `(${reason}, head ${head}) without a merge.`) + next;
 }
 
 async function pageHammerOwnerOutcome({

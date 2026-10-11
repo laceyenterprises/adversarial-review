@@ -760,8 +760,12 @@ Key control points:
   reviewed head when reviews differ; each commit binds one `Reviewed-Head` to its
   citations. Missing and unrelated citations remain refused. After a rebase
   (cited review head `diverged` from the HAM parent) a citation is still accepted
-  by the protected hunk's identical patch lines and review submission order
-  against the HAM author date (REVERSALREBASE-01); a refusal names its
+  by the protected hunk's identical patch lines, unique in both primary and
+  reviewed diffs (REVERSALREBASE-01). A superseded citation additionally requires
+  the original HAM reversal, with the same complete patch and valid original
+  authorization, in the first superseding GitHub review's immutable head.
+  Commit dates cannot prove freshness. A refusal names collector and evaluator
+  rejection reasons in its
   `missingEvidence` and a HAM head missing only that authorization gets one
   exact-head re-review rather than an operator hold.
   A blocking finding the hammer disputes with concrete exact-head evidence is

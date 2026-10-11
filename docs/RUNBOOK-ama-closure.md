@@ -1635,14 +1635,25 @@ rewrites the HAM commit, so its parent no longer descends from the cited
 compare from the cited review head to the HAM parent is exactly `diverged`, the
 collector still accepts the citation if the trailer is on a HAM commit in the
 current history, the review is on this pull request and contains that finding
-and kind, no authoritative review that would supersede it was submitted between
-the review and the HAM commit's (rebase-preserved) author date, and the
-protected hunk has the same patch lines in the reviewed diff (`<base>...<review
-head>`) as in the current primary diff. Coordinates are translated through that
+and kind, and the protected hunk has the same patch lines in the reviewed diff
+(`<base>...<review head>`) as in the current primary diff. The matching segment
+must be unique in both diffs; one reviewed segment cannot authorize repeated
+primary segments. A citation with no later superseding authoritative review
+remains current by GitHub review order. If a later review supersedes it (same
+family, or another family on another head), the first such review's immutable
+head must contain the original HAM commit with the same message and complete
+reversal patch, ignoring only hunk coordinates. The collector verifies original
+HAM identity, citation freshness at its original parent, and the parent's merge
+base. The evaluator rechecks finding coverage and HAM touch against that original
+patch as well as the rebased patch. Author and committer dates supply no freshness
+evidence. Missing, capped or diverged snapshot history cannot establish that
+original authorization and refuses the waiver. Coordinates are translated through that
 matched hunk; File/Lines coverage and the HAM commit's own touch are checked as
 before. A changed, ambiguous or missing hunk, an unknown review or finding, or
 a review superseded before the reversal stays refused. Every refusal carries
-`missingEvidence` (with each unverified citation and why) into the hammer gate
+`missingEvidence` (with collector and evaluator rejection reasons, including
+missing findings and failed patch or File/Lines coverage; verified counts include
+only citations that passed evaluation) into the hammer gate
 JSON (`primaryChangeMissingEvidence`), the hammer's closing status and the
 watcher's hold log. When a HAM head's own exact-head self-certification failed
 only on that authorization (`stale-review-head`, `verdict-not-settled-success`

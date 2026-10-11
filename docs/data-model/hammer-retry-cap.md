@@ -36,13 +36,13 @@ Directory: `data/follow-up-jobs/hammer-retry-cap/`
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. |
 | `jobKey` | string or null | Stable reviewed-head key for the current per-series counter. A changed known job key resets `attemptCount`, `dispatchHeads`, ordinary retry refunds, and the three per-series deferral fields below. Lifetime refund usage survives. |
-| `attemptCount` | non-negative integer | Confirmed hammer dispatches in the current reviewed-head series, less ordinary retry, contention and durable non-execution refunds. Dispatches increment only after launch succeeds. |
+| `attemptCount` | non-negative integer | Confirmed hammer dispatches in the current reviewed-head series, less ordinary retry, contention, durable non-execution and independently observed operator-label deferral refunds. Dispatches increment only after launch succeeds. |
 | `lifetimeAttemptCount` | non-negative integer | Confirmed hammer dispatches for the PR across all reviewed-head series, less bounded contention refunds (at most twelve for the entire PR). Missing legacy values are seeded from `attemptCount`; non-finite present values fail closed to the lifetime ceiling. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation. This may differ from `jobKey` when the review is stale and the exhausted-lane hammer runs against a newer head. |
 | `targetAttemptCount` | non-negative integer | Confirmed hammer dispatches against `targetRemediationSha` across job keys. A changed known target SHA resets the count; missing legacy values are backfilled from `attemptCount` on suppression writes and from the evaluated target count on dispatch writes. |
 | `retryable` | non-negative integer, optional | Dispatches refunded because the hammer exited `succeeded` without closing its PR (HAMBG-02), or its launch failed for an infrastructure reason and it pushed nothing (CLOSERREUSE-01). `attemptCount` and the matching `targetAttemptCount` go down by one, and `retryable` goes up by one. At most `HAMMER_EXITED_WITHOUT_CLOSE_RETRY_BUDGET` (1) per series. Belongs to the series: a fresh-review job-key change resets it, on a dispatch write and on a suppression write alike. Absent until the first refund. Not the same counter as the base-branch merge gate's `retryable` (HAMGATE-01, `data/merge-leases/`): the two live in different stores and have separate budgets. |
 | `retryableLaunchRequestIds` | string array, optional | Launch request ids already refunded, so a launch observed on several ticks is refunded once. Last 10 kept; reset with `retryable`. |
-| `unexecutedLaunchRequestIds` | array of strings, optional | HAMREFUND-01 refunded launch identities, bounded to the newest ten entries. Preserved across dispatches, suppression writes and fresh-review resets; absent legacy values mean no recorded non-execution refunds. |
+| `unexecutedLaunchRequestIds` | array of strings, optional | HAMREFUND-01 or LABELGATE-01 refunded launch identities, bounded to the newest ten entries. Preserved across dispatches, suppression writes and fresh-review resets; absent legacy values mean no recorded non-execution refunds. |
 | `transientRetryHeads` | object of head SHA to positive integer grant count, optional | Spent closer-authored stale-head retry grants. Default limit is one grant per head. Retained for the PR's lifetime across target churn, dispatch/suppression writes and fresh-review job-key resets; unlike refunded launch history, this map is never truncated to ten heads. Absent legacy values mean no grants recorded. |
 | `lastTransientRetryAt` | ISO-8601 string or null, optional | Timestamp supplied for the latest transient retry grant, or null if none was supplied. Preserved with grant history on later dispatch/suppression writes and fresh-review resets. |
 | `deferralLaunches` | string array | Launch IDs observed parked on merge-lease contention or pending required checks in this review series. Dedupes refunds across ticks and against `retryableLaunchRequestIds`. Resets on a changed known job key because the certified reviewed-head queue changed. At twelve deferrals the queue expires. |
@@ -131,3 +131,12 @@ Deferral fields are preserved on suppression writes within a series. A changed
 known job key clears only the series queue, including on suppression writes.
 
 Queue bounds and backoff are evaluated by `evaluateHammerDeferralQueue`; missing or invalid `deferralStartedAt` fails closed as expired.
+
+LABELGATE-01 reuses the non-execution refund operation for an executed hammer
+that deferred at an operator-label gate. The closer requires a matching live
+exact-head gate and a latest typed deferred audit at or after the recorded
+launch. `unexecutedLaunchRequestIds` dedupes this credit against later
+HAMREFUND-01 reconciliation; lifetime charges remain intact. Ordinary exited-without-close refunds also check this durable launch history,
+preventing another credit even when a dispatch marker is absent. The dispatch
+record retains `labelGateRefundedLaunchRequestId` to prevent duplicate per-head
+admission credit.

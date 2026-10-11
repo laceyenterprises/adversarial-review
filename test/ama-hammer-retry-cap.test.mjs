@@ -3578,3 +3578,24 @@ test('LABELGATE-01: typed hammer stop refunds a recorded launch once through PR 
     assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount, 1);
   }
 });
+
+
+test('LABELGATE-01: a hammer-written refusal without a matching live gate stays charged', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'labelgate-unproven-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = hammerDispatchArgs(rootDir, { reviewState: { remediationPending: true },
+    prMetadata: { statusCheckRollup: [{ name: 'unit', conclusion: 'FAILURE' }] },
+  });
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now: '2026-07-06T11:00:00Z' });
+  updateAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }, () => ({
+    ...identity, headSha: REVIEWED_HEAD, reviewedSha: REVIEWED_HEAD, workerClass: 'hammer',
+    launchRequestId: 'unproven-label-launch', dispatchedAt: '2026-07-06T11:00:00Z',
+  }));
+  writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: REVIEWED_HEAD,
+    attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
+    now: '2026-07-06T11:30:00Z' });
+  await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps() });
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 1);
+  assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount, undefined);
+});

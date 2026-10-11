@@ -4137,17 +4137,18 @@ export async function maybeDispatchAmaCloser({
   if (prMetadata?.isOpen !== false && prMetadata?.headSha) {
     const rootDir = dispatchContext?.rootDir || SUBMODULE_ROOT;
     const repo = dispatchContext?.repo;
-    // Reconcile even after the operator clears the check. Match the latest
-    // charged launch and audit timestamp; never refund a different series.
+    // Require independent exact-head CI evidence as well as the typed audit.
+    // Match the latest charged launch and audit timestamp; never refund a
+    // different series or an unobserved hammer-reported refusal.
     let audit;
     try { audit = readAmaAuditEntry(dispatchContext?.hqRoot || DEFAULT_HQ_ROOT, repo, prNumber, prMetadata.headSha); }
     catch { /* An unreadable audit cannot authorize a refund; existing audit gates handle it. */ }
     const attempt = audit?.attempts?.at(-1);
-    if (audit?.status === 'deferred' && OPERATOR_LABEL_GATES.some(g => `operator-label-required:${g.label}` === attempt?.reason)) {
+    if (audit?.status === 'deferred' && labelGates.some(g => g.reason === attempt?.reason)) {
       const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
       const record = listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber })
         .filter(r => r.launchRequestId && isHammerWorkerClass(r.workerClass) && r.headSha === ledger?.lastDispatchedHeadSha
-          && r.reviewedSha === ledger?.jobKey)
+          && r.headSha === prMetadata.headSha && r.reviewedSha === ledger?.jobKey)
         .sort((a, b) => Date.parse(b.dispatchedAt) - Date.parse(a.dispatchedAt))[0];
       if (record && Date.parse(attempt.startedAt) >= Date.parse(record.dispatchedAt)) {
         const refund = refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
@@ -4700,7 +4701,8 @@ export async function maybeDispatchAmaCloser({
               ...current,
               previousUnexecutedLaunchRequestId: current.launchRequestId,
               launchRequestId: null, dispatchId: null,
-              unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1,
+              unexecutedRefundCount: Number(current.unexecutedRefundCount || 0)
+                + (current.labelGateRefundedLaunchRequestId === reconciledLaunchRequestId ? 0 : 1),
               state: 'dispatch-failed', lastError: reason,
               prelaunchRefusalSlowRetry: {
                 ...current.prelaunchRefusalSlowRetry, kind: 'non-execution',

@@ -791,7 +791,7 @@ test('applyPreSpawnLifecycleGate: closed lifecycle delegates to canonical stoppe
   assert.equal(stoppedJob.commentDelivery?.posted, false);
 });
 
-test('applyPreSpawnLifecycleGate: stale-review-head uses the canonical consume-time stop', async () => {
+test('applyPreSpawnLifecycleGate: stale-review-head beats DIRTY repair and uses the canonical stop', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
     jobId: 'laceyenterprises__agent-os-pr-1229-stale-head',
@@ -808,7 +808,9 @@ test('applyPreSpawnLifecycleGate: stale-review-head uses the canonical consume-t
       mergedAt: null,
       closedAt: null,
       headSha: 'sha-after',
+      mergeStateStatus: 'DIRTY',
     }),
+    dirtyMergeImpl: async () => { throw new Error('stale head must stop before dirty repair'); },
     execFileImpl: async () => ({ stdout: '', stderr: '' }),
     now: () => '2026-06-01T05:01:51.000Z',
   });
@@ -823,7 +825,7 @@ test('applyPreSpawnLifecycleGate: stale-review-head uses the canonical consume-t
   assert.equal(stoppedJob.remediationWorker?.state, 'never-spawned');
 });
 
-test('applyPreSpawnLifecycleGate: stale-drift uses the canonical consume-time stop', async () => {
+test('applyPreSpawnLifecycleGate: stale-drift beats DIRTY repair and uses the canonical stop', async () => {
   const rootDir = makeRoot();
   const { job, jobPath } = seedInProgressJob(rootDir, {
     jobId: 'laceyenterprises__agent-os-pr-1230-stale-drift',
@@ -841,7 +843,9 @@ test('applyPreSpawnLifecycleGate: stale-drift uses the canonical consume-time st
       mergedAt: null,
       closedAt: null,
       labels: [{ name: 'stale-drift' }],
+      mergeStateStatus: 'DIRTY',
     }),
+    dirtyMergeImpl: async () => { throw new Error('stale drift must stop before dirty repair'); },
     execFileImpl: async () => ({ stdout: '', stderr: '' }),
     now: () => '2026-06-01T05:01:51.000Z',
     log: { log: (msg) => logs.push(msg) },
@@ -1419,23 +1423,24 @@ test('pushDirtyMergeWithRetry retries transient push failures but fails terminal
   assert.equal(terminalErr?.dirtyPushAttempts, 1);
 });
 
-test('LABELGATE-01: final pre-spawn label hold wins over dirty-conflict hammer dispatch', async t => {
-  const { holdForOperatorLabels, operatorLabelGateFailures } = await import('../src/ama/operator-label-gates.mjs');
+test('LABELGATE-01: final pre-spawn gate allows repair of a guarded change', async t => {
   const rootDir = makeRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { job, jobPath } = seedInProgressJob(rootDir, { jobUpdates: { revisionRef: 'label-head' } });
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const reviewBody = '## Blocking Issues\n- **Accidental submodule bump**: Restore tools/example to the base pointer.\n\n## Verdict\nRequest changes';
+  const { job, jobPath } = seedInProgressJob(rootDir, { jobUpdates: { revisionRef: 'label-head', reviewBody } });
   const lifecycle = { source: 'live', prState: 'open', headSha: 'label-head', mergeStateStatus: 'DIRTY',
     statusCheckRollup: [{ name: 'submodule-pointer-gate', conclusion: 'FAILURE' }] };
-  // Seed the shared page receipt using a fixture transport, never the live pager.
-  await holdForOperatorLabels({ rootDir, repo: job.repo, prNumber: job.prNumber, headSha: lifecycle.headSha,
-    gates: operatorLabelGateFailures(lifecycle.statusCheckRollup), deliverAlertImpl: async () => {} });
-  const result = await applyPreSpawnLifecycleGate({ rootDir, job, jobPath,
-    resolvePRLifecycleImpl: async () => lifecycle,
-    dirtyMergeImpl: async () => { throw new Error('must not repair or launch a dirty-conflict hammer'); },
-    stopConsumedJobWithCommentImpl: async args => markFollowUpJobStopped({ ...args }),
+  let repaired = false;
+  const result = await applyPreSpawnLifecycleGate({ rootDir, job, jobPath, workspaceDir,
+    baseBranch: 'main', resolvePRLifecycleImpl: async () => lifecycle,
+    dirtyMergeImpl: async () => { repaired = true; return { outcome: 'clean-merged', push: { attempts: 1 } }; },
+    stopConsumedJobWithCommentImpl: async () => { throw new Error('review repair must not stop on CI labels'); },
     log: { log() {}, warn() {}, error() {} },
   });
-  assert.equal(result.action, 'stopped');
-  assert.equal(result.job.remediationPlan.stop.code, 'operator-label-required:allow-submodule-pointer-bump');
-  assert.equal(result.job.remediationWorker.state, 'never-spawned');
+  assert.equal(result.action, 'continue');
+  assert.equal(result.reason, 'dirty-clean-merged');
+  assert.equal(repaired, true);
+  assert.equal(readJobAtPath(jobPath).reviewBody, reviewBody);
 });

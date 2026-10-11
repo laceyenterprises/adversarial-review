@@ -129,17 +129,28 @@ The repository's operator-only override registry is:
 <<OPERATOR_LABEL_GATES>>
 
 Before CI repair and during every check wait, inspect the latest failed checks
-and their failure output. If a registered label gate blocks the run, stop
-immediately with `operator-label-required:<label>`; do not rerun it, apply labels,
-weaken the guard, or ask another worker to clear it. For a composite check, name
-its failing guard and label from the output; do not infer a label gate from the
-composite job name. Advisory/successful checks are not blockers.
+and their failure output. A registered check name is a signal to inspect the
+refusal, not proof that an operator override is the only repair. When a cited
+review finding authorizes restoring the guarded change to its base state
+(for example, restore pack files or remove an unintended workflow cost delta), make that repair and validate the
+new head normally. Preserve the guard and the primary-change protections below.
+Submodule pointer restoration remains subject to SUBSYNC-01: HAM commits cannot
+change gitlinks. Leave that code repair to review remediation and report the
+needed pointer restoration instead of requesting an override for an accidental
+bump.
+If the remaining refusal requires an operator override, stop with
+`operator-label-required:<label>`; do not apply labels, weaken the guard, or ask
+another worker to clear it. Do not rerun an unchanged refusal before an operator
+acts. For a composite check, name its failing guard and label from the output;
+do not infer a label gate from the composite job name. Advisory/successful checks
+are not blockers. Explain that the operator must inspect the refusal, apply the
+label if appropriate, and rerun the named check.
 Write the existing AMA audit for the **current live head** with outcome `deferred`
 and an attempt JSON containing `reason: "operator-label-required:<label>"` and
 `startedAt` set to the current ISO timestamp. Release any merge lease and include
 the check and label in the single no-merge closing-status comment. The closer
-holds that head, pages the operator once, and reconciles this launch through the
-PR 1261 refund path so it does not consume the retry cap (the lifetime ceiling remains intact).
+holds that head, pages the operator once, and, after independently observing a matching live label gate, reconciles
+this launch through the PR 1261 refund path so it does not consume the retry cap (the lifetime ceiling remains intact).
 
 ## Preserve the PR primary change (HAMINTENT-02 / LAC-1833)
 

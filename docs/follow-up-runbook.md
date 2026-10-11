@@ -5,6 +5,13 @@ lease for the same PR at any head, including a rekeyed hammer head. An active
 closer dispatch record continues to defer claims after the lease's 30-minute
 age threshold; stale leases without active dispatch evidence can expire.
 
+Operator-label CI holds belong to closure, not review-findings consumption.
+Remediation may restore a review-flagged guarded change to its base state even
+while its label gate is red. The final pre-spawn lifecycle gate gives
+`stale-drift` and `stale-review-head` precedence over DIRTY conflict repair, so
+those stopped jobs cannot launch a conflict hammer before their stale-state
+condition is resolved.
+
 ## SDK cutover gate
 
 Full SDK cutover remains blocked until the airlock-owned deploy host returns

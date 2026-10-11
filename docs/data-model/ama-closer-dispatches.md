@@ -51,7 +51,8 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `infraRearmLoggedLaunchRequestId` | string, optional | Launch whose `ama_closer.infra_dead_hammer_rearm` event was already logged. The event is skipped while this equals `launchRequestId`, so it is logged once per launch whatever the re-arm reason. Stamped only while the record still names that launch. |
 | `retryCount` | non-negative integer | Monotonic launch/pass attempt identity. Admission subtracts `unexecutedRefundCount` from this value when enforcing the per-head redispatch bound. Transient and branch-holder refusals preserve budget. |
-| `unexecutedRefundCount` | non-negative integer, optional | Number of durable non-execution refunds reconciled for this dispatch head. Defaults to zero; reset when the dispatch head advances. Does not reset retry/pass numbering or refund lifetime charges. |
+| `unexecutedRefundCount` | non-negative integer, optional | Number of durable non-execution or independently observed operator-label deferral refunds reconciled for this dispatch head. A label-deferring hammer may have run; this is admission credit, not proof that it never executed. Defaults to zero; reset when the dispatch head advances. Does not reset retry/pass numbering or refund lifetime charges. |
+| `labelGateRefundedLaunchRequestId` | string, optional | Launch already credited for a typed operator-label deferral corroborated by a matching live gate on that exact head. Prevents repeat label refunds and duplicate credit during later HAMREFUND-01 or exited-without-close reconciliation. |
 | `previousUnexecutedLaunchRequestId` | string, optional | Most recently reconciled non-execution launch, retained after clearing `launchRequestId` and `dispatchId`. Keeps the refunded record discoverable as the review series owner during slow retry. |
 | `branchHolderBlockCount` | non-negative integer | Count of branch-holder refusals for bounded same-PR worktree cleanup. |
 | `prelaunchRefusalSlowRetry` | optional object | Durable bounded retry window; fields below. Pre-launch refusals apply before launch IDs exist. `non-execution` also applies after a durable harness death; its window survives admission of replacement launches. |
@@ -148,3 +149,21 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   defer intent collection as `primary-change-read-failed` rather than parking
   permanently or silently dropping protection. Legacy records without valid
   baseline SHAs do not hide later trusted launches.
+
+## Operator-label deferral credit (LABELGATE-01)
+
+A latest `deferred` audit attempt with `reason: operator-label-required:<label>`
+is eligible only while the closer independently observes that matching label
+gate on the current live head. The recorded hammer must match the retry ledger's
+latest dispatched head and reviewed-head job key, and the attempt timestamp must
+be at or after its dispatch. A hammer-written reason alone grants no credit.
+The existing PR 1261 refund operation records the LRQ in
+`unexecutedLaunchRequestIds`, reducing series/target charges once while retaining
+lifetime charges and suppression. The record's marker and
+`unexecutedRefundCount` are updated once; later signal/non-execution or
+exited-without-close reconciliation cannot grant another credit to that launch.
+
+The early label hold currently defers ordinary terminal-worker cleanup, lease
+settlement and pass/token accounting until closure proceeds beyond that hold.
+The label refund itself does not perform those operations. Its receipt is
+separate from dispatch ownership; see [Operator Label Holds](operator-label-holds.md).

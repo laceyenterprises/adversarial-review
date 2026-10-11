@@ -1,7 +1,7 @@
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { adversarialOwnCheckContexts, isAdversarialOwnStatusContext, checkItemState, latestCheckRollupItems } from '../checks-summary.mjs';
+import { adversarialOwnCheckContexts, isAdversarialOwnStatusContext, checkItemState, latestCheckRollupItems, classifyCheckRollup } from '../checks-summary.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 
@@ -15,17 +15,23 @@ export const OPERATOR_LABEL_GATES = Object.freeze([
 ].map(gate => Object.freeze({ ...gate, checks: Object.freeze(gate.checks) })));
 
 export function operatorLabelGateFailures(rollup, { env = process.env } = {}) {
-  const failed = latestCheckRollupItems(rollup).filter(item =>
-    !isAdversarialOwnStatusContext(item, adversarialOwnCheckContexts(env))).filter(item =>
+  const external = latestCheckRollupItems(rollup).filter(item =>
+    !isAdversarialOwnStatusContext(item, adversarialOwnCheckContexts(env)));
+  // A pending sibling can still report a repairable failure. Wait for it before
+  // treating this as an exclusively operator-label closure hold.
+  if (external.some(item => [null, 'PENDING', 'UNKNOWN'].includes(classifyCheckRollup([item])))) return [];
+  const failed = external.filter(item =>
     ['FAILURE', 'ERROR', 'TIMED_OUT', 'ACTION_REQUIRED', 'CANCELLED', 'STARTUP_FAILURE', 'STALE'].includes(checkItemState(item)));
   if (!failed.length) return [];
   const gates = failed.map(item => {
     const check = String(item.context || item.name || '').trim();
     const evidence = String(item.output?.summary || item.description || '');
-    const gate = OPERATOR_LABEL_GATES.find(g => g.checks.includes(check.toLowerCase())
-      || (checkItemState(item) === 'FAILURE' && (evidence.includes(`operator-label-required:${g.label}`)
-        || evidence.split('\n').some(line => line.includes(g.label)
-          && /\b(?:apply|requires?|without)\b/i.test(line) && /\blabel\b/i.test(line)))));
+    const refusalFor = g => evidence.includes(`operator-label-required:${g.label}`)
+      || evidence.split('\n').some(line => line.includes(g.label)
+        && /\b(?:apply|requires?|without)\b/i.test(line) && /\blabel\b/i.test(line));
+    const gate = OPERATOR_LABEL_GATES.find(g =>
+      (g.checks.includes(check.toLowerCase()) && (!evidence.trim() || refusalFor(g)))
+      || (checkItemState(item) === 'FAILURE' && refusalFor(g)));
     // Cancellation, timeout, etc. do not prove an operator-label refusal.
     return gate && ['FAILURE', 'ERROR', 'ACTION_REQUIRED'].includes(checkItemState(item))
       ? { check, label: gate.label, reason: `operator-label-required:${gate.label}` } : null;
@@ -94,7 +100,7 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
     let alertedAt = prior?.alertedAt || null;
     if (!alertedAt && !alerted.has(path)) {
       try {
-        await deliverAlertImpl(`${repo} PR ${prNumber} head ${headSha}: ${gates.map(g => `${g.check} requires operator label ${g.label}`).join('; ')}. Hammer and remediation held.`, {
+        await deliverAlertImpl(`${repo} PR ${prNumber} head ${headSha}: ${gates.map(g => `${g.check} requires operator label ${g.label}`).join('; ')}. Closure held; review remediation remains available. Inspect the refusal; if an override is appropriate, apply the label, then rerun the named check. Otherwise restore the guarded change to its base state.`, {
           event: 'ama_closer.operator_label_required', payload: { repo, prNumber, headSha, reason, gates },
         });
         alerted.add(path);

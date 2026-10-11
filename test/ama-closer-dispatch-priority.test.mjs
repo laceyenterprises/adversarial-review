@@ -1008,6 +1008,7 @@ test('LABELGATE-01: only label failures hold closure and page once per head', as
     assert.equal(result.skipMergeAgent, true);
   }
   assert.equal(alerts.length, 1);
+  assert.match(alerts[0].text, /apply the label, then rerun the named check/);
   assert.match(alerts[0].text, /submodule-pointer-gate.*allow-submodule-pointer-bump/);
   await maybeDispatchAmaCloser({ ...args, ...deps, prMetadata: { ...args.prMetadata, headSha: 'b'.repeat(40) } });
   assert.equal(alerts.length, 2);
@@ -1019,6 +1020,12 @@ test('LABELGATE-01: latest runs, mixed failures, pending and advisory checks', (
   const failure = { name: 'submodule-pointer-gate', conclusion: 'FAILURE', completedAt: '2026-10-11T01:00:00Z' };
   assert.equal(operatorLabelGateFailures([failure]).length, 1);
   assert.deepEqual(operatorLabelGateFailures([failure, { name: 'unit', conclusion: 'FAILURE' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([failure, { name: 'unit', status: 'IN_PROGRESS' }]), []);
+  assert.deepEqual(operatorLabelGateFailures([failure, { name: 'unit' }]), []);
+  for (const state of ['EXPECTED', 'QUEUED', 'WAITING', 'REQUESTED']) {
+    assert.deepEqual(operatorLabelGateFailures([failure, { __typename: 'StatusContext', context: 'unit', state }]), []);
+  }
+  assert.deepEqual(operatorLabelGateFailures([{ ...failure, output: { summary: 'Script crashed: commit unreachable' } }]), []);
   assert.deepEqual(operatorLabelGateFailures([failure, { ...failure, conclusion: 'SUCCESS', completedAt: '2026-10-11T02:00:00Z' }]), []);
   assert.deepEqual(operatorLabelGateFailures([{ ...failure, status: 'IN_PROGRESS' }]), []);
   assert.deepEqual(operatorLabelGateFailures([{ ...failure, conclusion: 'CANCELLED' }]), []);

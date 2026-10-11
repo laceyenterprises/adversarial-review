@@ -503,7 +503,8 @@ export function refundHammerRetryDispatch(rootDir, identity, {
   const ledgerJobKey = normalizeKey(existing.jobKey);
   const incomingJobKey = normalizeKey(jobKey);
   if (ledgerJobKey && incomingJobKey && ledgerJobKey !== incomingJobKey) return refuse('series-changed');
-  if (launch && (refundedLaunches.includes(launch) || existing.deferralLaunches?.includes(launch))) return refuse('already-refunded');
+  if (launch && (refundedLaunches.includes(launch) || existing.deferralLaunches?.includes(launch)
+    || existing.unexecutedLaunchRequestIds?.includes(launch))) return refuse('already-refunded');
   if (existing.suppressed || existing.lifetimeSuppressed || existing.targetSuppressed) return refuse('suppressed');
   const attemptCount = Math.max(0, Math.trunc(Number(existing.attemptCount) || 0));
   if (attemptCount === 0) return refuse('no-charged-attempt');

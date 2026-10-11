@@ -1030,6 +1030,38 @@ default `observe` enforcement honors a known actor even if that actor is not
 allowlisted; `enforce` requires an allowlisted operator login. The substitution emits
 `ama.daemon_clean_merge.operator_accountability_substituted`.
 
+### Operator-label closure holds (LABELGATE-01)
+
+Before closure dispatch, the closer classifies the latest exact-head external
+CI failures against `src/ama/operator-label-gates.mjs`. All failures must map to
+registered label gates and no external sibling may still be pending or unknown.
+Known check names require refusal text when output is available; composite job
+reads require exact-head, exclusively registered failed steps. Advisory or green
+checks do not hold. Required-check greenness remains an independent merge gate,
+including in advisory CI-cost mode; a label cannot waive red CI.
+
+A hold suppresses hammer/merge-agent dispatch and pages through
+`ama_closer.operator_label_required`, with a durable once-per-head delivery
+receipt in `data/operator-label-holds/`. Inspect the actual refusal first. For an
+intended guarded delta, apply the appropriate operator label and rerun the named
+check. For an unintended delta, review remediation remains available to restore
+its base state. Consumption never terminally stops review jobs for this CI
+state. A running hammer may perform a review-authorized guard-preserving
+reversion before deferring; it cannot apply labels or weaken a guard. SUBSYNC-01
+still forbids gitlink changes in HAM commits, so pointer restoration belongs to
+review remediation rather than an operator override for an accidental bump.
+
+The next closer pass releases the hold when live CI no longer classifies as
+label-only, without deleting historical receipts. A deferred hammer audit with
+a matching typed label reason can receive PR 1261 series/target retry credit
+only when corroborated by a matching live gate on its recorded head and an audit
+timestamp at or after launch. `labelGateRefundedLaunchRequestId` dedupes the
+record credit; HAMREFUND-01 and ordinary exit refunds cannot credit it again.
+Lifetime charges remain intact. The early hold defers ordinary worker cleanup,
+lease finalization and token accounting until the hold clears. Receipt locking
+is best effort and there is no automatic retention sweep; see
+[Operator Label Holds](data-model/operator-label-holds.md) for those limits.
+
 ### Durable signal/tool-host refunds (HAMREFUND-01)
 
 `maybeDispatchAmaCloser` reconciles a terminal hammer before stale-lease

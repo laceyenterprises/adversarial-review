@@ -27,6 +27,11 @@ const IN_PROGRESS_REASONS = new Set([
   'daemon-deferred', 'deferred',
 ]);
 
+const MERGEABILITY_UNKNOWN_NEUTRAL_REASONS = new Set([
+  ...IN_PROGRESS_REASONS, 'ama-closer-launch-in-progress',
+  'background-pr-state-unavailable', 'ama-coexistence-operation-timeout',
+]);
+
 const CONFIG_HOLD_REASONS = new Set([
   'branch-protection-missing-gate', 'fast-merge-state-unsupported', 'pr-is-draft',
   'current-head-ham-terminal-remediation-needs-operator',
@@ -91,9 +96,14 @@ async function recoverAmaAutomationLocked({
     || value?.recoveryWait || value?.commentOnlyFinalRoundAwaitingCi === true
     || FOLLOW_UP_REASONS.has(value?.reason)
     || (value?.reasons || []).some((item) => FOLLOW_UP_REASONS.has(item));
-  if (reason !== 'background-pr-mergeable-unknown' && !IN_PROGRESS_REASONS.has(reason)) {
-    if (state.mergeabilityUnknownCycles) {
+  if (reason !== 'background-pr-mergeable-unknown' && !MERGEABILITY_UNKNOWN_NEUTRAL_REASONS.has(reason)) {
+    if (state.mergeabilityUnknownCycles || state.mergeabilityUnknownSince != null
+      || state.event?.reason === 'background-pr-mergeable-unknown') {
       state.mergeabilityUnknownCycles = 0;
+      delete state.mergeabilityUnknownSince;
+      // A resolved UNKNOWN must not suppress later hammer/rereview recovery.
+      // Preserve the per-head page receipt so a second stall cannot page twice.
+      if (state.event?.reason === 'background-pr-mergeable-unknown') delete state.event;
       save();
     }
   }
@@ -136,9 +146,11 @@ async function recoverAmaAutomationLocked({
   // or consume hammer launch attempts merely because GitHub is recomputing.
   if (reason === 'background-pr-mergeable-unknown') {
     state.mergeabilityUnknownCycles = (state.mergeabilityUnknownCycles || 0) + 1;
+    state.mergeabilityUnknownSince ??= now();
     state.lastReason = reason;
     save();
-    if (state.mergeabilityUnknownCycles > maxAttempts) return exhausted();
+    if (state.event || (state.mergeabilityUnknownCycles > maxAttempts
+      && now() - state.mergeabilityUnknownSince >= stuckDeadlineMs)) return exhausted();
     return waiting('await-mergeability');
   }
   const stalled = async (action, amaClosureResult = result) => {

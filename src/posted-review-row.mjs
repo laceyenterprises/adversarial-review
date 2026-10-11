@@ -695,7 +695,8 @@ export async function handlePostedReviewRow({
           `workerClass=${amaClosureResult.workerClass || 'unknown'}${suppressedNote}`
         );
       }
-      return { handled: true, outcome: 'ama-pending', gateDecision: gateProjection?.decision || null };
+      return { handled: true, outcome: 'ama-pending', amaClosureResult,
+        recovery: coexistenceDecision.recovery, gateDecision: gateProjection?.decision || null };
     }
 
     // Shared AMA recovery owns transient/finding misses. Only safety holds
@@ -933,8 +934,9 @@ export function createNoProgressLaneGate({
         // HAMUNKNOWN-01: GitHub can finish computing without any review-row
         // change. Keep its bounded recovery cycles (and queued probe) active.
         urgent: value?.outcome !== 'recovery-exhausted'
-          && ['background-pr-mergeable-unknown', 'ama-closer-dispatch-backgrounded']
-            .includes(value?.amaClosureResult?.reason),
+          && (value?.amaClosureResult?.reason === 'background-pr-mergeable-unknown'
+            || (value?.amaClosureResult?.reason === 'ama-closer-dispatch-backgrounded'
+              && value?.recovery?.mergeabilityUnknownCycles > 0 && !value?.recovery?.event)),
         // A starvation-floor admission is a walk the lane did not schedule.
         // Recording it as escalating would charge the PR for a look it never
         // asked for and push its next real walk twice as far away — the exact

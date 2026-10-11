@@ -632,6 +632,15 @@ explicit configuration/operator holds await adjudication. Active owners, lease
 contention, background dispatch, grace and proven final-round CI waits do not
 spend recovery attempts. A per-head durable recovery budget exhausts into a
 structured SEV1 event and one deduplicated page, never a silent operator wait.
+Background mergeability UNKNOWN is sampled in the same queue slot (three probes,
+2.5 seconds apart by default). Settled UNKNOWN cycles retain a separate per-head
+count and first-observation timestamp across queue/in-progress ticks and
+transient probe failures. Exceeding the recovery cap pages only after the
+30-minute stall floor. UNKNOWN waits and queued probes in an unexhausted UNKNOWN
+series remain active in the no-progress lane; ordinary background submissions
+and exhausted series retain backoff. A resolved different blocker clears the
+UNKNOWN series and its exhaustion event, allowing ordinary recovery to resume
+while keeping the successful page receipt for deduplication.
 The action cap follows the job's convergence budget; exhausted actions and
 non-progressing refusals page only after a 30-minute wall-clock stall. A requested
 pass owns its row until a new posting is observed. Active reviewer queue states

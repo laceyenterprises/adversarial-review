@@ -34,10 +34,12 @@ than a missing file fail the caller rather than silently resetting its budget.
 | `rereviewBaseline` | optional string | Prior `posted_at`, otherwise reviewer session UUID, otherwise `unobserved`; prevents a stale posted snapshot from racing the requested pass. |
 | `rereviewRequestedAt` | optional number | Request timestamp in epoch milliseconds. |
 | `blockedSince` | optional number | First continuously non-progressing observation in epoch milliseconds. Cleared by a confirmed action, an ordinary ownership/time wait, or an operator hold. |
-| `lastReason` | optional string | Latest charged action or non-progressing refusal reason. |
+| `mergeabilityUnknownCycles` | optional number | Settled `background-pr-mergeable-unknown` observations on this head. Each increments once, without spending `attempts`. A resolved different blocker resets it to zero; neutral observations preserve it. Missing legacy values start at zero. |
+| `mergeabilityUnknownSince` | optional number | Epoch milliseconds of the first settled UNKNOWN in the current series; supplies the `stuckDeadlineMs` time floor. Neutral observations preserve it; a resolved different blocker deletes it. Legacy series without this field start the clock at the next UNKNOWN observation. |
+| `lastReason` | optional string | Latest charged action, non-progressing refusal, or settled UNKNOWN reason. |
 | `paged` | boolean | Page delivery/enqueue returned successfully. Prevents another enqueue for this head. |
 | `pageError` | optional string | Most recent enqueue error; retained as diagnostic history even if a later enqueue succeeds. |
-| `event` | optional object | Sticky exhaustion evidence: `event` (`ama.automated_recovery.exhausted`), `severity` (`SEV1`), `reason`, `reasons` (string array), `repo`, `pr`, `head`, and `attempts`. Persisted before logging or page delivery. |
+| `event` | optional object | Exhaustion evidence: `event` (`ama.automated_recovery.exhausted`), `severity` (`SEV1`), `reason`, `reasons` (string array), `repo`, `pr`, `head`, and `attempts`. Persisted before logging or page delivery. Sticky except an UNKNOWN-origin event is cleared on a resolved different blocker, preserving `paged` so subsequent recovery cannot enqueue a second successful page. |
 
 Returned recovery objects may additionally include `action`, a re-review
 result, or other tick diagnostics. These return-only fields are not stored.
@@ -50,6 +52,21 @@ The cap prevents further recovery actions. A refusal or exhausted action cap
 must persist for `stuckDeadlineMs` (default 30 minutes) before paging. Poll
 frequency alone cannot exhaust the head. The closer's own dispatch bounds still
 apply independently.
+
+Background mergeability UNKNOWN has a separate cycle budget using the same cap:
+K settled UNKNOWN cycles are tolerated; exhaustion requires both more than K
+cycles and `stuckDeadlineMs` elapsed since `mergeabilityUnknownSince`. This
+survives intervening queued/in-progress observations even though those clear
+`blockedSince`. It never spends hammer attempts or requests a stale-head review.
+Background launch/in-progress reasons (including `ama-closer-launch-in-progress`),
+`background-pr-state-unavailable`, and `ama-coexistence-operation-timeout` are
+neutral: they neither increment nor reset the UNKNOWN count or timestamp.
+A different resolved blocker resets both and clears only UNKNOWN-origin
+exhaustion evidence, allowing normal hammer or re-review recovery to resume.
+`paged` remains set for per-head deduplication. The handler returns the closure
+result and recovery snapshot to lane scheduling: settled UNKNOWN waits and
+backgrounded probes with an unexhausted UNKNOWN series remain urgent; ordinary
+background submissions and exhausted series follow normal lane backoff.
 
 Live hammers, follow-up jobs, background launches, leases, uncertain dispatch
 status, daemon lease contention, comment-only grace, and proven final-round

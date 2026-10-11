@@ -371,7 +371,15 @@ yields `background-pr-state-changed`, a draft yields `background-pr-draft`, a
 PR whose normalized mergeability (`mergeable` plus `mergeStateStatus`, where
 `UNKNOWN`+`CLEAN` counts as `MERGEABLE`, because the hammer re-reads
 mergeability itself) is still `UNKNOWN` yields
-`background-pr-mergeable-unknown`, any other state that is neither `MERGEABLE`
+`background-pr-mergeable-unknown` only after bounded same-cycle sampling with
+`resolveMergeabilityWithSampling`: three total probes by default, 2.5 seconds
+between reads, using the existing mergeability sample constants. Each re-read
+checks open state, draft flag, and the target head; closed, draft, or moved-head
+reads stop sampling and refuse dispatch. `MERGEABLE` and `CONFLICTING` readings
+can dispatch in the same cycle. Sampling holds the background queue slot for
+up to two additional sleeps (five seconds by default) and two live fetches, so
+a queue saturated with UNKNOWN heads can delay other hammer launches.
+Any other state that is neither `MERGEABLE`
 nor `CONFLICTING` yields `background-pr-not-mergeable` (with the observed
 `mergeable` value), and an unreadable live state yields
 `background-pr-state-unavailable`. A `CONFLICTING` PR is not blocked here: it
@@ -2052,6 +2060,21 @@ contention, uncertain dispatch status, comment-only grace, and proven final-roun
 CI waits return `ama-pending` without consuming the budget. Configuration/draft
 refusals and explicit `needsOperator` results retain adjudication without paging.
 Abort and coexistence-timeout errors propagate without charging recovery.
+
+HAMUNKNOWN-01 tracks settled `background-pr-mergeable-unknown` cycles separately
+from charged recovery actions. K cycles are tolerated, using the same
+remediation-derived cap; more than K cycles exhaust only after 30 minutes
+(`stuckDeadlineMs`) since the first UNKNOWN in that series. Queue/in-flight
+observations, probe-unavailable results and coexistence timeouts neither spend
+nor reset this series. A different resolved blocker resets its count and clock.
+The handler preserves the closure result and recovery snapshot for lane
+scheduling: UNKNOWN waits and backgrounded probes with an unexhausted UNKNOWN
+series remain urgent despite an unchanged review row. Ordinary background
+submissions and exhausted series retain normal lane backoff and the
+decision-reset cap. UNKNOWN exhaustion names `background-pr-mergeable-unknown`
+in the existing SEV1 event and page. When a different resolved blocker arrives,
+its UNKNOWN-origin event clears so hammer/re-review recovery can resume;
+the successful page receipt remains for per-head deduplication.
 
 A refused action or exhausted action cap must remain non-progressing for 30
 minutes (`stuckDeadlineMs`), independent of tick count. Re-review queue states

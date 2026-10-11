@@ -591,6 +591,7 @@
       "store": "data/follow-up-jobs/ama-automated-recovery/<sha256>.{json,lock}",
       "schemaSurface": "src/ama/automated-recovery.mjs",
       "relatedSchemaSurfaces": [
+        "src/posted-review-row.mjs",
         "src/ama-closure-orchestration.mjs",
         "src/ama/dispatch-closer.mjs",
         "src/ama/recovery-launch-reconciliation.mjs"

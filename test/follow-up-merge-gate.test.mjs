@@ -640,7 +640,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     prNumber: 1,
     execFileImpl: async (command, args) => {
       assert.equal(command, 'gh');
-      assert.ok(args.includes('state,mergedAt,closedAt,labels,headRefOid'));
+      assert.ok(args.includes('state,mergedAt,closedAt,labels,headRefOid,statusCheckRollup'));
       return {
         stdout: JSON.stringify({
           state: 'MERGED',
@@ -648,6 +648,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
           closedAt: null,
           labels: [{ name: 'stale-drift' }],
           headRefOid: 'merged-head-sha',
+          statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }],
         }),
       };
     },
@@ -659,6 +660,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     closedAt: null,
     labels: [{ name: 'stale-drift' }],
     headSha: 'merged-head-sha',
+    statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }],
   });
 });
 
@@ -683,6 +685,7 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
     closedAt: '2026-05-02T10:45:00.000Z',
     labels: [],
     headSha: 'closed-head-sha',
+    statusCheckRollup: undefined,
   });
 });
 

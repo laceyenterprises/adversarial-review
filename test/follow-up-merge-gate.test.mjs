@@ -72,6 +72,7 @@ test('consumeNextFollowUpJob short-circuits to stopped/operator-merged-pr when l
   const result = await consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'unused',
+    postCommentImpl: async () => ({ posted: true }),
     execFileImpl: async (command, args) => {
       if (command === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
         cloneFired = true;
@@ -115,6 +116,7 @@ test('consumeNextFollowUpJob short-circuits to stopped/operator-closed-pr when l
   const result = await consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'unused',
+    postCommentImpl: async () => ({ posted: true }),
     execFileImpl: async () => ({ stdout: '', stderr: '' }),
     spawnImpl: () => {
       spawnFired = true;
@@ -170,6 +172,7 @@ test('consumeNextFollowUpJob proceeds normally when resolvePRLifecycle returns n
   await expectLifecycleGateAllowedThrough(consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'unused',
+    postCommentImpl: async () => ({ posted: true }),
     execFileImpl: async () => {
       throw new Error('Codex auth file not configured for this test');
     },
@@ -187,6 +190,7 @@ test('consumeNextFollowUpJob proceeds normally when live lookup reports open', a
   await expectLifecycleGateAllowedThrough(consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'unused',
+    postCommentImpl: async () => ({ posted: true }),
     execFileImpl: async () => {
       throw new Error('Codex auth file not configured for this test');
     },
@@ -238,6 +242,7 @@ test('consumeNextFollowUpJob proceeds normally when resolvePRLifecycle throws (l
   await expectLifecycleGateAllowedThrough(consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'unused',
+    postCommentImpl: async () => ({ posted: true }),
     execFileImpl: async () => {
       throw new Error('Codex auth file not configured for this test');
     },
@@ -564,6 +569,7 @@ test('consumeNextFollowUpJob trusts live lookup over a stale mirror that still s
   const result = await consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'unused',
+    postCommentImpl: async () => ({ posted: true }),
     execFileImpl: async (command, args) => {
       if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
         return {
@@ -608,6 +614,7 @@ test('consumeNextFollowUpJob falls back to mirror when live lookup fails', async
   const result = await consumeNextFollowUpJob({
     rootDir,
     promptTemplate: 'unused',
+    postCommentImpl: async () => ({ posted: true }),
     execFileImpl: async (command, args) => {
       if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
         // Simulate a `gh` failure (auth, network, etc.).
@@ -640,7 +647,7 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     prNumber: 1,
     execFileImpl: async (command, args) => {
       assert.equal(command, 'gh');
-      assert.ok(args.includes('state,mergedAt,closedAt,labels,headRefOid,statusCheckRollup'));
+      assert.equal(args[args.indexOf('--json') + 1], 'state,mergedAt,closedAt,labels,headRefOid');
       return {
         stdout: JSON.stringify({
           state: 'MERGED',
@@ -648,7 +655,6 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
           closedAt: null,
           labels: [{ name: 'stale-drift' }],
           headRefOid: 'merged-head-sha',
-          statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }],
         }),
       };
     },
@@ -660,7 +666,6 @@ test('fetchLivePRLifecycle parses MERGED state from gh pr view JSON', async () =
     closedAt: null,
     labels: [{ name: 'stale-drift' }],
     headSha: 'merged-head-sha',
-    statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }],
   });
 });
 
@@ -685,7 +690,6 @@ test('fetchLivePRLifecycle parses CLOSED state from gh pr view JSON', async () =
     closedAt: '2026-05-02T10:45:00.000Z',
     labels: [],
     headSha: 'closed-head-sha',
-    statusCheckRollup: undefined,
   });
 });
 

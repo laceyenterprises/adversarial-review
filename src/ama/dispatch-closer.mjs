@@ -4132,44 +4132,6 @@ export async function maybeDispatchAmaCloser({
     }
   }
 
-  const labelGates = await resolveOperatorLabelGateFailures({ rollup: prMetadata?.statusCheckRollup,
-    repo: dispatchContext?.repo, headSha: prMetadata?.headSha, execFileImpl, env });
-  if (prMetadata?.isOpen !== false && prMetadata?.headSha) {
-    const rootDir = dispatchContext?.rootDir || SUBMODULE_ROOT;
-    const repo = dispatchContext?.repo;
-    // Require independent exact-head CI evidence as well as the typed audit.
-    // Match the latest charged launch and audit timestamp; never refund a
-    // different series or an unobserved hammer-reported refusal.
-    let audit;
-    try { audit = readAmaAuditEntry(dispatchContext?.hqRoot || DEFAULT_HQ_ROOT, repo, prNumber, prMetadata.headSha); }
-    catch { /* An unreadable audit cannot authorize a refund; existing audit gates handle it. */ }
-    const attempt = audit?.attempts?.at(-1);
-    if (audit?.status === 'deferred' && labelGates.some(g => g.reason === attempt?.reason)) {
-      const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
-      const record = listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber })
-        .filter(r => r.launchRequestId && isHammerWorkerClass(r.workerClass) && r.headSha === ledger?.lastDispatchedHeadSha
-          && r.headSha === prMetadata.headSha && r.reviewedSha === ledger?.jobKey)
-        .sort((a, b) => Date.parse(b.dispatchedAt) - Date.parse(a.dispatchedAt))[0];
-      if (record && Date.parse(attempt.startedAt) >= Date.parse(record.dispatchedAt)) {
-        const refund = refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
-          jobKey: ledger.jobKey, headSha: record.headSha,
-          launchRequestId: record.launchRequestId, now: dispatchContext.dispatchedAt,
-        });
-        if (refund.refunded || (refund.reason === 'already-refunded'
-          && ledger.unexecutedLaunchRequestIds?.includes(record.launchRequestId))) {
-          updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: record.headSha }, current => {
-            if (current?.launchRequestId !== record.launchRequestId
-              || current.labelGateRefundedLaunchRequestId === record.launchRequestId) return null;
-            return { ...current, labelGateRefundedLaunchRequestId: record.launchRequestId,
-              unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 };
-          });
-        }
-      }
-    }
-    if (labelGates.length) return noAmaDispatch(await holdForOperatorLabels({ rootDir, repo, prNumber,
-      headSha: prMetadata.headSha, gates: labelGates, deliverAlertImpl, logger, now: dispatchContext?.dispatchedAt }));
-  }
-
   const eligibilityOptions = { ...(options || {}) };
   // STALECLOSER-03: the closer judges a closer-authored stale head with the same
   // predicate rescue and the hammer wake used (computed by the orchestrator).
@@ -4283,9 +4245,11 @@ export async function maybeDispatchAmaCloser({
     const reviewCycleCapRoute = hammerOwnerRouteOf(dispatchContext) !== null
       && reviewState?.remediationPending !== true;
     const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
-    const routeReasons = verdict.eligible ? eligibleHammerRouteReasons
+    // Label reasons supplement ci-not-green; test the route without that
+    // annotation before resolving/paging the independent label hold below.
+    const routeReasons = (verdict.eligible ? eligibleHammerRouteReasons
       : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed')
-        : verdict.reasons;
+        : verdict.reasons).filter(reason => !reason.startsWith('operator-label-required:'));
     if (isHammerRouteStructurallyBlocked(routeReasons)) {
       return noAmaDispatch({
         dispatched: false,
@@ -5997,6 +5961,47 @@ export async function maybeDispatchAmaCloser({
   if (activeFollowUp) {
     logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job ${activeFollowUp.jobId} ${activeFollowUp.status}`);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
+  }
+
+  // Resolve label holds only after route admission, stop releases, terminal
+  // launch/lease reconciliation and same-PR remediation ownership checks.
+  if (prMetadata?.isOpen === true && prMetadata?.headSha) {
+    const labelGates = await resolveOperatorLabelGateFailures({ rollup: prMetadata.statusCheckRollup,
+      repo: dispatchContext?.repo, headSha: prMetadata.headSha, execFileImpl, env, signal });
+    throwIfAborted(signal);
+    const rootDir = dispatchContext?.rootDir || SUBMODULE_ROOT;
+    const repo = dispatchContext?.repo;
+    // Require independent exact-head CI evidence as well as the typed audit.
+    // Match the latest charged launch and audit timestamp; never refund a
+    // different series or an unobserved hammer-reported refusal.
+    let audit;
+    try { audit = readAmaAuditEntry(dispatchContext?.hqRoot || DEFAULT_HQ_ROOT, repo, prNumber, prMetadata.headSha); }
+    catch { /* An unreadable audit cannot authorize a refund; existing audit gates handle it. */ }
+    const attempt = audit?.attempts?.at(-1);
+    if (audit?.status === 'deferred' && labelGates.some(g => g.reason === attempt?.reason)) {
+      const ledger = readHammerRetryCapLedger(rootDir, { repo, prNumber });
+      const record = listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber })
+        .filter(r => r.launchRequestId && isHammerWorkerClass(r.workerClass) && r.headSha === ledger?.lastDispatchedHeadSha
+          && r.headSha === prMetadata.headSha && r.reviewedSha === ledger?.jobKey)
+        .sort((a, b) => Date.parse(b.dispatchedAt) - Date.parse(a.dispatchedAt))[0];
+      if (record && Date.parse(attempt.startedAt) >= Date.parse(record.dispatchedAt)) {
+        const refund = refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
+          jobKey: ledger.jobKey, headSha: record.headSha,
+          launchRequestId: record.launchRequestId, now: dispatchContext.dispatchedAt,
+        });
+        if (refund.refunded || (refund.reason === 'already-refunded'
+          && ledger.unexecutedLaunchRequestIds?.includes(record.launchRequestId))) {
+          updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: record.headSha }, current => {
+            if (current?.launchRequestId !== record.launchRequestId
+              || current.labelGateRefundedLaunchRequestId === record.launchRequestId) return null;
+            return { ...current, labelGateRefundedLaunchRequestId: record.launchRequestId,
+              unexecutedRefundCount: Number(current.unexecutedRefundCount || 0) + 1 };
+          });
+        }
+      }
+    }
+    if (labelGates.length) return noAmaDispatch(await holdForOperatorLabels({ rootDir, repo, prNumber,
+      headSha: prMetadata.headSha, gates: labelGates, deliverAlertImpl, logger, now: dispatchContext?.dispatchedAt }));
   }
 
   assertAmaAuditOwner({

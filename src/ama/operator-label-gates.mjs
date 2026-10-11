@@ -39,33 +39,67 @@ export function operatorLabelGateFailures(rollup, { env = process.env } = {}) {
   return gates.every(Boolean) ? gates : [];
 }
 
-// GitHub rollups name composite jobs, not the failing guard. Resolve their
-// failed steps from the exact-head job API; unrelated failed steps prevent a
-// label-only classification. An unreadable/stale job never creates a hold.
-const JOB_READ_TIMEOUT_MS = Math.max(1_000, Number(process.env.OPERATOR_LABEL_JOB_READ_TIMEOUT_MS) || 10_000);
-export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, execFileImpl, env }) {
-  const expanded = [];
-  for (const item of latestCheckRollupItems(rollup)) {
-    if (checkItemState(item) !== 'FAILURE' || operatorLabelGateFailures([item], { env }).length) {
-      expanded.push(item);
-      continue;
-    }
+// Only the registered repo-guards job family contains composite label gates.
+// Other failed jobs, pending siblings, and unreadable/stale jobs cannot hold.
+const JOB_READ_TIMEOUT_MS = 3_000;
+const JOB_READ_BUDGET_MS = 5_000;
+const MAX_JOB_READS_PER_PASS = 2;
+const MAX_JOB_CACHE_ENTRIES = 512;
+const FAILED_JOB_READ_TTL_MS = 60_000;
+// Scope caches to the reader (including injected offline readers). Completed
+// steps are immutable per repo/job/head; negative transport reads retry later.
+const jobCaches = new WeakMap();
+export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, execFileImpl, env, signal }) {
+  const external = latestCheckRollupItems(rollup).filter(item =>
+    !isAdversarialOwnStatusContext(item, adversarialOwnCheckContexts(env)));
+  if (!repo || !headSha || signal?.aborted
+    || external.some(item => [null, 'PENDING', 'UNKNOWN'].includes(classifyCheckRollup([item])))) return [];
+  const candidates = new Map();
+  for (const item of external) {
+    if (classifyCheckRollup([item]) === 'SUCCESS' || operatorLabelGateFailures([item], { env }).length) continue;
     const match = String(item.detailsUrl || '').match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/\d+\/job\/(\d+)(?:\?.*)?$/);
-    if (!match || match[1] !== repo || !execFileImpl) { expanded.push(item); continue; }
-    try {
-      const { stdout } = await execFileImpl('gh', ['api', `repos/${repo}/actions/jobs/${match[2]}`], {
-        timeout: JOB_READ_TIMEOUT_MS, maxBuffer: 1024 * 1024,
-      });
-      const job = JSON.parse(stdout);
-      const failures = Array.isArray(job.steps) ? job.steps.filter(step => step.conclusion === 'failure') : [];
-      const steps = failures.map(step => ({ name: step.name, conclusion: 'FAILURE' }));
-      if (job.head_sha !== headSha || job.conclusion !== 'failure' || !operatorLabelGateFailures(steps, { env }).length) {
-        expanded.push(item);
-      } else {
-        expanded.push(...steps.map(step => ({ ...step, name: `${item.name}: ${step.name}`,
-          description: `operator-label-required:${operatorLabelGateFailures([step], { env })[0].label}` })));
+    if (checkItemState(item) !== 'FAILURE' || !/^repo-guards(?:[-/ ].*)?$/i.test(String(item.name || ''))
+      || !match || match[1] !== repo || !execFileImpl) return [];
+    candidates.set(item, match[2]);
+  }
+  if (!candidates.size) return operatorLabelGateFailures(external, { env });
+  let cache = jobCaches.get(execFileImpl);
+  if (!cache) { cache = new Map(); jobCaches.set(execFileImpl, cache); }
+  const expanded = [];
+  const deadline = Date.now() + JOB_READ_BUDGET_MS;
+  let reads = 0;
+  for (const item of external) {
+    const jobId = candidates.get(item);
+    if (!jobId) { expanded.push(item); continue; }
+    if (signal?.aborted) return [];
+    const key = JSON.stringify([repo, jobId, headSha]);
+    let entry = cache.get(key);
+    if (entry && entry.expiresAt <= Date.now()) { cache.delete(key); entry = null; }
+    if (!entry) {
+      const remaining = deadline - Date.now();
+      if (reads >= MAX_JOB_READS_PER_PASS || remaining <= 0) return [];
+      reads++;
+      try {
+        const { stdout } = await execFileImpl('gh', ['api', `repos/${repo}/actions/jobs/${jobId}`], {
+          timeout: Math.min(JOB_READ_TIMEOUT_MS, remaining), maxBuffer: 1024 * 1024, signal,
+        });
+        if (signal?.aborted) return [];
+        const job = JSON.parse(stdout);
+        const failures = Array.isArray(job.steps) ? job.steps.filter(step => step.conclusion === 'failure') : [];
+        const steps = failures.map(step => ({ name: step.name, conclusion: 'FAILURE' }));
+        const gates = job.head_sha === headSha && job.conclusion === 'failure'
+          ? operatorLabelGateFailures(steps, { env }) : [];
+        entry = { gates, expiresAt: Infinity };
+      } catch {
+        if (signal?.aborted) return [];
+        entry = { gates: [], expiresAt: Date.now() + FAILED_JOB_READ_TTL_MS };
       }
-    } catch { expanded.push(item); }
+      if (cache.size >= MAX_JOB_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
+      cache.set(key, entry);
+    }
+    if (!entry.gates.length) return [];
+    expanded.push(...entry.gates.map(gate => ({ name: `${item.name}: ${gate.check}`, conclusion: 'FAILURE',
+      description: gate.reason })));
   }
   return operatorLabelGateFailures(expanded, { env });
 }
@@ -89,6 +123,9 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
   // retries after the bounded stale-lock window; failed transport also retries.
   let claimed = false;
   try {
+    const receiptMatches = prior => prior?.alertedAt && prior.repo === repo && prior.prNumber === prNumber
+      && prior.headSha === headSha && prior.reason === reason && JSON.stringify(prior.gates) === JSON.stringify(gates);
+    try { if (receiptMatches(JSON.parse(readFileSync(path, 'utf8')))) return result; } catch { /* no matching receipt */ }
     mkdirSync(dir, { recursive: true });
     try {
       if (Date.now() - statSync(lockPath).mtimeMs > PAGE_LOCK_STALE_MS) unlinkSync(lockPath);
@@ -97,6 +134,7 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
     catch (error) { if (error.code === 'EEXIST') return result; throw error; }
     let prior;
     try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first observation */ }
+    if (receiptMatches(prior)) return result;
     let alertedAt = prior?.alertedAt || null;
     if (!alertedAt && !alerted.has(path)) {
       try {

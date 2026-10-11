@@ -951,7 +951,7 @@ async function fetchLivePRLifecycle({
         '--repo',
         repo,
         '--json',
-        'state,mergedAt,closedAt,labels,headRefOid,statusCheckRollup',
+        'state,mergedAt,closedAt,labels,headRefOid',
       ],
       {
         maxBuffer: 1 * 1024 * 1024,
@@ -981,7 +981,6 @@ async function fetchLivePRLifecycle({
     closedAt: parsed.closedAt || null,
     labels: Array.isArray(parsed.labels) ? parsed.labels : [],
     headSha: parsed.headRefOid || null,
-    statusCheckRollup: parsed.statusCheckRollup,
   };
 }
 

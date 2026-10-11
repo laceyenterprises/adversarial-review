@@ -1481,3 +1481,15 @@ test('fetchLivePRLifecycle forwards cancellation to a running gh subprocess', as
     } });
   assert.equal(result, null);
 });
+
+
+test('fetchLivePRLifecycle requests lifecycle fields without unused check rollup', async () => {
+  const result = await fetchLivePRLifecycle({ repo: 'org/repo', prNumber: 1,
+    awaitThrottleImpl: async () => {}, execFileImpl: async (command, args) => {
+      assert.equal(args[args.indexOf('--json') + 1], 'state,mergedAt,closedAt,labels,headRefOid');
+      return { stdout: JSON.stringify({ state: 'OPEN', headRefOid: 'live-head', labels: [] }) };
+    } });
+  assert.equal(result.headSha, 'live-head');
+  assert.equal(result.prState, 'open');
+  assert.equal(Object.hasOwn(result, 'statusCheckRollup'), false);
+});

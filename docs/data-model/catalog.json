@@ -303,7 +303,8 @@
       "store": "data/operator-label-holds/",
       "schemaSurface": "src/ama/operator-label-gates.mjs",
       "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs"],
-      "owner": "AMA closer operator-label paging"
+      "owner": "AMA closer operator-label paging",
+      "receiptWritePolicy": "Unchanged delivered identity/reason/gates skip paging locks and atomic replacement"
     },
     {
       "id": "operator-label-wakes",

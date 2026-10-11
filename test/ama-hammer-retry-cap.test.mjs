@@ -3565,11 +3565,19 @@ test('LABELGATE-01: typed hammer stop refunds a recorded launch once through PR 
   writeAmaAuditEntry({ hqRoot: args.dispatchContext.hqRoot, ...identity, headSha: REVIEWED_HEAD,
     attempt: { outcome: 'deferred', reason: 'operator-label-required:allow-submodule-pointer-bump' },
     now: '2026-07-06T11:30:00Z' });
+  let cleanups = 0;
   for (let i = 0; i < 2; i++) {
-    const result = await maybeDispatchAmaCloser({ ...args,
+    const result = await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps({
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }),
+    }),
       deliverAlertImpl: async () => {}, logger: { warn() {} },
-      execFileImpl: async () => { throw new Error('must not dispatch'); } });
+      execFileImpl: async (command, argv) => {
+        if (argv[0] === 'worker' && argv[1] === 'tear-down') { cleanups++; return { stdout: '{}' }; }
+        if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: '{"status":"failed"}' };
+        throw new Error('must not dispatch');
+      } });
     assert.equal(result.reason, 'operator-label-required:allow-submodule-pointer-bump');
+    assert.equal(cleanups, i + 1, 'terminal worker cleanup precedes the label hold');
     const ledger = readHammerRetryCapLedger(rootDir, identity);
     assert.equal(ledger.attemptCount, 0);
     assert.equal(ledger.targetAttemptCount, 0);

@@ -7,14 +7,24 @@
 
 ## Purpose
 
-The closer observes exclusively registered operator-label failures on the live
-PR head before launching closure work. Pending or state-less external siblings
+After hammer-route admission, stop-release persistence, terminal-launch and
+lease reconciliation, and same-PR remediation ownership checks, the closer
+observes exclusively registered operator-label failures on the live PR head
+before launching closure work. Pending or state-less external siblings
 and unrelated failures prevent a label-only classification. Latest runs win;
 the pipeline's own status context is excluded. Registered check names are a
-fallback when no failure output is available; when output is present it must
-contain the matching refusal/override text. Composite jobs are expanded through
-the GitHub jobs API only when their head matches and every failed step is a
-registered gate. Unreadable jobs create no hold. The registry currently maps
+paging heuristic in production, whose normalized rollups omit failure output;
+check/step names cannot distinguish a refusal from a guard script crash. When
+supplemental output is present it must contain matching refusal/override text.
+Only the registered `repo-guards` composite family (`repo-guards` and names
+starting with `repo-guards-`, `repo-guards/`, or `repo-guards `) is expanded
+through the GitHub jobs API, and only when its head matches and every failed
+step is a registered gate. Pending or unrelated failures skip all job reads.
+A per-reader, bounded 512-entry cache keys responses by repo/job/head, retaining
+completed responses and cooling down unreadable responses for 60 seconds. At
+most two uncached jobs are read per pass with a 3-second subprocess timeout, a
+5-second total read budget, and the closer abort signal. Unreadable jobs create
+no hold. The registry currently maps
 CI cost, submodule pointers, live-pack cross edits and historical gym freeze
 checks to their operator labels. Advisory/successful checks create no hold.
 
@@ -42,16 +52,19 @@ there is no schema-version field.
 `<digest>.json.lock` is an empty exclusive-create paging claim. Its mtime is
 used to reclaim stale claims after `OPERATOR_LABEL_PAGE_LOCK_STALE_MS` (default
 60 seconds, minimum 1 second). The claim spans alert delivery and receipt write,
-and is removed in `finally`. The receipt is re-read under the claim. A
-process-local successful-delivery set also suppresses repeat pages if a receipt
+and is removed in `finally`. The receipt is re-read under the claim. Delivered
+receipts matching the current
+identity, reason and gates bypass both the lock and atomic rewrite; changed
+gates update the receipt without paging that head again. A process-local successful-delivery set also suppresses repeat pages if a receipt
 write fails, but does not survive restart.
 
 ## Lifecycle and retention
 
 The closer reevaluates CI on every pass. Clearing the failing checks, advancing
 the head, or observing a non-label failure removes this hold without deleting
-the old receipt. Applying a label alone does not clear red CI: inspect the
-refusal, apply the appropriate override if intended, then rerun the named check.
+the old receipt. Applying a label alone does not clear red CI. Inspect the
+failure and repair a crashed script, or apply the appropriate override for a real
+label refusal if intended, then rerun the named check.
 Alternatively, review remediation can remove the offending guarded delta.
 
 The alert event is `ama_closer.operator_label_required` with payload

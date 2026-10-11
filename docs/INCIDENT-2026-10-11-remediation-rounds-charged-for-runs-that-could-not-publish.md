@@ -21,6 +21,9 @@ Bare signal exits 137/143 have no provenance and do not qualify; operator and
 supervisor cancellation must not be refunded on that evidence alone. Local
 child exit/error events are recorded in the job; HQ dispatch status supplies
 external outcomes, with failed terminal events confirmed through that status.
+HQ outcomes qualify only when dispatch status is `failed`; recovered successful
+and superseded runs cannot refund stale failure fields. Local outcomes without
+a status qualify only for `boot-failed` from a recorded spawn error.
 Missing live heads and ordinary failures remain charged. No narrative text is
 used to grant a refund.
 
@@ -50,3 +53,12 @@ Historical runs without recorded infrastructure outcomes are not inferred from
 comments or retroactively refunded. A detached local child whose parent daemon
 was lost before recording its exit also cannot be classified safely here;
 external worker supervision must supply a recorded outcome for that case.
+
+Coverage remains conditional for the cited publish-refusal incidents. This
+repository produces only local `boot-failed`; it consumes, but does not produce,
+HQ `publish-blocked`, `boot-failure` and `codex-tool-host-unavailable` outcomes.
+The corresponding failed-status producers have not been confirmed here. An
+8044/8052-style worker that reports a push refusal and exits `succeeded` stays
+charged. Covering those runs requires a follow-up in agent-os dispatch status
+to record a failed terminal outcome with the appropriate structured reason;
+this patch alone does not establish that those incident classes are fixed.

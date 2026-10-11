@@ -27,7 +27,8 @@ afterEach(() => {
 });
 
 for (const outcome of [
-  { failureReason: 'codex-tool-host-unavailable' }, { failureClass: 'publish-blocked' },
+  { status: 'failed', failureReason: 'codex-tool-host-unavailable' }, { status: 'failed', failureClass: 'publish-blocked' },
+  { status: 'failed', failureCode: 'boot-failure' }, { status: 'failed', failureReason: 'boot-failed' },
   { failure_class: 'boot-failed' },
 ]) {
   test(`recorded infrastructure outcome ${JSON.stringify(outcome)} needs unchanged known heads and bounded refunds`, () => {
@@ -42,10 +43,75 @@ for (const outcome of [
 test('narrative and generic worker failures cannot earn a refund', () => {
   for (const outcome of [{ failureDetail: 'publish-blocked' }, { exitCode: 1 },
     { exitCode: 143 }, { exit_code: 137 }, { signal: 'SIGTERM' },
-    { status: 'cancelled', failureReason: 'publish-blocked', exitCode: 143 }, null]) {
+    ...['succeeded', 'superseded', 'running', 'cancelled', 'canceled', '', 'unknown'].map((status) =>
+      ({ status, failureReason: 'publish-blocked', failureClass: 'codex-tool-host-unavailable', failureCode: 'boot-failed', exitCode: 143 })),
+    { failureReason: 'publish-blocked' }, { failureClass: 'codex-tool-host-unavailable' },
+    { failureReason: 'boot-failure' }, null]) {
     assert.equal(infrastructureRefundReason({ outcome, startHead: 'a', endHead: 'a' }), null);
   }
 });
+
+test('refund env override accepts only decimal integers and defaults invalid values to two', () => {
+  const args = { outcome: { status: 'failed', failureReason: 'publish-blocked' }, startHead: 'a', endHead: 'a' };
+  for (const value of ['', ' ', 'invalid', '-1', '+1', '1.0', '1e0', '0x0']) {
+    const env = { ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS: value };
+    assert.equal(infrastructureRefundReason({ ...args, env, refunds: 1 }), 'publish-blocked', value);
+    assert.equal(infrastructureRefundReason({ ...args, env, refunds: 2 }), null, value);
+  }
+  for (const [value, cap] of [['0', 0], ['1', 1], [' 1 ', 1], ['2', 2], ['99', 2]]) {
+    const env = { ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS: value };
+    if (cap) assert.equal(infrastructureRefundReason({ ...args, env, refunds: cap - 1 }), 'publish-blocked', value);
+    assert.equal(infrastructureRefundReason({ ...args, env, refunds: cap }), null, value);
+  }
+});
+
+for (const terminal of [
+  { status: 'succeeded', failureClass: 'codex-tool-host-unavailable' },
+  { status: 'superseded', failureReason: 'publish-blocked' },
+]) {
+  test(`HQ ${terminal.status} with stale infrastructure fields and an unchanged head is not refunded`, async () => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'remrefund-terminal-'));
+    try {
+      createFollowUpJob({ rootDir, repo: 'fixture/repo', prNumber: 1, revisionRef: 'a'.repeat(40),
+        reviewerModel: 'claude', reviewBody: 'Fix.', critical: true });
+      const claimed = claimNextFollowUpJob({ rootDir });
+      const replyPath = join(fixtureHqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json');
+      const workspaceDir = join(fixtureHqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+      mkdirSync(workspaceDir, { recursive: true });
+      mkdirSync(join(replyPath, '..'), { recursive: true });
+      writeFileSync(replyPath, JSON.stringify({
+        kind: 'adversarial-review-remediation-reply', schemaVersion: 1,
+        jobId: claimed.job.jobId, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
+        outcome: 'completed', summary: 'Reviewed the findings; the unchanged branch is ready for re-review.',
+        validation: ['Offline fixture'], addressed: [], pushback: [], blockers: [],
+        reReview: { requested: true, reason: 'Ready for re-review.' },
+      }));
+      const spawned = markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker: {
+        model: 'codex', workerClass: 'codex', dispatchMode: 'hq', dispatchId: 'fixture',
+        hqRoot: fixtureHqRoot, replyPath, workspaceDir,
+      } });
+      const comments = [];
+      const result = await reconcileFollowUpJob({ rootDir, jobPath: spawned.jobPath, job: spawned.job,
+        execFileImpl: async () => ({ stdout: JSON.stringify({ ...terminal, workspacePath: workspaceDir }) }),
+        resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'a'.repeat(40) }),
+        auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+        inspectRemediationCiRegressionImpl: async () => ({ state: 'green', conclusion: 'SUCCESS',
+          headSha: 'a'.repeat(40), totalExternalChecks: 1, failedChecks: [], pendingChecks: [] }),
+        requestReviewRereviewImpl: () => ({ triggered: true, status: 'pending', reason: 'review-status-reset' }),
+        postCommentImpl: async ({ body }) => { comments.push(body); return { posted: false, error: 'offline fixture' }; },
+        log: { log() {}, warn() {}, error() {} },
+      });
+      assert.notEqual(result.action, 'requeued');
+      assert.equal(summarizePRRemediationLedger(rootDir, result.job).infrastructureRefundsForPR, 0);
+      assert.ok(comments.every((body) => !body.includes('not charged:')));
+      if (terminal.status === 'succeeded') {
+        assert.equal(result.action, 'completed', JSON.stringify({ reason: result.reason, failure: result.job.failure }));
+        assert.equal(result.job.reReview.requested, true);
+        assert.equal(result.job.remediationReply.state, 'worker-wrote-reply');
+      }
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  });
+}
 
 for (const reason of ['codex-tool-host-unavailable', 'publish-blocked', 'boot-failed']) {
   test(`reconcile refunds ${reason} once and publishes its marker`, async () => {
@@ -56,6 +122,7 @@ for (const reason of ['codex-tool-host-unavailable', 'publish-blocked', 'boot-fa
       let claimed = claimNextFollowUpJob({ rootDir });
       const spawn = () => markFollowUpJobSpawned({ rootDir, jobPath: claimed.jobPath, worker: {
         workerClass: 'codex', model: 'codex', processId: reason === 'boot-failed' ? null : 1234,
+        ...(reason === 'boot-failed' ? {} : { dispatchMode: 'hq', dispatchId: 'fixture', hqRoot: fixtureHqRoot }),
         workspaceDir: 'data/workspace', outputPath: 'data/workspace/output.md', logPath: 'data/workspace/log.md',
         recordedOutcome: { failureReason: reason },
       } });
@@ -63,6 +130,7 @@ for (const reason of ['codex-tool-host-unavailable', 'publish-blocked', 'boot-fa
       const comments = [];
       const reconcile = () => reconcileFollowUpJob({ rootDir, jobPath: spawned.jobPath, job: spawned.job,
         isWorkerRunning: () => false,
+        execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed', failureReason: reason }) }),
         resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: 'a'.repeat(40) }),
         postCommentImpl: async ({ body }) => { comments.push(body); return { posted: false, error: 'offline fixture' }; },
         log: { log() {}, warn() {}, error() {} },
@@ -125,7 +193,7 @@ test('PR ledger retains the two refunds across jobs and counts published rounds 
     assert.equal(ledger.infrastructureRefundsForPR, 2);
     assert.equal(ledger.publishedRoundsForPR, 1);
     assert.equal(ledger.completedRoundsForPR, 3);
-    assert.equal(infrastructureRefundReason({ outcome: { failureReason: 'publish-blocked' },
+    assert.equal(infrastructureRefundReason({ outcome: { status: 'failed', failureReason: 'publish-blocked' },
       startHead: 'a', endHead: 'a', refunds: ledger.infrastructureRefundsForPR }), null);
     assert.equal(summarizePRRemediationLedger(rootDir, { repo: 'fixture/repo', prNumber: 2 }).infrastructureRefundsForPR, 0);
     const body = buildRemediationOutcomeCommentBody({ action: 'stopped', workerClass: 'codex', job: {

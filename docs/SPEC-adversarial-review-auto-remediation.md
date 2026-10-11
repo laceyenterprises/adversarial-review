@@ -744,15 +744,19 @@ retain their existing behavior.
 Reconcile refunds only an exited worker with an independent recorded reason
 (`codex-tool-host-unavailable`, `publish-blocked`, `boot-failed`/`boot-failure`),
 known unchanged authoritative live head evidence and no lifecycle stop.
-Bare signals or exit 137/143 cannot prove infrastructure provenance, and
-cancelled HQ statuses are ineligible. Failed terminal events require an HQ
+HQ outcomes must have `status: "failed"`; successful, superseded, running and
+cancelled outcomes cannot qualify even with stale failure fields. Local outcomes
+without a status qualify only for `boot-failed` recorded from a spawn error.
+Bare signals or exit 137/143 cannot prove infrastructure provenance.
+Failed terminal events require an HQ
 status probe before any settlement, including while HQ recovery is active.
 The existing retry transition removes the charged round, retains the outcome
 in `retryHistory[]` with `retryMetadata.code: "infrastructure-refund"` and queues
 the same round immediately without spending the transient budget. One refund
 is allowed per charged round on the job and at most two across the PR's ledger,
 including archived jobs. `ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS` can lower
-that ceiling (zero disables it); non-negative integers are clamped to two and
+that ceiling (zero disables it); non-negative integers are clamped to two.
+Only decimal digits after trimming whitespace are accepted, and blank or
 invalid values use two. Eligibility and requeue share the job-write lock.
 An ineligible refund continues through existing HQ transient retry handling.
 The [follow-up job data model](data-model/follow-up-jobs.md#infrastructure-round-refunds-remrefund-01)

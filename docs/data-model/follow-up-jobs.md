@@ -11,9 +11,12 @@ Reconcile can return an exited worker's job to `pending/` without charging the
 round or `remediationPlan.transientRetries`. It requires known, equal start and
 authoritative live end heads, no lifecycle stop, and a recorded reason:
 `codex-tool-host-unavailable`, `publish-blocked`, `boot-failed` or `boot-failure`.
-Narrative text and bare signal exits (including 137/143) cannot qualify;
-`cancelled`/`canceled` HQ status cannot qualify either. Operator and supervisor
-cancels therefore do not earn a refund from their signal exit alone.
+HQ outcomes require `status: "failed"`; stale failure fields on `succeeded`,
+`superseded`, running or cancelled dispatches cannot qualify. Local outcomes
+without a status qualify only for `boot-failed`, recorded from a child spawn
+error. Narrative text and bare signal exits (including 137/143) cannot qualify.
+Operator and supervisor cancels therefore do not earn a refund from their
+signal exit alone.
 
 The persisted accounting fields are:
 
@@ -38,7 +41,8 @@ is the settlement timestamp. Only one refund is allowed per charged round on
 the job; a failed retry stays charged. The PR-wide limit is two, including
 other jobs and archived stopped jobs. `ADV_MAX_REMEDIATION_INFRASTRUCTURE_REFUNDS`
 can lower the limit to a non-negative integer, including zero, but cannot raise
-it above two. Invalid overrides use the default. Eligibility and requeue share
+it above two. Only decimal digits after trimming whitespace are accepted;
+blank and invalid overrides use the default. Eligibility and requeue share
 the job-write lock. A declined refund retains existing HQ transient retry rules
 and their separate bounded budget.
 

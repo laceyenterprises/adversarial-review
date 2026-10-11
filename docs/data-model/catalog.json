@@ -98,6 +98,8 @@
       "owner": "follow-up remediation queue",
       "infrastructureRefundRetryCode": "infrastructure-refund",
       "infrastructureRefundLimit": 2,
+      "infrastructureRefundHqStatus": "failed",
+      "infrastructureRefundLocalReason": "boot-failed",
       "infrastructureRefundEvidenceFields": ["remediationPlan.rounds[].startHeadSha", "remediationPlan.rounds[].publishedHeadSha", "remediationWorker.recordedOutcome", "remediationPlan.publishedRoundsForPR", "remediationPlan.retryHistory[].retryMetadata"],
       "conflictedBaseProbeRetryCode": "hq-conflicted-base-probe-transient",
       "conflictedBaseProbeExhaustionCode": "hq-conflicted-base-probe-retries-exhausted",

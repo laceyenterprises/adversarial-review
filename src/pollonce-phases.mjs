@@ -1,3 +1,4 @@
+import { readGeminiQuotaCooldown } from './reviewer-quota-signal.mjs';
 // HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
 // ARC-18: extracted per-PR processing phase of pollOnce (watcher.mjs).
 //
@@ -1626,7 +1627,8 @@ export async function processReviewSubject(entry, ctx) {
       // gemini-on-gemini route that an operator `roles.reviewer=gemini` pin
       // could otherwise produce.
       const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
-      const geminiReviewerMode = geminiModeResolution.mode;
+      const geminiCooldown = readGeminiQuotaCooldown({ rootDir: ROOT });
+      const geminiReviewerMode = geminiCooldown ? 'off' : geminiModeResolution.mode;
       console.log(
         `[watcher] gemini-mode resolved=${geminiReviewerMode} ` +
           `source=${geminiModeResolution.source || 'unknown'} ` +
@@ -3545,6 +3547,8 @@ export async function processReviewSubject(entry, ctx) {
                 repo: repoPath,
                 prNumber,
                 reviewerModel: route.reviewerModel,
+                geminiQuotaFallbackRoute: baseRoute,
+                rootDir: ROOT,
                 codexBrokerProvider: route.codexBrokerProvider || 'codex',
                 botTokenEnv: route.botTokenEnv,
                 linearTicketId,

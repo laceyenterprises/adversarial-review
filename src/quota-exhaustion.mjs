@@ -41,7 +41,8 @@ const CLAUDE_QUOTA_PATTERNS = [
 // Shared / provider-agnostic hard-cap markers.
 const GENERIC_QUOTA_PATTERNS = [
   /resource_exhausted/i,
-  /\bquota (?:exceeded|exhausted|reached)\b/i,
+  /\bquota[_ -](?:exceeded|exhausted|reached)\b/i,
+  /GeminiCredentialPoolNoCreditError|Gemini credential checkout deferred:.*no[_ -]?credit/i,
   /\bplan_limit\b/i,
   /would exceed your account['’]s rate limit/i,
 ];

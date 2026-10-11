@@ -264,3 +264,30 @@ test('quotaFallbackDecision: not exhausted -> no fallback', () => {
   assert.equal(d.fallbackToPrimary, false);
   assert.equal(d.reason, 'not-exhausted');
 });
+
+test('GEMINIQUOTA-01: cooldown persists, expires once, and explicit reset wins', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { startGeminiQuotaCooldown, readGeminiQuotaCooldown, GEMINI_QUOTA_COOLDOWN_MS } = await import('../src/reviewer-quota-signal.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'gemini-quota-state-'));
+  const events = [];
+  const options = { rootDir, env: {}, nowMs: NOW, log: { info: s => events.push(s) } };
+  try {
+    const signal = parseReviewerQuotaExhaustion({ stderr: 'Gemini credential checkout deferred: quota_exhausted', nowMs: NOW });
+    assert.equal(signal.exhausted, true);
+    assert.equal(signal.resetAt, null);
+    const state = startGeminiQuotaCooldown({ ...options, signal });
+    assert.equal(Date.parse(state.resetAt), NOW + GEMINI_QUOTA_COOLDOWN_MS);
+    assert.deepEqual(readGeminiQuotaCooldown(options), state);
+    startGeminiQuotaCooldown({ ...options, signal });
+    assert.equal(events.length, 1);
+    assert.equal(readGeminiQuotaCooldown({ ...options, nowMs: NOW + GEMINI_QUOTA_COOLDOWN_MS }), null);
+    readGeminiQuotaCooldown({ ...options, nowMs: NOW + GEMINI_QUOTA_COOLDOWN_MS });
+    assert.equal(events.length, 2);
+    const resetAt = new Date(NOW + 60000).toISOString();
+    assert.equal(startGeminiQuotaCooldown({ ...options, signal: { exhausted: true, resetAt }, env: { AGENT_OS_GEMINI_QUOTA_COOLDOWN_MS: '10000' } }).resetAt, resetAt);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

@@ -1,3 +1,4 @@
+import { parseReviewerQuotaExhaustion, readGeminiQuotaCooldown, startGeminiQuotaCooldown } from './reviewer-quota-signal.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
 // spawnReviewer + the gated pipeline entry point + settleReviewerAttempt +
@@ -506,7 +507,38 @@ function resolveReviewerOutageSignal({
 
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
-async function spawnReviewer({
+async function spawnReviewer(args) {
+  if (normalizeReviewerModel(args.reviewerModel) !== 'gemini') return spawnReviewerOnce(args);
+  const rootDir = args.rootDir || ROOT;
+  const env = args.quotaCheckEnv || process.env;
+  const fallback = args.geminiQuotaFallbackRoute;
+  const canFallback = fallback && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
+  if (canFallback && readGeminiQuotaCooldown({ rootDir, env })) {
+    return spawnReviewerOnce({ ...args, reviewerModel: fallback.reviewerModel, botTokenEnv: fallback.botTokenEnv });
+  }
+  const result = await spawnReviewerOnce({
+    ...args,
+    onPostOperationSettled: canFallback ? (result) => {
+      const text = [result.error, result.stdout, result.stderr].filter(Boolean).join('\n');
+      if (!result.ok && (result.failureClass === 'quota-exhausted' || parseReviewerQuotaExhaustion({ stderr: text }).exhausted)) return;
+      args.onPostOperationSettled?.(result);
+    } : args.onPostOperationSettled,
+  });
+  const diagnostic = [result.error, result.stdout, result.stderr].filter(Boolean).join('\n');
+  const signal = parseReviewerQuotaExhaustion({ stderr: diagnostic });
+  if (!result.ok && (signal.exhausted || result.failureClass === 'quota-exhausted')) {
+    signal.resetAt ||= resolveQuotaResetIso(diagnostic);
+    startGeminiQuotaCooldown({ rootDir, env, signal });
+    if (canFallback) {
+      console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
+      return spawnReviewerOnce({ ...args, reviewerModel: fallback.reviewerModel, botTokenEnv: fallback.botTokenEnv });
+    }
+    return { ...result, failureClass: 'quota-exhausted' };
+  }
+  return result;
+}
+
+async function spawnReviewerOnce({
   repo,
   prNumber,
   reviewerModel,

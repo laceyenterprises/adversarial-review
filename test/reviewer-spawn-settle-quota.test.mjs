@@ -205,3 +205,70 @@ for (const provider of ['codex', 'codex-corp']) {
     assert.match(result.error, /Codex-family reviewer cannot review/);
   });
 }
+
+test('GEMINIQUOTA-01: no-reset checkout failure falls back in the same pass and skips subsequent checkouts', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'gemini-cooldown-'));
+  try {
+    const capture = newCapture();
+    const models = [];
+    const settled = [];
+    const args = {
+      ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false', ADVERSARIAL_REVIEW_STATE_DIR: rootDir }, capture }),
+      rootDir,
+      reviewerModel: 'gemini',
+      builderTag: 'codex',
+      geminiQuotaFallbackRoute: { reviewerModel: 'claude-code', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
+      onPostOperationSettled: result => settled.push(result),
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer({ model }) {
+          models.push(model);
+          return model === 'gemini'
+            ? { ok: false, failureClass: 'unknown', stdout: 'Gemini credential checkout deferred: quota_exhausted\nERROR STACK: GeminiCredentialPoolNoCreditError' }
+            : { ok: true, reviewBody: 'test', reviewBodyDelivery: 'adapter' };
+        },
+      },
+    };
+    assert.equal((await spawnReviewer(args)).ok, true);
+    assert.deepEqual(models, ['gemini', 'claude-code']);
+    assert.equal(settled.length, 1);
+    assert.equal(settled[0].ok, true);
+    // A fresh invocation reads disk, including after a watcher restart.
+    assert.equal((await spawnReviewer(args)).ok, true);
+    assert.deepEqual(models, ['gemini', 'claude-code', 'claude-code']);
+    await writeFile(join(rootDir, 'gemini-quota-cooldown.json'), JSON.stringify({ resetAt: '2000-01-01T00:00:00Z' }));
+    assert.equal((await spawnReviewer(args)).ok, true);
+    assert.deepEqual(models, ['gemini', 'claude-code', 'claude-code', 'gemini', 'claude-code']);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('GEMINIQUOTA-01: quota_exhausted without reset preserves both settlement budgets', async () => {
+  const { classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  const { settleReviewerAttempt } = await import('../src/reviewer-spawn-settle.mjs');
+  const rootDir = await mkdtemp(join(tmpdir(), 'gemini-quota-budgets-'));
+  try {
+    const error = 'Gemini credential checkout deferred: quota_exhausted\nGeminiCredentialPoolNoCreditError';
+    const failureClass = classifyReviewerFailure(error, 1);
+    assert.equal(failureClass, 'quota-exhausted');
+    const row = { review_attempts: 2, infra_auto_recover_attempts: 1 };
+    let held = false;
+    const charge = () => assert.fail('quota must not enter an attempt-charging statement');
+    settleReviewerAttempt({
+      rootDir, repoPath: 'example/demo', prNumber: 1, reviewerModel: 'gemini',
+      result: { ok: false, failureClass, error },
+      statements: {
+        markOutageTransient: { run: () => { held = true; } },
+        getReviewRow: { get: () => row },
+        markFailed: { run: charge },
+        releaseReviewLease: { run: charge },
+        markPendingUpstream: { run: charge },
+      },
+      log: { warn() {} },
+    });
+    assert.equal(held, true);
+    assert.deepEqual(row, { review_attempts: 2, infra_auto_recover_attempts: 1 });
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});

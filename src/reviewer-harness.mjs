@@ -1,3 +1,4 @@
+import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
 import { createHash } from 'node:crypto';
 // Reviewer model-execution harness.
 //
@@ -1442,8 +1443,10 @@ class GeminiCredentialPoolUnavailableError extends Error {
 }
 
 class GeminiCredentialPoolNoCreditError extends Error {
-  constructor(reason = 'no-credit') {
-    super(`Gemini credential checkout deferred: ${reason}`);
+  constructor(reason = 'no-credit', body = null) {
+    const signal = parseReviewerQuotaExhaustion({ brokerBody: body });
+    super(`Gemini credential checkout deferred: ${reason}${signal.resetAt ? `; resets at ${signal.resetAt}` : ''}`);
+    this.resetAt = signal.resetAt;
     this.name = 'GeminiCredentialPoolNoCreditError';
     this.isGeminiCredentialPoolNoCredit = true;
   }
@@ -1669,7 +1672,7 @@ function isTypedNoCreditResponse(status, body) {
     body?.error?.code,
     body?.error?.reason,
   ].map((value) => String(value || '').trim().toLowerCase());
-  return values.some((value) => value === 'no-credit' || value === 'no_credit' || value === 'quota-exhausted')
+  return values.some((value) => value === 'no-credit' || value === 'no_credit' || value === 'quota-exhausted' || value === 'quota_exhausted')
     || ((status === 409 || status === 429) && values.some((value) => value.includes('no-credit') || value.includes('quota')));
 }
 
@@ -1810,7 +1813,8 @@ async function checkoutGeminiCredentialFromBrokerOnce({
       stringifyGeminiBrokerReason(body?.reason)
       || stringifyGeminiBrokerReason(body?.error?.reason)
       || stringifyGeminiBrokerReason(body?.error)
-      || 'no-credit'
+      || 'no-credit',
+      body
     );
   }
   if (!res.ok) {

@@ -522,3 +522,14 @@ test('comment-only remediation recovery retains hard-stop labels', () => {
   const result = classify(inputFor('comment-only-with-non-blocking-findings.md', { labels: ['paused-for-redesign'] }));
   assert.equal(result.decision, 'inconclusive');
 });
+
+
+test('FINALROUND-01: superseded cancellation finishing last does not hide a successful rerun', () => {
+  const rollup = [
+    { name: 'fixture-check', status: 'COMPLETED', conclusion: 'SUCCESS',
+      startedAt: '2026-10-12T01:41:00Z', completedAt: '2026-10-12T01:43:00Z' },
+    { name: 'fixture-check', status: 'COMPLETED', conclusion: 'CANCELLED',
+      startedAt: '2026-10-12T01:40:00Z', completedAt: '2026-10-12T01:50:00Z' },
+  ];
+  assert.equal(classify(inputFor('comment-only-merge-eligible.md', { statusCheckRollup: rollup })).decision, 'merge-eligible');
+});

@@ -19,17 +19,15 @@ function checkIdentity(item) {
 }
 
 function checkTimestampMs(item) {
-  const values = [
-    item?.completedAt,
-    item?.startedAt,
-    item?.updatedAt,
-    item?.createdAt,
-  ];
+  // Run creation/start orders reruns. An older run can finish (or be
+  // cancelled) after its replacement succeeded; completion is not recency.
+  const values = [item?.createdAt, item?.startedAt, item?.updatedAt, item?.completedAt];
   let latest = null;
   for (const value of values) {
     const parsed = Date.parse(String(value || ''));
     if (!Number.isFinite(parsed)) continue;
-    latest = latest === null ? parsed : Math.max(latest, parsed);
+    latest = parsed;
+    break;
   }
   return latest;
 }

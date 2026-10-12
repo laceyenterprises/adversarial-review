@@ -29,6 +29,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { writeFileAtomic } from './atomic-write.mjs';
+import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 import {
   appendOperatorMutationAuditRow,
@@ -43,6 +44,8 @@ import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-commen
 const VERB = 'hq.adversarial.retrigger-review';
 
 export const RETRIGGER_REVIEW_LABEL = 'retrigger-review';
+
+export const MISSING_LABEL_EVENT_WAIT_MS = 5 * 60_000;
 
 const DEFAULT_REASON = 'retrigger-review: label applied; re-review requested on current HEAD.';
 const ACK_COMMENT_TIMEOUT_MS = 10_000;
@@ -153,6 +156,9 @@ function buildAckCommentBody({
       ? '- This is a one-shot signal — the label has been removed. Apply it again to request another re-review.'
       : '- The label has been removed. If you need to force a re-review, wait for the current pipeline state to clear, then re-apply.',
   ];
+  if (rereviewResult?.route === 'hammer') {
+    lines.push('', 'The completed final round owns this head: the hammer validates and closes it on the next watcher tick.');
+  }
   if (safeReason) {
     lines.push('', `Reason: ${safeReason}`);
   }
@@ -517,20 +523,42 @@ export async function tryRetriggerReviewFromLabel({
   labelEvent = null,
   labelControlReason = null,
   revisionRef = null,
+  env = process.env,
+  logger = console,
 }) {
-  const labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
+  let labelEventKey = normalizeLabelEventKey({ repo, prNumber, labelEvent });
   if (!labelEventKey) {
-    // A missing scoped event can mean a lagging subject snapshot or timeline
-    // anchor, not missing attribution. Keep inconclusive requests retryable.
     const labelRemoved = ['non-attributable', 'untrusted-actor'].includes(labelControlReason);
     if (labelRemoved) await removeLabelFromPR({ repo, prNumber, execFileImpl });
-    return {
-      outcome: 'label-event-missing',
-      detail: labelRemoved
-        ? `removed retrigger-review label (${labelControlReason}); apply it again with an attributable trusted actor`
-        : 'kept retrigger-review label pending a current-head attributable event',
-      labelRemoved,
-    };
+    // Persist the observation per PR@head so restarts cannot reset the wait.
+    // This fallback authorizes review only; it grants no operator override.
+    const currentHead = /^[0-9a-f]{40}$/iu.test(String(revisionRef || '')) ? normalizeRevisionRef(revisionRef) : null;
+    const observationKey = `missing-label-event:${repo}#${prNumber}@${currentHead}`;
+    const observationPath = join(rootDir, 'data', 'follow-up-jobs', 'missing-label-events',
+      `${digestSha256(observationKey).replace(/^sha256:/, '')}.json`);
+    let observation = null;
+    if (!labelRemoved && currentHead) {
+      if (existsSync(observationPath)) observation = JSON.parse(readFileSync(observationPath, 'utf8'));
+      else {
+        observation = { firstSeenAt: now() };
+        writeFileAtomic(observationPath, `${JSON.stringify(observation)}\n`);
+      }
+    }
+    const override = Number(env.RETRIGGER_REVIEW_MISSING_EVENT_WAIT_MS);
+    const waitMs = Number.isFinite(override) && override >= 0 && env.RETRIGGER_REVIEW_MISSING_EVENT_WAIT_MS !== undefined
+      ? override : MISSING_LABEL_EVENT_WAIT_MS;
+    if (!observation || Date.parse(now()) - Date.parse(observation.firstSeenAt) < waitMs) {
+      return {
+        outcome: 'label-event-missing',
+        detail: labelRemoved
+          ? `removed retrigger-review label (${labelControlReason}); apply it again with an attributable trusted actor`
+          : 'kept retrigger-review label pending a current-head attributable event',
+        labelRemoved,
+      };
+    }
+    labelEventKey = observationKey;
+    labelActor = 'unknown';
+    logger.warn?.(`[retrigger-review] ${repo}#${prNumber}@${currentHead}: labeled event missing after ${waitMs}ms; treating the present retrigger-review label as a request for the current head`);
   }
   const normalizedRevisionRef = normalizeRevisionRef(
     revisionRef || labelEvent?.headSha || labelEvent?.head_sha
@@ -590,13 +618,18 @@ export async function tryRetriggerReviewFromLabel({
   // no-op.
   let rereviewResult;
   try {
-    rereviewResult = rereviewImpl({
-      rootDir,
-      repo,
-      prNumber,
-      requestedAt: now(),
-      reason,
-    });
+    rereviewResult = hasCommentOnlyFinalRoundPush(rootDir, {
+      repo, prNumber, headSha: normalizedRevisionRef,
+    }, logger)
+      ? { triggered: false, status: 'owned', reason: 'comment-only-final-round-completed', route: 'hammer' }
+      : rereviewImpl({
+        rootDir,
+        repo,
+        prNumber,
+        requestedAt: now(),
+        targetRevisionRef: normalizedRevisionRef,
+        reason,
+      });
   } catch (err) {
     return {
       outcome: 'rereview-call-failed',

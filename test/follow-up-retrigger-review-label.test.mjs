@@ -347,3 +347,27 @@ test('CAPROUTE-01: removal failure leaves an unattributed label retryable withou
   const result = await tryRetriggerReviewFromLabel(args);
   assert.equal(result.labelRemoved, true);
 });
+
+
+test('FINALROUND-01: missing labeled event is honored after a durable bounded wait on the current head', async () => {
+  const root = makeTempRoot();
+  const logs = [];
+  const requests = [];
+  const audit = stubAuditAppender();
+  const args = { ...defaultArgs(root), ...audit, labelEvent: null,
+    env: { RETRIGGER_REVIEW_MISSING_EVENT_WAIT_MS: '300000' },
+    logger: { warn: (line) => logs.push(line) },
+    rereviewImpl: (request) => { requests.push(request); return { triggered: true, status: 'pending' }; } };
+  const first = await tryRetriggerReviewFromLabel({ ...args, now: () => '2026-10-12T01:43:00Z' });
+  assert.equal(first.outcome, 'label-event-missing');
+  const before = await tryRetriggerReviewFromLabel({ ...args, now: () => '2026-10-12T01:47:59Z' });
+  assert.equal(before.outcome, 'label-event-missing');
+  await tryRetriggerReviewFromLabel({ ...args, now: () => '2026-10-12T01:48:00Z' });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].targetRevisionRef, args.revisionRef);
+  assert.match(logs[0], /labeled event missing.*current head/);
+  await tryRetriggerReviewFromLabel({ ...args, now: () => '2026-10-12T01:49:00Z' });
+  assert.equal(requests.length, 1, 'same observed label is consumed once');
+  const changed = await tryRetriggerReviewFromLabel({ ...args, revisionRef: 'd'.repeat(40), now: () => '2026-10-12T01:49:00Z' });
+  assert.equal(changed.outcome, 'label-event-missing', 'head movement starts its own bound');
+});

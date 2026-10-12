@@ -1,0 +1,105 @@
+{
+  "_fixture": {
+    "ticket": "FINALROUND-01",
+    "note": "Sanitized completed-job reconstruction from the PR 8123 incident sequence, not a live job capture. Public review/head identities and timestamps retained; review body shortened. The reconstructed terminal job includes the replay-proof authority needed by the existing diverged-head handoff.",
+    "compareStatus": "diverged"
+  },
+  "schemaVersion": 2,
+  "kind": "adversarial-review-follow-up",
+  "status": "completed",
+  "jobId": "laceyenterprises__agent-os-pr-8123-2026-10-12T01-37-08-000Z",
+  "createdAt": "2026-10-12T22:33:55.502Z",
+  "trigger": {
+    "type": "github-review-posted",
+    "postedAt": "2026-10-12T01:37:08.000Z"
+  },
+  "repo": "laceyenterprises/agent-os",
+  "prNumber": 8123,
+  "baseBranch": "main",
+  "branch": "claude-code/omd11-evidence",
+  "domainId": "code-pr",
+  "subjectExternalId": "laceyenterprises/agent-os#8123",
+  "revisionRef": "bad181b374679fc48d2bcf9aae73512d1711c31f",
+  "linearTicketId": null,
+  "riskClass": "medium",
+  "reviewerModel": "gemini",
+  "builderTag": "claude-code",
+  "critical": false,
+  "nonBlockingOnly": true,
+  "finalRound": "comment-only",
+  "reviewSummary": "The PR adds an operational report (`REPORT-omd-11-oss-dispatch-activation-2026-10-12.md`) and links to it from the OSS model dispatch runbook. Both files are documentation-only. The report provides clear evidence of a successful OSS model dispatch activation, including status checks, smoke test results across six routes, and a list of applied fixes. No internal inconsistencies, unsupported claims, missing specs, or operator harm were found in the provided diff.",
+  "reviewBody": "## Summary\nFleet control routing is correct.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- **Inaccurate error message for non-isolated callers with invalid canonical DSN**\n  - **File:** `platform/session-ledger/src/session_ledger/db_path.py`\n  - **Lines:** `727-730`\n  - **Problem:** The invalid breadcrumb error assumes an isolated caller.\n  - **Recommended fix:** Describe the invalid canonical breadcrumb without assuming caller isolation.\n\n## Verdict\nComment only",
+  "verdict_mode": "enforce",
+  "recommendedFollowUpAction": {
+    "type": "address-adversarial-review",
+    "priority": "normal",
+    "summary": "Start a follow-up coding session for this PR and address the adversarial review findings.",
+    "executionModel": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "futureArchitectureNote": "Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff."
+  },
+  "remediationPlan": {
+    "mode": "bounded-manual-rounds",
+    "maxRounds": 2,
+    "currentRound": 2,
+    "rounds": [
+      {
+        "round": 2,
+        "domainId": "code-pr",
+        "subjectExternalId": "laceyenterprises/agent-os#8123",
+        "revisionRef": "bad181b374679fc48d2bcf9aae73512d1711c31f",
+        "kind": "remediation",
+        "state": "completed",
+        "claimedAt": "2026-10-12T01:37:16.000Z",
+        "spawnedAt": "2026-10-12T01:37:16.000Z",
+        "finishedAt": "2026-10-12T01:43:44.000Z",
+        "reReview": {
+          "requested": false,
+          "requestedAt": null,
+          "reason": null,
+          "triggered": false,
+          "status": "suppressed",
+          "outcomeReason": "comment-only-final-round",
+          "reviewRow": null,
+          "suppressed": "comment-only-final-round"
+        },
+        "completion": {
+          "workerPushedHeadSha": "9387869826ae41761d801d1b57bdf9e0a2181801"
+        }
+      }
+    ],
+    "transientRetries": 0,
+    "retryHistory": [],
+    "retryAfter": null,
+    "stopReason": null,
+    "stop": null,
+    "nextAction": null
+  },
+  "nonBlockingRoundsBefore": 0,
+  "nonBlockingMaxRounds": 1,
+  "claimedAt": "2026-10-12T01:37:16.000Z",
+  "completedAt": "2026-10-12T01:43:44.000Z",
+  "reReview": {
+    "requested": false,
+    "requestedAt": null,
+    "reason": null,
+    "triggered": false,
+    "status": "suppressed",
+    "outcomeReason": "comment-only-final-round",
+    "reviewRow": null,
+    "suppressed": "comment-only-final-round"
+  },
+  "remediationWorker": {
+    "model": "codex",
+    "workerClass": "codex",
+    "state": "completed"
+  },
+  "completion": {
+    "source": "codex-output-last-message",
+    "workerModel": "codex",
+    "workerPushedHeadSha": "9387869826ae41761d801d1b57bdf9e0a2181801",
+    "workerPushProof": {
+      "method": "git-cherry-replay"
+    }
+  }
+}

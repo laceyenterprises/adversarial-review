@@ -52,16 +52,19 @@ function tempRoot(t, label) {
 
 // ── #7313: a proven final-round push reaches hammer terminal validation ────────
 
-const PR_7313_REVIEWED = 'b90d1471efebe965b5c15d3cf975f93078c4ee99';
-const PR_7313_PUSHED = '6a9f27f04fedeb533b291610b2c9dcc6300f13e1';
 
-test('replay #7313: the proven final-round push goes to hammer terminal validation, not AWAIT_OPERATOR_ACTION', async (t) => {
+
+for (const pr of [7313, 8123]) {
+test(`replay PR ${pr}: the proven final-round push goes to hammer terminal validation on the next tick`, async (t) => {
   const rootDir = tempRoot(t, '7313');
-  const job = fixture('pr-7313-final-round-job.json');
+  const job = fixture(`pr-${pr}-final-round-job.json`);
+  const reviewedHead = job.revisionRef;
+  const pushedHead = job.completion.workerPushedHeadSha;
+  const compareStatus = job._fixture?.compareStatus || 'ahead';
   delete job._fixture;
   assert.equal(job.status, 'completed');
-  assert.equal(job.revisionRef, PR_7313_REVIEWED);
-  assert.equal(job.completion.workerPushedHeadSha, PR_7313_PUSHED);
+  assert.equal(job.revisionRef, reviewedHead);
+  assert.equal(job.completion.workerPushedHeadSha, pushedHead);
   const completedDir = getFollowUpJobDir(rootDir, 'completed');
   mkdirSync(completedDir, { recursive: true });
   writeFollowUpJob(path.join(completedDir, `${job.jobId}.json`), job);
@@ -71,7 +74,13 @@ test('replay #7313: the proven final-round push goes to hammer terminal validati
     .filter((line) => /release-freeze-gate, repo-guards, and submodule-pointer-gate all passed/.test(line))
     .flatMap(() => ['release-freeze-gate', 'repo-guards', 'submodule-pointer-gate'])
     .map((name) => ({ __typename: 'CheckRun', name, status: 'COMPLETED', conclusion: 'SUCCESS' }));
-  assert.equal(greenRollup.length, 3, 'the worker reported green PR-head CI for #7313');
+  if (pr === 8123) {
+    greenRollup[0].startedAt = '2026-10-12T01:41:00Z';
+    greenRollup[0].completedAt = '2026-10-12T01:43:00Z';
+    greenRollup.push({ ...greenRollup[0], conclusion: 'CANCELLED',
+      startedAt: '2026-10-12T01:40:00Z', completedAt: '2026-10-12T01:50:00Z' });
+  }
+  assert.equal(greenRollup.length, pr === 8123 ? 4 : 3, 'the worker reported green PR-head CI for #7313');
 
   const cfg = {
     enabled: true, workerClass: 'hammer', mergeMethod: 'squash',
@@ -87,7 +96,7 @@ test('replay #7313: the proven final-round push goes to hammer terminal validati
     resolveAmaHammerDispatchModeImpl: () => 'inline',
     fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => {
       liveReviewHeads.push(head);
-      return head === PR_7313_REVIEWED ? [job.reviewBody] : [];
+      return head === reviewedHead ? [job.reviewBody] : [];
     },
     resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false, reason: 'not-closer-commit' }),
     fetchMergedProtectiveDependentsImpl: async () => [],
@@ -95,8 +104,8 @@ test('replay #7313: the proven final-round push goes to hammer terminal validati
     // terminal-validation audit, and a remediation worker's commit is not a
     // terminal-closer commit, so nothing certifies it for merge.
     runDaemonCleanMergeAttemptImpl: async (args) => {
-      assert.equal(args.gateSnapshot.reviewedHeadSha, PR_7313_REVIEWED);
-      assert.equal(args.currentPrHeadSha, PR_7313_PUSHED);
+      assert.equal(args.gateSnapshot.reviewedHeadSha, reviewedHead);
+      assert.equal(args.currentPrHeadSha, pushedHead);
       const daemon = await runDaemonCleanMergeAttempt({
         ...args,
         candidate: { ...args.candidate, baseBranch: 'main' },
@@ -113,9 +122,9 @@ test('replay #7313: the proven final-round push goes to hammer terminal validati
       return daemon;
     },
     requestEligibleHammerWakeImpl: () => ({ requested: false }),
-    // GitHub compare for #7313 reports `ahead` (ahead 1 / behind 0).
+    // PR 7313 is ahead; PR 8123 replayed onto its base and diverged (8 ahead / 2 behind).
     proveCommentOnlyFinalRoundHeadImpl: (args) => proveCommentOnlyFinalRoundHead({
-      ...args, execFileImpl: async () => ({ stdout: 'ahead\n' }),
+      ...args, execFileImpl: async () => ({ stdout: `${compareStatus}\n` }),
     }),
     maybeDispatchAmaCloserImpl: (args) => {
       closerPayloads.push(args);
@@ -144,31 +153,31 @@ test('replay #7313: the proven final-round push goes to hammer terminal validati
     reviewStateRow: {
       repo: job.repo, pr_number: job.prNumber, pr_state: 'open', review_status: 'posted',
       last_verdict: 'Comment only', risk_class: job.riskClass, remediation_pending: 0,
-      reviewer: job.reviewerModel, reviewer_head_sha: PR_7313_REVIEWED, posted_at: job.trigger.postedAt,
+      reviewer: job.reviewerModel, reviewer_head_sha: reviewedHead, posted_at: job.trigger.postedAt,
     },
     dispatchJob: {},
     candidate: {
-      headSha: PR_7313_PUSHED, riskClass: job.riskClass, prState: 'open', prAuthor: 'claude-code-worker',
+      headSha: pushedHead, riskClass: job.riskClass, prState: 'open', prAuthor: 'claude-code-worker',
       mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', isDraft: false,
       statusCheckRollup: greenRollup, branchProtection: { requiredContexts: [] },
     },
-    labelNames: [],
+    labelNames: pr === 8123 ? ['merge-agent-stuck'] : [],
     repoPath: job.repo,
     prNumber: job.prNumber,
-    currentRevisionRef: PR_7313_PUSHED,
+    currentRevisionRef: pushedHead,
     logger: silent,
     maybeDispatchAmaClosureForImpl: (args) => maybeDispatchAmaClosureFor({ ...args, ...stubs }),
   });
 
   assert.equal(outcome.outcome, 'ama-dispatched', 'production routed this PR to AWAIT_OPERATOR_ACTION');
   assert.notEqual(outcome.coexistence?.action, 'await-operator-action');
-  assert.deepEqual(liveReviewHeads, [PR_7313_REVIEWED], 'the live verdict is read from the reviewed head');
+  assert.deepEqual(liveReviewHeads, [reviewedHead], 'the live verdict is read from the reviewed head');
   const [payload] = closerPayloads;
   assert.equal(payload.reviewState.verdict, 'comment-only');
-  assert.equal(payload.reviewState.headSha, PR_7313_REVIEWED);
+  assert.equal(payload.reviewState.headSha, reviewedHead);
   assert.equal(payload.dispatchContext.commentOnlyFinalRoundResume, true);
-  assert.equal(payload.dispatchContext.reviewedSha, PR_7313_REVIEWED);
-  assert.equal(payload.dispatchContext.targetRemediationSha, PR_7313_PUSHED);
+  assert.equal(payload.dispatchContext.reviewedSha, reviewedHead);
+  assert.equal(payload.dispatchContext.targetRemediationSha, pushedHead);
   const hammerDispatches = execCalls.filter(({ argv }) => argv[0] === 'dispatch' && argv.includes('hammer'));
   assert.equal(hammerDispatches.length, 1);
 
@@ -177,10 +186,43 @@ test('replay #7313: the proven final-round push goes to hammer terminal validati
   assert.ok(!execCalls.some(({ cmd, argv }) => cmd === 'gh' && argv[0] === 'pr' && argv[1] === 'merge'));
   assert.deepEqual(daemonOutcomes.map(({ disposition, reason }) => [disposition, reason]),
     [['not-taken', 'non-blocking-findings-present']]);
+  if (pr === 8123) {
+    const mergeAgent = await import('../src/follow-up-merge-agent.mjs');
+    const classify = (await import('../src/merge-agent-rescue-classifier.mjs')).default;
+    assert.equal(await mergeAgent.applyMergeAgentStuckLabel({ rootDir, repo: job.repo,
+      prNumber: pr, headSha: pushedHead, labels: [], logger: silent,
+      ghExecFileImpl: async () => assert.fail('automatic owner must prevent stuck label') }), false);
+    const rescue = classify({ reviewBody: job.reviewBody, headSha: pushedHead,
+      reviewHeadSha: reviewedHead, commentOnlyFinalRoundPush: true,
+      statusCheckRollup: greenRollup, labels: ['merge-agent-stuck'], mergeable: 'MERGEABLE' });
+    assert.equal(rescue.decision, 'hammer-eligible');
+    const dispatchJob = mergeAgent.buildMergeAgentDispatchJob(rootDir, {
+      repo: job.repo, prNumber: pr, headSha: pushedHead,
+      statusCheckRollup: greenRollup, labels: ['merge-agent-stuck'], mergeable: 'MERGEABLE',
+    });
+    assert.equal(dispatchJob.mergeAgentRescueDecision, rescue.decision);
+    const refusal = requestReviewRereview({ rootDir, repo: job.repo, prNumber: pr,
+      reason: 'auto-refresh: posted review on stale head', targetRevisionRef: pushedHead, logger: silent });
+    assert.equal(refusal.reason, 'comment-only-final-round-completed');
+    const { pickAdversarialGateStatus } = await import('../src/adversarial-gate-status.mjs');
+    const gate = pickAdversarialGateStatus({ labels: ['merge-agent-stuck'], headSha: pushedHead,
+      reviewRow: { review_status: 'posted', reviewer_head_sha: reviewedHead, last_verdict: 'Comment only' } });
+    assert.notEqual(gate.reason, 'operator-skip-label');
+    const { tryRetriggerReviewFromLabel } = await import('../src/follow-up-retrigger-review-label.mjs');
+    const labelResult = await tryRetriggerReviewFromLabel({ rootDir, repo: job.repo, prNumber: pr,
+      revisionRef: pushedHead, labelEvent: null, env: { RETRIGGER_REVIEW_MISSING_EVENT_WAIT_MS: '0' },
+      now: () => '2026-10-12T01:49:00Z', logger: silent,
+      rereviewImpl: () => assert.fail('the label must preserve final-round hammer ownership'),
+      appendAuditRow: () => {}, findAuditRow: () => null,
+      execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    });
+    assert.equal(labelResult.rereviewResult.route, 'hammer');
+  }
   const mergeEligibility = isEligibleForAmaClosure(payload.reviewState, payload.prMetadata, cfg, { env: {} });
   assert.equal(mergeEligibility.eligible, false);
   assert.ok(mergeEligibility.reasons.includes('stale-review-head'), mergeEligibility.reasons.join(','));
 });
+}
 
 // ── #7311: pending CI completes the final round; the pushed head is not re-reviewed
 

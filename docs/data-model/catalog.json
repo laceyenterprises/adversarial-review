@@ -101,10 +101,11 @@
       "id": "follow-up-jobs",
       "title": "Follow-Up Remediation Jobs",
       "path": "docs/data-model/follow-up-jobs.md",
-      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped,single-review-voids}/*.json",
+      "store": "data/follow-up-jobs/{pending,in-progress,completed,failed,stopped,single-review-voids,missing-label-events}/*.json",
       "schemaSurface": "src/follow-up-jobs.mjs",
       "relatedSchemaSurfaces": [
         "src/follow-up-remediation.mjs",
+        "src/follow-up-retrigger-review-label.mjs",
         "src/remediation-conflicted-base.mjs",
         "src/comment-only-final-round.mjs",
         "src/follow-up-job-write.mjs",
@@ -122,6 +123,8 @@
         "src/github-auth-recovery.mjs"
       ],
       "owner": "follow-up remediation queue",
+      "missingLabelEventObservationFields": ["firstSeenAt"],
+      "missingLabelEventRetention": "no automatic expiry; operator cleanup after PR closure or head supersession",
       "infrastructureRefundRetryCode": "infrastructure-refund",
       "infrastructureRefundLimit": 2,
       "infrastructureRefundHqStatus": "failed",

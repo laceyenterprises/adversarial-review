@@ -1,11 +1,10 @@
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import { classifyCheckRollup } from './checks-summary.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 
 const GATE_CONTEXT = 'agent-os/adversarial-gate';
 
-const PASSING_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
-const PENDING_CHECK_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED']);
 const HARD_STOP_LABELS = new Set([
   'merge-agent-stuck',
   'merge-agent-recovery-in-flight',
@@ -136,20 +135,10 @@ function checkRowsForHead(statusCheckRollup, headSha) {
   });
 }
 
-function checkState(row) {
-  return String(row?.conclusion || row?.status || row?.state || '').trim().toUpperCase();
-}
-
 function checksPass(input) {
   if (!Array.isArray(input?.statusCheckRollup)) return false;
   const rows = checkRowsForHead(input?.statusCheckRollup, input?.headSha);
-  if (rows.length === 0) return true;
-  for (const row of rows) {
-    const state = checkState(row);
-    if (!state || PENDING_CHECK_STATES.has(state)) return false;
-    if (!PASSING_CHECK_STATES.has(state)) return false;
-  }
-  return true;
+  return rows.length === 0 || classifyCheckRollup(rows) === 'SUCCESS';
 }
 
 function hasValidOperatorApproval(input) {
@@ -195,6 +184,13 @@ function classify(input = {}) {
       nonBlockingFindings,
       parsedFindings,
     };
+  }
+
+  // This head is owned by terminal hammer validation, not another review.
+  // The caller derives this bit from the durable final-round push record.
+  if (input.commentOnlyFinalRoundPush === true) {
+    return { decision: 'hammer-eligible', reason: 'comment-only-final-round-completed',
+      blockingFindings, nonBlockingFindings, parsedFindings };
   }
 
   if (input.reviewHeadSha != null && input.headSha != null && String(input.reviewHeadSha) !== String(input.headSha)) {

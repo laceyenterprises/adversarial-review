@@ -17,6 +17,13 @@ The store is `data/follow-up-jobs/missing-label-events/<digest>.json`, where
 only `firstSeenAt`, an ISO 8601 timestamp from the initial observation. It has no
 schema-version field and is written through `writeFileAtomic`.
 
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `firstSeenAt` | ISO 8601 timestamp string | Initial observation time; reused across daemon restarts. |
+
+The digest filename is the record key; there are no foreign keys or additional
+payload fields.
+
 Subsequent observations read the same timestamp, so a daemon restart cannot
 restart the wait. After five minutes (`MISSING_LABEL_EVENT_WAIT_MS`), the present
 label is treated as a current-head review request with actor `unknown` and the

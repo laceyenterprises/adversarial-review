@@ -326,6 +326,9 @@ export async function evaluateHammerStopHold({
         logger?.warn?.(`[ama-closer] hammer evidence probe failed for ${repo}#${prNumber}: ${err?.message || err}`);
       }
     }
+    // HAMSIGN-01 retires the signature-based predicate. New helper refusals
+    // use hammer-head-ancestry-rejected and retain the ordinary stop hold.
+    if (stop.predicate === 'hammer-head-context') changed.push('hammer-head-validation-changed');
     if (changed.length === 0 && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
     if (changed.length > 0) {
       entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };

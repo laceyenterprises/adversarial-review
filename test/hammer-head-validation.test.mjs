@@ -27,20 +27,27 @@ test('HAMFINAL-02: foreign side commit is refused even with a trusted hammer tip
   const foreign = { ...fleet('foreign'), committer: 'unverified-person' };
   assert.equal(await fetchHammerHeadRange(fixture([foreign, fleet('head')]).options), null);
 });
-test('HAMFINAL-02: spoofed fleet logins require a strictly verified signature', async () => {
-  assert.equal(fleetCommitIdentityMatches(fleet('head')), true);
-  for (const verification of [undefined, {}, { verified: false }, { verified: 'true' }]) {
-    const spoof = { ...fleet('spoof'), commit: { verification } };
-    assert.equal(fleetCommitIdentityMatches(spoof), false);
-    assert.equal(await fetchHammerHeadRange(fixture([spoof, fleet('head')]).options), null);
+test('HAMSIGN-01: unsigned hammer App commits are trusted by linked identity', async () => {
+  const hammer = { ...fleet('head'), author: { login: 'the-hammer-lacey[bot]' },
+    committer: { login: 'the-hammer-lacey[bot]' },
+    commit: { verification: { verified: false, reason: 'unsigned' } } };
+  assert.equal(fleetCommitIdentityMatches(hammer), true);
+  assert.equal((await fetchHammerHeadRange(fixture([hammer]).options)).verified, true);
+  assert.equal(fleetCommitIdentityMatches({ ...hammer, author: undefined }), true);
+  for (const foreign of [{ ...hammer, author: 'foreign' }, { ...hammer, committer: 'foreign' }]) {
+    assert.equal(fleetCommitIdentityMatches(foreign), false);
+    assert.equal(await fetchHammerHeadRange(fixture([foreign]).options), null);
   }
-  assert.equal(fleetCommitIdentityMatches({ ...fleet('head'), commit: undefined }), false);
-  assert.equal(fleetCommitIdentityMatches({ ...fleet('head'), author: 'foreign' }), false);
 });
-test('HAMFINAL-02: unsigned spoofed base merges cannot bypass signature verification', async () => {
-  const merge = { ...fleet('head'), commit: { verification: { verified: false } },
+test('HAMSIGN-01: unsigned base merges retain the base ancestry rule', async () => {
+  const merge = { ...fleet('head'), author: 'human', committer: 'human',
+    commit: { verification: { verified: false, reason: 'unsigned' } },
     parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };
-  assert.equal(await fetchHammerHeadRange(fixture([fleet('fleet'), merge]).options), null);
+  const { options } = fixture([fleet('fleet'), merge]);
+  assert.equal((await fetchHammerHeadRange(options)).verified, true);
+  const get = options.get;
+  assert.equal(await fetchHammerHeadRange({ ...options, get: path => path.endsWith('base-parent...base')
+    ? { status: 'diverged' } : get(path) }), null);
 });
 test('HAMFINAL-02: merge of verified base is permitted; foreign side merge is refused', async () => {
   const merge = { ...fleet('merge'), author: 'human', committer: 'human', parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };

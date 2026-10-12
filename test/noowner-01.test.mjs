@@ -599,6 +599,42 @@ test('Case 3: after a hammer no-merge on its own closer head the closer holds an
   assert.equal(hqLaunches(released).length, 1);
 });
 
+test('HAMSIGN-01: an existing signature stop dispatches a hammer on the first unchanged tick', async t => {
+  const rootDir = tmpRoot(t, 'hamsign-stop-');
+  const hqRoot = join(rootDir, 'hq-root');
+  writeAmaAuditEntry({ hqRoot, repo: AOS, prNumber: 8116, headSha: REVIEWED_8022,
+    now: '2026-10-12T00:04:00Z', attempt: { outcome: 'failed-without-merge',
+      reason: 'hammer-head-context', currentHead: CLOSER_8022 } });
+  const args = closerArgs(rootDir, {
+    repo: AOS, prNumber: 8116, reviewedSha: REVIEWED_8022, headSha: CLOSER_8022,
+    reviewState: { verdict: 'comment-only' },
+    prMetadata: { mergeableState: 'MERGEABLE', baseSha: 'base',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    dispatchContext: { dispatchedAt: '2026-10-12T01:00:00Z', liveHeadCloserAuthored: true,
+      dispatchRecordHeadSha: REVIEWED_8022 },
+  });
+  // A pre-deploy hold already exists, with exactly the same inputs.
+  const stop = readHammerStopForHead({ hqRoot, repo: AOS, prNumber: 8116,
+    headSha: CLOSER_8022, reviewedSha: REVIEWED_8022 });
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'hammer-stop-hold');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${AOS.replace(/[^A-Za-z0-9._-]/g, '-')}-pr-8116.json`),
+    JSON.stringify({ heads: { [CLOSER_8022]: { stopKey: stop.stopKey,
+      firstObservedAt: '2026-10-12T00:05:00Z', inputs: hammerStopInputs(args.prMetadata) } } }));
+  const deps = closerDeps();
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(hqLaunches(deps).length, 1);
+  // A new foreign/incomplete-range refusal is a fresh judgment, not retired.
+  writeAmaAuditEntry({ hqRoot, repo: AOS, prNumber: 8116, headSha: REVIEWED_8022,
+    now: '2026-10-12T01:04:00Z', attempt: { outcome: 'failed-without-merge',
+      reason: 'hammer-head-ancestry-rejected', currentHead: CLOSER_8022 } });
+  const held = await evaluateHammerStopHold({ rootDir, hqRoot, repo: AOS, prNumber: 8116,
+    headSha: CLOSER_8022, reviewedSha: REVIEWED_8022, prMetadata: args.prMetadata,
+    logger: SILENT, now: '2026-10-12T01:05:00Z' });
+  assert.equal(held.action, 'hold');
+});
+
 // REMCONFLICT-01 (SEV1): on 2026-10-10 PR 8022 was CONFLICTING and sat in this
 // hold. The only input change that helps a conflicting PR is a rebase, and the
 // hold was stopping the hammer, which owns merge-conflict resolution.

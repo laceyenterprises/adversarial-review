@@ -701,9 +701,10 @@ Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the active claim.
 The entitled hammer audit must record `HAM-Validated-Head: <exact SHA>`;
 `ama-check` verifies its body and author against the live timeline. Fetch the
 complete fleet ancestry using the versioned helper. Every head-only delta commit
-requires a GitHub-verified signature, including base merges; email-mapped fleet
-logins alone are insufficient. The helper retries PR-base discovery and each
-ancestry read on transient transport failures at most three times with 500/1000ms
+requires a trusted fleet/hammer committer login and, when present, a trusted
+author login, or a base merge whose second parent is reachable from the base.
+GitHub signature verification is not required for git-pushed App commits. The
+helper retries PR-base discovery and each ancestry read on transient transport failures at most three times with 500/1000ms
 backoff and a 15-second per-attempt timeout. Exhausted reads refuse this proof:
 
 ```bash
@@ -717,6 +718,10 @@ backoff and a 15-second per-attempt timeout. Exhausted reads refuse this proof:
     exit "$HAM_HEAD_CONTEXT_EXIT"
   }
 ```
+
+For exit 65, record the no-merge audit with reason
+`hammer-head-ancestry-rejected`. Do not reuse the retired `hammer-head-context`
+reason: the watcher releases that old signature-based stop after HAMSIGN-01.
 
 ```json
 {

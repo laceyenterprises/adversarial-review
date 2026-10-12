@@ -36,8 +36,8 @@ if (args[0] === 'pr') {
   process.stdout.write(JSON.stringify({ sha: 'base' }));
 } else if (['repos/fixture/repo/compare/base...head', 'repos/fixture/repo/compare/reviewed...head'].includes(args[1])) {
   process.stdout.write(JSON.stringify({ status: 'ahead', total_commits: 1, commits: [{ sha: 'head',
-    author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'lacey-codex-agent[bot]' },
-    commit: { verification: { verified: scenario !== 'spoof' } } }] }));
+    author: { login: 'lacey-codex-agent[bot]' }, committer: { login: scenario === 'spoof' ? 'foreign-person' : 'lacey-codex-agent[bot]' },
+    commit: { verification: { verified: false, reason: 'unsigned' } } }] }));
 } else fail('unexpected API call');
 `, { mode: 0o755 });
   return {

@@ -1954,9 +1954,11 @@ one of:
    from trusted inputs. HAMFINAL-02 exact-head validation is final: an active
    hammer records `HAM-Validated-Head` in its entitled audit and verifies every
    head-only delta commit after the review (or in the rebased branch) as
-   fleet-authored or a merge of the base. Every such commit must also carry
-   `commit.verification.verified === true` from GitHub, including base merges;
-   email-mapped author/committer logins alone cannot establish fleet provenance.
+   fleet-authored or a merge of the base. HAMSIGN-01 accepts trusted fleet/hammer
+   committer logins (and trusted author logins when present), without GitHub
+   signature verification: git-pushed App commits are unsigned. Base merges
+   still require their second parent to be reachable from the base. The exact
+   head audit written by the hammer App remains the validation authority.
    `bin/hammer-head-context.mjs` accepts either a base ref or `--pr <PR_URL>`;
    the latter discovers the PR base through the shared `execGhWithRetry` helper.
    Both that helper and the daemon's exact-head range collector retry each
@@ -1966,7 +1968,10 @@ one of:
    the shared helper's single forced token-refresh attempt. Exhausted reads
    fail closed. The prompt bounds the complete collection to 90 seconds and
    marks read failures as retryable lease aborts; exit 65 means unverified or
-   incomplete ancestry and is a structural refusal, not a retryable read.
+   incomplete ancestry and is recorded as `hammer-head-ancestry-rejected`,
+   a structural refusal, not a retryable read. Old `hammer-head-context` stops
+   release on the first watcher tick after deployment because their signature
+   predicate has changed; ordinary gates, leases and retry caps still apply.
    No reviewed-parent trailer or new HAM commit is required
    when findings are already addressed. The watcher suppresses another review
    of this exact head and bounded recovery retries the merge under the lease.

@@ -23,6 +23,34 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 
+test('HAMVERIFY-01: publish uses API and every range failure requests one review without escalation', () => {
+  assert.match(HAMMER_TEMPLATE, /HAM_COMMIT_PUBLICATION_ONLY=1/);
+  assert.match(HAMMER_TEMPLATE, /tree IDs/);
+  const start = HAMMER_TEMPLATE.indexOf('[ "${HAM_API_PUBLISH_FALLBACK');
+  const end = HAMMER_TEMPLATE.indexOf('\n```', start);
+  const block = HAMMER_TEMPLATE.slice(start, end);
+  assert.match(block, /hammer-head-context\.mjs/);
+  assert.match(block, /--pr <<PR_URL>>/);
+  for (const exitCode of [1, 65, 124]) {
+    const script = block.replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, `(exit ${exitCode})`)
+      .replace(/\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 gh[^\n]+/g, 'echo re-review');
+    const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${script}`],
+      { encoding: 'utf8', timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /re-review/);
+  }
+});
+
+test('ordinary remediation publishes before validating the live head', () => {
+  const ordinary = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('Commit the remediation:'),
+    HAMMER_TEMPLATE.indexOf('## Resolving merge conflicts'));
+  assert.match(ordinary, /HAM_COMMIT_PUBLICATION_ONLY=1/);
+  assert.match(ordinary, /hammer-procedure\.mjs hammer-publish --render/);
+  assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
+  assert.match(HAMMER_TEMPLATE, /Preserve rebased and multi-commit history/);
+});
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
@@ -400,7 +428,7 @@ test('hammer audit comment composes footer from validated inputs', () => {
   assert.doesNotMatch(bodyComposer, /<n>|<b>|<nb>/);
   assert.match(
     bodyComposer,
-    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
+    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nHAM-Validated-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
   );
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_TOTAL='<n>'/);
   assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$\{HAM_AUDIT_REMEDIATED_TOTAL:-\}"/);

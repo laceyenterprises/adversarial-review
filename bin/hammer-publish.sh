@@ -58,6 +58,16 @@ if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   ham_publish_abort 1; return 1
 fi
+# Never publish a validation claim before the independent range proof. A
+# failed proof releases ownership; LEASEDEFER-01 recovers the unvalidated head
+# through bounded exact-head review without an ambient-credential label.
+if [ "${HAM_API_PUBLISH_FALLBACK:-0}" -eq 1 ] ||
+  ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
+    <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
+    > /tmp/ham-<<PR_NUMBER>>-range.json; then
+  HAM_PHASE_OUTCOME=exact-head-review-required
+  ham_publish_abort 20; return 20
+fi
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
 # Counts and finding bullets are supplied by the caller before rendering.
 ham_audit_is_nonnegative_int() {
@@ -81,9 +91,10 @@ fi
 # non-blocking waiver holds). Keep one bullet per finding on ONE line, and use
 # the finding's title VERBATIM from the review so the identity match lands.
 HAM_AUDIT_COMMENT_DETAILS="$(cat "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
   "$HAM_AUDIT_COMMENT_MARKER" \
   "$HAM_AUDIT_COMMENT_DETAILS" \
+  "$POST_REMEDIATION_SHA" \
   "$POST_REMEDIATION_SHA" \
   "$HAM_AUDIT_REMEDIATED_TOTAL" \
   "$HAM_AUDIT_REMEDIATED_BLOCKING" \
@@ -173,4 +184,30 @@ HAM_PUBLISHED_AUDIT_HEAD="$POST_REMEDIATION_SHA"
 HAM_PHASE_OUTCOME=published
 return 0
 }
-ham_publish_phase
+# Called before the hammer's ordinary git publication. The audit phase remains
+# separate, under the merge lease, after remote CI validates the published SHA.
+if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
+  HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
+  printf '%s\n' "$HAM_API_PUBLISH_RESULT"
+  if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then
+    # Preserve the existing lease-protected git route. Range proof below will
+    # request one exact-head review, rather than turning this into an escalation.
+    HAM_API_PUBLISH_FALLBACK=1
+    export HAM_API_PUBLISH_FALLBACK
+    HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
+    HAM_API_FALLBACK_BRANCH=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
+    if [ -n "$HAM_API_FALLBACK_HEAD" ] && [ -n "$HAM_API_FALLBACK_BRANCH" ]; then
+      git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
+        if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
+        return 1
+      }
+    else
+      git push --force-with-lease || {
+        if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
+        return 1
+      }
+    fi
+  fi
+else
+  ham_publish_phase
+fi

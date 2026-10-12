@@ -1970,7 +1970,19 @@ one of:
    active HAM session only after the predicate verifies current-head HAM authority
    from trusted inputs: HAM worker trailers, reviewed-parent/current-head match,
    non-empty verified diff, allowlisted audit-comment author, matching
-   audit-comment body, and doc-currency evidence. The zero-finding path is
+   audit-comment body, and doc-currency evidence. HAMVERIFY-01 also accepts an
+   entitled `HAM-Validated-Head` audit for the exact live head when the complete
+   head-only ancestry is GitHub-verified and bound to trusted fleet App authors
+   with GitHub's `web-flow` committer (or GitHub-signed base merges with
+   `web-flow` as committer and verified/valid verification, whose second parent
+   is reachable from the live base). Locally signed human base merges require
+   exact-head re-review. The versioned
+   `bin/hammer-head-context.mjs` helper discovers the live PR base and retries
+   transient reads at most three times with 500/1000ms backoff and a 15-second
+   per-attempt timeout. The prompt bounds collection to 90 seconds; any failed
+   provenance proof releases the lease and requests one bounded exact-head
+   review. Proven heads retain merge ownership without another review; all
+   ordinary structural merge gates still apply. The zero-finding path is
    admitted only after the caller supplies a finite measured terminal-unmerged
    duration that meets the comment-only grace threshold. This active trust is
    intentionally narrower than strict `.ok`: it does not require the finding-count
@@ -2667,3 +2679,39 @@ The qualified missing-reversal-authorization recovery lane also admits standing
 finding refusals inherited from the stale review (blocking or non-blocking).
 This permits only a bounded exact-head review request; merge remains refused.
 CI, protection, labels and live ownership refusals still prevent recovery.
+
+HAMVERIFY-01: hammer publication uses GitHub's `createCommitOnBranch` API with
+its own entitled App token and an expected head lease, only for one single-parent
+local commit descending from the freshly fetched remote head. Rebased and
+multi-commit histories use the lease-protected git fallback: the API cannot
+preserve their ancestry or all commit messages. Both ordinary remediation and
+conflict resolution invoke the versioned publication procedure. GitHub signs the commit;
+the publisher compares the returned and fetched tree IDs with the tested local
+tree before adopting the new SHA. API-created fleet commits have the fleet App
+as author, GitHub `web-flow` as committer, and verified/valid verification.
+Unsigned git-pushed commits cannot qualify merely through an email-mapped login.
+The publisher retries transient `gh pr view`, API and `git fetch` transport
+failures at most three times with 500/1000ms backoff and a 15-second per-attempt
+timeout, within the existing 120-second publication window. Permanent errors
+and malformed responses take the fallback immediately. Mutation retries retain
+the original expected-head CAS; an ambiguous server-side success cannot authorize
+an overwrite. Both fallback git push routes release the merge lease and abort
+on rejection, including a stale lease following an API timeout.
+
+The audit procedure proves the range before writing `HAM-Validated-Head`.
+If proof fails or publication used the git fallback, it returns status 20
+(`exact-head-review-required`), releases the lease and leaves no new validation
+claim. LEASEDEFER-01 can request bounded exact-head review for unvalidated
+closer heads after proving absence of live ownership; a proven
+`hamTerminalRemediationValidated` head retains terminal merge authority.
+This recovery does not rely on an ambient-credential `retrigger-review` label.
+
+If the entire responsibility range is proven, the hammer merges its validated
+head without another review. Its closing comment says `Hammer route: verified
+validated head`. If any publication or range proof fails (including unsupported
+file modes, symlinks, submodules, unsigned remediation/rebase ancestry, foreign
+identity, API errors or mismatched trees), it preserves the git publication path
+and requests one exact-head re-review through the existing bounded route. The
+closing comment says `Hammer route: exact-head re-review` with the head SHA;
+the daemon merges after a clean review. Provenance never requires an operator
+escalation, signing key, new label or new workflow retry loop.

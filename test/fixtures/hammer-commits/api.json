@@ -1,0 +1,78 @@
+{
+  "sha": "cd9ca5686b0492f218951b1743bfeca3e914da0c",
+  "author": {
+    "login": "lacey-codex-agent[bot]",
+    "id": 291217052,
+    "node_id": "BOT_kgDOEVuenA",
+    "avatar_url": "https://avatars.githubusercontent.com/in/3977955?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D",
+    "html_url": "https://github.com/apps/lacey-codex-agent",
+    "followers_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/followers",
+    "following_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/following{/other_user}",
+    "gists_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/subscriptions",
+    "organizations_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/orgs",
+    "repos_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/repos",
+    "events_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/lacey-codex-agent%5Bbot%5D/received_events",
+    "type": "Bot",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "committer": {
+    "login": "web-flow",
+    "id": 19864447,
+    "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+    "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/web-flow",
+    "html_url": "https://github.com/web-flow",
+    "followers_url": "https://api.github.com/users/web-flow/followers",
+    "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+    "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+    "organizations_url": "https://api.github.com/users/web-flow/orgs",
+    "repos_url": "https://api.github.com/users/web-flow/repos",
+    "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/web-flow/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "commit": {
+    "author": {
+      "name": "lacey-codex-agent[bot]",
+      "email": "291217052+lacey-codex-agent[bot]@users.noreply.github.com",
+      "date": "2026-10-12T01:00:54Z"
+    },
+    "committer": {
+      "name": "GitHub",
+      "email": "noreply@github.com",
+      "date": "2026-10-12T01:00:54Z"
+    },
+    "message": "HAMVERIFY-01 SPEC none: capture API signing identity",
+    "tree": {
+      "sha": "8f62aa783b51c4d5bb80bba7967396ffd6f308d5",
+      "url": "https://api.github.com/repos/laceyenterprises/adversarial-review/git/trees/8f62aa783b51c4d5bb80bba7967396ffd6f308d5"
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/adversarial-review/git/commits/cd9ca5686b0492f218951b1743bfeca3e914da0c",
+    "comment_count": 0,
+    "verification": {
+      "verified": true,
+      "reason": "valid",
+      "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqzDFHCRC1aQ7uu5UhlAAA0jgQADeDI/bsVEmnSjK8IEI412Ky\nd/ipGLuCR2WVtk+MX6s06Na7y+6vkgvBsZCnyVnxIRz03GLxG890eRI+2dcqcovt\nV28WWCzOvCx60b1dj8P4RoJV65sKcbBw5T36rS5yxymeaWWxPyZXwikdZMwzXbqN\nKVZWOVjMHddf00cE3m3js35dkXNdvg/3avp+NaTidka/kg5TpxEJPg3pcuZlUS31\n/zHDyLQP1IZXwpzZwJmk6FqBLeK7+Tx/ETkmc4fapP4H2jYeolSToZlolTmHVTRa\niZjLi2ecFCYNNJGlnP7u2xhVxTOXwgPVdGzoNCpRfUAls9v4DyFf0cx/fKo+mEf9\nhqYgLRvoI6dlTFKJ0TtDdq5V9NfEFx2RfruSZekdg8zkJdRqWZRxQiR+14lI2oiT\ny4tN5GHR3B3Ju550w1yQmS6z6O3IQq8dUzL7nCxf+v/fthFIcmGkGl3OhLal7D4k\ne5xJCN2Rauwb6cdLpy0Mz+D9Xpm8NhhIHxfVGuC5Gt3dt0+Y7yVc8hFBGu1Sn1nG\nhM3f3Xcjh2Lu7trxX5NacN5fKMq8Uk4bKOdmRi6kdubO3jimcQOG6l/JcuLlbRiy\nh/MZTSzunQvTvXCl51fpmLBk2F56PnTp6HT3Lu0UzO/6gvJnyAbCT7/nfvm4L3PL\nhBQpbl08fyhZfz48g8yW\n=XrwC\n-----END PGP SIGNATURE-----\n",
+      "payload": "tree 8f62aa783b51c4d5bb80bba7967396ffd6f308d5\nparent 91d167532d20cc54430ebd60a4a02a1c118c7596\nauthor lacey-codex-agent[bot] <291217052+lacey-codex-agent[bot]@users.noreply.github.com> 1791766854 -0700\ncommitter GitHub <noreply@github.com> 1791766854 -0700\n\nHAMVERIFY-01 SPEC none: capture API signing identity",
+      "verified_at": "2026-10-12T01:00:55Z"
+    }
+  },
+  "parents": [
+    {
+      "sha": "91d167532d20cc54430ebd60a4a02a1c118c7596",
+      "url": "https://api.github.com/repos/laceyenterprises/adversarial-review/commits/91d167532d20cc54430ebd60a4a02a1c118c7596",
+      "html_url": "https://github.com/laceyenterprises/adversarial-review/commit/91d167532d20cc54430ebd60a4a02a1c118c7596"
+    }
+  ]
+}

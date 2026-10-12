@@ -617,11 +617,13 @@ must inspect the actual failure before applying an override. Unchanged delivered
 receipts skip writes and paging locks.
 
 LEASEDEFER-01 adds `closer-head-exact-review-requested` → `ama-pending` when
-an unheld closer-trailer stale head has only stale/unsettled/unknown-finding
+an unheld, unvalidated closer-trailer stale head has only stale/unsettled/unknown-finding
 eligibility misses and its exact-head review request is triggered or already
 pending (`status: already-pending`, `reason: review-already-pending`). Recovery
 first proves no held PR-wide closer lease and no queued/running or uncertain
-launch ownership. Live/uncertain owners retain retry/watchdog routing.
+launch ownership. Live/uncertain owners retain retry/watchdog routing. Proven
+`hamTerminalRemediationValidated` heads retain merge authority; a failed range
+proof cannot publish a new `HAM-Validated-Head` audit claim.
 Hard refusals retain `needsOperator`; the watcher-owned duplicate-family census
 hold retains its 30-second retry. Refused requests continue to the
 elapsed OWNERPROOF-01 watchdog and its per-head two-attempt exhaustion page.

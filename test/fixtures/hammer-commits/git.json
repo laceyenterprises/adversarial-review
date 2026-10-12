@@ -1,0 +1,78 @@
+{
+  "sha": "97a911fc4cc8d7175e3004ad1a3d82c18c55aafe",
+  "author": {
+    "login": "codex-worker-lacey",
+    "id": 284341814,
+    "node_id": "U_kgDOEPK2Ng",
+    "avatar_url": "https://avatars.githubusercontent.com/u/284341814?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/codex-worker-lacey",
+    "html_url": "https://github.com/codex-worker-lacey",
+    "followers_url": "https://api.github.com/users/codex-worker-lacey/followers",
+    "following_url": "https://api.github.com/users/codex-worker-lacey/following{/other_user}",
+    "gists_url": "https://api.github.com/users/codex-worker-lacey/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/codex-worker-lacey/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/codex-worker-lacey/subscriptions",
+    "organizations_url": "https://api.github.com/users/codex-worker-lacey/orgs",
+    "repos_url": "https://api.github.com/users/codex-worker-lacey/repos",
+    "events_url": "https://api.github.com/users/codex-worker-lacey/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/codex-worker-lacey/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "committer": {
+    "login": "codex-worker-lacey",
+    "id": 284341814,
+    "node_id": "U_kgDOEPK2Ng",
+    "avatar_url": "https://avatars.githubusercontent.com/u/284341814?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/codex-worker-lacey",
+    "html_url": "https://github.com/codex-worker-lacey",
+    "followers_url": "https://api.github.com/users/codex-worker-lacey/followers",
+    "following_url": "https://api.github.com/users/codex-worker-lacey/following{/other_user}",
+    "gists_url": "https://api.github.com/users/codex-worker-lacey/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/codex-worker-lacey/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/codex-worker-lacey/subscriptions",
+    "organizations_url": "https://api.github.com/users/codex-worker-lacey/orgs",
+    "repos_url": "https://api.github.com/users/codex-worker-lacey/repos",
+    "events_url": "https://api.github.com/users/codex-worker-lacey/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/codex-worker-lacey/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "commit": {
+    "author": {
+      "name": "Codex Worker",
+      "email": "codex@laceyenterprises.com",
+      "date": "2026-10-12T01:01:06Z"
+    },
+    "committer": {
+      "name": "Codex Worker",
+      "email": "codex@laceyenterprises.com",
+      "date": "2026-10-12T01:01:06Z"
+    },
+    "message": "HAMVERIFY-01 SPEC none: record real API commit evidence\n\nWorker-Class: codex",
+    "tree": {
+      "sha": "364bf7ace1070e7c4134c83fab8a902bb9a1d66f",
+      "url": "https://api.github.com/repos/laceyenterprises/adversarial-review/git/trees/364bf7ace1070e7c4134c83fab8a902bb9a1d66f"
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/adversarial-review/git/commits/97a911fc4cc8d7175e3004ad1a3d82c18c55aafe",
+    "comment_count": 0,
+    "verification": {
+      "verified": false,
+      "reason": "unsigned",
+      "signature": null,
+      "payload": null,
+      "verified_at": null
+    }
+  },
+  "parents": [
+    {
+      "sha": "cd9ca5686b0492f218951b1743bfeca3e914da0c",
+      "url": "https://api.github.com/repos/laceyenterprises/adversarial-review/commits/cd9ca5686b0492f218951b1743bfeca3e914da0c",
+      "html_url": "https://github.com/laceyenterprises/adversarial-review/commit/cd9ca5686b0492f218951b1743bfeca3e914da0c"
+    }
+  ]
+}

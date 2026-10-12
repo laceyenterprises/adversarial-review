@@ -1027,13 +1027,14 @@ for (const closer of [false, true]) {
   });
 }
 
-test('refused stale closer review falls through coexistence to bounded orphan recovery', async t => {
+test('refused exact-head review for an unvalidated closer reaches bounded watchdog recovery', async t => {
   const { args } = closerResumeFixture('green');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'not-eligible',
     reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] });
   let requests = 0;
   args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
+    probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
     requestRereviewImpl: async () => { requests++; return { triggered: false, reason: 'malformed-title-terminal' }; } });
   let orphanCalls = 0;
   const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,

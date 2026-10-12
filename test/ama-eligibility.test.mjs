@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -2310,12 +2312,12 @@ test('ham terminal remediation: COMMENTED review with bookkeeping drift self-cer
   assert.ok(!result.reasons.includes('stale-review-head'));
 });
 
-for (const auditAuthor of ['clio-airlock', 'the-hammer-lacey[bot]']) {
-  test(`ham terminal remediation: server-rebased HAM commit proves reviewed head with trailer for ${auditAuthor}`, () => {
+for (const auditAuthor of ['hammer-worker', 'the-hammer-lacey[bot]']) {
+  test(`ham terminal remediation: server-rebased HAM commit validates exact head with fleet range for ${auditAuthor}`, () => {
     const reviewedHead = 'abc12345';
     const rebasedParent = 'fc53d29b';
     const currentHead = 'def67890';
-    const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.';
+    const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.' + `\nHAM-Validated-Head: ${currentHead}`;
     const { reviewState, prMetadata, cfg } = eligibleFixture({
       reviewState: {
         headSha: reviewedHead,
@@ -2347,13 +2349,14 @@ for (const auditAuthor of ['clio-airlock', 'the-hammer-lacey[bot]']) {
           ],
         },
       },
-      hamTerminalRemediationGroundTruth: hamGroundTruth({
+      hamTerminalRemediationGroundTruth: { ...hamGroundTruth({
         headSha: currentHead,
         parentSha: rebasedParent,
         reviewedHead,
         auditAuthor,
+        committer: 'hammer-worker',
         auditBody,
-      }),
+      }), range: { verified: true, reviewedHead, currentHead, baseSha: rebasedParent, commits: [currentHead] } },
     });
     assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
     assert.equal(result.trace.hamTerminalRemediation.checks.parent, true);
@@ -3436,3 +3439,111 @@ test('qualified primary-evidence refusal recovers stale known findings without a
   }
   assert.equal(requests, 1);
 });
+
+for (const noDiff of [false, true]) test(`HAMFINAL-02: exact validation closes fleet head (no diff: ${noDiff})`, async () => {
+  const reviewedHead = 'abc12345';
+  const apiFixture = JSON.parse(readFileSync(new URL('./fixtures/hammer-commits/api.json', import.meta.url), 'utf8'));
+  const currentHead = apiFixture.sha;
+  const auditBody = `HAM-Validated-Head: ${currentHead}`;
+  const { reviewState, prMetadata, cfg } = eligibleFixture({ prMetadata: { headSha: currentHead } });
+  const ground = hamGroundTruth({ headSha: currentHead, parentSha: 'remediation-head', reviewedHead: '', auditBody,
+    changedFiles: noDiff ? [] : ['src/auth.js'],
+    workerClass: noDiff ? 'codex' : 'hammer',
+    author: noDiff ? 'lacey-codex-agent[bot]' : 'hammer-worker',
+    committer: noDiff ? 'lacey-codex-agent[bot]' : 'hammer-worker' });
+  ground.range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead, currentHead, env: {},
+    get: async path => path.endsWith('/commits/main') ? { sha: 'base' }
+      : { status: 'ahead', total_commits: 1, commits: [apiFixture] } });
+  // Real API response shape: the author is the fleet App; GitHub commits it.
+  ground.commit.committer = apiFixture.committer.login;
+  const options = { env: ENV, hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: 'remediation-head', auditBody }),
+    hamTerminalRemediationGroundTruth: ground };
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
+  assert.equal(result.eligible, true, JSON.stringify(result));
+  assert.equal(result.trace.hamTerminalRemediation.checks.exactValidation, true);
+  assert.equal(result.trace.headMatch.current, currentHead);
+  for (const invalid of [null, { ...ground.range, verified: false }, { ...ground.range, currentHead: 'moved' }]) {
+    const refused = isEligibleForAmaClosure(reviewState, prMetadata, cfg,
+      { ...options, hamTerminalRemediationGroundTruth: { ...ground, range: invalid } });
+    assert.equal(refused.eligible, false);
+    assert.ok(refused.reasons.includes('stale-review-head'));
+  }
+  const inactive = isEligibleForAmaClosure(reviewState, prMetadata, cfg,
+    { ...options, hamTerminalRemediation: { ...options.hamTerminalRemediation, active: false } });
+  assert.equal(inactive.eligible, false);
+  if (!noDiff) {
+    const foreignCommitter = isEligibleForAmaClosure(reviewState, prMetadata, cfg,
+      { ...options, hamTerminalRemediationGroundTruth: { ...ground,
+        commit: { ...ground.commit, committer: 'lacey-codex-agent[bot]' } } });
+    assert.equal(foreignCommitter.eligible, false, 'HAM tip needs a verified hammer committer');
+  }
+
+});
+
+test('HAMFINAL-02: validated hammer never transfers lease recovery to review', async () => {
+  let reviews = 0;
+  const result = await recoverStrandedCloserHead({
+    result: { reason: 'not-eligible', reasons: ['stale-review-head'], hamTerminalRemediationValidated: true },
+    closerAuthored: true, headSha: 'validated',
+    requestBoundedReviewImpl: async () => { reviews++; },
+  });
+  assert.equal(result, null);
+  assert.equal(reviews, 0);
+});
+
+for (const auditAuthor of ['clio-airlock', 'the-hammer-lacey[bot]']) {
+  test(`ham terminal remediation: server-rebased HAM commit proves reviewed head with trailer for ${auditAuthor}`, () => {
+    const reviewedHead = 'abc12345';
+    const rebasedParent = 'fc53d29b';
+    const currentHead = 'def67890';
+    const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.';
+    const { reviewState, prMetadata, cfg } = eligibleFixture({
+      reviewState: {
+        headSha: reviewedHead,
+        verdict: 'request-changes',
+        blockingFindingCount: 1,
+        blockingFindingState: 'known',
+        reviewCycleExhausted: true,
+      },
+      prMetadata: { headSha: currentHead },
+    });
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+      env: ENV,
+      hamTerminalRemediation: {
+        ...hamEvidence({
+          headSha: currentHead,
+          parentSha: reviewedHead,
+          reviewedHead,
+          auditBody,
+        }),
+        auditComment: {
+          body: auditBody,
+          docCurrency: {
+            status: 'not_applicable',
+            changedFiles: ['src/auth.js'],
+          },
+          findings: [
+            { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+            { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+          ],
+        },
+      },
+      hamTerminalRemediationGroundTruth: hamGroundTruth({
+        headSha: currentHead,
+        parentSha: rebasedParent,
+        reviewedHead,
+        auditAuthor,
+        auditBody,
+      }),
+    });
+    assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+    assert.equal(result.trace.hamTerminalRemediation.checks.parent, true);
+    assert.equal(result.trace.hamTerminalRemediation.checks.auditCommentAuthor, true);
+    assert.equal(result.trace.hamTerminalRemediation.reviewedParent, reviewedHead);
+    assert.equal(result.trace.hamTerminalRemediation.actualParent, rebasedParent);
+    assert.equal(result.trace.hamTerminalRemediation.reviewedHeadTrailer, reviewedHead);
+    assert.equal(result.trace.headMatch.hamTerminalRemediation, true);
+    assert.ok(!result.reasons.includes('stale-review-head'));
+    assert.ok(result.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
+  });
+}

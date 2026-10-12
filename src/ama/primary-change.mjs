@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { storedPrimaryChange } from './primary-change-store.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
@@ -429,7 +431,7 @@ function reversalPatchIdentity(files) {
   }).sort((a, b) => a[0].localeCompare(b[0])));
 }
 
-async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, read }) {
+async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, read, metadata }) {
   if (!SHA.test(superseding.commit_id || '')) return null;
   const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (snapshot.status !== 'ahead' || !Array.isArray(snapshot.commits)
@@ -443,7 +445,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
       || !SHA.test(original.parents[0].sha || '') || reversalPatchIdentity(original.files) !== identity) continue;
     const parentSha = original.parents[0].sha;
     if (!await isCurrentAuthoritativeFamilyReview(review, reviews.slice(0, reviews.indexOf(superseding)), parentSha,
-      (from, to) => read(`repos/${repo}/compare/${from}...${to}`))) continue;
+      (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`))) continue;
     const parent = await read(`repos/${repo}/compare/${reviewed.merge_base_commit.sha}...${parentSha}`);
     if (parent.merge_base_commit?.sha !== reviewed.merge_base_commit.sha) continue;
     changes(parent.files);
@@ -466,6 +468,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     }));
     return responses.get(path);
   };
+  const metadata = path => get.metadata ? get.metadata(path) : read(path);
   const unknown = (reason, extra = {}) => ({ headSha, hasHammerCommits: null, reason, ...extra });
   try {
     if (!SHA.test(headSha || '')) return unknown('invalid head SHA');
@@ -477,6 +480,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
         || typeof commit?.commit?.message !== 'string')) return unknown('missing, malformed or capped commit history');
     let launchIndex = -1;
+    let builderBoundary = null;
     const untagged = history.commits.some((commit) => !isHammerCommit(commit)
       && hamCommitIdentityMatches(commit));
     if (untagged) {
@@ -494,11 +498,12 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         }
         if (!SHA.test(boundary || '')) return unknown('missing builder head for untagged hammer provenance');
         const ancestry = boundary === launchHead ? { status: 'identical' }
-          : await read(`repos/${repo}/compare/${boundary}...${launchHead}`);
+          : await metadata(`repos/${repo}/compare/${boundary}...${launchHead}`);
         launchIndex = history.commits.findIndex((commit) => commit.sha === launchHead);
         if (!['ahead', 'identical'].includes(ancestry.status) || launchIndex < 0) {
           return unknown('untagged hammer launch is outside builder history');
         }
+        builderBoundary = boundary;
       }
     }
     const first = history.commits.find((commit, index) => isHammerCommit(commit,
@@ -507,7 +512,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     if (first && (!first.parents?.length || first.parents.length > 2
       || !SHA.test(first.parents[0].sha))) return unknown('missing or unsupported first hammer parents');
     if (first && first.parents.length === 2) {
-      const baseParent = await read(`repos/${repo}/compare/${first.parents[1].sha}...${pr.base.sha}`);
+      const baseParent = await metadata(`repos/${repo}/compare/${first.parents[1].sha}...${pr.base.sha}`);
       if (!['ahead', 'identical'].includes(baseParent.status)) return unknown('hammer merge second parent is not in base ancestry');
     }
     // The actual first hammer parent includes every author commit, including
@@ -551,20 +556,20 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           let rebased = false;
           let superseding;
           if (!await isCurrentAuthoritativeFamilyReview(review, reviews, parentSha,
-            (from, to) => read(`repos/${repo}/compare/${from}...${to}`))) {
+            (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`))) {
             // REVERSALREBASE-01: a rebase rewrites the HAM commit, so its parent
             // no longer descends from the cited review head. Only that diverged
             // shape may use the rebase path. A superseded citation additionally
             // needs its original reversal pinned by a GitHub review snapshot.
-            const ancestry = await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
+            const ancestry = await metadata(`repos/${repo}/compare/${review.commit_id}...${parentSha}`);
             if (ancestry.status !== 'diverged') { reject('review-not-current'); continue; }
             superseding = firstSupersedingReview(review, reviews);
             rebased = true;
           }
           // The HAM parent stays inside the protected closure either way.
-          const chain = [await read(`repos/${repo}/compare/${primaryHead}...${parentSha}`)];
-          if (!rebased) chain.push(await read(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`),
-            await read(`repos/${repo}/compare/${review.commit_id}...${parentSha}`));
+          const chain = [await metadata(`repos/${repo}/compare/${primaryHead}...${parentSha}`)];
+          if (!rebased) chain.push(await metadata(`repos/${repo}/compare/${primaryHead}...${review.commit_id}`),
+            await metadata(`repos/${repo}/compare/${review.commit_id}...${parentSha}`));
           if (!chain.every((entry) => ['ahead', 'identical'].includes(entry.status))) {
             reject('review-outside-closure');
             continue;
@@ -578,7 +583,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
-            originalAuthorization = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, read });
+            originalAuthorization = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, read, metadata });
             if (!originalAuthorization) { reject('original-reversal-not-proven-before-supersession'); continue; }
           }
           reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
@@ -602,6 +607,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       testChanges = testRegionsChanged(primaryChanges, finalChanges);
     } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
+      ...(builderBoundary ? { builderBoundary } : {}),
       testRegionsChanged: testChanges,
       ...(reversalAuthorizations.length ? { reversalAuthorizations } : {}),
       ...(rejectedReversalAuthorizations.length ? { rejectedReversalAuthorizations } : {}),
@@ -617,8 +623,32 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
 // Every production primary-change read also proves the independent cost gate.
 // Keep history failures distinct and retain the existing terminal-state handling.
 export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost } = {}) {
-  const history = await fetchPrimaryChangeHistory(args);
+  let history;
+  if (args.get.persistPrimaryChange) {
+    try {
+      const pr = await args.get(`repos/${args.repo}/pulls/${args.prNumber}`);
+      if (pr.head?.sha !== args.headSha || !SHA.test(pr.base?.sha || '')) {
+        return { headSha: args.headSha, hasHammerCommits: null, headMismatch: true };
+      }
+      const comparison = await args.get.metadata(`repos/${args.repo}/compare/${pr.base.sha}...${args.headSha}`);
+      if (!SHA.test(comparison.merge_base_commit?.sha || '')) throw new Error('missing merge base');
+      // Reviews and dispatcher provenance can change without a head move.
+      // Include them so stored finding waivers cannot survive supersession.
+      const reviewsPath = `repos/${args.repo}/pulls/${args.prNumber}/reviews?per_page=100`;
+      const reviews = await args.get(reviewsPath);
+      const reviewKey = createHash('sha256').update(JSON.stringify(reviews)).digest('hex');
+      const launchHead = readPrimaryChangeLaunchHead(primaryChangeRoot(args), args.repo, args.prNumber);
+      history = await storedPrimaryChange({ ...args, rootDir: primaryChangeRoot(args),
+        baseSha: pr.base.sha, mergeBase: comparison.merge_base_commit.sha, reviewKey, launchHead },
+      () => fetchPrimaryChangeHistory({ ...args, get: Object.assign(
+        path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
+        { metadata: args.get.metadata }) }));
+    } catch (error) {
+      return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true, reason: String(error.message).startsWith('history read failed:') ? error.message : `history read failed: ${error.message}` };
+    }
+  } else history = await fetchPrimaryChangeHistory(args);
   if (![true, false].includes(history.hasHammerCommits) || history.headMismatch) return history;
-  const ciCost = await fetchCiCostImpl(args);
+  const ciCost = await fetchCiCostImpl({ ...args, get: path =>
+    args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
   return { ...history, ciCost };
 }

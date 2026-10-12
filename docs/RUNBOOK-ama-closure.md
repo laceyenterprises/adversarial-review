@@ -1608,6 +1608,18 @@ findings are allowed. Reviewers must still flag inversions or neutralizations of
 the tested primary-change behavior. Renaming production code into a test path
 does not exempt its protected baseline.
 
+PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
+records under `data/primary-change-history`, keyed by repository, PR, base SHA,
+head SHA, merge base, builder boundary, reviews and dispatcher provenance. Live head/base and merge-base metadata
+are checked before reuse; CI-cost evidence remains live. Only completed successful
+history reads are stored. A daemon timeout cancels merge execution while the
+bounded history read finishes and stores evidence for the next tick; stall logs
+name the running read and elapsed seconds. The existing cache sweep removes
+records older than seven days and retains at most 512 records, without a new knob.
+Compare pages use four workers; blob pairs and tree pairs are fetched together.
+Metadata-only cost reads avoid reconstructing patches they do not consume;
+each page/blob/diff retains the existing output bound.
+
 The hammer's `bin/primary-change-context.mjs` reads each GitHub endpoint through
 `execGhWithRetry`: transient transport, timeout, rate-limit and HTTP 5xx failures
 get at most three attempts with 500/1000ms backoff and a 15-second timeout per

@@ -21,7 +21,11 @@ const compare = { merge_base_commit: { sha: evidence.mergeBase }, files: evidenc
 
 function runCli(t, plan, argv = ['fixture/repo', '1208', head]) {
   if (plan.some((entry) => entry.path === primaryPath && entry.data)) {
-    plan = [...plan,
+    const liveIndex = plan.findIndex(entry => entry.path === prPath && entry.data);
+    plan = [...plan.slice(0, liveIndex + 1),
+      { path: comparePath, data: { merge_base_commit: { sha: evidence.mergeBase } } },
+      { path: 'repos/fixture/repo/pulls/1208/reviews?per_page=100', data: [] },
+      ...plan.slice(liveIndex + 1),
       { path: prPath, data: pr },
       { path: comparePath, data: compare },
       { path: 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', data: [] },
@@ -61,7 +65,7 @@ process.stdout.write(entry.raw ?? JSON.stringify(data));
 `, { mode: 0o755 });
   const result = spawnSync(process.execPath, [cli, ...argv], {
     encoding: 'utf8', timeout: 15_000,
-    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root },
+    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root },
   });
   assert.ifError(result.error);
   return { ...result, calls: JSON.parse(readFileSync(callsFile, 'utf8')) };
@@ -84,7 +88,7 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
   const { ciCost: _cost, ...historyEvidence } = evidence;
   for (const key of ['primaryFiles', 'finalFiles']) for (const file of parsed[key]) { delete file.sha; file.patch = file.patch.trimEnd(); }
   assert.deepEqual(parsed, { ...historyEvidence, completeFileLists: true, testRegionsChanged: [] });
-  assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath,
+  assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/reviews?per_page=100', comparePath,
     primaryPath, primaryPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, prPath].map(path => ['api', path]));
 });
 

@@ -4109,3 +4109,42 @@ test('production protection-read 403 refuses no-CI and preserves eligibility han
     assert.ok(warnings.some(message => message.includes('HTTP 403')));
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+test('PCCSLOW-01: expired daemon attempt stores history and next attempt consumes it before merging', async t => {
+  const { storedPrimaryChange } = await import('../src/ama/primary-change-store.mjs');
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const head = 'f'.repeat(40);
+  const controller = new AbortController();
+  let finish, started;
+  const reading = new Promise(resolve => { started = resolve; });
+  let histories = 0, merges = 0;
+  const identity = { rootDir, repo: 'fixture/repo', prNumber: 1, baseSha: 'b'.repeat(40), headSha: head, mergeBase: 'c'.repeat(40) };
+  const args = {
+    ...unattributedDaemonArgs({ rootDir, head }),
+    operatorApprovalEvent: operatorApprovedEventAt(head),
+    fetchPrimaryChangeImpl: () => storedPrimaryChange(identity, () => {
+      histories++;
+      started();
+      return new Promise(resolve => { finish = () => resolve({ ...primaryChangeFixture(head), hasHammerCommits: false }); });
+    }),
+    fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: head,
+      checks: [{ name: 'ci', conclusion: 'SUCCESS' }], labels: ['operator-approved'],
+      mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefName: 'author/branch' }),
+    attemptDaemonCleanMergeImpl: async () => {
+      merges++;
+      return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+    },
+  };
+  const expired = runDaemonCleanMergeAttemptReal({ ...args, signal: controller.signal });
+  const rejected = assert.rejects(expired, /time limit/);
+  await reading;
+  controller.abort(new Error('time limit'));
+  finish();
+  await rejected;
+  assert.equal(merges, 0);
+  const next = await runDaemonCleanMergeAttemptReal(args);
+  assert.equal(next.merged, true);
+  assert.equal(histories, 1);
+  assert.equal(merges, 1);
+});

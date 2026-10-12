@@ -1,3 +1,4 @@
+import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 /**
  * LAC-11: PR Watcher
  * Polls GitHub every N minutes for new agent-built PRs and spawns reviewer agents.
@@ -713,7 +714,7 @@ function maybeSweepConditionalRequestCache({
   if ((nowMs - lastEtagCacheSweepAtMs) < ETAG_CACHE_SWEEP_INTERVAL_MS) return [];
   lastEtagCacheSweepAtMs = nowMs;
   try {
-    const deleted = sweepEtagCache(rootDir, { nowMs });
+    const deleted = [...sweepEtagCache(rootDir, { nowMs }), ...sweepPrimaryChangeStore(rootDir, { nowMs })];
     if (deleted.length > 0) {
       logger.log?.(`[watcher] pruned ${deleted.length} expired conditional-request cache entries`);
     }

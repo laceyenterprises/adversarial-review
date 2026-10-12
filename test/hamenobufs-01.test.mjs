@@ -10,7 +10,9 @@ import { hammerRetryCapFilePath, readHammerRetryCapLedger } from '../src/ama/ham
 const base = 'a'.repeat(40), author = 'b'.repeat(40), head = 'c'.repeat(40);
 const repo = 'fixture/repo';
 
-test('large compare: all 401 files and 301 commits yield complete protected evidence without compare patches', async () => {
+test('large compare: all 401 files and 301 commits yield complete protected evidence without compare patches', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamenobufs-history-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const files = Array.from({ length: 401 }, (_, i) => ({ path: `file-${i}.mjs`, type: 'blob', mode: '100644', sha: String(i).padStart(40, '0') }));
   const commits = Array.from({ length: 300 }, (_, i) => ({ sha: i === 299 ? author : (i + 1000).toString(16).padStart(40, '0'), commit: { message: 'builder' } }));
   commits.push({ sha: head, parents: [{ sha: author }], commit: { message: 'repair\n\nWorker-Class: hammer' } });
@@ -20,7 +22,8 @@ test('large compare: all 401 files and 301 commits yield complete protected evid
   const reader = createHistoryReader({ execGhWithRetryImpl: async ({ args }) => {
     const [, path, , projection] = args;
     let value;
-    if (path.includes('/pulls/')) value = { head: { sha: head }, base: { sha: base } };
+    if (path.includes('/reviews?')) value = [];
+    else if (path.includes('/pulls/')) value = { head: { sha: head }, base: { sha: base } };
     else if (path.includes('/compare/')) {
       assert.ok(!projection.includes('patch'));
       const page = Number(new URL(`https://fixture/${path}`).searchParams.get('page'));
@@ -32,14 +35,14 @@ test('large compare: all 401 files and 301 commits yield complete protected evid
     else throw new Error(`unexpected ${path}`);
     return { stdout: JSON.stringify(value) };
   } });
-  const evidence = await fetchPrimaryChange({ repo, prNumber: 1, headSha: head, get: reader }, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
+  const evidence = await fetchPrimaryChange({ repo, prNumber: 1, headSha: head, rootDir, get: reader }, { fetchCiCostImpl: async () => ({ headSha: head, ok: true }) });
   assert.equal(evidence.primaryHead, author);
   assert.equal(evidence.mergeBase, base);
   assert.equal(evidence.primaryFiles.length, 401);
   assert.equal(evidence.finalFiles.length, 401);
   assert.equal(evidence.completeFileLists, true);
   assert.equal(checkPrimaryChange(JSON.parse(JSON.stringify(evidence)), head).ok, true);
-  assert.deepEqual(pages, [1, 2, 3, 4, 1, 2, 3]);
+  assert.deepEqual(pages, [0, 1, 2, 3, 4, 1, 2, 3]);
 });
 
 test('spawn ENOBUFS reports explicit failed read with error and output limit, never unknown', async () => {

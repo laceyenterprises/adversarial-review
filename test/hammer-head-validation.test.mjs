@@ -27,27 +27,38 @@ test('HAMFINAL-02: foreign side commit is refused even with a trusted hammer tip
   const foreign = { ...fleet('foreign'), committer: 'unverified-person' };
   assert.equal(await fetchHammerHeadRange(fixture([foreign, fleet('head')]).options), null);
 });
-test('HAMSIGN-01: unsigned hammer App commits are trusted by linked identity', async () => {
+test('HAMSIGN-01: fleet and hammer logins require strictly verified signatures throughout the range', async () => {
   const hammer = { ...fleet('head'), author: { login: 'the-hammer-lacey[bot]' },
-    committer: { login: 'the-hammer-lacey[bot]' },
-    commit: { verification: { verified: false, reason: 'unsigned' } } };
+    committer: { login: 'the-hammer-lacey[bot]' } };
   assert.equal(fleetCommitIdentityMatches(hammer), true);
   assert.equal((await fetchHammerHeadRange(fixture([hammer]).options)).verified, true);
   assert.equal(fleetCommitIdentityMatches({ ...hammer, author: undefined }), true);
+  for (const identity of [fleet('spoof'), { ...hammer, sha: 'spoof' }, { ...hammer, sha: 'spoof', author: undefined }]) {
+    for (const verification of [undefined, {}, { verified: false, reason: 'unsigned' }, { verified: 'true' }, { verified: 1 }]) {
+      const spoof = { ...identity, commit: { verification } };
+      assert.equal(fleetCommitIdentityMatches(spoof), false);
+      assert.equal(await fetchHammerHeadRange(fixture([spoof, hammer]).options), null);
+    }
+    const missing = { ...identity, commit: undefined };
+    assert.equal(fleetCommitIdentityMatches(missing), false);
+    assert.equal(await fetchHammerHeadRange(fixture([missing, hammer]).options), null);
+  }
   for (const foreign of [{ ...hammer, author: 'foreign' }, { ...hammer, committer: 'foreign' }]) {
     assert.equal(fleetCommitIdentityMatches(foreign), false);
     assert.equal(await fetchHammerHeadRange(fixture([foreign]).options), null);
   }
 });
-test('HAMSIGN-01: unsigned base merges retain the base ancestry rule', async () => {
-  const merge = { ...fleet('head'), author: 'human', committer: 'human',
-    commit: { verification: { verified: false, reason: 'unsigned' } },
-    parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };
-  const { options } = fixture([fleet('fleet'), merge]);
-  assert.equal((await fetchHammerHeadRange(options)).verified, true);
-  const get = options.get;
-  assert.equal(await fetchHammerHeadRange({ ...options, get: path => path.endsWith('base-parent...base')
-    ? { status: 'diverged' } : get(path) }), null);
+test('HAMSIGN-01: base merges cannot bypass signature verification even before a trusted hammer tip', async () => {
+  for (const identity of [fleet('merge'), { ...fleet('merge'), author: 'human', committer: 'human' }]) {
+    for (const verification of [undefined, {}, { verified: false, reason: 'unsigned' }, { verified: 'true' }]) {
+      const merge = { ...identity, commit: { verification },
+        parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };
+      const { options, calls } = fixture([fleet('fleet'), merge, fleet('head')]);
+      assert.equal(await fetchHammerHeadRange(options), null);
+      assert.ok(!calls.some(path => path.endsWith('base-parent...base')),
+        'signature refusal precedes the base-ancestry exception');
+    }
+  }
 });
 test('HAMFINAL-02: merge of verified base is permitted; foreign side merge is refused', async () => {
   const merge = { ...fleet('merge'), author: 'human', committer: 'human', parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };

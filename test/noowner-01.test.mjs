@@ -599,7 +599,7 @@ test('Case 3: after a hammer no-merge on its own closer head the closer holds an
   assert.equal(hqLaunches(released).length, 1);
 });
 
-test('HAMSIGN-01: an existing signature stop dispatches a hammer on the first unchanged tick', async t => {
+test('HAMSIGN-01: existing signature and new ancestry stops remain held on unchanged inputs', async t => {
   const rootDir = tmpRoot(t, 'hamsign-stop-');
   const hqRoot = join(rootDir, 'hq-root');
   writeAmaAuditEntry({ hqRoot, repo: AOS, prNumber: 8116, headSha: REVIEWED_8022,
@@ -623,9 +623,9 @@ test('HAMSIGN-01: an existing signature stop dispatches a hammer on the first un
       firstObservedAt: '2026-10-12T00:05:00Z', inputs: hammerStopInputs(args.prMetadata) } } }));
   const deps = closerDeps();
   const result = await maybeDispatchAmaCloser({ ...args, ...deps });
-  assert.equal(result.dispatched, true, JSON.stringify(result));
-  assert.equal(hqLaunches(deps).length, 1);
-  // A new foreign/incomplete-range refusal is a fresh judgment, not retired.
+  assert.equal(result.reason, HAMMER_STOP_HOLD_REASON, JSON.stringify(result));
+  assert.equal(hqLaunches(deps).length, 0);
+  // The renamed structural refusal obeys the same hold contract.
   writeAmaAuditEntry({ hqRoot, repo: AOS, prNumber: 8116, headSha: REVIEWED_8022,
     now: '2026-10-12T01:04:00Z', attempt: { outcome: 'failed-without-merge',
       reason: 'hammer-head-ancestry-rejected', currentHead: CLOSER_8022 } });

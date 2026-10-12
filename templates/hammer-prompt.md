@@ -701,10 +701,12 @@ Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the active claim.
 The entitled hammer audit must record `HAM-Validated-Head: <exact SHA>`;
 `ama-check` verifies its body and author against the live timeline. Fetch the
 complete fleet ancestry using the versioned helper. Every head-only delta commit
-requires a trusted fleet/hammer committer login and, when present, a trusted
-author login, or a base merge whose second parent is reachable from the base.
-GitHub signature verification is not required for git-pushed App commits. The
-helper retries PR-base discovery and each ancestry read on transient transport failures at most three times with 500/1000ms
+requires `commit.verification.verified === true` from GitHub, including base
+merges. Fleet commits also require a trusted fleet/hammer committer login and,
+when present, a trusted author login. Base merges require their second parent to
+be reachable from the base. Email-mapped logins and your exact-head audit cannot
+authenticate unsigned intermediate commits. The helper retries PR-base discovery
+and each ancestry read on transient transport failures at most three times with 500/1000ms
 backoff and a 15-second per-attempt timeout. Exhausted reads refuse this proof:
 
 ```bash
@@ -720,8 +722,10 @@ backoff and a 15-second per-attempt timeout. Exhausted reads refuse this proof:
 ```
 
 For exit 65, record the no-merge audit with reason
-`hammer-head-ancestry-rejected`. Do not reuse the retired `hammer-head-context`
-reason: the watcher releases that old signature-based stop after HAMSIGN-01.
+`hammer-head-ancestry-rejected`. Existing `hammer-head-context` stops and new
+ancestry refusals both remain held on unchanged inputs. Unsigned App commits
+cannot use this range waiver; preserve the refusal and use the existing
+exact-head review recovery path or operator handoff.
 
 ```json
 {

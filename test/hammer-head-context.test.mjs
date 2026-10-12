@@ -36,8 +36,8 @@ if (args[0] === 'pr') {
   process.stdout.write(JSON.stringify({ sha: 'base' }));
 } else if (['repos/fixture/repo/compare/base...head', 'repos/fixture/repo/compare/reviewed...head'].includes(args[1])) {
   process.stdout.write(JSON.stringify({ status: 'ahead', total_commits: 1, commits: [{ sha: 'head',
-    author: { login: 'lacey-codex-agent[bot]' }, committer: { login: scenario === 'spoof' ? 'foreign-person' : 'lacey-codex-agent[bot]' },
-    commit: { verification: { verified: false, reason: 'unsigned' } } }] }));
+    author: { login: 'lacey-codex-agent[bot]' }, committer: { login: scenario === 'foreign' ? 'foreign-person' : 'lacey-codex-agent[bot]' },
+    commit: { verification: { verified: scenario !== 'spoof' } } }] }));
 } else fail('unexpected API call');
 `, { mode: 0o755 });
   return {
@@ -71,8 +71,10 @@ for (const [scenario, count] of [['exhaust', 3], ['permanent', 1], ['malformed',
   });
 }
 
-test('head context distinguishes spoofed fleet ancestry from read failures', async t => {
-  const f = fixture(t, 'spoof');
-  await assert.rejects(f.run(), error => error.code === 65 && !error.stdout);
-  assert.equal(f.calls().length, 4);
-});
+for (const scenario of ['spoof', 'foreign']) {
+  test(`head context distinguishes ${scenario} fleet ancestry from read failures`, async t => {
+    const f = fixture(t, scenario);
+    await assert.rejects(f.run(), error => error.code === 65 && !error.stdout);
+    assert.equal(f.calls().length, 4);
+  });
+}

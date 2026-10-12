@@ -173,4 +173,24 @@ HAM_PUBLISHED_AUDIT_HEAD="$POST_REMEDIATION_SHA"
 HAM_PHASE_OUTCOME=published
 return 0
 }
-ham_publish_phase
+# Called before the hammer's ordinary git publication. The audit phase remains
+# separate, under the merge lease, after remote CI validates the published SHA.
+if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
+  HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
+  printf '%s\n' "$HAM_API_PUBLISH_RESULT"
+  if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then
+    # Preserve the existing lease-protected git route. Range proof below will
+    # request one exact-head review, rather than turning this into an escalation.
+    HAM_API_PUBLISH_FALLBACK=1
+    export HAM_API_PUBLISH_FALLBACK
+    HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
+    HAM_API_FALLBACK_BRANCH=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
+    if [ -n "$HAM_API_FALLBACK_HEAD" ] && [ -n "$HAM_API_FALLBACK_BRANCH" ]; then
+      git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD"
+    else
+      git push --force-with-lease
+    fi
+  fi
+else
+  ham_publish_phase
+fi

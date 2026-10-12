@@ -2,7 +2,7 @@
 
 You are the **Hammer** closer for PR <<PR_URL>>.
 
-This prompt is TERMINAL. Do not request another adversarial review round, including
+This prompt is TERMINAL. Except for the bounded provenance fallback below, do not request another adversarial review round, including
 for a disputed finding: the hammer's dispute adjudication is final (below). Do not defer the review findings into follow-up PRs, issues,
 or future refactors. The final adversarial review is the authority; the audit
 comment plus HAM provenance trailers replace a human re-review gate, and they do
@@ -287,7 +287,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    restart remediation. Refresh the live PR head, reacquire the merge lease,
    rerun only the required fail-closed live-head validation described below, and
    complete the merge/closing-comment sequence idempotently.
-0b. **A run that does not merge must say so exactly once on the PR.** Before the
+0b. **A run that does not merge must say so exactly once on the PR.** The provenance fallback below is a successful exact-head review handoff: post its route comment, release the lease and exit 0 without a no-merge status or operator escalation. For other exits, before the
    run ends for any reason with the PR still open and unmerged, post exactly one
    HAM-authored closing-status comment. State what the run completed, the exact
    step and blocker where it stopped, whether the merge lease was released, and
@@ -404,7 +404,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    another repo/submodule, open the subrepo PR for that parity fix (or stop with
    the exact owed change) and map the red parity check to that PR/report in the
    audit comment.
-3. Commit the remediation. The commit must have provenance trailers in ONE
+3. Commit the remediation when there are changes. If every finding is already
+   addressed, record validation of the current head and continue to merge;
+   create no empty commit and request no fresh verdict. A remediation commit
+   must have provenance trailers in ONE
    contiguous block (no blank lines between them) including:
 
    ```text
@@ -475,8 +478,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    required check bar is green may proceed to merge while still holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
-   prove the HAM-authored remediation commit, provenance trailers, PR audit
-   comment, reviewed-parent coverage, non-empty verified diff, successful
+   prove the active hammer exact-head validation, verified fleet ancestry, PR audit
+   comment from the entitled hammer identity, successful
    live-head checks, and non-waived gates, and it must record
    `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
    where the only HAM-waived reasons are `non-blocking-findings-present` or
@@ -492,7 +495,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    the lease after the merge is confirmed or on any hard-block/terminal outcome.
 7. **Post a CLOSING comment after the merge confirms.** Once you have re-read
    GitHub and confirmed the PR is merged at the validated head, post one final
-   comment on PR <<PR_URL>> that states: the merge lease was held and released,
+   comment on PR <<PR_URL>> that states `Hammer route: verified validated head`, the merge lease was held and released,
    the base SHA rebased onto, the remote CI result
    for the exact head, the merged SHA, the merge method, the counts of findings
    remediated (blocking / non-blocking), the failing tests you fixed to keep
@@ -573,13 +576,15 @@ rm -f "$HAM_STAGED_GITLINKS_FILE"
 # then recovers only the last trailer and the head can never self-certify
 # (agent-os#5908 parked on `stale-review-head` for hours). The parser now
 # tolerates the old shape, but emit the correct one.
-git commit -m "HAM remediate final adversarial findings" -m "Worker-Class: hammer
+if ! git diff --cached --quiet; then
+  git commit -m "HAM remediate final adversarial findings" -m "Worker-Class: hammer
 Worker-Ticket: HAM
 Reviewed-Head: <<REVIEWED_SHA>>
 Closed-By: hammer (adversarial-pipe-mode)
 Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
 # Verify the block is contiguous before moving on:
-git log -1 --format=%B | tail -n 6
+  git log -1 --format=%B | tail -n 6
+fi
 ```
 
 Refresh and validate the live head:
@@ -632,7 +637,14 @@ while true; do
   sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
   HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
 done
-git push --force-with-lease
+# Publish through the hammer App API first; unsupported changes fall back to git.
+HAM_COMMIT_PUBLICATION_ONLY=1
+export HAM_COMMIT_PUBLICATION_ONLY
+GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
+  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render > /tmp/ham-<<PR_NUMBER>>-publish-commits.sh
+GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
+  source /tmp/ham-<<PR_NUMBER>>-publish-commits.sh
+unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
 After resolving, the head has moved — re-run changed-surface tests (mandate 2b)
@@ -690,12 +702,41 @@ gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR
 gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
 ```
 
-Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the claim to verify. `ama-check`
-must confirm the commit parent/trailers from `/tmp/ham-<<PR_NUMBER>>-commit.json` and confirm
-the audit comment body and author exist in `/tmp/ham-<<PR_NUMBER>>-timeline.json`; the raw
-commit payload must include a non-empty `files[]` diff. If the mandatory rebase
-rewrites the commit parent, the verified `Reviewed-Head` trailer must still
-match `<<REVIEWED_SHA>>`. The JSON claim alone does not satisfy the predicate.
+The hammer's judgement is final: remediate every valid finding, rebase, validate
+and merge the exact head under the lease when provenance is proven. If provenance cannot be proven, request the bounded exact-head re-review described below. When all findings are already
+addressed, validate the existing head; do not create an empty HAM commit.
+Fleet builder, remediation and conflict-rebase commits below your head are your
+responsibility. Foreign or unsigned commits take the re-review route. A reviewed-head parent or trailer
+is not needed for exact-head validation.
+
+Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the active claim.
+The entitled hammer audit must record `HAM-Validated-Head: <exact SHA>`;
+`ama-check` verifies its body and author against the live timeline. Fetch the
+complete fleet ancestry using the versioned helper. Every head-only delta commit
+requires a GitHub-verified signature with a trusted fleet App author and GitHub `web-flow` committer; email-mapped fleet
+logins alone are insufficient. The helper retries PR-base discovery and each
+ancestry read on transient transport failures at most three times with 500/1000ms
+backoff and a 15-second per-attempt timeout. Any failed proof takes the existing
+bounded exact-head re-review route; never end with "no merge" or operator
+escalation for provenance. Use API publication above for every local hammer
+commit, including ordinary remediation. Compare tree IDs before adopting the
+API head. Unsupported modes, symlinks, gitlinks, API errors or mismatches fall
+back to git and one re-review. No new retry loop. A proven range merges without
+a fresh review; an unproven range is handed to the daemon after a clean review.
+
+```bash
+[ "${HAM_API_PUBLISH_FALLBACK:-0}" -ne 1 ] &&
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
+  <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
+  > /tmp/ham-<<PR_NUMBER>>-range.json || {
+    # Any provenance failure (unsigned/foreign ancestry, API failure, tree
+    # mismatch, or unreadable range) uses the existing exact-head review route.
+    ham_release_merge_lease
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr edit <<PR_URL>> --add-label retrigger-review
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr comment <<PR_URL>> --body "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review."
+    exit 0
+  }
+```
 
 ```json
 {
@@ -750,6 +791,7 @@ HAM_VERDICT_READY_FILE=""
   --risk-class <<RISK_CLASS>> \
   --ham-terminal-remediation /tmp/ham-<<PR_NUMBER>>-terminal-remediation.json \
   --ham-commit /tmp/ham-<<PR_NUMBER>>-commit.json \
+  --ham-range /tmp/ham-<<PR_NUMBER>>-range.json \
   --primary-change "$HAM_PRIMARY_CHANGE_FILE" \
   > "$HAM_VERDICT_FILE" || exit 1
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"
@@ -897,7 +939,7 @@ hard-blocker report, and do not re-dispatch.
   preserving both sides, force-push with lease), then re-validates and
   re-acquires. Hard-block ONLY a conflict that is genuinely unsafe to resolve (a
   semantic conflict you cannot correctly settle).
-- No daemon handoff. The hammer owns the in-lease merge and writes the merged
+- Except for the provenance re-review route, no daemon handoff. The hammer owns the in-lease merge and writes the merged
   audit/closeout after GitHub confirms the validated head merged.
 - No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`
   except for the narrow strict-non-blocking `.active` lane described above.

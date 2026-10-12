@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+import { publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
+const [repo, pr] = process.argv.slice(2);
+const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
+const api = async (path, input) => JSON.parse(execFileSync('gh', ['api', path, ...(input ? ['--input', '-'] : [])],
+  { input: input ? JSON.stringify(input) : undefined, timeout: 30000, maxBuffer: 64 * 1024 * 1024, env: process.env }).toString());
+let fallback = {};
+try {
+  if (git('status', '--porcelain').length) throw new Error('local tree has uncommitted changes');
+  const info = JSON.parse(execFileSync('gh', ['pr', 'view', pr, '--repo', repo, '--json', 'headRefName,headRefOid'], { timeout: 30000 }));
+  fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
+  git('fetch', 'origin', info.headRefOid);
+  const entries = ref => new Map(git('ls-tree', '-rz', ref).toString().split('\0').filter(Boolean).map(entry => {
+    const tab = entry.indexOf('\t');
+    const meta = entry.slice(0, tab), path = entry.slice(tab + 1);
+    const [mode, , oid] = meta.split(' ');
+    return [path, { mode, oid }];
+  }));
+  const before = entries(info.headRefOid), after = entries('HEAD');
+  const changes = [...new Set([...before.keys(), ...after.keys()])].filter(path => before.get(path)?.oid !== after.get(path)?.oid || before.get(path)?.mode !== after.get(path)?.mode)
+    .map(path => ({ path, oldMode: before.get(path)?.mode, mode: after.get(path)?.mode,
+      contents: after.get(path)?.mode === '100644' ? git('cat-file', 'blob', after.get(path).oid).toString('base64') : undefined }));
+  const result = await publishHammerTree({ repo, branch: info.headRefName, expectedHead: info.headRefOid,
+    localTree: git('rev-parse', 'HEAD^{tree}').toString().trim(), message: git('log', '-1', '--format=%B').toString().trim(), changes, api });
+  fallback = { fallbackHead: result.head || result.fallbackHead || info.headRefOid, branch: info.headRefName };
+  if (result.route === 'published') {
+    git('fetch', 'origin', result.head);
+    if (git('rev-parse', `${result.head}^{tree}`).toString().trim() !== result.tree) throw new Error('fetched tree mismatch');
+    git('reset', '--hard', result.head);
+  }
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+} catch (error) {
+  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: error.message, ...fallback })}\n`);
+}

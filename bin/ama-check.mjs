@@ -201,6 +201,7 @@ function parseInputs(argv) {
       'review-cycle-exhausted': { type: 'string' },
       'ham-terminal-remediation': { type: 'string' },
       'ham-commit': { type: 'string' },
+      'ham-range': { type: 'string' },
       'primary-change': { type: 'string' },
       'rebase-assessment': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
@@ -541,6 +542,7 @@ function main(argv = process.argv.slice(2)) {
       hamTerminalRemediation = loadJson(args['ham-terminal-remediation']);
       hamTerminalRemediationGroundTruth = {
         commit: buildVerifiedHamCommit(loadJson(args['ham-commit'])),
+        range: args['ham-range'] ? loadJson(args['ham-range']) : null,
         auditComment: findVerifiedHamAuditComment(timelineJson, hamTerminalRemediation),
       };
     } catch (err) {

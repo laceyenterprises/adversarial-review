@@ -1,3 +1,4 @@
+import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -315,7 +316,7 @@ else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${
   }
 });
 
-for (const scenario of ['accepted confirmation timeout', 'accepted confirmation permanent read error',
+for (const scenario of ['no-diff validated merge', 'accepted confirmation timeout', 'accepted confirmation permanent read error',
   'superseded head', 'gate read failed', 'gate timeout', 'red CI after pending', 'permanent merge rejection']) {
   test(`rendered hammer receipt classification: ${scenario}`, (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-receipt-decision-'));
@@ -325,6 +326,23 @@ for (const scenario of ['accepted confirmation timeout', 'accepted confirmation 
     writeFileSync(verdict, JSON.stringify({ eligible: true, trace: {
       headMatch: { current: head }, branchProtection: { required: false },
     } }));
+    if (scenario === 'no-diff validated merge') {
+      const body = `HAM-Validated-Head: ${head}`;
+      const primaryChange = { headSha: head, hasHammerCommits: false };
+      const result = isEligibleForAmaClosure({ headSha: 'reviewed', verdict: 'request-changes', riskClass: 'low',
+        remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,
+        nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+      { headSha: head, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE', labels: [],
+        statusCheckRollup: [{ name: 'CI', conclusion: 'SUCCESS' }], branchProtection: { requiredContexts: ['CI'] } },
+      { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
+      { primaryChange, hamTerminalRemediation: { active: true, commit: { sha: head }, auditComment: { body, findings: [] } },
+        hamTerminalRemediationGroundTruth: { commit: { sha: head, changedFiles: [], primaryChange },
+          auditComment: { body, author: 'hammer-worker' },
+          range: { verified: true, reviewedHead: 'reviewed', currentHead: head, baseSha: 'base', commits: [head] } } });
+      assert.equal(result.eligible, true, JSON.stringify(result));
+      assert.equal(result.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
+      writeFileSync(verdict, JSON.stringify(result));
+    }
     mkdirSync(join(dir, '.hq'));
     writeFileSync(join(dir, '.hq/config.json'), JSON.stringify({ ownerUser: userInfo().username }));
     const gate = { ok: true, state: 'OPEN', headMatches: true, expectedHead: head,
@@ -345,6 +363,7 @@ case "$*" in
     echo attempted > "$TMPDIR/merge-attempted"
     while [ "$#" -gt 1 ]; do
       case "$1" in
+        --match-head-commit) printf '%s' "$2" > "$TMPDIR/merge-head" ;;
         --subject) printf '%s' "$2" > "$TMPDIR/merge-subject" ;;
         --body) printf '%s' "$2" > "$TMPDIR/merge-body" ;;
       esac
@@ -353,6 +372,10 @@ case "$*" in
     if [ "$RECEIPT_SCENARIO" = 'permanent merge rejection' ]; then echo 'permission denied' >&2; exit 1; fi
     exit 0 ;;
   'pr view '*)
+    if [ '${scenario}' = 'no-diff validated merge' ] && [ -f '${dir}/merge-attempted' ]; then
+      echo '{"state":"MERGED","mergedAt":"${new Date().toISOString()}","mergeCommit":{"oid":"${'b'.repeat(40)}"},"headRefOid":"${head}"}'
+      exit 0
+    fi
     if [ "$RECEIPT_SCENARIO" = 'accepted confirmation timeout' ]; then echo 'TLS handshake timeout' >&2;
     else echo 'permission denied' >&2; fi
     exit 1 ;;
@@ -392,8 +415,13 @@ esac
     const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
     assert.equal(render.status, 0, render.stderr);
     const script = join(dir, 'merge.sh');
-    writeFileSync(script, render.stdout);
+    writeFileSync(script, scenario === 'no-diff validated merge'
+      ? render.stdout.replace('if ! ham_emit_git_merge_signal; then', 'if ! ham_fixture_emit_git_merge_signal; then')
+        .replace('if ! ham_mark_ama_closer_lease_succeeded; then', 'if ! ham_fixture_mark_ama_closer_lease_succeeded; then')
+      : render.stdout);
     const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=1
+ham_fixture_emit_git_merge_signal() { echo FIXTURE_MERGE_SIGNAL; }
+ham_fixture_mark_ama_closer_lease_succeeded() { echo FIXTURE_CLOSER_SUCCEEDED; }
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
 ham_mark_merge_lease_retryable_abort() { echo REFUNDED; }
 sleep() { :; }
@@ -411,7 +439,10 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
       assert.match(result.stdout, /github-gate-red/);
       assert.doesNotMatch(result.stdout, /REFUNDED/);
     }
-    if (scenario.startsWith('accepted')) {
+    if (scenario === 'no-diff validated merge') {
+      assert.match(result.stdout, /STATUS=0 HELD=0 OWN=1 EXIT=0/);
+      assert.equal(readFileSync(join(dir, 'merge-head'), 'utf8'), head);
+    } else if (scenario.startsWith('accepted')) {
       assert.equal(readFileSync(join(dir, 'merge-attempted'), 'utf8').trim(), 'attempted');
       assert.match(result.stdout, /OWN=1 EXIT=0/);
       assert.match(result.stdout, /--outcome deferred/);
@@ -421,11 +452,11 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     }
     const directory = join(dir, 'dispatch/audit/automation-merge-actions');
     const receipts = (() => { try { return readdirSync(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } })();
-    assert.equal(receipts.length, ['permanent merge rejection', 'red CI after pending'].includes(scenario) ? 1 : 0, result.stderr);
+    assert.equal(receipts.length, ['no-diff validated merge', 'permanent merge rejection', 'red CI after pending'].includes(scenario) ? 1 : 0, result.stderr);
     if (receipts.length) {
       const receipt = JSON.parse(readFileSync(join(directory, receipts[0])));
-      assert.equal(receipt.merged, false);
-      assert.equal(receipt.reason, scenario === 'red CI after pending' ? 'github-gate-red' : 'permanent-merge-rejection');
+      assert.equal(receipt.merged, scenario === 'no-diff validated merge');
+      if (scenario !== 'no-diff validated merge') assert.equal(receipt.reason, scenario === 'red CI after pending' ? 'github-gate-red' : 'permanent-merge-rejection');
     }
   });
 }

@@ -2667,3 +2667,20 @@ The qualified missing-reversal-authorization recovery lane also admits standing
 finding refusals inherited from the stale review (blocking or non-blocking).
 This permits only a bounded exact-head review request; merge remains refused.
 CI, protection, labels and live ownership refusals still prevent recovery.
+
+HAMVERIFY-01: hammer publication uses GitHub's `createCommitOnBranch` API with
+its own entitled App token and an expected head lease. GitHub signs the commit;
+the publisher compares the returned and fetched tree IDs with the tested local
+tree before adopting the new SHA. API-created fleet commits have the fleet App
+as author, GitHub `web-flow` as committer, and verified/valid verification.
+Unsigned git-pushed commits cannot qualify merely through an email-mapped login.
+
+If the entire responsibility range is proven, the hammer merges its validated
+head without another review. Its closing comment says `Hammer route: verified
+validated head`. If any publication or range proof fails (including unsupported
+file modes, symlinks, submodules, unsigned remediation/rebase ancestry, foreign
+identity, API errors or mismatched trees), it preserves the git publication path
+and requests one exact-head re-review through the existing bounded route. The
+closing comment says `Hammer route: exact-head re-review` with the head SHA;
+the daemon merges after a clean review. Provenance never requires an operator
+escalation, signing key, new label or new retry loop.

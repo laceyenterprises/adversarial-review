@@ -155,11 +155,11 @@ test('HAMCLOSE-01 exhaustive open non-held ownership cross product uses real eli
   ])));
   let combinations = 0;
   for (const [verdict, headKind, leaseKind, retryExhausted, lifetimeExhausted, mergeable, conclusion,
-    roundsLeft, stuck, retrigger] of product([
+    roundsLeft, stuck, retrigger, commentOnlyFinalRoundCompleted] of product([
     ['', 'approved', 'comment-clean', 'comment-findings', 'request-changes'],
     ['reviewed', 'untrusted', 'attested'], ['none', 'dispatched', 'handed-to-review', 'terminal'],
     [false, true], [false, true], ['MERGEABLE', 'CONFLICTING', 'UNKNOWN'],
-    ['SUCCESS', 'FAILURE', 'PENDING'], [true, false], [false, true], [false, true],
+    ['SUCCESS', 'FAILURE', 'PENDING'], [true, false], [false, true], [false, true], [false, true],
   ])) {
     combinations++;
     const currentHead = headKind === 'reviewed' ? reviewed : hammer;
@@ -181,7 +181,7 @@ test('HAMCLOSE-01 exhaustive open non-held ownership cross product uses real eli
     assert.equal(cap.lifetimeCapExhausted, lifetimeExhausted);
     const input = { reviewState, currentHead, attested, lease,
       retryExhausted: cap.capExhausted, lifetimeExhausted: cap.lifetimeCapExhausted,
-      mergeable, checks: classified, roundsLeft, labels };
+      mergeable, checks: classified, roundsLeft, labels, commentOnlyFinalRoundCompleted };
     const result = decideClosureOwner(input);
     const rescue = classifyClosureOwnership(input);
     assert.deepEqual(rescue.closureOwner, result);
@@ -223,7 +223,7 @@ test('HAMCLOSE-01 exhaustive open non-held ownership cross product uses real eli
       assert.ok(['review', 'page'].includes(result.owner));
     }
   }
-  assert.equal(combinations, 17_280);
+  assert.equal(combinations, 34_560);
 });
 
 test('HAMCLOSE-02 every primary evidence × ceiling × handoff/drain × diff combination has one owner', async () => {

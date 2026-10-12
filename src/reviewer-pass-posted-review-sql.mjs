@@ -1,3 +1,9 @@
+export const DELIVERED_REVIEW_SQL = `(
+  (gh_comment_id IS NOT NULL AND gh_comment_id <> '')
+  OR (body_md IS NOT NULL AND trim(body_md) <> '')
+  OR (CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.reviewBodyCapture.status') END = 'verified-github-artifact')
+)`;
+
 export const REVIEWER_PASS_POSTED_AT_SOURCE_SQL = 'COALESCE(body_captured_at, ended_at)';
 
 export const REVIEWER_PASS_NORMALIZED_POSTED_AT_SQL = `strftime(

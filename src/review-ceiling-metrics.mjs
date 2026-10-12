@@ -1,8 +1,5 @@
-export const DELIVERED_REVIEW_SQL = `(
-  (gh_comment_id IS NOT NULL AND gh_comment_id <> '')
-  OR (body_md IS NOT NULL AND trim(body_md) <> '')
-  OR (CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.reviewBodyCapture.status') END = 'verified-github-artifact')
-)`;
+import { DELIVERED_REVIEW_SQL } from './reviewer-pass-posted-review-sql.mjs';
+export { DELIVERED_REVIEW_SQL } from './reviewer-pass-posted-review-sql.mjs';
 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

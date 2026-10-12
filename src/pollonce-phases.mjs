@@ -1,3 +1,5 @@
+import { readAmaCloserLease } from './ama/closer-lease.mjs';
+import { observeClosureWait } from './ama/closure-wait.mjs';
 import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
 import { closeEmptyPullRequest } from './empty-pr-close.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
@@ -797,6 +799,21 @@ export async function processReviewSubject(entry, ctx) {
       ) {
         return;
       }
+      // Run before admission refusals so unavailable capacity, credentials,
+      // CI, routing, or a retained claim cannot strand the transfer silently.
+      const handoffLease = subject.headSha && readAmaCloserLease(ROOT, {
+        repo: repoPath, prNumber, headSha: subject.headSha,
+      });
+      const handoffAwaitingReview = !subject.terminal && handoffLease?.status === 'handed-to-review'
+        && !(existing?.reviewer_head_sha === subject.headSha && ['posted'].includes(existing?.review_status));
+      if (handoffAwaitingReview) {
+        try {
+          await observeClosureWait({ rootDir: ROOT, repo: repoPath, prNumber,
+            headSha: subject.headSha, reason: `handed-to-review:${subject.headSha}` });
+        } catch (error) {
+          console.warn(`[watcher] handoff wait observation failed: ${error?.message || error}`);
+        }
+      }
       try {
         const loaded = loadConfigCached();
         const authority = resolveMergeAuthorityConfigFromDomain(
@@ -1228,6 +1245,26 @@ export async function processReviewSubject(entry, ctx) {
       // head, memoized in `argus_classified_head_sha`; a steady-state tick spends
       // no GitHub calls here at all.
       const argusOutcome = await routeSecuritySurfaceSafe(existing);
+      if (handoffAwaitingReview) {
+        try {
+          const requestRow = { revision_ref: subject.headSha,
+            rereview_requested_at: new Date().toISOString(),
+            rereview_reason: `system-orphan-head-review:${subject.headSha}` };
+          if (hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
+            prNumber, headSha: subject.headSha, row: requestRow })) {
+            requestReviewRereview({ rootDir: ROOT, db, repo: repoPath, prNumber,
+              targetRevisionRef: subject.headSha, requestedAt: requestRow.rereview_requested_at,
+              reason: requestRow.rereview_reason, preserveBudgets: true });
+            existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
+          } else if (existing?.review_status === 'failed' && !isExplicitOperatorReviewRetrigger(existing)) {
+            // The transferred attempt is spent. The shared wait owns its
+            // failure; generic infrastructure retries must not spawn again.
+            return;
+          }
+        } catch (error) {
+          console.warn(`[watcher] handoff admission failed: ${error?.message || error}`);
+        }
+      }
 
       const observeLabelControl = createLabelControlObservationCache(operatorSurface);
       try {
@@ -2806,6 +2843,8 @@ export async function processReviewSubject(entry, ctx) {
       // still accept the older GitHub label-object shape for historical rows.
       if (!holdObservationFailed && subject.labelsKnown !== false) stmtUpdateReviewLabels.run(JSON.stringify(Array.isArray(subject.labels) ? subject.labels : []), repoPath, prNumber);
 
+      const handoffReviewAdmission = hammerHandoffReviewBypass({ db, rootDir: ROOT,
+        repo: repoPath, prNumber, headSha: subject.headSha, row: current });
       const roundBudgetDecision = evaluateRoundBudgetForReview({
         rootDir: ROOT,
         repo: repoPath,
@@ -2814,7 +2853,7 @@ export async function processReviewSubject(entry, ctx) {
         reviewStatus: existing?.review_status || 'pending',
         reviewAttempts: existing?.review_attempts || 0,
       });
-      if (roundBudgetDecision.skip) {
+      if (roundBudgetDecision.skip && !handoffReviewAdmission) {
         return;
       }
 
@@ -2929,7 +2968,7 @@ export async function processReviewSubject(entry, ctx) {
         windowHours: cycleCapConfig.windowHours,
         now: new Date().toISOString(),
       });
-      if (cycleCapDecision.escalate) {
+      if (cycleCapDecision.escalate && !handoffReviewAdmission) {
         const escalatedAt = new Date().toISOString();
         const recentVerdicts = recentReviewCycleVerdicts(db, {
           repo: repoPath,

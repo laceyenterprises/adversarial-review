@@ -14,13 +14,14 @@ export async function handoffHammerReview({ rootDir, repo, prNumber, headSha,
     if (!rekey.rekeyed) throw new Error(`review handoff lease rekey: ${rekey.reason}`);
   }
   const lease = readAmaCloserLease(rootDir, identity);
-  // A failed request must leave the lease recoverable by ordinary hammer
-  // settlement. handed-to-review refuses that failure settlement by design.
-  const request = await requestBoundedReviewImpl({ rootDir, ...identity,
-    requestRereviewImpl: requestReviewRereview, logger });
+  // Admission must see the transfer before the bounded request checks the
+  // final-round guards. Keep the transfer on refusal/error: the watcher's
+  // bounded handoff wait owns recovery and pages once, without another hammer.
   if (lease && lease.status !== 'handed-to-review') {
     updateAmaCloserLease({ rootDir, ...identity, status: 'handed-to-review' });
   }
+  const request = await requestBoundedReviewImpl({ rootDir, ...identity,
+    requestRereviewImpl: requestReviewRereview, logger });
   return { outcome: 'handed-to-review', headSha, request };
 }
 

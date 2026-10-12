@@ -14,7 +14,7 @@ import { consumeFollowUpJobsUntilCapacity } from '../src/follow-up-remediation.m
 import { acquireAmaCloserLease, updateAmaCloserLease, rekeyAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { amaCloserDispatchFilePath, maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { closeEmptyPullRequest, EMPTY_PR_COMMENT } from '../src/empty-pr-close.mjs';
-import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
+import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, postedReviewCeilingReached } from '../src/hamclose-review-admission.mjs';
 import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
@@ -22,6 +22,7 @@ import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 
 const repo = 'fixture/repo';
 const cleanBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved';
+const findingsBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- **Cleanup**\n  - **File:** `src/fixture.mjs`\n  - **Lines:** `1`\n  - **Problem:** redundant branch\n  - **Recommended fix:** remove it\n## Verdict\nComment only';
 const quiet = { log() {}, warn() {}, error() {} };
 function root(t) { const dir = mkdtempSync(join(tmpdir(), 'hamclose-replay-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; }
 async function history(options = {}) {
@@ -36,17 +37,19 @@ async function history(options = {}) {
 
 // Both production watcher phases run. Only external GitHub/dispatch/merge
 // boundaries are injected; the actual primary-change and merge predicates run.
-async function watcherTick({ rootDir, prNumber, headSha, evidence, store, row, closerImpl, closureOnly = false, pageImpl = async () => {} }) {
+async function watcherTick({ rootDir, prNumber, headSha, evidence, store, row, closerImpl, closureOnly = false, pageImpl = async () => {}, findings = false }) {
   const candidate = { repo, prNumber, headSha, prState: store.merged ? 'merged' : 'open',
     title: '[codex] HAMCLOSE replay', body: '', baseBranch: 'main', isDraft: false, riskClass: 'low',
     mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', statusCheckRollup: [{ name: 'ci', conclusion: 'SUCCESS' }],
     labels: [], branchProtection: { requiredContexts: [] } };
   const reviewState = { blockingFindingCount: 0, blockingFindingState: 'known', nonBlockingFindingCount: 0,
     nonBlockingFindingState: 'known', headSha, verdict: 'approved' };
+  if (findings) reviewState.nonBlockingFindingCount = 1;
+  const body = findings ? findingsBody : cleanBody;
   return handlePostedReviewRow({ rootDir, repoPath: repo, prNumber, existing: row,
     currentRevisionRef: headSha, logger: quiet,
     currentReviewRowReader: () => row, latestFollowUpJobFinder: () => null,
-    latestPostedReviewBodyFinder: () => cleanBody,
+    latestPostedReviewBodyFinder: () => body,
     projectGateStatusSafe: async () => ({ decision: { state: 'success', reason: 'review-settled' } }),
     fetchMergeAgentCandidateImpl: async () => candidate,
     buildMergeAgentDispatchJobImpl: () => ({ ...reviewState }),
@@ -61,7 +64,7 @@ async function watcherTick({ rootDir, prNumber, headSha, evidence, store, row, c
         fetchPullRequestMergeabilityImpl: async () => ({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
         fetchMergedProtectiveDependentsImpl: async () => [],
         fetchProtectivePredecessorStateImpl: async () => null,
-        fetchLatestHeadReviewBodiesImpl: async () => closureOnly ? [] : [cleanBody], liveReviewRetryDelaysMs: [0],
+        fetchLatestHeadReviewBodiesImpl: async () => closureOnly ? [] : [body], liveReviewRetryDelaysMs: [0],
         maybeDispatchAmaCloserImpl: closerImpl || (async () => { throw new Error('clean review must not launch a hammer'); }),
         runDaemonCleanMergeAttemptImpl: async () => {
           if (closureOnly) return { disposition: 'not-taken', reason: 'stale-head' };
@@ -257,4 +260,53 @@ test('ceiling routing preserves generic failures and logs every admitted transit
   db.prepare("UPDATE reviewed_prs SET rereview_reason='system-review-ceiling-closure'").run();
   assert.equal(routeCappedReviewToClosure({ ...args, row: db.prepare('SELECT * FROM reviewed_prs').get() }), true);
   assert.equal(logs.length, 1); assert.equal(logs[0].priorStatus, 'failed');
+});
+
+for (const findings of [false, true]) test(`HAMCLOSE-04 handed-off review closes with findings=${findings}`, async t => {
+  const rootDir = root(t), headSha = 'b'.repeat(40), prNumber = 30;
+  const identity = { rootDir, repo, prNumber, headSha };
+  acquireAmaCloserLease(identity);
+  await handoffHammerReview({ ...identity, requestBoundedReviewImpl: async () => ({ triggered: true }), logger: quiet });
+  const store = { merged: false };
+  let hammers = 0;
+  const args = { ...identity, evidence: { headSha, hasHammerCommits: false }, store, findings,
+    row: { review_status: 'posted', reviewer_head_sha: headSha, reviewer: 'gemini', review_body: findings ? findingsBody : cleanBody },
+    closerImpl: async () => {
+      if (!acquireAmaCloserLease({ ...identity, fromReviewHandoff: true }).acquired)
+        return { dispatched: false, reason: 'lease-held' };
+      hammers++;
+      updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'synthetic-hammer' });
+      return { dispatched: true, workerClass: 'hammer' };
+    } };
+  await watcherTick(args);
+  assert.equal(store.merged, !findings, JSON.stringify(store));
+  assert.equal(hammers, findings ? 1 : 0, JSON.stringify(store));
+  await watcherTick(args);
+  assert.equal(hammers, findings ? 1 : 0);
+});
+
+for (const guard of ['settled', 'unproven']) test(`HAMCLOSE-04 ${guard} comment-only guard admits only the lease-owned attempt`, t => {
+  const rootDir = root(t), headSha = 'c'.repeat(40), prNumber = 31;
+  const identity = { rootDir, repo, prNumber, headSha };
+  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db); t.after(() => db.close());
+  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status)
+    VALUES (?,?,'2026-01-01','gemini','open','posted')`).run(repo, prNumber);
+  const dir = join(rootDir, 'data/follow-up-jobs/completed'); mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'fixture__repo-pr-31-final.json'), JSON.stringify({ repo, prNumber,
+    status: 'completed', revisionRef: guard === 'settled' ? headSha : 'a'.repeat(40),
+    reviewBody: '## Verdict\nComment only', finalRound: 'comment-only',
+    reReview: { suppressed: 'comment-only-final-round' }, completion: { withheldPushHeadSha: headSha } }));
+  const request = () => requestReviewRereview({ ...identity, db, targetRevisionRef: headSha,
+    reason: `system-orphan-head-review:${headSha}`, logger: quiet });
+  assert.equal(request().triggered, false, 'a request marker alone grants no authority');
+  acquireAmaCloserLease(identity);
+  updateAmaCloserLease({ ...identity, status: 'handed-to-review' });
+  assert.equal(request().triggered, true);
+  db.prepare(`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
+    started_at,status,head_sha) VALUES (?,?,1,'gemini','rereview',?,'failed',?)`)
+    .run(repo, prNumber, new Date(Date.now() + 1000).toISOString().replace('T', ' ').replace('Z', ''), headSha);
+  assert.equal(request().triggered, false, 'a failed attempt also spends the transfer');
+  db.prepare("UPDATE reviewer_passes SET status='completed', body_md='Synthetic completed review' WHERE pr_number=?").run(prNumber);
+  updateAmaCloserLease({ ...identity, status: 'handed-to-review', now: new Date(Date.now() + 2000).toISOString() });
+  assert.equal(request().triggered, false, 'renewing the lease cannot authorize a second same-head review');
 });

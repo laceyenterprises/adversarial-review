@@ -621,6 +621,7 @@ for (const { labelNames, remediationPending } of [
       maybeDispatchAmaClosureForImpl: async () => ({ amaEnabled: true, dispatched: false,
         reason: 'not-eligible', reasons: ['ci-not-green'] }),
       recoverAmaAutomationImpl: async () => { recovered = true; return { outcome: 'ama-pending' }; },
+      recoverOrphanImpl: async () => { recovered = true; return { outcome: 'ama-pending' }; },
     });
     assert.equal(recovered, true, 'a scoped event alone must not skip automated recovery');
     assert.equal(result.outcome, 'ama-pending');
@@ -1093,35 +1094,26 @@ for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-
   });
 }
 
-test('pending closer-head CI remains an ordinary coexistence wait beyond the recovery deadline', async t => {
+test('OWNERPROOF-01: ownerless stale closer with pending CI requests bounded current-head review', async t => {
   const { args, payloads } = closerResumeFixture('pending');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
-  let evaluations = 0;
-  const pages = [];
-  const reviews = [];
+  const pages = [], reviews = [];
   for (const minutes of [0, 15, 31, 61]) {
-    const result = await resolveMergeAgentCoexistenceForWatcher({
-      ...args,
-      maybeDispatchAmaClosureForImpl: options => {
-        evaluations += 1;
-        return maybeDispatchAmaClosureFor({ ...args, ...options });
-      },
-      recoveryOptions: {
-        now: () => minutes * 60_000,
+    const result = await resolveMergeAgentCoexistenceForWatcher({ ...args,
+      maybeDispatchAmaClosureForImpl: options => maybeDispatchAmaClosureFor({ ...args, ...options }),
+      orphanOptions: {
+        now: new Date(Date.UTC(2026, 9, 11, 16, minutes)).toISOString(),
+        hasOwnerImpl: async () => ({ owned: false }),
         pageImpl: async page => pages.push(page),
         requestRereviewImpl: async request => { reviews.push(request); return { triggered: true }; },
       },
     });
-    assert.equal(result.outcome, 'ama-pending');
-    assert.equal(result.amaClosureResult.recoveryWait, true);
-    assert.equal(result.recovery.attempts, 0);
-    assert.equal(result.recovery.blockedSince, undefined);
-    assert.equal(result.recovery.event, undefined);
+    assert.equal(result.outcome, minutes === 61 ? 'recovery-exhausted' : 'ama-pending');
   }
-  assert.equal(evaluations, 4, 'one closure evaluation per tick; no recovery hammer retry');
   assert.deepEqual(payloads, []);
-  assert.deepEqual(pages, []);
-  assert.deepEqual(reviews, []);
+  assert.equal(pages.length, 1);
+  assert.equal(reviews.length, 2);
+  assert.ok(reviews.every(request => request.targetRevisionRef === 'H1'));
 });
 
 // STALECLOSER-03: the real wake against a stubbed watcher, so the dedupe and

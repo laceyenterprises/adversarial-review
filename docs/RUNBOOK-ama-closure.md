@@ -1798,18 +1798,26 @@ the eligibility-miss recovery routing. Timeout handoffs normalize the live
 GitHub label objects into names before applying it.
 Generic `operator-approved`, stale label events and read outages do not activate
 this route. This is a recovery dispatch, not AMA merge eligibility or a waiver of
-the primary-change predicate. REMORPHAN-01 automatically dispatches a repair
-HAM after six consecutive ownerless ticks on an open, non-draft, unheld head.
-Its primary-line edits require the HAMINTENT-03 per-finding
-`Reversal-Authorized-By` contract or restoration of the reverted lines.
-The same watchdog covers `no-progress` / `remediation-stopped` remediation,
-blocking findings with explicit valid round/max-round evidence below max and no
-pending job, and closer-authored stale heads (STALECLOSER-01). `operator-stop`
-and every other unrecognized stop code forbid recovery; a missing plan does not
-default to below max. A scoped `merge-agent-requested` retains its operator
-fallback precedence, including on heads whose watchdog budget is exhausted.
-A closer head that HAM cannot re-certify gets one exact-head re-review.
-Admission never waives CI, primary-change, identity, policy or merge leases.
+the primary-change predicate. OWNERPROOF-01 replaces REMORPHAN-01's tick and
+reason admission with a PR-wide elapsed absence-of-owner clock. On an open,
+non-draft, unheld PR, a live reviewer/remediator process, a nonterminal launch in
+the session ledger, or a current-head review request younger than the bound
+proves ownership. Queued jobs, leases, refusal reasons and unreadable ledger
+results alone do not. A proven owner clears the clock; head movement does not.
+After 15 minutes (`OWNERPROOF_IDLE_MINUTES` accepts a positive override), request
+current-head review when no authoritative review exists, otherwise request HAM
+repair. Historical stops and retry counters do not prevent that dispatch.
+Each external action reserves one of two per-head attempts before launch;
+refusals, exceptions and missing receipts still consume the attempt. The next
+ownerless observation pages with both durable outcomes, once delivery succeeds.
+Pending/failed review rows visit this watchdog before ordinary retry admission;
+posted rows visit it through closure orchestration. A daemon merge completed on
+this tick settles as terminal before the watchdog, even if the earlier PR read
+was OPEN. A scoped `merge-agent-requested` retains operator fallback precedence.
+HAM keeps quota admission, operator holds, merge leases and all live merge
+predicates. Its primary-line edits require HAMINTENT-03 per-finding
+`Reversal-Authorized-By` trailers or restoration of reverted lines. See the
+[watchdog data model](data-model/orphan-watchdog.md) for migration and evidence.
 
 LEASEDEFER-01 lets the closure orchestrator request an immediate
 `system-orphan-head-review:<headSha>` for a recognized closer-trailer tip when
@@ -1822,13 +1830,14 @@ ordinary retry and the bounded watchdog. Hard refusals are classified first:
 labels, terminal PRs, disallowed risk classes and branch-protection/fast-merge
 failures retain `needsOperator` routing without requesting review. The watcher-owned
 `duplicate-family-unresolved` census hold retains its 30-second automatic retry.
-The leaf and watchdog share the durable per-head `heads.rereview` reservation
-and lock, set before attempting the request. Failed current-head review rows
+The leaf retains the durable per-head `heads.rereview` guard and lock, set
+before attempting the request. OWNERPROOF-01 instead uses its shared
+two-attempt review/HAM budget. Failed current-head review rows
 never reset through this leaf. Only a triggered request, or a returned row
 with the exact `system-orphan-head-review:<head>` marker and revision, returns `closer-head-exact-review-requested`, mapped to
 `ama-pending` while the watcher owns that review. A refused request falls through
-to REMORPHAN-01 with its existing per-head attempts/ticks and SEV1 exhaustion or
-ownership-uncertainty page; refusal never creates an unconditional wait.
+to OWNERPROOF-01 with its PR-wide idle clock, two per-head attempts and
+exhaustion page; refusal never creates an unconditional wait.
 A closer-trailer tip can arm stale-head HAM resume after a rebase breaks the
 closer-only chain only after an authoritative live-review probe finds no review
 on the new head. Without chain proof or authoritative reviewer identity, resume
@@ -1840,7 +1849,8 @@ additional live-review/commit/certificate probes. This admits repair only: the t
 `reviewed-head` binding before merge.
 
 STALECLOSER-03 shares `closerAuthoredStaleEligible` across the closer, eligible
-hammer wake and orphan watchdog (also exposed to agent-os rescue). A proven
+hammer wake (also exposed to agent-os rescue). OWNERPROOF-01 does not require
+closer-only ancestry for recovery dispatch. A proven
 closer-only chain may carry a settled clean reviewed verdict to its current
 head. Exact-head pending CI or unknown mergeability yields `retry`; green CI
 and `MERGEABLE` yields `eligible`; resolved conflicts are hard misses and cannot
@@ -1852,50 +1862,29 @@ failures warn without changing authority. See the
 [hammer retry ledger](data-model/hammer-retry-cap.md) and
 [carried-verdict audit](data-model/closer-authored-stale.md) for durable fields.
 
-Across-head live launch records and pending reviewer/remediator queues retain
-ownership. A closer `dispatching` intent without a launch identity proves
-ownership only while the existing closer lease/PID/age checks report a live
-launch, including the narrow pre-lease write window. Interrupted or stale
-intents at any head enter uncertainty and page rather than resetting streaks
-forever. Their unresolved reservations stay charged. `primary-change-unknown`
-also enters uncertainty; unreadable reversal evidence never admits a repair HAM.
-Launch terminality shares the closer capacity classifier, including
-operator triage and reaped statuses; terminal rekey-successor ancestry releases
-obsolete source records. Unreadable, corrupt or missing launch evidence holds
-dispatch and pages SEV1 after six consecutive uncertain ticks. Ownership probes
-use PR-filtered settled directory listings and the coexistence timeout, with
-synchronous ledger subprocesses bounded by the remaining probe budget.
-Two settled attempts per head exhaust into one durable SEV1 page with bounded
-reason, stop, round and last-attempt summaries. Explicit pre-launch live-owner
-refusals and `gate-read-failed` refund their reservation. Cancellation before
-dispatch starts also refunds. Exceptions after dispatch starts, including
-operation timeouts, transient GitHub errors and aborts, preserve the charged
-reservation until durable launch evidence resolves admission. An interrupted
-outcome-unknown reservation is reconciled
-against same-head launch identity plus `dispatchedAt` or `lastAttemptedAt`
-evidence before the live-owner return or another attempt. Receipt comparisons
-accept the reservation's whole second, including receipts retained by later
-`no-dispatch` writes; uncertainty never authorizes a duplicate. Page enqueue
-failures are persisted and retried without
-throwing out of coexistence. State and a nonblocking process lock live under
+Across-head launch records prove ownership only through a nonterminal session
+ledger status. A `dispatching` intent without a launch ID is uncertain; queued
+reviewer/remediator records alone are not live ownership. Launch terminality
+shares the closer capacity classifier, including operator triage and reaped
+statuses. Unreadable, corrupt or missing launch evidence advances the same idle
+clock as an absent owner. Ownership probes use PR-filtered settled directory
+listings and the coexistence timeout; synchronous ledger subprocesses are
+bounded by the remaining probe budget. Immutable terminal results are cached.
+Every recovery writes an `outcome-unknown` entry before the external call and
+settles it with bounded reason, action, timestamp and launch/review-request
+results. There are no refusal or exception refunds. Legacy missing outcomes
+remain explicit unknown summaries. Page enqueue failures retry without another
+launch. SQLite state and a nonblocking flock live under
 `data/follow-up-jobs/orphan-watchdog`; restarts preserve budgets and page guards.
-Filesystem, flock, SQLite and malformed-evidence failures are caught, logged and
-paged as `ama.orphan_recovery.store-error`, returning `ama-pending` with
-`skipMergeAgent: true` even on ineligible ticks that open an existing store.
-Pager failure is logged and retains that hold. Store-error and ownership-uncertain
-pages use deterministic repo/PR/head outbox IDs, including across guard-write
-crashes. Empty head observations do not create rows or reset other heads.
-Eligible orphan observations take precedence over ordinary automated recovery
-and comment-only CI handling throughout the grace period and after exhaustion.
-The exhausted head stays held for operator action; a new head gets its own
-budget, while returning to an old head preserves its budget. Scoped operator
-merge-agent fallback still precedes the watchdog.
-Orphan admission widens covered primary-repair/closer-head routing after the
-ownerless grace, but pending-CI-only misses keep the mechanical validate-and-click
-closer instead of a terminal-remediation HAM. Recovery dispatch runs inline even
-when ordinary HAM dispatch uses the background queue, so its result can be
-accounted for. Unsettled background queue results are neutral watchdog
-observations and preserve the eligible tick streak. See
+Filesystem, flock, SQLite and malformed-evidence failures log and page through
+`ama.orphan_recovery.store-error`, retaining `ama-pending` and `skipMergeAgent`.
+The watchdog precedes ordinary automated recovery and comment-only CI handling
+throughout grace and exhaustion. A new head gets a fresh attempt budget, while
+returning to an old head preserves its budget; the PR-wide idle clock survives
+both. Scoped operator merge-agent fallback keeps precedence. Recovery dispatch
+runs inline even when ordinary HAM dispatch uses the background queue, including
+pending-CI-only ownerless heads, so the watchdog records its outcome. HAM must
+still satisfy all ordinary merge gates. See
 [data-model/orphan-watchdog.md](data-model/orphan-watchdog.md), the legacy
 [refusal store](data-model/ham-primary-change-refusals.md) (no production writer),
 and [data-model/ham-finding-disputes.md](data-model/ham-finding-disputes.md).
@@ -2394,17 +2383,15 @@ HAM finding authority is scoped per reviewer family on the same reviewed head. A
 
 ### Orphan watchdog evidence boundaries
 
-Stale-only observations prove closer-authored identity before probing ownership;
-ordinary externally pushed stale heads fall through to exact-head review recovery.
-Unreadable queue files hold only the PR identified by their filename prefix;
-repository matching is case-insensitive. Historical missing ledger rows expire
-at the closer pending-lease reclaim age, except while reconciling a reservation.
-Ledger probes use the dispatch record's HQ root and cache immutable terminal
-results (up to 1,000 entries). Identity and re-review request errors retain a
-pending hold without consuming the store-error alert slot. Uncovered or persistently
-owned primary-change refusals page after six observations, without authorizing
-HAM dispatch. Reservations persist the expected dispatch-record head so reviewed
-head receipts cannot refund an already launched attempt.
+OWNERPROOF-01 does not classify refusal reasons or require closer-authored
+ancestry. Current-head authoritative review evidence chooses review versus HAM
+repair after the elapsed bound. Unreadable queue files are scoped by PR filename
+prefix; repository matching is case-insensitive. Ledger probes use the record's
+HQ root and cache immutable terminal results (up to 1,000 entries). Missing or
+unreadable ledger rows remain uncertain, without proving a live owner or
+refunding an attempt. Review-request errors consume the same bounded attempt as
+HAM errors. Only a proven owner clears the PR-wide idle clock.
+
 ### LEASEPARK-01: certified-head contention queue
 
 Lease acquisition timeouts and pending-required-check deferrals are written as
@@ -2605,8 +2592,9 @@ lease retryable before release even if the audit append fails (hard-block exit 2
 reports that write failure). The CI-green wake resumes the normal leased
 verify-and-merge lane without minting a review. Each new closer head has its own
 dispatch budget; the lifetime ceiling bounds repeated closer pushes across heads. The
-orphan watchdog covers `blocking-findings-unknown` only beside `stale-review-head`
-and the same bounded, complete closer ancestry proof; all other refusal reasons retain their existing rules.
+OWNERPROOF-01 watchdog uses live ownership and elapsed time independently of
+refusal reasons or closer ancestry. After the bound, absent current-head review
+evidence requests review; present evidence requests HAM repair.
 Local Git provenance retains its trailer fallback because it has no GitHub-linked
 identity. Remote commit probes require linked closer identity. This existing
 local trust boundary is tracked by LAC-1848; a trailer alone never grants merge

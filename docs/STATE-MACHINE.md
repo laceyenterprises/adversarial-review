@@ -624,7 +624,7 @@ first proves no held PR-wide closer lease and no queued/running or uncertain
 launch ownership. Live/uncertain owners retain retry/watchdog routing.
 Hard refusals retain `needsOperator`; the watcher-owned duplicate-family census
 hold retains its 30-second retry. Refused requests continue to the
-bounded REMORPHAN-01 watchdog and its per-head SEV1 exhaustion/uncertainty page.
+elapsed OWNERPROOF-01 watchdog and its per-head two-attempt exhaustion page.
 A closer tip without a closer-only chain may admit a HAM repair attempt only
 after an authoritative probe proves no live review on the new head. Unknown
 reviewer identity without chain proof leaves resume off. In either case,
@@ -792,11 +792,13 @@ Key control points:
   refusals hold merge with `needsOperator: true`; an attributable current-head
   `merge-agent-requested` event can dispatch the existing operator recovery lane.
   The closer returns `primary-change-repair-required`; the daemon returns
-  `primary-change-needs-operator` before the closer. REMORPHAN-01 admits repair
-  after six eligible ownerless observations and pages after two settled attempts.
-  Unreadable primary-change evidence and stale interrupted closer intents use
-  the six-observation uncertainty lane. This watchdog precedes ordinary automated
-  recovery and comment-only CI handling while observing or exhausted; scoped
+  `primary-change-needs-operator` before the closer. OWNERPROOF-01 admits repair
+  after 15 minutes without proven ownership (`OWNERPROOF_IDLE_MINUTES` overrides
+  the bound), with a PR-wide clock that survives head changes. Refused or thrown
+  launches consume the same two per-head attempts as successful dispatches; the
+  next ownerless observation pages with both outcomes. Unreadable ledger evidence
+  advances the idle clock; proven live ownership clears it. This watchdog precedes
+  ordinary automated recovery and comment-only CI handling while observing or exhausted; scoped
   operator merge-agent fallback keeps precedence. Store failures retain a held
   `ama-pending` result and page through the independent alert outbox. Disputes
   no longer page or spend the review cap.

@@ -1,7 +1,8 @@
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
-import { orphanDispatchReasonsCovered } from './orphan-watchdog.mjs';
+import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
+import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
 import { effectiveCloserCap, launchHoldsCloserCapacity, warnCloserFloor } from './closure-capacity.mjs';
 import { automatedHammerReasonsCovered } from './automated-recovery.mjs';
@@ -4111,11 +4112,23 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
+    && dispatchContext.orphanRecovery.headSha === prMetadata?.headSha;
+  if (ownerProofRecovery) {
+    if (!prMetadata.isOpen || prMetadata.isDraft || isOperatorHeld(prMetadata.labels)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'ownerless-live-pr-held-or-terminal' });
+    }
+    const owner = await probeOrphanOwnership({ rootDir: dispatchContext.rootDir,
+      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha, signal, logger,
+      readStatusImpl: readLaunchRequestStatusImpl });
+    if (owner.owned) return noAmaDispatch({ dispatched: false, reason: 'live-run-in-flight' });
+  }
+
   // CAPROUTE-01: evidence holds must be probed even when ordinary eligibility
   // would return early. Keep this result for later reconciliation in this pass.
   let evidenceStopHold = null;
   let hammerStopRelease = null;
-  if (prMetadata?.isOpen === true) {
+  if (!ownerProofRecovery && prMetadata?.isOpen === true) {
     const stop = readHammerStopForHead({
       hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
       repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha,
@@ -4190,14 +4203,11 @@ export async function maybeDispatchAmaCloser({
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
   const primaryReadRepair = verdict.reasons.includes('primary-change-read-failed')
     && verdict.reasons.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
-  if (verdict.reasons.includes('primary-change-read-failed') && !primaryReadRepair) {
+  if (!ownerProofRecovery && verdict.reasons.includes('primary-change-read-failed') && !primaryReadRepair) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
-  const orphanAdmit = Boolean(dispatchContext?.orphanRecovery)
-    && orphanDispatchReasonsCovered(verdict.reasons.filter(reason => !reason.startsWith('operator-label-required:')))
-    && (!verdict.reasons.includes('stale-review-head')
-      || (dispatchContext.orphanRecovery.closerHead === true && dispatchContext.allowStaleReviewHeadHammerResume === true));
+  const orphanAdmit = ownerProofRecovery;
   if (!orphanAdmit && verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
     const missingEvidence = primaryChangeExactReviewEvidence(verdict.trace);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
@@ -4234,7 +4244,7 @@ export async function maybeDispatchAmaCloser({
     && parkRepairReasons.length > 0
     && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
   if (!resumeCertifiedPark && (!verdict.eligible || eligibleHammerRouteReasons.length > 0)) {
-    if (!verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark) {
+    if (!ownerProofRecovery && !verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark) {
       return noAmaDispatch({
         dispatched: false,
         skipMergeAgent: true,
@@ -4264,7 +4274,7 @@ export async function maybeDispatchAmaCloser({
     const routeReasons = (verdict.eligible ? eligibleHammerRouteReasons
       : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed')
         : verdict.reasons).filter(reason => !reason.startsWith('operator-label-required:'));
-    if (isHammerRouteStructurallyBlocked(routeReasons)) {
+    if (!ownerProofRecovery && isHammerRouteStructurallyBlocked(routeReasons)) {
       return noAmaDispatch({
         dispatched: false,
         skipMergeAgent: true,
@@ -4278,7 +4288,7 @@ export async function maybeDispatchAmaCloser({
     // closer-authored, because policy never re-reviews that head; on any other
     // head the exact-head re-review stays the owner. The hammer-owner routes keep
     // their own final no-merge decision.
-    if (hammerOwnerRouteOf(dispatchContext) === null
+    if (!ownerProofRecovery && hammerOwnerRouteOf(dispatchContext) === null
       && (!verdict.reasons.includes('stale-review-head') || dispatchContext?.liveHeadCloserAuthored === true)) {
       const hammerStopHold = evidenceStopHold || await evaluateHammerStopHoldImpl({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
@@ -4344,7 +4354,7 @@ export async function maybeDispatchAmaCloser({
     // Ordinary recovery widens worker-class admission only. Orphan recovery also
     // admits covered primary-repair/closer-head reasons after its ownerless grace.
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
-    const autoHammer = (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
+    const autoHammer = ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -4539,7 +4549,8 @@ export async function maybeDispatchAmaCloser({
   const existingDispatchIdentity = newerLaunchRecord
     ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
     : reviewedHeadDispatchIdentity;
-  let existingRecord = newerLaunchRecord || reviewedHeadRecord;
+  let existingRecord = ownerProofRecovery ? null : newerLaunchRecord || reviewedHeadRecord;
+  if (ownerProofRecovery) logger?.info?.(`OWNERPROOF-01 setting aside historical closer dispatch and retry state for ${repo} PR ${prNumber}@${prMetadata.headSha}`);
   let existingRecordLeaseIdentity = {
     repo,
     prNumber,
@@ -4561,7 +4572,7 @@ export async function maybeDispatchAmaCloser({
       targetRemediationSha || dispatchRecordHeadSha || reviewedSha,
     )
     : null;
-  let existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
+  let existingLeaseBeforeDispatch = ownerProofRecovery ? null : readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
   let targetLeaseBeforeDispatch = leaseIdentity.headSha !== existingDispatchLeaseIdentity.headSha
     ? readAmaCloserLease(rootDir, leaseIdentity)
     : null;
@@ -4583,7 +4594,7 @@ export async function maybeDispatchAmaCloser({
     && ['merge-lease-timeout', 'required-checks-pending'].includes(parkReason)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const certifiedPark = resumeCertifiedPark && deferredPark;
-  if (certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
+  if (!ownerProofRecovery && certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'current-head-ham-terminal-remediation-needs-operator', needsOperator: true });
   }
@@ -4699,7 +4710,7 @@ export async function maybeDispatchAmaCloser({
       }
     }
   }
-  if (targetLeaseBeforeDispatch) {
+  if (!ownerProofRecovery && targetLeaseBeforeDispatch) {
     if (isReclaimableDispatchedAmaCloserLease(targetLeaseBeforeDispatch, {
       now: dispatchContext.dispatchedAt,
     })) {
@@ -5961,7 +5972,7 @@ export async function maybeDispatchAmaCloser({
   }
 
   if (verdict.eligible && eligibleHammerRouteReasons.length === 0
-    && dispatchContext?.forceHammerAfterDaemonFailure !== true) {
+    && dispatchContext?.forceHammerAfterDaemonFailure !== true && !ownerProofRecovery) {
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
@@ -5972,7 +5983,7 @@ export async function maybeDispatchAmaCloser({
   // A same-PR remediation worker owns the branch. Check before the append-only
   // authority audit, prompt write, and quota probe: no closer attempt exists yet.
   const activeFollowUp = findActiveRemediationJob(rootDir, { repo, prNumber });
-  if (activeFollowUp) {
+  if (activeFollowUp && !ownerProofRecovery) {
     logger.log?.(`[ama-closer] deferred ${repo}#${prNumber}: remediation job ${activeFollowUp.jobId} ${activeFollowUp.status}`);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'active-remediation-job' });
   }
@@ -6037,7 +6048,7 @@ export async function maybeDispatchAmaCloser({
   // authors, then fails loud via a GBI operator alert and suppresses further
   // dispatch. Composes with MSM-01 (hammer-merges-under-lease): this is the
   // safety cap, not a replacement, and it only bounds the re-dispatch count.
-  if (isHammerWorkerClass(workerClass)) {
+  if (isHammerWorkerClass(workerClass) && !ownerProofRecovery) {
     const hammerCapIdentity = { repo, prNumber };
     const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
     const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
@@ -6261,7 +6272,7 @@ export async function maybeDispatchAmaCloser({
     log: logger,
     processKillImpl,
   });
-  const samePrLaunch = activeLaunches.find((record) => record.repo === repo
+  const samePrLaunch = !ownerProofRecovery && activeLaunches.find((record) => record.repo === repo
     && Number(record.prNumber) === Number(prNumber));
   const otherPrLaunches = activeLaunches.filter((record) => record.holdsCapacity === true
     && (record.repo !== repo || Number(record.prNumber) !== Number(prNumber)));
@@ -6351,7 +6362,9 @@ export async function maybeDispatchAmaCloser({
   });
   if (!leaseResult.acquired) {
     const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
-    if (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded') {
+    if ((ownerProofRecovery && (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
+      || Date.parse(dispatchContext.dispatchedAt || new Date().toISOString()) - Date.parse(existingLease?.updatedAt) >= ownerlessBoundMs()))
+      || (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded')) {
       deleteAmaCloserLease(rootDir, leaseIdentity);
       leaseResult = acquireAmaCloserLease({
         rootDir,
@@ -6401,8 +6414,17 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  if (ownerProofRecovery) {
+    const owner = await probeOrphanOwnership({ rootDir, repo, prNumber, headSha: prMetadata.headSha,
+      signal, logger, readStatusImpl: readLaunchRequestStatusImpl });
+    if (owner.owned) {
+      deleteAmaCloserLease(rootDir, leaseIdentity);
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'live-run-in-flight' });
+    }
+  }
+
   // A follow-up can claim between the first queue check and lease acquisition.
-  if (findActiveRemediationJob(rootDir, { repo, prNumber })) {
+  if (!ownerProofRecovery && findActiveRemediationJob(rootDir, { repo, prNumber })) {
     deleteAmaCloserLease(rootDir, leaseIdentity);
     updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
       if (!current) return null;

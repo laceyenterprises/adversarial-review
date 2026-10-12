@@ -1,110 +1,54 @@
 # Data Model - Orphan Watchdog
 
-**Owner:** AMA owner-of-last-resort recovery
+**Owner:** AMA ownerless recovery (OWNERPROOF-01)
 **Store:** `data/follow-up-jobs/orphan-watchdog/<sha256(repo#prNumber)>.db` and sibling `.lock`
 **Source of truth:** `src/ama/orphan-watchdog.mjs`
-**Related schema surface:** `src/ama/orphan-review-request.mjs`
-**Runtime surface:** `src/ama-closure-orchestration.mjs`
+**Runtime surfaces:** `src/ama-closure-orchestration.mjs`, `src/ownerproof-review-recovery.mjs`
 
-## Schema and lifecycle
+Each PR has a SQLite database with a `heads` row per head SHA. A nonblocking
+exclusive flock serializes observations, attempt reservation, dispatch and
+paging. Existing attempt counts survive migration and process restarts.
 
-Each PR has a SQLite database with one `heads` row per observed head SHA. The
-`head` text primary key scopes all budgets and guards. Integer columns default
-to zero: `ticks`, `attempts`, `paged`, `rereview`, `reserved`, `uncertaintyTicks`,
-and `uncertaintyPaged`. Nullable text columns are `evidence` (bounded JSON
-attempt summary or reservation metadata) and `pageError` (last enqueue error,
-limited to 300 characters). Creation uses `CREATE TABLE IF NOT EXISTS`; existing
-databases gain the four reservation/uncertainty columns with idempotent
-`ALTER TABLE` migration. Existing attempt counts are preserved.
+Ownership requires a live current-head reviewer process, a remediation job
+with a live worker process, a PR-scoped launch ID with a nonterminal session
+ledger status, or a current-head pending review request younger than the bound.
+Queued jobs, leases, dispatch receipts and refusal reasons alone do not prove
+ownership. Unreadable ledger evidence is unknown; it advances the same idle
+clock as absence of an owner. A proven owner clears `idleSince`.
 
-A nonblocking exclusive flock on the sibling `.lock` serializes observations,
-reservation, dispatch and page enqueue across watcher processes. Lock contention
-returns pending without consuming a tick or attempt. File descriptors and the
-SQLite connection close on every exit.
+`OWNERLESS_BOUND_MS` defaults to 15 minutes. `OWNERPROOF_IDLE_MINUTES` accepts a
+positive numeric override; invalid values retain the default. `ownership.idleSince` stores
+the first PR-wide observation without a proven owner, across head changes. Poll frequency does not affect
+the bound. Held, draft and terminal PRs do not enter recovery.
 
-Six consecutive eligible ownerless observations reserve an attempt atomically:
-`attempts` increments, `reserved=1`, `ticks=0`, and `evidence` records
-`reservationStartedAt` and `reason=reserved-outcome-unknown` before dispatch.
-Settlement clears `reserved` and records only `dispatched`, a bounded `reason`,
-and `launchRequestId`. Explicit pre-launch refusals (including a live owner or
-gate-read failure) refund the reservation. Cancellation before calling dispatch
-also refunds it. Exceptions after dispatch begins, including aborts, timeouts
-and transient GitHub failures, retain `reserved=1` and the reservation evidence
-for reconciliation; they cannot prove HQ refused admission. No launch is
-authorized by uncertain ownership evidence.
+After the bound, current-head review evidence chooses the next action: request
+review if absent, otherwise request a hammer. Historical dispatch stops and
+retry counters are set aside for this bounded recovery. The hammer and merge
+agent retain their live merge predicates, quota admission and operator holds.
+Pending/failed review rows visit the watchdog before ordinary retry admission;
+posted rows visit it through closure orchestration. Live PR reads guard both
+paths against already merged or closed targets. A daemon merge completed during
+closure settles the PR as terminal before recovery, even when the earlier live
+read still reported OPEN.
 
-After interruption, the next eligible observation reconciles the reservation.
-A same-head record with a launch identity and readable launch status proves
-dispatch when `dispatchedAt` or `lastAttemptedAt` falls in the reservation second
-or later. This accommodates second-truncated receipts and later `no-dispatch`
-writes that retain the receipt fields. Launch reconciliation runs before the
-live-owner return and retains the charged attempt. With neither an owner nor
-uncertain evidence, absence of launch proof refunds it. A live owner
-holds the reservation; unreadable or missing launch evidence retains it and
-enters the uncertainty lane rather than charging another attempt. Malformed
-evidence JSON or a reserved row without a valid reservation timestamp fails
-closed without modifying its attempt budget.
+Before the external action, `attempts` increments and `outcomes` appends an
+`outcome-unknown` record with action and timestamp. Settlement records the
+bounded reason, launch identity, dispatched flag and review-request result.
+Exceptions consume an attempt; missing receipts or refusal strings cannot
+refund it. Attempts do not prove ownership or restart the idle timer. At two attempts, the next
+ownerless observation pages with repo, PR, head and both outcomes. `paged` is set
+only after successful enqueue, allowing delivery failures to retry without
+another launch. Legacy evidence fills missing historical outcomes with explicit
+unknown summaries. `evidence` retains the latest summary for existing readers.
 
-`uncertaintyTicks` counts consecutive uncertain ownership observations. At six,
-`uncertaintyPaged` deduplicates `ama.orphan_recovery.ownership-uncertain` SEV1
-paging while dispatch remains held. A stale `dispatching` record without a
-launch identity is uncertain, using the closer's `isAmaCloserLaunchInProgress`
-lease/PID/age checks to distinguish it from a live launch (including the narrow
-pre-lease write window). It never proves permanent ownership. Unreadable
-primary-change evidence (`primary-change-unknown`) uses this uncertainty lane
-and cannot admit a repair worker. Proven ownership or restored readable
-evidence resets the uncertainty streak. Terminal launch statuses share the
-closer's capacity classification; a terminal rekey successor lease's ancestry
-supersedes obsolete closer records. Dispatch filenames are filtered to the PR
-before reads; cached settled listings and a bounded coexistence probe limit
-fleet-history scans and ledger subprocess time.
+Migration adds a singleton `ownership` clock table, nullable `heads.idleSince`, JSON `outcomes` (default `[]`) and the
+legacy reservation column if absent. Old tick and uncertainty columns remain
+readable but no longer control recovery. The independent closer-head review
+helper retains its historical `rereview` guard; ownerless recovery uses the
+shared two-attempt budget instead.
 
-At two settled attempts, `paged` deduplicates
-`ama.orphan_recovery.exhausted` SEV1 paging. Both page guards are set only after
-successful enqueue. Exhaustion and uncertainty pages also use deterministic
-alert-outbox identities scoped to repo/PR/head, so a crash before updating a
-page guard cannot enqueue a duplicate. Failures persist `pageError` and retry
-on later ticks without another launch. Pages contain bounded reason/round/stop/launch summaries, never
-whole review or job objects. `rereview` reserves the one exact-head review request
-for an uncertifiable closer-authored head before the external request. The
-recovery leaf and watchdog share this row and its lock. Failures and interruption
-retain the reservation; bounded hammer attempts and exhaustion paging retain
-ownership. An already-pending response counts as reviewer ownership only when
-its returned row contains the exact-head orphan request marker and revision.
-Failed review rows already attempted on this head cannot be reset by either path.
-
-Ineligibility or a known owner resets consecutive observation streaks. An
-empty head or unsettled background-dispatch result is neutral: no store write,
-observation, or reset. Head changes reset other heads' streaks, preserving
-attempts and page/re-review guards.
-Operator stop codes other than the explicit `no-progress` / `remediation-stopped`
-allowlist are ineligible. A blocking job with no stop requires explicit valid
-round and max-round evidence; an absent plan grants no below-max admission.
-Scoped operator merge-agent fallback and its lease checks precede watchdog
-recovery in coexistence routing. Eligible orphan observations, including the
-grace period and exhausted heads, precede and hold ordinary automated recovery
-and comment-only CI routing. Exhaustion remains a hold for that head until an
-operator acts or the head changes; returning to an old head retains its budget.
-
-Filesystem, lock, SQLite and evidence failures are contained at the recovery
-boundary. They log a bounded warning, enqueue `ama.orphan_recovery.store-error`
-SEV1 through the independent alert outbox, and return `ama-pending` with
-`skipMergeAgent: true`, including when an ineligible tick opens an existing
-store. The store-error alert identity is deterministic per repo/PR/head.
-Pager failure logs a second warning and keeps the hold. No failed-store path
-falls through to ordinary recovery or merge-agent dispatch.
-
-## Retention and migration
-
-There is no automatic expiry or cleanup of databases, head rows or lock files.
-An operator may archive closed-PR diagnostics. Do not delete an open head's store
-to reset its budget or guards. Returning to an old head retains its budget.
-This replaces automatic observation writes to the legacy
-[HAM primary-change refusal store](ham-primary-change-refusals.md).
-
-
-Reservation `evidence` also records `recordHeadSha`, the expected closer dispatch
-head (which may differ from the live closer-authored head). Together with the
-reservation timestamp, this reconciles a launch receipt without refunding an
-already spent attempt. Legacy reservations without this field continue to match
-the live head and fail closed on uncertain evidence.
+Every recovery emits one `ownerless-recovery` log line containing repo, PR,
+head, elapsed idle minutes, last reason and action. Separate diagnostics record
+that historical stops were set aside. Store failures retain the existing
+store-error page behavior. All tests use fixture state and injected dispatch,
+ledger and pager functions.

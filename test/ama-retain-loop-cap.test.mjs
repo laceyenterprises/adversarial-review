@@ -81,9 +81,8 @@ function coexistenceArgs(rootDir, headSha, amaResult) {
     currentRevisionRef: headSha,
     logger: { warn() {}, log() {}, info() {} },
     maybeDispatchAmaClosureForImpl: async () => amaResult,
-    // This suite exercises ordinary stale-head retain recovery, not a
-    // closer-authored head; the new watchdog identity read must stay offline.
-    orphanOptions: { closerHeadImpl: async () => ({ suppressed: false }) },
+    // Isolate the legacy recovery ledger from elapsed ownerless admission.
+    recoverOrphanImpl: async () => null,
     recoveryOptions: { requestRereviewImpl: async () => ({ triggered: false }), pageImpl: async () => {}, maxAttempts: AMA_RETAIN_LOOP_CAP, stuckDeadlineMs: 1000, now: () => 0 },
   };
 }
@@ -134,7 +133,8 @@ test('coexistence: a NON-not-eligible skipMergeAgent reason never escalates (onl
     };
     for (let i = 0; i < AMA_RETAIN_LOOP_CAP + 3; i += 1) {
       const res = await resolveMergeAgentCoexistenceForWatcher(
-        coexistenceArgs(rootDir, HEAD_A, daemonMerged),
+        { ...coexistenceArgs(rootDir, HEAD_A, daemonMerged),
+          recoverOrphanImpl: () => assert.fail('a completed merge must bypass ownerless recovery') },
       );
       assert.equal(res.outcome, 'pr-terminal', 'daemon-merged terminates without redriving');
     }

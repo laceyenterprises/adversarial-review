@@ -932,7 +932,7 @@ test('watcher never exhausts a real pre-grace comment-only closer across ticks',
     const waiting = await resolveMergeAgentCoexistenceForWatcher(input);
     assert.equal(waiting.outcome, 'ama-pending');
     assert.equal(waiting.amaClosureResult.recoveryWait, 'comment-only-grace');
-    assert.equal(waiting.recovery.attempts, 0);
+    assert.equal(waiting.orphan?.attempts || 0, 0);
   }
   assert.equal(evaluations, 8, 'a grace hold needs only the initial closer evaluation');
   assert.equal(pages, 0);
@@ -1271,4 +1271,19 @@ test('LABELGATE-01: sweep removes superseded and closed receipts, preserving act
   rmSync(`${path}.lock`);
   sweepOperatorLabelHolds({ ...args, closed: true });
   assert.deepEqual(readdirSync(dir), []);
+});
+
+test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not refuse bounded recovery', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ownerproof-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  acquireAmaCloserLease({ rootDir, ...identity, watcherPid: process.pid, now: '2026-07-20T12:00:00Z' });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge' });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'no-dispatch', reason: 'not-eligible', retryCount: 100 }));
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...baseArgs(rootDir, {
+    dispatchContext: { orphanRecovery: { ownerProof: true, headSha: HEAD } },
+  }), ...deps });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(deps.calls.filter(c => c.args.includes('dispatch')).length, 1);
 });

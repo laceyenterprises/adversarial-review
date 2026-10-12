@@ -637,16 +637,20 @@
       "path": "docs/data-model/orphan-watchdog.md",
       "store": "data/follow-up-jobs/orphan-watchdog/<sha256(repo#prNumber)>.db and .lock",
       "schemaSurface": "src/ama/orphan-watchdog.mjs",
-      "relatedSchemaSurfaces": ["src/ama/orphan-review-request.mjs"],
       "relatedSchemaSurfaces": [
+        "src/ama/orphan-review-request.mjs",
         "src/ama-closure-orchestration.mjs",
+        "src/ownerproof-review-recovery.mjs",
         "src/ama/launch-request-status.mjs",
         "src/ama/closer-lease.mjs",
         "src/ama/dispatch-closer.mjs",
         "src/alert-delivery.mjs"
       ],
-      "owner": "AMA owner-of-last-resort recovery",
-      "reservationEvidenceFields": ["reservationStartedAt", "recordHeadSha", "reason"]
+      "owner": "AMA ownerless recovery (OWNERPROOF-01)",
+      "ownershipClock": "ownership.idleSince (singleton id=1; PR-wide across head changes)",
+      "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged"],
+      "attemptOutcomeFields": ["action", "reason", "at", "dispatched", "launchRequestId", "triggered"],
+      "recoveryAttemptLimit": 2
     },
     {
       "id": "ham-primary-change-refusals",

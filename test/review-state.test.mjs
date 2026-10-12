@@ -1545,3 +1545,24 @@ test('HOLDRELEASE-01: incomplete lifecycle observation cannot erase a held snaps
   try { assert.equal(db.prepare('SELECT labels_json FROM reviewed_prs').get().labels_json, '["no-merge-hold"]'); }
   finally { db.close(); }
 });
+
+test('OWNERPROOF-01: bounded recovery re-arms an old pending head and resets spent review attempts', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'ownerproof-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  insertReviewRow(rootDir, { reviewStatus: 'pending', reviewAttempts: 100, revisionRef: 'head' });
+  const result = requestReviewRereview({ rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: 'head', ownerlessRecovery: true, reason: 'system-orphan-head-review:head' });
+  assert.equal(result.triggered, true);
+  assert.equal(result.reviewRow.review_attempts, 0);
+  assert.equal(result.reviewRow.revision_ref, 'head');
+});
+
+test('OWNERPROOF-01: dead reviewing snapshot can be rearmed, but a replacement snapshot cannot', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'ownerproof-dead-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  insertReviewRow(rootDir, { reviewStatus: 'reviewing', reviewerStartedAt: '2026-04-24T12:00:00Z', revisionRef: 'head' });
+  const args = { rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
+    targetRevisionRef: 'head', ownerlessRecovery: true, reason: 'system-orphan-head-review:head' };
+  assert.equal(requestReviewRereview({ ...args, expectedOwnerlessReviewer: { pgid: null, startedAt: 'other' } }).triggered, false);
+  assert.equal(requestReviewRereview({ ...args, expectedOwnerlessReviewer: { pgid: null, startedAt: '2026-04-24T12:00:00Z' } }).triggered, true);
+});

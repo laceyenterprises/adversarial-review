@@ -1,3 +1,4 @@
+import { recoverOwnerlessReview } from './ownerproof-review-recovery.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 // HELDHEAD-01: admit withheld-head recovery without interrupting other subjects.
@@ -792,6 +793,19 @@ export async function processReviewSubject(entry, ctx) {
         String(existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID) !== String(domainId)
       ) {
         return;
+      }
+      try {
+        const loaded = loadConfigCached();
+        const authority = resolveMergeAuthorityConfigFromDomain(
+          loadDomainConfig(ROOT, effectiveDomainId), loaded.getMergeAuthorityConfig(),
+          { fallbackSources: loaded.sources || {} });
+        const ownershipRecovery = await recoverOwnerlessReview({ rootDir: ROOT, repo: repoPath, prNumber,
+          reviewStateRow: existing, domainId: effectiveDomainId, enabled: authority?.enabled,
+          execFileImpl: execFileAsync, logger: console });
+        if (ownershipRecovery?.outcome === 'ama-dispatched') return;
+        existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
+      } catch (error) {
+        console.warn(`[watcher] OWNERPROOF-01 review ownership probe deferred for ${repoPath} PR ${prNumber}: ${error.message}`);
       }
       let holdReleaseId = null;
       let holdObservationFailed = false;

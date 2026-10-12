@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { isOperatorHeld } from './operator-hold-labels.mjs';
 const execFileAsync = promisify(execFile);
 const EMPTY_PR_CLOSE_TIMEOUT_MS = 15_000;
 export const EMPTY_PR_COMMENT = 'Closing this pull request because its diff against the current base is empty; there is no change left to review or merge.';
@@ -19,12 +20,14 @@ export async function closeEmptyPullRequest({ repo, prNumber, headSha,
     const path = `repos/${repo}/pulls/${prNumber}`;
     const pr = await api(path);
     if (pr.state === 'closed') return { closed: false, terminal: true };
-    if (pr.state !== 'open' || pr.head?.sha !== headSha || pr.changed_files !== 0
+    if (pr.state !== 'open' || pr.draft !== false || !Array.isArray(pr.labels) || isOperatorHeld(pr.labels)
+      || pr.head?.sha !== headSha || pr.changed_files !== 0
       || !/^[a-f0-9]{40}$/.test(pr.base?.sha || '')) return { closed: false };
     const diff = await api(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
     if (!Array.isArray(diff.files) || diff.files.length !== 0) return { closed: false };
     const fresh = await api(path);
-    if (fresh.state !== 'open' || fresh.head?.sha !== headSha || fresh.base?.sha !== pr.base.sha) return { closed: false };
+    if (fresh.state !== 'open' || fresh.draft !== false || !Array.isArray(fresh.labels) || isOperatorHeld(fresh.labels)
+      || fresh.head?.sha !== headSha || fresh.base?.sha !== pr.base.sha || fresh.changed_files !== 0) return { closed: false };
     await execFileImpl('gh', ['pr', 'close', String(prNumber), '--repo', repo, '--comment', EMPTY_PR_COMMENT], {
       encoding: 'utf8', timeout,
     });

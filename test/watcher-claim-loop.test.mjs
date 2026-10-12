@@ -56,6 +56,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
 function buildLoaderSource({
   capRouteSource = null,
   subjectHeads = {},
+  subject101Overrides = {},
   subjectRevisionRefs = {},
   followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE,
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
@@ -178,6 +179,7 @@ export async function load(url, context, nextLoad) {
             labels: ['risk:medium'],
             updatedAt: '2026-05-15T12:00:00.000Z',
             headSha: subjectHeadOverrides['101'] || 'sha-happy-101',
+            ...${JSON.stringify(subject101Overrides)},
             terminal: false,
             observedAt: '2026-05-15T12:00:01.000Z',
           },
@@ -2851,29 +2853,41 @@ test('HOLDRELEASE-01: stale drift captures release without routing until cleared
   });
 });
 
-test('HAMCLOSE-02 replay B pollOnce closes an empty remediation head before any claim, once across two ticks', () => {
+for (const [scenario, draft, hold] of [
+  ['eligible', false, null], ['draft', true, null],
+  ['do-not-merge', false, 'do-not-merge'], ['no-merge-hold', false, 'no-merge-hold'],
+  ['merge-agent-skip', false, 'merge-agent-skip'],
+]) test(`HAMCLOSE-02 replay B pollOnce empty head: ${scenario}`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-empty-'));
   try {
     const head = 'b82fde32'.padEnd(40, '0');
     const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
-    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head } }));
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head },
+      subject101Overrides: { isDraft: draft, labels: hold ? [hold] : ['risk:medium'] } }));
     writeFileSync(registerPath, `import { register } from 'node:module'; register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);`);
     const closedPath = path.join(tmp, 'closed');
-    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, afterFirstPoll: `
+    const probePath = path.join(tmp, 'probe');
+    const afterPoll = draft || hold ? `
+      const { existsSync } = await import('node:fs');
+      assert.equal(existsSync(${JSON.stringify(closedPath)}), false);
+      assert.equal(existsSync(${JSON.stringify(probePath)}), false, 'draft/held subjects skip the probe');
+    ` : `
       const { existsSync, readFileSync } = await import('node:fs');
       assert.ok(existsSync(${JSON.stringify(closedPath)}));
       await pollOnce(octokit, pollOptions);
       assert.equal(readFileSync(${JSON.stringify(closedPath)}, 'utf8'), 'one comment\\n');
       assert.ok(!claims.some(claim => claim.prNumber === 101));
       assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
-    ` }));
+    `;
+    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, afterFirstPoll: afterPoll }));
     const env = installGhFixture(tmp);
     writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf 'probe\\n' >> '${probePath}'
   state=open
   [[ ! -f '${closedPath}' ]] || state=closed
-  printf '{"state":"%s","changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n' "$state"
+  printf '{"state":"%s","draft":false,"labels":[],"changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n' "$state"
 elif [[ "\${1:-}" == api && "\${2:-}" == *'/compare/'* ]]; then
   printf '{"files":[]}\\n'
 elif [[ "\${1:-}" == pr && "\${2:-}" == close ]]; then

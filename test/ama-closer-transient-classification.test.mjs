@@ -525,6 +525,8 @@ test('HAMINTENT: the closer holds an intent reversal with scoped operator recove
     execFileImpl: async () => { assert.fail('intent reversal must not dispatch or merge'); },
   });
   assert.equal(result.reason, 'primary-change-repair-required');
+  assert.equal(result.exactHeadReview, undefined, 'builder refusal cannot authorize HAM exact-head recovery');
+  assert.equal(result.missingEvidence.evidence, 'reversal-authorization');
   assert.equal(result.needsOperator, true);
   assert.equal(result.dispatched, false);
   assert.ok(result.reasons.includes('primary-change-reverted'));

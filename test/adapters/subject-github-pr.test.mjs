@@ -11,6 +11,7 @@ import {
   parseSubjectExternalId,
   revisionRefFromPR,
   stateFromSnapshot,
+  normalizePRSnapshot,
 } from '../../src/adapters/subject/github-pr/index.mjs';
 import {
   defaultReviewerRouteFromEnv,
@@ -1228,4 +1229,12 @@ test('REGRESSION 2026-05-18: fresh cache snapshot is reused even when caller kee
   assert.equal(mut.calls.get, 1,
     'fetchContent with the original ref should reuse the fresh snapshot from fetchState');
   assert.equal(diffCalls, 1);
+});
+
+test('github-pr subject draft state survives REST and adapter snapshots', () => {
+  for (const field of ['draft', 'isDraft']) for (const draft of [true, false]) {
+    const snapshot = normalizePRSnapshot(fixture.repo, { ...fixture.pulls[0], [field]: draft });
+    assert.equal(stateFromSnapshot(snapshot).isDraft, draft);
+  }
+  assert.equal(stateFromSnapshot(normalizePRSnapshot(fixture.repo, fixture.pulls[0])).isDraft, undefined);
 });

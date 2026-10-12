@@ -1201,7 +1201,8 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID) {
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && !isOperatorHeld(prLabelNames)
+        && subject.isDraft !== true && subject.draft !== true) {
         const emptyClose = await closeEmptyPullRequest({ repo: repoPath, prNumber,
           headSha: subject.headSha, execFileImpl: execFileAsync });
         if (emptyClose.closed || emptyClose.terminal) return;

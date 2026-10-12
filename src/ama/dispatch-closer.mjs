@@ -4220,11 +4220,12 @@ export async function maybeDispatchAmaCloser({
   }
   const orphanAdmit = ownerProofRecovery;
   if (!orphanAdmit && verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
-    const missingEvidence = verdict.trace?.primaryChange?.missingEvidence
-      || primaryChangeExactReviewEvidence(verdict.trace);
+    const exactReviewEvidence = primaryChangeExactReviewEvidence(verdict.trace);
+    const missingEvidence = verdict.trace?.primaryChange?.missingEvidence || exactReviewEvidence;
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true,
-      ...(missingEvidence ? { missingEvidence, exactHeadReview: true } : {}) });
+      ...(missingEvidence ? { missingEvidence } : {}),
+      ...(exactReviewEvidence ? { exactHeadReview: true } : {}) });
   }
   const reviewHandoffLease = dispatchContext?.repo && prMetadata?.headSha
     ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, {

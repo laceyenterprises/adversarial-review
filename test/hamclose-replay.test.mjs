@@ -98,19 +98,25 @@ test('HAMCLOSE-02 replay B: empty PR closes once; delivered ceiling transfers a 
   const insert = (n, posted) => db.prepare(`INSERT INTO reviewer_passes(pass_id,repo,pr_number,attempt_number,reviewer_class,pass_kind,
     started_at,ended_at,status,head_sha,gh_comment_id) VALUES (?,?,8143,?,'gemini','rereview',
     '2026-10-12T04:44:00Z','2026-10-12T04:45:00Z',?,?,?)`).run(n, repo, n, posted ? 'completed' : 'failed', old, posted ? `PRR-${n}` : null);
-  for (const pass of recorded.passes.filter(pass => ['first-pass', 'rereview'].includes(pass.pass_kind))) {
+  for (const [index, pass] of recorded.passes.entries()) {
     db.prepare(`INSERT INTO reviewer_passes(pass_id,repo,pr_number,attempt_number,reviewer_class,pass_kind,
       started_at,ended_at,status,head_sha,gh_comment_id) VALUES (?,?,8143,?,'gemini',?,?,?,?,?,?)`)
-      .run(pass.attempt_number, repo, pass.attempt_number, pass.pass_kind, pass.started_at,
+      .run(10 + index, repo, pass.attempt_number, pass.pass_kind, pass.started_at,
         pass.ended_at, pass.status, pass.head_sha, pass.gh_comment_id);
   }
   assert.equal(recorded.passes.filter(pass => pass.pass_kind === 'rereview' && pass.status === 'completed' && !pass.gh_comment_id).length, 3);
   assert.equal(postedReviewCeilingReached({ db, repo, prNumber: 8143, ceiling: 3 }), false);
+  // The later remediation comment must never become the restored review.
+  const recordedRow = db.prepare('SELECT * FROM reviewed_prs').get();
+  assert.equal(routeCappedReviewToClosure({ db, repo, prNumber: 8143, headSha, row: recordedRow, ceiling: 1 }), true);
+  const restored = db.prepare('SELECT * FROM reviewed_prs').get();
+  assert.equal(restored.reviewer_head_sha, old);
+  assert.equal(restored.posted_at, recorded.passes[0].ended_at);
   let closed = false, comments = 0;
   const base = 'a'.repeat(40);
   const execFileImpl = async (_cmd, args) => {
     if (args[0] === 'api') return { stdout: JSON.stringify(args[1].includes('/compare/') ? { files: [] }
-      : { state: closed ? 'closed' : 'open', changed_files: 0, head: { sha: headSha }, base: { sha: base } }) };
+      : { state: closed ? 'closed' : 'open', draft: false, labels: [], changed_files: 0, head: { sha: headSha }, base: { sha: base } }) };
     assert.equal(args[0], 'pr'); assert.equal(args.at(-1), EMPTY_PR_COMMENT); closed = true; comments++;
     return { stdout: '' };
   };
@@ -200,3 +206,15 @@ for (const status of ['succeeded', 'failed', 'cancelled', 'completed', 'terminal
     assert.equal(drained.stopped, 1);
   });
 }
+
+test('capped routing refuses posted passes without any usable reviewed head', t => {
+  const db = openReviewStateDb(root(t)); ensureReviewStateSchema(db); t.after(() => db.close());
+  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status)
+    VALUES (?,8143,'2026-10-12T04:45:00Z','gemini','pending')`).run(repo);
+  db.prepare(`INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,pass_kind,
+    started_at,ended_at,status,head_sha,gh_comment_id) VALUES (?,8143,1,'gemini','first-pass',
+    '2026-10-12T04:44:00Z','2026-10-12T04:45:00Z','completed',NULL,'posted-null-head')`).run(repo);
+  const row = db.prepare('SELECT * FROM reviewed_prs').get();
+  assert.equal(routeCappedReviewToClosure({ db, repo, prNumber: 8143, headSha: 'a'.repeat(40), row, ceiling: 1 }), false);
+  assert.deepEqual(db.prepare('SELECT * FROM reviewed_prs').get(), row);
+});

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { hammerAttestationChain, fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
@@ -225,7 +226,7 @@ test('HAMCLOSE-01 exhaustive open non-held ownership cross product uses real eli
   assert.equal(combinations, 17_280);
 });
 
-test('HAMCLOSE-02 every primary evidence × ceiling × handoff/drain × diff combination has one owner', () => {
+test('HAMCLOSE-02 every primary evidence × ceiling × handoff/drain × diff combination has one owner', async () => {
   const preserved = { headSha: reviewed, hasHammerCommits: true, primaryHead: hammer, mergeBase: next,
     primaryFiles: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' }],
     finalFiles: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' }] };
@@ -237,7 +238,12 @@ test('HAMCLOSE-02 every primary evidence × ceiling × handoff/drain × diff com
     review: { commit_id: hammer, node_id: 'PRR_matrix', user: { login: 'lacey-claude-reviewer[bot]' },
       state: 'CHANGES_REQUESTED', body: '## Blocking issues\n- **Undo**\n  - **File:** `src/a.mjs`\n  - **Lines:** `1`\n  - **Problem:** wrong\n  - **Recommended fix:** undo\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' },
   }] };
-  const rebased = JSON.parse(readFileSync(new URL('./fixtures/hamclose-02/primary-change-context.json', import.meta.url)));
+  const responses = JSON.parse(readFileSync(new URL('./fixtures/hamclose-02/history.json', import.meta.url)));
+  const headSha = 'aa7001ca2f07a3c0a86ac955c21b2d36e6bf9c90';
+  const rebased = await fetchPrimaryChange({ repo: 'laceyenterprises/agent-os', prNumber: 8132, headSha,
+    get: async path => { assert.ok(Object.hasOwn(responses, path), path); return structuredClone(responses[path]); } },
+  { fetchCiCostImpl: async () => ({ headSha, ok: true }) });
+  assert.equal(rebased.reversalAuthorizations[0].originalAuthorization.rebased, true);
   const evidence = [{ hasHammerCommits: false, headSha: reviewed }, reversal, rebased,
     { ...preserved, finalFiles: [] }];
   let combinations = 0;
@@ -248,8 +254,9 @@ test('HAMCLOSE-02 every primary evidence × ceiling × handoff/drain × diff com
           const input = { reviewState: { ...clean, headSha: primaryChange.headSha }, currentHead: primaryChange.headSha, primaryChange,
             reviewCeilingReached, lease, followUpJob, diffEmpty };
           const result = decideClosureOwner(input);
-          assert.ok(['daemon-merge', 'page', 'close', 'follow-up-drain'].includes(result.owner));
-          assert.equal(typeof result.owner, 'string');
+          const expected = diffEmpty ? 'close' : primaryChange === evidence[3] ? 'page'
+            : followUpJob.status === 'pending' ? 'follow-up-drain' : 'daemon-merge';
+          assert.equal(result.owner, expected, JSON.stringify({ reviewCeilingReached, lease, followUpJob, diffEmpty }));
           assert.equal(classifyClosureOwnership(input).closureOwner.owner, result.owner);
           if (diffEmpty) assert.equal(result.owner, 'close');
           else if (primaryChange === evidence[3]) assert.equal(result.owner, 'page');

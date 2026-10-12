@@ -26,6 +26,7 @@ export function routeCappedReviewToClosure({ db, repo, prNumber, headSha, row, c
     || !postedReviewCeilingReached({ db, repo, prNumber, ceiling })) return false;
   const posted = db.prepare(`SELECT head_sha, ended_at FROM reviewer_passes
     WHERE repo=? AND pr_number=? AND status='completed'
+    AND pass_kind IN ('first-pass','rereview') AND head_sha IS NOT NULL
     AND gh_comment_id IS NOT NULL AND gh_comment_id<>''
     ORDER BY ended_at DESC, pass_id DESC LIMIT 1`).get(repo, prNumber);
   if (!posted || posted.head_sha === headSha) return false;

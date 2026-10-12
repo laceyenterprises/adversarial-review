@@ -2396,6 +2396,13 @@ async function dispatchAmaClosureFor({
       || String(reason).startsWith('label-'));
     if (hardReason) result = { ...result, needsOperator: true, operatorReason: `not-eligible:${hardReason}` };
   }
+
+  const closerRecovery = await recoverStrandedCloserHeadImpl({ result: { ...result, hamTerminalRemediationValidated },
+    closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
+    prNumber, headSha: currentPrHeadSha, reviewStateRow, labels: labelNames || [], signal,
+    timeoutMs: operationTimeoutMs, logger });
+  if (closerRecovery) return withAmaDispatchMetadata(closerRecovery, { amaEnabled: true });
+
   if (result?.needsOperator && result?.reason === 'primary-change-repair-required') {
     try {
       await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
@@ -2404,12 +2411,6 @@ async function dispatchAmaClosureFor({
     if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: result.reason };
     return withAmaDispatchMetadata(result, { amaEnabled: true });
   }
-
-  const closerRecovery = await recoverStrandedCloserHeadImpl({ result: { ...result, hamTerminalRemediationValidated },
-    closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
-    prNumber, headSha: currentPrHeadSha, reviewStateRow, labels: labelNames || [], signal,
-    timeoutMs: operationTimeoutMs, logger });
-  if (closerRecovery) return withAmaDispatchMetadata(closerRecovery, { amaEnabled: true });
 
   // CIDEDUPE-01: the closer handed this PR to the daemon, but the daemon declined
   // it this tick. Never silent: log the daemon's reason, count it per head, and

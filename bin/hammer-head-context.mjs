@@ -11,9 +11,13 @@ const baseRef = process.env.HAM_BASE_HEAD ? (baseArg === '--pr' ? 'main' : baseA
 })).stdout.trim() : baseArg;
 if (!baseRef) throw new Error('hammer PR base is missing');
 const comments = [];
+const prNumber = process.env.HAM_PR_NUMBER || (baseArg === '--pr' ? prUrl.match(/\/pull\/(\d+)(?:[/?#]|$)/)?.[1] : undefined);
+if (process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead && !prNumber) {
+  throw new Error('hammer PR number is missing; supply a PR URL or HAM_PR_NUMBER');
+}
 for (let page = 1; process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead; page++) {
   const batch = JSON.parse((await execGhWithRetry({ args: ['api',
-    `repos/${repo}/issues/${process.env.HAM_PR_NUMBER}/comments?per_page=100&page=${page}`], timeoutMs: 15000 })).stdout);
+    `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`], timeoutMs: 15000 })).stdout);
   comments.push(...batch);
   if (batch.length < 100) break;
 }

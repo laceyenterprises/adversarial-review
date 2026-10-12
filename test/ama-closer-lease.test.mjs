@@ -22,6 +22,17 @@ const IDENTITY = Object.freeze({
   headSha: 'abc12345abc12345abc12345abc12345abc12345',
 });
 
+test('review handoff reacquires a handed-to-review lease', t => {
+  const rootDir = freshRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({ rootDir, ...IDENTITY, watcherPid: 4242 });
+  updateAmaCloserLease({ rootDir, ...IDENTITY, status: 'handed-to-review' });
+  const result = acquireAmaCloserLease({ rootDir, ...IDENTITY, watcherPid: 4243, fromReviewHandoff: true });
+  assert.equal(result.acquired, true);
+  assert.equal(result.lease.watcherPid, 4243);
+  assert.equal(readAmaCloserLease(rootDir, IDENTITY).status, 'pending');
+});
+
 // ---------------------------------------------------------------------------
 // Test 1 — first acquire on a fresh (repo, pr, head) → acquired:true.
 // ---------------------------------------------------------------------------

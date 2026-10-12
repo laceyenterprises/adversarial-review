@@ -95,3 +95,17 @@ test('HAMCLOSE-01 earlier App-attested starting base requires only authenticated
   assert.equal(f.calls().length, 1);
   assert.match(f.calls()[0][1], /issues\/1\/comments/);
 });
+
+test('head context derives the comment PR number from its explicit URL without HAM_PR_NUMBER', async t => {
+  const f = fixture(t, 'spoof');
+  const result = JSON.parse((await f.run(undefined, { HAM_BASE_HEAD: 'earlier', HAM_PR_NUMBER: '' })).stdout);
+  assert.equal(result.proof, 'hammer-app-attestation-chain');
+  assert.equal(f.calls().length, 1);
+  assert.match(f.calls()[0][1], /issues\/1\/comments/);
+});
+
+test('head context refuses a missing comment PR number before making an API request', async t => {
+  const f = fixture(t, 'success');
+  await assert.rejects(f.run(['release'], { HAM_BASE_HEAD: 'earlier', HAM_PR_NUMBER: '' }), /hammer PR number is missing/);
+  assert.equal(f.calls().length, 0);
+});

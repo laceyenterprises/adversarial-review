@@ -397,7 +397,7 @@ export function acquireAmaCloserLease({
         return { acquired: false, leasePath, lease: existingLease, existingLease };
       }
       const handed = readLeaseFile(leasePath);
-      if (handed?.status === HANDED_TO_REVIEW) rmSync(leasePath);
+      if (handed?.status === HANDED_TO_REVIEW) rmSync(leasePath, { force: true });
       return acquireAmaCloserLease({ rootDir, repo, prNumber, headSha, watcherPid, dispatchTimeoutMs, host, now });
     } finally { closeSync(fd); }
   }

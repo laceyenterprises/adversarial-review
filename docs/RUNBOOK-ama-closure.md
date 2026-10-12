@@ -1961,8 +1961,12 @@ one of:
    merges require their second parent to be reachable from the base as well.
    An exact-head hammer App audit does not authenticate intermediate commits.
    Git-pushed App commits without verified signatures cannot use this range
-   waiver; enabling them requires a signing mechanism whose commits GitHub
-   verifies, or an exact-head review through the existing recovery path.
+   waiver; autonomous publication requires a signing mechanism whose commits
+   GitHub verifies throughout the unreviewed range, including after rebases
+   and conflict repair. An operator can instead request an exact-head review
+   through `retrigger-review --exact-head-now`; the resulting review does not
+   waive any other merge gate. This is not an automatic recovery performed by
+   a hammer that has failed ancestry validation.
    `bin/hammer-head-context.mjs` accepts either a base ref or `--pr <PR_URL>`;
    the latter discovers the PR base through the shared `execGhWithRetry` helper.
    Both that helper and the daemon's exact-head range collector retry each
@@ -1995,6 +1999,29 @@ and a hard dependency on the HAM remediation path being healthy. Operators who
 want the prior behavior (direct-close on `Comment only` regardless of
 non-blocking findings) can set `strict_non_blocking_remediation: false` in
 `config.local.yaml`; the gate then reverts to blocking-only.
+
+#### HAMSIGN-01 scope and deployment status
+
+The signature-removal and automatic stop-release proposal in PR #1276 was
+withdrawn during remediation. The retained change documents and tests the
+existing fail-closed signature requirement and records new structural ancestry
+refusals as `hammer-head-ancestry-rejected`. It does **not** implement signed
+hammer commit publication or restore autonomous merging of unsigned heads.
+HAMSIGN-01's unsigned-commit deadlock remains unresolved; deploying this PR
+must not be reported as restoring that autonomy.
+
+Deployment does not release existing `hammer-head-context` stops on unchanged
+inputs. That legacy reason also covers incomplete or foreign ancestry, so it
+does not prove a signature-only stop is obsolete. Normal input changes or the
+documented operator recovery are still required. The renamed reason follows
+the same hold contract; no hold-store migration is performed.
+
+The PR title, summary, acceptance evidence and post-merge instructions must
+describe this retained scope. Claims that unsigned commits are accepted or that
+the first watcher tick releases old stops are superseded by the behavior above
+and must be removed from PR metadata before landing. A follow-up that supplies
+secure publication must cover remediation, rebase and conflict-repair commits,
+preserve provenance trailers, and verify the resulting ancestry before merge.
 
 ### Lifecycle settlement
 

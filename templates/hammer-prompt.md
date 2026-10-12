@@ -724,8 +724,12 @@ backoff and a 15-second per-attempt timeout. Exhausted reads refuse this proof:
 For exit 65, record the no-merge audit with reason
 `hammer-head-ancestry-rejected`. Existing `hammer-head-context` stops and new
 ancestry refusals both remain held on unchanged inputs. Unsigned App commits
-cannot use this range waiver; preserve the refusal and use the existing
-exact-head review recovery path or operator handoff.
+cannot use this range waiver. Preserve the refusal and report the unsigned or
+incomplete ancestry in the no-merge handoff. Do not request a fresh verdict
+yourself: an operator can use `retrigger-review --exact-head-now` for the
+unvalidated head. Renaming the reason neither releases an existing stop nor
+supplies signed publication; HAMSIGN-01's unsigned-commit deadlock remains
+unresolved.
 
 ```json
 {

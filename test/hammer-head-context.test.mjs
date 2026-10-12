@@ -46,7 +46,7 @@ if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
   return {
     run: (baseArgs = ['--pr', 'https://github.com/fixture/repo/pull/1'], env = {}) => exec(process.execPath,
       [cli, 'fixture/repo', 'reviewed', 'head', ...baseArgs], {
-        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 15000,
+        env: { ...process.env, HAM_BASE_HEAD: '', HAM_PR_NUMBER: '', PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 15000,
       }),
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
   };

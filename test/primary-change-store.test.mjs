@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readdirSync, utimesSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { storedPrimaryChange, primaryChangeReadStatus, sweepPrimaryChangeStore } from '../src/ama/primary-change-store.mjs';
@@ -11,6 +12,67 @@ function fixture(t) {
   return { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40), mergeBase: 'c'.repeat(40) };
 }
 const evidence = args => ({ headSha: args.headSha, hasHammerCommits: true, mergeBase: args.mergeBase, primaryFiles: [], finalFiles: [] });
+
+function mockFs(t, name, implementation) {
+  t.mock.method(fs, name, implementation);
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+}
+
+test('foreign runtime root, data directory, store or record refuses access before compute or mutation', async t => {
+  for (const target of ['root', 'data', 'store', 'record']) {
+    await t.test(target, async t => {
+      const args = fixture(t);
+      const dataDir = join(args.rootDir, 'data');
+      const dir = join(dataDir, 'primary-change-history');
+      let path;
+      if (target === 'data') mkdirSync(dataDir);
+      if (target === 'store') mkdirSync(dir, { recursive: true });
+      if (target === 'record') {
+        await storedPrimaryChange(args, async () => evidence(args));
+        path = join(dir, readdirSync(dir)[0]);
+        assert.equal(statSync(path).mode & 0o777, 0o600);
+        assert.equal(statSync(path).uid, process.geteuid());
+      }
+      const foreignPath = { root: args.rootDir, data: dataDir, store: dir, record: path }[target];
+      const original = fs.lstatSync;
+      mockFs(t, 'lstatSync', (candidate, ...options) => {
+        const stat = original(candidate, ...options);
+        return candidate === foreignPath ? { uid: process.geteuid() + 1, isSymbolicLink: () => false } : stat;
+      });
+      await assert.rejects(storedPrimaryChange(args, () => { assert.fail('must refuse before expensive compute'); }), /canonical daemon owner/);
+      if (target === 'root') assert.equal(existsSync(dataDir), false);
+      if (target === 'data') assert.deepEqual(readdirSync(dataDir), []);
+      if (target === 'store') assert.deepEqual(readdirSync(dir), []);
+      if (target === 'record') {
+        assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).history, evidence(args));
+        utimesSync(path, new Date(0), new Date(0));
+        assert.throws(() => sweepPrimaryChangeStore(args.rootDir), /canonical daemon owner/);
+        assert.equal(existsSync(path), true);
+      }
+    });
+  }
+});
+
+test('ownership is checked again after asynchronous compute before publishing', async t => {
+  const args = fixture(t);
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  const original = fs.lstatSync;
+  let foreign = false;
+  mockFs(t, 'lstatSync', (path, ...options) => {
+    const stat = original(path, ...options);
+    return path === dir && foreign ? { uid: process.geteuid() + 1, isSymbolicLink: () => false } : stat;
+  });
+  await assert.rejects(storedPrimaryChange(args, async () => {
+    mkdirSync(dir, { recursive: true });
+    foreign = true;
+    return evidence(args);
+  }), /canonical daemon owner/);
+  assert.deepEqual(readdirSync(dir), []);
+  assert.equal(primaryChangeReadStatus(args), null);
+  foreign = false;
+  await storedPrimaryChange(args, async () => evidence(args));
+});
 
 test('exact identity reuses disk evidence with no API; changed head, base, merge base or boundary recomputes', async t => {
   const args = fixture(t);
@@ -58,6 +120,32 @@ test('existing sweep expires obsolete records with fixed age bound', async t => 
   const path = join(dir, readdirSync(dir)[0]);
   utimesSync(path, new Date(0), new Date(0));
   assert.deepEqual(sweepPrimaryChangeStore(args.rootDir), [path]);
+});
+
+test('sweep skips a concurrently removed temporary file and still expires other records', async t => {
+  const args = fixture(t);
+  assert.deepEqual(sweepPrimaryChangeStore(args.rootDir), []);
+  await storedPrimaryChange(args, async () => evidence(args));
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  const expired = join(dir, readdirSync(dir)[0]);
+  utimesSync(expired, new Date(0), new Date(0));
+  const temporary = join(dir, 'vanishing.tmp');
+  writeFileSync(temporary, 'in progress');
+  const original = fs.statSync;
+  mockFs(t, 'statSync', path => {
+    if (path === temporary) rmSync(path);
+    return original(path);
+  });
+  assert.deepEqual(sweepPrimaryChangeStore(args.rootDir), [expired]);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test('sweep propagates per-file errors other than ENOENT', async t => {
+  const args = fixture(t);
+  await storedPrimaryChange(args, async () => evidence(args));
+  mockFs(t, 'statSync', () => { throw Object.assign(new Error('permission denied'), { code: 'EACCES' }); });
+  assert.throws(() => sweepPrimaryChangeStore(args.rootDir), { code: 'EACCES' });
+  assert.equal(readdirSync(join(args.rootDir, 'data', 'primary-change-history')).length, 1);
 });
 
 test('production collector reuses history while checking live identity, reviews and cost', async t => {

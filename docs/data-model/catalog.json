@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "primary-change-history",
+      "title": "Primary Change History",
+      "path": "docs/data-model/primary-change-history.md",
+      "store": "<runtime rootDir>/data/primary-change-history/",
+      "schemaSurface": "src/ama/primary-change-store.mjs",
+      "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
+      "owner": "AMA canonical daemon data owner"
+    },
+    {
       "id": "gemini-quota-cooldown",
       "title": "Gemini Quota Cooldown",
       "path": "docs/data-model/gemini-quota-cooldown.md",

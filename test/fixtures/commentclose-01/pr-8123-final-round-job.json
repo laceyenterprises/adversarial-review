@@ -1,7 +1,8 @@
 {
   "_fixture": {
     "ticket": "FINALROUND-01",
-    "note": "Sanitized completed-job reconstruction from the PR 8123 incident sequence, not a live job capture. Public review/head identities and timestamps retained; review body shortened."
+    "note": "Sanitized completed-job reconstruction from the PR 8123 incident sequence, not a live job capture. Public review/head identities and timestamps retained; review body shortened. The reconstructed terminal job includes the replay-proof authority needed by the existing diverged-head handoff.",
+    "compareStatus": "diverged"
   },
   "schemaVersion": 2,
   "kind": "adversarial-review-follow-up",
@@ -96,6 +97,9 @@
   "completion": {
     "source": "codex-output-last-message",
     "workerModel": "codex",
-    "workerPushedHeadSha": "9387869826ae41761d801d1b57bdf9e0a2181801"
+    "workerPushedHeadSha": "9387869826ae41761d801d1b57bdf9e0a2181801",
+    "workerPushProof": {
+      "method": "git-cherry-replay"
+    }
   }
 }

@@ -60,6 +60,7 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
   const job = fixture(`pr-${pr}-final-round-job.json`);
   const reviewedHead = job.revisionRef;
   const pushedHead = job.completion.workerPushedHeadSha;
+  const compareStatus = job._fixture?.compareStatus || 'ahead';
   delete job._fixture;
   assert.equal(job.status, 'completed');
   assert.equal(job.revisionRef, reviewedHead);
@@ -121,9 +122,9 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
       return daemon;
     },
     requestEligibleHammerWakeImpl: () => ({ requested: false }),
-    // GitHub compare for #7313 reports `ahead` (ahead 1 / behind 0).
+    // PR 7313 is ahead; PR 8123 replayed onto its base and diverged (8 ahead / 2 behind).
     proveCommentOnlyFinalRoundHeadImpl: (args) => proveCommentOnlyFinalRoundHead({
-      ...args, execFileImpl: async () => ({ stdout: 'ahead\n' }),
+      ...args, execFileImpl: async () => ({ stdout: `${compareStatus}\n` }),
     }),
     maybeDispatchAmaCloserImpl: (args) => {
       closerPayloads.push(args);

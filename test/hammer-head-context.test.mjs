@@ -29,7 +29,10 @@ if (scenario === 'recover' && attempt === 1) fail('TLS handshake timeout');
 if (scenario === 'exhaust') fail('HTTP 503 Service Unavailable');
 if (scenario === 'permanent') fail('HTTP 403 Forbidden');
 if (scenario === 'malformed') { process.stdout.write('{'); process.exit(0); }
-if (args[0] === 'pr') {
+if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
+  process.stdout.write(JSON.stringify([{ user: { login: 'the-hammer-lacey[bot]' },
+    body: 'HAM-Base-Head: reviewed\\nHAM-Validated-Head: earlier' }]));
+} else if (args[0] === 'pr') {
   if (args.join(' ') !== 'pr view https://github.com/fixture/repo/pull/1 --json baseRefName --jq .baseRefName') fail('unexpected PR call');
   process.stdout.write('release\\n');
 } else if (args[1] === 'repos/fixture/repo/commits/release') {
@@ -41,9 +44,9 @@ if (args[0] === 'pr') {
 } else fail('unexpected API call');
 `, { mode: 0o755 });
   return {
-    run: (baseArgs = ['--pr', 'https://github.com/fixture/repo/pull/1']) => exec(process.execPath,
+    run: (baseArgs = ['--pr', 'https://github.com/fixture/repo/pull/1'], env = {}) => exec(process.execPath,
       [cli, 'fixture/repo', 'reviewed', 'head', ...baseArgs], {
-        env: { ...process.env, PATH: `${root}:${process.env.PATH}` }, timeout: 15000,
+        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 15000,
       }),
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
   };
@@ -75,4 +78,20 @@ test('head context distinguishes spoofed fleet ancestry from read failures', asy
   const f = fixture(t, 'spoof');
   await assert.rejects(f.run(), error => error.code === 65 && !error.stdout);
   assert.equal(f.calls().length, 4);
+});
+
+
+test('HAMCLOSE-01 reviewed starting base bypasses irrelevant signature and ancestry reads', async t => {
+  const f = fixture(t, 'spoof');
+  const result = JSON.parse((await f.run(undefined, { HAM_BASE_HEAD: 'reviewed', HAM_PR_NUMBER: '1' })).stdout);
+  assert.equal(result.proof, 'hammer-app-attestation-chain');
+  assert.equal(f.calls().length, 0);
+});
+
+test('HAMCLOSE-01 earlier App-attested starting base requires only authenticated comments', async t => {
+  const f = fixture(t, 'spoof');
+  const result = JSON.parse((await f.run(undefined, { HAM_BASE_HEAD: 'earlier', HAM_PR_NUMBER: '1' })).stdout);
+  assert.equal(result.proof, 'hammer-app-attestation-chain');
+  assert.equal(f.calls().length, 1);
+  assert.match(f.calls()[0][1], /issues\/1\/comments/);
 });

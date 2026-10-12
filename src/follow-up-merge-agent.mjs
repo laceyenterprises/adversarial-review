@@ -2814,6 +2814,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
   });
   const parsedReview = parseMergeAgentRescueReviewBody(latestJob?.reviewBody);
   const classifierResult = classifyMergeAgentRescue({
+    closureOwner: candidate.closureOwner || null,
     commentOnlyFinalRoundPush: hasCommentOnlyFinalRoundPush(rootDir, { repo: candidate.repo, prNumber: candidate.prNumber, headSha: candidate.headSha }),
     reviewBody: latestJob?.reviewBody ?? null,
     mergeable: candidate.mergeable || 'UNKNOWN',

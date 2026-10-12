@@ -1289,7 +1289,6 @@ for (const label of [
   'merge-agent-skip',
   'do-not-merge',
   'no-merge-hold',
-  'merge-agent-stuck',
   'adversarial-merge-blocked',
 ]) {
   test(`not eligible: GitHub-style ${label} label object fails closed`, () => {
@@ -1302,13 +1301,13 @@ for (const label of [
   });
 }
 
-test('not eligible: `merge-agent-stuck` label fails closed WITHOUT scoped recovery evidence', () => {
+test('HAMCLOSE-01 diagnostic stuck label does not require scoped recovery evidence', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['merge-agent-stuck'] },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, false);
-  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.trace.blockLabels, []);
 });
 
 test('eligible: `merge-agent-stuck` label cleared by current-head merge-agent-requested recovery evidence', () => {
@@ -1350,7 +1349,7 @@ test('eligible: `merge-agent-stuck` recovery allows same-login merge-agent-reque
   assert.deepEqual(result.trace.blockLabels, []);
 });
 
-test('not eligible: `merge-agent-stuck` is not cleared by plain operator-approved recovery evidence', () => {
+test('HAMCLOSE-01 diagnostic stuck label does not depend on operator approval', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['merge-agent-stuck', 'operator-approved'] },
   });
@@ -1365,11 +1364,11 @@ test('not eligible: `merge-agent-stuck` is not cleared by plain operator-approve
       observedAt: '2026-06-10T20:30:00Z',
     },
   });
-  assert.equal(result.eligible, false);
-  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.trace.blockLabels, []);
 });
 
-test('not eligible: `merge-agent-stuck` is not cleared by stale recovery-in-flight evidence', () => {
+test('HAMCLOSE-01 diagnostic stuck label does not depend on stale recovery evidence', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['merge-agent-stuck', 'merge-agent-recovery-in-flight'] },
   });
@@ -1384,8 +1383,8 @@ test('not eligible: `merge-agent-stuck` is not cleared by stale recovery-in-flig
       observedAt: '2026-06-10T20:30:00Z',
     },
   });
-  assert.equal(result.eligible, false);
-  assert.ok(result.reasons.includes('label-merge-agent-stuck'));
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.trace.blockLabels, []);
 });
 
 // ---------------------------------------------------------------------------
@@ -1740,8 +1739,7 @@ test('__testables__ hard-stop label set matches SPEC §4.2 #6', () => {
       'do-not-merge',
       'no-merge-hold',
       'duplicate-family-hold',
-      'merge-agent-stuck',
-      'adversarial-merge-blocked',
+          'adversarial-merge-blocked',
     ],
   );
 });
@@ -2036,6 +2034,11 @@ test('final hammer: waives risk-class for medium not in allowlist with adversari
 // with provenance, audit-comment mapping, live-head checks, and non-waived gates.
 // ---------------------------------------------------------------------------
 
+function boundAudit(body, reviewedHead = 'abc12345', headSha = 'def67890') {
+  return body.includes('HAM-Validated-Head:') ? body
+    : body + '\nHAM-Base-Head: ' + reviewedHead + '\nHAM-Validated-Head: ' + headSha;
+}
+
 function hamEvidence({
   headSha = 'def67890',
   parentSha = 'abc12345',
@@ -2054,6 +2057,7 @@ function hamEvidence({
     { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
   ],
 } = {}) {
+  if (!auditBody.includes('HAM-Validated-Head:')) auditBody += `\nHAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${headSha}`;
   return {
     active: true,
     ticket: workerTicket,
@@ -2094,6 +2098,7 @@ function hamGroundTruth({
   changedFiles = ['src/auth.js'],
   auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
 } = {}) {
+  if (!auditBody.includes('HAM-Validated-Head:')) auditBody += `\nHAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${headSha}`;
   return {
     commit: {
       sha: headSha,
@@ -2110,6 +2115,7 @@ function hamGroundTruth({
         'Remediated-Findings': remediatedFindings,
       },
     },
+    range: { verified: true, reviewedHead, currentHead: headSha, baseSha: reviewedHead, commits: [headSha] },
     auditComment: audit
       ? {
           body: auditBody,
@@ -2137,7 +2143,7 @@ test('ham terminal remediation: exhausted HAM-authored live head over reviewed p
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        body: boundAudit('HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.'),
         docCurrency: {
           status: 'not_applicable',
           changedFiles: ['src/auth.js'],
@@ -2249,7 +2255,7 @@ test('ham terminal remediation: safety-core pass self-certifies with all bookkee
       workerTicket: 'HAM-02',
       closedBy: 'hammer-closer',
       remediatedFindings: 'also not parseable',
-      auditAuthor: 'codex-worker-bot',
+      auditAuthor: 'hammer-worker',
       auditBody: 'verified audit body drifted',
       changedFiles: ['src/auth.js'],
     }),
@@ -2262,11 +2268,11 @@ test('ham terminal remediation: safety-core pass self-certifies with all bookkee
   assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
   assert.deepEqual(
     result.trace.hamTerminalRemediation.advisoryShortfall,
-    ['ticket', 'auditComment', 'auditCommentAuthor', 'docCurrency', 'closedBy', 'remediatedFindings'],
+    ['ticket', 'auditComment', 'docCurrency', 'closedBy', 'remediatedFindings'],
   );
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /self-certified on safety-core/);
-  assert.match(warnings[0], /ticket,auditComment,auditCommentAuthor,docCurrency,closedBy,remediatedFindings/);
+  assert.match(warnings[0], /ticket,auditComment,docCurrency,closedBy,remediatedFindings/);
   assert.ok(!result.reasons.includes('stale-review-head'));
   assert.ok(!result.reasons.includes('blocking-findings-present'));
 });
@@ -2836,7 +2842,7 @@ test('ham terminal remediation: claimed doc updates must be in the verified diff
         },
       }),
       auditComment: {
-        body: auditBody,
+        body: boundAudit(auditBody),
         docCurrency: {
           status: 'updated',
           changedFiles: ['migrations/001-add-profile.sql'],
@@ -2956,7 +2962,7 @@ test('ham terminal remediation: failed live-head checks still block merge', () =
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        body: boundAudit('HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.'),
         docCurrency: {
           status: 'not_applicable',
           changedFiles: ['src/auth.js'],
@@ -2988,7 +2994,7 @@ test('ham terminal remediation: forged self-attested parent and trailers do not 
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        body: boundAudit('HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.'),
         docCurrency: {
           status: 'not_applicable',
           changedFiles: ['src/auth.js'],
@@ -3012,7 +3018,7 @@ test('ham terminal remediation: forged self-attested parent and trailers do not 
 });
 
 for (const author of ['hammer-worker', 'codex-worker-bot']) {
-  test(`ham terminal remediation: external committer cannot self-certify a stale head (author=${author})`, () => {
+  test(`ham terminal remediation: App head binding permits arbitrary commit metadata (author=${author})`, () => {
     const reviewedHead = 'abc12345';
     const currentHead = 'def67890';
     const { reviewState, prMetadata, cfg } = eligibleFixture({
@@ -3035,11 +3041,11 @@ for (const author of ['hammer-worker', 'codex-worker-bot']) {
       }),
     });
 
-    assert.equal(result.eligible, false);
-    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
-    assert.equal(result.trace.hamTerminalRemediation.ok, false);
+    assert.equal(result.eligible, true);
+    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+    assert.equal(result.trace.hamTerminalRemediation.ok, true);
     assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
-    assert.ok(result.reasons.includes('stale-review-head') || result.reasons.includes('blocking-findings-present'));
+    assert.deepEqual(result.reasons, []);
   });
 }
 
@@ -3071,7 +3077,7 @@ test('ham terminal remediation: null GitHub committer falls back to verified aut
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
-test('ham terminal remediation: no verified commit identity fails closed', () => {
+test('ham terminal remediation: App head binding permits unlinked commit identities', () => {
   const reviewedHead = 'abc12345';
   const currentHead = 'def67890';
   const { reviewState, prMetadata, cfg } = eligibleFixture({
@@ -3094,11 +3100,11 @@ test('ham terminal remediation: no verified commit identity fails closed', () =>
     }),
   });
 
-  assert.equal(result.eligible, false);
-  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, false);
-  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.eligible, true);
+  assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+  assert.equal(result.trace.hamTerminalRemediation.ok, true);
   assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
-  assert.equal(result.trace.hamTerminalRemediation.reasonCode, 'ham-commit-identity-unlinked');
+  assert.equal(result.trace.hamTerminalRemediation.reasonCode, null);
   assert.deepEqual(result.trace.hamTerminalRemediation.commitIdentity, {
     authorLoginNull: true, committerLoginNull: true,
   });
@@ -3183,7 +3189,7 @@ test('ham terminal remediation: doc-currency validation ignores global status ph
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
-test('ham terminal remediation: forged audit author, loose closed-by, or bad counts are advisory; empty diff is rejected', () => {
+test('ham terminal remediation: App audit author is mandatory; bookkeeping and empty diff do not veto a validated head', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -3195,7 +3201,7 @@ test('ham terminal remediation: forged audit author, loose closed-by, or bad cou
   const validEvidence = {
     ...hamEvidence(),
     auditComment: {
-      body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+      body: boundAudit('HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.'),
       docCurrency: {
         status: 'not_applicable',
         changedFiles: ['src/auth.js'],
@@ -3212,9 +3218,9 @@ test('ham terminal remediation: forged audit author, loose closed-by, or bad cou
     hamTerminalRemediation: validEvidence,
     hamTerminalRemediationGroundTruth: hamGroundTruth({ auditAuthor: 'codex-worker-bot' }),
   });
-  assert.equal(forgedAuthor.eligible, true, JSON.stringify(forgedAuthor, null, 2));
+  assert.equal(forgedAuthor.eligible, false, JSON.stringify(forgedAuthor, null, 2));
   assert.equal(forgedAuthor.trace.hamTerminalRemediation.checks.auditCommentAuthor, false);
-  assert.deepEqual(forgedAuthor.trace.hamTerminalRemediation.advisoryShortfall, ['auditCommentAuthor']);
+  assert.deepEqual(forgedAuthor.trace.hamTerminalRemediation.advisoryShortfall, []);
 
   const looseClosedBy = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
@@ -3239,8 +3245,8 @@ test('ham terminal remediation: forged audit author, loose closed-by, or bad cou
     hamTerminalRemediation: validEvidence,
     hamTerminalRemediationGroundTruth: hamGroundTruth({ changedFiles: [] }),
   });
-  assert.equal(emptyDiff.eligible, false);
-  assert.equal(emptyDiff.trace.hamTerminalRemediation.safetyCoreOk, false);
+  assert.equal(emptyDiff.eligible, true);
+  assert.equal(emptyDiff.trace.hamTerminalRemediation.safetyCoreOk, true);
   assert.equal(emptyDiff.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
 });
 
@@ -3261,7 +3267,7 @@ test('exhausted request-changes with blocking findings is eligible after validat
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        body: boundAudit('HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.'),
         docCurrency: {
           status: 'not_applicable',
           changedFiles: ['src/auth.js'],
@@ -3283,7 +3289,7 @@ test('exhausted request-changes with blocking findings is eligible after validat
 });
 
 for (const variant of ['linked', 'missing', 'foreign', 'non-hammer']) {
-  test(`HAMIDENT-02: identity diagnostic fails closed for ${variant}`, () => {
+  test(`HAMCLOSE-01: commit identity is diagnostic for ${variant}`, () => {
     const { reviewState, prMetadata, cfg } = eligibleFixture({
       reviewState: { headSha: 'abc12345', verdict: 'request-changes',
         blockingFindingCount: 1, blockingFindingState: 'known' },
@@ -3299,8 +3305,8 @@ for (const variant of ['linked', 'missing', 'foreign', 'non-hammer']) {
       hamTerminalRemediationGroundTruth: groundTruth,
     });
     assert.equal(result.trace.hamTerminalRemediation.reasonCode, null);
-    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, variant === 'linked');
-    assert.equal(result.eligible, variant === 'linked');
+    assert.equal(result.trace.hamTerminalRemediation.safetyCoreOk, true);
+    assert.equal(result.eligible, true);
   });
 }
 
@@ -3368,7 +3374,7 @@ test('HAM identity agrees across reversal, terminal eligibility and closer suppr
   }
 });
 
-test('HAM committer identity cannot treat terminal ticket and Closed-By as advisory', () => {
+test('HAMCLOSE-01 App binding carries authority independently of commit ticket and Closed-By', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { verdict: 'request-changes', blockingFindingCount: 1, blockingFindingState: 'known' },
     prMetadata: { headSha: 'def67890' },
@@ -3380,7 +3386,7 @@ test('HAM committer identity cannot treat terminal ticket and Closed-By as advis
         committer: 'the-hammer-lacey[bot]', ...overrides }),
     });
     assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
-    assert.equal(result.eligible, false);
+    assert.equal(result.eligible, true);
   }
 });
 
@@ -3475,7 +3481,7 @@ for (const noDiff of [false, true]) test(`HAMFINAL-02: exact validation closes f
     const foreignCommitter = isEligibleForAmaClosure(reviewState, prMetadata, cfg,
       { ...options, hamTerminalRemediationGroundTruth: { ...ground,
         commit: { ...ground.commit, committer: 'lacey-codex-agent[bot]' } } });
-    assert.equal(foreignCommitter.eligible, false, 'HAM tip needs a verified hammer committer');
+    assert.equal(foreignCommitter.eligible, true, 'App exact-head proof is independent of commit metadata');
   }
 
 });
@@ -3532,7 +3538,7 @@ for (const auditAuthor of ['clio-airlock', 'the-hammer-lacey[bot]']) {
         headSha: currentHead,
         parentSha: rebasedParent,
         reviewedHead,
-        auditAuthor,
+        auditAuthor: 'the-hammer-lacey[bot]',
         auditBody,
       }),
     });
@@ -3547,3 +3553,29 @@ for (const auditAuthor of ['clio-airlock', 'the-hammer-lacey[bot]']) {
     assert.ok(result.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
   });
 }
+
+
+test('HAMCLOSE-01 exact App-attested git heads pass the real predicate independently of commit identities and signatures', async () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'b'.repeat(40);
+  const earlier = 'c'.repeat(40);
+  for (const startingBase of [reviewedHead, earlier]) {
+    const auditBody = `HAM-Base-Head: ${startingBase}\nHAM-Validated-Head: ${currentHead}`;
+    const comment = { author: 'the-hammer-lacey[bot]', body: auditBody };
+    const prior = { author: 'the-hammer-lacey[bot]', body: `HAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${earlier}` };
+    const ground = hamGroundTruth({ headSha: currentHead, parentSha: earlier, reviewedHead,
+      auditBody, changedFiles: ['src/auth.js'], author: 'arbitrary-author', committer: 'arbitrary-committer' });
+    ground.commit.commit = { verification: { verified: false, reason: 'unsigned' } };
+    ground.auditComment = comment;
+    ground.range = await fetchHammerHeadRange({ reviewedHead, currentHead,
+      comments: [prior, comment], get() { throw new Error('App proof must not require commit signatures'); } });
+    const { reviewState, prMetadata, cfg } = eligibleFixture({ prMetadata: { headSha: currentHead } });
+    const options = { env: ENV, hamTerminalRemediation: hamEvidence({ headSha: currentHead,
+      parentSha: earlier, auditBody }), hamTerminalRemediationGroundTruth: ground };
+    const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
+    assert.equal(result.eligible, true, JSON.stringify(result));
+    assert.equal(result.trace.hamTerminalRemediation.checks.exactValidation, true);
+    const moved = isEligibleForAmaClosure(reviewState, { ...prMetadata, headSha: 'd'.repeat(40) }, cfg, options);
+    assert.equal(moved.eligible, false, 'a push above the exact attestation does not inherit its authority');
+  }
+});

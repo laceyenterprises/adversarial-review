@@ -46,17 +46,14 @@ const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
  * label that AMA-05 introduces; including it here so the predicate is
  * already correct on the day AMA-05 lands.
  *
- * `merge-agent-stuck` is a hard stop for ordinary settled-review closure.
- * The spec carves out a scoped recovery path that the caller must encode
- * explicitly via `recoveryEvidence`; this module evaluates the label as a
- * stop unless that evidence is supplied.
+ * `merge-agent-stuck` records pipeline state, not an operator hold.
+ * HAMCLOSE-01 keeps closure and exact-head review reachable under that label.
  */
 const HARD_STOP_LABELS = Object.freeze([
   'merge-agent-skip',
   'do-not-merge',
   'no-merge-hold',
   DUPLICATE_FAMILY_HOLD_LABEL,
-  'merge-agent-stuck',
   ADVERSARIAL_MERGE_BLOCKED_LABEL,
 ]);
 
@@ -848,11 +845,7 @@ function validateHamTerminalRemediationEvidence(
     && shaClaimMatches(verifiedReviewedHeadSha, String(reviewedHead || ''))
     && parentClaimHonest;
   const exactValidation = exactHammerValidation(verifiedAuditComment, currentHead)
-    && hammerRangeMatches(verifiedRange, reviewedHead, currentHead)
-    && (verifiedTrailers['worker-class'] !== 'hammer'
-      || hamAuditCommentAuthorMatches(verifiedCommit?.committer)
-      || (hamAuditCommentAuthorMatches(verifiedCommit?.author)
-        && String(verifiedCommit?.committer?.login || verifiedCommit?.committer || '').toLowerCase() === 'web-flow'));
+    && hammerRangeMatches(verifiedRange, reviewedHead, currentHead);
   const checks = {
     exactValidation,
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
@@ -880,12 +873,11 @@ function validateHamTerminalRemediationEvidence(
     remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
   };
   const activeClaimed = evidence?.enabled === true || evidence?.active === true;
-  const recordedValidation = /(?:^|\n)HAM-Validated-Head:/.test(verifiedAuditBody);
   const safetyCoreOk = activeClaimed === true
     && checks.head
-    && (exactValidation || (!recordedValidation && checks.workerClass && checks.parent && checks.commitIdentity && checks.nonEmptyCommit))
+    && exactValidation
     && checks.primaryChange;
-  // HAMIDENT-02: diagnostic only; unlinked commits still fail the safety core.
+  // HAMIDENT-02: identity is diagnostic; the App SHA binding supplies authority.
   // Missing identity fields are not proof that GitHub explicitly returned null.
   const loginIsNull = (identity) => identity === null
     || (typeof identity === 'object' && identity !== null && identity.login === null);
@@ -893,7 +885,7 @@ function validateHamTerminalRemediationEvidence(
     authorLoginNull: Boolean(verifiedCommit && loginIsNull(verifiedCommit.author)),
     committerLoginNull: Boolean(verifiedCommit && loginIsNull(verifiedCommit.committer)),
   };
-  const identityOnlyFailure = activeClaimed === true
+  const identityOnlyFailure = activeClaimed === true && !exactValidation
     && checks.workerClass && checks.head && checks.parent && checks.nonEmptyCommit && checks.primaryChange
     && !checks.commitIdentity;
   const reasonCode = identityOnlyFailure

@@ -1,0 +1,45 @@
+import { isDaemonMergeReviewAllowed } from './daemon-merge.mjs';
+import { SETTLED_SUCCESS_VERDICTS } from './eligibility.mjs';
+import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS } from './closer-lease.mjs';
+
+export const CLOSURE_OWNER_WAIT_MS = 30_000;
+
+// One arbitration rule for an open PR without an operator hold. This chooses
+// ownership, never merge authority: execution still runs the live exact-head
+// eligibility predicate and lease CAS. Diagnostic labels confer no ownership.
+export function decideClosureOwner({ reviewState = {}, currentHead, attested = false,
+  lease = null, retryExhausted = false, lifetimeExhausted = false,
+  mergeable = 'MERGEABLE', checks = 'SUCCESS', roundsLeft = true,
+  waitExhausted = false } = {}) {
+  const action = (owner, reason, extra = {}) => ({ owner, reason, ...extra });
+  if (lease && ['pending', 'dispatched'].includes(lease.status)) {
+    return waitExhausted
+      ? action('page', 'in-flight-lease-expired')
+      : action('wait', `in-flight:${lease.lrqId || lease.watcherPid || 'closer-lease'}`,
+        { boundedMs: AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, retryAfterMs: CLOSURE_OWNER_WAIT_MS });
+  }
+  const capped = retryExhausted || lifetimeExhausted;
+  const hammer = reason => capped
+    ? action('page', lifetimeExhausted ? 'hammer-lifetime-cap' : 'hammer-retry-cap')
+    : action('hammer', reason);
+  if (!reviewState.verdict || (reviewState.headSha !== currentHead && (!attested || lease?.status === 'handed-to-review'))) {
+    return roundsLeft ? action('review', 'exact-head-review') : action('page', 'review-rounds-exhausted');
+  }
+  const clean = SETTLED_SUCCESS_VERDICTS.has(reviewState.verdict)
+    && isDaemonMergeReviewAllowed(reviewState, { strictMode: true });
+  if (!clean) {
+    if (lease?.status === 'handed-to-review' || !roundsLeft || attested) return hammer('review-findings');
+    return action('remediation', 'review-findings');
+  }
+  if (mergeable === 'CONFLICTING') {
+    const result = hammer('conflict-rebase');
+    return result.owner === 'hammer' ? { ...result, owner: 'conflict-rebase' } : result;
+  }
+  if (checks === 'FAILURE') return hammer('required-checks-red');
+  if (mergeable === 'UNKNOWN' || checks !== 'SUCCESS') {
+    return waitExhausted ? action('page', 'pending-gate-budget-exhausted')
+      : action('wait', mergeable === 'UNKNOWN' ? 'pending-mergeability' : 'pending-required-checks',
+        { boundedMs: AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS, retryAfterMs: CLOSURE_OWNER_WAIT_MS });
+  }
+  return action('daemon-merge', 'clean-exact-head');
+}

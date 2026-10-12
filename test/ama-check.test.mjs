@@ -71,6 +71,7 @@ function hamTerminalEvidence({
   },
   audit = true,
 } = {}) {
+  if (!auditBody.includes('HAM-Validated-Head:')) auditBody += `\nHAM-Base-Head: ${HEAD_SHA}\nHAM-Validated-Head: ${HAM_SHA}`;
   return {
     active: true,
     ticket: 'HAM',
@@ -108,7 +109,7 @@ function loadJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
-function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews = null } = {}) {
+function writeFixtureFiles(tmp, { protectionBody = '{}', prPatch = {}, reviews = null} = {}) {
   const paths = {
     pr: join(tmp, 'pr.json'),
     reviews: join(tmp, 'reviews.json'),
@@ -310,6 +311,10 @@ function runAmaCheck(tmp, {
       });
       writeJson(paths.timeline, timeline);
     }
+    paths.hamRange = join(tmp, 'ham-range.json');
+    writeJson(paths.hamRange, { verified: true, reviewedHead: HEAD_SHA, currentHead: HAM_SHA,
+      baseSha: HEAD_SHA, commits: [HAM_SHA] });
+    extraArgs.push('--ham-range', paths.hamRange);
     extraArgs.push(
       '--ham-terminal-remediation',
       paths.hamTerminalRemediation,
@@ -663,9 +668,9 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(forgedAuthor.status, 0, forgedAuthor.stderr);
     const forgedAuthorVerdict = JSON.parse(forgedAuthor.stdout);
-    assert.equal(forgedAuthorVerdict.eligible, true, JSON.stringify(forgedAuthorVerdict, null, 2));
+    assert.equal(forgedAuthorVerdict.eligible, false, JSON.stringify(forgedAuthorVerdict, null, 2));
     assert.equal(forgedAuthorVerdict.trace.hamTerminalRemediation.checks.auditCommentAuthor, false);
-    assert.deepEqual(forgedAuthorVerdict.trace.hamTerminalRemediation.advisoryShortfall, ['auditCommentAuthor']);
+    assert.equal(forgedAuthorVerdict.trace.hamTerminalRemediation.checks.exactValidation, false);
 
     const unresolvedCommitIdentity = runAmaCheck(tmp, {
       branchProtectionRequired: true,
@@ -683,15 +688,15 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(unresolvedCommitIdentity.status, 0, unresolvedCommitIdentity.stderr);
     const unresolvedCommitIdentityVerdict = JSON.parse(unresolvedCommitIdentity.stdout);
-    assert.equal(unresolvedCommitIdentityVerdict.eligible, false);
+    assert.equal(unresolvedCommitIdentityVerdict.eligible, true);
     assert.equal(
       unresolvedCommitIdentityVerdict.trace.hamTerminalRemediation.checks.commitIdentity,
       false,
     );
 
     assert.equal(
-      unresolvedCommitIdentityVerdict.trace.hamTerminalRemediation.reasonCode,
-      'ham-commit-identity-unlinked',
+      unresolvedCommitIdentityVerdict.trace.hamTerminalRemediation.checks.exactValidation,
+      true,
     );
     assert.deepEqual(unresolvedCommitIdentityVerdict.trace.hamTerminalRemediation.commitIdentity, {
       authorLoginNull: true, committerLoginNull: true,
@@ -823,7 +828,7 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     });
     assert.equal(emptyDiff.status, 0, emptyDiff.stderr);
     const emptyDiffVerdict = JSON.parse(emptyDiff.stdout);
-    assert.equal(emptyDiffVerdict.eligible, false);
+    assert.equal(emptyDiffVerdict.eligible, true);
     assert.equal(emptyDiffVerdict.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
 
     const forgedActiveOnlyReview = [

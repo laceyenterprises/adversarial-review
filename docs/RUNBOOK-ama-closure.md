@@ -2722,20 +2722,64 @@ the original expected-head CAS; an ambiguous server-side success cannot authoriz
 an overwrite. Both fallback git push routes release the merge lease and abort
 on rejection, including a stale lease following an API timeout.
 
-The audit procedure proves the range before writing `HAM-Validated-Head`.
-If proof fails or publication used the git fallback, it returns status 20
-(`exact-head-review-required`), releases the lease and leaves no new validation
-claim. LEASEDEFER-01 can request bounded exact-head review for unvalidated
-closer heads after proving absence of live ownership; a proven
-`hamTerminalRemediationValidated` head retains terminal merge authority.
-This recovery does not rely on an ambient-credential `retrigger-review` label.
+HAMCLOSE-01: the starting PR head is captured once in `HAM_BASE_HEAD`, before
+edits. It is trustworthy when it is the review record's reviewed head or when
+App-authored comments connect that reviewed head to it through exact
+`HAM-Base-Head` / `HAM-Validated-Head` edges. GitHub authenticates each comment's
+author; a builder token cannot post or edit a hammer App comment. Commit SHAs
+bind immutable content, while the reviewed head comes from the review record.
+Builder-authored text, commit authors, committers and signatures are not needed
+for this proof. Earlier edges remain available; retries deduplicate only the
+same App-authored base/head edge.
 
-If the entire responsibility range is proven, the hammer merges its validated
-head without another review. Its closing comment says `Hammer route: verified
-validated head`. If any publication or range proof fails (including unsupported
-file modes, symlinks, submodules, unsigned remediation/rebase ancestry, foreign
-identity, API errors or mismatched trees), it preserves the git publication path
-and requests one exact-head re-review through the existing bounded route. The
-closing comment says `Hammer route: exact-head re-review` with the head SHA;
-the daemon merges after a clean review. Provenance never requires an operator
-escalation, signing key, new label or new workflow retry loop.
+API and CAS git publication use the same starting-base rule. Immediately before
+attesting, the audit procedure confirms the remote SHA equals local HEAD. It
+posts both SHA lines using the hammer token, validates the required checks at
+that exact head, and merges under the shared lease. A foreign push above an
+attested head has no matching edge and cannot inherit its authority. An
+unproven starting base or unreadable proof requests exact-head review. The
+stale-head prover and daemon also require this App chain; old prose audits
+and forgeable commit identity fields cannot authorize a moved head.
+
+`bin/hammer-review-handoff.mjs` records the closer lease as `handed-to-review`
+and requests the existing bounded exact-head review CAS. This is a completed
+handoff, not `failed-without-merge`. The handed lease does not block reviewers
+or daemon closure. A clean review merges through the daemon; any findings,
+including Comment only findings, admit another hammer through the existing
+retry and lifetime caps. Reclaiming the handed lease for that hammer is locked
+and still uses atomic single-claim acquisition.
+
+`decideClosureOwner` in `src/ama/closure-owner.mjs` exposes the shared ownership
+answer alongside orchestration results. Diagnostic `merge-agent-stuck` and
+`retrigger-review` labels do not grant or suppress ownership; operator holds
+remain enforced. The daemon retries lease contention after 250 and 500 ms in
+the same tick. Pending gates, uncertain/live ownership and deferred daemon
+attempts record a bounded wait in `data/ama-closure-waits/`; the default limit
+is 30 minutes, adjustable through `AMA_CLOSURE_WAIT_BOUND_MS`. Exhaustion
+reserves one page naming the PR, head and reason. The coexistence router keeps
+that wait/page out of the independent orphan and recovery accounting. Finished
+worker teardown failures remain logged cleanup debt and never change the
+closure outcome.
+
+The offline HAMCLOSE-01 test enumerates 17,280 combinations of verdict,
+reviewed/untrusted/attested head, closer lease, retry and lifetime caps,
+mergeability, required checks, remaining rounds and the two diagnostic labels.
+It invokes the production ownership, closer eligibility, merge eligibility,
+check classification, stale-head, hammer-remediability, retry-cap and rescue
+adapter decisions, asserting
+one named route with bounded waits and pages at exhaustion.
+
+The JavaScript rescue classifier also accepts the authoritative ownership
+projection and uses the shared decision for structured ownership inputs. Its
+legacy path keeps Approved findings in remediation and treats the stuck label
+as diagnostic. `buildMergeAgentDispatchJob` forwards an available ownership
+projection instead of independently overriding it.
+
+Parent-repository rescue scope remains in agent-os:
+`modules/worker-pool/lib/python/cwp_helm/merge_agent_rescue_classifier.py`
+still classifies Approved/Comment only with findings as inconclusive, which
+`modules/worker-pool/lib/python/cwp_helm/merge_agent_rescue.py` turns into
+escalation. Those two files must consume the shared `closureOwner`
+answer (and the review-handoff lease) rather than treating that handled state
+as a reviewer-contract violation. This repository ships the decision and
+pipeline transitions; it does not edit or deploy that parent classifier.

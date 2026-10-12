@@ -107,6 +107,7 @@ test('AMA live review reconciliation uses Gemini reviewer authority for native G
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
     assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
+      closureOwner: { owner: 'hammer', reason: 'comment-only' },
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
         verdict: 'comment-only', checks: [], mergeable: 'TRUE' } });
   } finally {
@@ -142,6 +143,7 @@ test('AMA live review reconciliation retries a transient lookup and lets authori
     assert.deepEqual(result, {
       dispatched: false,
       reason: 'request-changes',
+      closureOwner: { owner: 'remediation', reason: 'review-findings' },
       namedReason: 'request-changes',
       amaEnabled: true,
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
@@ -179,6 +181,7 @@ test('AMA live review reconciliation treats opencode as Codex reviewer authority
     ]);
     assert.equal(seenReviewStates[0].verdict, 'comment-only');
     assert.deepEqual(result, { dispatched: true, reason: 'comment-only', amaEnabled: true,
+      closureOwner: { owner: 'hammer', reason: 'comment-only' },
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',
         verdict: 'comment-only', checks: [], mergeable: 'TRUE' } });
   } finally {
@@ -211,6 +214,7 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
     assert.deepEqual(result, {
       dispatched: false,
       reason: 'fail-closed',
+      closureOwner: { owner: 'review', reason: 'exact-head-review' },
       namedReason: 'fail-closed',
       amaEnabled: true,
       ownerProofFacts: { headSha: 'head-live', reviewedHeadSha: 'head-live',

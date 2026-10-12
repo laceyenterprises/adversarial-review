@@ -19,11 +19,8 @@ where GNU `timeout` may not exist, wrap commands like this:
 
 Use focused timeouts that match the operation: short reads/searches should be
 seconds, test suites and GitHub waits can be longer. **For test suites, size the
-alarm with the load-aware helper instead of a fixed literal** — a suite that
-runs in ~T seconds solo can overrun 2-3x under fleet contention, and a fixed cap
-then times out with no failures and forces a full rerun on identical code
-(agent-os#5464). Pass the suite's nominal (idle-host) seconds and let the helper
-scale it by current host load:
+alarm with the load-aware helper**. Pass the idle-host suite duration; it
+scales for host load and retains a bounded fallback:
 
 ```bash
 /usr/bin/perl -e '$t = shift || 360; alarm $t; exec @ARGV' \
@@ -31,10 +28,7 @@ scale it by current host load:
   python3 -m pytest tests/test_endpoints.py
 ```
 
-The helper keeps a tight cap on an idle host (fast hang detection) and inflates
-up to 6x under heavy load; it prints the nominal unchanged on any error, so the
-alarm is always bounded. The Perl wrapper also falls back to the nominal timeout
-if the helper process cannot start and the substitution is empty. Never run unbounded
+The helper scales up to 6x and falls back to the nominal timeout on error. Never run unbounded
 recursive searches over `/tmp`, `/private/tmp`, `$HOME`,
 `/Users/airlock/agent-os-hq`, or an entire checkout when looking for review
 state. Prefer the live PR, the final review body, this prompt's audit inputs,
@@ -70,10 +64,12 @@ At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs 
 
 ## Versioned helper inputs
 
-Before the merge-lease window, export the trusted dispatch values in the shell that will remain open through verify, audit, predicate and merge:
+At run start, before any edits, export these values in the shell used through publication and merge:
 
 ```bash
 export HAM_PR_URL='<<PR_URL>>' HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
+export HAM_BASE_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr view '<<PR_URL>>' --json headRefOid --jq .headRefOid)
+# Capture this once before edits. Start from this exact head; never change HAM_BASE_HEAD after a push.
 export HAM_REVIEWED_SHA='<<REVIEWED_SHA>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 export HAM_RISK_CLASS='<<RISK_CLASS>>' HAM_MERGE_METHOD='<<MERGE_METHOD>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
@@ -478,7 +474,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    required check bar is green may proceed to merge while still holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
-   prove the active hammer exact-head validation, verified fleet ancestry, PR audit
+   prove the active hammer exact-head validation, a trustworthy starting base through App-authored attestations, PR audit
    comment from the entitled hammer identity, successful
    live-head checks, and non-waived gates, and it must record
    `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
@@ -656,7 +652,7 @@ on the new head before re-acquiring the lease and merging.
 Post the PR audit comment. List every final finding with its blocking class and changed paths, using
 `HAMMER_LACEY_GH_TOKEN` (legacy: `MERGE_AGENT_GH_TOKEN`), never ambient credentials.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the exported dispatch values. Prove the range before posting the validation audit under lease. Nonzero status blocks continuation; status 20 (`exact-head-review-required`) releases the lease for LEASEDEFER-01 recovery.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the exported dispatch values. Prove the starting base before posting the validation audit under lease. Nonzero status blocks continuation; status 20 (`exact-head-review-required`) releases the lease for LEASEDEFER-01 recovery.
 
 
 ```bash
@@ -707,22 +703,25 @@ daemon closure, never operator escalation.
 
 Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
-Head-only fleet commits require verified/valid signatures and `web-flow`
-committers. Foreign base merges require both plus a second parent on base;
-local human merges require re-review. No reviewed-parent trailer needed.
+Capture the remote starting head before edits as `HAM_BASE_HEAD`, and begin from
+that exact checkout. A base is trusted when it equals the reviewed head or an
+App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain reaches it from the
+reviewed head. Publish by API or CAS git, confirm remote head equals local HEAD,
+and append both exact SHA lines in the hammer App comment. Preserve earlier
+edges: never overwrite an earlier run's attestation. Signatures and commit
+metadata do not establish this chain. Any unproven base requests re-review.
 
-API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use git/re-review; push rejection releases the lease and aborts.
+API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use CAS git and the same base proof; push rejection releases the lease and aborts.
 
 ```bash
-[ "${HAM_API_PUBLISH_FALLBACK:-0}" -ne 1 ] &&
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
   > /tmp/ham-<<PR_NUMBER>>-range.json || {
     # Any provenance failure (unsigned/foreign ancestry, API failure, tree
     # mismatch, or unreadable range) uses the existing exact-head review route.
     ham_release_merge_lease
-    /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr edit <<PR_URL>> --add-label retrigger-review
-    /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr comment <<PR_URL>> --body "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review."
+    GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr comment <<PR_URL>> --body "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review."
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 node <<ROOT_DIR>>/bin/hammer-review-handoff.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" || exit 1
     exit 0
   }
 ```

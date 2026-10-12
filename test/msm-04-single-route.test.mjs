@@ -11,7 +11,7 @@ import {
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
-import { AMA_CLOSER_LEASE_STATUS, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { AMA_CLOSER_LEASE_STATUS, acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
@@ -625,5 +625,48 @@ test('MSM-04: structural hard stops still block hammer dispatch', async (t) => {
   assert.equal(result.skipMergeAgent, true);
   assert.equal(result.reason, 'not-eligible');
   assert.ok(result.reasons.includes('label-do-not-merge'));
+  assert.equal(deps.calls.length, 0);
+});
+
+
+test('HAMCLOSE-01 handed Comment only findings dispatch one hammer on that exact head', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamclose-real-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { rootDir, repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  acquireAmaCloserLease(identity);
+  updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'prior-hammer' });
+  updateAmaCloserLease({ ...identity, status: 'handed-to-review' });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+    repo: identity.repo, prNumber: 404, headSha: HEAD, reviewedSha: HEAD,
+    launchRequestId: 'prior-hammer', state: 'dispatched', lastObservedStatus: 'succeeded',
+  }));
+  const deps = testDeps();
+  const args = { ...baseHammerArgs(rootDir, {
+    reviewState: { verdict: 'comment-only', blockingFindingCount: 0, nonBlockingFindingCount: 2 },
+    prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }] },
+  }), ...deps };
+  const result = await maybeDispatchAmaCloser(args);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(result.launchRequestId, 'lrq_hammer_1');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+  const second = await maybeDispatchAmaCloser(args);
+  assert.equal(second.dispatched, false);
+  assert.equal(deps.calls.filter(call => call.args[0] === 'dispatch').length, 1);
+});
+
+test('HAMCLOSE-01 handed clean review selects daemon closure without classifying its prior hammer as failed', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamclose-real-clean-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { rootDir, repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  acquireAmaCloserLease(identity);
+  updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'prior-hammer' });
+  updateAmaCloserLease({ ...identity, status: 'handed-to-review' });
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...baseHammerArgs(rootDir, {
+    reviewState: { verdict: 'approved', blockingFindingCount: 0 },
+    prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }] },
+  }), ...deps });
+  assert.equal(result.reason, 'daemon-clean-route');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'handed-to-review');
   assert.equal(deps.calls.length, 0);
 });

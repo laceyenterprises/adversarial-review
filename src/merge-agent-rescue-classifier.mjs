@@ -1,3 +1,4 @@
+import { decideClosureOwner } from './ama/closure-owner.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import { classifyCheckRollup } from './checks-summary.mjs';
@@ -6,7 +7,6 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 const GATE_CONTEXT = 'agent-os/adversarial-gate';
 
 const HARD_STOP_LABELS = new Set([
-  'merge-agent-stuck',
   'merge-agent-recovery-in-flight',
   'paused-for-redesign',
   'reviewer-cycle-cap-reached',
@@ -156,6 +156,22 @@ function isMergeable(input) {
   return String(input?.mergeable ?? '').trim().toUpperCase() === 'MERGEABLE';
 }
 
+// Adapter for the authoritative MSM ownership answer. It grants no merge
+// authority and preserves the pipeline's bounded wait/page evidence.
+export function classifyClosureOwnership(input) {
+  const closureOwner = decideClosureOwner(input);
+  return rescueOwnershipDecision(closureOwner);
+}
+
+function rescueOwnershipDecision(closureOwner) {
+  const decision = {
+    'daemon-merge': 'merge-eligible', hammer: 'hammer-eligible',
+    review: 'rereview-eligible', remediation: 'remediation-eligible',
+    'conflict-rebase': 'rebase-eligible', wait: 'wait-closer', page: 'page-required',
+  }[closureOwner?.owner];
+  return decision ? { decision, reason: closureOwner.reason, closureOwner } : null;
+}
+
 function classify(input = {}) {
   let verdict = verdictKindToDisplay(normalizeEffectiveReviewVerdict(input.reviewBody));
   const blocking = parseIssueSection(input.reviewBody, 'Blocking issues', 'blocking');
@@ -170,6 +186,9 @@ function classify(input = {}) {
   ) {
     verdict = 'Request changes';
   }
+  const owned = input.closureOwner ? rescueOwnershipDecision(input.closureOwner)
+    : input.closureOwnership ? classifyClosureOwnership(input.closureOwnership) : null;
+  if (owned) return { ...owned, blockingFindings, nonBlockingFindings, parsedFindings };
   const hardStop = hasHardStopLabel(input.labels);
   const rebaseHardStop = hasRebaseHardStopLabel(input.labels);
   const checksArePassing = checksPass(input);
@@ -247,7 +266,8 @@ function classify(input = {}) {
     };
   }
 
-  if (verdict === 'Request changes' || (verdict === 'Comment only' && blockingFindings === 0 && nonBlockingFindings > 0 && !hardStop)) {
+  if (verdict === 'Request changes' || (['Approved', 'Comment only'].includes(verdict)
+    && blockingFindings + nonBlockingFindings > 0 && !hardStop)) {
     const blockerCategories = blocking.findings
       .map((finding) => finding.category)
       .filter(Boolean);

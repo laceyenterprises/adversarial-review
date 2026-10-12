@@ -67,6 +67,8 @@ function nonBlockingReviewArgs(rootDir, overrides = {}) {
     fetchRollupImpl: async () => ({
       state: 'OPEN',
       headSha: CLOSER_HEAD,
+      comments: [{ author: 'the-hammer-lacey[bot]',
+        body: `HAM-Base-Head: ${REVIEWED_HEAD}\nHAM-Validated-Head: ${CLOSER_HEAD}` }],
       headRefName: 'closer/branch',
       statusCheckRollup: [GREEN_CHECK],
       mergeable: 'MERGEABLE',

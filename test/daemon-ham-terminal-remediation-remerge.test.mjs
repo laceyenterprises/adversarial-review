@@ -95,6 +95,8 @@ function findingsReviewArgs(rootDir, overrides = {}) {
     fetchRollupImpl: async () => ({
       state: 'OPEN',
       headSha: HAM_HEAD,
+      comments: [{ author: 'the-hammer-lacey[bot]',
+        body: `HAM-Base-Head: ${REVIEWED_HEAD}\nHAM-Validated-Head: ${HAM_HEAD}` }],
       headRefName: 'ham/branch',
       statusCheckRollup: [GREEN_CHECK],
       mergeable: 'MERGEABLE',
@@ -306,6 +308,8 @@ test('a HAM-validated head with still-pending required CI declines and falls thr
         fetchRollupImpl: async () => ({
           state: 'OPEN',
           headSha: HAM_HEAD,
+          comments: [{ author: 'the-hammer-lacey[bot]',
+            body: `HAM-Base-Head: ${REVIEWED_HEAD}\nHAM-Validated-Head: ${HAM_HEAD}` }],
           headRefName: 'ham/branch',
           statusCheckRollup: [],
           mergeable: 'MERGEABLE',

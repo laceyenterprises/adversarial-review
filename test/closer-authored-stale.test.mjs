@@ -33,6 +33,9 @@ function graphStubs(graph) {
   const probed = [];
   return {
     probed,
+    comments: Object.entries(graph).filter(([, edge]) => edge.closer).map(([head, edge]) => ({
+      author: 'the-hammer-lacey[bot]', body: `HAM-Base-Head: ${edge.parent}\nHAM-Validated-Head: ${head}`,
+    })),
     suppressionImpl: async ({ headSha }) => {
       probed.push(headSha);
       return graph[headSha]?.closer
@@ -70,8 +73,8 @@ test('postmortem 2: any non-closer commit after the reviewed head routes to exac
   const graph = { [W]: { parent: R, closer: false }, [C1]: { parent: W, closer: true } };
   const { headProof, eligibility } = await decide(graph, { currentHead: C1 });
   assert.equal(headProof.proven, false);
-  assert.equal(headProof.reason, 'non-closer-commit-after-reviewed-head');
-  assert.equal(headProof.nonCloserCommit, W);
+  assert.equal(headProof.reason, 'hammer-app-attestation-missing');
+
   assert.equal(eligibility.eligible, false);
   assert.equal(eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.REREVIEW);
   // A plain worker push on top of the reviewed head is the same answer.
@@ -92,13 +95,12 @@ test('postmortem 3: red exact-head CI is not eligible', async () => {
   }
 });
 
-test('closer commit stacked on a recorded comment-only final-round push anchors at that push', async () => {
+test('HAMCLOSE-01 recorded builder/remediator pushes are not trust anchors', async () => {
   // agent-os#7818/#7822 shape: R reviewed, worker pushed comment-only P, hammer stacked C1 on P.
   const graph = { [P]: { parent: R, closer: false }, [C1]: { parent: P, closer: true } };
   const anchored = await decide(graph, { currentHead: C1, anchorHeads: [P] });
-  assert.equal(anchored.headProof.proven, true);
-  assert.equal(anchored.headProof.anchorHead, P);
-  assert.equal(anchored.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.ELIGIBLE);
+  assert.equal(anchored.headProof.proven, false);
+  assert.equal(anchored.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.REREVIEW);
   // Without the recorded push, P is a non-closer commit.
   const unanchored = await decide(graph, { currentHead: C1 });
   assert.equal(unanchored.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.REREVIEW);
@@ -149,12 +151,12 @@ test('blocking, unknown-blocking and unsettled verdicts are not carried forward'
   }
 });
 
-test('merge commits, broken and over-long chains are never closer-authored', async () => {
+test('HAMCLOSE-01 App bindings support rebases/merges; broken and over-long bindings request review', async () => {
   const merge = await decide({ [M]: { parent: R, closer: true, parentCount: 2 } }, { currentHead: M });
-  assert.equal(merge.headProof.reason, 'merge-commit-in-closer-chain');
-  assert.equal(merge.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.REREVIEW);
+  assert.equal(merge.headProof.proven, true);
+  assert.equal(merge.eligibility.decision, CLOSER_AUTHORED_STALE_DECISIONS.ELIGIBLE);
   const broken = await decide({ [C1]: { parent: null, closer: true } }, { currentHead: C1 });
-  assert.equal(broken.headProof.reason, 'closer-chain-broken');
+  assert.equal(broken.headProof.reason, 'hammer-app-attestation-missing');
   const chain = {};
   let parent = R;
   for (let i = 0; i < 10; i += 1) {
@@ -174,7 +176,8 @@ test('a head that is not stale is not-applicable, and probe errors propagate', a
     checksConclusion: 'SUCCESS', mergeability: 'MERGEABLE' });
   assert.equal(reviewed.decision, CLOSER_AUTHORED_STALE_DECISIONS.NOT_APPLICABLE);
   await assert.rejects(proveCloserAuthoredStaleHead({ reviewedHead: R, currentHead: C1,
-    suppressionImpl: async () => { throw new Error('gh down'); } }), /gh down/);
+    repoPath: 'fixture/repo', prNumber: 1,
+    execGhWithRetryImpl: async () => { throw new Error('gh down'); } }), /gh down/);
   assert.equal(closerAuthoredStaleEligible({}).decision, CLOSER_AUTHORED_STALE_DECISIONS.REREVIEW);
 });
 

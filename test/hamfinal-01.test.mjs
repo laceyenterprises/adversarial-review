@@ -185,6 +185,8 @@ test('7987 replay: the hammer remediates finding 1 and its self-cert accepts the
       '',
       '<sub>',
       `HAM-Terminal-Remediation-Head: ${HAM_HEAD}`,
+      `HAM-Base-Head: ${REVIEWED_HEAD}`,
+      `HAM-Validated-Head: ${HAM_HEAD}`,
       'Remediated-Findings: 3 addressed (3 blocking, 0 non-blocking)',
       'Closed-By: hammer (adversarial-pipe-mode)',
       '</sub>',
@@ -198,7 +200,8 @@ test('7987 replay: the hammer remediates finding 1 and its self-cert accepts the
     { prNumber: PR, headSha: HAM_HEAD, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE', labels: [] },
     { enabled: true, workerClass: 'hammer' },
     { env: {}, hamTerminalRemediation: evidence,
-      hamTerminalRemediationGroundTruth: { commit, auditComment: audit },
+      hamTerminalRemediationGroundTruth: { commit, auditComment: audit,
+        range: { verified: true, reviewedHead: REVIEWED_HEAD, currentHead: HAM_HEAD, baseSha: REVIEWED_HEAD, commits: [HAM_HEAD] } },
       hammerWithdrawnFindings: [withdrawal(1), withdrawal(2)] },
   );
   const ham = verdict.trace.hamTerminalRemediation;

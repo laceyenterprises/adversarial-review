@@ -55,7 +55,7 @@ function withEnv(name, value, fn) {
 const decisionFixtures = [
   ['comment-only-merge-eligible.md', 'merge-eligible'],
   ['approved-merge-eligible.md', 'merge-eligible'],
-  ['approved-with-non-blocking-findings.md', 'inconclusive'],
+  ['approved-with-non-blocking-findings.md', 'remediation-eligible'],
   ['formatted-verdict-and-none-variants.md', 'merge-eligible'],
   ['request-changes-non-blocking-only.md', 'remediation-eligible'],
   ['request-changes-with-blockers-addressable.md', 'remediation-eligible'],
@@ -156,11 +156,11 @@ test('None sentinel tolerates trailing prose on the same line', () => {
   assert.equal(result.nonBlockingFindings, 0);
 });
 
-test('Approved reviews with non-blocking findings are inconclusive', () => {
+test('HAMCLOSE-01 Approved reviews with non-blocking findings retain remediation ownership', () => {
   const result = classify(inputFor('approved-with-non-blocking-findings.md'));
 
-  assert.equal(result.decision, 'inconclusive');
-  assert.equal(result.reason, 'no-matching-decision-rule');
+  assert.equal(result.decision, 'remediation-eligible');
+  assert.equal(result.reason, 'addressable-findings');
   assert.equal(result.blockingFindings, 0);
   assert.equal(result.nonBlockingFindings, 1);
 });
@@ -263,12 +263,12 @@ test('explicit empty check rollup is merge eligible but missing rollup fails clo
   );
 });
 
-test('raw GitHub label objects are normalized before hard-stop checks', () => {
+test('HAMCLOSE-01 raw diagnostic stuck label objects keep clean closure reachable', () => {
   const result = classify(inputFor('comment-only-merge-eligible.md', {
     labels: [{ name: 'merge-agent-stuck' }],
   }));
 
-  assert.equal(result.decision, 'inconclusive');
+  assert.equal(result.decision, 'merge-eligible');
 });
 
 test('section extraction ignores headings inside fenced code blocks', () => {

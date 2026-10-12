@@ -1,3 +1,4 @@
+import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { inspectCiBootstrap } from '../src/ci-recovery.mjs';
@@ -870,6 +871,9 @@ test('watcher passes live HAM target separately from stable reviewed-head dispat
         reviewCycleExhausted: true,
         riskClass: 'low',
       }),
+      proveCloserAuthoredStaleHeadImpl: args => proveCloserAuthoredStaleHead({ ...args, comments: [{
+        author: 'the-hammer-lacey[bot]', body: `HAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${liveHead}`,
+      }] }),
       fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: liveHead, parentSha: reviewedHead, message: 'Closed-By: hammer' }),
       fetchLatestHeadReviewBodiesImpl: async () => [],
       resolveHeadCloserCommitSuppressionImpl: async () => ({
@@ -2628,7 +2632,7 @@ test('Deliverable 2: daemon fail-closed on a REMEDIABLE gate (gate-not-eligible/
 // checks, mergeable, head-match) stays in force.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function unattributedDaemonArgs({ rootDir, prNumber = 900, head = 'operator-pr-head', checks = [{ name: 'ci', conclusion: 'SUCCESS' }] }) {
+function unattributedDaemonArgs({ rootDir, prNumber = 900, head = 'operator-pr-head', attestedFrom = null, checks = [{ name: 'ci', conclusion: 'SUCCESS' }] }) {
   return {
     rootDir,
     cfg: { mergeMethod: 'squash', autonomousMergeExecutionEnabled: true, strictMode: true },
@@ -2659,6 +2663,8 @@ function unattributedDaemonArgs({ rootDir, prNumber = 900, head = 'operator-pr-h
       state: 'OPEN', headRefOid: head,
       checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
       headRefName: 'claude-code/infra-fix',
+      comments: attestedFrom ? [{ author: 'the-hammer-lacey[bot]',
+        body: `HAM-Base-Head: ${attestedFrom}\nHAM-Validated-Head: ${head}` }] : [],
       labels: [],
     }),
     // Identity resolution fails on every path: no build-completion signal, no head
@@ -3015,7 +3021,7 @@ test('SEV1: clean stale-head closer commit with unknown worker identity merges u
     let suppressionHead = null;
     const logs = [];
     const result = await runDaemonCleanMergeAttempt({
-      ...unattributedDaemonArgs({ rootDir, prNumber: 910, head: 'closer-clean-head-910' }),
+      ...unattributedDaemonArgs({ rootDir, prNumber: 910, head: 'closer-clean-head-910', attestedFrom: 'reviewed-clean-head-910' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-clean-head-910',
         settledReview: { verdict: 'comment-only' },
@@ -3070,7 +3076,7 @@ test('SEV1 regression: operator-approved does not prevent trusted closer commit 
     let suppressionHead = null;
     const logs = [];
     const result = await runDaemonCleanMergeAttempt({
-      ...unattributedDaemonArgs({ rootDir, prNumber: 912, head: 'closer-clean-head-912' }),
+      ...unattributedDaemonArgs({ rootDir, prNumber: 912, head: 'closer-clean-head-912', attestedFrom: 'reviewed-clean-head-912' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-clean-head-912',
         settledReview: { verdict: 'comment-only' },
@@ -3122,7 +3128,7 @@ test('SEV1 regression: autonomous closer clean head wins when non-blocking head 
     let seen = null;
     let proofCalls = 0;
     const result = await runDaemonCleanMergeAttempt({
-      ...unattributedDaemonArgs({ rootDir, prNumber: 914, head: 'closer-clean-head-914' }),
+      ...unattributedDaemonArgs({ rootDir, prNumber: 914, head: 'closer-clean-head-914', attestedFrom: 'reviewed-nonblocking-head-914' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-nonblocking-head-914',
         settledReview: { verdict: 'comment-only' },
@@ -3137,6 +3143,8 @@ test('SEV1 regression: autonomous closer clean head wins when non-blocking head 
       fetchRollupImpl: async () => ({
         state: 'OPEN',
         headRefOid: 'closer-clean-head-914',
+        comments: [{ author: 'the-hammer-lacey[bot]',
+          body: 'HAM-Base-Head: reviewed-nonblocking-head-914\nHAM-Validated-Head: closer-clean-head-914' }],
         checks: [],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
@@ -3195,8 +3203,8 @@ test('SEV1 SAFETY: clean stale head that is NOT a terminal closer commit still p
     });
 
     assert.equal(mergeAttempted, false);
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
-    assert.equal(result.reason, 'worker-identity-unresolved');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'stale-head');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -3239,7 +3247,7 @@ test('SEV1 rollback: feature flag off disables autonomous closer-commit clean su
   try {
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
-      ...unattributedDaemonArgs({ rootDir, prNumber: 913, head: 'closer-clean-head-913' }),
+      ...unattributedDaemonArgs({ rootDir, prNumber: 913, head: 'closer-clean-head-913', attestedFrom: 'reviewed-clean-head-913' }),
       cfg: {
         mergeMethod: 'squash',
         autonomousMergeExecutionEnabled: true,

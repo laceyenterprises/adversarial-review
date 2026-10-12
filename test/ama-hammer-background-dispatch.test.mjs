@@ -1,3 +1,4 @@
+import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
 import { acquireAmaCloserLease, isHeldAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import assert from 'node:assert/strict';
@@ -920,6 +921,10 @@ function closerResumeFixture(scenario) {
         : scenario === 'live-blocking' ? ['## Verdict\nRequest changes\n## Blocking Issues\n- Live defect.']
           : scenario === 'live-clean' ? [body] : [];
     },
+    proveCloserAuthoredStaleHeadImpl: args => proveCloserAuthoredStaleHead({ ...args,
+      comments: scenario === 'worker' ? [] : [{ author: 'the-hammer-lacey[bot]',
+        body: `HAM-Base-Head: ${HEAD}\nHAM-Validated-Head: H1` }],
+    }),
     resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: scenario !== 'worker', reason: 'closer-commit-trailer' }),
     fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: 'H1', parentSha: HEAD, message: 'Closed-By: hammer' }),
     resolveHamTerminalRemediationEvidenceImpl: async () => null,
@@ -1052,10 +1057,11 @@ test('refused exact-head review for an unvalidated closer reaches bounded watchd
   assert.equal(result.orphanRecovery.disposition, 'exhausted');
 });
 
-test('rebased closer head without authoritative identities cannot arm HAM resume', async t => {
+test('rebased closer head without an App attestation cannot arm HAM resume', async t => {
   const { args, payloads } = closerResumeFixture('green');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   args.reviewStateRow.reviewer = 'unknown-model';
+  args.proveCloserAuthoredStaleHeadImpl = input => proveCloserAuthoredStaleHead({ ...input, comments: [] });
   args.fetchHeadCloserVerifiedCommitImpl = async () => ({ sha: 'H1', parentSha: 'rebased-worker', message: 'Closed-By: hammer' });
   args.resolveHeadCloserCommitSuppressionImpl = async ({ headSha }) => ({
     suppressed: headSha === 'H1', reason: headSha === 'H1' ? 'closer-commit-trailer' : 'worker' });

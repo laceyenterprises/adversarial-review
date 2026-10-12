@@ -1,3 +1,5 @@
+import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
+import { applyMergeAgentStuckLabel as applyStuckLabel } from './merge-agent-stuck-label.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { fetchMergeAgentCandidate, normalizeLabelNames, extractOperatorNotes } from './merge-agent-candidate.mjs';
 import { execFile, spawnSync } from 'node:child_process';
@@ -127,7 +129,7 @@ import { isRecordedDispatchAtLeastStuckMinAge } from './merge-agent-stuck-age.mj
 const execFileAsync = promisify(execFile);
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
-const OPERATOR_SKIP_LABELS = new Set([...OPERATOR_HOLD_LABELS, MERGE_AGENT_STUCK_LABEL]);
+const OPERATOR_SKIP_LABELS = new Set(OPERATOR_HOLD_LABELS);
 const DEFAULT_HQ_PATH = 'hq';
 const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
@@ -1487,6 +1489,7 @@ async function reconcilePhantomHandoffEscalation({
   const currentLabelNames = normalizeLabelNames(labels);
   const stuckPresent = currentLabelNames.includes(MERGE_AGENT_STUCK_LABEL);
   const appliedStuck = stuckPresent || await applyMergeAgentStuckLabel({
+    rootDir, headSha: job.headSha,
     repo: job.repo,
     prNumber: job.prNumber,
     labels: currentLabelNames,
@@ -1700,44 +1703,8 @@ function isTerminalMergeAgentCancelDetail({ cancelStdout, cancelError } = {}) {
 
 const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add';
 
-// Best-effort terminal hand-off: mark the PR `merge-agent-stuck` so it surfaces
-// for the operator and OPERATOR_SKIP_LABELS halts further auto-dispatch. Used
-// when the watcher's bounded re-dispatch budget is exhausted. Never throws into
-// the watcher loop — a failed label add just leaves the PR in its prior state.
-async function applyMergeAgentStuckLabel({
-  repo,
-  prNumber,
-  labels = [],
-  ghExecFileImpl = execFileAsync,
-  logger = console, env = process.env,
-} = {}) {
-  if (normalizeLabelNames(labels).includes(MERGE_AGENT_STUCK_LABEL)) return false;
-  try {
-    const adapterHandled = await tryAdapterPullRequestLabel({
-      repo,
-      prNumber,
-      action: 'add',
-      labelName: MERGE_AGENT_STUCK_LABEL,
-      execFileImpl: ghExecFileImpl, env,
-    });
-    if (!adapterHandled) {
-      await ghExecFileImpl('gh', [
-        'pr',
-        'edit',
-        String(prNumber),
-        '--repo',
-        repo,
-        '--add-label',
-        MERGE_AGENT_STUCK_LABEL,
-      ], { maxBuffer: 5 * 1024 * 1024 });
-    }
-    return true;
-  } catch (err) {
-    logger?.error?.(
-      `merge-agent: failed to apply ${MERGE_AGENT_STUCK_LABEL} to ${repo}#${prNumber}: ${err?.message || err}`
-    );
-    return false;
-  }
+function applyMergeAgentStuckLabel(args) {
+  return applyStuckLabel({ ...args, tryAdapterPullRequestLabelImpl: tryAdapterPullRequestLabel });
 }
 
 async function removeConsumedTriggerLabel({
@@ -2228,6 +2195,7 @@ async function dispatchMergeAgentForPR({
     let stuckReady = labelNames.includes(MERGE_AGENT_STUCK_LABEL);
     if (!stuckReady) {
       stuckReady = await applyMergeAgentStuckLabel({
+        rootDir, headSha,
         repo,
         prNumber,
         labels: labelNames,
@@ -2318,6 +2286,7 @@ async function dispatchMergeAgentForPR({
         at: now,
       });
       await applyMergeAgentStuckLabel({
+        rootDir, headSha,
         repo,
         prNumber,
         labels: labelNames,
@@ -2505,6 +2474,7 @@ async function dispatchMergeAgentForPR({
       });
       if (dispatchDecision.handoffRequired === true) {
         await applyMergeAgentStuckLabel({
+          rootDir, headSha,
           repo,
           prNumber,
           labels,
@@ -2844,6 +2814,7 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
   });
   const parsedReview = parseMergeAgentRescueReviewBody(latestJob?.reviewBody);
   const classifierResult = classifyMergeAgentRescue({
+    commentOnlyFinalRoundPush: hasCommentOnlyFinalRoundPush(rootDir, { repo: candidate.repo, prNumber: candidate.prNumber, headSha: candidate.headSha }),
     reviewBody: latestJob?.reviewBody ?? null,
     mergeable: candidate.mergeable || 'UNKNOWN',
     mergeStateStatus: candidate.mergeStateStatus || '',
@@ -2931,6 +2902,7 @@ export {
   classifyBlockingFindings,
   classifyNonBlockingFindings,
   describeStaleDispatch,
+  applyMergeAgentStuckLabel,
   scanStuckMergeAgentDispatches,
   isTerminalMergeAgentCancelDetail,
   STUCK_DISPATCH_DEFAULTS,

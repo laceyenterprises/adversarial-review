@@ -199,7 +199,7 @@ test('replay #7332: a conflicting, red-CI final-round head reaches one hammer in
 });
 
 test('replay #7332: a hard-stop label still blocks, and both background log lines name the reasons', async (t) => {
-  for (const label of ['do-not-merge', 'merge-agent-stuck']) {
+  for (const label of ['do-not-merge', 'merge-agent-skip']) {
     const rootDir = tempRoot(t, `7332-${label}`);
     const input = setup7332(rootDir);
     const queue = createAmaHammerBackgroundQueue({ maxConcurrent: 1 });

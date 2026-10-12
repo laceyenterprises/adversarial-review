@@ -1321,7 +1321,10 @@ async function dispatchAmaClosureFor({
     // read waits a tick on both sides instead of the closer answering
     // `daemon-clean-route` for a head the daemon declines.
     mergeableState: closureGateMergeability(mergeabilityForGate || {}),
-    labels: Array.isArray(labelNames) ? labelNames : undefined,
+    // The diagnostic stuck marker cannot veto its recorded final-round owner.
+    labels: Array.isArray(labelNames) ? labelNames.filter((label) =>
+      label !== 'merge-agent-stuck' ||
+      !(gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true || closerOnlyHeadDelta)) : undefined,
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     baseSha: candidate?.baseSha || null,
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
@@ -1367,7 +1370,10 @@ async function dispatchAmaClosureFor({
     requiredGateContext,
     branchProtectionRequiredContexts,
     requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
-    labels: Array.isArray(labelNames) ? labelNames : undefined,
+    // The diagnostic stuck marker cannot veto its recorded final-round owner.
+    labels: Array.isArray(labelNames) ? labelNames.filter((label) =>
+      label !== 'merge-agent-stuck' ||
+      !(gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true || closerOnlyHeadDelta)) : undefined,
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
     validatedHead: closerOnlyHeadDelta && closerAuthoredStale.carryForward
       ? currentPrHeadSha : reviewState.headSha,
@@ -1952,7 +1958,7 @@ async function dispatchAmaClosureFor({
     reviewState.blockingFindingState === 'known' &&
     reviewState.blockingFindingCount === 0 &&
     reviewState.nonBlockingFindingState === 'known' &&
-    reviewState.nonBlockingFindingCount > 0;
+    (reviewState.nonBlockingFindingCount > 0 || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true);
   // COMMENTCLOSE-01: prove the final-round head whatever CI says. The proof only
   // authorizes the hammer's terminal validation of this exact head; merge still
   // needs that validation's exact-head `ham_terminal_remediation_validated`.

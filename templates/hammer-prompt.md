@@ -702,9 +702,9 @@ gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR
 gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
 ```
 
-The hammer's judgement is final: remediate every valid finding, rebase, validate
-and merge the exact head under the lease when provenance is proven. If provenance cannot be proven, request the bounded exact-head re-review described below. When all findings are already
-addressed, validate the existing head; do not create an empty HAM commit.
+Remediate every valid finding, rebase, validate and merge under the lease when
+provenance is proven. Otherwise use the bounded exact-head re-review below.
+If findings are already addressed, validate the existing head without an empty commit.
 Fleet builder, remediation and conflict-rebase commits below your head are your
 responsibility. Foreign or unsigned commits take the re-review route. A reviewed-head parent or trailer
 is not needed for exact-head validation.

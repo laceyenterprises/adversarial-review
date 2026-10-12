@@ -81,9 +81,10 @@ fi
 # non-blocking waiver holds). Keep one bullet per finding on ONE line, and use
 # the finding's title VERBATIM from the review so the identity match lands.
 HAM_AUDIT_COMMENT_DETAILS="$(cat "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
   "$HAM_AUDIT_COMMENT_MARKER" \
   "$HAM_AUDIT_COMMENT_DETAILS" \
+  "$POST_REMEDIATION_SHA" \
   "$POST_REMEDIATION_SHA" \
   "$HAM_AUDIT_REMEDIATED_TOTAL" \
   "$HAM_AUDIT_REMEDIATED_BLOCKING" \

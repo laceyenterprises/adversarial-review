@@ -1,9 +1,39 @@
 # Data Model - Follow-Up Remediation Jobs
 
 **Owner:** follow-up remediation queue
-**Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`
+**Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
+
+## Missing retrigger-review label-event observations
+
+`tryRetriggerReviewFromLabel` in `src/follow-up-retrigger-review-label.mjs`
+persists the first observation when a present `retrigger-review` label lacks a
+scoped event and the current head is a valid 40-character SHA. Conclusively
+non-attributable or untrusted labels are removed without creating an observation.
+The store is `data/follow-up-jobs/missing-label-events/<digest>.json`, where
+`digest` is the lowercase SHA-256 hex digest (without the `sha256:` prefix) of
+`missing-label-event:<repo>#<prNumber>@<normalized-head-sha>`. The payload contains
+only `firstSeenAt`, an ISO 8601 timestamp from the initial observation. It has no
+schema-version field and is written through `writeFileAtomic`.
+
+Subsequent observations read the same timestamp, so a daemon restart cannot
+restart the wait. After five minutes (`MISSING_LABEL_EVENT_WAIT_MS`), the present
+label is treated as a current-head review request with actor `unknown` and the
+observation key as its synthetic label-event key. A finite non-negative
+`RETRIGGER_REVIEW_MISSING_EVENT_WAIT_MS` overrides that delay. Normal
+label-consumption idempotency and audit handling then apply; this fallback grants
+no operator override. A proven completed comment-only final-round push retains
+hammer ownership rather than triggering another review.
+
+Retention is indefinite in the current implementation: consumption, label
+removal and head changes do not delete observation files, and no automatic
+sweeper covers this directory. Operators may remove a record after confirming
+that its PR is closed or its head is superseded; recompute the digest from the
+repo, PR number and head because those identifiers are absent from the payload.
+Keep records for active heads: deleting one resets the observation wait if the
+label is encountered again. Retention cleanup does not remove the separate
+label-consumption or operator-mutation audit receipts.
 
 ## Infrastructure round refunds (REMREFUND-01)
 

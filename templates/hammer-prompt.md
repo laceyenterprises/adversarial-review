@@ -705,7 +705,9 @@ daemon closure, never operator escalation.
 Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
 Start from the captured `HAM_BASE_HEAD`. Trust only the reviewed head or an
-App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain from it. After API or
+App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain from it, or daemon-recorded
+completed remediation rounds whose start/result heads link it to the starting
+head and whose links GitHub confirms are strictly ahead. After API or
 CAS git publication, confirm remote SHA equals HEAD and append both exact SHAs
 in the hammer App comment. Preserve earlier attestation edges. Signatures and
 commit metadata confer no trust; an unproven base requests re-review.

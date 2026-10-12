@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,8 +46,9 @@ if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
   return {
     run: (baseArgs = ['--pr', 'https://github.com/fixture/repo/pull/1'], env = {}) => exec(process.execPath,
       [cli, 'fixture/repo', 'reviewed', 'head', ...baseArgs], {
-        env: { ...process.env, HAM_BASE_HEAD: '', HAM_PR_NUMBER: '', PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 15000,
+        env: { ...process.env, HAM_BASE_HEAD: '', HAM_PR_NUMBER: '', HAM_ROOT_DIR: root, PATH: `${root}:${process.env.PATH}`, ...env }, timeout: 15000,
       }),
+    root,
     calls: () => JSON.parse(readFileSync(callsFile, 'utf8')),
   };
 }
@@ -108,4 +109,23 @@ test('head context refuses a missing comment PR number before making an API requ
   const f = fixture(t, 'success');
   await assert.rejects(f.run(['release'], { HAM_BASE_HEAD: 'earlier', HAM_PR_NUMBER: '' }), /hammer PR number is missing/);
   assert.equal(f.calls().length, 0);
+});
+
+test('HAMCLOSE-05 completed daemon round exits successfully instead of handing off', async t => {
+  const f = fixture(t, 'spoof');
+  const dir = join(f.root, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
+    status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
+      startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
+  const { stdout } = await f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root });
+  assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');
+  for (const overrides of [{ repo: 'fixture/other' }, { prNumber: 2 }, { status: 'in_progress' }]) {
+    writeFileSync(join(dir, 'round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
+      status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
+        startHeadSha: 'reviewed', resultingHeadSha: 'head' }] }, ...overrides }));
+    await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root }), error => error.code === 65);
+  }
+  writeFileSync(join(dir, 'round.json'), '{');
+  await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root }), error => error.code === 65);
 });

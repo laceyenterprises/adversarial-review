@@ -90,3 +90,30 @@ test('HAMFINAL-02: complete paginated fleet histories are validated beyond the f
   assert.equal(range.verified, true);
   assert.equal(range.commits.length, 260);
 });
+
+for (const [name, rounds, target, diverged, proven] of [
+  ['one round', [['reviewed', 'head']], 'head', false, true],
+  ['two rounds', [['reviewed', 'round1'], ['round1', 'head']], 'head', false, true],
+  ['extra commit', [['reviewed', 'head']], 'extra', false, false],
+  ['wrong start', [['other', 'head']], 'head', false, false],
+  ['unfinished', [['reviewed', 'head', 'spawned']], 'head', false, false],
+  ['identical link', [['reviewed', 'head']], 'head', 'identical', false],
+  ['unreadable compare', [['reviewed', 'head']], 'head', 'unreadable', false],
+  ['diverged link', [['reviewed', 'round1'], ['round1', 'head']], 'head', true, false],
+  ['no records', [], 'head', false, false],
+  ['legacy missing result', [['reviewed', null]], 'head', false, false],
+]) {
+  test(`HAMCLOSE-05: ${name}`, async () => {
+    const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed',
+      currentHead: target, hammerBaseHead: target,
+      remediationRounds: rounds.map(([startHeadSha, resultingHeadSha, state = 'completed']) => ({ startHeadSha, resultingHeadSha, state })),
+      get: async path => {
+        if (diverged === 'unreadable') throw new Error('synthetic read failure');
+        return { status: diverged === 'identical' ? 'identical'
+          : diverged && path.endsWith('round1...head') ? 'diverged' : 'ahead' };
+      },
+    });
+    assert.equal(Boolean(range), proven);
+    if (proven) assert.equal(range.proof, 'completed-remediation-round-chain');
+  });
+}

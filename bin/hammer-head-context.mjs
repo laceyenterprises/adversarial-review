@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execGhWithRetry } from '../src/gh-cli.mjs';
-import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
+import { fetchHammerHeadRange, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 const [repo, reviewedHead, currentHead, baseArg, prUrl] = process.argv.slice(2);
 if (!repo || !reviewedHead || !currentHead || !baseArg || (baseArg === '--pr' && !prUrl)) {
   throw new Error('usage: hammer-head-context REPO REVIEWED HEAD BASE | REPO REVIEWED HEAD --pr PR_URL');
@@ -22,6 +22,7 @@ for (let page = 1; process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== re
   if (batch.length < 100) break;
 }
 const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef, comments, hammerBaseHead: process.env.HAM_BASE_HEAD,
+  remediationRounds: readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
   get: async path => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout) });
 if (!range) {
   process.stderr.write('hammer starting base or responsibility range could not be proven\n');

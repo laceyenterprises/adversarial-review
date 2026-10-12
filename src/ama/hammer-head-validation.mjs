@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 
 const login = identity => String(typeof identity === 'object' ? identity?.login || '' : identity || '').toLowerCase().replace(/\[bot\]$/, '');
@@ -50,6 +52,43 @@ export function hammerAttestationChain(comments, reviewedHead, currentHead) {
   return trusted.get(currentHead) || null;
 }
 
+// Read only daemon-owned state under the supplied runtime root. Old rounds
+// without a resulting head cannot establish an edge.
+export function readCompletedRemediationRounds(rootDir, repo, prNumber) {
+  if (!rootDir || !prNumber) return [];
+  try {
+    const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+    return readdirSync(dir).filter(name => name.endsWith('.json')).flatMap(name => {
+      const job = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+      if (job.repo !== repo || String(job.prNumber) !== String(prNumber) || job.status !== 'completed') return [];
+      return (job.remediationPlan?.rounds || []).filter(round => round.state === 'completed'
+        && round.startHeadSha && round.resultingHeadSha);
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function remediationChain(rounds, reviewedHead, target, repo, get) {
+  const trusted = new Map([[reviewedHead, []]]);
+  for (let pass = 0; pass < rounds.length; pass++) {
+    let changed = false;
+    for (const round of rounds) {
+      const { startHeadSha: base, resultingHeadSha: head } = round;
+      if (round.state !== 'completed' || !base || !head || !trusted.has(base) || trusted.has(head)) continue;
+      try {
+        const comparison = await get(`repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`);
+        if (comparison?.status !== 'ahead') continue;
+      } catch { continue; }
+      trusted.set(head, [...trusted.get(base), head]);
+      changed = true;
+    }
+    if (trusted.has(target)) return trusted.get(target);
+    if (!changed) break;
+  }
+  return null;
+}
+
 export const HAMMER_RANGE_MAX_COMMITS = 10000;
 async function readComparison(path, get, limit) {
   const first = await get(path);
@@ -73,11 +112,15 @@ async function readComparison(path, get, limit) {
 
 // Read the complete head-only DAG, including side parents. The comparison with
 // the base excludes base history; foreign PR commits cannot hide behind a merge.
-export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], hammerBaseHead = null }) {
+export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], hammerBaseHead = null, remediationRounds = [] }) {
   const chain = hammerAttestationChain(comments, reviewedHead, hammerBaseHead || currentHead);
   if (chain) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
     commits: [...chain, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
     proof: 'hammer-app-attestation-chain' };
+  const rounds = await remediationChain(remediationRounds, reviewedHead, hammerBaseHead || currentHead, repo, get);
+  if (rounds) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+    commits: [...rounds, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
+    proof: 'completed-remediation-round-chain' };
   if (hammerBaseHead) return null;
   const { resolveGitHubAppBotLogin } = await import('../github-app-identity.mjs');
   const fleetLogins = [...DEFAULT_FLEET_LOGINS];

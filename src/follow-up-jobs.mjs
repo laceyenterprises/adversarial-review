@@ -3112,6 +3112,7 @@ function markFollowUpJobFailed({
 }
 
 function markFollowUpJobCompleted({
+  resultingHeadSha = null,
   rootDir,
   jobPath,
   completion,
@@ -3152,6 +3153,7 @@ function markFollowUpJobCompleted({
         nextJob = updateCurrentRound(nextJob, (round) => ({
           ...round,
           state: 'completed',
+          resultingHeadSha,
           finishedAt: normalizedCompletedAt,
           worker: remediationWorker || round.worker || currentJob.remediationWorker || null,
           completion: normalizedCompletion,

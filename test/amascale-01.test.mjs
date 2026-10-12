@@ -121,6 +121,8 @@ test('lag lock tolerates contention beyond the former one-second budget', { time
   try {
     const observation = observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 2 });
     const result = assert.doesNotReject(observation);
+    // Observe early assertion failures while the lock remains held; await below still fails.
+    result.catch(() => {});
     await delay(1100);
     fsExt.flockSync(fd, 'un');
     await result;

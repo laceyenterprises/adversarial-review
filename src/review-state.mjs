@@ -1,3 +1,4 @@
+import { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { observeHoldRelease } from './operator-hold-release.mjs';
 import { parseReviewFindings } from './kernel/review-findings.mjs';
@@ -1151,7 +1152,11 @@ function requestReviewRereview({
     }
     const operatorRequestedRereview = isExplicitOperatorRetriggerReason(reason);
     const targetHead = normalizedTargetRevisionRef;
-    if (targetHead && !operatorRequestedRereview) {
+    const handoffReview = targetHead && hammerHandoffReviewBypass({
+      db, rootDir, repo, prNumber, headSha: targetHead,
+      row: { revision_ref: targetHead, rereview_requested_at: requestedAt, rereview_reason: reason },
+    });
+    if (targetHead && !operatorRequestedRereview && !handoffReview) {
       const settledBodies = db.prepare(
         `SELECT verdict, body_md FROM reviewer_passes
           WHERE repo = ? AND pr_number = ? AND head_sha = ?
@@ -1167,12 +1172,12 @@ function requestReviewRereview({
         return buildBlockedRereviewResult('comment-only-verdict-settled', currentRow);
       }
     }
-    if (targetHead && !operatorRequestedRereview && !ownerlessRecovery &&
+    if (targetHead && !operatorRequestedRereview && !handoffReview && !ownerlessRecovery &&
         hasCommentOnlyFinalRoundPush(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: comment-only final round completed`);
       return buildBlockedRereviewResult('comment-only-final-round-completed', currentRow);
     }
-    if (targetHead && !operatorRequestedRereview && !ownerlessRecovery && !automaticWithheldHeadRecovery &&
+    if (targetHead && !operatorRequestedRereview && !handoffReview && !ownerlessRecovery && !automaticWithheldHeadRecovery &&
         hasUnprovenCommentOnlyFinalRoundHead(rootDir, { repo, prNumber, headSha: targetHead }, logger)) {
       logger.warn?.(`[review-state] Refusing re-review for ${repo}#${prNumber}: unproven comment-only final-round push`);
       return buildBlockedRereviewResult('comment-only-final-round-push-unproven', currentRow);

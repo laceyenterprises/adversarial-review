@@ -3037,21 +3037,24 @@ fi
   });
 }
 
-test('HAMCLOSE-02 real pollOnce admits one handed-off exact-head review past exhausted attempts', () => {
+for (const stranded of [false, true]) test(`HAMCLOSE-04 real pollOnce admits a final-round handoff once, stranded=${stranded}`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-review-'));
   try {
     const head = 'b'.repeat(40);
     const probePath = path.join(tmp, 'nonempty-probes');
     const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
     let loader = buildLoaderSource({ subjectHeads: { 101: head } });
-    loader = loader.replace('export async function resolve', `stubs.set(${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs'))}, 'fixture:handoff-lease');\nexport async function resolve`);
-    const leaseSource = `export * from ${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs') + '?actual')};
-      export function readAmaCloserLease(_root, identity) {
-        return identity.prNumber === 101 && identity.headSha === ${JSON.stringify(head)}
-          ? { status: 'handed-to-review', headSha: identity.headSha, lrqId: 'hammer-8143', updatedAt: '2026-10-12T06:15:00.000Z' } : null;
-      }`;
+    const leaseUrl = fileUrl('src', 'ama', 'closer-lease.mjs');
+    const waitUrl = fileUrl('src', 'ama', 'closure-wait.mjs');
+    loader = loader.replace('export async function resolve',
+      `stubs.set(${JSON.stringify(leaseUrl)}, 'fixture:handoff-lease');\nstubs.set(${JSON.stringify(waitUrl)}, 'fixture:handoff-wait');\nexport async function resolve`);
+    const leaseSource = `export * from ${JSON.stringify(leaseUrl + '?actual')};
+      import { readAmaCloserLease as read } from ${JSON.stringify(leaseUrl + '?actual')};
+      export function readAmaCloserLease(_root, identity) { return read(${JSON.stringify(tmp)}, identity); }`;
+    const waitSource = `import { observeClosureWait as observe } from ${JSON.stringify(waitUrl + '?actual')};
+      export function observeClosureWait(args) { return observe({ ...args, rootDir: ${JSON.stringify(tmp)}, pageImpl: async () => {} }); }`;
     loader = loader.replace('export async function load(url, context, nextLoad) {',
-      `export async function load(url, context, nextLoad) {\nif (url === 'fixture:handoff-lease') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(leaseSource)} };`);
+      `export async function load(url, context, nextLoad) {\nif (url === 'fixture:handoff-lease') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(leaseSource)} };\nif (url === 'fixture:handoff-wait') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(waitSource)} };`);
     writeFileSync(loaderPath, loader);
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
@@ -3059,6 +3062,32 @@ test('HAMCLOSE-02 real pollOnce admits one handed-off exact-head review past exh
         review_attempts,revision_ref,rereview_requested_at,rereview_reason)
         VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12T04:45:00Z','claude','open','pending',36,?,
         '2026-10-12T06:15:00Z',?)\`).run(${JSON.stringify(head)}, ${JSON.stringify('system-orphan-head-review:' + head)});
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      const rootDir = ${JSON.stringify(tmp)};
+      const repo = db.prepare('SELECT repo FROM reviewed_prs WHERE pr_number=101').get().repo;
+      const identity = { rootDir, repo, prNumber: 101, headSha: ${JSON.stringify(head)} };
+      const completed = rootDir + '/data/follow-up-jobs/completed';
+      mkdirSync(completed, { recursive: true });
+      writeFileSync(completed + '/' + repo.replace('/', '__') + '-pr-101-final.json', JSON.stringify({
+        repo, prNumber: 101, status: 'completed', revisionRef: 'a'.repeat(40),
+        reviewBody: ${JSON.stringify('## Blocking issues\n- None.\n## Non-blocking issues\n- **Cleanup**\n  - **File:** `src/fixture.mjs`\n  - **Lines:** `1`\n  - **Problem:** redundant branch\n  - **Recommended fix:** remove the branch\n## Verdict\nComment only')}, currentRound: 1, maxRounds: 2,
+        finalRound: 'comment-only', reReview: { suppressed: 'comment-only-final-round' },
+        completion: { workerPushedHeadSha: identity.headSha },
+      }));
+      db.prepare("UPDATE reviewed_prs SET review_status='posted', reviewer_head_sha=? WHERE pr_number=101").run('a'.repeat(40));
+      const { acquireAmaCloserLease } = await import(${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs'))});
+      const { handoffHammerReview } = await import(${JSON.stringify(fileUrl('bin', 'hammer-review-handoff.mjs'))});
+      const { requestReviewRereview } = await import(${JSON.stringify(fileUrl('src', 'review-state.mjs') + '?actual')});
+      assert.equal(requestReviewRereview({ ...identity, db, targetRevisionRef: identity.headSha }).reason, 'comment-only-final-round-completed');
+      const { requestBoundedOrphanReview } = await import(${JSON.stringify(fileUrl('src', 'ama', 'orphan-review-request.mjs'))});
+      const boundedRequest = args => requestBoundedOrphanReview({ ...args,
+        requestRereviewImpl: options => requestReviewRereview({ ...options, db }),
+      });
+      if (${stranded}) await boundedRequest(identity);
+      acquireAmaCloserLease(identity);
+      await handoffHammerReview({ ...identity, requestBoundedReviewImpl: boundedRequest });
+      db.prepare(\`INSERT INTO review_cycle_verdicts(pr_url,head_sha,verdict_count,verdict_at)
+        VALUES (?, ?, 6, ?)\`).run('https://github.com/' + repo + '/pull/101', 'a'.repeat(40), new Date().toISOString());
       for (let attempt = 1; attempt <= 36; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,
         attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,metadata_json)
         VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T05:12:10Z',
@@ -3066,6 +3095,7 @@ test('HAMCLOSE-02 real pollOnce admits one handed-off exact-head review past exh
     `, afterFirstPoll: `
       assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101).length, 1);
       assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+      assert.equal(requestReviewRereview({ ...identity, db, targetRevisionRef: identity.headSha, reason: 'system-orphan-head-review:' + identity.headSha }).reason, 'comment-only-final-round-completed');
       await pollOnce(octokit, pollOptions);
       const { readFileSync } = await import('node:fs');
       assert.equal(readFileSync(${JSON.stringify(probePath)}, 'utf8'), 'probe\\n', 'verified nonempty head is probed once across ticks');

@@ -1,5 +1,4 @@
 import { DELIVERED_REVIEW_SQL, countReviewCeilingUnits } from './review-ceiling-metrics.mjs';
-import { readAmaCloserLease } from './ama/closer-lease.mjs';
 import { isOrphanHeadReviewRequested, isExplicitOperatorReviewRetrigger } from './first-pass-review-suppression.mjs';
 
 // A persisted legacy/operator increase remains authoritative for the active
@@ -19,15 +18,7 @@ export function postedReviewCeilingReached({ db, repo, prNumber, ceiling }) {
   return Math.max(Number(row.count), countReviewCeilingUnits({ db, repoPath: repo, prNumber })) >= ceiling;
 }
 
-export function hammerHandoffReviewBypass({ db, rootDir, repo, prNumber, headSha, row }) {
-  if (!isOrphanHeadReviewRequested(row, headSha)) return false;
-  const lease = readAmaCloserLease(rootDir, { repo, prNumber, headSha });
-  if (lease?.status !== 'handed-to-review') return false;
-  // The handoff authorizes one attempt after transfer, never an unbounded
-  // quota-error retry loop. The normal reviewer claim CAS remains unchanged.
-  return !db.prepare(`SELECT 1 FROM reviewer_passes WHERE repo=? AND pr_number=?
-    AND head_sha=? AND started_at>=? LIMIT 1`).get(repo, prNumber, headSha, lease.updatedAt);
-}
+export { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 
 export function routeCappedReviewToClosure({ db, repo, prNumber, headSha, row, ceiling, logger = console }) {
   if (!row || ['reviewing', 'malformed', 'failed-orphan'].includes(row.review_status)

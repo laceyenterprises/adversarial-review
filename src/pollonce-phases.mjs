@@ -1,6 +1,6 @@
 import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
 import { closeEmptyPullRequest } from './empty-pr-close.mjs';
-import { routeCappedReviewToClosure, hammerHandoffReviewBypass } from './hamclose-review-admission.mjs';
+import { routeCappedReviewToClosure, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
 import { recoverOwnerlessReview } from './ownerproof-review-recovery.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
@@ -1416,10 +1416,18 @@ export async function processReviewSubject(entry, ctx) {
       // ...UNLESS the merge-agent is provably still converging for THIS head.
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
-      const cappedClosure = effectiveDomainId === CODE_PR_DOMAIN_ID && routeCappedReviewToClosure({ db, repo: repoPath,
-        prNumber, headSha: subject.headSha, row: existing,
-        ceiling: resolveHardReviewCeiling(resolveRoundBudgetForJob({ linearTicketId,
-          riskClass: summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber }).latestRiskClass }, { rootDir: ROOT }).roundBudget) });
+      let cappedClosure = false;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID) {
+        const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
+        const roundBudget = resolveRoundBudgetForJob({
+          linearTicketId, riskClass: ledger.latestRiskClass,
+        }, { rootDir: ROOT });
+        cappedClosure = routeCappedReviewToClosure({ db, repo: repoPath,
+          prNumber, headSha: subject.headSha, row: existing,
+          ceiling: resolveHardReviewCeiling(resolveMaxRemediationRounds({
+            roundBudget: roundBudget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
+          })) });
+      }
       if (cappedClosure) existing = stmtGetReviewRow.get(repoPath, prNumber);
       const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
@@ -3439,11 +3447,10 @@ export async function processReviewSubject(entry, ctx) {
               linearTicketId,
               riskClass: ledger.latestRiskClass,
             }, { rootDir: ROOT });
-            const latestMaxRounds = Number(ledger.latestMaxRounds);
             const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
-            const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
-              ? latestMaxRounds
-              : roundBudget.roundBudget;
+            const maxRemediationRounds = resolveMaxRemediationRounds({
+              roundBudget: roundBudget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
+            });
             const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
               ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
               : 0;

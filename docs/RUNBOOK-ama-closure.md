@@ -2810,7 +2810,12 @@ closure. In-progress placeholder drafts therefore retain their PR.
 
 When delivered reviews reach the ceiling on a moved head, closure routing
 restores the latest completed, posted first-pass or re-review with a non-null
-head. Remediation/closer comments never supply review head or posting time.
+head. Both capped closure routing and re-review admission derive their ceiling
+from the greater of the current risk-class round budget and the latest follow-up
+job's persisted integer `maxRounds`, plus one review. A raised legacy/operator
+budget therefore keeps moved heads eligible for re-review until that ceiling
+is reached. Invalid or lower persisted values retain the risk-class budget.
+Remediation/closer comments never supply review head or posting time.
 Without such a review pass, the router leaves the row unchanged. HAMCLOSE-02
 replay captures and their load-bearing fields are documented in
 [`test/fixtures/hamclose-02/README.md`](../test/fixtures/hamclose-02/README.md).

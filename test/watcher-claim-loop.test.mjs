@@ -2853,10 +2853,73 @@ test('HOLDRELEASE-01: stale drift captures release without routing until cleared
   });
 });
 
-for (const [scenario, draft, hold] of [
+test('HAMCLOSE-02 budget resolution preserves only integer increases', async () => {
+  const { resolveMaxRemediationRounds } = await import('../src/hamclose-review-admission.mjs');
+  for (const [latestMaxRounds, expected] of [
+    [4, 4], ['4', 4], [1, 2], [2, 2], [null, 2], [undefined, 2], ['', 2],
+    [2.5, 2], [Infinity, 2], ['invalid', 2],
+  ]) assert.equal(resolveMaxRemediationRounds({ roundBudget: 2, latestMaxRounds }), expected);
+});
+
+for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCount} delivered reviews`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-raised-budget-'));
+  try {
+    const head = 'b'.repeat(40), reviewedHead = 'a'.repeat(40);
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    const followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('latestMaxRounds: 1', 'latestMaxRounds: 4');
+    // Automatic stale-head requests omit db in production. Bind this replay
+    // to the fixture DB so its re-review reset and claim share the same state.
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource }).replace(
+      'return actual.requestReviewRereview(options);',
+      'return actual.requestReviewRereview({ ...options, db: options.db || db });',
+    ));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+        review_attempts,revision_ref,reviewer_head_sha,posted_at)
+        VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12T04:45:00Z','claude','open','posted',?,?,?,
+        '2026-10-12T05:00:00Z')\`).run(${postedCount}, ${JSON.stringify(reviewedHead)}, ${JSON.stringify(reviewedHead)});
+      for (let attempt = 1; attempt <= ${postedCount}; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,
+        attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,gh_comment_id)
+        VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T04:45:00Z',
+        '2026-10-12T05:00:00Z','completed',?,?)\`).run(attempt, ${JSON.stringify(reviewedHead)}, 'posted-' + attempt);
+    `, afterFirstPoll: postedCount < 5 ? `
+      const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
+      assert.equal(spawns.length, 1, 'raised budget admits the moved head');
+      assert.equal(spawns[0].subjectContext.reviewerHeadSha, ${JSON.stringify(head)});
+      assert.equal(spawns[0].subjectContext.passKind, 'rereview');
+      assert.equal(spawns[0].subjectContext.maxRemediationRounds, 4);
+      assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1);
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      assert.equal(row.reviewer_head_sha, ${JSON.stringify(head)});
+      assert.notEqual(row.rereview_reason, 'system-review-ceiling-closure');
+      assert.match(row.rereview_reason, /auto-refresh: posted review on stale head/);
+    ` : `
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      assert.equal(row.review_status, 'posted');
+      assert.equal(row.reviewer_head_sha, ${JSON.stringify(reviewedHead)});
+      assert.equal(row.rereview_reason, 'system-review-ceiling-closure');
+    ` }));
+    const env = installGhFixture(tmp);
+    const ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf '{"state":"open","draft":false,"labels":[],"changed_files":1,"head":{"sha":"${head}"},"base":{"sha":"${reviewedHead}"}}\\n'
+  exit 0
+fi`));
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+for (const [scenario, draft, hold, liveDraft = false, liveHold = null] of [
   ['eligible', false, null], ['draft', true, null],
   ['do-not-merge', false, 'do-not-merge'], ['no-merge-hold', false, 'no-merge-hold'],
   ['merge-agent-skip', false, 'merge-agent-skip'],
+  ['live draft', false, null, true], ['live hold', false, null, false, 'do-not-merge'],
 ]) test(`HAMCLOSE-02 replay B pollOnce empty head: ${scenario}`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-empty-'));
   try {
@@ -2871,6 +2934,11 @@ for (const [scenario, draft, hold] of [
       const { existsSync } = await import('node:fs');
       assert.equal(existsSync(${JSON.stringify(closedPath)}), false);
       assert.equal(existsSync(${JSON.stringify(probePath)}), false, 'draft/held subjects skip the probe');
+    ` : liveDraft || liveHold ? `
+      const { existsSync } = await import('node:fs');
+      assert.equal(existsSync(${JSON.stringify(closedPath)}), false);
+      assert.ok(existsSync(${JSON.stringify(probePath)}), 'eligible snapshot reaches the live recheck');
+      assert.ok(claims.some(claim => claim.prNumber === 101), 'deferring empty closure does not break review dispatch');
     ` : `
       const { existsSync, readFileSync } = await import('node:fs');
       assert.ok(existsSync(${JSON.stringify(closedPath)}));
@@ -2881,24 +2949,26 @@ for (const [scenario, draft, hold] of [
     `;
     writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, afterFirstPoll: afterPoll }));
     const env = installGhFixture(tmp);
-    writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
-set -euo pipefail
+    const ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
 if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
   printf 'probe\\n' >> '${probePath}'
   state=open
   [[ ! -f '${closedPath}' ]] || state=closed
-  printf '{"state":"%s","draft":false,"labels":[],"changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n' "$state"
+  printf '{"state":"%s","draft":${liveDraft},"labels":${JSON.stringify(liveHold ? [{ name: liveHold }] : [])},"changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n' "$state"
+  exit 0
 elif [[ "\${1:-}" == api && "\${2:-}" == *'/compare/'* ]]; then
   printf '{"files":[]}\\n'
+  exit 0
 elif [[ "\${1:-}" == pr && "\${2:-}" == close ]]; then
   printf 'one comment\\n' >> '${closedPath}'
-else
-  exit 1
+  exit 0
 fi
-`);
+`));
     const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.doesNotMatch(`${result.stdout || ''}${result.stderr || ''}`, /unexpected gh fixture call/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 

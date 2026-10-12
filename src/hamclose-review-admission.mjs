@@ -1,6 +1,15 @@
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
 import { isOrphanHeadReviewRequested, isExplicitOperatorReviewRetrigger } from './first-pass-review-suppression.mjs';
 
+// A persisted legacy/operator increase remains authoritative for the active
+// PR cycle. Routing to closure and admitting reviews must use the same budget.
+export function resolveMaxRemediationRounds({ roundBudget, latestMaxRounds }) {
+  const persistedMaxRounds = Number(latestMaxRounds);
+  return Number.isInteger(persistedMaxRounds) && persistedMaxRounds > roundBudget
+    ? persistedMaxRounds
+    : roundBudget;
+}
+
 // Only a delivered review spends the PR-wide ceiling. A successful process
 // exit without a GitHub review is still just an attempt.
 export function postedReviewCeilingReached({ db, repo, prNumber, ceiling }) {

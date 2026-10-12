@@ -23,10 +23,25 @@ const recoverStrandedCloserHead = options => recoverCloserHead({ rootDir: '/fixt
   probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
   ...options });
 
-test('HAMFINAL-02: pushed HAM head stranded after lease timeout retains merge retry', async () => {
+test('pushed HAM head stranded after lease timeout requests an admissible exact-head review in one tick', async () => {
+  const requests = [];
+  const logs = [];
   const result = await recoverStrandedCloserHead({ result: stale, closerAuthored: true,
-    headSha: head, requestRereviewImpl: () => assert.fail('hammer head must not request review') });
-  assert.equal(result, null, 'bounded orphan watchdog retains the merge lane');
+    rootDir: '/fixture', repo: 'fixture/repo', prNumber: 8089, headSha: head,
+    logger: { log: line => logs.push(line) }, requestRereviewImpl: options => {
+      requests.push(options);
+      return { triggered: true };
+    } });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].targetRevisionRef, head);
+  assert.equal(isOrphanHeadReviewRequested({ rereview_requested_at: 'now',
+    rereview_reason: requests[0].reason, revision_ref: head }, head), true);
+  assert.equal(isOrphanHeadReviewRequested({ rereview_requested_at: 'now',
+    rereview_reason: requests[0].reason, revision_ref: 'other' }, head), false);
+  assert.equal(result.recoveryWait, true);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /fixture\/repo#8089/);
+  assert.ok(logs[0].includes(head));
 });
 
 test('certified retry and explicit safety holds retain their existing owner', async () => {
@@ -204,7 +219,7 @@ test('already-pending exact-head review retains reviewer ownership', async () =>
     logger: { log() {} }, requestRereviewImpl: async () => ({ triggered: false,
       status: 'already-pending', reason: 'review-already-pending',
       reviewRow: { rereview_requested_at: 'now', rereview_reason: `system-orphan-head-review:${head}`, revision_ref: head } }) });
-  assert.equal(result, null);
+  assert.equal(result.reason, 'closer-head-exact-review-requested');
 });
 
 for (const leaseHead of [head, 'b'.repeat(40)]) {
@@ -232,8 +247,8 @@ for (const status of ['queued', 'running', 'unknown', 'succeeded']) {
         readStatusImpl: async () => status === 'unknown' ? { ok: false }
           : { ok: true, row: { status } } }),
       requestRereviewImpl: () => { requests++; return { triggered: true }; } });
-    assert.equal(requests, 0);
-    assert.equal(result, null);
+    assert.equal(requests, status === 'succeeded' ? 1 : 0);
+    assert.equal(result?.reason || null, status === 'succeeded' ? 'closer-head-exact-review-requested' : null);
   });
 }
 
@@ -257,12 +272,12 @@ test('timeout-exhausted head cannot be reset repeatedly after closer recovery', 
   const options = { rootDir: dir, result: stale, closerAuthored: true, headSha: head,
     requestBoundedReviewImpl: requestBoundedOrphanReview, logger: { log() {} },
     requestRereviewImpl: async () => { calls++; return { triggered: true }; } };
-  assert.equal(await recoverStrandedCloserHead(options), null);
+  assert.equal((await recoverStrandedCloserHead(options)).recoveryWait, true);
   const failed = { ...options, reviewStateRow: { review_status: 'failed', reviewer_head_sha: head } };
   assert.equal(await recoverStrandedCloserHead(failed), null);
   assert.equal(await recoverStrandedCloserHead(failed), null);
   assert.equal(await recoverStrandedCloserHead(options), null, 'durable guard survives missing review row');
-  assert.equal(calls, 0);
+  assert.equal(calls, 1);
 });
 
 for (const reason of ['operator-hold', 'pr-is-draft', 'pr-not-open']) {

@@ -10,31 +10,43 @@
 `observeClosureWait` tracks pending gates, live or uncertain ownership, lease
 contention and deferred closure attempts. Each PR has a SQLite database named
 by the SHA-256 hex digest of the literal `repo#prNumber` string. The canonical
-daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes `waits`:
+daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
+`waits_by_class`, keyed by `PRIMARY KEY(head, class)`:
 
 | Column | SQLite definition | Meaning |
 | --- | --- | --- |
-| `head` | `TEXT PRIMARY KEY` | Exact PR head SHA; one wait boundary per head. |
+| `head` | `TEXT` | Exact PR head SHA. |
+| `class` | `TEXT` | `primary-change` for immediate pages, `bounded-wait` otherwise; separate deadlines and reservations per head/class. |
 | `started` | `INTEGER NOT NULL` | First observation in epoch milliseconds. |
 | `reason` | `TEXT` | Latest wait reason, refreshed on every observation. |
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |
 
 ## Lifecycle and recovery
 
-An immediate transaction inserts the head with `INSERT OR IGNORE`, updates its
+An immediate transaction inserts the head/class with `INSERT OR IGNORE`, updates its
 reason and compares elapsed time against the wait bound. Later ticks, changed
 reasons and process restarts retain the original `started`. A new head starts
-its own boundary. The default bound is 30 minutes; a finite positive
+its own boundary for each class. Immediate primary-change observations exhaust
+immediately without starting or consuming the bounded-wait clock or page.
+The default bound is 30 minutes; a finite positive
 `AMA_CLOSURE_WAIT_BOUND_MS` overrides it. Invalid or nonpositive values retain
 the default. Observations return a 30-second `retryAfterMs`.
 
 At exhaustion, an atomic `paged=0 → 1` update reserves one SEV1 alert before
 delivery. The alert names repo, PR, head and reason, with source
-`hamclose-closure-wait` and deduplication key `hamclose:<repo>:<prNumber>:<head>`.
+`hamclose-closure-wait` and deduplication key
+`hamclose:<repo>:<prNumber>:<head>:<class>`.
 A thrown delivery error resets `paged` to 0 so a later observation can retry
 without restarting the deadline. An interrupted process after reservation can
 leave `paged=1` without a delivered alert; this store has no automatic reservation
-expiry. Operators must verify delivery before resetting that head's reservation.
+expiry. Operators must verify delivery before resetting that head/class reservation.
+
+The transition from the legacy `waits` table deliberately accepts a one-time
+reset: existing rows are not migrated, and the old table remains on disk but
+is no longer read. Each head/class starts its deadline and page reservation
+on its first new observation. Active bounded waits may therefore incur another
+30-minute default window, and prior page reservations do not suppress new
+class-specific pages. Subsequent process restarts preserve `waits_by_class` rows.
 
 This store measures wait debt; it grants no merge or dispatch authority and
 does not consume the independent orphan/recovery attempt budgets. No automatic

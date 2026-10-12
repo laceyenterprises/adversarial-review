@@ -513,7 +513,11 @@
       "schemaSurface": "src/ama/closure-wait.mjs",
       "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs"],
       "owner": "AMA bounded closure wait and exhaustion paging",
-      "waitColumns": ["head", "started", "reason", "paged"]
+      "waitTable": "waits_by_class",
+      "waitColumns": ["head", "class", "started", "reason", "paged"],
+      "waitPrimaryKey": ["head", "class"],
+      "waitClasses": ["primary-change", "bounded-wait"],
+      "legacyWaitMigration": "none; one-time deadline and page-reservation reset"
     },
     {
       "id": "ama-closer-cancels",

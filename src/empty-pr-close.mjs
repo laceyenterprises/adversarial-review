@@ -6,7 +6,7 @@ const EMPTY_PR_CLOSE_TIMEOUT_MS = 15_000;
 export const EMPTY_PR_COMMENT = 'Closing this pull request because its diff against the current base is empty; there is no change left to review or merge.';
 
 // Read live PR metadata, prove an empty base/head diff, and recheck the head
-// before closing. A missing/unreadable response leaves normal admission alone.
+// before closing. A read or close failure defers watcher admission to the next tick.
 export async function closeEmptyPullRequest({ repo, prNumber, headSha,
   execFileImpl = execFileAsync, logger = console, env = process.env, withApiTelemetry = (_category, _context, fn) => fn() }) {
   if (!/^[a-f0-9]{40}$/.test(headSha || '')) return { closed: false };

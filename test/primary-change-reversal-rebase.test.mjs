@@ -1,7 +1,7 @@
 import { collect, review } from './helpers/hamclose-history.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPrimaryChange,
+import { checkPrimaryChange, fetchPrimaryChange,
   primaryChangeExactReviewEvidence } from '../src/ama/primary-change.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 
@@ -176,6 +176,40 @@ test('HAMCLOSE-02 an original rebased App reversal survives a diverged supersedi
     { reviews: [review({ user: { login: 'builder' } }), later] },
     { rebasedAdded: '+builder_intervened()' }]) {
     assert.equal((await collect({ ...options, ...forged })).result.ok, false, JSON.stringify(forged));
+  }
+});
+
+for (const opaque of [
+  { filename: 'asset.png', status: 'modified', additions: 0, deletions: 0, sha: sha('8') },
+  { filename: 'renamed.mjs', previous_filename: 'old.mjs', status: 'renamed', additions: 0, deletions: 0 },
+]) test(`opaque ${opaque.filename} rebase proof declines only its original snapshot`, async () => {
+  const later = review({ node_id: 'PRR_later', commit_id: sha('f'), submitted_at: '2026-10-11T19:10:00Z',
+    body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved', state: 'APPROVED' });
+  const { transport } = await collect({ reviews: [review(), later], originalRecorded: true,
+    originalParent: author, originalLine: 15, snapshotStatus: 'diverged' });
+  const original = await transport(`repos/fixture/repo/commits/${sha('d')}`);
+  const opaqueOriginal = { ...original, sha: sha('9'), parents: [{ sha: sha('e') }] };
+  const parent = await transport(`repos/fixture/repo/compare/${base}...${author}`);
+  for (const validFallback of [false, true]) {
+    const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head,
+      get: async path => {
+        if (path.endsWith(`${reviewedHead}...${sha('f')}`)) return { status: 'diverged',
+          commits: validFallback ? [opaqueOriginal, original] : [opaqueOriginal], total_commits: validFallback ? 2 : 1 };
+        if (path.endsWith(`/commits/${opaqueOriginal.sha}`)) return opaqueOriginal;
+        if (path.endsWith(`${reviewedHead}...${sha('e')}`)) return { status: 'diverged' };
+        if (path.endsWith(`${base}...${sha('e')}`)) return { ...parent, files: [...parent.files, opaque] };
+        return transport(path);
+      } }, { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
+    assert.equal(evidence.hasHammerCommits, true, 'opaque evidence must not become a history read failure');
+    assert.equal(evidence.readFailed, undefined);
+    if (validFallback) {
+      assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, original.sha);
+      assert.equal(checkPrimaryChange(evidence, head).ok, true);
+    } else {
+      assert.equal(evidence.reversalAuthorizations, undefined);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'original-reversal-not-proven-before-supersession');
+      assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+    }
   }
 });
 

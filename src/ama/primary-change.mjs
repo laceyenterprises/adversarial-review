@@ -538,8 +538,13 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     // as the unsuperseded path; dates and ancestry to later heads prove nothing.
     const parent = await read(`repos/${repo}/compare/${rebased ? mergeBase : reviewed.merge_base_commit.sha}...${parentSha}`);
     if (parent.merge_base_commit?.sha !== (rebased ? mergeBase : reviewed.merge_base_commit.sha)) continue;
-    changes(parent.files);
-    if (rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) continue;
+    try {
+      changes(parent.files);
+      if (rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) continue;
+    } catch {
+      // Opaque or malformed patches decline this snapshot, not later candidates.
+      continue;
+    }
     return { commit: original, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
       ...(rebased ? { rebased: true } : {}),
       completeFileLists: original.filesComplete === true && reviewed.filesComplete === true && parent.filesComplete === true };

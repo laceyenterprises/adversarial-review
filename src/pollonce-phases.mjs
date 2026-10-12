@@ -1210,7 +1210,7 @@ export async function processReviewSubject(entry, ctx) {
           headSha: subject.headSha, execFileImpl: execFileAsync,
           withApiTelemetry });
         if (emptyClose.nonempty) db.prepare('INSERT INTO nonempty_pr_heads(repo,pr_number,head) VALUES (?,?,?) ON CONFLICT(repo,pr_number) DO UPDATE SET head=excluded.head').run(repoPath, prNumber, subject.headSha);
-        if (emptyClose.closed || emptyClose.terminal) return;
+        if (emptyClose.closed || emptyClose.terminal || emptyClose.reason === 'read-or-close-failed') return;
       }
 
       // ASR-04 — ADDITIVE, and this is the half of the ticket that is easiest to

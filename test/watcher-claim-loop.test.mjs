@@ -31,6 +31,10 @@ function installGhFixture(tmp) {
   const ghPath = path.join(tmp, 'gh');
   writeFileSync(ghPath, `#!/usr/bin/env bash
 set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf '{"state":"open","draft":false,"labels":[],"changed_files":1,"head":{"sha":"%s"}}\\n' "\${WATCHER_CLAIM_LOOP_FIXTURE_HEAD_101:-}"
+  exit 0
+fi
 if [[ "\${1:-}" == "api" && "\${2:-}" =~ ^repos/[^/]+/[^/]+/commits/(.+)$ ]]; then
   sha="\${BASH_REMATCH[1]}"
   printf '{"sha":"%s","message":"Fixture commit","committerLogin":null,"authorLogin":null,"committerName":"Fixture Worker","committerEmail":"fixture@example.com"}\\n' "$sha"
@@ -200,6 +204,8 @@ export async function load(url, context, nextLoad) {
             missingDetail: true,
           },
         ];
+
+        process.env.WATCHER_CLAIM_LOOP_FIXTURE_HEAD_101 = subjects[0].headSha;
 
         export function parseSubjectExternalId(subjectExternalId) {
           const match = String(subjectExternalId || '').match(/^([^#/]+\\/[^#/]+)#(\\d+)$/);
@@ -2974,6 +2980,62 @@ fi
     assert.doesNotMatch(`${result.stdout || ''}${result.stderr || ''}`, /unexpected gh fixture call/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+for (const phase of ['initial', 'compare', 'fresh', 'close']) {
+  test(`empty PR ${phase} transport failure defers admission and retries next tick`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-empty-failure-'));
+    try {
+      const head = 'b'.repeat(40);
+      const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+      const failedPath = path.join(tmp, 'failed'), closedPath = path.join(tmp, 'closed'), readsPath = path.join(tmp, 'reads');
+      writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, subject101Overrides: { changedFiles: 0 } }));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,review_attempts)
+          VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12','claude','open','pending',0)\`).run();
+      `, afterFirstPoll: `
+        const { existsSync, readFileSync } = await import('node:fs');
+        assert.ok(existsSync(${JSON.stringify(failedPath)}), 'the first tick encounters the failure');
+        assert.equal(existsSync(${JSON.stringify(closedPath)}), false);
+        const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+        assert.equal(row.review_status, 'pending');
+        assert.equal(row.review_attempts, 0);
+        assert.equal(db.prepare('SELECT head FROM nonempty_pr_heads WHERE pr_number=101').get(), undefined);
+        assert.ok(!claims.some(claim => claim.prNumber === 101));
+        await pollOnce(octokit, pollOptions);
+        assert.equal(readFileSync(${JSON.stringify(closedPath)}, 'utf8'), 'one comment\\n');
+        assert.ok(!claims.some(claim => claim.prNumber === 101));
+        assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
+      ` }));
+      const env = installGhFixture(tmp), ghPath = path.join(tmp, 'gh');
+      writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+phase=
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  phase=initial
+  [[ ! -f '${readsPath}' ]] || phase=fresh
+  touch '${readsPath}'
+elif [[ "\${1:-}" == api && "\${2:-}" == *'/compare/'* ]]; then phase=compare
+elif [[ "\${1:-}" == pr && "\${2:-}" == close ]]; then phase=close
+fi
+if [[ "$phase" == '${phase}' && ! -f '${failedPath}' ]]; then
+  touch '${failedPath}'
+  echo 'Operation timed out' >&2
+  exit 1
+fi
+if [[ "$phase" == initial || "$phase" == fresh ]]; then
+  printf '{"state":"open","draft":false,"labels":[],"changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n'
+  exit 0
+elif [[ "$phase" == compare ]]; then printf '{"files":[]}\\n'; exit 0
+elif [[ "$phase" == close ]]; then touch '${closedPath}'; exit 0
+elif [[ "\${1:-}" == pr && "\${2:-}" == comment ]]; then printf 'one comment\\n' >> '${closedPath}'; exit 0
+fi
+`));
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}
 
 test('HAMCLOSE-02 real pollOnce admits one handed-off exact-head review past exhausted attempts', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-review-'));

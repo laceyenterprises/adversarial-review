@@ -2825,6 +2825,9 @@ The ledger and ceiling are computed only when the review head has moved.
 The watcher persists the last head verified nonempty and probes again only on a
 new head or a zero-file snapshot. Calls use API telemetry. Closing precedes the
 single comment, so a failed close cannot duplicate comments on retry.
+Read or close transport failures defer the subject before reviewer admission,
+without claiming a pass, spending an attempt or caching the head as nonempty.
+The next tick retries the probe.
 
 Reverted or unknown primary changes page once per head and prevent further
 hammer dispatch, including orphan recovery. The obsolete orphan primary-repair
@@ -2832,5 +2835,10 @@ exception is removed because unknown authorization needs operator ownership.
 Read/head/cost failures wait with a bounded deadline. The caller supplies strict
 policy. Immediate primary-change pages and bounded waits have separate reason
 classes, deadlines and page reservations, so neither suppresses the other.
+Deployment of `waits_by_class` does not migrate legacy `waits` rows. Existing
+wait deadlines and page reservations restart once at the first observation of
+each head/class; bounded waits can therefore incur another 30-minute default
+window. The old table is retained but no longer read. See the wait data model
+for schema and recovery details.
 Replay coverage uses invented histories and an offline transport that rejects
 unrecognized paths.

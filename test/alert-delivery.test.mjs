@@ -1141,3 +1141,24 @@ test('corrupt legacy receipt suppresses duplicate recovery page', async t => {
   assert.equal(retry.queued, false);
   assert.equal(retry.id, legacyId);
 });
+
+test('REVIEWMODEL-02: model refusal alerts deduplicate across PRs by model and UTC day', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = {
+    event: 'reviewer.model_unavailable', env,
+    now: new Date('2026-10-12T01:00:00Z'),
+    requestText: async () => { throw new Error('synthetic offline transport'); },
+    fsImpl: { readFileSync: () => 'synthetic-token', existsSync: () => true },
+  };
+  const payload = { refusedModel: 'Synthetic model', availableModels: ['Offered model'] };
+  const first = await deliverAlert('synthetic refusal', { ...options, payload: { ...payload, prNumber: 1 } });
+  const second = await deliverAlert('synthetic refusal', { ...options, payload: { ...payload, prNumber: 2 } });
+  assert.equal(first.id, second.id);
+  assert.equal(first.queued, true);
+  assert.equal(second.queued, false);
+  const nextDay = await deliverAlert('synthetic refusal', { ...options, payload, now: new Date('2026-10-13T01:00:00Z') });
+  const otherModel = await deliverAlert('synthetic refusal', { ...options, payload: { ...payload, refusedModel: 'Other synthetic model' } });
+  assert.notEqual(nextDay.id, first.id);
+  assert.notEqual(otherModel.id, first.id);
+});

@@ -1379,6 +1379,18 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
+  if (event === 'reviewer.model_unavailable') {
+    doc.id = `reviewer-model-${crypto.createHash('sha256').update(JSON.stringify([
+      payload?.refusedModel, new Date(now).toISOString().slice(0, 10),
+    ])).digest('hex')}`;
+    for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
+      const existingPath = alertDocPath(rootDir, state, doc.id);
+      if (existsSync(existingPath)) {
+        if (state === 'pending' || state === 'inflight') scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
+        return { status: state, queued: false, id: doc.id, queuePath: existingPath };
+      }
+    }
+  }
   if (event === 'adversarial_review.operator_decision_required' && payload?.decisionId && payload?.decisionSeriesId) {
     // A lane reset starts a new blocker series even when the PR head is unchanged.
     doc.id = `review-decision-${crypto.createHash('sha256').update(JSON.stringify([payload.decisionId, payload.decisionSeriesId])).digest('hex')}`;

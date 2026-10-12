@@ -293,7 +293,7 @@ test('GEMINIQUOTA-01: quota_exhausted without reset preserves both settlement bu
   }
 });
 
-for (const failureClass of ['stale-review-head', 'review-post', 'github-review-create-transient', 'unknown']) {
+for (const failureClass of ['stale-review-head', 'review-post', 'github-review-create-transient', 'unknown', 'reviewer-timeout', 'reviewer-empty-output', 'reviewer-output']) {
   test(`Gemini ${failureClass} quota-like text settles without provider cooldown or fallback`, async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'gemini-non-quota-'));
     try {
@@ -495,4 +495,75 @@ test('Gemini terminal run fallback transfers claim and survives bounce recovery'
     assert.throws(() => transferGeminiFallbackSession(db, { repo: args.repo, prNumber: args.prNumber,
       previousSessionUuid: originalSession, reviewerSessionUuid: randomUUID(), reviewerModel: 'codex' }), /lost session claim/);
   } finally { db.close(); await rm(rootDir, { recursive: true, force: true }); }
+});
+
+test('REVIEWMODEL-02: first model refusal falls back immediately with the logical budget intact', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'model-refusal-'));
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const stderr = await readFile(new URL('./fixtures/reviewer-model-unavailable.txt', import.meta.url), 'utf8');
+    const models = [];
+    const settled = [];
+    const alerts = [];
+    let transferred = false;
+    const args = {
+      ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }, capture: newCapture() }),
+      rootDir, repo: 'example/synthetic', reviewerModel: 'gemini', builderTag: 'codex',
+      beginReviewerPassImpl: beginReviewerPass, completeReviewerPassImpl: completeReviewerPass,
+      geminiQuotaFallbackRoute: { reviewerModel: 'claude-code' },
+      onGeminiQuotaFallback: route => {
+        const db = openReviewStateDb(rootDir);
+        try {
+          transferGeminiFallbackSession(db, { ...route, repo: 'example/synthetic', prNumber: 99,
+            previousSessionUuid: args.reviewerSessionUuid });
+        } finally { db.close(); }
+        transferred = true;
+      },
+      onPostOperationSettled: result => settled.push(result),
+      deliverAlertImpl: async (message, options) => alerts.push({ message, options }),
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer({ model }) {
+          models.push(model);
+          if (model === 'gemini') return { ok: false, failureClass: 'reviewer-model-unavailable', error: stderr.split('\n')[0], stderr };
+          assert.equal(transferred, true);
+          return { ok: true, reviewBody: 'synthetic review', reviewBodyDelivery: 'adapter' };
+        },
+      },
+    };
+    const claimDb = openReviewStateDb(rootDir);
+    try {
+      ensureReviewStateSchema(claimDb);
+      claimDb.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewer, review_status,
+        reviewer_session_uuid, review_attempts, infra_auto_recover_attempts, reviewed_at)
+        VALUES ('example/synthetic', 99, 'gemini', 'reviewing', ?, 2, 1, '2026-10-12T00:00:00Z')`).run(args.reviewerSessionUuid);
+    } finally { claimDb.close(); }
+    assert.equal((await spawnReviewer(args)).ok, true);
+    assert.deepEqual(models, ['gemini', 'claude-code']);
+    assert.equal(settled.length, 1);
+    assert.equal(settled[0].ok, true);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].options.payload.availableModels.length, 10);
+    assert.equal(readGeminiQuotaCooldown({ rootDir, env: {} }), null);
+    const db = openReviewStateDb(rootDir);
+    try {
+      const claim = db.prepare("SELECT reviewer, review_attempts, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = 'example/synthetic' AND pr_number = 99").get();
+      assert.deepEqual(claim, { reviewer: 'claude-code', review_attempts: 2, infra_auto_recover_attempts: 1 });
+      const passes = db.prepare('SELECT metadata_json FROM reviewer_passes ORDER BY attempt_number').all();
+      assert.equal(JSON.parse(passes[1].metadata_json).reviewAttemptNumber, 1);
+      const failure = JSON.parse(passes[0].metadata_json);
+      assert.equal(failure.failureDetail.availableModels.length, 10);
+      assert.ok(failure.failureMessage.includes(stderr.split('\n')[0]));
+    } finally { db.close(); }
+    const row = { review_attempts: 2, infra_auto_recover_attempts: 1 };
+    let held = false;
+    const charge = () => assert.fail('model refusal must not charge retries');
+    settleReviewerAttempt({ rootDir, repoPath: 'example/synthetic', prNumber: 1,
+      result: { ok: false, failureClass: 'reviewer-model-unavailable', error: stderr },
+      statements: { markOutageTransient: { run: () => { held = true; } },
+        markFailed: { run: charge }, releaseReviewLease: { run: charge } },
+      log: { warn() {} },
+    });
+    assert.equal(held, true);
+    assert.deepEqual(row, { review_attempts: 2, infra_auto_recover_attempts: 1 });
+  } finally { await rm(rootDir, { recursive: true, force: true }); }
 });

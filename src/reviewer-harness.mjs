@@ -12,6 +12,7 @@
 // this module is the OS-independent local-review lifeline that keeps the review
 // pipeline alive when the OS dispatch contract is unavailable.
 
+import { parseReviewerModelUnavailable } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -2451,6 +2452,13 @@ function sanitizeAgyReviewOutput(rawOutput) {
     }
   }
 
+  const modelUnavailable = parseReviewerModelUnavailable(text);
+  if (modelUnavailable) {
+    throw Object.assign(new Error(`Antigravity agy model unavailable: ${text}`), {
+      failureClass: 'reviewer-model-unavailable', failureDetail: modelUnavailable, stderr: text,
+    });
+  }
+
   if (hasAgyErrorSentinel(text)) {
     throw new Error(`Antigravity agy returned error output instead of a review: ${previewText(text, 400)}`);
   }
@@ -2460,6 +2468,7 @@ function sanitizeAgyReviewOutput(rawOutput) {
 
 function isRetryableGeminiSubprocessError(err) {
   const detail = buildGhErrorDetail(err);
+  if (parseReviewerModelUnavailable(detail)) return false;
   return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|eio|tls)\b/.test(detail)
     || detail.includes('timeout')
     || detail.includes('timed out')
@@ -2809,7 +2818,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     // Runtime-aware model token. The token FORMATS differ and are NOT
     // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);
     // the agy/antigravity path expects agy's verbatim display name
-    // (e.g. "Gemini 3.1 Pro (High)"). Feeding the cli slug to agy is the bug
+    // (e.g. "Gemini 3.8 Flash (High)"). Feeding the cli slug to agy is the bug
     // that previously left the model unbound — agy ignores an unknown token and
     // falls back to its persisted default (Flash).
     const fallbackModel = runtime === 'antigravity'
@@ -2881,7 +2890,14 @@ async function reviewWithGemini(diff, extraContext = '', {
     if (/\b(?:401|403)\b|invalid_grant|refresh_token|not logged in|\blogin\b/i.test(msg)) {
       throw new OAuthError('gemini', `CLI returned auth error: ${String(err.message || stderr || '').substring(0, 200)}`);
     }
-    throw new Error(`Gemini exec failed: ${String(err.message || stderr || '').substring(0, 800)}`);
+    const modelUnavailable = runtime === 'antigravity' && parseReviewerModelUnavailable(msg);
+    const firstStderrLine = String(stderr).trim().split(/\r?\n/)[0];
+    const detail = modelUnavailable
+      ? `${firstStderrLine || err.message}\nRefused model: ${modelUnavailable.refusedModel}\nAvailable models:\n${modelUnavailable.availableModels.map((name) => `  ${name}`).join('\n')}`
+      : [String(err.message || '').substring(0, 800), firstStderrLine].filter(Boolean).join('\n');
+    throw Object.assign(new Error(`Gemini exec failed: ${detail}`), {
+      stdout, stderr, ...(modelUnavailable ? { failureClass: 'reviewer-model-unavailable', failureDetail: modelUnavailable } : {}),
+    });
   } finally {
     if (identityRun) {
       await finishAgyIdentityReviewImpl(identityRun, { log });

@@ -3020,12 +3020,12 @@ function schemaV1() {
                 __enum: ENUM_REVIEWER_GEMINI_RUNTIME,
               },
               // agy/antigravity reviewer model token. Uses agy's verbatim
-              // display names (e.g. "Gemini 3.1 Pro (High)"), NOT the
+              // display names (e.g. "Gemini 3.8 Flash (High)"), NOT the
               // gemini-CLI slug. Only consulted on the antigravity runtime;
               // the cli runtime keeps its own slug default (gemini-2.5-pro).
               model: {
                 __type: TYPE_STRING,
-                __default: 'Gemini 3.1 Pro (High)',
+                __default: 'Gemini 3.8 Flash (High)',
               },
               // CCX-08 (credential-capacity-expansion SPEC §2b): the ordered
               // agy reviewer identities, as OS user names. Unset means one

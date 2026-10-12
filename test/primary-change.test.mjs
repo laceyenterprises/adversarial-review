@@ -73,7 +73,17 @@ test('collector distinguishes read failure from unsupported history', async () =
       ? { head: { sha: head }, base: { sha: 'b'.repeat(40) } } : { total_commits: 1, commits: [{}] }]) {
     const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get });
     assert.ok(result.reason);
-    assert.equal(checkPrimaryChange(result, head).reason, result.readFailed ? 'primary-change-read-failed' : 'primary-change-unknown');
+    assert.equal(checkPrimaryChange(result, head).reason, result.historyReadFailed ? 'history-read-failed' : result.readFailed ? 'primary-change-read-failed' : 'primary-change-unknown');
+  }
+});
+test('collector adds one history failure prefix for plain and already-prefixed reader errors', async () => {
+  for (const message of ['offline', 'history read failed: offline']) {
+    const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+      get: async () => { throw new Error(message); } });
+    assert.equal(result.reason, 'history read failed: offline');
+    assert.equal(result.readFailed, true);
+    assert.equal(result.historyReadFailed, true);
+    assert.equal(checkPrimaryChange(result, head).reason, 'history-read-failed');
   }
 });
 test('hammer prompt preserves intent and resolves conflicting non-blocking findings by rationale', () => {
@@ -200,15 +210,15 @@ test('closer dispatch retries failed reads and escalates deterministic unknown e
 });
 
 
-test('permanent read errors need an operator while head races and transport failures defer', async () => {
+test('all failed reads defer while head races stay distinct', async () => {
   for (const message of ['HTTP 403 forbidden', 'HTTP 404 not found', 'invalid JSON', 'HTTP 401']) {
     const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
       get: async () => { throw new Error(message); } });
-    assert.equal(checkPrimaryChange(result, head).reason, 'primary-change-unknown');
+    assert.equal(checkPrimaryChange(result, head).reason, 'history-read-failed');
   }
   const transient = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
     get: async () => { throw new Error('HTTP 503'); } });
-  assert.equal(checkPrimaryChange(transient, head).reason, 'primary-change-read-failed');
+  assert.equal(checkPrimaryChange(transient, head).reason, 'history-read-failed');
   const raced = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
     get: async () => ({ head: { sha: 'a'.repeat(40) } }) });
   assert.equal(checkPrimaryChange(raced, head).reason, 'primary-change-read-failed');
@@ -386,7 +396,7 @@ test('installation auth outage and cancellation defer primary evidence', async (
     Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' })]) {
     const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
       get: async () => { throw error; } });
-    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-read-failed');
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'history-read-failed');
   }
 });
 

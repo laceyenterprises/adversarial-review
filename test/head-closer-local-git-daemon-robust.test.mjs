@@ -718,12 +718,13 @@ test('a transient primary-change API failure recovers within the default gh retr
   const git = makeFakeGit();
   const execFileImpl = async (file, args, options) => {
     if (file === 'git') return git(file, args, options);
-    if (args[1].includes('/pulls/')) {
+    if (args[1].endsWith('/pulls/5348')) {
       prReads += 1;
       if (prReads === 1) throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
       return { stdout: JSON.stringify({ head: { sha: HEAD_SHA }, base: { sha: PARENT_SHA } }) };
     }
-    return { stdout: JSON.stringify({ total_commits: 1,
+    if (args[1].includes('/git/trees/')) return { stdout: JSON.stringify({ tree: [], truncated: false }) };
+    return { stdout: JSON.stringify({ merge_base_commit: { sha: PARENT_SHA }, total_commits: 1,
       commits: [{ sha: HEAD_SHA, commit: { message: 'author change' } }] }) };
   };
   const commit = await fetchHeadCloserVerifiedCommit({ repoPath: 'laceyenterprises/agent-os',

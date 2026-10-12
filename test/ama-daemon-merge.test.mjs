@@ -1286,3 +1286,19 @@ test('ordinary green CI keeps pre-lease no-CI evidence explicitly labeled as adm
   assert.equal(h.calls.auditWrites[0].metadata.ciConfiguration, undefined);
   assert.equal(h.calls.auditAppends.at(-1).attempt.ciConfiguration, undefined);
 });
+
+// HAMENOBUFS-01: the durable park carries the read error and stays retryable.
+test('history read failure parks with its error without a permanent marker or merge', async () => {
+  const detail = 'history read failed: spawnSync gh ENOBUFS';
+  const failed = greenGate({ requirePrimaryChange: true, primaryChange: {
+    headSha: HEAD, hasHammerCommits: null, historyReadFailed: true, reason: detail } });
+  const h = makeHarness({ liveGateSequence: [failed] });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { retryCap: 1 }));
+  assert.equal(result.reason, 'history-read-failed');
+  assert.equal(result.permanent, false);
+  assert.equal(result.manualCloseRequired, false);
+  assert.equal(h.calls.merge, 0);
+  const doc = h.auditStore.get('o/r#7@' + HEAD);
+  assert.equal(doc.attempts.at(-1).reason, 'history-read-failed');
+  assert.equal(doc.attempts.at(-1).historyReadError, detail);
+});

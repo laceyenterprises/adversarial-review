@@ -76,7 +76,7 @@ function testRegionsChanged(primary, final) {
 // author's added text to survive verbatim. Repairs may replace that text; a
 // region which disappears from the final diff has returned to the base.
 function changes(files, paths = null, aliases = new Map()) {
-  if (!Array.isArray(files) || files.length >= 300) throw new Error('missing or capped file list');
+  if (!Array.isArray(files)) throw new Error('missing or capped file list');
   const result = new Map();
   for (const file of files) {
     const original = file.previous_filename || file.filename;
@@ -257,6 +257,8 @@ function reversalAuthorized(evidence, path, region, cache, strictNonBlockingReme
     };
     try {
       const { commit, review, reviewedFiles, parentFiles, rebased } = authorization;
+      if (authorization.completeFileLists !== true && [reviewedFiles, parentFiles, commit?.files]
+        .some(files => files?.length >= 300)) return reject('capped-file-list');
       if (!cache.has(review)) cache.set(review, {
         verdict: normalizeEffectiveReviewVerdict(review.body),
         findings: { blocking: parseBlockingFindingsSection(review.body),
@@ -347,11 +349,14 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
   }
   if (!evidence) return { ok: false, reason: 'primary-change-unknown', detail: 'missing primary-change evidence' };
   if (evidence.headSha !== headSha || evidence.headMismatch) return { ok: false, reason: 'primary-change-read-failed' };
-  if (evidence.readFailed === true) return { ok: false, reason: 'primary-change-read-failed' };
+  if (evidence.historyReadFailed === true) return { ok: false, reason: 'history-read-failed', detail: evidence.reason };
+  if (evidence.readFailed === true) return { ok: false, reason: 'primary-change-read-failed', detail: evidence.reason };
   if (evidence.hasHammerCommits === false) return { ok: true, applicable: false };
   try {
     if (evidence.hasHammerCommits !== true || !SHA.test(evidence.primaryHead || '')
       || !SHA.test(evidence.mergeBase || '')) throw new Error('unknown primary change');
+    if (evidence.completeFileLists !== true && [evidence.primaryFiles, evidence.finalFiles]
+      .some(files => files?.length >= 300)) throw new Error('missing or capped file list');
     const authorizationCache = new Map();
     const primary = changes(evidence.primaryFiles);
     const aliases = new Map([...primary].map(([path, change]) => [change.filename, path]));
@@ -428,7 +433,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
   if (!SHA.test(superseding.commit_id || '')) return null;
   const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (snapshot.status !== 'ahead' || !Array.isArray(snapshot.commits)
-    || snapshot.commits.length !== snapshot.total_commits || snapshot.commits.length >= 250) return null;
+    || snapshot.commits.length !== snapshot.total_commits) return null;
   const identity = reversalPatchIdentity(commit.files);
   for (const candidate of snapshot.commits.filter((entry) => isHammer(entry)
     && SHA.test(entry.sha || '') && entry.commit.message === commit.commit.message)) {
@@ -442,7 +447,8 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     const parent = await read(`repos/${repo}/compare/${reviewed.merge_base_commit.sha}...${parentSha}`);
     if (parent.merge_base_commit?.sha !== reviewed.merge_base_commit.sha) continue;
     changes(parent.files);
-    return { commit: original, review, reviewedFiles: reviewed.files, parentFiles: parent.files };
+    return { commit: original, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
+      completeFileLists: original.filesComplete === true && reviewed.filesComplete === true && parent.filesComplete === true };
   }
   return null;
 }
@@ -452,7 +458,12 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
   // Reuse only within this evaluation. The in-lease evaluation must re-read live state.
   const responses = new Map();
   const read = (path) => {
-    if (!responses.has(path)) responses.set(path, Promise.resolve().then(() => get(path)));
+    if (!responses.has(path)) responses.set(path, Promise.resolve().then(() => get(path)).then(result => {
+      if (Array.isArray(result?.files) && result.files.length >= 300 && result.filesComplete !== true) {
+        throw new Error(`incomplete file list: ${path}`);
+      }
+      return result;
+    }));
     return responses.get(path);
   };
   const unknown = (reason, extra = {}) => ({ headSha, hasHammerCommits: null, reason, ...extra });
@@ -463,7 +474,6 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     if (!SHA.test(pr.base?.sha || '')) return unknown('missing base SHA');
     const history = await read(`repos/${repo}/compare/${pr.base.sha}...${headSha}`);
     if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
-      || history.commits.length >= 250
       || history.commits.some((commit) => !SHA.test(commit?.sha || '')
         || typeof commit?.commit?.message !== 'string')) return unknown('missing, malformed or capped commit history');
     let launchIndex = -1;
@@ -564,14 +574,15 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           const parent = await read(`repos/${repo}/compare/${mergeBase}...${parentSha}`);
           if ((rebased ? !SHA.test(reviewed.merge_base_commit?.sha || '') : reviewed.merge_base_commit?.sha !== mergeBase)
             || parent.merge_base_commit?.sha !== mergeBase) { reject('merge-base-mismatch'); continue; }
-          if (!Array.isArray(reviewed.files) || reviewed.files.length >= 300
-            || !Array.isArray(parent.files) || parent.files.length >= 300) { reject('capped-file-list'); continue; }
+          if (!Array.isArray(reviewed.files)
+            || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
             originalAuthorization = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, read });
             if (!originalAuthorization) { reject('original-reversal-not-proven-before-supersession'); continue; }
           }
           reversalAuthorizations.push({ commit, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
+            completeFileLists: reviewed.filesComplete === true && parent.filesComplete === true && commit.filesComplete === true,
             ...(originalAuthorization ? { originalAuthorization } : {}),
             ...(rebased ? { rebased: true } : {}) });
         } catch (error) {
@@ -594,11 +605,13 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       testRegionsChanged: testChanges,
       ...(reversalAuthorizations.length ? { reversalAuthorizations } : {}),
       ...(rejectedReversalAuthorizations.length ? { rejectedReversalAuthorizations } : {}),
+      completeFileLists: primary.filesComplete === true && final.filesComplete === true,
       primaryFiles: primary.files, finalFiles: final.files };
-  } catch (error) { return error?.primaryChangeReadFailed === true || error?.authOutage === true || error?.name === 'AbortError'
-    || error?.code === 'ABORT_ERR' || isTransientGhError(error)
-    ? unknown(`history read failed: ${error.message || error}`, { readFailed: true })
-    : unknown(`history read failed: ${error.message || error}`); }
+  } catch (error) {
+    const message = String(error.message || error);
+    return unknown(message.startsWith('history read failed:') ? message : `history read failed: ${message}`,
+      { readFailed: true, historyReadFailed: true });
+  }
 }
 
 // Every production primary-change read also proves the independent cost gate.

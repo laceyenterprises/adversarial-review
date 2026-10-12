@@ -1,3 +1,4 @@
+import { createHistoryReader } from './ama/history-reader.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
@@ -447,10 +448,7 @@ export async function fetchHeadCloserVerifiedCommit({
   if (!repoPath || !sha) return null;
   const withPrimaryChange = async (commit) => includePrimaryChange ? ({ ...normalizeVerifiedCloserCommit(commit),
     primaryChange: await fetchPrimaryChange({ repo: repoPath, prNumber, headSha: sha, rootDir, env,
-      get: async (path) => {
-        const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
-        return JSON.parse(stdout);
-      },
+      get: createHistoryReader({ execGhWithRetryImpl: execGhWithRetryImpl, execFileImpl, env, signal }),
     }),
   }) : normalizeVerifiedCloserCommit(commit);
   // Daemon-robust: read the closer commit from the local checkout first. The remote

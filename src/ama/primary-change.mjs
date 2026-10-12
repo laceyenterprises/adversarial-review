@@ -607,7 +607,11 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       ...(rejectedReversalAuthorizations.length ? { rejectedReversalAuthorizations } : {}),
       completeFileLists: primary.filesComplete === true && final.filesComplete === true,
       primaryFiles: primary.files, finalFiles: final.files };
-  } catch (error) { return unknown(`history read failed: ${error.message || error}`, { readFailed: true, historyReadFailed: true }); }
+  } catch (error) {
+    const message = String(error.message || error);
+    return unknown(message.startsWith('history read failed:') ? message : `history read failed: ${message}`,
+      { readFailed: true, historyReadFailed: true });
+  }
 }
 
 // Every production primary-change read also proves the independent cost gate.

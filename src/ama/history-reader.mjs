@@ -59,7 +59,9 @@ export function createHistoryReader(options = {}) {
     const files = new Array(changed.length);
     const dir = await mkdtemp(join(tmpdir(), 'ham-history-'));
     const blob = async entry => {
-      if (!entry) return Buffer.alloc(0);
+      // Gitlinks have no file contents; type transitions diff the blob side
+      // against empty bytes without attempting to fetch a submodule commit.
+      if (!entry || entry.type === 'commit') return Buffer.alloc(0);
       if (entry.type !== 'blob') throw new Error(`unsupported changed object ${entry.type}`);
       const data = await cached(`repos/${repo}/git/blobs/${entry.sha}`, '{encoding, content, size}');
       if (data.encoding !== 'base64' || typeof data.content !== 'string') throw new Error(`unreadable blob ${entry.sha}`);
@@ -75,7 +77,7 @@ export function createHistoryReader(options = {}) {
           const { path, a, b } = changed[index];
           const beforePath = `before-${index}`, afterPath = `after-${index}`;
           const file = { filename: path, status: !a ? 'added' : !b ? 'removed' : 'modified', sha: b?.sha || a.sha };
-          if (a?.type === 'commit' || b?.type === 'commit') {
+          if (a?.type === 'commit' && b?.type === 'commit') {
             file.additions = 0; file.deletions = 0; files[index] = file; continue;
           }
           await writeFile(join(dir, beforePath), await blob(a));

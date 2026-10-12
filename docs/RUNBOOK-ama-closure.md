@@ -1562,7 +1562,11 @@ HAMENOBUFS-01: every production history reader projects compare metadata and
 commit identity into pages of 100 without compare patches. Because GitHub caps
 compare files at 300 with no file pagination, complete file evidence comes from
 immutable merge-base/head trees, skipping equal subtrees and diffing individual
-blob pairs locally; commit file reads paginate independently. Each child output
+blob pairs locally; commit file reads paginate independently. A file/submodule
+type transition diffs the file's full contents against empty bytes; a change
+between two submodule pointers retains patchless gitlink evidence. Read errors
+carry one `history read failed:` prefix, including when the reader already
+supplied it. Each child output
 is explicitly bounded at 25 MiB and exceeding that limit is a named read error.
 Any failed history read returns `historyReadFailed: true` with the underlying
 error, the dedicated helper exits non-zero, and the hammer records

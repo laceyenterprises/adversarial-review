@@ -51,6 +51,51 @@ test('spawn ENOBUFS reports explicit failed read with error and output limit, ne
   assert.equal(answer.reason, 'history-read-failed');
   assert.match(answer.detail, /ENOBUFS/);
   assert.match(answer.detail, /output limit 26214400 bytes exceeded/);
+  assert.equal(answer.detail, `history read failed: repos/${repo}/pulls/1 (output limit 26214400 bytes exceeded): spawnSync gh ENOBUFS`);
+});
+
+test('tree evidence diffs file/submodule transitions and preserves standalone gitlinks', async () => {
+  const gitlink = { path: 'entry', type: 'commit', mode: '160000', sha: author };
+  const file = { path: 'entry', type: 'blob', mode: '100644', sha: head };
+  const content = 'first line\nsecond line\n';
+  for (const [before, after, additions, deletions] of [
+    [gitlink, file, 2, 0], [file, gitlink, 0, 2],
+    [gitlink, { ...gitlink, sha: head }, 0, 0],
+    [null, gitlink, 0, 0], [gitlink, null, 0, 0],
+  ]) {
+    const blobReads = [];
+    const reader = createHistoryReader({ execGhWithRetryImpl: async ({ args }) => {
+      const path = args[1];
+      let value;
+      if (path.includes('/compare/')) value = { status: 'ahead', total_commits: 0, commits: [], merge_base_commit: { sha: base } };
+      else if (path.includes('/git/trees/')) {
+        const entry = path.endsWith(base) ? before : after;
+        value = { tree: entry ? [entry] : [], truncated: false };
+      } else if (path === `repos/${repo}/git/blobs/${file.sha}`) {
+        blobReads.push(path);
+        value = { encoding: 'base64', content: Buffer.from(content).toString('base64'), size: Buffer.byteLength(content) };
+      } else throw new Error(`unexpected ${path}`);
+      return { stdout: JSON.stringify(value) };
+    } });
+    const evidence = await reader(`repos/${repo}/compare/${base}...${head}`);
+    assert.equal(evidence.filesComplete, true);
+    assert.equal(evidence.files.length, 1);
+    const change = evidence.files[0];
+    assert.equal(change.filename, 'entry');
+    assert.equal(change.status, !before ? 'added' : !after ? 'removed' : 'modified');
+    assert.equal(change.sha, after?.sha || before.sha);
+    assert.equal(change.additions, additions);
+    assert.equal(change.deletions, deletions);
+    if (additions || deletions) {
+      assert.match(change.patch, /^@@/);
+      const sign = additions ? '+' : '-';
+      assert.ok(change.patch.includes(`${sign}first line\n${sign}second line\n`));
+      assert.deepEqual(blobReads, [`repos/${repo}/git/blobs/${file.sha}`]);
+    } else {
+      assert.equal(change.patch, undefined);
+      assert.deepEqual(blobReads, []);
+    }
+  }
 });
 
 test('two preflight failed reads refund both attempts and hold/probe/page once rather than spend retry cap', async t => {

@@ -76,6 +76,16 @@ test('collector distinguishes read failure from unsupported history', async () =
     assert.equal(checkPrimaryChange(result, head).reason, result.historyReadFailed ? 'history-read-failed' : result.readFailed ? 'primary-change-read-failed' : 'primary-change-unknown');
   }
 });
+test('collector adds one history failure prefix for plain and already-prefixed reader errors', async () => {
+  for (const message of ['offline', 'history read failed: offline']) {
+    const result = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head,
+      get: async () => { throw new Error(message); } });
+    assert.equal(result.reason, 'history read failed: offline');
+    assert.equal(result.readFailed, true);
+    assert.equal(result.historyReadFailed, true);
+    assert.equal(checkPrimaryChange(result, head).reason, 'history-read-failed');
+  }
+});
 test('hammer prompt preserves intent and resolves conflicting non-blocking findings by rationale', () => {
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
   assert.match(prompt, /may not revert, neutralize or invert any protected hunk/);

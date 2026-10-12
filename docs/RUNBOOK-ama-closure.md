@@ -2734,6 +2734,9 @@ bind immutable content, while the reviewed head comes from the review record.
 Builder-authored text, commit authors, committers and signatures are not needed
 for this proof. Earlier edges remain available; retries deduplicate only the
 same App-authored base/head edge.
+The audit lookup uses `gh api --paginate --slurp` to read all comment pages
+as one JSON payload. `bin/hammer-audit-comment-id.mjs` parses that payload
+once and searches across the pages, including pretty-printed responses.
 
 API and CAS git publication use the same starting-base rule. Immediately before
 attesting, the audit procedure confirms the remote SHA equals local HEAD. It

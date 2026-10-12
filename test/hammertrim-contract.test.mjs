@@ -232,7 +232,8 @@ test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
     prUrl: 'https://github.com/acme/repo/pull/42', repo: 'acme/repo', prNumber: 42,
     reviewedSha: 'a'.repeat(40), riskClass: 'medium', mergeMethod: 'squash',
     requiredGateContext: 'adversarial-review', auditPath: '/tmp/hammer-audit.json',
-    hqRoot: '/tmp/hq', rootDir: root, hqOwnerUser: 'tester', reviewedBy: 'reviewer',
+    // Keep this prompt-size fixture independent of the checkout path length.
+    hqRoot: '/tmp/hq', rootDir: '/tmp/adversarial-review', hqOwnerUser: 'tester', reviewedBy: 'reviewer',
     reviewer: 'reviewer', dispatchedAt: '2026-09-27T00:00:00Z', amaTrailers: '',
     templateBody: template,
   });

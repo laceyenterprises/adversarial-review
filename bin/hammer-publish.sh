@@ -115,10 +115,11 @@ HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Hea
 # rather than silently posting as the wrong bot.
 HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
 ham_existing_terminal_audit_comment_id() {
+  # Slurp pagination into one JSON value; gh's --slurp cannot be combined
+  # with --jq. The selector reads the complete array of comment pages.
   HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" gh api \
-    --paginate \
-    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
-    -q '.[] | {id: .id, body: .body, author: .user.login}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
+    --paginate --slurp \
+    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
   # Preserve earlier runs' base/head edges. Repeating publication of this exact
   # edge is idempotent, and only an entitled App author's comment can be edited.
   printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |

@@ -27,7 +27,7 @@ function makeTempRoot() {
 
 function insertPass(
   db,
-  { repoPath, prNumber, attemptNumber, passKind, headSha, status = 'completed', metadata = {} }
+  { repoPath, prNumber, attemptNumber, passKind, headSha, status = 'completed', metadata = {}, postedId = null }
 ) {
   db.prepare(
     `INSERT INTO reviewer_passes (
@@ -44,6 +44,8 @@ function insertPass(
     status,
     headSha,
   );
+  if (postedId !== null) db.prepare('UPDATE reviewer_passes SET gh_comment_id=? WHERE repo=? AND pr_number=? AND attempt_number=?')
+    .run(`${postedId}-${attemptNumber}`, repoPath, prNumber, attemptNumber);
   db.prepare(
     `UPDATE reviewer_passes
         SET metadata_json = ?
@@ -70,7 +72,7 @@ test('duplicate completed reviews of one head count as a single distinct head', 
     const head = '316e2513d000';
     // The live pathology: four completed reviews, all on the same head.
     for (const attemptNumber of [1, 2, 3, 4]) {
-      insertPass(db, { repoPath, prNumber, attemptNumber, passKind: 'rereview', headSha: head });
+      insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber, passKind: 'rereview', headSha: head });
     }
     assert.equal(
       countDistinctReviewedHeadShas({ db, rootDir, repoPath, prNumber }),
@@ -89,10 +91,10 @@ test('genuine head churn increments the distinct-head count', () => {
     ensureReviewStateSchema(db);
     const repoPath = 'laceyenterprises/agent-os';
     const prNumber = 3700;
-    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'aaaa1111' });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: 'bbbb2222' });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 3, passKind: 'rereview', headSha: 'bbbb2222' }); // dup of head B
-    insertPass(db, { repoPath, prNumber, attemptNumber: 4, passKind: 'rereview', headSha: 'cccc3333' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'aaaa1111' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: 'bbbb2222' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 3, passKind: 'rereview', headSha: 'bbbb2222' }); // dup of head B
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 4, passKind: 'rereview', headSha: 'cccc3333' });
     assert.equal(
       countDistinctReviewedHeadShas({ db, rootDir, repoPath, prNumber }),
       3,
@@ -110,8 +112,8 @@ test('non-completed and null-head passes never count toward the distinct-head ce
     ensureReviewStateSchema(db);
     const repoPath = 'laceyenterprises/agent-os';
     const prNumber = 3800;
-    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: 'dddd4444', status: 'failed' });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: null });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: 'dddd4444', status: 'failed' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: null });
     assert.equal(
       countDistinctReviewedHeadShas({ db, rootDir, repoPath, prNumber }),
       0,
@@ -129,7 +131,7 @@ test('distinct-head counter owned-db path closes without ReferenceError', () => 
     ensureReviewStateSchema(db);
     const repoPath = 'laceyenterprises/agent-os';
     const prNumber = 3900;
-    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'eeee5555' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'eeee5555' });
     db.close();
 
     assert.equal(
@@ -149,7 +151,7 @@ test('completed-rereview counter owned-db path closes without ReferenceError', (
     ensureReviewStateSchema(db);
     const repoPath = 'laceyenterprises/agent-os';
     const prNumber = 3901;
-    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: 'ffff6666' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: 'ffff6666' });
     db.close();
 
     assert.equal(
@@ -172,9 +174,9 @@ test('ceiling units collapse duplicate completions and ignore non-landed failure
     const completedHead = '1111aaaa';
     const failingHead = '2222bbbb';
 
-    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: completedHead });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: completedHead });
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: completedHead });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: completedHead });
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 3,
@@ -182,7 +184,7 @@ test('ceiling units collapse duplicate completions and ignore non-landed failure
       headSha: failingHead,
       status: 'failed',
     });
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 4,
@@ -190,7 +192,7 @@ test('ceiling units collapse duplicate completions and ignore non-landed failure
       headSha: failingHead,
       status: 'failed',
     });
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 5,
@@ -237,10 +239,10 @@ test('stale-head passes do not spend either current-head reviewer ceiling', () =
 
     // Two stale comment-only reviews and one stale blocking review are useful
     // audit history, but cannot deny the exact-head review of the remediation.
-    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'first-head' });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: 'middle-head' });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 3, passKind: 'rereview', headSha: 'blocking-head' });
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'first-head' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: 'middle-head' });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 3, passKind: 'rereview', headSha: 'blocking-head' });
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 4,
@@ -275,9 +277,9 @@ test('stale-head passes do not spend either current-head reviewer ceiling', () =
       'a stale timeout cannot trip the independent fuse for the current head',
     );
 
-    insertPass(db, { repoPath, prNumber, attemptNumber: 5, passKind: 'rereview', headSha: currentHead });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 6, passKind: 'rereview', headSha: currentHead });
-    insertPass(db, { repoPath, prNumber, attemptNumber: 7, passKind: 'rereview', headSha: currentHead });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 5, passKind: 'rereview', headSha: currentHead });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 6, passKind: 'rereview', headSha: currentHead });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 7, passKind: 'rereview', headSha: currentHead });
     assert.equal(
       countReviewCeilingUnits({ db, rootDir, repoPath, prNumber, headSha: currentHead }),
       3,
@@ -302,7 +304,7 @@ test('ceiling units do not fall back to raw attempts for modern failed-only pass
     const prNumber = 3903;
     const failingHead = '4444dddd';
 
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 1,
@@ -338,7 +340,7 @@ test('ceiling units do not fall back to raw attempts for modern failed-only pass
   }
 });
 
-test('ceiling units preserve legacy null-head history and empty-ledger fallback', () => {
+test('ceiling units preserve legacy posted history but attempts without a pass spend nothing', () => {
   const rootDir = makeTempRoot();
   try {
     const db = openReviewStateDb(rootDir);
@@ -346,7 +348,7 @@ test('ceiling units preserve legacy null-head history and empty-ledger fallback'
     const repoPath = 'laceyenterprises/agent-os';
     const prNumber = 3904;
 
-    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: null });
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: null });
     assert.equal(
       countReviewCeilingUnits({
         db,
@@ -367,8 +369,8 @@ test('ceiling units preserve legacy null-head history and empty-ledger fallback'
         prNumber: 3905,
         fallbackReviewAttempts: 4,
       }),
-      4,
-      'an empty reviewer_passes ledger falls back to the durable reviewed_prs attempt counter',
+      0,
+      'an empty reviewer_passes ledger proves no posted review',
     );
     assert.equal(
       countReviewCeilingAttempts({
@@ -400,7 +402,7 @@ test('transient fleet-infra failures do not consume the review-attempt ceiling',
       [3, 'launchctl-bootstrap'],
       [4, 'oauth-broken'],
     ]) {
-      insertPass(db, {
+      insertPass(db, { postedId: 'delivered',
         repoPath,
         prNumber,
         attemptNumber,
@@ -423,7 +425,7 @@ test('transient fleet-infra failures do not consume the review-attempt ceiling',
       'outage retries are not review attempts and must not ceiling-freeze the PR',
     );
 
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 5,
@@ -455,7 +457,7 @@ test('deterministic crash, timeout, and genuine review failures still consume th
     const repoPath = 'laceyenterprises/agent-os';
     const prNumber = 4314;
 
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 1,
@@ -464,7 +466,7 @@ test('deterministic crash, timeout, and genuine review failures still consume th
       status: 'failed',
       metadata: { failureClass: 'worker_crashed' },
     });
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 2,
@@ -473,7 +475,7 @@ test('deterministic crash, timeout, and genuine review failures still consume th
       status: 'failed',
       metadata: { failureClass: 'reviewer-timeout' },
     });
-    insertPass(db, {
+    insertPass(db, { postedId: 'delivered',
       repoPath,
       prNumber,
       attemptNumber: 3,
@@ -495,4 +497,36 @@ test('deterministic crash, timeout, and genuine review failures still consume th
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('HAMCLOSE-02 a completed process with no posted review ID consumes no review ceiling unit', () => {
+  const rootDir = makeTempRoot();
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const repoPath = 'fixture/repo', prNumber = 8143, headSha = 'b'.repeat(40);
+    insertPass(db, { postedId: 'delivered', repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha });
+    db.prepare('UPDATE reviewer_passes SET gh_comment_id=NULL WHERE repo=? AND pr_number=?').run(repoPath, prNumber);
+    for (const head of [null, headSha]) assert.equal(countReviewCeilingUnits({ db, rootDir, repoPath,
+      prNumber, headSha: head, fallbackReviewAttempts: 3 }), 0);
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('one delivered head and three undelivered completions spend exactly one and zero units', () => {
+  const rootDir = makeTempRoot(), db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const repoPath = 'fixture/repo', prNumber = 1, a = 'a'.repeat(40), b = 'b'.repeat(40);
+    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: a, postedId: 'delivered' });
+    for (const attemptNumber of [2,3,4]) insertPass(db, { repoPath, prNumber, attemptNumber, passKind: 'rereview', headSha: b });
+    assert.equal(countReviewCeilingUnits({ db, repoPath, prNumber, headSha: a }), 1);
+    assert.equal(countReviewCeilingUnits({ db, repoPath, prNumber, headSha: b }), 0);
+    assert.equal(countReviewCeilingUnits({ db, repoPath, prNumber }), 1);
+    db.prepare("UPDATE reviewer_passes SET body_md='Stored review' WHERE attempt_number=2").run();
+    assert.equal(countReviewCeilingUnits({ db, repoPath, prNumber, headSha: b }), 1);
+    db.prepare(`UPDATE reviewer_passes SET metadata_json=? WHERE attempt_number=3`).run(JSON.stringify({ reviewBodyCapture: { status: 'verified-github-artifact' } }));
+    assert.equal(countReviewCeilingUnits({ db, repoPath, prNumber, headSha: b }), 2);
+    db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,review_attempts) VALUES (?,2,'2026-01-01','gemini','posted',3)`).run(repoPath);
+    assert.equal(countReviewCeilingUnits({ db, repoPath, prNumber: 2 }), 3);
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
 });

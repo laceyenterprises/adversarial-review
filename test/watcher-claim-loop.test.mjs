@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -31,6 +31,10 @@ function installGhFixture(tmp) {
   const ghPath = path.join(tmp, 'gh');
   writeFileSync(ghPath, `#!/usr/bin/env bash
 set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf '{"state":"open","draft":false,"labels":[],"changed_files":1,"head":{"sha":"%s"}}\\n' "\${WATCHER_CLAIM_LOOP_FIXTURE_HEAD_101:-}"
+  exit 0
+fi
 if [[ "\${1:-}" == "api" && "\${2:-}" =~ ^repos/[^/]+/[^/]+/commits/(.+)$ ]]; then
   sha="\${BASH_REMATCH[1]}"
   printf '{"sha":"%s","message":"Fixture commit","committerLogin":null,"authorLogin":null,"committerName":"Fixture Worker","committerEmail":"fixture@example.com"}\\n' "$sha"
@@ -56,6 +60,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
 function buildLoaderSource({
   capRouteSource = null,
   subjectHeads = {},
+  subject101Overrides = {},
   subjectRevisionRefs = {},
   followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE,
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
@@ -178,6 +183,7 @@ export async function load(url, context, nextLoad) {
             labels: ['risk:medium'],
             updatedAt: '2026-05-15T12:00:00.000Z',
             headSha: subjectHeadOverrides['101'] || 'sha-happy-101',
+            ...${JSON.stringify(subject101Overrides)},
             terminal: false,
             observedAt: '2026-05-15T12:00:01.000Z',
           },
@@ -198,6 +204,8 @@ export async function load(url, context, nextLoad) {
             missingDetail: true,
           },
         ];
+
+        process.env.WATCHER_CLAIM_LOOP_FIXTURE_HEAD_101 = subjects[0].headSha;
 
         export function parseSubjectExternalId(subjectExternalId) {
           const match = String(subjectExternalId || '').match(/^([^#/]+\\/[^#/]+)#(\\d+)$/);
@@ -2849,4 +2857,229 @@ test('HOLDRELEASE-01: stale drift captures release without routing until cleared
       assert.ok(db.prepare('SELECT routed_at FROM operator_hold_releases WHERE pr_number = 101').get().routed_at);
     `,
   });
+});
+
+test('HAMCLOSE-02 budget resolution preserves only integer increases', async () => {
+  const { resolveMaxRemediationRounds } = await import('../src/hamclose-review-admission.mjs');
+  for (const [latestMaxRounds, expected] of [
+    [4, 4], ['4', 4], [1, 2], [2, 2], [null, 2], [undefined, 2], ['', 2],
+    [2.5, 2], [Infinity, 2], ['invalid', 2],
+  ]) assert.equal(resolveMaxRemediationRounds({ roundBudget: 2, latestMaxRounds }), expected);
+});
+
+for (const postedCount of [3, 5]) test(`HAMCLOSE-02 raised maxRounds: ${postedCount} delivered reviews`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-raised-budget-'));
+  try {
+    const head = 'b'.repeat(40), reviewedHead = 'a'.repeat(40);
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    const followUpJobsSource = DEFAULT_FOLLOW_UP_JOBS_SOURCE.replace('latestMaxRounds: 1', 'latestMaxRounds: 4');
+    // Automatic stale-head requests omit db in production. Bind this replay
+    // to the fixture DB so its re-review reset and claim share the same state.
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, followUpJobsSource }).replace(
+      'return actual.requestReviewRereview(options);',
+      'return actual.requestReviewRereview({ ...options, db: options.db || db });',
+    ));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+        review_attempts,revision_ref,reviewer_head_sha,posted_at)
+        VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12T04:45:00Z','claude','open','posted',?,?,?,
+        '2026-10-12T05:00:00Z')\`).run(${postedCount}, ${JSON.stringify(reviewedHead)}, ${JSON.stringify(reviewedHead)});
+      for (let attempt = 1; attempt <= ${postedCount}; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,
+        attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,gh_comment_id)
+        VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T04:45:00Z',
+        '2026-10-12T05:00:00Z','completed',?,?)\`).run(attempt, ${JSON.stringify(reviewedHead)}, 'posted-' + attempt);
+    `, afterFirstPoll: postedCount < 5 ? `
+      const spawns = (globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101);
+      assert.equal(spawns.length, 1, 'raised budget admits the moved head');
+      assert.equal(spawns[0].subjectContext.reviewerHeadSha, ${JSON.stringify(head)});
+      assert.equal(spawns[0].subjectContext.passKind, 'rereview');
+      assert.equal(spawns[0].subjectContext.maxRemediationRounds, 4);
+      assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1);
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      assert.equal(row.reviewer_head_sha, ${JSON.stringify(head)});
+      assert.notEqual(row.rereview_reason, 'system-review-ceiling-closure');
+      assert.match(row.rereview_reason, /auto-refresh: posted review on stale head/);
+    ` : `
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
+      const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+      assert.equal(row.review_status, 'posted');
+      assert.equal(row.reviewer_head_sha, ${JSON.stringify(reviewedHead)});
+      assert.equal(row.rereview_reason, 'system-review-ceiling-closure');
+    ` }));
+    const env = installGhFixture(tmp);
+    const ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf '{"state":"open","draft":false,"labels":[],"changed_files":1,"head":{"sha":"${head}"},"base":{"sha":"${reviewedHead}"}}\\n'
+  exit 0
+fi`));
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+for (const [scenario, draft, hold, liveDraft = false, liveHold = null] of [
+  ['eligible', false, null], ['draft', true, null],
+  ['do-not-merge', false, 'do-not-merge'], ['no-merge-hold', false, 'no-merge-hold'],
+  ['merge-agent-skip', false, 'merge-agent-skip'],
+  ['live draft', false, null, true], ['live hold', false, null, false, 'do-not-merge'],
+]) test(`HAMCLOSE-02 replay B pollOnce empty head: ${scenario}`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-empty-'));
+  try {
+    const head = 'b'.repeat(40);
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head },
+      subject101Overrides: { isDraft: draft, labels: hold ? [hold] : ['risk:medium'] } }));
+    writeFileSync(registerPath, `import { register } from 'node:module'; register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);`);
+    const closedPath = path.join(tmp, 'closed');
+    const probePath = path.join(tmp, 'probe');
+    const afterPoll = draft || hold ? `
+      const { existsSync } = await import('node:fs');
+      assert.equal(existsSync(${JSON.stringify(closedPath)}), false);
+      assert.equal(existsSync(${JSON.stringify(probePath)}), false, 'draft/held subjects skip the probe');
+    ` : liveDraft || liveHold ? `
+      const { existsSync } = await import('node:fs');
+      assert.equal(existsSync(${JSON.stringify(closedPath)}), false);
+      assert.ok(existsSync(${JSON.stringify(probePath)}), 'eligible snapshot reaches the live recheck');
+      assert.ok(claims.some(claim => claim.prNumber === 101), 'deferring empty closure does not break review dispatch');
+    ` : `
+      const { existsSync, readFileSync } = await import('node:fs');
+      assert.ok(existsSync(${JSON.stringify(closedPath)}));
+      await pollOnce(octokit, pollOptions);
+      assert.equal(readFileSync(${JSON.stringify(closedPath)}, 'utf8'), 'one comment\\n');
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
+    `;
+    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, afterFirstPoll: afterPoll }));
+    const env = installGhFixture(tmp);
+    const ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf 'probe\\n' >> '${probePath}'
+  state=open
+  [[ ! -f '${closedPath}' ]] || state=closed
+  printf '{"state":"%s","draft":${liveDraft},"labels":${JSON.stringify(liveHold ? [{ name: liveHold }] : [])},"changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n' "$state"
+  exit 0
+elif [[ "\${1:-}" == api && "\${2:-}" == *'/compare/'* ]]; then
+  printf '{"files":[]}\\n'
+  exit 0
+elif [[ "\${1:-}" == pr && "\${2:-}" == close ]]; then
+  touch '${closedPath}'
+  exit 0
+elif [[ "\${1:-}" == pr && "\${2:-}" == comment ]]; then
+  printf 'one comment\\n' >> '${closedPath}'
+  exit 0
+fi
+`));
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.doesNotMatch(`${result.stdout || ''}${result.stderr || ''}`, /unexpected gh fixture call/);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+for (const phase of ['initial', 'compare', 'fresh', 'close']) {
+  test(`empty PR ${phase} transport failure defers admission and retries next tick`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-empty-failure-'));
+    try {
+      const head = 'b'.repeat(40);
+      const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+      const failedPath = path.join(tmp, 'failed'), closedPath = path.join(tmp, 'closed'), readsPath = path.join(tmp, 'reads');
+      writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head }, subject101Overrides: { changedFiles: 0 } }));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,review_attempts)
+          VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12','claude','open','pending',0)\`).run();
+      `, afterFirstPoll: `
+        const { existsSync, readFileSync } = await import('node:fs');
+        assert.ok(existsSync(${JSON.stringify(failedPath)}), 'the first tick encounters the failure');
+        assert.equal(existsSync(${JSON.stringify(closedPath)}), false);
+        const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number=101').get();
+        assert.equal(row.review_status, 'pending');
+        assert.equal(row.review_attempts, 0);
+        assert.equal(db.prepare('SELECT head FROM nonempty_pr_heads WHERE pr_number=101').get(), undefined);
+        assert.ok(!claims.some(claim => claim.prNumber === 101));
+        await pollOnce(octokit, pollOptions);
+        assert.equal(readFileSync(${JSON.stringify(closedPath)}, 'utf8'), 'one comment\\n');
+        assert.ok(!claims.some(claim => claim.prNumber === 101));
+        assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
+      ` }));
+      const env = installGhFixture(tmp), ghPath = path.join(tmp, 'gh');
+      writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+phase=
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  phase=initial
+  [[ ! -f '${readsPath}' ]] || phase=fresh
+  touch '${readsPath}'
+elif [[ "\${1:-}" == api && "\${2:-}" == *'/compare/'* ]]; then phase=compare
+elif [[ "\${1:-}" == pr && "\${2:-}" == close ]]; then phase=close
+fi
+if [[ "$phase" == '${phase}' && ! -f '${failedPath}' ]]; then
+  touch '${failedPath}'
+  echo 'Operation timed out' >&2
+  exit 1
+fi
+if [[ "$phase" == initial || "$phase" == fresh ]]; then
+  printf '{"state":"open","draft":false,"labels":[],"changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n'
+  exit 0
+elif [[ "$phase" == compare ]]; then printf '{"files":[]}\\n'; exit 0
+elif [[ "$phase" == close ]]; then touch '${closedPath}'; exit 0
+elif [[ "\${1:-}" == pr && "\${2:-}" == comment ]]; then printf 'one comment\\n' >> '${closedPath}'; exit 0
+fi
+`));
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}
+
+test('HAMCLOSE-02 real pollOnce admits one handed-off exact-head review past exhausted attempts', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-review-'));
+  try {
+    const head = 'b'.repeat(40);
+    const probePath = path.join(tmp, 'nonempty-probes');
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    let loader = buildLoaderSource({ subjectHeads: { 101: head } });
+    loader = loader.replace('export async function resolve', `stubs.set(${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs'))}, 'fixture:handoff-lease');\nexport async function resolve`);
+    const leaseSource = `export * from ${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs') + '?actual')};
+      export function readAmaCloserLease(_root, identity) {
+        return identity.prNumber === 101 && identity.headSha === ${JSON.stringify(head)}
+          ? { status: 'handed-to-review', headSha: identity.headSha, lrqId: 'hammer-8143', updatedAt: '2026-10-12T06:15:00.000Z' } : null;
+      }`;
+    loader = loader.replace('export async function load(url, context, nextLoad) {',
+      `export async function load(url, context, nextLoad) {\nif (url === 'fixture:handoff-lease') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(leaseSource)} };`);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+        review_attempts,revision_ref,rereview_requested_at,rereview_reason)
+        VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12T04:45:00Z','claude','open','pending',36,?,
+        '2026-10-12T06:15:00Z',?)\`).run(${JSON.stringify(head)}, ${JSON.stringify('system-orphan-head-review:' + head)});
+      for (let attempt = 1; attempt <= 36; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,
+        attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,metadata_json)
+        VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T05:12:10Z',
+        '2026-10-12T05:12:13Z','failed',?,'{"failureClass":"reviewer-command-failed"}')\`).run(attempt, ${JSON.stringify(head)});
+    `, afterFirstPoll: `
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101).length, 1);
+      assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+      await pollOnce(octokit, pollOptions);
+      const { readFileSync } = await import('node:fs');
+      assert.equal(readFileSync(${JSON.stringify(probePath)}, 'utf8'), 'probe\\n', 'verified nonempty head is probed once across ticks');
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101).length, 1);
+    ` }));
+    const env = installGhFixture(tmp), ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf 'probe\\n' >> '${probePath}'
+  printf '{"state":"open","changed_files":1,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n'
+  exit 0
+fi`));
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

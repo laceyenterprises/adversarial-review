@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { collect } from './helpers/hamclose-history.mjs';
 import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 import { hammerAttestationChain, fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
@@ -223,4 +224,95 @@ test('HAMCLOSE-01 exhaustive open non-held ownership cross product uses real eli
     }
   }
   assert.equal(combinations, 17_280);
+});
+
+test('HAMCLOSE-02 every primary evidence × ceiling × handoff/drain × diff combination has one owner', async () => {
+  const preserved = { headSha: reviewed, hasHammerCommits: true, primaryHead: hammer, mergeBase: next,
+    primaryFiles: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' }],
+    finalFiles: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' }] };
+  const reversal = { ...preserved, finalFiles: [], reversalAuthorizations: [{
+    reviewedFiles: preserved.primaryFiles, parentFiles: preserved.primaryFiles,
+    commit: { sha: reviewed, author: { login: 'the-hammer-lacey[bot]' }, parents: [{ sha: hammer }],
+      commit: { message: `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${hammer}\nReversal-Authorized-By: PRR_matrix finding=1 kind=blocking` },
+      files: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-new\n+old' }] },
+    review: { commit_id: hammer, node_id: 'PRR_matrix', user: { login: 'lacey-claude-reviewer[bot]' },
+      state: 'CHANGES_REQUESTED', body: '## Blocking issues\n- **Undo**\n  - **File:** `src/a.mjs`\n  - **Lines:** `1`\n  - **Problem:** wrong\n  - **Recommended fix:** undo\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' },
+  }] };
+  const rebased = (await collect()).evidence;
+  assert.equal(rebased.reversalAuthorizations[0].rebased, true);
+  const evidence = [{ hasHammerCommits: false, headSha: reviewed }, reversal, rebased,
+    { ...preserved, finalFiles: [] }];
+  let combinations = 0;
+  for (const primaryChange of evidence) for (const reviewCeilingReached of [false, true])
+    for (const lease of [null, { status: 'dispatched' }, { status: 'handed-to-review' }])
+      for (const followUpJob of [{ status: 'pending', clean: true }, { status: 'stopped', clean: true }])
+        for (const diffEmpty of [false, true]) for (const stale of [false, true]) {
+          const input = { reviewState: { ...clean, headSha: stale ? 'e'.repeat(40) : primaryChange.headSha }, currentHead: primaryChange.headSha, primaryChange,
+            reviewCeilingReached, lease, followUpJob, diffEmpty };
+          const result = decideClosureOwner(input);
+          const expected = diffEmpty ? 'close' : primaryChange === evidence[3] ? 'page'
+            : lease?.status === 'dispatched' ? 'wait'
+            : stale ? (reviewCeilingReached && !lease ? 'hammer' : 'review')
+            : followUpJob.status === 'pending' ? 'follow-up-drain' : 'daemon-merge';
+          assert.equal(result.owner, expected, JSON.stringify({ reviewCeilingReached, lease, followUpJob, diffEmpty }));
+          assert.equal(classifyClosureOwnership(input).closureOwner.owner, result.owner);
+          combinations++;
+        }
+  assert.equal(combinations, 192);
+});
+
+for (const immediateFirst of [false, true]) test(`immediate pages and bounded waits keep independent reservations: ${immediateFirst}`, async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closure-classes-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pages = [];
+  const common = { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: reviewed,
+    env: { AMA_CLOSURE_WAIT_BOUND_MS: '100' }, pageImpl: async text => pages.push(text) };
+  const immediate = () => observeClosureWait({ ...common, reason: 'primary-change-reverted', immediate: true, now: 0 });
+  const bounded = async () => {
+    assert.equal((await observeClosureWait({ ...common, reason: 'lease-contended', now: 0 })).exhausted, false);
+    await observeClosureWait({ ...common, reason: 'lease-contended', now: 100 });
+  };
+  if (immediateFirst) { await immediate(); await bounded(); } else { await bounded(); await immediate(); }
+  await immediate(); await observeClosureWait({ ...common, reason: 'lease-contended', now: 101 });
+  assert.equal(pages.length, 2);
+});
+
+test('owner bounds read failures and honors caller strict policy', () => {
+  for (const failure of [{ headSha: next, hasHammerCommits: false },
+    { headSha: reviewed, historyReadFailed: true }, { headSha: reviewed, readFailed: true }]) {
+    assert.equal(decideClosureOwner({ currentHead: reviewed, primaryChange: failure }).owner, 'wait');
+    assert.equal(decideClosureOwner({ currentHead: reviewed, primaryChange: failure, waitExhausted: true }).owner, 'page');
+  }
+  const oldMode = process.env.AMA_CI_COST_MODE;
+  process.env.AMA_CI_COST_MODE = 'blocking';
+  try { assert.equal(decideClosureOwner({ currentHead: reviewed, primaryChange: { headSha: reviewed, hasHammerCommits: false, ciCost: { headSha: reviewed, failedCheck: true } } }).owner, 'wait'); }
+  finally { if (oldMode === undefined) delete process.env.AMA_CI_COST_MODE; else process.env.AMA_CI_COST_MODE = oldMode; }
+  assert.equal(decideClosureOwner({ reviewState: { ...clean, verdict: 'comment-only', nonBlockingFindingCount: 1 },
+    currentHead: reviewed, strictMode: false }).owner, 'daemon-merge');
+});
+
+test('dispatch lease lookup tolerates a missing head and listing keeps its active reservation', async t => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const { readAmaCloserDispatchLease } = await import('../src/ama/closer-lease.mjs');
+  const { listActiveAmaCloserDispatches, amaCloserDispatchFilePath } = await import('../src/ama/dispatch-closer.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'lease-missing-head-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  assert.equal(readAmaCloserDispatchLease(rootDir, { prNumber: 1 }), null);
+  const record = { repo: 'fixture/repo', prNumber: 1, state: 'dispatched', launchRequestId: 'active', lastObservedStatus: 'running' };
+  const path = amaCloserDispatchFilePath(rootDir, { ...record, headSha: reviewed });
+  const { dirname } = await import('node:path');
+  mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, JSON.stringify(record));
+  assert.equal(readAmaCloserDispatchLease(rootDir, record), null);
+  assert.equal(listActiveAmaCloserDispatches(rootDir).length, 1);
+});
+
+test('caller nonblocking reversal policy reaches the ownership predicate', async () => {
+  const { review } = await import('./helpers/hamclose-history.mjs');
+  const cited = review({ state: 'APPROVED', body: review().body.replace('## Blocking issues', '## Placeholder issues')
+    .replace('## Non-blocking issues\n- None.', '## Blocking issues\n- None.')
+    .replace('## Placeholder issues', '## Non-blocking issues').replace('Request changes', 'Approved') });
+  const { evidence } = await collect({ reviews: [cited], cites: ['PRR_cited finding=1 kind=non-blocking'] });
+  const input = { reviewState: { ...clean, headSha: evidence.headSha }, currentHead: evidence.headSha, primaryChange: evidence };
+  assert.equal(decideClosureOwner({ ...input, strictNonBlockingRemediation: true }).owner, 'daemon-merge');
+  assert.equal(decideClosureOwner({ ...input, strictNonBlockingRemediation: false }).owner, 'page');
 });

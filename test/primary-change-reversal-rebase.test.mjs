@@ -1,76 +1,12 @@
+import { collect, review } from './helpers/hamclose-history.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost,
+import { checkPrimaryChange, fetchPrimaryChange,
   primaryChangeExactReviewEvidence } from '../src/ama/primary-change.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 
-// REVERSALREBASE-01 replays agent-os PR 8088: a HAM commit reverted an author
-// region under a blocking finding, then a conflict-owner rebase and a hammer
-// rebase rewrote every commit, so neither the HAM commit nor its Reviewed-Head
-// is in the branch history any more.
-const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {
-  fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }),
-});
 const sha = (c) => c.repeat(40);
 const oldBase = sha('0'), base = sha('b'), reviewedHead = sha('1'), author = sha('2'), head = sha('c');
-const card = (lines) => `- **Finding**\n  - **File:** \`daemon.py\`\n  - **Lines:** \`${lines}\`\n  - **Problem:** Unsafe startup.\n  - **Recommended fix:** Revert it.`;
-const review = (overrides = {}) => ({ node_id: 'PRR_cited', html_url: 'https://github.com/fixture/repo/pull/8088#pullrequestreview-1',
-  commit_id: reviewedHead, state: 'CHANGES_REQUESTED', user: { login: 'lacey-claude-reviewer[bot]' },
-  submitted_at: '2026-10-11T17:00:00Z',
-  body: `## Blocking issues\n${card('10-11')}\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes`, ...overrides });
-// The author hunk, in the coordinates of the base it was written against.
-const authorPatch = (line, added = '+start_unsafe()') => ({ filename: 'daemon.py', status: 'modified', additions: 2, deletions: 1,
-  patch: `@@ -${line} +${line},2 @@\n-start()\n${added}\n+log_startup()` });
-const message = (cites) => ['HAM repair', '', 'Worker-Class: hammer', 'Worker-Ticket: HAM',
-  'Closed-By: hammer (adversarial-pipe-mode)', `Reviewed-Head: ${reviewedHead}`,
-  ...cites.map((cite) => `Reversal-Authorized-By: ${cite}`)].join('\n');
-
-// shift: how far the rebases moved the author hunk. reviewedPatch: the author
-// hunk as the cited review saw it, in the older base's coordinates.
-async function collect({ shift = 5, cites = ['PRR_cited finding=1 kind=blocking'], reviews = [review()],
-  rebasedAdded, reviewedAdded, authoredAt = '2026-10-11T17:30:00Z', reviewToParent = 'diverged',
-  duplicatePrimary = false, duplicateReviewed = false, originalRecorded = false, originalAdded,
-  originalLogin = 'the-hammer-lacey[bot]', originalParent = reviewedHead, snapshotCapped = false,
-  originalLine = 10 } = {}) {
-  const primary = authorPatch(10 + shift, rebasedAdded);
-  const ham = { sha: head, parents: [{ sha: author }], author: { login: 'the-hammer-lacey[bot]' },
-    committer: { login: 'the-hammer-lacey[bot]' },
-    commit: { message: message(cites), author: { date: authoredAt }, committer: { date: '2026-10-11T17:30:00Z' } },
-    files: [{ filename: 'daemon.py', status: 'modified', additions: 1, deletions: 2,
-      patch: `@@ -${10 + shift},2 +${10 + shift} @@\n${rebasedAdded ? `-${rebasedAdded.slice(1)}` : '-start_unsafe()'}\n-log_startup()\n+start()` }] };
-  const duplicate = (file) => ({ ...file, additions: file.additions * 2, deletions: file.deletions * 2,
-    patch: `${file.patch}\n${file.patch.replace(/@@ -\d+ \+\d+,2 @@/, '@@ -45 +45,2 @@')}` });
-  const original = { ...ham, sha: sha('d'), parents: [{ sha: originalParent }],
-    author: { login: originalLogin },
-    files: [{ ...ham.files[0], patch: ham.files[0].patch.replace(/@@ -\d+,2 \+\d+ @@/, `@@ -${originalLine},2 +${originalLine} @@`)
-      .replace('-start_unsafe()', originalAdded || '-start_unsafe()') }] };
-  const reads = [];
-  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head,
-    get: async (path) => {
-      reads.push(path);
-      if (path.endsWith('/pulls/8088')) return { head: { sha: head }, base: { sha: base } };
-      if (path.includes('/reviews?')) return reviews;
-      if (path.endsWith(`/commits/${head}`)) return ham;
-      if (path.endsWith(`/commits/${original.sha}`)) return original;
-      if (originalRecorded && path.endsWith(`${reviewedHead}...${sha('f')}`)) {
-        return { status: 'ahead', total_commits: snapshotCapped ? 250 : 1, commits: [original] };
-      }
-      if (path.endsWith(`${oldBase}...${reviewedHead}`)) return { status: 'ahead',
-        merge_base_commit: { sha: oldBase }, files: [authorPatch(10, reviewedAdded)] };
-      if (path.endsWith(`${base}...${head}`)) return { status: 'ahead', merge_base_commit: { sha: base }, files: [],
-        total_commits: 2, commits: [{ sha: author, commit: { message: 'author change' } }, ham] };
-      if (path.endsWith(`${base}...${author}`)) return { status: 'ahead', merge_base_commit: { sha: base }, files: [duplicatePrimary ? duplicate(primary) : primary] };
-      if (path.endsWith(`${author}...${author}`)) return { status: 'identical' };
-      if (path.endsWith(`${reviewedHead}...${author}`)) return { status: reviewToParent, merge_base_commit: { sha: oldBase } };
-      if (path.endsWith(`${base}...${reviewedHead}`)) return { status: 'diverged', merge_base_commit: { sha: oldBase },
-        files: [duplicateReviewed ? duplicate(authorPatch(10, reviewedAdded)) : authorPatch(10, reviewedAdded)] };
-      // Every pre-rebase head has diverged from the rebased history.
-      if (path.includes('/compare/')) return { status: 'diverged', merge_base_commit: { sha: oldBase }, files: [] };
-      throw new Error(`unexpected ${path}`);
-    } });
-  return { evidence, reads, result: checkPrimaryChange(evidence, head, { strictNonBlockingRemediation: true }) };
-}
-
 test('an authorized HAM reversal stays authorized after the branch is rebased onto a newer base', async () => {
   const { evidence, result } = await collect();
   assert.equal(evidence.reversalAuthorizations.length, 1);
@@ -78,7 +14,7 @@ test('an authorized HAM reversal stays authorized after the branch is rebased on
   assert.deepEqual(result, { ok: true, applicable: true, testRegionsChanged: [] });
 });
 
-test('PR 8088: a conflict-owner rebase then a hammer rebase keep the authorization, past a later review', async () => {
+test('a conflict-owner rebase then a hammer rebase keep the authorization, past a later review', async () => {
   // Two base moves (5 then 3 lines) and the post-reversal re-review on the
   // conflict-owner head with zero blocking findings, submitted after the HAM commit.
   const later = review({ node_id: 'PRR_later', commit_id: sha('f'), state: 'COMMENTED', submitted_at: '2026-10-11T19:10:00Z',
@@ -92,7 +28,7 @@ test('a trailer naming a review that is not on this pull request is rejected and
     const { result } = await collect({ cites });
     assert.equal(result.reason, 'primary-change-reverted');
     assert.equal(result.missingEvidence.evidence, 'reversal-authorization');
-    assert.equal(result.missingEvidence.path, 'daemon.py');
+    assert.equal(result.missingEvidence.path, 'src/a.mjs');
   }
   const { evidence, result } = await collect({ cites: ['PRR_other_pr finding=1 kind=blocking'] });
   assert.deepEqual(evidence.rejectedReversalAuthorizations.map(({ reason }) => reason), ['review-not-on-this-pull-request']);
@@ -156,7 +92,7 @@ test('an unauthorized rebased reversal still stops the hammer and names the miss
   assert.equal(evidence.reversalAuthorizations, undefined);
   assert.equal(result.reason, 'primary-change-reverted');
   assert.equal(result.missingEvidence.accepted, 0);
-  assert.match(result.missingEvidence.summary, /no verified Reversal-Authorized-By covers the reverted daemon\.py region \(0 verified\)/);
+  assert.match(result.missingEvidence.summary, /no verified Reversal-Authorized-By covers the reverted src\/a\.mjs region \(0 verified\)/);
 });
 
 test('a superseded citation needs an immutable original reversal, even with a preserved author date', async () => {
@@ -214,7 +150,7 @@ test('a HAM head failing self-certification only on the reversal authorization r
   assert.equal(recovered.needsOperator, false);
   assert.equal(recovered.missingEvidence.evidence, 'reversal-authorization');
   assert.deepEqual(requests, [head]);
-  assert.match(logs[0], /missing-evidence=no verified Reversal-Authorized-By covers the reverted daemon\.py region/);
+  assert.match(logs[0], /missing-evidence=no verified Reversal-Authorized-By covers the reverted src\/a\.mjs region/);
   // Without that proof, or with any other co-occurring refusal, the operator hold stays.
   for (const result of [refusal, { ...refusal, missingEvidence, exactHeadReview: true, reasons: [...refusal.reasons, 'ci-not-green'] },
     { ...refusal, missingEvidence, exactHeadReview: true, reasons: ['primary-change-reverted'] },
@@ -225,4 +161,89 @@ test('a HAM head failing self-certification only on the reversal authorization r
   assert.equal(await recover({ ...refusal, missingEvidence, exactHeadReview: true },
     { probeOwnershipImpl: async () => ({ owned: true, uncertain: false }) }), null);
   assert.equal(requests.length, 1);
+});
+
+// The original reversal itself was already
+// rebased when its immutable superseding review was posted.
+test('HAMCLOSE-02 an original rebased App reversal survives a diverged superseding snapshot', async () => {
+  const later = review({ node_id: 'PRR_later', commit_id: sha('f'), submitted_at: '2026-10-11T19:10:00Z',
+    body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved', state: 'APPROVED' });
+  const options = { reviews: [review(), later], originalRecorded: true,
+    originalParent: author, originalLine: 15, snapshotStatus: 'diverged' };
+  assert.equal((await collect(options)).result.ok, true);
+  for (const forged of [{ cites: [] }, { cites: ['PRR_missing finding=1'] },
+    { cites: ['PRR_cited finding=99'] }, { hammerLogin: 'builder' },
+    { reviews: [review({ user: { login: 'builder' } }), later] },
+    { rebasedAdded: '+builder_intervened()' }]) {
+    assert.equal((await collect({ ...options, ...forged })).result.ok, false, JSON.stringify(forged));
+  }
+});
+
+for (const opaque of [
+  { filename: 'asset.png', status: 'modified', additions: 0, deletions: 0, sha: sha('8') },
+  { filename: 'renamed.mjs', previous_filename: 'old.mjs', status: 'renamed', additions: 0, deletions: 0 },
+]) test(`opaque ${opaque.filename} rebase proof declines only its original snapshot`, async () => {
+  const later = review({ node_id: 'PRR_later', commit_id: sha('f'), submitted_at: '2026-10-11T19:10:00Z',
+    body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved', state: 'APPROVED' });
+  const { transport } = await collect({ reviews: [review(), later], originalRecorded: true,
+    originalParent: author, originalLine: 15, snapshotStatus: 'diverged' });
+  const original = await transport(`repos/fixture/repo/commits/${sha('d')}`);
+  const opaqueOriginal = { ...original, sha: sha('9'), parents: [{ sha: sha('e') }] };
+  const parent = await transport(`repos/fixture/repo/compare/${base}...${author}`);
+  for (const validFallback of [false, true]) {
+    const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head,
+      get: async path => {
+        if (path.endsWith(`${reviewedHead}...${sha('f')}`)) return { status: 'diverged',
+          commits: validFallback ? [opaqueOriginal, original] : [opaqueOriginal], total_commits: validFallback ? 2 : 1 };
+        if (path.endsWith(`/commits/${opaqueOriginal.sha}`)) return opaqueOriginal;
+        if (path.endsWith(`${reviewedHead}...${sha('e')}`)) return { status: 'diverged' };
+        if (path.endsWith(`${base}...${sha('e')}`)) return { ...parent, files: [...parent.files, opaque] };
+        return transport(path);
+      } }, { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
+    assert.equal(evidence.hasHammerCommits, true, 'opaque evidence must not become a history read failure');
+    assert.equal(evidence.readFailed, undefined);
+    if (validFallback) {
+      assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, original.sha);
+      assert.equal(checkPrimaryChange(evidence, head).ok, true);
+    } else {
+      assert.equal(evidence.reversalAuthorizations, undefined);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'original-reversal-not-proven-before-supersession');
+      assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+    }
+  }
+});
+
+test('unsigned unlinked author with copied hammer trailers and hammer committer is refused', async () => {
+  const { evidence, result } = await collect({ nullAuthor: true });
+  assert.equal(result.ok, false);
+  assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'commit-provenance');
+});
+
+test('a rebased builder with unlinked author and hammer committer remains a builder', async () => {
+  const { evidence, result } = await collect({ nullAuthor: true, builderOnly: true });
+  assert.equal(evidence.hasHammerCommits, false);
+  assert.equal(result.ok, true);
+});
+
+test('rebase proof retains context and extra hunks', async () => {
+  for (const options of [{ parentContext: '\n context_elsewhere', reviewedContext: '\n original_context' }, { parentExtraHunk: true }]) {
+    assert.equal((await collect(options)).result.ok, false);
+  }
+});
+
+test('unrelated mainline files in a diverged compare do not change authorization', async () => {
+  assert.deepEqual((await collect({ unrelated: true })).result, (await collect({ unrelated: false })).result);
+});
+
+test('synthetic transport throws on an unrecorded path', async () => {
+  const { transport } = await collect();
+  await assert.rejects(transport('repos/fixture/repo/unrecorded'), /unexpected/);
+});
+
+test('unlinked rebased reversal requires an exact SHA in the authenticated App comment', async () => {
+  assert.equal((await collect({ nullAuthor: true, attestationAuthor: 'the-hammer-lacey[bot]' })).result.ok, true);
+  for (const options of [{ attestationAuthor: 'builder' },
+    { attestationAuthor: 'the-hammer-lacey[bot]', attestationHead: '9'.repeat(40) }]) {
+    assert.equal((await collect({ nullAuthor: true, ...options })).result.ok, false);
+  }
 });

@@ -56,7 +56,7 @@ test('every citation is required; ranges and hammer provenance fail closed', asy
   const list = structuredClone(reviews);
   list[1].body = list[1].body.replace('`30`', '`31`');
   assert.equal((await replay({ list })).reason, 'primary-change-reverted');
-  assert.equal((await replay({ worker: 'codex' })).reason, 'primary-change-reverted');
+  assert.equal((await collect({ worker: 'codex' })).hasHammerCommits, false, 'non-hammer worker trailers keep rebased builder commits in builder history');
   assert.equal((await replay({ touched: { ...file, patch: file.patch.replaceAll('30', '31') } })).reason, 'primary-change-reverted');
 });
 test('superseding a cited reviewer final review refuses its waiver', async () => {

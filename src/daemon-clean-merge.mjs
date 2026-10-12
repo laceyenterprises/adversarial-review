@@ -1117,19 +1117,8 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
-  const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
-  if (remediableGate && daemonResult?.reasons?.some(reason => ['primary-change-read-failed', 'history-read-failed'].includes(reason))) {
-    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-      reason: 'gate-not-eligible', needsOperator: false };
-  }
-  if (daemonResult?.reasons?.some(reason => ['primary-change-read-failed', 'history-read-failed'].includes(reason))) {
-    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-      reason: daemonResult.reasons.includes('history-read-failed') ? 'history-read-failed' : 'gate-read-failed', needsOperator: false };
-  }
-  if (daemonResult?.reasons?.some((reason) => ['primary-change-reverted', 'primary-change-unknown', 'primary-change-needs-operator'].includes(reason))) {
-    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-      reason: 'primary-change-needs-operator', needsOperator: true };
-  }
+  const mappedPrimary = mapDaemonPrimaryChangeResult(daemonResult);
+  if (mappedPrimary !== daemonResult) return mappedPrimary;
   if (daemonResult?.reason === 'operator-approval-no-longer-current') {
     return NOT_TAKEN('operator-approval-no-longer-current');
   }
@@ -1165,3 +1154,20 @@ export async function runDaemonCleanMergeAttempt({
 export const __testables__ = Object.freeze({
   resolveRollupRequiredChecks,
 });
+
+export function mapDaemonPrimaryChangeResult(daemonResult) {
+  const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
+  if (remediableGate && daemonResult?.reasons?.some(reason => ['primary-change-read-failed', 'history-read-failed'].includes(reason))) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+      reason: 'gate-not-eligible', needsOperator: false };
+  }
+  if (daemonResult?.reasons?.some(reason => ['primary-change-read-failed', 'history-read-failed'].includes(reason))) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      reason: daemonResult.reasons.includes('history-read-failed') ? 'history-read-failed' : 'gate-read-failed', needsOperator: false };
+  }
+  if (daemonResult?.reasons?.some((reason) => ['primary-change-reverted', 'primary-change-unknown', 'primary-change-needs-operator'].includes(reason))) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+      reason: 'primary-change-needs-operator', needsOperator: true };
+  }
+  return daemonResult;
+}

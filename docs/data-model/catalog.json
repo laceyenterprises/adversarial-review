@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "nonempty-pr-heads",
+      "title": "Nonempty PR Heads",
+      "path": "docs/data-model/nonempty-pr-heads.md",
+      "store": "data/reviews.db: nonempty_pr_heads",
+      "schemaSurface": "src/pollonce-phases.mjs",
+      "relatedSchemaSurfaces": ["src/empty-pr-close.mjs"],
+      "owner": "watcher empty-PR admission"
+    },
+    {
       "id": "primary-change-history",
       "title": "Primary Change History",
       "path": "docs/data-model/primary-change-history.md",
@@ -513,7 +522,11 @@
       "schemaSurface": "src/ama/closure-wait.mjs",
       "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs"],
       "owner": "AMA bounded closure wait and exhaustion paging",
-      "waitColumns": ["head", "started", "reason", "paged"]
+      "waitTable": "waits_by_class",
+      "waitColumns": ["head", "class", "started", "reason", "paged"],
+      "waitPrimaryKey": ["head", "class"],
+      "waitClasses": ["primary-change", "bounded-wait"],
+      "legacyWaitMigration": "none; one-time deadline and page-reservation reset"
     },
     {
       "id": "ama-closer-cancels",

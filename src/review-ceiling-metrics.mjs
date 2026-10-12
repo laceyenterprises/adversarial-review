@@ -1,3 +1,9 @@
+export const DELIVERED_REVIEW_SQL = `(
+  (gh_comment_id IS NOT NULL AND gh_comment_id <> '')
+  OR (body_md IS NOT NULL AND trim(body_md) <> '')
+  OR (CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.reviewBodyCapture.status') END = 'verified-github-artifact')
+)`;
+
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
@@ -137,6 +143,7 @@ export function countReviewCeilingUnits({
   prNumber,
   headSha = null,
   fallbackReviewAttempts = 0,
+  fallbackReviewStatus = null,
 } = {}) {
   const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
     ? headSha.trim()
@@ -153,6 +160,7 @@ export function countReviewCeilingUnits({
             AND pr_number = ?
             AND pass_kind IN ('first-pass', 'rereview')
             AND status = 'completed'
+            AND ${DELIVERED_REVIEW_SQL}
             AND head_sha = ?`,
       ).get(repoPath, prNumber, normalizedHeadSha);
       const completedCurrentHeadPasses = Number(row?.completed_current_head_passes || 0);
@@ -176,12 +184,15 @@ export function countReviewCeilingUnits({
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
-          AND pass_kind IN ('first-pass', 'rereview')`;
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND status = 'completed' AND ${DELIVERED_REVIEW_SQL}`;
     const row = readDb.prepare(baseSql).get(repoPath, prNumber);
     const passCount = Number(row?.pass_count || 0);
     if (!Number.isFinite(passCount) || passCount <= 0) {
-      const fallback = Number(fallbackReviewAttempts || 0);
-      return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+      const history = readDb.prepare(`SELECT COUNT(*) AS count FROM reviewer_passes WHERE repo=? AND pr_number=? AND pass_kind IN ('first-pass','rereview')`).get(repoPath, prNumber);
+      const legacy = readDb.prepare('SELECT review_status, review_attempts FROM reviewed_prs WHERE repo=? AND pr_number=?').get(repoPath, prNumber);
+      const fallback = Number(fallbackReviewAttempts || legacy?.review_attempts || 0);
+      return history.count === 0 && (fallbackReviewStatus || legacy?.review_status) === 'posted' && Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
     }
     const distinctCompletedHeads = Number(row?.distinct_completed_heads || 0);
     const legacyUnknownHeadPasses = Number(row?.legacy_unknown_head_passes || 0);

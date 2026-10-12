@@ -1,3 +1,6 @@
+import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
+import { closeEmptyPullRequest } from './empty-pr-close.mjs';
+import { routeCappedReviewToClosure, hammerHandoffReviewBypass, resolveMaxRemediationRounds } from './hamclose-review-admission.mjs';
 import { recoverOwnerlessReview } from './ownerproof-review-recovery.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
@@ -1198,6 +1201,18 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      db.exec('CREATE TABLE IF NOT EXISTS nonempty_pr_heads (repo TEXT, pr_number INTEGER, head TEXT, PRIMARY KEY(repo, pr_number))');
+      const nonemptyHead = db.prepare('SELECT head FROM nonempty_pr_heads WHERE repo=? AND pr_number=?').get(repoPath, prNumber)?.head;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && !isOperatorHeld(prLabelNames)
+        && subject.isDraft !== true && subject.draft !== true
+        && (subject.changedFiles === 0 || subject.changed_files === 0 || nonemptyHead !== subject.headSha)) {
+        const emptyClose = await closeEmptyPullRequest({ repo: repoPath, prNumber,
+          headSha: subject.headSha, execFileImpl: execFileAsync,
+          withApiTelemetry });
+        if (emptyClose.nonempty) db.prepare('INSERT INTO nonempty_pr_heads(repo,pr_number,head) VALUES (?,?,?) ON CONFLICT(repo,pr_number) DO UPDATE SET head=excluded.head').run(repoPath, prNumber, subject.headSha);
+        if (emptyClose.closed || emptyClose.terminal || emptyClose.reason === 'read-or-close-failed') return;
+      }
+
       // ASR-04 — ADDITIVE, and this is the half of the ticket that is easiest to
       // lose. A HUMAN PR that bumps a dependency carries the same supply-chain
       // risk as a bot one, so the manifest trigger routes on the FILE, not the
@@ -1406,12 +1421,25 @@ export async function processReviewSubject(entry, ctx) {
       // ...UNLESS the merge-agent is provably still converging for THIS head.
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
+      let cappedClosure = false;
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha) {
+        const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
+        const roundBudget = resolveRoundBudgetForJob({
+          linearTicketId, riskClass: ledger.latestRiskClass,
+        }, { rootDir: ROOT });
+        cappedClosure = routeCappedReviewToClosure({ db, repo: repoPath,
+          prNumber, headSha: subject.headSha, row: existing,
+          ceiling: resolveHardReviewCeiling(resolveMaxRemediationRounds({
+            roundBudget: roundBudget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
+          })) });
+      }
+      if (cappedClosure) existing = stmtGetReviewRow.get(repoPath, prNumber);
       const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
         existing.reviewer_head_sha &&
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
-        !subject.terminal;
+        !subject.terminal && !cappedClosure;
       const finalRoundInProgress = postedReviewHeadMoved &&
         hasInProgressCommentOnlyFinalRound(ROOT, {
           repo: repoPath, prNumber, reviewedHead: existing.reviewer_head_sha,
@@ -3424,11 +3452,10 @@ export async function processReviewSubject(entry, ctx) {
               linearTicketId,
               riskClass: ledger.latestRiskClass,
             }, { rootDir: ROOT });
-            const latestMaxRounds = Number(ledger.latestMaxRounds);
             const reviewAttemptNumber = ledger.completedRoundsForPR + 1;
-            const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
-              ? latestMaxRounds
-              : roundBudget.roundBudget;
+            const maxRemediationRounds = resolveMaxRemediationRounds({
+              roundBudget: roundBudget.roundBudget, latestMaxRounds: ledger.latestMaxRounds,
+            });
             const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
               ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
               : 0;
@@ -3564,6 +3591,8 @@ export async function processReviewSubject(entry, ctx) {
             if (passKind === 'rereview') {
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
+              const handoffReviewBypass = hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
+                prNumber, headSha: reviewerHeadSha, row: current });
               const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
                 repoPath,
                 prNumber,
@@ -3611,7 +3640,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason &&
                 priorReviewCount >= hardReviewCeiling &&
                 !explicitOperatorReviewRetrigger &&
-                !fleetSelfRepairTrailerOnlyBypass
+                !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -3639,7 +3668,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
                 && !explicitOperatorReviewRetrigger
-                && !fleetSelfRepairTrailerOnlyBypass
+                && !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +

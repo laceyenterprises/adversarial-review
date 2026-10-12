@@ -1973,7 +1973,10 @@ one of:
    audit-comment body, and doc-currency evidence. HAMVERIFY-01 also accepts an
    entitled `HAM-Validated-Head` audit for the exact live head when the complete
    head-only ancestry is GitHub-verified and bound to trusted fleet App authors
-   with GitHub's `web-flow` committer (or verified base merges). The versioned
+   with GitHub's `web-flow` committer (or GitHub-signed base merges with
+   `web-flow` as committer and verified/valid verification, whose second parent
+   is reachable from the live base). Locally signed human base merges require
+   exact-head re-review. The versioned
    `bin/hammer-head-context.mjs` helper discovers the live PR base and retries
    transient reads at most three times with 500/1000ms backoff and a 15-second
    per-attempt timeout. The prompt bounds collection to 90 seconds; any failed
@@ -2683,6 +2686,13 @@ the publisher compares the returned and fetched tree IDs with the tested local
 tree before adopting the new SHA. API-created fleet commits have the fleet App
 as author, GitHub `web-flow` as committer, and verified/valid verification.
 Unsigned git-pushed commits cannot qualify merely through an email-mapped login.
+The publisher retries transient `gh pr view`, API and `git fetch` transport
+failures at most three times with 500/1000ms backoff and a 15-second per-attempt
+timeout, within the existing 120-second publication window. Permanent errors
+and malformed responses take the fallback immediately. Mutation retries retain
+the original expected-head CAS; an ambiguous server-side success cannot authorize
+an overwrite. Both fallback git push routes release the merge lease and abort
+on rejection, including a stale lease following an API timeout.
 
 If the entire responsibility range is proven, the hammer merges its validated
 head without another review. Its closing comment says `Hammer route: verified
@@ -2692,4 +2702,4 @@ identity, API errors or mismatched trees), it preserves the git publication path
 and requests one exact-head re-review through the existing bounded route. The
 closing comment says `Hammer route: exact-head re-review` with the head SHA;
 the daemon merges after a clean review. Provenance never requires an operator
-escalation, signing key, new label or new retry loop.
+escalation, signing key, new label or new workflow retry loop.

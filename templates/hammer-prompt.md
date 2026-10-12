@@ -647,17 +647,13 @@ GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
-After resolving, the head has moved — re-run changed-surface tests (mandate 2b)
-and required checks on the new head before re-acquiring the merge lease and
-merging, exactly as for any parallel-phase validation.
+After conflict repair, re-run changed-surface tests (2b) and required checks
+on the new head before re-acquiring the lease and merging.
 
-Post the PR audit comment. It must list every final finding, whether it was
-blocking or non-blocking, and the file paths changed for that finding. The
-comment is HAM-authored terminal-remediation output: post it with the entitled
-hammer GitHub token from `HAMMER_LACEY_GH_TOKEN` (legacy fallback
-`MERGE_AGENT_GH_TOKEN`), not an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
+Post the PR audit comment. List every final finding with its blocking class and changed paths, using
+`HAMMER_LACEY_GH_TOKEN` (legacy: `MERGE_AGENT_GH_TOKEN`), never ambient credentials.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` after exporting the dispatch values above. Post or update the terminal-remediation audit under the held merge lease. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status blocks the next phase.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the exported dispatch values. Post/update the audit under lease; any nonzero wrapper status blocks the next phase.
 
 
 ```bash
@@ -702,27 +698,20 @@ gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR
 gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
 ```
 
-Remediate every valid finding, rebase, validate and merge under the lease when
-provenance is proven. Otherwise use the bounded exact-head re-review below.
-If findings are already addressed, validate the existing head without an empty commit.
-Fleet builder, remediation and conflict-rebase commits below your head are your
-responsibility. Foreign or unsigned commits take the re-review route. A reviewed-head parent or trailer
-is not needed for exact-head validation.
+Remediate, rebase and validate; reuse an already-fixed head. Proven fleet
+ancestry merges under lease; failed proofs request one exact-head review for
+daemon closure, never operator escalation.
 
-Build `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json` as the active claim.
-The entitled hammer audit must record `HAM-Validated-Head: <exact SHA>`;
-`ama-check` verifies its body and author against the live timeline. Fetch the
-complete fleet ancestry using the versioned helper. Every head-only delta commit
-requires a GitHub-verified signature with a trusted fleet App author and GitHub `web-flow` committer; email-mapped fleet
-logins alone are insufficient. The helper retries PR-base discovery and each
-ancestry read on transient transport failures at most three times with 500/1000ms
-backoff and a 15-second per-attempt timeout. Any failed proof takes the existing
-bounded exact-head re-review route; never end with "no merge" or operator
-escalation for provenance. Use API publication above for every local hammer
-commit, including ordinary remediation. Compare tree IDs before adopting the
-API head. Unsupported modes, symlinks, gitlinks, API errors or mismatches fall
-back to git and one re-review. No new retry loop. A proven range merges without
-a fresh review; an unproven range is handed to the daemon after a clean review.
+Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
+must record `HAM-Validated-Head: <exact SHA>`.
+Head-only fleet commits require verified/valid signatures and `web-flow`
+committers. Foreign base merges require both plus a second parent on base;
+local human merges require re-review. No reviewed-parent trailer needed.
+
+API-publish local commits; compare tree IDs. Both helpers retry transient
+network failures: three attempts, 500/1000ms backoff, 15s each. Preserve mutation
+expected-head CAS. Permanent errors, unsupported modes/symlinks/gitlinks or mismatches fall
+back to git/re-review. Rejected fallback pushes release the lease and abort.
 
 ```bash
 [ "${HAM_API_PUBLISH_FALLBACK:-0}" -ne 1 ] &&

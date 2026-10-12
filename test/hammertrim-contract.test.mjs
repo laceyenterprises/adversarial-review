@@ -106,6 +106,36 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   assert.match(failure.stdout, /LEASE_RELEASED/);
   assert.match(failure.stdout, /STATUS=1 HELD=0 PUBLISHED=$/m);
 });
+test('API fallback push rejection releases the lease under set -e for both push routes', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-fallback-push-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'publisher'), '#!/bin/sh\nprintf "%s\\n" "$PUBLISH_RESULT"\n', { mode: 0o755 });
+  writeFileSync(join(dir, 'git'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$PUSH_ARGS_FILE"\nexit 1\n', { mode: 0o755 });
+  const source = readFileSync(join(root, 'bin/hammer-publish.sh'), 'utf8')
+    .replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1');
+  const script = join(dir, 'publish.sh');
+  writeFileSync(script, source);
+  for (const result of [
+    { route: 're-review', branch: 'worker', fallbackHead: 'a'.repeat(40) },
+    { route: 're-review', reason: 'API publication timed out' },
+  ]) {
+    const env = { HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'),
+      PUBLISH_RESULT: JSON.stringify(result), PUSH_ARGS_FILE: join(dir, 'push-args'), PATH: `${dir}:${process.env.PATH}` };
+    const failure = run('/bin/bash', ['-c', `set -e
+HAM_MERGE_LEASE_HELD=1
+ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; echo LEASE_RELEASED; }
+trap 'echo HELD=$HAM_MERGE_LEASE_HELD' EXIT
+source "$1"
+echo SHOULD_NOT_CONTINUE
+`, '_', script], env);
+    assert.equal(failure.status, 1, failure.stderr);
+    assert.match(failure.stdout, /LEASE_RELEASED\nHELD=0/);
+    assert.doesNotMatch(failure.stdout, /SHOULD_NOT_CONTINUE/);
+    assert.equal(readFileSync(env.PUSH_ARGS_FILE, 'utf8').trim(), result.branch
+      ? `push origin HEAD:refs/heads/worker --force-with-lease=refs/heads/worker:${result.fallbackHead}`
+      : 'push --force-with-lease');
+  }
+});
 test('merge refuses an ineligible predicate before reading the green gate', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-merge-verdict-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

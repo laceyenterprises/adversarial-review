@@ -42,13 +42,22 @@ test('HAMFINAL-02: unsigned spoofed base merges cannot bypass signature verifica
     parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };
   assert.equal(await fetchHammerHeadRange(fixture([fleet('fleet'), merge]).options), null);
 });
-test('HAMFINAL-02: merge of verified base is permitted; foreign side merge is refused', async () => {
-  const merge = { ...fleet('merge'), author: 'human', committer: 'human', parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };
+test('HAMFINAL-02: GitHub-signed base merge is permitted; foreign side merge is refused', async () => {
+  const merge = { ...fleet('merge'), author: 'human', parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };
   const { options } = fixture([fleet('fleet'), merge, fleet('head')]);
   assert.equal((await fetchHammerHeadRange(options)).verified, true);
   const get = options.get;
   assert.equal(await fetchHammerHeadRange({ ...options, get: path => path.endsWith('base-parent...base')
     ? { status: 'diverged' } : get(path) }), null);
+});
+test('HAMFINAL-02: locally signed human base merges cannot inject unreviewed edits', async () => {
+  const merge = { ...fleet('merge'), author: 'human', committer: { login: 'human' },
+    parents: [{ sha: 'fleet' }, { sha: 'base-parent' }] };
+  const f = fixture([fleet('fleet'), merge, fleet('head')]);
+  assert.equal(await fetchHammerHeadRange(f.options), null);
+  assert.ok(!f.calls.some(path => path.endsWith('base-parent...base')));
+  assert.equal(await fetchHammerHeadRange(fixture([{ ...merge, committer: { login: 'web-flow' },
+    commit: { verification: { verified: true, reason: 'unknown_key' } } }, fleet('head')]).options), null);
 });
 test('HAMFINAL-02: incomplete comparisons fail closed', async () => {
   assert.equal(await fetchHammerHeadRange(fixture([fleet('head')], { total_commits: 251 }).options), null);

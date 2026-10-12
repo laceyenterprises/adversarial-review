@@ -1,16 +1,33 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import { isTransientGhError } from '../src/gh-cli.mjs';
 import { publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
 const [repo, pr] = process.argv.slice(2);
 const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
-const api = async (path, input) => JSON.parse(execFileSync('gh', ['api', path, ...(input ? ['--input', '-'] : [])],
-  { input: input ? JSON.stringify(input) : undefined, timeout: 30000, maxBuffer: 64 * 1024 * 1024, env: process.env }).toString());
+// Retry transport failures only, preserving the entitled token and expected-head
+// CAS on every mutation attempt. An ambiguous server-side success still fails
+// closed through the lease-protected git fallback if the CAS rejects a retry.
+async function network(command, args, input) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return execFileSync(command, args, { input, timeout: 15000,
+        maxBuffer: 64 * 1024 * 1024, env: process.env });
+    } catch (error) {
+      const transient = isTransientGhError(error) || (command === 'git'
+        && /timed out|TLS|SSL|early EOF|RPC failed|remote end hung up unexpectedly|HTTP.*5\d\d/i.test(String(error.stderr || error.message)));
+      if (!transient || attempt === 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 500 * (2 ** attempt)));
+    }
+  }
+}
+const api = async (path, input) => JSON.parse((await network('gh',
+  ['api', path, ...(input ? ['--input', '-'] : [])], input ? JSON.stringify(input) : undefined)).toString());
 let fallback = {};
 try {
   if (git('status', '--porcelain').length) throw new Error('local tree has uncommitted changes');
-  const info = JSON.parse(execFileSync('gh', ['pr', 'view', pr, '--repo', repo, '--json', 'headRefName,headRefOid'], { timeout: 30000 }));
+  const info = JSON.parse(await network('gh', ['pr', 'view', pr, '--repo', repo, '--json', 'headRefName,headRefOid']));
   fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
-  git('fetch', 'origin', info.headRefOid);
+  await network('git', ['fetch', 'origin', info.headRefOid]);
   const entries = ref => new Map(git('ls-tree', '-rz', ref).toString().split('\0').filter(Boolean).map(entry => {
     const tab = entry.indexOf('\t');
     const meta = entry.slice(0, tab), path = entry.slice(tab + 1);
@@ -25,7 +42,7 @@ try {
     localTree: git('rev-parse', 'HEAD^{tree}').toString().trim(), message: git('log', '-1', '--format=%B').toString().trim(), changes, api });
   fallback = { fallbackHead: result.head || result.fallbackHead || info.headRefOid, branch: info.headRefName };
   if (result.route === 'published') {
-    git('fetch', 'origin', result.head);
+    await network('git', ['fetch', 'origin', result.head]);
     if (git('rev-parse', `${result.head}^{tree}`).toString().trim() !== result.tree) throw new Error('fetched tree mismatch');
     git('reset', '--hard', result.head);
   }

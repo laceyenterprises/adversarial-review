@@ -64,9 +64,11 @@ export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, ba
     // Base-merge ancestry cannot waive signature verification either.
     if (commit?.commit?.verification?.verified !== true) return null;
     if (fleetCommitIdentityMatches(commit, fleetLogins)) continue;
-    // A merge of the verified base branch is permitted, but never a foreign
-    // side branch: its second parent must already be reachable from the base.
-    if (commit.parents?.length !== 2) return null;
+    // Only GitHub-signed base updates may bypass fleet authorship. A locally
+    // signed human merge can contain arbitrary edits despite valid ancestry.
+    // Never permit a foreign side branch: the second parent must be on base.
+    if (login(commit?.committer) !== 'web-flow'
+      || commit.commit.verification.reason !== 'valid' || commit.parents?.length !== 2) return null;
     const ancestry = await get(`repos/${repo}/compare/${commit.parents[1].sha}...${base.sha}`);
     if (!['ahead', 'identical'].includes(ancestry.status)) return null;
   }

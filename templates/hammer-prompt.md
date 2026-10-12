@@ -68,7 +68,8 @@ At run start, before any edits, export these values in the shell used through pu
 
 ```bash
 export HAM_PR_URL='<<PR_URL>>' HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
-export HAM_BASE_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr view '<<PR_URL>>' --json headRefOid --jq .headRefOid)
+HAM_BASE_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-base-head.mjs '<<PR_URL>>') || exit 1
+export HAM_BASE_HEAD
 # Capture this once before edits. Start from this exact head; never change HAM_BASE_HEAD after a push.
 export HAM_REVIEWED_SHA='<<REVIEWED_SHA>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 export HAM_RISK_CLASS='<<RISK_CLASS>>' HAM_MERGE_METHOD='<<MERGE_METHOD>>'
@@ -703,13 +704,11 @@ daemon closure, never operator escalation.
 
 Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
-Capture the remote starting head before edits as `HAM_BASE_HEAD`, and begin from
-that exact checkout. A base is trusted when it equals the reviewed head or an
-App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain reaches it from the
-reviewed head. Publish by API or CAS git, confirm remote head equals local HEAD,
-and append both exact SHA lines in the hammer App comment. Preserve earlier
-edges: never overwrite an earlier run's attestation. Signatures and commit
-metadata do not establish this chain. Any unproven base requests re-review.
+Start from the captured `HAM_BASE_HEAD`. Trust only the reviewed head or an
+App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain from it. After API or
+CAS git publication, confirm remote SHA equals HEAD and append both exact SHAs
+in the hammer App comment. Preserve earlier attestation edges. Signatures and
+commit metadata confer no trust; an unproven base requests re-review.
 
 API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use CAS git and the same base proof; push rejection releases the lease and aborts.
 
@@ -717,11 +716,15 @@ API-publish only one single-parent commit above the fetched remote head. Preserv
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
   > /tmp/ham-<<PR_NUMBER>>-range.json || {
-    # Any provenance failure (unsigned/foreign ancestry, API failure, tree
-    # mismatch, or unreadable range) uses the existing exact-head review route.
+    # Every failed provenance proof uses exact-head review.
     ham_release_merge_lease
     GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr comment <<PR_URL>> --body "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review."
-    /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 node <<ROOT_DIR>>/bin/hammer-review-handoff.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" || exit 1
+    # Write daemon state as its canonical owner.
+    HAM_REVIEW_HANDOFF_RUN=()
+    if [ "$(id -un)" != "$HAM_HQ_OWNER" ]; then
+      HAM_REVIEW_HANDOFF_RUN=(sudo -A -H -u "$HAM_HQ_OWNER")
+    fi
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 "${HAM_REVIEW_HANDOFF_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-review-handoff.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" || exit 1
     exit 0
   }
 ```

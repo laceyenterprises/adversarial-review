@@ -2723,7 +2723,10 @@ an overwrite. Both fallback git push routes release the merge lease and abort
 on rejection, including a stale lease following an API timeout.
 
 HAMCLOSE-01: the starting PR head is captured once in `HAM_BASE_HEAD`, before
-edits. It is trustworthy when it is the review record's reviewed head or when
+edits. `bin/hammer-base-head.mjs` uses `execGhWithRetry`: three total transport
+attempts, 15 seconds each, with 500/1000 ms backoff. Permanent errors or an
+invalid SHA abort startup before edits rather than exporting an empty base.
+It is trustworthy when it is the review record's reviewed head or when
 App-authored comments connect that reviewed head to it through exact
 `HAM-Base-Head` / `HAM-Validated-Head` edges. GitHub authenticates each comment's
 author; a builder token cannot post or edit a hammer App comment. Commit SHAs
@@ -2741,8 +2744,13 @@ unproven starting base or unreadable proof requests exact-head review. The
 stale-head prover and daemon also require this App chain; old prose audits
 and forgeable commit identity fields cannot authorize a moved head.
 
-`bin/hammer-review-handoff.mjs` records the closer lease as `handed-to-review`
-and requests the existing bounded exact-head review CAS. This is a completed
+The prompt runs `bin/hammer-review-handoff.mjs` as `HAM_HQ_OWNER`, using
+`sudo -A -H -u` when the worker differs, so lease and review state retain
+canonical daemon ownership. The helper requests the existing bounded exact-head
+review CAS before recording the closer lease as `handed-to-review`. A thrown
+request leaves the lease dispatched and eligible for ordinary failure settlement
+and capped hammer retry; it never claims a completed transfer. The request is a
+local SQLite CAS, not a GitHub network mutation. This is a completed
 handoff, not `failed-without-merge`. The handed lease does not block reviewers
 or daemon closure. A clean review merges through the daemon; any findings,
 including Comment only findings, admit another hammer through the existing
@@ -2754,7 +2762,8 @@ answer alongside orchestration results. Diagnostic `merge-agent-stuck` and
 `retrigger-review` labels do not grant or suppress ownership; operator holds
 remain enforced. The daemon retries lease contention after 250 and 500 ms in
 the same tick. Pending gates, uncertain/live ownership and deferred daemon
-attempts record a bounded wait in `data/ama-closure-waits/`; the default limit
+attempts record a bounded wait in `data/ama-closure-waits/` (see the
+[wait data model](data-model/ama-closure-waits.md)); the default limit
 is 30 minutes, adjustable through `AMA_CLOSURE_WAIT_BOUND_MS`. Exhaustion
 reserves one page naming the PR, head and reason. The coexistence router keeps
 that wait/page out of the independent orphan and recovery accounting. Finished

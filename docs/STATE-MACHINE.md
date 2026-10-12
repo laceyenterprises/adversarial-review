@@ -633,7 +633,10 @@ reviewer identity without chain proof leaves resume off. In either case,
 the exact-head terminal-remediation validator retains merge authority.
 
 HAMCLOSE-01 adds `dispatched → handed-to-review`: the completed hammer records
-an exact-head review transfer instead of a terminal failure. The review CAS
+an exact-head review transfer instead of a terminal failure. The canonical
+daemon owner executes the handoff helper; its bounded local review CAS completes
+before the lease transition. A thrown request retains dispatched ownership for
+normal failure settlement and capped retry. The review CAS
 owns that head while the handed lease stops blocking review/merge. A clean
 review uses daemon merge; any findings use a new, single-claim hammer through
 the existing retry/lifetime caps. App-authored base/head attestation chains

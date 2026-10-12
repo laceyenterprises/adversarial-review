@@ -1702,7 +1702,9 @@ and `blocking-findings-unknown` are its cascade), the closer marks the
 `primary-change-repair-required` refusal `exactHeadReview: true` and the
 LEASEDEFER-01 leaf requests one bounded exact-head re-review instead of an
 operator hold. The merge stays refused by the predicate until the evidence is
-valid.
+valid. Recovery runs before the primary-change page; only a refused recovery
+falls through to paging. `missingEvidence` alone does not authorize that review:
+`exactHeadReview` requires the HAM self-certification checks above.
 
 **The hammer's dispute adjudication is final (HAMFINAL-01).** Operator decision,
 2026-10-10, after agent-os PR 7987:
@@ -2795,3 +2797,40 @@ escalation. Those two files must consume the shared `closureOwner`
 answer (and the review-handoff lease) rather than treating that handled state
 as a reviewer-contract violation. This repository ships the decision and
 pipeline transitions; it does not edit or deploy that parent classifier.
+
+### Empty-diff closure and capped review routing (HAMCLOSE-02)
+
+The watcher may close an open code PR only after live metadata reports a
+non-draft PR with known labels and no operator hold (`do-not-merge`,
+`no-merge-hold`, or `merge-agent-skip`), zero changed files, and an empty
+base/head compare. A final metadata read must retain those conditions and the
+same base and head before closing with the empty-diff comment. Draft and held
+subjects skip this probe; missing draft or label evidence on live reads defers
+closure. In-progress placeholder drafts therefore retain their PR.
+
+When delivered reviews reach the ceiling on a moved head, closure routing
+restores the latest completed, posted first-pass or re-review with a non-null
+head. Both capped closure routing and re-review admission derive their ceiling
+from the greater of the current risk-class round budget and the latest follow-up
+job's persisted integer `maxRounds`, plus one review. A raised legacy/operator
+budget therefore keeps moved heads eligible for re-review until that ceiling
+is reached. Invalid or lower persisted values retain the risk-class budget.
+Remediation/closer comments never supply review head or posting time.
+Without such a review pass, the router leaves the row unchanged. Stored review
+bodies and verified artifact evidence count as delivery even before comment-id
+backfill. Posted legacy rows without pass history retain the attempts fallback.
+Generic failed rows are not revived; every routing transition logs prior status.
+The ledger and ceiling are computed only when the review head has moved.
+
+The watcher persists the last head verified nonempty and probes again only on a
+new head or a zero-file snapshot. Calls use API telemetry. Closing precedes the
+single comment, so a failed close cannot duplicate comments on retry.
+
+Reverted or unknown primary changes page once per head and prevent further
+hammer dispatch, including orphan recovery. The obsolete orphan primary-repair
+exception is removed because unknown authorization needs operator ownership.
+Read/head/cost failures wait with a bounded deadline. The caller supplies strict
+policy. Immediate primary-change pages and bounded waits have separate reason
+classes, deadlines and page reservations, so neither suppresses the other.
+Replay coverage uses invented histories and an offline transport that rejects
+unrecognized paths.

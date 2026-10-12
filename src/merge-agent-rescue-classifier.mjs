@@ -167,6 +167,7 @@ function rescueOwnershipDecision(closureOwner) {
   const decision = {
     'daemon-merge': 'merge-eligible', hammer: 'hammer-eligible',
     review: 'rereview-eligible', remediation: 'remediation-eligible',
+    close: 'close-empty', 'follow-up-drain': 'wait-closer',
     'conflict-rebase': 'rebase-eligible', wait: 'wait-closer', page: 'page-required',
   }[closureOwner?.owner];
   return decision ? { decision, reason: closureOwner.reason, closureOwner } : null;
@@ -189,6 +190,9 @@ function classify(input = {}) {
   const owned = input.closureOwner ? rescueOwnershipDecision(input.closureOwner)
     : input.closureOwnership ? classifyClosureOwnership(input.closureOwnership) : null;
   if (owned) return { ...owned, blockingFindings, nonBlockingFindings, parsedFindings };
+  if (input.primaryChange && classifyClosureOwnership({ primaryChange: input.primaryChange, currentHead: input.headSha }).decision === 'page-required') {
+    return { decision: 'page-required', reason: 'primary-change-needs-operator', blockingFindings, nonBlockingFindings, parsedFindings };
+  }
   const hardStop = hasHardStopLabel(input.labels);
   const rebaseHardStop = hasRebaseHardStopLabel(input.labels);
   const checksArePassing = checksPass(input);

@@ -98,6 +98,7 @@ import {
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
+  readAmaCloserDispatchLease, listAmaCloserLeaseNames,
   updateAmaCloserLease,
 } from './closer-lease.mjs';
 export {
@@ -1818,6 +1819,8 @@ export function isAmaCloserLaunchInProgress(record, options = {}) {
 export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return false;
   const state = String(record.state || '').trim().toLowerCase();
+  if (options.lease?.status === 'handed-to-review'
+    || AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(record.lastObservedStatus))) return false;
   if (state === 'dispatching') {
     return !isStaleDispatchingAmaCloserRecord(record, options);
   }
@@ -1863,11 +1866,13 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   const dir = amaCloserDispatchDir(rootDir);
   const log = options?.log || options?.logger || null;
   const activeDispatches = [];
+  const leaseNames = listAmaCloserLeaseNames(rootDir);
   for (const name of listSettledJsonNames(dir)) {
     const dispatchPath = join(dir, name);
     try {
       const record = readJsonFile(dispatchPath);
-      if (!isActiveAmaCloserDispatchRecord(record, options)) continue;
+      if (!isActiveAmaCloserDispatchRecord(record, { ...options,
+        lease: readAmaCloserDispatchLease(rootDir, record, leaseNames) })) continue;
       const prNumber = Number(record?.prNumber);
       if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
       activeDispatches.push({
@@ -4215,18 +4220,21 @@ export async function maybeDispatchAmaCloser({
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
   const orphanAdmit = ownerProofRecovery;
-  if (!orphanAdmit && verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
-    const missingEvidence = primaryChangeExactReviewEvidence(verdict.trace);
+  if (verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
+    const exactReviewEvidence = primaryChangeExactReviewEvidence(verdict.trace);
+    const missingEvidence = verdict.trace?.primaryChange?.missingEvidence || exactReviewEvidence;
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true,
-      ...(missingEvidence ? { missingEvidence, exactHeadReview: true } : {}) });
+      ...(missingEvidence ? { missingEvidence } : {}),
+      ...(exactReviewEvidence ? { exactHeadReview: true } : {}) });
   }
   const reviewHandoffLease = dispatchContext?.repo && prMetadata?.headSha
     ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, {
       repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
     }) : null;
   const reviewHandoffOwner = reviewHandoffLease?.status === 'handed-to-review'
-    ? decideClosureOwner({ reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease }) : null;
+    ? decideClosureOwner({ reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease,
+      strictMode: cfg?.strictMode !== false, strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false }) : null;
   const reviewHandoffFindings = reviewHandoffOwner?.owner === 'hammer';
   if (reviewHandoffOwner?.owner === 'review') {
     const wait = await observeClosureWait({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,

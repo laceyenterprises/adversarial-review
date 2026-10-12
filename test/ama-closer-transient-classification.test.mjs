@@ -525,6 +525,8 @@ test('HAMINTENT: the closer holds an intent reversal with scoped operator recove
     execFileImpl: async () => { assert.fail('intent reversal must not dispatch or merge'); },
   });
   assert.equal(result.reason, 'primary-change-repair-required');
+  assert.equal(result.exactHeadReview, undefined, 'builder refusal cannot authorize HAM exact-head recovery');
+  assert.equal(result.missingEvidence.evidence, 'reversal-authorization');
   assert.equal(result.needsOperator, true);
   assert.equal(result.dispatched, false);
   assert.ok(result.reasons.includes('primary-change-reverted'));
@@ -555,7 +557,7 @@ test('primary-change closer refusals do not page before orphan attempts exhaust'
   }
 });
 
-test('OWNERPROOF-01 primary repair reaches HAM dispatch with per-finding trailer contract', async t => {
+test('ownerproof recovery cannot waive unproven primary reversal', async t => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-orphan-repair-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const inputs = eligibleInputs(rootDir);
@@ -568,11 +570,11 @@ test('OWNERPROOF-01 primary repair reaches HAM dispatch with per-finding trailer
     writeFileImpl: (_dir, _path, body) => { prompt = body; },
     execFileImpl: async (_cmd, args) => { calls.push(args); throw new Error('test provisioning refusal'); },
   });
-  assert.equal(result.reason, 'dispatch-failed');
-  assert.ok(calls.some(args => args.includes('dispatch')), 'repair must reach the existing leased HAM launcher');
-  assert.match(prompt, /REMORPHAN-01 owner-of-last-resort pass/);
-  assert.match(prompt, /Reversal-Authorized-By: <review node id or URL> finding=<n> kind=<blocking\|non-blocking>/);
-  assert.match(prompt, /never waive primary-change or CI gates/);
+  assert.equal(result.reason, 'primary-change-repair-required');
+  assert.equal(result.needsOperator, true);
+  assert.equal(result.dispatched, false);
+  assert.deepEqual(calls, []);
+  assert.equal(prompt, undefined);
 });
 
 test('ownerproof recovery requests HAM repair even for pending-CI-only misses', async t => {

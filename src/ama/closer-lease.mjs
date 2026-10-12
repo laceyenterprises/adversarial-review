@@ -171,6 +171,29 @@ export function readAmaCloserLease(rootDir, identity) {
   return readLeaseFile(amaCloserLeaseFilePath(rootDir, identity));
 }
 
+// Dispatch records keep the launch head. A rekeyed lease carries that head
+// and the same LRQ, so handoff can release the old record's PR reservation.
+export function listAmaCloserLeaseNames(rootDir) {
+  try { return readdirSync(join(rootDir, ...LEASE_DIR_SEGMENTS)); } catch { return []; }
+}
+
+export function readAmaCloserDispatchLease(rootDir, record, names = null) {
+  if (!record?.repo || !record?.headSha) return null;
+  const exact = readAmaCloserLease(rootDir, record);
+  if (exact) return exact;
+  if (!record.launchRequestId) return null;
+  const dir = join(rootDir, ...LEASE_DIR_SEGMENTS);
+  names ??= listAmaCloserLeaseNames(rootDir);
+  const sample = basename(amaCloserLeaseFilePath(rootDir, { ...record, headSha: 'H' }));
+  const prefix = sample.slice(0, -'H.json'.length);
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
+    const lease = readLeaseFile(join(dir, name));
+    if (lease?.lrqId === record.launchRequestId && leaseSupersedesHead(lease, record.headSha)) return lease;
+  }
+  return null;
+}
+
 /** A current-head closer blocks a remediation claim until its existing lease expiry. */
 export function isHeldAmaCloserLease(rootDir, identity, {
   now = new Date().toISOString(),

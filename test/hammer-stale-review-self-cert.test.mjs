@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -294,9 +298,9 @@ test('terminal Hammer arms at the budget boundary after Codex releases the revie
 // Fix A part 1 — the orchestration arms `allowStaleReviewHeadHammerResume` for a
 // stale reviewed head on a NON-exhausted (comment-only) review, gated on the
 // own-commit suppression proof.
-async function runOrchestrationForSuppression(suppressed) {
+async function runOrchestrationForSuppression(suppressed, overrides = {}) {
   let payload = null;
-  await maybeDispatchAmaClosureFor({
+  const result = await maybeDispatchAmaClosureFor({
     reviewStateRow: {
       repo: 'laceyenterprises/nonexistent-selfcert-fixture',
       pr_number: 5053,
@@ -360,8 +364,9 @@ async function runOrchestrationForSuppression(suppressed) {
       payload = p;
       return { dispatched: false, reason: 'fixture' };
     },
+    ...overrides,
   });
-  return payload;
+  return { ...payload, orchestrationResult: result };
 }
 
 test('orchestration: a self-certified stale head arms hammer resume (eligible to land)', async () => {
@@ -397,3 +402,32 @@ test('watcher orchestration: merge-agent rebase of worker-authored head stays re
     allowStaleReviewHeadHammerResume: payload.dispatchContext.allowStaleReviewHeadHammerResume,
   }), false);
 });
+
+for (const recoverable of [true, false]) {
+  test(`orchestration: primary-change refusal ${recoverable ? 'requests exact-head review before paging' : 'pages when exact-head recovery refuses'}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'primary-recovery-orchestration-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    let requests = 0, pages = 0, recoveryCalls = 0;
+    const { orchestrationResult } = await runOrchestrationForSuppression(true, {
+      rootDir,
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, skipMergeAgent: true,
+        needsOperator: true, reason: 'primary-change-repair-required',
+        reasons: ['stale-review-head', 'primary-change-reverted'],
+        exactHeadReview: recoverable,
+        missingEvidence: { evidence: 'reversal-authorization', path: 'src/a.mjs', summary: 'missing citation' } }),
+      recoverStrandedCloserHeadImpl: args => {
+        recoveryCalls++;
+        assert.equal(args.closerAuthored, true);
+        return recoverStrandedCloserHead({ ...args,
+          probeOwnershipImpl: async () => ({ owned: false, uncertain: false }),
+          requestBoundedReviewImpl: async () => { requests++; return { triggered: true }; } });
+      },
+      observeClosureWaitImpl: async () => { pages++; return {}; },
+    });
+    assert.equal(recoveryCalls, 1);
+    assert.equal(requests, recoverable ? 1 : 0);
+    assert.equal(pages, recoverable ? 0 : 1);
+    assert.equal(orchestrationResult.reason, recoverable ? 'closer-head-exact-review-requested' : 'primary-change-repair-required');
+    assert.equal(orchestrationResult.needsOperator, !recoverable);
+  });
+}

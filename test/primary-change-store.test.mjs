@@ -38,7 +38,10 @@ test('foreign runtime root, data directory, store or record refuses access befor
       const original = fs.lstatSync;
       mockFs(t, 'lstatSync', (candidate, ...options) => {
         const stat = original(candidate, ...options);
-        return candidate === foreignPath ? { uid: process.geteuid() + 1, isSymbolicLink: () => false } : stat;
+        // Node 22's rmSync also uses lstatSync during fixture cleanup. Preserve
+        // the complete Stats interface while simulating only foreign ownership.
+        if (candidate === foreignPath) stat.uid = process.geteuid() + 1;
+        return stat;
       });
       await assert.rejects(storedPrimaryChange(args, () => { assert.fail('must refuse before expensive compute'); }), /canonical daemon owner/);
       if (target === 'root') assert.equal(existsSync(dataDir), false);
@@ -61,7 +64,8 @@ test('ownership is checked again after asynchronous compute before publishing', 
   let foreign = false;
   mockFs(t, 'lstatSync', (path, ...options) => {
     const stat = original(path, ...options);
-    return path === dir && foreign ? { uid: process.geteuid() + 1, isSymbolicLink: () => false } : stat;
+    if (path === dir && foreign) stat.uid = process.geteuid() + 1;
+    return stat;
   });
   await assert.rejects(storedPrimaryChange(args, async () => {
     mkdirSync(dir, { recursive: true });

@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "nonempty-pr-heads",
+      "title": "Nonempty PR Heads",
+      "path": "docs/data-model/nonempty-pr-heads.md",
+      "store": "data/reviews.db: nonempty_pr_heads",
+      "schemaSurface": "src/pollonce-phases.mjs",
+      "relatedSchemaSurfaces": ["src/empty-pr-close.mjs"],
+      "owner": "watcher empty-PR admission"
+    },
+    {
       "id": "primary-change-history",
       "title": "Primary Change History",
       "path": "docs/data-model/primary-change-history.md",

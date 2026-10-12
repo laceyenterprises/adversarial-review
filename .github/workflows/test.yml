@@ -39,6 +39,12 @@ jobs:
         node:
           - '22'
           - '26'
+        include:
+          # 2026-10-12: fs-ext 2.1.1 fails with Node 26.11.1 headers:
+          # field 'work_req' has incomplete type 'uv__work'. Pin production's
+          # version until a Node 26 or fs-ext release builds; then float again.
+          - node: '26'
+            version: '26.10.0'
     steps:
       # Third-party actions are pinned to commit SHAs, not version tags.
       # This protects us from a tag-repoint supply-chain attack: if the
@@ -53,7 +59,7 @@ jobs:
       - name: Set up Node.js ${{ matrix.node }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ matrix.version || matrix.node }}
           cache: npm
 
       - name: Install dependencies

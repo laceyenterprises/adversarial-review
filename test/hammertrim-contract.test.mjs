@@ -2,7 +2,7 @@ import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,7 +74,10 @@ case "$*" in
 esac
 `);
   chmodSync(gh, 0o755);
+  const proof = join(bin, 'proof');
+  writeFileSync(proof, '#!/bin/sh\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
   const env = {
+    HAM_NODE_BIN: proof,
     HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
     HAM_PR_NUMBER: '424242', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
     HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
@@ -102,6 +105,12 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   assert.match(body, /Remediated-Findings: 1 addressed \(1 blocking, 0 non-blocking\)/);
   assert.match(body, /\*\*Fix gate\*\*/);
   assert.doesNotMatch(body, /<finding title>/);
+  rmSync(bodyPath);
+  for (const refusal of [{ FAIL_PROOF: '1' }, { HAM_API_PUBLISH_FALLBACK: '1' }]) {
+    const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...refusal });
+    assert.match(refused.stdout, /STATUS=20 HELD=0 PUBLISHED=$/m);
+    assert.equal(existsSync(bodyPath), false, 'failed proof must not post a validation audit');
+  }
   const failure = run('/bin/bash', ['-c', shell, '_', script], { ...env, FAIL_POST: '1' });
   assert.match(failure.stdout, /LEASE_RELEASED/);
   assert.match(failure.stdout, /STATUS=1 HELD=0 PUBLISHED=$/m);
@@ -112,7 +121,8 @@ test('API fallback push rejection releases the lease under set -e for both push 
   writeFileSync(join(dir, 'publisher'), '#!/bin/sh\nprintf "%s\\n" "$PUBLISH_RESULT"\n', { mode: 0o755 });
   writeFileSync(join(dir, 'git'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$PUSH_ARGS_FILE"\nexit 1\n', { mode: 0o755 });
   const source = readFileSync(join(root, 'bin/hammer-publish.sh'), 'utf8')
-    .replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1');
+    .replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1')
+    .replaceAll('<<REVIEWED_SHA>>', 'a'.repeat(40)).replaceAll('<<PR_NUMBER>>', '1');
   const script = join(dir, 'publish.sh');
   writeFileSync(script, source);
   for (const result of [

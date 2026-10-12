@@ -585,7 +585,10 @@ Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
 # Verify the block is contiguous before moving on:
   git log -1 --format=%B | tail -n 6
 fi
+
 ```
+
+Before validating the live head, export `HAM_COMMIT_PUBLICATION_ONLY=1` and render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with `GH_TOKEN` set to the hammer token. Stop on failure; unset the flag on success. This publishes ordinary remediation through the same guarded route as conflict repair.
 
 Refresh and validate the live head:
 
@@ -637,13 +640,13 @@ while true; do
   sleep $((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT * 2))
   HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT=$((HAM_CONFLICT_SUBMODULE_SYNC_ATTEMPT + 1))
 done
-# Publish through the hammer App API first; unsupported changes fall back to git.
+# Publish; rebased/multi-commit history keeps the lease-protected git route.
 HAM_COMMIT_PUBLICATION_ONLY=1
 export HAM_COMMIT_PUBLICATION_ONLY
 GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
-  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render > /tmp/ham-<<PR_NUMBER>>-publish-commits.sh
+  "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render > /tmp/ham-<<PR_NUMBER>>-publish-commits.sh || exit 1
 GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
-  source /tmp/ham-<<PR_NUMBER>>-publish-commits.sh
+  source /tmp/ham-<<PR_NUMBER>>-publish-commits.sh || exit 1
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
@@ -653,7 +656,7 @@ on the new head before re-acquiring the lease and merging.
 Post the PR audit comment. List every final finding with its blocking class and changed paths, using
 `HAMMER_LACEY_GH_TOKEN` (legacy: `MERGE_AGENT_GH_TOKEN`), never ambient credentials.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the exported dispatch values. Post/update the audit under lease; any nonzero wrapper status blocks the next phase.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the exported dispatch values. Prove the range before posting the validation audit under lease. Nonzero status blocks continuation; status 20 (`exact-head-review-required`) releases the lease for LEASEDEFER-01 recovery.
 
 
 ```bash
@@ -708,10 +711,7 @@ Head-only fleet commits require verified/valid signatures and `web-flow`
 committers. Foreign base merges require both plus a second parent on base;
 local human merges require re-review. No reviewed-parent trailer needed.
 
-API-publish local commits; compare tree IDs. Both helpers retry transient
-network failures: three attempts, 500/1000ms backoff, 15s each. Preserve mutation
-expected-head CAS. Permanent errors, unsupported modes/symlinks/gitlinks or mismatches fall
-back to git/re-review. Rejected fallback pushes release the lease and abort.
+API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use git/re-review; push rejection releases the lease and aborts.
 
 ```bash
 [ "${HAM_API_PUBLISH_FALLBACK:-0}" -ne 1 ] &&

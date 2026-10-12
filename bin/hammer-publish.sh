@@ -58,6 +58,16 @@ if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   ham_publish_abort 1; return 1
 fi
+# Never publish a validation claim before the independent range proof. A
+# failed proof releases ownership; LEASEDEFER-01 recovers the unvalidated head
+# through bounded exact-head review without an ambient-credential label.
+if [ "${HAM_API_PUBLISH_FALLBACK:-0}" -eq 1 ] ||
+  ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
+    <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
+    > /tmp/ham-<<PR_NUMBER>>-range.json; then
+  HAM_PHASE_OUTCOME=exact-head-review-required
+  ham_publish_abort 20; return 20
+fi
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
 # Counts and finding bullets are supplied by the caller before rendering.
 ham_audit_is_nonnegative_int() {
@@ -187,9 +197,15 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
     HAM_API_FALLBACK_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.fallbackHead // empty')
     HAM_API_FALLBACK_BRANCH=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.branch // empty')
     if [ -n "$HAM_API_FALLBACK_HEAD" ] && [ -n "$HAM_API_FALLBACK_BRANCH" ]; then
-      git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || { ham_release_merge_lease; return 1; }
+      git push origin "HEAD:refs/heads/$HAM_API_FALLBACK_BRANCH" --force-with-lease="refs/heads/$HAM_API_FALLBACK_BRANCH:$HAM_API_FALLBACK_HEAD" || {
+        if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
+        return 1
+      }
     else
-      git push --force-with-lease || { ham_release_merge_lease; return 1; }
+      git push --force-with-lease || {
+        if declare -F ham_release_merge_lease > /dev/null; then ham_release_merge_lease; fi
+        return 1
+      }
     fi
   fi
 else

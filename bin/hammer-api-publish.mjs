@@ -28,6 +28,18 @@ try {
   const info = JSON.parse(await network('gh', ['pr', 'view', pr, '--repo', repo, '--json', 'headRefName,headRefOid']));
   fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
   await network('git', ['fetch', 'origin', info.headRefOid]);
+  // createCommitOnBranch preserves trees, not local ancestry. A rebased head
+  // must use the lease-protected git route so the new base remains an ancestor.
+  try {
+    git('merge-base', '--is-ancestor', info.headRefOid, 'HEAD');
+  } catch {
+    throw new Error('local HEAD does not descend from the remote head; preserve rebased history with git');
+  }
+  const count = git('rev-list', '--count', `${info.headRefOid}..HEAD`).toString().trim();
+  if (count !== '0' && (count !== '1'
+    || git('rev-list', '--parents', '-n', '1', 'HEAD').toString().trim().split(/\s+/).length !== 2)) {
+    throw new Error('API publication requires exactly one single-parent local commit; preserve history and messages with git');
+  }
   const entries = ref => new Map(git('ls-tree', '-rz', ref).toString().split('\0').filter(Boolean).map(entry => {
     const tab = entry.indexOf('\t');
     const meta = entry.slice(0, tab), path = entry.slice(tab + 1);

@@ -51,7 +51,7 @@ test('PR 8086: terminal lease on current head cannot prove ownership', async t =
 test('PR 8089: closer-authored stale head and not-eligible hammer requests current review', async t => {
   const { tick, calls } = setup(t);
   const overrides = { reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'old' },
-    result: { amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'], closerHeadMergeRetry: true } };
+    result: { amaEnabled: true, reason: 'not-eligible', reasons: ['stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'] } };
   await tick(0, overrides); await tick(15, overrides);
   assert.equal(calls.launches.length, 0);
   assert.equal(calls.reviews[0].targetRevisionRef, 'current');

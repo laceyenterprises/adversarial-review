@@ -2681,7 +2681,11 @@ This permits only a bounded exact-head review request; merge remains refused.
 CI, protection, labels and live ownership refusals still prevent recovery.
 
 HAMVERIFY-01: hammer publication uses GitHub's `createCommitOnBranch` API with
-its own entitled App token and an expected head lease. GitHub signs the commit;
+its own entitled App token and an expected head lease, only for one single-parent
+local commit descending from the freshly fetched remote head. Rebased and
+multi-commit histories use the lease-protected git fallback: the API cannot
+preserve their ancestry or all commit messages. Both ordinary remediation and
+conflict resolution invoke the versioned publication procedure. GitHub signs the commit;
 the publisher compares the returned and fetched tree IDs with the tested local
 tree before adopting the new SHA. API-created fleet commits have the fleet App
 as author, GitHub `web-flow` as committer, and verified/valid verification.
@@ -2693,6 +2697,14 @@ and malformed responses take the fallback immediately. Mutation retries retain
 the original expected-head CAS; an ambiguous server-side success cannot authorize
 an overwrite. Both fallback git push routes release the merge lease and abort
 on rejection, including a stale lease following an API timeout.
+
+The audit procedure proves the range before writing `HAM-Validated-Head`.
+If proof fails or publication used the git fallback, it returns status 20
+(`exact-head-review-required`), releases the lease and leaves no new validation
+claim. LEASEDEFER-01 can request bounded exact-head review for unvalidated
+closer heads after proving absence of live ownership; a proven
+`hamTerminalRemediationValidated` head retains terminal merge authority.
+This recovery does not rely on an ambient-credential `retrigger-review` label.
 
 If the entire responsibility range is proven, the hammer merges its validated
 head without another review. Its closing comment says `Hammer route: verified

@@ -42,6 +42,15 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   }
 });
 
+test('ordinary remediation publishes before validating the live head', () => {
+  const ordinary = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('Commit the remediation:'),
+    HAMMER_TEMPLATE.indexOf('## Resolving merge conflicts'));
+  assert.match(ordinary, /HAM_COMMIT_PUBLICATION_ONLY=1/);
+  assert.match(ordinary, /hammer-procedure\.mjs hammer-publish --render/);
+  assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
+  assert.match(HAMMER_TEMPLATE, /Preserve rebased and multi-commit history/);
+});
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,

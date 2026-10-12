@@ -2344,7 +2344,6 @@ async function dispatchAmaClosureFor({
   return withAmaDispatchMetadata(
     {
       ...result,
-      ...(liveHeadCloserAuthored && !result?.needsOperator ? { closerHeadMergeRetry: true } : {}),
       ...(result?.reason === 'not-eligible' && !result?.needsOperator
         ? { retryAfterMs: 30_000,
             ...(commentOnlyFinalRoundAwaitingCi ? { commentOnlyFinalRoundAwaitingCi: true } : {}) }

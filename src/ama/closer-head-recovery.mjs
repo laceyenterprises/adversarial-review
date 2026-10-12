@@ -19,17 +19,14 @@ export async function recoverStrandedCloserHead({ result, closerAuthored, rootDi
   logger = console, reviewStateRow = null, requestRereviewImpl = requestReviewRereview,
   requestBoundedReviewImpl = requestBoundedOrphanReview,
   probeOwnershipImpl = probeOrphanOwnership }) {
-  // HAMFINAL-02: exact-head validation is terminal authority. The bounded
-  // orphan watchdog retries the merge lane; it must never transfer to review.
+  // HAMFINAL-02: proven exact-head validation retains terminal authority.
+  // Unproven closer heads still need LEASEDEFER-01 review recovery.
   if (result?.hamTerminalRemediationValidated === true) return null;
   // REVERSALREBASE-01: a HAM head that failed self-certification only on a
   // missing reversal authorization keeps its merge hold, but the closer names
   // that evidence and the exact-head review is the action that can supply it.
   const primaryEvidence = result?.reason === 'primary-change-repair-required'
     && result.exactHeadReview === true && result.missingEvidence?.evidence === 'reversal-authorization';
-  // LEASEDEFER-01 now retains closer heads for bounded merge retry. A
-  // missing primary-change authorization remains its existing review lane.
-  if (closerAuthored && !primaryEvidence) return null;
   if (!closerAuthored || !headSha || result?.dispatched || (result?.needsOperator && !primaryEvidence)
     || (result?.reason !== 'not-eligible' && !primaryEvidence) || !result?.reasons?.includes('stale-review-head')
     || !result.reasons.every(reason => EXACT_REVIEW_REASONS.has(reason)

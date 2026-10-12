@@ -1970,7 +1970,16 @@ one of:
    active HAM session only after the predicate verifies current-head HAM authority
    from trusted inputs: HAM worker trailers, reviewed-parent/current-head match,
    non-empty verified diff, allowlisted audit-comment author, matching
-   audit-comment body, and doc-currency evidence. The zero-finding path is
+   audit-comment body, and doc-currency evidence. HAMVERIFY-01 also accepts an
+   entitled `HAM-Validated-Head` audit for the exact live head when the complete
+   head-only ancestry is GitHub-verified and bound to trusted fleet App authors
+   with GitHub's `web-flow` committer (or verified base merges). The versioned
+   `bin/hammer-head-context.mjs` helper discovers the live PR base and retries
+   transient reads at most three times with 500/1000ms backoff and a 15-second
+   per-attempt timeout. The prompt bounds collection to 90 seconds; any failed
+   provenance proof releases the lease and requests one bounded exact-head
+   review. Proven heads retain merge ownership without another review; all
+   ordinary structural merge gates still apply. The zero-finding path is
    admitted only after the caller supplies a finite measured terminal-unmerged
    duration that meets the comment-only grace threshold. This active trust is
    intentionally narrower than strict `.ok`: it does not require the finding-count

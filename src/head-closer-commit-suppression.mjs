@@ -1,4 +1,3 @@
-import { exactHammerValidation } from './ama/hammer-head-validation.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { stat } from 'node:fs/promises';
@@ -557,19 +556,7 @@ export async function getHeadCloserCommitSuppression({
       author: { login: raw.authorLogin || null },
       committer: { login: raw.committerLogin || null },
     };
-    const identity = isTerminalCloserCommitIdentity(commit, { requireLinkedIdentity: true });
-    if (identity.suppressed || !prNumber) return identity;
-    // HAMFINAL-02: no-diff validation has no HAM tip to suppress. An entitled
-    // exact-head audit reserves this head for merge, never for another review.
-    const comments = await execGhWithRetryImpl({ execFileImpl,
-      args: ['api', `repos/${repoPath}/issues/${prNumber}/comments`, '--paginate', '--slurp'],
-      retries: retryDelays.length, backoffMs: Number(retryDelays[0]) || 500, sleep: sleepImpl });
-    const pages = JSON.parse(String(comments.stdout || '[]'));
-    const records = Array.isArray(pages) ? pages.flat() : [];
-    if (records.some(comment => exactHammerValidation({ body: comment.body, author: comment.user?.login }, sha))) {
-      return { suppressed: true, reason: 'hammer-validated-head', headSha: sha };
-    }
-    return identity;
+    return isTerminalCloserCommitIdentity(commit, { requireLinkedIdentity: true });
   } catch (err) {
     logger?.warn?.(
       `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +

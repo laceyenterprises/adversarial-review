@@ -1543,7 +1543,7 @@ async function dispatchAmaClosureFor({
       );
       throwIfAborted(signal);
       liveHeadCloserAuthored = closerCommitSuppression?.suppressed === true
-        && ['closer-commit-trailer', 'hammer-validated-head'].includes(closerCommitSuppression?.reason);
+        && closerCommitSuppression?.reason === 'closer-commit-trailer';
       if (liveHeadCloserAuthored && !closerOnlyHeadDelta && !closerHeadHasLiveReview
         && authoritativeReviewerLogins.length > 0) {
         const currentBodies = await runCoexistenceOperation(
@@ -1594,7 +1594,7 @@ async function dispatchAmaClosureFor({
         });
       }
       if (
-        (allowStaleReviewHeadHammerResume || closerCommitSuppression?.reason === 'hammer-validated-head') &&
+        allowStaleReviewHeadHammerResume &&
         typeof resolveHamTerminalRemediationEvidenceImpl === 'function'
       ) {
         const resolvedHamEvidence = await runCoexistenceOperation(
@@ -1633,10 +1633,6 @@ async function dispatchAmaClosureFor({
           });
           hamTerminalRemediationValidated =
             hamEligibility?.trace?.hamTerminalRemediation?.ok === true;
-          if (hamTerminalRemediationValidated) {
-            allowStaleReviewHeadHammerResume = true;
-            liveHeadCloserAuthored = true;
-          }
         }
       }
     } catch (err) {
@@ -2306,7 +2302,7 @@ async function dispatchAmaClosureFor({
       || String(reason).startsWith('label-'));
     if (hardReason) result = { ...result, needsOperator: true, operatorReason: `not-eligible:${hardReason}` };
   }
-  const closerRecovery = await recoverStrandedCloserHeadImpl({ result: { ...result, hamTerminalRemediationValidated },
+  const closerRecovery = await recoverStrandedCloserHeadImpl({ result,
     closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewStateRow, labels: labelNames || [], signal,
     timeoutMs: operationTimeoutMs, logger });
@@ -2338,7 +2334,6 @@ async function dispatchAmaClosureFor({
   return withAmaDispatchMetadata(
     {
       ...result,
-      ...(liveHeadCloserAuthored && !result?.needsOperator ? { closerHeadMergeRetry: true } : {}),
       ...(result?.reason === 'not-eligible' && !result?.needsOperator
         ? { retryAfterMs: 30_000,
             ...(commentOnlyFinalRoundAwaitingCi ? { commentOnlyFinalRoundAwaitingCi: true } : {}) }

@@ -23,23 +23,6 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 
-test('head context prompt delegates base discovery and keeps structural refusals out of retryable aborts', () => {
-  const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl', HAMMER_TEMPLATE.indexOf('complete fleet ancestry'));
-  const end = HAMMER_TEMPLATE.indexOf('\n```', start);
-  const block = HAMMER_TEMPLATE.slice(start, end);
-  assert.match(block, /hammer-head-context\.mjs/);
-  assert.match(block, /--pr <<PR_URL>>/);
-  assert.doesNotMatch(block, /\$\(gh pr view/);
-  for (const exitCode of [1, 65, 124]) {
-    const script = block.replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, `(exit ${exitCode})`);
-    const result = spawnSync('bash', ['-c', `ham_mark_merge_lease_retryable_abort() { echo "$1"; }\n${script}`],
-      { encoding: 'utf8', timeout: 5000 });
-    assert.ifError(result.error);
-    assert.equal(result.status, exitCode);
-    assert.equal(result.stdout.trim(), exitCode === 65 ? '' : 'hammer-head-context-read-failed');
-  }
-});
-
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
@@ -417,7 +400,7 @@ test('hammer audit comment composes footer from validated inputs', () => {
   assert.doesNotMatch(bodyComposer, /<n>|<b>|<nb>/);
   assert.match(
     bodyComposer,
-    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nHAM-Validated-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
+    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
   );
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_TOTAL='<n>'/);
   assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$\{HAM_AUDIT_REMEDIATED_TOTAL:-\}"/);

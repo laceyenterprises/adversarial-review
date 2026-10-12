@@ -31,9 +31,9 @@ async function collect({ shift = 5, cites = ['PRR_cited finding=1 kind=blocking'
   rebasedAdded, reviewedAdded, authoredAt = '2026-10-11T17:30:00Z', reviewToParent = 'diverged',
   duplicatePrimary = false, duplicateReviewed = false, originalRecorded = false, originalAdded,
   originalLogin = 'the-hammer-lacey[bot]', originalParent = reviewedHead, snapshotCapped = false,
-  originalLine = 10 } = {}) {
+  originalLine = 10, snapshotStatus = 'ahead', hammerLogin = 'the-hammer-lacey[bot]' } = {}) {
   const primary = authorPatch(10 + shift, rebasedAdded);
-  const ham = { sha: head, parents: [{ sha: author }], author: { login: 'the-hammer-lacey[bot]' },
+  const ham = { sha: head, parents: [{ sha: author }], author: { login: hammerLogin },
     committer: { login: 'the-hammer-lacey[bot]' },
     commit: { message: message(cites), author: { date: authoredAt }, committer: { date: '2026-10-11T17:30:00Z' } },
     files: [{ filename: 'daemon.py', status: 'modified', additions: 1, deletions: 2,
@@ -53,7 +53,7 @@ async function collect({ shift = 5, cites = ['PRR_cited finding=1 kind=blocking'
       if (path.endsWith(`/commits/${head}`)) return ham;
       if (path.endsWith(`/commits/${original.sha}`)) return original;
       if (originalRecorded && path.endsWith(`${reviewedHead}...${sha('f')}`)) {
-        return { status: 'ahead', total_commits: snapshotCapped ? 250 : 1, commits: [original] };
+        return { status: snapshotStatus, total_commits: snapshotCapped ? 250 : 1, commits: [original] };
       }
       if (path.endsWith(`${oldBase}...${reviewedHead}`)) return { status: 'ahead',
         merge_base_commit: { sha: oldBase }, files: [authorPatch(10, reviewedAdded)] };
@@ -225,4 +225,20 @@ test('a HAM head failing self-certification only on the reversal authorization r
   assert.equal(await recover({ ...refusal, missingEvidence, exactHeadReview: true },
     { probeOwnershipImpl: async () => ({ owned: true, uncertain: false }) }), null);
   assert.equal(requests.length, 1);
+});
+
+// HAMCLOSE-02: unlike PR 8088, the original reversal itself was already
+// rebased when its immutable superseding review was posted.
+test('HAMCLOSE-02 an original rebased App reversal survives a diverged superseding snapshot', async () => {
+  const later = review({ node_id: 'PRR_later', commit_id: sha('f'), submitted_at: '2026-10-11T19:10:00Z',
+    body: '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved', state: 'APPROVED' });
+  const options = { reviews: [review(), later], originalRecorded: true,
+    originalParent: author, originalLine: 15, snapshotStatus: 'diverged' };
+  assert.equal((await collect(options)).result.ok, true);
+  for (const forged of [{ cites: [] }, { cites: ['PRR_missing finding=1'] },
+    { cites: ['PRR_cited finding=99'] }, { hammerLogin: 'builder' },
+    { reviews: [review({ user: { login: 'builder' } }), later] },
+    { rebasedAdded: '+builder_intervened()' }]) {
+    assert.equal((await collect({ ...options, ...forged })).result.ok, false, JSON.stringify(forged));
+  }
 });

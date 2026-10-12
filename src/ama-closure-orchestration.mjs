@@ -1,3 +1,4 @@
+import { checkPrimaryChange } from './ama/primary-change.mjs';
 import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
 import { decideClosureOwner } from './ama/closure-owner.mjs';
 import { probeOrphanOwnership } from './ama/orphan-watchdog.mjs';
@@ -967,7 +968,8 @@ async function dispatchAmaClosureFor({
   }
   // CYCLECAPHAM-01: the watcher's review-cycle-cap hand-off. The cap stops
   // review-then-remediate cycles, so the capped PR is a final-hammer close.
-  const reviewCycleCapReached = dispatchJob?.reviewCycleCapReached === true;
+  const reviewCycleCapReached = dispatchJob?.reviewCycleCapReached === true
+    || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure';
   // CIBLOCKHAM-01: the same final-hammer close for a red-CI head with no
   // remediation job left to fix it.
   const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true;
@@ -1385,7 +1387,8 @@ async function dispatchAmaClosureFor({
     mergeable: closureGateMergeability(mergeabilityForGate || {}),
     checks: classifyCheckRollup(candidate?.statusCheckRollup, {
       requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
-    }), roundsLeft: !reviewCycleExhausted };
+    }), roundsLeft: !reviewCycleExhausted,
+    reviewCeilingReached: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure' };
   let closureOwner = decideClosureOwner(closureOwnerInput);
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
   const wouldUseDaemonPath = isDaemonMergeReviewAllowed(reviewState, { strictMode });
@@ -1861,14 +1864,24 @@ async function dispatchAmaClosureFor({
       eligible: false, reason: daemonCleanMerge.reason, logger }); }
     catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
   }
-  if (!orphanRecovery && daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
+  if (daemonCleanMerge?.needsOperator === true && daemonCleanMerge.reason === 'primary-change-needs-operator') {
     recordDaemonMergePark({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha || null,
       reason: daemonCleanMerge.reasons?.find((reason) => reason.startsWith('primary-change-'))
         || daemonCleanMerge.reason });
+    const missingEvidence = daemonCleanMerge.eligibilityTrace?.trace?.primaryChange?.missingEvidence
+      || checkPrimaryChange(daemonCleanMerge.liveGate?.primaryChange, currentPrHeadSha, { strictNonBlockingRemediation: true }).missingEvidence;
+    try {
+      await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber,
+        headSha: currentPrHeadSha, immediate: true, env,
+        reason: `primary-change-needs-operator: ${missingEvidence?.path || 'unknown file'}: ${missingEvidence?.summary || daemonCleanMerge.reasons?.join(', ')}` });
+    } catch (error) {
+      logger?.warn?.(`[watcher] primary-change page delivery failed for ${repoPath} PR ${prNumber}: ${error.message}`);
+    }
+    if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: 'primary-change-needs-operator' };
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true,
       reason: daemonCleanMerge.reason, reasons: daemonCleanMerge.reasons,
-      needsOperator: true, daemonCleanMerge }, { amaEnabled: true });
+      needsOperator: true, missingEvidence, daemonCleanMerge }, { amaEnabled: true });
   }
   const cleanReviewMergePath = () => {
     const reasons = daemonCleanMerge?.reasons || [];
@@ -2383,6 +2396,15 @@ async function dispatchAmaClosureFor({
       || String(reason).startsWith('label-'));
     if (hardReason) result = { ...result, needsOperator: true, operatorReason: `not-eligible:${hardReason}` };
   }
+  if (result?.needsOperator && result?.reason === 'primary-change-repair-required') {
+    try {
+      await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+        immediate: true, env, reason: `${result.reason}: ${result.missingEvidence?.path || 'unknown file'}: ${result.missingEvidence?.summary || result.reasons?.join(', ')}` });
+    } catch (error) { logger?.warn?.(`[watcher] primary-change page delivery failed: ${error.message}`); }
+    if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: result.reason };
+    return withAmaDispatchMetadata(result, { amaEnabled: true });
+  }
+
   const closerRecovery = await recoverStrandedCloserHeadImpl({ result: { ...result, hamTerminalRemediationValidated },
     closerAuthored: liveHeadCloserAuthored, rootDir, repo: repoPath,
     prNumber, headSha: currentPrHeadSha, reviewStateRow, labels: labelNames || [], signal,

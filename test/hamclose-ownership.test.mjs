@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -223,4 +223,38 @@ test('HAMCLOSE-01 exhaustive open non-held ownership cross product uses real eli
     }
   }
   assert.equal(combinations, 17_280);
+});
+
+test('HAMCLOSE-02 every primary evidence × ceiling × handoff/drain × diff combination has one owner', () => {
+  const preserved = { headSha: reviewed, hasHammerCommits: true, primaryHead: hammer, mergeBase: next,
+    primaryFiles: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' }],
+    finalFiles: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-old\n+new' }] };
+  const reversal = { ...preserved, finalFiles: [], reversalAuthorizations: [{
+    reviewedFiles: preserved.primaryFiles, parentFiles: preserved.primaryFiles,
+    commit: { sha: reviewed, author: { login: 'the-hammer-lacey[bot]' }, parents: [{ sha: hammer }],
+      commit: { message: `HAM repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nReviewed-Head: ${hammer}\nReversal-Authorized-By: PRR_matrix finding=1 kind=blocking` },
+      files: [{ filename: 'src/a.mjs', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-new\n+old' }] },
+    review: { commit_id: hammer, node_id: 'PRR_matrix', user: { login: 'lacey-claude-reviewer[bot]' },
+      state: 'CHANGES_REQUESTED', body: '## Blocking issues\n- **Undo**\n  - **File:** `src/a.mjs`\n  - **Lines:** `1`\n  - **Problem:** wrong\n  - **Recommended fix:** undo\n## Non-blocking issues\n- None.\n## Verdict\nRequest changes' },
+  }] };
+  const rebased = JSON.parse(readFileSync(new URL('./fixtures/hamclose-02/primary-change-context.json', import.meta.url)));
+  const evidence = [{ hasHammerCommits: false, headSha: reviewed }, reversal, rebased,
+    { ...preserved, finalFiles: [] }];
+  let combinations = 0;
+  for (const primaryChange of evidence) for (const reviewCeilingReached of [false, true])
+    for (const lease of [null, { status: 'handed-to-review' }])
+      for (const followUpJob of [{ status: 'pending', clean: true }, { status: 'stopped', clean: true }])
+        for (const diffEmpty of [false, true]) {
+          const input = { reviewState: { ...clean, headSha: primaryChange.headSha }, currentHead: primaryChange.headSha, primaryChange,
+            reviewCeilingReached, lease, followUpJob, diffEmpty };
+          const result = decideClosureOwner(input);
+          assert.ok(['daemon-merge', 'page', 'close', 'follow-up-drain'].includes(result.owner));
+          assert.equal(typeof result.owner, 'string');
+          assert.equal(classifyClosureOwnership(input).closureOwner.owner, result.owner);
+          if (diffEmpty) assert.equal(result.owner, 'close');
+          else if (primaryChange === evidence[3]) assert.equal(result.owner, 'page');
+          else if (followUpJob.status === 'stopped') assert.equal(result.owner, 'daemon-merge', JSON.stringify(primaryChange));
+          combinations++;
+        }
+  assert.equal(combinations, 64);
 });

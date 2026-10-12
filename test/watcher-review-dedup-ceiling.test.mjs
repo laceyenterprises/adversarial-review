@@ -44,6 +44,8 @@ function insertPass(
     status,
     headSha,
   );
+  if (status === 'completed') db.prepare('UPDATE reviewer_passes SET gh_comment_id=? WHERE repo=? AND pr_number=? AND attempt_number=?')
+    .run(`posted-${attemptNumber}`, repoPath, prNumber, attemptNumber);
   db.prepare(
     `UPDATE reviewer_passes
         SET metadata_json = ?
@@ -338,7 +340,7 @@ test('ceiling units do not fall back to raw attempts for modern failed-only pass
   }
 });
 
-test('ceiling units preserve legacy null-head history and empty-ledger fallback', () => {
+test('ceiling units preserve legacy posted history but attempts without a pass spend nothing', () => {
   const rootDir = makeTempRoot();
   try {
     const db = openReviewStateDb(rootDir);
@@ -367,8 +369,8 @@ test('ceiling units preserve legacy null-head history and empty-ledger fallback'
         prNumber: 3905,
         fallbackReviewAttempts: 4,
       }),
-      4,
-      'an empty reviewer_passes ledger falls back to the durable reviewed_prs attempt counter',
+      0,
+      'an empty reviewer_passes ledger proves no posted review',
     );
     assert.equal(
       countReviewCeilingAttempts({
@@ -495,4 +497,17 @@ test('deterministic crash, timeout, and genuine review failures still consume th
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('HAMCLOSE-02 a completed process with no posted review ID consumes no review ceiling unit', () => {
+  const rootDir = makeTempRoot();
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const repoPath = 'fixture/repo', prNumber = 8143, headSha = 'b'.repeat(40);
+    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha });
+    db.prepare('UPDATE reviewer_passes SET gh_comment_id=NULL WHERE repo=? AND pr_number=?').run(repoPath, prNumber);
+    for (const head of [null, headSha]) assert.equal(countReviewCeilingUnits({ db, rootDir, repoPath,
+      prNumber, headSha: head, fallbackReviewAttempts: 3 }), 0);
+  } finally { db.close(); rmSync(rootDir, { recursive: true, force: true }); }
 });

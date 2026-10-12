@@ -1,0 +1,113 @@
+{
+  "sha": "c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+  "node_id": "C_kwDOR6Em7doAKGM1NGI4ZWMxZmVlY2IzN2QxYmVkM2IxZTI3ZjhiMWExNWNiNWQ2YmI",
+  "commit": {
+    "author": {
+      "name": "the-hammer-lacey",
+      "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+      "date": "2026-10-12T04:05:36Z"
+    },
+    "committer": {
+      "name": "the-hammer-lacey[bot]",
+      "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+      "date": "2026-10-12T04:10:02Z"
+    },
+    "message": "HAM unify attended and unattended clone recovery\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: 368626dd2d7eaece165bb2611bb7c53934bb02cf\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 1 addressed (0 blocking, 1 non-blocking)\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABRwM9gA finding=1 kind=non-blocking",
+    "tree": {
+      "sha": "09dddd9a4e75abec0436a315ccc7ccabe792499d",
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/trees/09dddd9a4e75abec0436a315ccc7ccabe792499d"
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/commits/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+    "comment_count": 0,
+    "verification": {
+      "verified": false,
+      "reason": "unsigned",
+      "signature": null,
+      "payload": null,
+      "verified_at": null
+    }
+  },
+  "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+  "html_url": "https://github.com/laceyenterprises/agent-os/commit/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+  "comments_url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb/comments",
+  "author": {
+    "login": "the-hammer-lacey[bot]",
+    "id": 298977630,
+    "node_id": "BOT_kgDOEdIJXg",
+    "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+    "html_url": "https://github.com/apps/the-hammer-lacey",
+    "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+    "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+    "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+    "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+    "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+    "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+    "type": "Bot",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "committer": {
+    "login": "the-hammer-lacey[bot]",
+    "id": 298977630,
+    "node_id": "BOT_kgDOEdIJXg",
+    "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+    "html_url": "https://github.com/apps/the-hammer-lacey",
+    "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+    "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+    "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+    "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+    "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+    "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+    "type": "Bot",
+    "user_view_type": "public",
+    "site_admin": false
+  },
+  "parents": [
+    {
+      "sha": "7bc12762cee6545854f06c7edbdb9db2f7db7279",
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/7bc12762cee6545854f06c7edbdb9db2f7db7279",
+      "html_url": "https://github.com/laceyenterprises/agent-os/commit/7bc12762cee6545854f06c7edbdb9db2f7db7279"
+    }
+  ],
+  "stats": {
+    "total": 53,
+    "additions": 25,
+    "deletions": 28
+  },
+  "files": [
+    {
+      "sha": "3c062f08d82e06ffa21e48e7fb89fe629a50ae81",
+      "filename": "bootstrap/install-agent-os.sh",
+      "status": "modified",
+      "additions": 15,
+      "deletions": 28,
+      "changes": 43,
+      "blob_url": "https://github.com/laceyenterprises/agent-os/blob/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb/bootstrap%2Finstall-agent-os.sh",
+      "raw_url": "https://github.com/laceyenterprises/agent-os/raw/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb/bootstrap%2Finstall-agent-os.sh",
+      "contents_url": "https://api.github.com/repos/laceyenterprises/agent-os/contents/bootstrap%2Finstall-agent-os.sh?ref=c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+      "patch": "@@ -739,48 +739,35 @@ clone_or_relocate_repo() {\n   # install root matches, we're done \u2014 just confirm and move on.\n   if [[ -n \"$REPO_ROOT\" ]] && [[ \"$(cd \"$REPO_ROOT\" && pwd)\" == \"$(cd \"$AGENT_OS_INSTALL_ROOT\" 2>/dev/null && pwd 2>/dev/null || echo \"\")\" ]]; then\n     ok \"agent-os already at install root: $AGENT_OS_INSTALL_ROOT\"\n-    return\n   fi\n \n-  # Otherwise clone fresh.\n+  # Resolve ownership for both new clones and resumed submodule initialization.\n+  local clone_as=\"$AGENT_OS_ADMIN_USER\"\n+  if [[ \"$AGENT_OS_MODE\" == \"dual\" ]]; then\n+    clone_as=\"$AGENT_OS_RUNTIME_USER\"\n+  fi\n   if [[ -d \"$AGENT_OS_INSTALL_ROOT/.git\" ]]; then\n-    ok \"existing clone at $AGENT_OS_INSTALL_ROOT (skip)\"\n+    ok \"existing clone at $AGENT_OS_INSTALL_ROOT (skip clone)\"\n   else\n     info \"cloning $AGENT_OS_REPO \u2192 $AGENT_OS_INSTALL_ROOT\"\n-    # In dual mode the runtime user owns the deploy checkout, so clone\n-    # as them. Single mode clones as the operator.\n-    local clone_as=\"\"\n-    if [[ \"$AGENT_OS_MODE\" == \"dual\" ]]; then\n-      clone_as=\"$AGENT_OS_RUNTIME_USER\"\n-    else\n-      clone_as=\"$AGENT_OS_ADMIN_USER\"\n-    fi\n-\n     # Ensure parent dir exists with right ownership\n     local parent\n     parent=\"$(dirname \"$AGENT_OS_INSTALL_ROOT\")\"\n     sudo mkdir -p \"$parent\"\n     sudo chown \"$clone_as\":staff \"$parent\"\n \n-    # Clone as the target user. We're not the target user; use sudo -u.\n-    if [[ \"${AGENT_OS_NON_INTERACTIVE:-0}\" == 1 ]]; then\n-      # A recursive clone can leave the parent checkout behind when a submodule\n-      # transfer fails. Retry the two idempotent stages separately so recovery\n-      # never attempts to clone over that populated checkout or deletes it.\n-      installer_run_with_retry network sudo -u \"$clone_as\" git clone \\\n-        \"$AGENT_OS_REPO\" \"$AGENT_OS_INSTALL_ROOT\" \\\n-        || { err \"git clone failed\"; exit 1; }\n-      installer_run_with_retry network sudo -u \"$clone_as\" git -C \"$AGENT_OS_INSTALL_ROOT\" submodule update --init --recursive \\\n-        || { err \"git submodule initialization failed\"; exit 1; }\n-    else\n-      sudo -u \"$clone_as\" git clone --recurse-submodules \\\n-        \"$AGENT_OS_REPO\" \"$AGENT_OS_INSTALL_ROOT\" \\\n-        || { err \"git clone failed\"; exit 1; }\n-    fi\n-\n+    # Preserve the parent checkout if a later submodule transfer fails.\n+    # The shared runner retries only in unattended mode.\n+    installer_run_with_retry network sudo -u \"$clone_as\" git clone \\\n+      \"$AGENT_OS_REPO\" \"$AGENT_OS_INSTALL_ROOT\" \\\n+      || { err \"git clone failed\"; exit 1; }\n     ok \"cloned to $AGENT_OS_INSTALL_ROOT (owner: $clone_as)\"\n   fi\n \n+  # Also resume this stage when an operator reruns after a transfer failure.\n+  installer_run_with_retry network sudo -u \"$clone_as\" git -C \"$AGENT_OS_INSTALL_ROOT\" submodule update --init --recursive \\\n+    || { err \"git submodule initialization failed\"; exit 1; }\n+\n   # Dual-mode: ensure the deploy checkout is readable by the admin\n   # account too (the canonical topology has a `/Users/<admin>/agent-os`\n   # symlink pointing at the runtime user's checkout)."
+    },
+    {
+      "sha": "7c1c8cc59ae2c0b55f1af21942cd7da9bc90e7f2",
+      "filename": "bootstrap/install-agent-os.test.sh",
+      "status": "modified",
+      "additions": 10,
+      "deletions": 0,
+      "changes": 10,
+      "blob_url": "https://github.com/laceyenterprises/agent-os/blob/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb/bootstrap%2Finstall-agent-os.test.sh",
+      "raw_url": "https://github.com/laceyenterprises/agent-os/raw/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb/bootstrap%2Finstall-agent-os.test.sh",
+      "contents_url": "https://api.github.com/repos/laceyenterprises/agent-os/contents/bootstrap%2Finstall-agent-os.test.sh?ref=c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+      "patch": "@@ -703,6 +703,16 @@ pass \"hung readiness producer fails within the subprocess budget\"\n   [[ \"$(wc -l <\"$clone_calls\" | tr -d ' ')\" == 1 && \"$(wc -l <\"$submodule_calls\" | tr -d ' ')\" == 2 ]] || fail \"recursive clone did not resume submodules independently\"\n   pass \"wrapper preserves the parent checkout when retrying a transient submodule transfer\"\n \n+  export AGENT_OS_NON_INTERACTIVE=0\n+  AGENT_OS_INSTALL_ROOT=\"$TMPDIR_TEST/attended-clone\"\n+  : >\"$clone_calls\"; : >\"$submodule_calls\"; : >\"$retry_delays\"\n+  rc=0\n+  (clone_or_relocate_repo >/dev/null 2>&1) || rc=$?\n+  [[ \"$rc\" == 1 && -d \"$AGENT_OS_INSTALL_ROOT/.git\" && ! -s \"$retry_delays\" ]] || fail \"attended transfer failure did not retain checkout without retry\"\n+  clone_or_relocate_repo >/dev/null 2>&1 || fail \"attended rerun did not resume submodules\"\n+  [[ \"$(wc -l <\"$clone_calls\" | tr -d ' ')\" == 1 && \"$(wc -l <\"$submodule_calls\" | tr -d ' ')\" == 2 ]] || fail \"attended rerun recloned or skipped submodules\"\n+  pass \"attended rerun resumes submodules without cloning over the retained checkout\"\n+\n   : >\"$retry_calls\"; : >\"$retry_delays\"\n   export AGENT_OS_NON_INTERACTIVE=0\n   rc=0"
+    }
+  ]
+}

@@ -1,3 +1,6 @@
+import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
+import { closeEmptyPullRequest } from './empty-pr-close.mjs';
+import { routeCappedReviewToClosure, hammerHandoffReviewBypass } from './hamclose-review-admission.mjs';
 import { recoverOwnerlessReview } from './ownerproof-review-recovery.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { summarizeChecksConclusion } from './checks-summary.mjs';
@@ -1198,6 +1201,12 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID) {
+        const emptyClose = await closeEmptyPullRequest({ repo: repoPath, prNumber,
+          headSha: subject.headSha, execFileImpl: execFileAsync });
+        if (emptyClose.closed || emptyClose.terminal) return;
+      }
+
       // ASR-04 — ADDITIVE, and this is the half of the ticket that is easiest to
       // lose. A HUMAN PR that bumps a dependency carries the same supply-chain
       // risk as a bot one, so the manifest trigger routes on the FILE, not the
@@ -1406,12 +1415,17 @@ export async function processReviewSubject(entry, ctx) {
       // ...UNLESS the merge-agent is provably still converging for THIS head.
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
+      const cappedClosure = effectiveDomainId === CODE_PR_DOMAIN_ID && routeCappedReviewToClosure({ db, repo: repoPath,
+        prNumber, headSha: subject.headSha, row: existing,
+        ceiling: resolveHardReviewCeiling(resolveRoundBudgetForJob({ linearTicketId,
+          riskClass: summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber }).latestRiskClass }, { rootDir: ROOT }).roundBudget) });
+      if (cappedClosure) existing = stmtGetReviewRow.get(repoPath, prNumber);
       const postedReviewHeadMoved =
         existing?.review_status === 'posted' &&
         existing.reviewer_head_sha &&
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
-        !subject.terminal;
+        !subject.terminal && !cappedClosure;
       const finalRoundInProgress = postedReviewHeadMoved &&
         hasInProgressCommentOnlyFinalRound(ROOT, {
           repo: repoPath, prNumber, reviewedHead: existing.reviewer_head_sha,
@@ -3564,6 +3578,8 @@ export async function processReviewSubject(entry, ctx) {
             if (passKind === 'rereview') {
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
+              const handoffReviewBypass = hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
+                prNumber, headSha: reviewerHeadSha, row: current });
               const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
                 repoPath,
                 prNumber,
@@ -3611,7 +3627,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason &&
                 priorReviewCount >= hardReviewCeiling &&
                 !explicitOperatorReviewRetrigger &&
-                !fleetSelfRepairTrailerOnlyBypass
+                !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -3639,7 +3655,7 @@ export async function processReviewSubject(entry, ctx) {
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
                 && !explicitOperatorReviewRetrigger
-                && !fleetSelfRepairTrailerOnlyBypass
+                && !fleetSelfRepairTrailerOnlyBypass && !handoffReviewBypass
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +

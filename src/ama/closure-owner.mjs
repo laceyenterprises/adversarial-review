@@ -1,3 +1,4 @@
+import { checkPrimaryChange } from './primary-change.mjs';
 import { isDaemonMergeReviewAllowed } from './daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './eligibility.mjs';
 import { AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS } from './closer-lease.mjs';
@@ -10,8 +11,13 @@ export const CLOSURE_OWNER_WAIT_MS = 30_000;
 export function decideClosureOwner({ reviewState = {}, currentHead, attested = false,
   lease = null, retryExhausted = false, lifetimeExhausted = false,
   mergeable = 'MERGEABLE', checks = 'SUCCESS', roundsLeft = true,
-  waitExhausted = false } = {}) {
+  waitExhausted = false, primaryChange = null, reviewCeilingReached = false,
+  diffEmpty = false, followUpJob = null } = {}) {
   const action = (owner, reason, extra = {}) => ({ owner, reason, ...extra });
+  if (diffEmpty) return action('close', 'empty-diff');
+  if (primaryChange && !checkPrimaryChange(primaryChange, currentHead, { strictNonBlockingRemediation: true }).ok) {
+    return action('page', 'primary-change-needs-operator');
+  }
   if (lease && ['pending', 'dispatched'].includes(lease.status)) {
     return waitExhausted
       ? action('page', 'in-flight-lease-expired')
@@ -23,13 +29,17 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
     ? action('page', lifetimeExhausted ? 'hammer-lifetime-cap' : 'hammer-retry-cap')
     : action('hammer', reason);
   if (!reviewState.verdict || (reviewState.headSha !== currentHead && (!attested || lease?.status === 'handed-to-review'))) {
-    return roundsLeft ? action('review', 'exact-head-review') : action('page', 'review-rounds-exhausted');
+    if (reviewCeilingReached && lease?.status !== 'handed-to-review') return hammer('review-ceiling-stale-head');
+    return (roundsLeft || (reviewCeilingReached && lease?.status === 'handed-to-review')) ? action('review', 'exact-head-review') : action('page', 'review-rounds-exhausted');
   }
   const clean = SETTLED_SUCCESS_VERDICTS.has(reviewState.verdict)
     && isDaemonMergeReviewAllowed(reviewState, { strictMode: true });
   if (!clean) {
     if (lease?.status === 'handed-to-review' || !roundsLeft || attested) return hammer('review-findings');
     return action('remediation', 'review-findings');
+  }
+  if (followUpJob?.status === 'pending' && followUpJob?.clean === true) {
+    return action('follow-up-drain', 'clean-review-drain');
   }
   if (mergeable === 'CONFLICTING') {
     const result = hammer('conflict-rebase');

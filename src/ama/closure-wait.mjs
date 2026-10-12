@@ -15,7 +15,7 @@ async function page(text, options) {
 // SQLite serializes observations across ticks/processes. Reserve the page before
 // sending it, refund on transport refusal, and keep the original wait deadline.
 export async function observeClosureWait({ rootDir, repo, prNumber, headSha, reason,
-  now = Date.now(), env = process.env, pageImpl = page }) {
+  now = Date.now(), env = process.env, pageImpl = page, immediate = false }) {
   const requested = Number(env.AMA_CLOSURE_WAIT_BOUND_MS);
   const boundMs = Number.isFinite(requested) && requested > 0 ? requested : CLOSURE_WAIT_BOUND_MS;
   const dir = join(rootDir, 'data', 'ama-closure-waits');
@@ -28,7 +28,7 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
       db.prepare('INSERT OR IGNORE INTO waits(head, started, reason) VALUES (?, ?, ?)').run(headSha, now, reason);
       db.prepare('UPDATE waits SET reason=? WHERE head=?').run(reason, headSha);
       const row = db.prepare('SELECT * FROM waits WHERE head=?').get(headSha);
-      const exhausted = now - row.started >= boundMs;
+      const exhausted = immediate || now - row.started >= boundMs;
       const notify = exhausted && db.prepare('UPDATE waits SET paged=1 WHERE head=? AND paged=0').run(headSha).changes === 1;
       return { exhausted, notify, startedAt: row.started, boundedMs: boundMs };
     }).immediate();

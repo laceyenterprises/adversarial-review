@@ -1,0 +1,42 @@
+[
+  {
+    "id": 5486619470,
+    "node_id": "PRR_kwDOR6Em7c8AAAABRwcrTg",
+    "user": {
+      "login": "lacey-gemini-reviewer[bot]",
+      "id": 291677684,
+      "node_id": "BOT_kgDOEWKl9A",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3994139?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/lacey-gemini-reviewer",
+      "followers_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "## Adversarial Review \u2014 Gemini (gemini-reviewer-lacey)\n\n> Reviewer: gemini \u00b7 Gemini 3.1 Pro (High) \u00b7 none\n\n## Summary\n\nThis is a documentation-only PR containing an automated post-merge build-pack official-record bump. It successfully updates the spec references in `projects/gym-oss-extraction/plan.json` and all corresponding ticket prompts to the new hash `gym-oss-extraction@11ec034f5e98`. The changes are internally consistent and no unsupported claims, safety risks, or contract drifts were found.\n\n## Blocking issues\n\n- **[live_pack_cross_edit] Cross-pack edit of live build pack `gym-oss-extraction`** \u2014 run(s): `dagrun_01M4K2W7FQYDP3VZ0GWPFYTYDH` (running); touched: `projects/gym-oss-extraction/plan.json`, `projects/gym-oss-extraction/prompts/pdk-01-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-02-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-03-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-04-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-05-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-06-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-07-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-08-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-09-prompt.md`. Restore these files to their base-branch content (or an operator applies `live-pack-edit-approved`).\n\n## Non-blocking issues\n\n- None.\n\n## Suggested fixes\n\n- None.\n\n## Verdict\n\nRequest changes\n\n## Live Pack Cross-Edit Finding\n\n```json\n[\n  {\n    \"kind\": \"live_pack_cross_edit\",\n    \"severity\": \"high\",\n    \"blocking\": true,\n    \"pack\": \"gym-oss-extraction\",\n    \"plan_id\": \"gym-oss-extraction-v1\",\n    \"run_ids\": [\n      \"dagrun_01M4K2W7FQYDP3VZ0GWPFYTYDH\"\n    ],\n    \"runs\": [\n      {\n        \"run_id\": \"dagrun_01M4K2W7FQYDP3VZ0GWPFYTYDH\",\n        \"state\": \"running\"\n      }\n    ],\n    \"touched_files\": [\n      \"projects/gym-oss-extraction/plan.json\",\n      \"projects/gym-oss-extraction/prompts/pdk-01-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-02-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-03-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-04-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-05-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-06-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-07-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-08-prompt.md\",\n      \"projects/gym-oss-extraction/prompts/pdk-09-prompt.md\"\n    ],\n    \"inconclusive\": false,\n    \"reason\": \"pack plan `gym-oss-extraction-v1` has non-terminal DAG run(s): dagrun_01M4K2W7FQYDP3VZ0GWPFYTYDH (running)\",\n    \"detail\": \"This PR edits build pack `gym-oss-extraction` (`projects/gym-oss-extraction/plan.json`, `projects/gym-oss-extraction/prompts/pdk-01-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-02-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-03-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-04-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-05-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-06-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-07-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-08-prompt.md`, `projects/gym-oss-extraction/prompts/pdk-09-prompt.md`) but its ticket is not one of that pack's plan tickets, and pack plan `gym-oss-extraction-v1` has non-terminal DAG run(s): dagrun_01M4K2W7FQYDP3VZ0GWPFYTYDH (running). Editing a running pack's spec, plan or prompts from outside the pack changes the contract its in-flight tickets are being built against. Restore these files to their base-branch content, or have an operator apply the `live-pack-edit-approved` label and re-run review.\"\n  }\n]\n```\n",
+    "state": "CHANGES_REQUESTED",
+    "html_url": "https://github.com/laceyenterprises/agent-os/pull/8143#pullrequestreview-5486619470",
+    "pull_request_url": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8143",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/laceyenterprises/agent-os/pull/8143#pullrequestreview-5486619470"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8143"
+      }
+    },
+    "submitted_at": "2026-10-12T04:45:18Z",
+    "commit_id": "dafce4d3f0a1a4f6a61c05d20f5b326c2c5ed118"
+  }
+]

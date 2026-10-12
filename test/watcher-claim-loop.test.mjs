@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -2849,4 +2849,84 @@ test('HOLDRELEASE-01: stale drift captures release without routing until cleared
       assert.ok(db.prepare('SELECT routed_at FROM operator_hold_releases WHERE pr_number = 101').get().routed_at);
     `,
   });
+});
+
+test('HAMCLOSE-02 replay B pollOnce closes an empty remediation head before any claim, once across two ticks', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-empty-'));
+  try {
+    const head = 'b82fde32'.padEnd(40, '0');
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { 101: head } }));
+    writeFileSync(registerPath, `import { register } from 'node:module'; register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);`);
+    const closedPath = path.join(tmp, 'closed');
+    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, afterFirstPoll: `
+      const { existsSync, readFileSync } = await import('node:fs');
+      assert.ok(existsSync(${JSON.stringify(closedPath)}));
+      await pollOnce(octokit, pollOptions);
+      assert.equal(readFileSync(${JSON.stringify(closedPath)}, 'utf8'), 'one comment\\n');
+      assert.ok(!claims.some(claim => claim.prNumber === 101));
+      assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || []).some(spawn => spawn.subjectContext?.prNumber === 101));
+    ` }));
+    const env = installGhFixture(tmp);
+    writeFileSync(path.join(tmp, 'gh'), `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  state=open
+  [[ ! -f '${closedPath}' ]] || state=closed
+  printf '{"state":"%s","changed_files":0,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n' "$state"
+elif [[ "\${1:-}" == api && "\${2:-}" == *'/compare/'* ]]; then
+  printf '{"files":[]}\\n'
+elif [[ "\${1:-}" == pr && "\${2:-}" == close ]]; then
+  printf 'one comment\\n' >> '${closedPath}'
+else
+  exit 1
+fi
+`);
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('HAMCLOSE-02 real pollOnce admits one handed-off exact-head review past exhausted attempts', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-hamclose-review-'));
+  try {
+    const head = 'b82fde32'.padEnd(40, '0');
+    const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+    let loader = buildLoaderSource({ subjectHeads: { 101: head } });
+    loader = loader.replace('export async function resolve', `stubs.set(${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs'))}, 'fixture:handoff-lease');\nexport async function resolve`);
+    const leaseSource = `export * from ${JSON.stringify(fileUrl('src', 'ama', 'closer-lease.mjs') + '?actual')};
+      export function readAmaCloserLease(_root, identity) {
+        return identity.prNumber === 101 && identity.headSha === ${JSON.stringify(head)}
+          ? { status: 'handed-to-review', headSha: identity.headSha, lrqId: 'hammer-8143', updatedAt: '2026-10-12T06:15:00.000Z' } : null;
+      }`;
+    loader = loader.replace('export async function load(url, context, nextLoad) {',
+      `export async function load(url, context, nextLoad) {\nif (url === 'fixture:handoff-lease') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(leaseSource)} };`);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({ freshHeads: { 101: head }, prePollSetup: `
+      db.prepare(\`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+        review_attempts,revision_ref,rereview_requested_at,rereview_reason)
+        VALUES ('laceyenterprises/adversarial-review',101,'2026-10-12T04:45:00Z','claude','open','pending',36,?,
+        '2026-10-12T06:15:00Z',?)\`).run(${JSON.stringify(head)}, ${JSON.stringify('system-orphan-head-review:' + head)});
+      for (let attempt = 1; attempt <= 36; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,
+        attempt_number,reviewer_class,pass_kind,started_at,ended_at,status,head_sha,metadata_json)
+        VALUES ('laceyenterprises/adversarial-review',101,?,'claude','rereview','2026-10-12T05:12:10Z',
+        '2026-10-12T05:12:13Z','failed',?,'{"failureClass":"reviewer-command-failed"}')\`).run(attempt, ${JSON.stringify(head)});
+    `, afterFirstPoll: `
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101).length, 1);
+      assert.equal(db.prepare('SELECT review_status FROM reviewed_prs WHERE pr_number=101').get().review_status, 'posted');
+      await pollOnce(octokit, pollOptions);
+      assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).filter(spawn => spawn.subjectContext?.prNumber === 101).length, 1);
+    ` }));
+    const env = installGhFixture(tmp), ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, readFileSync(ghPath, 'utf8').replace('set -euo pipefail', `set -euo pipefail
+if [[ "\${1:-}" == api && "\${2:-}" == repos/laceyenterprises/adversarial-review/pulls/101 ]]; then
+  printf '{"state":"open","changed_files":1,"head":{"sha":"${head}"},"base":{"sha":"${'a'.repeat(40)}"}}\\n'
+  exit 0
+fi`));
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

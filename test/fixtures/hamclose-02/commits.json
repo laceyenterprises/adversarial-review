@@ -1,0 +1,454 @@
+[
+  {
+    "sha": "29b6760b2454b6bfcf89a5bc26ae9752d352df02",
+    "node_id": "C_kwDOR6Em7doAKDI5YjY3NjBiMjQ1NGI2YmZjZjg5YTViYzI2YWU5NzUyZDM1MmRmMDI",
+    "commit": {
+      "author": {
+        "name": "Codex Worker",
+        "email": "codex@laceyenterprises.com",
+        "date": "2026-10-12T02:23:36Z"
+      },
+      "committer": {
+        "name": "the-hammer-lacey[bot]",
+        "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+        "date": "2026-10-12T04:10:02Z"
+      },
+      "message": "TIH-02: add unattended installer core boundaries (test-install-host@655efb6fd9dc)\n\nWorker-Class: codex",
+      "tree": {
+        "sha": "46e076ba6f5beee0a72b8781c351e388caa76816",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/trees/46e076ba6f5beee0a72b8781c351e388caa76816"
+      },
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/commits/29b6760b2454b6bfcf89a5bc26ae9752d352df02",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/29b6760b2454b6bfcf89a5bc26ae9752d352df02",
+    "html_url": "https://github.com/laceyenterprises/agent-os/commit/29b6760b2454b6bfcf89a5bc26ae9752d352df02",
+    "comments_url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/29b6760b2454b6bfcf89a5bc26ae9752d352df02/comments",
+    "author": {
+      "login": "codex-worker-lacey",
+      "id": 284341814,
+      "node_id": "U_kgDOEPK2Ng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/284341814?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/codex-worker-lacey",
+      "html_url": "https://github.com/codex-worker-lacey",
+      "followers_url": "https://api.github.com/users/codex-worker-lacey/followers",
+      "following_url": "https://api.github.com/users/codex-worker-lacey/following{/other_user}",
+      "gists_url": "https://api.github.com/users/codex-worker-lacey/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/codex-worker-lacey/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/codex-worker-lacey/subscriptions",
+      "organizations_url": "https://api.github.com/users/codex-worker-lacey/orgs",
+      "repos_url": "https://api.github.com/users/codex-worker-lacey/repos",
+      "events_url": "https://api.github.com/users/codex-worker-lacey/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/codex-worker-lacey/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]",
+      "id": 298977630,
+      "node_id": "BOT_kgDOEdIJXg",
+      "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+      "html_url": "https://github.com/apps/the-hammer-lacey",
+      "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "8c39ea57128d10c2c941c5845a5c5b179613aa7b",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/8c39ea57128d10c2c941c5845a5c5b179613aa7b",
+        "html_url": "https://github.com/laceyenterprises/agent-os/commit/8c39ea57128d10c2c941c5845a5c5b179613aa7b"
+      }
+    ]
+  },
+  {
+    "sha": "e78f797f27cef39a991ccaf3d400ad7d6078212e",
+    "node_id": "C_kwDOR6Em7doAKGU3OGY3OTdmMjdjZWYzOWE5OTFjY2FmM2Q0MDBhZDdkNjA3ODIxMmU",
+    "commit": {
+      "author": {
+        "name": "Codex Worker",
+        "email": "codex@laceyenterprises.com",
+        "date": "2026-10-12T03:03:33Z"
+      },
+      "committer": {
+        "name": "the-hammer-lacey[bot]",
+        "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+        "date": "2026-10-12T04:10:02Z"
+      },
+      "message": "fix(bootstrap): retry transient unattended provisioning failures\n\nWorker-Class: codex-remediation\nWorker-Job-Id: laceyenterprises__agent-os-pr-8132-2026-10-12T02-51-41-038Z\nWorker-Run-At: 2026-10-12T03:03:33Z\nWorker-Run-At: 2026-10-12T03:05:19Z",
+      "tree": {
+        "sha": "c8d5d4dff6153b8766ec53eadc49231330954261",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/trees/c8d5d4dff6153b8766ec53eadc49231330954261"
+      },
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/commits/e78f797f27cef39a991ccaf3d400ad7d6078212e",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/e78f797f27cef39a991ccaf3d400ad7d6078212e",
+    "html_url": "https://github.com/laceyenterprises/agent-os/commit/e78f797f27cef39a991ccaf3d400ad7d6078212e",
+    "comments_url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/e78f797f27cef39a991ccaf3d400ad7d6078212e/comments",
+    "author": {
+      "login": "codex-worker-lacey",
+      "id": 284341814,
+      "node_id": "U_kgDOEPK2Ng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/284341814?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/codex-worker-lacey",
+      "html_url": "https://github.com/codex-worker-lacey",
+      "followers_url": "https://api.github.com/users/codex-worker-lacey/followers",
+      "following_url": "https://api.github.com/users/codex-worker-lacey/following{/other_user}",
+      "gists_url": "https://api.github.com/users/codex-worker-lacey/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/codex-worker-lacey/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/codex-worker-lacey/subscriptions",
+      "organizations_url": "https://api.github.com/users/codex-worker-lacey/orgs",
+      "repos_url": "https://api.github.com/users/codex-worker-lacey/repos",
+      "events_url": "https://api.github.com/users/codex-worker-lacey/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/codex-worker-lacey/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]",
+      "id": 298977630,
+      "node_id": "BOT_kgDOEdIJXg",
+      "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+      "html_url": "https://github.com/apps/the-hammer-lacey",
+      "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "29b6760b2454b6bfcf89a5bc26ae9752d352df02",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/29b6760b2454b6bfcf89a5bc26ae9752d352df02",
+        "html_url": "https://github.com/laceyenterprises/agent-os/commit/29b6760b2454b6bfcf89a5bc26ae9752d352df02"
+      }
+    ]
+  },
+  {
+    "sha": "14ad6492278c610f0e3a7f057ab609752a619902",
+    "node_id": "C_kwDOR6Em7doAKDE0YWQ2NDkyMjc4YzYxMGYwZTNhN2YwNTdhYjYwOTc1MmE2MTk5MDI",
+    "commit": {
+      "author": {
+        "name": "Codex Remediation Worker",
+        "email": "codex-remediation-worker@laceyenterprises.com",
+        "date": "2026-10-12T03:24:12Z"
+      },
+      "committer": {
+        "name": "the-hammer-lacey[bot]",
+        "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+        "date": "2026-10-12T04:10:02Z"
+      },
+      "message": "fix(bootstrap): isolate installer host fixtures for Linux CI\n\nWorker-Class: codex-remediation\nWorker-Job-Id: laceyenterprises__agent-os-pr-8132-2026-10-12T02-51-41-038Z\nWorker-Run-At: 2026-10-12T03:24:12Z",
+      "tree": {
+        "sha": "356871e34a29fc9f151594ce6650ebf1192fbe0f",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/trees/356871e34a29fc9f151594ce6650ebf1192fbe0f"
+      },
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/commits/14ad6492278c610f0e3a7f057ab609752a619902",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/14ad6492278c610f0e3a7f057ab609752a619902",
+    "html_url": "https://github.com/laceyenterprises/agent-os/commit/14ad6492278c610f0e3a7f057ab609752a619902",
+    "comments_url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/14ad6492278c610f0e3a7f057ab609752a619902/comments",
+    "author": null,
+    "committer": {
+      "login": "the-hammer-lacey[bot]",
+      "id": 298977630,
+      "node_id": "BOT_kgDOEdIJXg",
+      "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+      "html_url": "https://github.com/apps/the-hammer-lacey",
+      "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "e78f797f27cef39a991ccaf3d400ad7d6078212e",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/e78f797f27cef39a991ccaf3d400ad7d6078212e",
+        "html_url": "https://github.com/laceyenterprises/agent-os/commit/e78f797f27cef39a991ccaf3d400ad7d6078212e"
+      }
+    ]
+  },
+  {
+    "sha": "7bc12762cee6545854f06c7edbdb9db2f7db7279",
+    "node_id": "C_kwDOR6Em7doAKDdiYzEyNzYyY2VlNjU0NTg1NGYwNmM3ZWRiZGI5ZGIyZjdkYjcyNzk",
+    "commit": {
+      "author": {
+        "name": "Codex Remediation Worker",
+        "email": "codex-remediation-worker@laceyenterprises.com",
+        "date": "2026-10-12T03:30:33Z"
+      },
+      "committer": {
+        "name": "the-hammer-lacey[bot]",
+        "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+        "date": "2026-10-12T04:10:02Z"
+      },
+      "message": "fix(bootstrap): remove remaining Mac account and stat fixture assumptions\n\nWorker-Class: codex-remediation\nWorker-Job-Id: laceyenterprises__agent-os-pr-8132-2026-10-12T02-51-41-038Z\nWorker-Run-At: 2026-10-12T03:30:33Z",
+      "tree": {
+        "sha": "612ac29836db12e72098baf30dff51c440b7ba9f",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/trees/612ac29836db12e72098baf30dff51c440b7ba9f"
+      },
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/commits/7bc12762cee6545854f06c7edbdb9db2f7db7279",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/7bc12762cee6545854f06c7edbdb9db2f7db7279",
+    "html_url": "https://github.com/laceyenterprises/agent-os/commit/7bc12762cee6545854f06c7edbdb9db2f7db7279",
+    "comments_url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/7bc12762cee6545854f06c7edbdb9db2f7db7279/comments",
+    "author": null,
+    "committer": {
+      "login": "the-hammer-lacey[bot]",
+      "id": 298977630,
+      "node_id": "BOT_kgDOEdIJXg",
+      "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+      "html_url": "https://github.com/apps/the-hammer-lacey",
+      "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "14ad6492278c610f0e3a7f057ab609752a619902",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/14ad6492278c610f0e3a7f057ab609752a619902",
+        "html_url": "https://github.com/laceyenterprises/agent-os/commit/14ad6492278c610f0e3a7f057ab609752a619902"
+      }
+    ]
+  },
+  {
+    "sha": "c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+    "node_id": "C_kwDOR6Em7doAKGM1NGI4ZWMxZmVlY2IzN2QxYmVkM2IxZTI3ZjhiMWExNWNiNWQ2YmI",
+    "commit": {
+      "author": {
+        "name": "the-hammer-lacey",
+        "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+        "date": "2026-10-12T04:05:36Z"
+      },
+      "committer": {
+        "name": "the-hammer-lacey[bot]",
+        "email": "298977630+the-hammer-lacey[bot]@users.noreply.github.com",
+        "date": "2026-10-12T04:10:02Z"
+      },
+      "message": "HAM unify attended and unattended clone recovery\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: 368626dd2d7eaece165bb2611bb7c53934bb02cf\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 1 addressed (0 blocking, 1 non-blocking)\nReversal-Authorized-By: PRR_kwDOR6Em7c8AAAABRwM9gA finding=1 kind=non-blocking",
+      "tree": {
+        "sha": "09dddd9a4e75abec0436a315ccc7ccabe792499d",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/trees/09dddd9a4e75abec0436a315ccc7ccabe792499d"
+      },
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/commits/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+    "html_url": "https://github.com/laceyenterprises/agent-os/commit/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+    "comments_url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb/comments",
+    "author": {
+      "login": "the-hammer-lacey[bot]",
+      "id": 298977630,
+      "node_id": "BOT_kgDOEdIJXg",
+      "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+      "html_url": "https://github.com/apps/the-hammer-lacey",
+      "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "the-hammer-lacey[bot]",
+      "id": 298977630,
+      "node_id": "BOT_kgDOEdIJXg",
+      "avatar_url": "https://avatars.githubusercontent.com/in/4197249?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D",
+      "html_url": "https://github.com/apps/the-hammer-lacey",
+      "followers_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/the-hammer-lacey%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "7bc12762cee6545854f06c7edbdb9db2f7db7279",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/7bc12762cee6545854f06c7edbdb9db2f7db7279",
+        "html_url": "https://github.com/laceyenterprises/agent-os/commit/7bc12762cee6545854f06c7edbdb9db2f7db7279"
+      }
+    ]
+  },
+  {
+    "sha": "aa7001ca2f07a3c0a86ac955c21b2d36e6bf9c90",
+    "node_id": "C_kwDOR6Em7doAKGFhNzAwMWNhMmYwN2EzYzBhODZhYzk1NWMyMWIyZDM2ZTZiZjljOTA",
+    "commit": {
+      "author": {
+        "name": "Codex Worker",
+        "email": "codex@laceyenterprises.com",
+        "date": "2026-10-12T05:36:41Z"
+      },
+      "committer": {
+        "name": "Codex Worker",
+        "email": "codex@laceyenterprises.com",
+        "date": "2026-10-12T05:37:29Z"
+      },
+      "message": "fix(bootstrap): recover unattended installs after partial failure (PR 8132, TIH-02 SPEC)\n\nWorker-Class: codex",
+      "tree": {
+        "sha": "fed4d2a1cb0b6e3bff8be5fb6891533098f2fb7e",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/trees/fed4d2a1cb0b6e3bff8be5fb6891533098f2fb7e"
+      },
+      "url": "https://api.github.com/repos/laceyenterprises/agent-os/git/commits/aa7001ca2f07a3c0a86ac955c21b2d36e6bf9c90",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/aa7001ca2f07a3c0a86ac955c21b2d36e6bf9c90",
+    "html_url": "https://github.com/laceyenterprises/agent-os/commit/aa7001ca2f07a3c0a86ac955c21b2d36e6bf9c90",
+    "comments_url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/aa7001ca2f07a3c0a86ac955c21b2d36e6bf9c90/comments",
+    "author": {
+      "login": "codex-worker-lacey",
+      "id": 284341814,
+      "node_id": "U_kgDOEPK2Ng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/284341814?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/codex-worker-lacey",
+      "html_url": "https://github.com/codex-worker-lacey",
+      "followers_url": "https://api.github.com/users/codex-worker-lacey/followers",
+      "following_url": "https://api.github.com/users/codex-worker-lacey/following{/other_user}",
+      "gists_url": "https://api.github.com/users/codex-worker-lacey/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/codex-worker-lacey/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/codex-worker-lacey/subscriptions",
+      "organizations_url": "https://api.github.com/users/codex-worker-lacey/orgs",
+      "repos_url": "https://api.github.com/users/codex-worker-lacey/repos",
+      "events_url": "https://api.github.com/users/codex-worker-lacey/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/codex-worker-lacey/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "codex-worker-lacey",
+      "id": 284341814,
+      "node_id": "U_kgDOEPK2Ng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/284341814?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/codex-worker-lacey",
+      "html_url": "https://github.com/codex-worker-lacey",
+      "followers_url": "https://api.github.com/users/codex-worker-lacey/followers",
+      "following_url": "https://api.github.com/users/codex-worker-lacey/following{/other_user}",
+      "gists_url": "https://api.github.com/users/codex-worker-lacey/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/codex-worker-lacey/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/codex-worker-lacey/subscriptions",
+      "organizations_url": "https://api.github.com/users/codex-worker-lacey/orgs",
+      "repos_url": "https://api.github.com/users/codex-worker-lacey/repos",
+      "events_url": "https://api.github.com/users/codex-worker-lacey/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/codex-worker-lacey/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+        "url": "https://api.github.com/repos/laceyenterprises/agent-os/commits/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb",
+        "html_url": "https://github.com/laceyenterprises/agent-os/commit/c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb"
+      }
+    ]
+  }
+]

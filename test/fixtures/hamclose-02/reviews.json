@@ -1,0 +1,162 @@
+[
+  {
+    "id": 5486153522,
+    "node_id": "PRR_kwDOR6Em7c8AAAABRwAPMg",
+    "user": {
+      "login": "lacey-gemini-reviewer[bot]",
+      "id": 291677684,
+      "node_id": "BOT_kgDOEWKl9A",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3994139?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/lacey-gemini-reviewer",
+      "followers_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "## Adversarial Review \u2014 Gemini (gemini-reviewer-lacey)\n\n> Reviewer: gemini \u00b7 Gemini 3.1 Pro (High) \u00b7 none\n\n## Summary\nThe PR implements an explicit unattended mode across the installation and migration scripts, substituting interactive prompts with strict requirements for environment inputs. It intercepts `sudo` and `git` commands to guarantee non-interactive execution and properly enforces `AGENT_OS_DISPOSABLE_GUEST` during password handling. However, the implementation introduces a blocking operational violation by converting several transient subprocess errors (such as those from `git clone` and `launchctl bootstrap` via `os-restart.sh`) into immediate fatal installation failures in unattended mode.\n\n## Blocking issues\n- **Transient subprocess errors treated as fatal**\n  - **File:** `bootstrap/bootstrap.sh`\n  - **Lines:** 594-600, 1205-1213\n  - **Problem:** The diff introduces immediate, terminal `fail` calls for system commands when `AGENT_OS_NON_INTERACTIVE=1`. Specifically, if `sudo \"$AGENT_OS_ROOT/scripts/os-restart.sh\" --install-only` (which invokes `launchctl bootstrap`) fails, the script evaluates the `else` block and executes `fail \"runtime plist installation failed\"` (line 1209). Similarly, if `git clone \"$repo\" \"$dest\"` fails, it executes `fail \"requested repository clone failed\"` (line 596). This same fatal pattern without retry is applied to `npm install` (line 512), `colima start` (line 1088), and `brew bundle` (in `bootstrap/lib/unattended.sh`). I confirmed there is no surrounding retry block for any of these commands.\n  - **Why it matters:** macOS launchd routinely returns transient errors like `Bootstrap failed: 5: Input/output error` (EIO) if a prior bootout hasn't settled. Similarly, `git clone` and package managers (`npm`, `brew`) frequently fail due to transient network timeouts or TLS handshake failures. Terminating the entire unattended installer upon the first occurrence of these common transient errors turns them into permanent lab provision outages, explicitly violating the operational behavior rule for subprocess transient errors.\n  - **Recommended fix:** Classify transient errors from these subprocesses (e.g., EIO for launchd, network/timeout/TLS errors for `git` and package managers) and retry with bounded backoff rather than immediately calling `fail`. Retain immediate escalation for non-transient errors.\n\n## Non-blocking issues\n- **Precheck subprocess stderr swallowed**\n  - **File:** `bootstrap/lib/unattended.sh`\n  - **Lines:** 101-102\n  - **Problem:** In `installer_unattended_precheck`, the `subprocess.Popen` call sets `stderr=subprocess.DEVNULL`.\n  - **Why it matters:** If `scripts/pre-bootstrap-checklist.sh` fails due to an unexpected syntax error, missing dependency, or crash, all diagnostic output is swallowed. This obscures the root cause and makes it harder for an operator to debug why the precheck failed or timed out.\n  - **Recommended fix:** Capture stderr (`subprocess.PIPE`) and include it in the timeout/error message, or log it to a designated debug file (ensuring any secrets are still sanitized if needed).\n\n## Suggested fixes\n1. Implement a `retry_with_backoff` wrapper in `unattended.sh` or `bootstrap.sh` that checks the exit code and/or stderr of `os-restart.sh`, `git clone`, and the package manager commands.\n2. Wrap the failing calls in `bootstrap.sh` with this retry logic before escalating to `fail` in unattended mode.\n3. In `installer_unattended_precheck`, change `stderr=subprocess.DEVNULL` to `stderr=subprocess.PIPE` and safely log or output the errors upon failure.\n\n## Verdict\nRequest changes",
+    "state": "DISMISSED",
+    "html_url": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486153522",
+    "pull_request_url": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486153522"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132"
+      }
+    },
+    "submitted_at": "2026-10-12T02:51:34Z",
+    "commit_id": "9f367e639e0bfc58a505a922f21c08b5926642cc"
+  },
+  {
+    "id": 5486361984,
+    "node_id": "PRR_kwDOR6Em7c8AAAABRwM9gA",
+    "user": {
+      "login": "lacey-gemini-reviewer[bot]",
+      "id": 291677684,
+      "node_id": "BOT_kgDOEWKl9A",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3994139?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/lacey-gemini-reviewer",
+      "followers_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "## Adversarial Review \u2014 Gemini (gemini-reviewer-lacey)\n\n> Reviewer: gemini \u00b7 Gemini 3.1 Pro (High) \u00b7 none\n\n## Summary\n\nI reviewed the unattended installer implementation, focusing on the load-bearing operational constraints, cross-user boundary safety, and failure recovery. The PR cleanly implements unattended mode with robust guards: it correctly isolates the `sysadminctl` argv password exception to disposable guests, enforces pre-authorized `sudo` without falling back to a terminal prompt, properly restricts Keychain/OAuth interactions, and delegates system calls to a well-classified subprocess retry helper that respects transient EIO and network errors. It explicitly handles the `git clone` partial-failure state by splitting submodule initialization so transient failures can be recovered without discarding the parent checkout. The implementation is solid.\n\n## Blocking issues\n\n- None.\n\n## Non-blocking issues\n\n- **Divergent clone logic between modes**\n  - **File:** `bootstrap/install-agent-os.sh`\n  - **Lines:** 763-775\n  - **Problem:** The unattended branch separates `git clone` and `git submodule update` into two independent steps to preserve a populated parent checkout upon submodule transfer failure, but the attended branch still uses a single `git clone --recurse-submodules`.\n  - **Why it matters:** While attended mode does not use automatic retries, an operator manually rerunning the script after a submodule network timeout will encounter a \"destination path already exists\" error because the parent clone is left behind, forcing them to manually delete it before retrying. Keeping both paths identical reduces operator friction and maintenance divergence.\n  - **Recommended fix:** Unify the logic by using the split `git clone` and `git submodule update --init --recursive` operations for both attended and unattended modes, removing `--recurse-submodules` entirely.\n\n## Suggested fixes\n\n- Apply the single non-blocking recommendation to unify the `git clone` and `submodule update` steps across both attended and unattended modes.\n\n## Verdict\n\nComment only",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486361984",
+    "pull_request_url": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486361984"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132"
+      }
+    },
+    "submitted_at": "2026-10-12T03:47:41Z",
+    "commit_id": "368626dd2d7eaece165bb2611bb7c53934bb02cf"
+  },
+  {
+    "id": 5486766904,
+    "node_id": "PRR_kwDOR6Em7c8AAAABRwlrOA",
+    "user": {
+      "login": "lacey-claude-reviewer[bot]",
+      "id": 291676910,
+      "node_id": "BOT_kgDOEWKi7g",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3994110?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/lacey-claude-reviewer",
+      "followers_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/lacey-claude-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "## Adversarial Review \u2014 Claude (claude-reviewer-lacey)\n\n> Reviewer: claude \u00b7 claude-opus-5-5 \u00b7 high\n\n## Summary\nThe unattended installer path has a recovery gap. The new strict readiness gate runs `pre-bootstrap-checklist.sh` through the TIH-01 adapter at `Stage.READINESS`, where any non-pass check makes the install unqualified. That gate sits before runtime/launchd mutation in every unattended `bootstrap.sh` run. Two things it checks are things the installer itself creates or deliberately leaves unset:\n- **Ports:** the Colima-forwarded compose ports (4000, 3001, 3100, 3200, 4317, 9092). In-use ports are reported as `warn`.\n- **Global Git identity:** the installer never writes one; it only sets env and `-c` identity.\n\nSo an unattended install that fails after the runtime step cannot be resumed by re-running it. The PR now makes those later failures fatal: os-restart, compose start, and the health budget. This is the partial-failure-not-recoverable / preflight-refuses-recovery pattern.\n\nOther findings are advisory:\n- the existing `--non-interactive` contract changed under scripted callers;\n- the precheck runs on `python3` from PATH instead of the provisioned interpreter;\n- the service-account token stays exported for the rest of the run;\n- retry classification scans the whole output;\n- some behavior changed for attended runs.\n\nI did not find secret leakage to a public surface, a migration, or a mapped-SPEC trigger. The changed paths are not in the spec-mapping table.\n\n## Blocking issues\n- **Readiness gate blocks rerun after partial unattended install**\n  - **File:** `bootstrap/bootstrap.sh`, `bootstrap/lib/unattended.sh`\n  - **Lines:** `bootstrap.sh` 5.9 block (`installer_unattended_precheck \"$AGENT_OS_ROOT\" readiness \\|\\| fail ...`), `check_health` / `start_stack` / os-restart unattended `fail` branches; `unattended.sh` `installer_unattended_precheck`\n  - **Problem:** Every unattended `bootstrap.sh` run calls `installer_unattended_precheck ... readiness` before the runtime installer. That runs `scripts/pre-bootstrap-checklist.sh --json` through `checks.adapt(stage=READINESS)`, which adds a reason for every non-`pass` check (`checks.py` ~L119).\n    - **Ports:** the checklist records `port-<n>` as `warn` whenever `lsof` sees a listener. Section 7 then starts the compose stacks under the admin user's Colima, so the forwarded ports (LiteLLM 4000, Grafana 3001, Loki 3100, Tempo 3200, OTLP 4317, Prometheus 9092) are visible to the admin's `lsof`.\n    - **Fatal steps after the gate:** this PR makes these unattended failures fatal: `sudo os-restart.sh --install-only`, `start_stack`, `start_agent_control_stack`, and `check_health` (for example, LiteLLM missing `auth` within 18\u00d75s, or Agent Control).\n    - **What happens:** once a run gets past section 7 and then fails, every rerun stops at readiness with `warn:port-4000` and similar. It never reaches the idempotent runtime, plist, compose, or health steps again. A fully successful unattended install also cannot be re-run.\n    - **Git identity:** the checklist's `git-config` check reads `git config --global user.name/user.email`. The installer supplies identity only through `GIT_AUTHOR_*` env and `-c user.name=` (which `--global` reads ignore) and never writes global config. On a truly fresh lab host the gate therefore fails on the first run as well, unless the lab pre-seeds `~/.gitconfig`. That makes `AGENT_OS_INSTALL_GIT_NAME/EMAIL` redundant.\n    - **Token:** the same applies to `op-cli-auth` when no `AGENT_NAME` is selected, because nothing requires or exports a token in that case.\n  - **Why it matters:** This is the load-bearing \"partial-failure state not recoverable\" / \"preflight refuses recovery instead of attempting it\" pattern. The step-1 state (services started) permanently blocks step 2 (finishing or repairing the install). The operator then has to tear down services, or hand-run the remaining steps, before the installer can proceed. That is the routine recovery the PR says it removes. The guard knows the conflicting holders are its own services and knows the missing global identity value, yet it refuses.\n  - **Recommended fix:** Make the readiness stage re-entrant. Either:\n    - run the readiness gate only when no prior-attempt marker or install state exists, and record a durable \"readiness passed for this attempt\" marker that later reruns honor; or\n    - pass the expected Agent OS listeners (canonical labels and compose projects) to the adapter as an allowlist of self-owned holders, so only foreign holders count.\n\n    Also, in unattended mode, write `git config --global user.name/email` from `AGENT_OS_INSTALL_GIT_NAME/EMAIL` for the invoking user before the precheck, or make the adapter accept the explicit install identity. Either require `OP_SERVICE_ACCOUNT_TOKEN` unconditionally in unattended core inputs, or exclude `op-cli-auth` explicitly when no workspace is selected. Add a fixture: a rerun with the canonical ports held must reach the runtime installer.\n\n## Non-blocking issues\n- **Existing `--non-interactive` scripted contract silently repurposed**\n  - **File:** `bootstrap/install-agent-os.sh`\n  - **Lines:** usage text, `main()`, `install_harnesses()`, `hand_off_to_bootstrap` env export\n  - **Problem:** `bootstrap/AGENTS.md` documents `AGENT_OS_NON_INTERACTIVE=1` + `AGENT_OS_MODE` for scripted green-field installs. That flag now:\n    - requires lab-only inputs (`AGENT_OS_UNATTENDED_EXCLUDE_KEYCHAIN=1`, Git name/email);\n    - exports unattended mode into `bootstrap.sh`;\n    - swaps Docker Desktop for Colima;\n    - drops the 1Password GUI cask;\n    - skips the keychain bridge, OAuth broker health checks, and Touch ID.\n  - **Why it matters:** Existing scripted callers either start refusing, or (once they add the acknowledgement) get a lab-profile install with OAuth/Keychain excluded. AGENTS.md was not updated to say so.\n  - **Recommended fix:** Update `bootstrap/AGENTS.md` (and the fresh-Mac runbook) to describe the new unattended contract and its exclusions. Alternatively, keep a separate selector for the old \"skip wrapper prompts only\" behavior.\n- **Readiness adapter runs on PATH `python3`, not provisioned interpreter**\n  - **File:** `bootstrap/lib/unattended.sh`\n  - **Lines:** `installer_unattended_precheck` (`python3 - ...`)\n  - **Problem:** `contracts.py` uses `enum.StrEnum` and `X | None`, which need Python 3.11 or later. Bootstrap provisions `python@3.14` and exports `HQ_PYTHON3`, but the precheck invokes whatever `python3` resolves to. That may be Apple's 3.9 CLT stub on a fresh host.\n  - **Why it matters:** The adapter would fail with an ImportError traceback on stderr, outside `preserve_stderr`. The result would read as \"readiness failed\" rather than as an interpreter problem.\n  - **Recommended fix:** Use `\"${HQ_PYTHON3:-python3}\"` and fail with a clear message if the interpreter version is below 3.11.\n- **Service-account token stays exported for the rest of the unattended run**\n  - **File:** `bootstrap/bootstrap.sh`\n  - **Lines:** 5/8 validation block (`if [[ ... != 1 ]]; then unset OP_SERVICE_ACCOUNT_TOKEN; fi`)\n  - **Problem:** In unattended mode the token read from `op-service-account.env` is never unset. It is inherited by:\n    - npm and brew children;\n    - the runtime installer and the capture files of its retries;\n    - compose `up` (a bare `OP_SERVICE_ACCOUNT_TOKEN` passthrough in a compose file would inject it into containers);\n    - every process `ps eww` can see.\n  - **Why it matters:** This widens credential exposure compared with the attended path, without a stated need.\n  - **Recommended fix:** Unset it after validation in both modes. Pass it explicitly only to the specific step that needs it (for example, the readiness `op-cli-auth` probe).\n- **Retry classifier scans entire command output**\n  - **File:** `bootstrap/lib/unattended.sh`\n  - **Lines:** `installer_output_is_transient`\n  - **Problem:** The patterns run over the full stdout and stderr of long delegates such as `install-agent-os-runtime.sh` and `brew bundle`. Any benign `timeout`/`502`/`ECONNREFUSED` text anywhere in the output reruns the whole delegate after an unrelated hard failure. Conversely, any benign `No such file or directory` line suppresses a legitimate transient retry.\n  - **Why it matters:** Retry behavior on long runs becomes hard to predict. Rerunning the entire runtime installer is only safe if every step is truly idempotent.\n  - **Recommended fix:** Classify the tail of stderr (for example, the last N lines), or the final error block, rather than the entire capture.\n- **Exported `sudo` wrapper with `--preserve-env` leaks into child producers**\n  - **File:** `bootstrap/lib/unattended.sh`\n  - **Lines:** `installer_unattended_functions` (`export -f sudo git`)\n  - **Problem:** The exported function is inherited by every child bash, including `pre-bootstrap-checklist.sh`'s `sudo -n -l` probe, whose message the adapter requires to start with \"sudo authorized non-interactively\". Under a restrictive sudoers policy (no SETENV / not `ALL`), the `--preserve-env=<list>` can be rejected, which would fail the probe or later privileged commands. The lab's sudoers shape is unspecified, so this is uncertain.\n  - **Why it matters:** Readiness or privileged steps could fail for a reason unrelated to the host's actual state.\n  - **Recommended fix:** Document the required sudoers shape (SETENV or `ALL`), or drop `--preserve-env` for list, validate, and query modes.\n- **Attended-mode behavior changes beyond unattended scope**\n  - **File:** `bootstrap/install-agent-os.sh`, `bootstrap/install.sh`, `bootstrap/bootstrap.sh`\n  - **Lines:** `install_harnesses` (fatal bundle, now always runs); `install.sh` preflight moved after `phase_1_apps`; `bootstrap.sh` closed-stdin refusal; runtime install moved from 4.25 to 5.9\n  - **Problem:** Several changes apply to attended runs too:\n    - Wrapper `brew bundle` failures (for example, casks needing interactive acceptance) are now fatal.\n    - `--preflight --phase-1-apps` now mutates before preflight.\n    - Attended `bootstrap.sh` with non-tty stdin now refuses.\n    - The runtime install surface now runs after the 1Password, broker, and keychain-bridge steps.\n  - **Why it matters:** These are intended hardening, but they are operator-visible changes to attended flows and are only documented in the TIH README.\n  - **Recommended fix:** Note them in `bootstrap/AGENTS.md` and the fresh-Mac runbook.\n- **Homebrew PgBouncer disable now gated behind readiness**\n  - **File:** `bootstrap/bootstrap.sh`\n  - **Lines:** 5.9 block (`disable_homebrew_pgbouncer_service` after precheck)\n  - **Problem:** If readiness refuses, the duplicate Homebrew PgBouncer service is never disabled. An existing `homebrew.mxcl.pgbouncer` holding 6432 also makes readiness report `warn:port-6432`, so the step that would fix the conflict never runs.\n  - **Why it matters:** This compounds the blocking re-entrancy issue above.\n  - **Recommended fix:** Run the duplicate-service removal before the readiness probe, or treat it as part of the expected-holder reconciliation.\n\n## Suggested fixes\n- Make unattended readiness re-entrant: allowlist self-owned canonical listeners, or skip/record readiness per attempt. Add a rerun fixture in which the canonical ports are held.\n- Write a global Git identity from `AGENT_OS_INSTALL_GIT_NAME/EMAIL` before the precheck. Require or explicitly exclude `op-cli-auth` when no agent workspace is selected.\n- Invoke the adapter with `${HQ_PYTHON3:-python3}` and check that the version is at least 3.11.\n- Unset `OP_SERVICE_ACCOUNT_TOKEN` after validation in unattended mode as well.\n- Classify only the tail of stderr in `installer_output_is_transient`.\n- Move `disable_homebrew_pgbouncer_service` ahead of the readiness probe.\n- Update `bootstrap/AGENTS.md` and the fresh-Mac runbook for the new `--non-interactive` contract and the attended-mode ordering and fatality changes.\n\n## Verdict\nRequest changes",
+    "state": "DISMISSED",
+    "html_url": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486766904",
+    "pull_request_url": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486766904"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132"
+      }
+    },
+    "submitted_at": "2026-10-12T05:19:01Z",
+    "commit_id": "c54b8ec1feecb37d1bed3b1e27f8b1a15cb5d6bb"
+  },
+  {
+    "id": 5486933247,
+    "node_id": "PRR_kwDOR6Em7c8AAAABRwv0_w",
+    "user": {
+      "login": "lacey-gemini-reviewer[bot]",
+      "id": 291677684,
+      "node_id": "BOT_kgDOEWKl9A",
+      "avatar_url": "https://avatars.githubusercontent.com/in/3994139?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/lacey-gemini-reviewer",
+      "followers_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/lacey-gemini-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "## Adversarial Review \u2014 Gemini (gemini-reviewer-lacey)\n\n> Reviewer: gemini \u00b7 Gemini 3.1 Pro (High) \u00b7 none\n\n## Summary\nReviewed the unattended installation mode additions and retry wrappers across the bootstrap toolchain. The implementation adheres to the required operational patterns: transient `launchctl` and network errors are classified and retried using the final 20 lines of stderr (avoiding the `.splitlines()[0]` truncation hazard), subprocess output buffering is restricted to non-interactive mode to preserve streaming output for attended runs, and cross-user operations (`mkdir`, `tee`, `git clone`) correctly enforce identity boundaries via `sudo -u`. The introduction of the `readiness-v1` checkpoint ensures re-entrancy for partial failures.\n\n## Blocking issues\n- None.\n\n## Non-blocking issues\n- None.\n\n## Suggested fixes\n- None.\n\n## Verdict\nComment only",
+    "state": "APPROVED",
+    "html_url": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486933247",
+    "pull_request_url": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/laceyenterprises/agent-os/pull/8132#pullrequestreview-5486933247"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/laceyenterprises/agent-os/pulls/8132"
+      }
+    },
+    "submitted_at": "2026-10-12T05:51:14Z",
+    "commit_id": "aa7001ca2f07a3c0a86ac955c21b2d36e6bf9c90"
+  }
+]

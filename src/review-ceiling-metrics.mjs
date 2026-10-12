@@ -136,7 +136,7 @@ export function countReviewCeilingUnits({
   repoPath,
   prNumber,
   headSha = null,
-  fallbackReviewAttempts = 0,
+  fallbackReviewAttempts: _fallbackReviewAttempts = 0,
 } = {}) {
   const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
     ? headSha.trim()
@@ -153,6 +153,7 @@ export function countReviewCeilingUnits({
             AND pr_number = ?
             AND pass_kind IN ('first-pass', 'rereview')
             AND status = 'completed'
+            AND gh_comment_id IS NOT NULL AND gh_comment_id <> ''
             AND head_sha = ?`,
       ).get(repoPath, prNumber, normalizedHeadSha);
       const completedCurrentHeadPasses = Number(row?.completed_current_head_passes || 0);
@@ -176,12 +177,13 @@ export function countReviewCeilingUnits({
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
-          AND pass_kind IN ('first-pass', 'rereview')`;
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND status = 'completed' AND gh_comment_id IS NOT NULL AND gh_comment_id <> ''`;
     const row = readDb.prepare(baseSql).get(repoPath, prNumber);
     const passCount = Number(row?.pass_count || 0);
     if (!Number.isFinite(passCount) || passCount <= 0) {
-      const fallback = Number(fallbackReviewAttempts || 0);
-      return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+      // An attempt counter cannot prove a posted review, even for legacy rows.
+      return 0;
     }
     const distinctCompletedHeads = Number(row?.distinct_completed_heads || 0);
     const legacyUnknownHeadPasses = Number(row?.legacy_unknown_head_passes || 0);

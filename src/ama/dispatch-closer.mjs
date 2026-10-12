@@ -98,6 +98,7 @@ import {
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
+  readAmaCloserDispatchLease,
   updateAmaCloserLease,
 } from './closer-lease.mjs';
 export {
@@ -1818,6 +1819,8 @@ export function isAmaCloserLaunchInProgress(record, options = {}) {
 export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return false;
   const state = String(record.state || '').trim().toLowerCase();
+  if (options.lease?.status === 'handed-to-review'
+    || AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(record.lastObservedStatus))) return false;
   if (state === 'dispatching') {
     return !isStaleDispatchingAmaCloserRecord(record, options);
   }
@@ -1867,7 +1870,8 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
     const dispatchPath = join(dir, name);
     try {
       const record = readJsonFile(dispatchPath);
-      if (!isActiveAmaCloserDispatchRecord(record, options)) continue;
+      if (!isActiveAmaCloserDispatchRecord(record, { ...options,
+        lease: readAmaCloserDispatchLease(rootDir, record) })) continue;
       const prNumber = Number(record?.prNumber);
       if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
       activeDispatches.push({
@@ -4216,7 +4220,8 @@ export async function maybeDispatchAmaCloser({
   }
   const orphanAdmit = ownerProofRecovery;
   if (!orphanAdmit && verdict.reasons.some((reason) => reason === 'primary-change-reverted' || reason === 'primary-change-unknown')) {
-    const missingEvidence = primaryChangeExactReviewEvidence(verdict.trace);
+    const missingEvidence = verdict.trace?.primaryChange?.missingEvidence
+      || primaryChangeExactReviewEvidence(verdict.trace);
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true,
       ...(missingEvidence ? { missingEvidence, exactHeadReview: true } : {}) });

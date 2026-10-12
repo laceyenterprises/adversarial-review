@@ -1,0 +1,85 @@
+{
+  "row": {
+    "review_status": "pending",
+    "review_attempts": 0,
+    "reviewer_head_sha": null,
+    "revision_ref": "b82fde32bfff3289d83015ec865b32dca8d4b3e0",
+    "rereview_reason": "system-orphan-head-review:b82fde32bfff3289d83015ec865b32dca8d4b3e0",
+    "posted_at": null,
+    "failed_at": null
+  },
+  "passes": [
+    {
+      "attempt_number": 1,
+      "pass_kind": "first-pass",
+      "started_at": "2026-10-12T04:44:00.722Z",
+      "ended_at": "2026-10-12T04:45:27.167Z",
+      "status": "completed",
+      "head_sha": "dafce4d3f0a1a4f6a61c05d20f5b326c2c5ed118",
+      "gh_comment_id": "5486619470"
+    },
+    {
+      "attempt_number": 1,
+      "pass_kind": "remediation",
+      "started_at": "2026-10-12T04:47:06.948Z",
+      "ended_at": "2026-10-12T05:00:14.738Z",
+      "status": "completed",
+      "head_sha": null,
+      "gh_comment_id": "6118053488"
+    },
+    {
+      "attempt_number": 2,
+      "pass_kind": "rereview",
+      "started_at": "2026-10-12T05:12:10.354Z",
+      "ended_at": "2026-10-12T05:12:13.110Z",
+      "status": "completed",
+      "head_sha": "b82fde32bfff3289d83015ec865b32dca8d4b3e0",
+      "gh_comment_id": null
+    },
+    {
+      "attempt_number": 3,
+      "pass_kind": "rereview",
+      "started_at": "2026-10-12T05:30:56.866Z",
+      "ended_at": "2026-10-12T05:31:28.203Z",
+      "status": "completed",
+      "head_sha": "b82fde32bfff3289d83015ec865b32dca8d4b3e0",
+      "gh_comment_id": null
+    },
+    {
+      "attempt_number": 4,
+      "pass_kind": "rereview",
+      "started_at": "2026-10-12T05:41:11.748Z",
+      "ended_at": "2026-10-12T05:41:13.654Z",
+      "status": "completed",
+      "head_sha": "b82fde32bfff3289d83015ec865b32dca8d4b3e0",
+      "gh_comment_id": null
+    },
+    {
+      "attempt_number": 1,
+      "pass_kind": "closer",
+      "started_at": "2026-10-12T05:44:53Z",
+      "ended_at": "2026-10-12T05:53:58Z",
+      "status": "failed",
+      "head_sha": null,
+      "gh_comment_id": null
+    },
+    {
+      "attempt_number": 2,
+      "pass_kind": "closer",
+      "started_at": "2026-10-12T05:53:58Z",
+      "ended_at": "2026-10-12T06:11:42Z",
+      "status": "failed",
+      "head_sha": null,
+      "gh_comment_id": null
+    },
+    {
+      "attempt_number": 3,
+      "pass_kind": "closer",
+      "started_at": "2026-10-12T06:11:42Z",
+      "ended_at": "2026-10-12T06:24:08Z",
+      "status": "failed",
+      "head_sha": null,
+      "gh_comment_id": null
+    }
+  ]
+}

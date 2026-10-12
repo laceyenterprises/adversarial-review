@@ -1608,6 +1608,30 @@ findings are allowed. Reviewers must still flag inversions or neutralizations of
 the tested primary-change behavior. Renaming production code into a test path
 does not exempt its protected baseline.
 
+PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
+records under `data/primary-change-history`, keyed by repository, PR, base SHA,
+head SHA, merge base, reviews and dispatcher provenance, with builder-boundary
+compatibility checked on reuse. Live head/base and merge-base metadata
+are checked before reuse; CI-cost evidence remains live. Only completed successful
+history reads are stored. A daemon timeout cancels merge execution while the
+bounded history read finishes and stores evidence for the next tick; stall logs
+name the running read and elapsed seconds. The existing cache sweep removes
+records older than seven days and retains at most 512 records, without a new knob.
+Compare pages use four workers; blob pairs and tree pairs are fetched together.
+Metadata-only cost reads avoid reconstructing patches they do not consume;
+each page/blob/diff retains the existing output bound.
+
+The [primary-change history data model](data-model/primary-change-history.md)
+defines the record layout and retention. Cache access and sweeping require the
+canonical runtime data owner's effective UID; `data/`, the store directory and
+existing records are checked before mutation, and asynchronous publication
+rechecks ownership. Hammer workers under another UID must run the snapshot or
+full-context helper through `sudo -A -H -u <owner>` with the canonical owner's
+runtime environment and `HAM_ROOT_DIR`. Ownership mismatches fail as history
+read failures before a worker can publish a private `0600` record in the daemon
+tree. No automatic ownership changes occur; pre-existing wrong-owner cache
+files require operator cleanup before retrying under the canonical owner.
+
 The hammer's `bin/primary-change-context.mjs` reads each GitHub endpoint through
 `execGhWithRetry`: transient transport, timeout, rate-limit and HTTP 5xx failures
 get at most three attempts with 500/1000ms backoff and a 15-second timeout per

@@ -1,3 +1,4 @@
+import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 // ── Posted-review row: per-row post-review dispatch hub ───────────────────────
 //
 // ARC-18: extracted from watcher.mjs. `handlePostedReviewRow` is the per-row
@@ -962,7 +963,7 @@ export function createNoProgressLaneGate({
         );
       }
       if (outcome?.progressed === false && !isTerminalReviewRow(row)) {
-        const missingInput = chooseNoProgressMissingInput({
+        const missingInput = primaryChangeReadStatus({ rootDir, repo: handler.repoPath, prNumber: handler.prNumber, headSha: handler.headSha }) || chooseNoProgressMissingInput({
           value,
         });
         const producer = resolveNoProgressProducerState({

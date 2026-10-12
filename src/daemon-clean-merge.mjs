@@ -811,10 +811,15 @@ export async function runDaemonCleanMergeAttempt({
   // refreshed live head above, after the same head-moved guard has ruled out a
   // snapshot mismatch, so it must pass that proven closer head to the merge
   // executor rather than a HAM audit head that may be absent or stale.
-  const readPrimaryChange = (headSha) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha, rootDir,
-    builderHead: workerIdentity.resolvedBy === 'head-attestation' ? null : workerIdentity.rowHeadSha,
-    get: createHistoryReader({ execGhWithRetryImpl: execGhWithRetryImpl, execFileImpl, env, signal }),
-  });
+  const readPrimaryChange = async (headSha) => {
+    // The immutable read owns its lifetime; the merge keeps the tick deadline.
+    const evidence = await fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha, rootDir,
+      builderHead: workerIdentity.resolvedBy === 'head-attestation' ? null : workerIdentity.rowHeadSha,
+      get: createHistoryReader({ execGhWithRetryImpl, execFileImpl, env }),
+    });
+    signal?.throwIfAborted();
+    return evidence;
+  };
   const primaryChange = await readPrimaryChange(liveHead);
   let ciMergePathPending = false;
   const bootstrapFor = async (rollup) => {

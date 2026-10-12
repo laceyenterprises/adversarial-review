@@ -73,6 +73,15 @@ test('closure-lag pages present the SEV1 and name the blocking PR and reason', (
 });
 
 test('contended lag lock leaves timers and IO responsive and times out safely', { timeout: 5000 }, async (t) => {
+  const previous = process.env.AMA_CLOSURE_LAG_LOCK_WAIT_MS;
+  let observeWithShortWait;
+  try {
+    process.env.AMA_CLOSURE_LAG_LOCK_WAIT_MS = '1000';
+    ({ observeCloserBacklog: observeWithShortWait } = await import('../src/ama/closure-lag.mjs?short-lock-wait'));
+  } finally {
+    if (previous === undefined) delete process.env.AMA_CLOSURE_LAG_LOCK_WAIT_MS;
+    else process.env.AMA_CLOSURE_LAG_LOCK_WAIT_MS = previous;
+  }
   const rootDir = root(t);
   await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 1 });
   const dir = join(rootDir, 'data', 'ama-closure-lag');
@@ -80,7 +89,7 @@ test('contended lag lock leaves timers and IO responsive and times out safely', 
   const fd = openSync(join(dir, 'state.lock'), 'a');
   fsExt.flockSync(fd, 'ex');
   try {
-    const observation = observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 2 });
+    const observation = observeWithShortWait({ rootDir, repo: 'test/repo', prNumber: 2 });
     let settled = false;
     observation.then(() => { settled = true; }, () => { settled = true; });
     const rejection = assert.rejects(observation, (error) => ['EAGAIN', 'EWOULDBLOCK'].includes(error.code));
@@ -104,7 +113,24 @@ test('parse failures quarantine bad state and recover the census', async (t) => 
   assert.equal(await observeCloserBacklog(args), 1);
 });
 
-test('concurrent lag writers serialize without losing observations or exhausting IO workers', { timeout: 5000 }, async (t) => {
+test('lag lock tolerates contention beyond the former one-second budget', { timeout: 15000 }, async (t) => {
+  const rootDir = root(t);
+  await observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 1 });
+  const fd = openSync(join(rootDir, 'data', 'ama-closure-lag', 'state.lock'), 'a');
+  fsExt.flockSync(fd, 'ex');
+  try {
+    const observation = observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: 2 });
+    const result = assert.doesNotReject(observation);
+    // Observe early assertion failures while the lock remains held; await below still fails.
+    result.catch(() => {});
+    await delay(1100);
+    fsExt.flockSync(fd, 'un');
+    await result;
+    assert.equal(await observation, 2);
+  } finally { closeSync(fd); }
+});
+
+test('concurrent lag writers serialize without losing observations or exhausting IO workers', { timeout: 15000 }, async (t) => {
   const rootDir = root(t);
   const counts = await Promise.all(Array.from({ length: 16 }, (_, i) =>
     observeCloserBacklog({ rootDir, repo: 'test/repo', prNumber: i + 1, now: 1000 })));

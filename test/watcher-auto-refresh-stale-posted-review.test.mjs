@@ -1,3 +1,4 @@
+import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 /* Watcher auto-refreshes stale posted reviews when PR HEAD has moved.
  *
  * Before this fix, a `posted` review row in reviewed_prs sat forever
@@ -1691,6 +1692,10 @@ test('MSM-04: exhausted stale posted review uses stable dispatch key with proved
       },
       dispatchJob: { prUpdatedAt: '2026-07-04T12:00:00Z' },
       labelNames: [],
+      proveCloserAuthoredStaleHeadImpl: args => proveCloserAuthoredStaleHead({ ...args,
+        comments: [{ author: 'the-hammer-lacey[bot]',
+          body: `HAM-Base-Head: ${staleReviewedHead}\nHAM-Validated-Head: ${currentHead}` }],
+      }),
       loadConfigImpl: () => ({
         getMergeAuthorityConfig: () => ({
           enabled: true,

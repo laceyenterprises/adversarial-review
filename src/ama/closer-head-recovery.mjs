@@ -6,6 +6,7 @@ import { probeOrphanOwnership } from './orphan-watchdog.mjs';
 
 const EXACT_REVIEW_REASONS = new Set([
   'stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown',
+  'blocking-findings-present', 'non-blocking-findings-present', 'non-blocking-findings-unknown',
 ]);
 const PRIMARY_EVIDENCE_REVIEW_REASONS = new Set([
   'primary-change-reverted', 'blocking-findings-present',

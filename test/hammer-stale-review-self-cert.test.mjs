@@ -1,3 +1,4 @@
+import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -345,6 +346,10 @@ async function runOrchestrationForSuppression(suppressed) {
     // The own-commit suppression proof — injected so the test is deterministic and
     // offline. suppressed:true models the hammer's own remediation commit at the
     // live head; suppressed:false models an external push.
+    proveCloserAuthoredStaleHeadImpl: args => proveCloserAuthoredStaleHead({ ...args,
+      comments: suppressed ? [{ author: 'the-hammer-lacey[bot]',
+        body: `HAM-Base-Head: ${REVIEWED_HEAD}\nHAM-Validated-Head: ${CURRENT_HEAD}` }] : [],
+    }),
     resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed, reason: 'closer-commit-trailer' }),
     fetchHeadCloserVerifiedCommitImpl: async () => ({ sha: CURRENT_HEAD, parentSha: REVIEWED_HEAD,
       message: 'Closed-By: hammer' }),

@@ -11,10 +11,8 @@
 // watcher fixtures stub (`fixture:head-closer-commit-suppression`).
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import {
-  fetchHeadCloserVerifiedCommit,
-  getHeadCloserCommitSuppression,
-} from './head-closer-commit-suppression.mjs';
+import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 export const CLOSER_AUTHORED_STALE_WAKE_REASON = 'closer-authored-stale-head-eligible';
@@ -33,52 +31,40 @@ function sha(value) {
 }
 
 /**
- * Commit-graph half of the rule. Walks first-parent from `currentHead` through
- * single-parent closer-trailer commits until it reaches an anchor: the reviewed
- * head itself, or a comment-only final-round push recorded for that reviewed
- * head (COMMENTCLOSE-01 already carries the reviewed verdict to that push).
- * Any non-closer commit (a worker push, a rebased worker commit, a merge) on
- * the way stops the walk: the head needs exact-head re-review.
- *
- * Probe failures propagate; callers fail closed.
+ * Provenance half of the shared rule. Only authenticated hammer App comments
+ * can connect the exact current SHA back to the reviewed SHA. Commit trailers,
+ * author fields and builder/remediator anchor heads confer no merge authority.
+ * Read failures propagate for bounded recovery; tests supply comment fixtures.
  */
 export async function proveCloserAuthoredStaleHead({
-  reviewedHead,
-  currentHead,
-  anchorHeads = [],
-  maxCommits = 8,
-  suppressionImpl = getHeadCloserCommitSuppression,
-  fetchCommitImpl = fetchHeadCloserVerifiedCommit,
-  ...options
+  reviewedHead, currentHead, maxCommits = 8, comments = null,
+  execGhWithRetryImpl = execGhWithRetry, ...options
 } = {}) {
-  const reviewed = sha(reviewedHead);
-  const current = sha(currentHead);
+  const reviewed = sha(reviewedHead), current = sha(currentHead);
   const base = { proven: false, reviewedHead: reviewed || null, currentHead: current || null,
     anchorHead: null, closerCommits: [] };
   if (!reviewed || !current) return { ...base, reason: 'head-unknown' };
   if (reviewed === current) return { ...base, reason: 'not-stale' };
-  const anchors = new Set([reviewed, ...anchorHeads.map(sha).filter(Boolean)]);
-  if (anchors.has(current)) return { ...base, reason: 'not-stale' };
-  const closerCommits = [];
-  const seen = new Set();
-  let head = current;
-  while (!anchors.has(head)) {
-    if (closerCommits.length >= maxCommits) return { ...base, closerCommits, reason: 'closer-chain-too-long' };
-    if (!head || seen.has(head)) return { ...base, closerCommits, reason: 'closer-chain-broken' };
-    seen.add(head);
-    const proof = await suppressionImpl({ ...options, headSha: head });
-    if (proof?.suppressed !== true || proof.reason !== 'closer-commit-trailer') {
-      return { ...base, closerCommits, nonCloserCommit: head, reason: 'non-closer-commit-after-reviewed-head' };
+  if (!comments) {
+    comments = [];
+    // An absent test collaborator is missing evidence, never live GitHub I/O.
+    if (!options.repoPath || !options.prNumber || (process.env.NODE_TEST_CONTEXT
+      && !options.execFileImpl && execGhWithRetryImpl === execGhWithRetry)) {
+      return { ...base, reason: 'hammer-app-attestation-missing' };
     }
-    const commit = await fetchCommitImpl({ ...options, headSha: head });
-    if (commit?.sha !== head || !commit.parentSha) return { ...base, closerCommits, reason: 'closer-chain-broken' };
-    if (commit.parentCount != null && commit.parentCount !== 1) {
-      return { ...base, closerCommits, nonCloserCommit: head, reason: 'merge-commit-in-closer-chain' };
+    for (let page = 1; ; page++) {
+      const batch = JSON.parse((await execGhWithRetryImpl({ ...options,
+        args: ['api', `repos/${options.repoPath}/issues/${options.prNumber}/comments?per_page=100&page=${page}`],
+        timeoutMs: 15000 })).stdout);
+      comments.push(...batch);
+      if (batch.length < 100) break;
     }
-    closerCommits.push(head);
-    head = commit.parentSha;
   }
-  return { ...base, proven: true, anchorHead: head, closerCommits, reason: 'closer-commits-only' };
+  const chain = hammerAttestationChain(comments, reviewed, current);
+  if (!chain) return { ...base, reason: 'hammer-app-attestation-missing' };
+  if (chain.length > maxCommits) return { ...base, reason: 'closer-chain-too-long' };
+  return { ...base, proven: true, anchorHead: reviewed, closerCommits: [...chain].reverse(),
+    reason: 'hammer-app-attestation-chain' };
 }
 
 /**

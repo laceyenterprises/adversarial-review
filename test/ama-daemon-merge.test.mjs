@@ -735,6 +735,8 @@ test('lease held by another principal → defers cleanly; no merge, no audit', a
   const result = await attemptDaemonCleanMerge(baseArgs(h));
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
   assert.equal(result.reason, 'lease-contended');
+  assert.equal(h.calls.acquire, 3, 'contention retries within the same tick');
+  assert.deepEqual(h.calls.sleeps, [250, 500]);
   assert.equal(h.calls.merge, 0, 'no double-merge under contention');
   assert.equal(h.calls.release, 0, 'never release a lease we do not hold');
   assert.equal(h.auditStore.size, 0);

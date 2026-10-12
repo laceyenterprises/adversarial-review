@@ -501,8 +501,19 @@
       "path": "docs/data-model/ama-closer-leases.md",
       "store": "data/ama-closer-leases/",
       "schemaSurface": "src/ama/closer-lease.mjs",
-      "relatedSchemaSurfaces": ["src/ama/closer-terminal-cancel.mjs"],
-      "owner": "AMA closer ownership and terminal settlement"
+      "relatedSchemaSurfaces": ["src/ama/closer-terminal-cancel.mjs", "bin/hammer-review-handoff.mjs"],
+      "owner": "AMA closer ownership and terminal settlement",
+      "statusValues": ["pending", "dispatched", "handed-to-review", "terminal"]
+    },
+    {
+      "id": "ama-closure-waits",
+      "title": "AMA Closure Waits",
+      "path": "docs/data-model/ama-closure-waits.md",
+      "store": "data/ama-closure-waits/<sha256(repo#prNumber)>.db",
+      "schemaSurface": "src/ama/closure-wait.mjs",
+      "relatedSchemaSurfaces": ["src/ama-closure-orchestration.mjs", "src/ama/dispatch-closer.mjs"],
+      "owner": "AMA bounded closure wait and exhaustion paging",
+      "waitColumns": ["head", "started", "reason", "paged"]
     },
     {
       "id": "ama-closer-cancels",

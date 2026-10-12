@@ -14,8 +14,40 @@ export function fleetCommitIdentityMatches(commit, fleetLogins = DEFAULT_FLEET_L
 }
 
 export function exactHammerValidation(comment, headSha) {
-  return Boolean(headSha && login(comment?.author) !== 'clio-airlock' && hamAuditCommentAuthorMatches(comment)
-    && String(comment?.body || '').split(/\r?\n/).some(line => line.trim() === `HAM-Validated-Head: ${headSha}`));
+  const author = comment?.author?.login || comment?.author || comment?.user?.login;
+  const heads = String(comment?.body || '').split(/\r?\n/).map(line => line.trim())
+    .filter(line => line.startsWith('HAM-Validated-Head:'));
+  const terminalHeads = String(comment?.body || '').split(/\r?\n/).map(line => line.trim())
+    .filter(line => line.startsWith('HAM-Terminal-Remediation-Head:'));
+  return Boolean(headSha && login(author) !== 'clio-airlock' && hamAuditCommentAuthorMatches(author)
+    && heads.length === 1 && heads[0] === `HAM-Validated-Head: ${headSha}`
+    && (terminalHeads.length === 0 || (terminalHeads.length === 1
+      && terminalHeads[0] === `HAM-Terminal-Remediation-Head: ${headSha}`)));
+}
+
+// Only GitHub's authenticated comment author binds these edges. Commit metadata
+// and builder-authored copies of the same trailers confer no authority.
+export function hammerAttestationChain(comments, reviewedHead, currentHead) {
+  if (!reviewedHead || !currentHead) return null;
+  const trusted = new Map([[reviewedHead, []]]);
+  const edges = (Array.isArray(comments) ? comments : []).flatMap(comment => {
+    const normalized = { ...comment, author: comment.author?.login || comment.author || comment.user?.login };
+    const lines = String(comment.body || '').split(/\r?\n/).map(line => line.trim());
+    const bases = lines.filter(line => line.startsWith('HAM-Base-Head: ')).map(line => line.slice(15));
+    const heads = lines.filter(line => line.startsWith('HAM-Validated-Head: ')).map(line => line.slice(20));
+    if (bases.length !== 1 || heads.length !== 1 || !exactHammerValidation(normalized, heads[0])) return [];
+    return [{ base: bases[0], head: heads[0] }];
+  });
+  for (let pass = 0; pass < edges.length; pass++) {
+    let changed = false;
+    for (const edge of edges) {
+      if (!trusted.has(edge.base) || trusted.has(edge.head)) continue;
+      trusted.set(edge.head, [...trusted.get(edge.base), edge.head]);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return trusted.get(currentHead) || null;
 }
 
 export const HAMMER_RANGE_MAX_COMMITS = 10000;
@@ -41,7 +73,12 @@ async function readComparison(path, get, limit) {
 
 // Read the complete head-only DAG, including side parents. The comparison with
 // the base excludes base history; foreign PR commits cannot hide behind a merge.
-export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env }) {
+export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], hammerBaseHead = null }) {
+  const chain = hammerAttestationChain(comments, reviewedHead, hammerBaseHead || currentHead);
+  if (chain) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+    commits: [...chain, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
+    proof: 'hammer-app-attestation-chain' };
+  if (hammerBaseHead) return null;
   const { resolveGitHubAppBotLogin } = await import('../github-app-identity.mjs');
   const fleetLogins = [...DEFAULT_FLEET_LOGINS];
   for (const identity of ['codex-agent', 'claude-agent', 'gemini-agent', 'clio-agent']) {

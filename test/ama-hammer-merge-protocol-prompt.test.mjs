@@ -26,14 +26,14 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
 test('HAMVERIFY-01: publish uses API and every range failure requests one review without escalation', () => {
   assert.match(HAMMER_TEMPLATE, /HAM_COMMIT_PUBLICATION_ONLY=1/);
   assert.match(HAMMER_TEMPLATE, /tree IDs/);
-  const start = HAMMER_TEMPLATE.indexOf('[ "${HAM_API_PUBLISH_FALLBACK');
+  const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
   const end = HAMMER_TEMPLATE.indexOf('\n```', start);
   const block = HAMMER_TEMPLATE.slice(start, end);
   assert.match(block, /hammer-head-context\.mjs/);
   assert.match(block, /--pr <<PR_URL>>/);
   for (const exitCode of [1, 65, 124]) {
     const script = block.replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, `(exit ${exitCode})`)
-      .replace(/\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 gh[^\n]+/g, 'echo re-review');
+      .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review');
     const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${script}`],
       { encoding: 'utf8', timeout: 5000 });
     assert.ifError(result.error);
@@ -49,6 +49,51 @@ test('ordinary remediation publishes before validating the live head', () => {
   assert.match(ordinary, /hammer-procedure\.mjs hammer-publish --render/);
   assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
   assert.match(HAMMER_TEMPLATE, /Preserve rebased and multi-commit history/);
+});
+
+for (const [worker, handoffStatus] of [['worker', 0], ['canonical', 0], ['worker', 1]]) {
+  test(`review handoff runs as canonical owner from ${worker}, helper exit ${handoffStatus}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'hammer-handoff-owner-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, 'id'), `#!/bin/sh\necho ${worker}\n`, { mode: 0o755 });
+    writeFileSync(join(dir, 'sudo'), `#!/bin/sh
+test "$1" = -A && test "$2" = -H && test "$3" = -u && test "$4" = canonical || exit 99
+export HANDOFF_EFFECTIVE_OWNER="$4"
+shift 4
+exec "$@"
+`, { mode: 0o755 });
+    const runtime = join(dir, 'node-runtime');
+    writeFileSync(runtime, `#!${process.execPath}
+process.stdout.write(JSON.stringify({ owner: process.env.HANDOFF_EFFECTIVE_OWNER, args: process.argv.slice(2) }));
+process.exit(${handoffStatus});
+`, { mode: 0o755 });
+    const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
+    const block = HAMMER_TEMPLATE.slice(start, HAMMER_TEMPLATE.indexOf('\n```', start))
+      .replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, '(exit 65)')
+      .replace(/[^\n]*30 gh pr comment[^\n]*/, ':')
+      .replace(/<<ROOT_DIR>>/g, '/fixture').replace(/<<REPO>>/g, 'fixture/repo').replace(/<<PR_NUMBER>>/g, '42');
+    const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${block}`], {
+      encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HAM_NODE_BIN: runtime,
+        HAM_HQ_OWNER: 'canonical', HANDOFF_EFFECTIVE_OWNER: worker, POST_REMEDIATION_SHA: 'a'.repeat(40) },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, handoffStatus, result.stderr);
+    const call = JSON.parse(result.stdout);
+    assert.equal(call.owner, 'canonical');
+    assert.deepEqual(call.args, ['/fixture/bin/hammer-review-handoff.mjs',
+      '/fixture', 'fixture/repo', '42', 'a'.repeat(40)]);
+  });
+}
+
+test('starting head capture aborts before edits when its retry helper fails', () => {
+  const block = HAMMER_TEMPLATE.match(/At run start,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(block);
+  assert.match(block, /hammer-base-head\.mjs/);
+  const script = block.replace(/HAM_BASE_HEAD=\([^]*?\) \|\| exit 1/, 'HAM_BASE_HEAD=$(exit 1) || exit 1');
+  const result = spawnSync('bash', ['-c', `${script}\necho EDITS_STARTED`], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(result.stdout, /EDITS_STARTED/);
 });
 
 function run(command, args, options = {}) {
@@ -428,14 +473,14 @@ test('hammer audit comment composes footer from validated inputs', () => {
   assert.doesNotMatch(bodyComposer, /<n>|<b>|<nb>/);
   assert.match(
     bodyComposer,
-    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nHAM-Validated-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
+    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nHAM-Base-Head: %s\\nHAM-Validated-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
   );
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_TOTAL='<n>'/);
   assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$\{HAM_AUDIT_REMEDIATED_TOTAL:-\}"/);
   assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_BLOCKING \+ HAM_AUDIT_REMEDIATED_NON_BLOCKING/);
 });
 
-test('hammer audit is deduped by marker and refreshed in place across rebases (agent-os#4090)', () => {
+test('hammer audit deduplicates exact edges and preserves earlier App attestations', () => {
   // A single hammer that rebases the same terminal remediation onto an advancing
   // main must refresh ONE audit comment, not post a look-alike per rebase — which
   // read as several separate hammers. The dedup lookup keys on the STABLE marker
@@ -444,9 +489,10 @@ test('hammer audit is deduped by marker and refreshed in place across rebases (a
     /ham_existing_terminal_audit_comment_id\(\)\s*\{[\s\S]*?\n\}/,
   )?.[0];
   assert.ok(lookup, 'expected the audit-comment lookup function');
-  assert.match(lookup, /contains\(\$marker\)/);
+  assert.match(lookup, /hammer-audit-comment-id\.mjs/);
   // No longer keyed on the per-rebase head sha (that caused the duplicate posts):
-  assert.doesNotMatch(lookup, /\$head/);
+  assert.match(lookup, /HAM_BASE_HEAD/);
+  assert.match(lookup, /POST_REMEDIATION_SHA/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_HEAD=/);
   // An existing audit is refreshed IN PLACE (PATCH edit), not skipped or duplicated:
   assert.match(HAMMER_PROMPT, /gh api --method PATCH/);

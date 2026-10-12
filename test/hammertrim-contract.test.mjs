@@ -1,3 +1,4 @@
+import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -74,10 +75,11 @@ case "$*" in
 esac
 `);
   chmodSync(gh, 0o755);
+  writeFileSync(join(bin, 'git'), '#!/bin/sh\necho '+ 'a'.repeat(40) +'\n', { mode: 0o755 });
   const proof = join(bin, 'proof');
-  writeFileSync(proof, '#!/bin/sh\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
+  writeFileSync(proof, '#!/bin/sh\ncase "$1" in *hammer-audit-comment-id.mjs) exit 0;; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
   const env = {
-    HAM_NODE_BIN: proof,
+    HAM_NODE_BIN: proof, HAM_BASE_HEAD: 'a'.repeat(40),
     HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
     HAM_PR_NUMBER: '424242', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
     HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
@@ -106,11 +108,13 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   assert.match(body, /\*\*Fix gate\*\*/);
   assert.doesNotMatch(body, /<finding title>/);
   rmSync(bodyPath);
-  for (const refusal of [{ FAIL_PROOF: '1' }, { HAM_API_PUBLISH_FALLBACK: '1' }]) {
+  for (const refusal of [{ FAIL_PROOF: '1' }]) {
     const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...refusal });
     assert.match(refused.stdout, /STATUS=20 HELD=0 PUBLISHED=$/m);
     assert.equal(existsSync(bodyPath), false, 'failed proof must not post a validation audit');
   }
+  const gitPublished = run('/bin/bash', ['-c', shell, '_', script], { ...env, HAM_API_PUBLISH_FALLBACK: '1' });
+  assert.match(gitPublished.stdout, /STATUS=0 HELD=1 PUBLISHED=aaaaaaaa/);
   const failure = run('/bin/bash', ['-c', shell, '_', script], { ...env, FAIL_POST: '1' });
   assert.match(failure.stdout, /LEASE_RELEASED/);
   assert.match(failure.stdout, /STATUS=1 HELD=0 PUBLISHED=$/m);
@@ -228,7 +232,8 @@ test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
     prUrl: 'https://github.com/acme/repo/pull/42', repo: 'acme/repo', prNumber: 42,
     reviewedSha: 'a'.repeat(40), riskClass: 'medium', mergeMethod: 'squash',
     requiredGateContext: 'adversarial-review', auditPath: '/tmp/hammer-audit.json',
-    hqRoot: '/tmp/hq', rootDir: root, hqOwnerUser: 'tester', reviewedBy: 'reviewer',
+    // Keep this prompt-size fixture independent of the checkout path length.
+    hqRoot: '/tmp/hq', rootDir: '/tmp/adversarial-review', hqOwnerUser: 'tester', reviewedBy: 'reviewer',
     reviewer: 'reviewer', dispatchedAt: '2026-09-27T00:00:00Z', amaTrailers: '',
     templateBody: template,
   });
@@ -356,31 +361,40 @@ else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${
   }
 });
 
-for (const scenario of ['no-diff validated merge', 'accepted confirmation timeout', 'accepted confirmation permanent read error',
+for (const scenario of ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge', 'accepted confirmation timeout', 'accepted confirmation permanent read error',
   'superseded head', 'gate read failed', 'gate timeout', 'red CI after pending', 'permanent merge rejection']) {
-  test(`rendered hammer receipt classification: ${scenario}`, (t) => {
+  test(`rendered hammer receipt classification: ${scenario}`, async t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-receipt-decision-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const head = 'a'.repeat(40);
+    const reviewedHead = 'd'.repeat(40);
+    const successfulMerge = ['no-diff validated merge', 'git-attested merge', 'prior-attested-base merge'].includes(scenario);
     const verdict = join(dir, 'verdict.json');
     writeFileSync(verdict, JSON.stringify({ eligible: true, trace: {
       headMatch: { current: head }, branchProtection: { required: false },
     } }));
-    if (scenario === 'no-diff validated merge') {
-      const body = `HAM-Validated-Head: ${head}`;
+    if (successfulMerge) {
+      const startingBase = scenario === 'prior-attested-base merge' ? 'c'.repeat(40) : reviewedHead;
+      const body = `HAM-Base-Head: ${startingBase}\nHAM-Validated-Head: ${head}`;
+      const comments = [{ author: 'hammer-worker', body },
+        { author: 'hammer-worker', body: `HAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${'c'.repeat(40)}` }];
+      const range = await fetchHammerHeadRange({ reviewedHead, currentHead: head, comments,
+        get() { throw new Error('App proof requires no commit signatures'); } });
       const primaryChange = { headSha: head, hasHammerCommits: false };
-      const result = isEligibleForAmaClosure({ headSha: 'reviewed', verdict: 'request-changes', riskClass: 'low',
+      const result = isEligibleForAmaClosure({ headSha: reviewedHead, verdict: 'request-changes', riskClass: 'low',
         remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,
         nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
       { headSha: head, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE', labels: [],
         statusCheckRollup: [{ name: 'CI', conclusion: 'SUCCESS' }], branchProtection: { requiredContexts: ['CI'] } },
       { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
       { primaryChange, hamTerminalRemediation: { active: true, commit: { sha: head }, auditComment: { body, findings: [] } },
-        hamTerminalRemediationGroundTruth: { commit: { sha: head, changedFiles: [], primaryChange },
+        hamTerminalRemediationGroundTruth: { commit: { sha: head, changedFiles: scenario === 'no-diff validated merge' ? [] : ['src/auth.js'],
+            author: 'arbitrary-author', committer: 'arbitrary-committer',
+            commit: { verification: { verified: false, reason: 'unsigned' } }, primaryChange },
           auditComment: { body, author: 'hammer-worker' },
-          range: { verified: true, reviewedHead: 'reviewed', currentHead: head, baseSha: 'base', commits: [head] } } });
+          range } });
       assert.equal(result.eligible, true, JSON.stringify(result));
-      assert.equal(result.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
+      assert.equal(result.trace.hamTerminalRemediation.checks.nonEmptyCommit, scenario !== 'no-diff validated merge');
       writeFileSync(verdict, JSON.stringify(result));
     }
     mkdirSync(join(dir, '.hq'));
@@ -412,7 +426,7 @@ case "$*" in
     if [ "$RECEIPT_SCENARIO" = 'permanent merge rejection' ]; then echo 'permission denied' >&2; exit 1; fi
     exit 0 ;;
   'pr view '*)
-    if [ '${scenario}' = 'no-diff validated merge' ] && [ -f '${dir}/merge-attempted' ]; then
+    if [ '${successfulMerge}' = true ] && [ -f '${dir}/merge-attempted' ]; then
       echo '{"state":"MERGED","mergedAt":"${new Date().toISOString()}","mergeCommit":{"oid":"${'b'.repeat(40)}"},"headRefOid":"${head}"}'
       exit 0
     fi
@@ -446,7 +460,7 @@ esac
       eligibilityReason: 'ham-terminal-remediation', auditRef: `ama-audit:acme/repo:pr-424244:head-${head}` });
     const env = {
       HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424244', HAM_REPO: 'acme/repo',
-      HAM_PR_NUMBER: '424244', HAM_REVIEWED_SHA: head, HAM_TARGET_REMEDIATION_SHA: head,
+      HAM_PR_NUMBER: '424244', HAM_REVIEWED_SHA: successfulMerge ? reviewedHead : head, HAM_TARGET_REMEDIATION_SHA: head,
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: userInfo().username,
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
       HAM_AMA_TRAILERS: trailers,
@@ -455,7 +469,7 @@ esac
     const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
     assert.equal(render.status, 0, render.stderr);
     const script = join(dir, 'merge.sh');
-    writeFileSync(script, scenario === 'no-diff validated merge'
+    writeFileSync(script, successfulMerge
       ? render.stdout.replace('if ! ham_emit_git_merge_signal; then', 'if ! ham_fixture_emit_git_merge_signal; then')
         .replace('if ! ham_mark_ama_closer_lease_succeeded; then', 'if ! ham_fixture_mark_ama_closer_lease_succeeded; then')
       : render.stdout);
@@ -479,7 +493,7 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
       assert.match(result.stdout, /github-gate-red/);
       assert.doesNotMatch(result.stdout, /REFUNDED/);
     }
-    if (scenario === 'no-diff validated merge') {
+    if (successfulMerge) {
       assert.match(result.stdout, /STATUS=0 HELD=0 OWN=1 EXIT=0/);
       assert.equal(readFileSync(join(dir, 'merge-head'), 'utf8'), head);
     } else if (scenario.startsWith('accepted')) {
@@ -492,11 +506,11 @@ echo "STATUS=$? HELD=$HAM_MERGE_LEASE_HELD OWN=$HAM_OWN_MERGE_EXECUTED EXIT=$HAM
     }
     const directory = join(dir, 'dispatch/audit/automation-merge-actions');
     const receipts = (() => { try { return readdirSync(directory); } catch (error) { if (error.code === 'ENOENT') return []; throw error; } })();
-    assert.equal(receipts.length, ['no-diff validated merge', 'permanent merge rejection', 'red CI after pending'].includes(scenario) ? 1 : 0, result.stderr);
+    assert.equal(receipts.length, (successfulMerge || ['permanent merge rejection', 'red CI after pending'].includes(scenario)) ? 1 : 0, result.stderr);
     if (receipts.length) {
       const receipt = JSON.parse(readFileSync(join(directory, receipts[0])));
-      assert.equal(receipt.merged, scenario === 'no-diff validated merge');
-      if (scenario !== 'no-diff validated merge') assert.equal(receipt.reason, scenario === 'red CI after pending' ? 'github-gate-red' : 'permanent-merge-rejection');
+      assert.equal(receipt.merged, successfulMerge);
+      if (!successfulMerge) assert.equal(receipt.reason, scenario === 'red CI after pending' ? 'github-gate-red' : 'permanent-merge-rejection');
     }
   });
 }

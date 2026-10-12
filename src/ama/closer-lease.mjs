@@ -23,7 +23,11 @@
  *
  *   pending  ──dispatched()──▶ dispatched
  *                                  │
+ *                                  ├── review handoff ──▶ handed-to-review
  *                                  └── terminalized()──▶ terminal (FINAL)
+ *
+ * A completed review can reclaim handed-to-review under a nonblocking flock
+ * and the ordinary atomic acquisition. It does not spend a failed-run refund.
  *
  * Transitions are write-once-per-state. `terminal` is never reverted
  * to `pending` or `dispatched`.
@@ -31,9 +35,10 @@
  * @module ama/closer-lease
  */
 
-import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import fsExt from 'fs-ext';
+import { closeSync, openSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 
@@ -44,8 +49,9 @@ const LEASE_SCHEMA_VERSION = 1;
 const PENDING = 'pending';
 const DISPATCHED = 'dispatched';
 const TERMINAL = 'terminal';
+const HANDED_TO_REVIEW = 'handed-to-review';
 
-const VALID_STATUSES = new Set([PENDING, DISPATCHED, TERMINAL]);
+const VALID_STATUSES = new Set([PENDING, DISPATCHED, HANDED_TO_REVIEW, TERMINAL]);
 const VALID_TERMINAL_OUTCOMES = new Set([
   'succeeded',
   'failed-without-merge',
@@ -172,7 +178,7 @@ export function isHeldAmaCloserLease(rootDir, identity, {
   dispatchedExpiryMs = AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
 } = {}) {
   const lease = readAmaCloserLease(rootDir, identity);
-  if (!lease || lease.status === TERMINAL) return false;
+  if (!lease || [TERMINAL, HANDED_TO_REVIEW].includes(lease.status)) return false;
   const age = Date.parse(now) - Date.parse(lease.updatedAt || lease.acquiredAt);
   const expiry = lease.status === PENDING
     ? (lease.dispatchTimeoutMs ? amaCloserPendingLeaseExpiryMs(lease.dispatchTimeoutMs) : pendingExpiryMs)
@@ -344,7 +350,7 @@ export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
   const supersededHeads = new Set(candidates.flatMap(({ lease }) => supersededHeadsFor(lease)));
   return candidates.sort(compareUpdatedAtDesc).find(({ headSha, lease }) => (
     !supersededHeads.has(headSha)
-    && String(lease.status) !== TERMINAL
+    && ![TERMINAL, HANDED_TO_REVIEW].includes(String(lease.status))
   )) || null;
 }
 
@@ -377,8 +383,24 @@ export function acquireAmaCloserLease({
   dispatchTimeoutMs,
   host,
   now,
+  fromReviewHandoff = false,
 } = {}) {
   const leasePath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha });
+  if (fromReviewHandoff) {
+    mkdirSync(dirname(leasePath), { recursive: true });
+    const fd = openSync(`${leasePath}.handoff.lock`, 'a', LEASE_FILE_MODE);
+    try {
+      try { fsExt.flockSync(fd, 'exnb'); }
+      catch (error) {
+        if (!['EAGAIN', 'EWOULDBLOCK'].includes(error.code)) throw error;
+        const existingLease = readLeaseFile(leasePath);
+        return { acquired: false, leasePath, lease: existingLease, existingLease };
+      }
+      const handed = readLeaseFile(leasePath);
+      if (handed?.status === HANDED_TO_REVIEW) rmSync(leasePath, { force: true });
+      return acquireAmaCloserLease({ rootDir, repo, prNumber, headSha, watcherPid, dispatchTimeoutMs, host, now });
+    } finally { closeSync(fd); }
+  }
   // Pre-check — cheap path when an existing lease is on disk. The
   // atomic linkSync below would also detect this, but the pre-read
   // gives a clean existingLease payload to return without sniffing
@@ -486,12 +508,20 @@ export function updateAmaCloserLease({
     );
   }
 
+  // The completed worker cannot take ownership back from its review handoff.
+  // A reviewed-head retry must acquire a fresh lease through the handoff CAS.
+  if (existing.status === HANDED_TO_REVIEW && status === TERMINAL
+    && ['failed-without-merge', 'deferred', 'superseded'].includes(terminalOutcome)) {
+    return { leasePath, lease: existing };
+  }
+
   // Refuse to demote a terminal lease — same shape as the AMA-04
   // sticky-succeeded refusal. If the closer reaches a different
   // terminal on a re-tick (e.g. failed-without-merge then deferred),
   // the watcher should reconcile from fresh GitHub state via the
   // SPEC §4.4 repair logic instead of mutating the lease.
   if (existing.status === TERMINAL) {
+    if (status === TERMINAL && existing.terminalOutcome === terminalOutcome) return { leasePath, lease: existing };
     throw new Error(
       `updateAmaCloserLease: refusing to demote terminal lease for ` +
       `${repo} pr#${prNumber} head=${headSha}. Existing terminalOutcome=` +
@@ -531,4 +561,5 @@ export const AMA_CLOSER_LEASE_STATUS = Object.freeze({
   PENDING,
   DISPATCHED,
   TERMINAL,
+  HANDED_TO_REVIEW,
 });

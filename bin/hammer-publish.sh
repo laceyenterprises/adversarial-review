@@ -61,7 +61,12 @@ fi
 # Never publish a validation claim before the independent range proof. A
 # failed proof releases ownership; LEASEDEFER-01 recovers the unvalidated head
 # through bounded exact-head review without an ambient-credential label.
-if [ "${HAM_API_PUBLISH_FALLBACK:-0}" -eq 1 ] ||
+if ! ham_is_full_sha "${HAM_BASE_HEAD:-}"; then
+  HAM_PHASE_OUTCOME=exact-head-review-required
+  ham_publish_abort 20; return 20
+fi
+HAM_BUILT_HEAD=$(git rev-parse HEAD) || { ham_publish_abort 1; return 1; }
+if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ] ||
   ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
     > /tmp/ham-<<PR_NUMBER>>-range.json; then
@@ -91,10 +96,11 @@ fi
 # non-blocking waiver holds). Keep one bullet per finding on ONE line, and use
 # the finding's title VERBATIM from the review so the identity match lands.
 HAM_AUDIT_COMMENT_DETAILS="$(cat "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Base-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
   "$HAM_AUDIT_COMMENT_MARKER" \
   "$HAM_AUDIT_COMMENT_DETAILS" \
   "$POST_REMEDIATION_SHA" \
+  "$HAM_BASE_HEAD" \
   "$POST_REMEDIATION_SHA" \
   "$HAM_AUDIT_REMEDIATED_TOTAL" \
   "$HAM_AUDIT_REMEDIATED_BLOCKING" \
@@ -109,19 +115,17 @@ HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Hea
 # rather than silently posting as the wrong bot.
 HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
 ham_existing_terminal_audit_comment_id() {
+  # Slurp pagination into one JSON value; gh's --slurp cannot be combined
+  # with --jq. The selector reads the complete array of comment pages.
   HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" gh api \
-    --paginate \
-    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
-    -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
-  # Dedup on the STABLE marker alone, NOT the per-rebase head sha. A hammer that
-  # rebases the same terminal remediation onto an advancing `main` several times
-  # before the merge window holds must refresh ONE audit — keying on the head sha
-  # made every rebase miss the prior audit and post a look-alike, so a single
-  # hammer's rebases read as several hammers (agent-os#4090).
+    --paginate --slurp \
+    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
+  # Preserve earlier runs' base/head edges. Repeating publication of this exact
+  # edge is idempotent, and only an entitled App author's comment can be edited.
   printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
-    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" \
-      'select((.body // "") | contains($marker)) | .id' |
-    head -n 1
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-audit-comment-id.mjs \
+      "$HAM_BASE_HEAD" "$POST_REMEDIATION_SHA" "$HAM_AUDIT_COMMENT_MARKER"
+
 }
 if [ -z "${HAM_GH_TOKEN:-}" ]; then
   echo "HAM hard-blocker: no entitled hammer token (HAMMER_LACEY_GH_TOKEN, or legacy MERGE_AGENT_GH_TOKEN) present for hammer audit comment identity" >&2

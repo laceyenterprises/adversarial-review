@@ -155,7 +155,7 @@ function validHamTerminalRemediationOptions({
   reviewedHead = REVIEWED_HEAD,
   currentHead = ADVANCED_HEAD,
 } = {}) {
-  const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js. Doc-currency: not applicable for changed files src/auth.js.';
+  const auditBody = `HAM audit: addressed Auth path not threaded in src/auth.js. Doc-currency: not applicable for changed files src/auth.js.\nHAM-Base-Head: ${reviewedHead}\nHAM-Validated-Head: ${currentHead}`;
   const finding = { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true };
   return {
     env: {},
@@ -175,6 +175,7 @@ function validHamTerminalRemediationOptions({
       },
     },
     hamTerminalRemediationGroundTruth: {
+      range: { verified: true, reviewedHead, currentHead, baseSha: reviewedHead, commits: [currentHead] },
       commit: {
         sha: currentHead,
         primaryChange: primaryChangeFixture(currentHead),

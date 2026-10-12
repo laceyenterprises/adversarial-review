@@ -632,6 +632,26 @@ after an authoritative probe proves no live review on the new head. Unknown
 reviewer identity without chain proof leaves resume off. In either case,
 the exact-head terminal-remediation validator retains merge authority.
 
+HAMCLOSE-01 adds `dispatched → handed-to-review`: the completed hammer records
+an exact-head review transfer instead of a terminal failure. The canonical
+daemon owner executes the handoff helper; its bounded local review CAS completes
+before the lease transition. A thrown request retains dispatched ownership for
+normal failure settlement and capped retry. The review CAS
+owns that head while the handed lease stops blocking review/merge. A clean
+review uses daemon merge; any findings use a new, single-claim hammer through
+the existing retry/lifetime caps. App-authored base/head attestation chains
+permit API or git publication to merge in the same run from a trustworthy
+starting base. A push beyond the attested SHA requires exact-head review.
+
+The shared `closureOwner` answer names daemon merge, hammer, review,
+remediation, conflict rebase, a bounded named wait, or page. Daemon contention
+retries twice in the same tick; persistent wait debt has a 30-minute default
+bound (`AMA_CLOSURE_WAIT_BOUND_MS`) and one reserved exhaustion page per head.
+`merge-agent-stuck` is diagnostic, while explicit operator holds still apply.
+A finished worker's worktree cleanup failure is nonfatal and remains available
+to the existing cleanup retry path. Terminal lease finalization is idempotent
+for the same outcome and continues refusing different terminal outcomes.
+
 Hammer lease admission checks live head/state/draft/labels before queuing.
 Refusals return `merge-lease-admission-refused` (exit 20) with a
 `hammer-lease-admission` audit and `merge-lease-admission:<reason>`.

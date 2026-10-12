@@ -1,3 +1,5 @@
+import { observeClosureWait } from './closure-wait.mjs';
+import { decideClosureOwner } from './closure-owner.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
@@ -344,6 +346,8 @@ function hasCommentOnlyTerminalResumeReason(reasons = []) {
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
+  if (options.reviewHandoff === true) return reasons.every(reason =>
+    HAMMER_ROUTE_ACTION_REASONS.has(reason) || reason === 'pr-mergeability-unknown');
   // FIX (stale-review-head spin, #5053): a self-certified stale reviewed head --
   // the terminal closer's OWN remediation commit, proven upstream by
   // `getHeadCloserCommitSuppression` (an external push cannot forge the closer
@@ -3248,6 +3252,7 @@ export const __testables__ = Object.freeze({
   inspectHolderForTakeover,
   salvageHolder,
   cleanupHammerCloserWorker,
+  logHammerCleanupFailure,
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   resolveSelfOwnedHammerCloserRunLiveness,
   resolveRollupRequiredChecks,
@@ -4023,6 +4028,7 @@ export async function resolveHamTerminalRemediationEvidence({
   env = process.env,
   signal,
 } = {}) {
+  throwIfAborted(signal);
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
   if (!reviewedHead || !currentHead || reviewedHead === currentHead) return null;
@@ -4047,7 +4053,7 @@ export async function resolveHamTerminalRemediationEvidence({
   const exactValidation = exactHammerValidation(verifiedAuditComment, currentHead);
   if (!exactValidation && identity?.suppressed !== true) return null;
   const range = exactValidation ? await fetchHammerHeadRange({ repo: repoPath,
-    reviewedHead, currentHead, baseRef: prMetadata.baseRefName || 'main', env,
+    reviewedHead, currentHead, baseRef: prMetadata.baseRefName || 'main', env, comments: rollup?.comments,
     get: async path => JSON.parse((await execGhWithRetry({ execFileImpl, args: ['api', path],
       timeoutMs: 15000, env, signal })).stdout) }) : null;
 
@@ -4215,6 +4221,21 @@ export async function maybeDispatchAmaCloser({
       reason: 'primary-change-repair-required', reasons: verdict.reasons, needsOperator: true,
       ...(missingEvidence ? { missingEvidence, exactHeadReview: true } : {}) });
   }
+  const reviewHandoffLease = dispatchContext?.repo && prMetadata?.headSha
+    ? readAmaCloserLease(dispatchContext.rootDir || SUBMODULE_ROOT, {
+      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
+    }) : null;
+  const reviewHandoffOwner = reviewHandoffLease?.status === 'handed-to-review'
+    ? decideClosureOwner({ reviewState, currentHead: prMetadata.headSha, lease: reviewHandoffLease }) : null;
+  const reviewHandoffFindings = reviewHandoffOwner?.owner === 'hammer';
+  if (reviewHandoffOwner?.owner === 'review') {
+    const wait = await observeClosureWait({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha,
+      reason: `handed-to-review:${prMetadata.headSha}`, pageImpl: deliverAlertImpl, env });
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'handed-to-review',
+      recoveryWait: true, retryAfterMs: wait.retryAfterMs, boundedWait: wait,
+      needsOperator: wait.exhausted });
+  }
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;
   const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
@@ -4355,7 +4376,7 @@ export async function maybeDispatchAmaCloser({
     // Ordinary recovery widens worker-class admission only. Orphan recovery also
     // admits covered primary-repair/closer-head reasons after its ownerless grace.
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
-    const autoHammer = ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
+    const autoHammer = (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -4550,7 +4571,7 @@ export async function maybeDispatchAmaCloser({
   const existingDispatchIdentity = newerLaunchRecord
     ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
     : reviewedHeadDispatchIdentity;
-  let existingRecord = ownerProofRecovery ? null : newerLaunchRecord || reviewedHeadRecord;
+  let existingRecord = ownerProofRecovery || reviewHandoffFindings ? null : newerLaunchRecord || reviewedHeadRecord;
   if (ownerProofRecovery) logger?.info?.(`OWNERPROOF-01 setting aside historical closer dispatch and retry state for ${repo} PR ${prNumber}@${prMetadata.headSha}`);
   let existingRecordLeaseIdentity = {
     repo,
@@ -4668,7 +4689,7 @@ export async function maybeDispatchAmaCloser({
             prNumber, workerClass, existingRecord, hqPath, hqRoot, execFileImpl, logger,
             reason: 'unexecuted-hammer',
           });
-          assertHammerCleanupSucceeded(cleanup);
+          logHammerCleanupFailure(cleanup, { logger, repo, prNumber, phase: 'terminal' });
           await recordAmaCloserReviewerPassTokens({
             rootDir, hqRoot, repo, prNumber, record: existingRecord,
             status: 'failed', merged: false, observedAt: dispatchContext.dispatchedAt,
@@ -4744,7 +4765,7 @@ export async function maybeDispatchAmaCloser({
     })) {
       deleteAmaCloserLease(rootDir, leaseIdentity);
       targetLeaseBeforeDispatch = null;
-    } else if (targetLeaseBeforeDispatch.status !== AMA_CLOSER_LEASE_STATUS.TERMINAL) {
+    } else if (![AMA_CLOSER_LEASE_STATUS.TERMINAL, AMA_CLOSER_LEASE_STATUS.HANDED_TO_REVIEW].includes(targetLeaseBeforeDispatch.status)) {
       return noAmaDispatch({
         dispatched: false,
         skipMergeAgent: true,
@@ -4982,7 +5003,7 @@ export async function maybeDispatchAmaCloser({
         prNumber, workerClass, existingRecord, hqPath, hqRoot, execFileImpl, logger,
         reason: `terminal-status-${observedStatus}`,
       });
-      assertHammerCleanupSucceeded(hammerCleanup);
+      logHammerCleanupFailure(hammerCleanup, { logger, repo, prNumber, phase: 'terminal' });
       await recordAmaCloserReviewerPassTokens({
         rootDir, hqRoot, repo, prNumber,
         record: { ...existingRecord, lastObservedStatus: observedStatus,
@@ -5800,7 +5821,7 @@ export async function maybeDispatchAmaCloser({
         logger,
         reason: `terminal-status-${status}`,
       });
-      assertHammerCleanupSucceeded(hammerCleanup);
+      logHammerCleanupFailure(hammerCleanup, { logger, repo, prNumber, phase: 'terminal' });
       await recordAmaCloserReviewerPassTokens({
         rootDir,
         hqRoot,
@@ -6353,6 +6374,7 @@ export async function maybeDispatchAmaCloser({
   // failures from leaving a permanent `pending` lease behind.
   let leaseResult = acquireAmaCloserLease({
     rootDir,
+    fromReviewHandoff: reviewHandoffFindings,
     ...leaseIdentity,
     dispatchTimeoutMs,
     watcherPid: typeof process !== 'undefined' ? process.pid : null,

@@ -138,6 +138,8 @@ export const DAEMON_MERGE_DISPOSITION = Object.freeze({
   NOT_TAKEN: 'not-taken',
 });
 
+export const DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS = [250, 500];
+
 /**
  * Is this settled review FULLY CLEAN — zero blocking AND zero non-blocking
  * findings, both classifications KNOWN? Fails closed on any unknown finding
@@ -636,7 +638,11 @@ async function attemptDaemonCleanMergeInner({
   // ── Acquire the merge lease for the head. Contention defers cleanly. ───────
   let leaseResult;
   try {
-    leaseResult = await acquireLeaseImpl({ repo, base, prNumber, head: validatedHead });
+    for (let attempt = 0; ; attempt++) {
+      leaseResult = await acquireLeaseImpl({ repo, base, prNumber, head: validatedHead });
+      if (leaseResult?.acquired || attempt >= DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS.length) break;
+      await sleep(DAEMON_LEASE_CONTENTION_RETRY_DELAYS_MS[attempt]);
+    }
   } catch (err) {
     logger?.warn?.(
       `[daemon-merge] lease acquisition error for ${repo}#${prNumber}@${validatedHead}: ${err?.message || err}`,

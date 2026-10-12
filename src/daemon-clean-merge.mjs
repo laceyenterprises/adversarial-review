@@ -1,3 +1,4 @@
+import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
@@ -401,7 +402,7 @@ export async function runDaemonCleanMergeAttempt({
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
-  const NOT_TAKEN = (reason) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason });
+  const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
   if (!base || !validatedHead) {
     return NOT_TAKEN('daemon-inputs-missing');
   }
@@ -568,6 +569,13 @@ export async function runDaemonCleanMergeAttempt({
   }, { headSha: liveHead, labels: liveRollup?.labels });
   if (snapshotOperatorOverride && !liveOperatorOverride && !ordinaryReviewAllowed) {
     return NOT_TAKEN('operator-approval-no-longer-current');
+  }
+  // Commit authors/trailers are hints, never authority for a moved head.
+  // An App-bound HAM validation or a complete App chain must carry the review.
+  if (validatedHead !== liveHead && !liveOperatorOverride
+    && hamTerminalRemediationValidated !== true
+    && !hammerAttestationChain(liveRollup?.comments, validatedHead, liveHead)) {
+    return NOT_TAKEN('stale-head', { reasons: ['stale-head'], exactHeadReview: true });
   }
   if (
     cfg?.autonomousCloserCommitCleanMergeEnabled !== false &&

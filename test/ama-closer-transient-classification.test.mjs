@@ -57,6 +57,8 @@ const VERIFIED_HAM_AUDIT_BODY = [
   '',
   '<sub>',
   'HAM-Terminal-Remediation-Head: def67890def67890def67890def67890def67890',
+  'HAM-Base-Head: abc12345abc12345abc12345abc12345abc12345',
+  'HAM-Validated-Head: def67890def67890def67890def67890def67890',
   'Remediated-Findings: 1 addressed (1 blocking, 0 non-blocking)',
   'Closed-By: hammer (adversarial-pipe-mode)',
   '</sub>',
@@ -186,7 +188,7 @@ function exactHeadOptions(execFileImpl, signal) {
     fetchHeadCloserVerifiedCommitImpl: async () => VERIFIED_HAM_COMMIT,
     fetchPullRequestRollupImpl: async () => ({ comments: [{
       author: 'the-hammer-lacey[bot]',
-      body: `${VERIFIED_HAM_AUDIT_BODY}\nHAM-Validated-Head: ${VERIFIED_HAM_COMMIT.sha}`,
+      body: VERIFIED_HAM_AUDIT_BODY.split('\n').filter(line => !line.startsWith('HAM-Base-Head:')).join('\n'),
     }] }),
   };
 }

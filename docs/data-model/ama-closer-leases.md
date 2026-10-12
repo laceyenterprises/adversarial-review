@@ -10,6 +10,15 @@
 One file per `(repo, prNumber, headSha)` protects a closer launch against
 duplicate watcher ticks. `status` moves from `pending` to `dispatched` to
 `terminal`; a pending lease may become terminal when no launch occurred.
+HAMCLOSE-01 also permits `dispatched → handed-to-review`. The canonical daemon
+owner runs `bin/hammer-review-handoff.mjs`, which rekeys a moved head and completes
+the bounded local exact-head review request before recording the transfer.
+Thrown requests leave the lease dispatched for failure settlement and retry.
+A handed lease no longer blocks review or daemon merge; later worker failure,
+deferral or supersession cannot demote it to a terminal failure. Findings from
+that review may acquire a fresh hammer lease through `fromReviewHandoff` under
+the sibling `.handoff.lock` exclusive flock and atomic single-claim acquisition.
+Clean reviews use daemon merge. Existing hammer retry and lifetime caps remain.
 `acquiredAt`, `updatedAt`, `watcherPid`, `host`, and `dispatchTimeoutMs`
 identify the launch window. A dispatched lease carries `lrqId`. Rekeys retain
 `rekeyedFromHeadSha` and `supersededHeads` so the current lease can identify

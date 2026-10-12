@@ -7,6 +7,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 const flock = promisify(fsExt.flock);
+// Allow sixteen serialized fsync writers headroom on a loaded runner.
+const configuredLockWaitMs = Number(process.env.AMA_CLOSURE_LAG_LOCK_WAIT_MS);
+const LOCK_WAIT_MS = Number.isFinite(configuredLockWaitMs) && configuredLockWaitMs > 0
+  ? configuredLockWaitMs : 10_000;
 
 async function locked(rootDir, action, logger = console) {
   const dir = join(rootDir, 'data', 'ama-closure-lag');
@@ -14,7 +18,7 @@ async function locked(rootDir, action, logger = console) {
   const lock = await open(join(dir, 'state.lock'), 'a');
   let acquired = false;
   try {
-    const deadline = Date.now() + 1000;
+    const deadline = Date.now() + LOCK_WAIT_MS;
     for (;;) {
       try { await flock(lock.fd, 'exnb'); acquired = true; break; }
       catch (error) {

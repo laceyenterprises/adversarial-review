@@ -40,18 +40,28 @@ const fs = require('node:fs');
 const callsFile = ${JSON.stringify(callsFile)};
 const plan = ${JSON.stringify(plan)};
 const calls = JSON.parse(fs.readFileSync(callsFile, 'utf8'));
+const path = process.argv[3].includes('/compare/') ? process.argv[3].replace(/\\?per_page=100&page=\\d+$/, '') : process.argv[3];
+if (path.includes('/git/trees/')) {
+ const before = path.endsWith(${JSON.stringify(evidence.mergeBase)});
+ process.stdout.write(JSON.stringify({tree: [{path:'src/config-loader.mjs', type:'blob', mode:'100644', sha: before ? '1'.repeat(40) : '2'.repeat(40)}], truncated:false})); process.exit(0);
+}
+if (path.includes('/git/blobs/')) {
+ const content = path.endsWith('1'.repeat(40)) ? 'shadow_only: true\\n' : 'shadow_only: false\\n';
+ process.stdout.write(JSON.stringify({encoding:'base64',content:Buffer.from(content).toString('base64'),size:Buffer.byteLength(content)})); process.exit(0);
+}
 const entry = plan[calls.length];
-calls.push(process.argv.slice(2));
+calls.push(['api', path]);
 fs.writeFileSync(callsFile, JSON.stringify(calls));
-if (!entry || process.argv[2] !== 'api' || process.argv[3] !== entry.path) {
+if (!entry || process.argv[2] !== 'api' || path !== entry.path) {
   process.stderr.write('unexpected fixture call'); process.exit(1);
 }
 if (entry.error) { process.stderr.write(entry.error); process.exit(1); }
-process.stdout.write(entry.raw ?? JSON.stringify(entry.data));
+const data = entry.data && path.includes('/compare/') ? {total_commits:0, commits:[], ...entry.data} : entry.data;
+process.stdout.write(entry.raw ?? JSON.stringify(data));
 `, { mode: 0o755 });
   const result = spawnSync(process.execPath, [cli, ...argv], {
     encoding: 'utf8', timeout: 15_000,
-    env: { PATH: root, HOME: root, GH_CONFIG_DIR: root },
+    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root },
   });
   assert.ifError(result.error);
   return { ...result, calls: JSON.parse(readFileSync(callsFile, 'utf8')) };
@@ -72,7 +82,8 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
   assert.equal(parsed.ciCost.ok, true);
   delete parsed.ciCost;
   const { ciCost: _cost, ...historyEvidence } = evidence;
-  assert.deepEqual(parsed, { ...historyEvidence, testRegionsChanged: [] });
+  for (const key of ['primaryFiles', 'finalFiles']) for (const file of parsed[key]) { delete file.sha; file.patch = file.patch.trimEnd(); }
+  assert.deepEqual(parsed, { ...historyEvidence, completeFileLists: true, testRegionsChanged: [] });
   assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath,
     primaryPath, primaryPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, prPath].map(path => ['api', path]));
 });
@@ -81,27 +92,27 @@ test('primary-change CLI exhausts transient reads after three attempts and fails
   const result = runCli(t, Array.from({ length: 3 }, () => ({
     path: prPath, error: 'gh: Bad Gateway (HTTP 502)',
   })));
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 1, result.stderr);
   const parsed = JSON.parse(result.stdout);
   assert.match(parsed.reason, /history read failed/);
   const { reason: _reason, ...flags } = parsed;
-  assert.deepEqual(flags, { headSha: head, hasHammerCommits: null, readFailed: true });
-  assert.equal(checkPrimaryChange(parsed, head).reason, 'primary-change-read-failed');
+  assert.deepEqual(flags, { headSha: head, hasHammerCommits: null, readFailed: true, historyReadFailed: true });
+  assert.equal(checkPrimaryChange(parsed, head).reason, 'history-read-failed');
   assert.deepEqual(result.calls, Array.from({ length: 3 }, () => ['api', prPath]));
 });
 
 test('primary-change CLI does not retry permanent permission errors', (t) => {
   const result = runCli(t, [{ path: prPath,
     error: 'gh: Resource not accessible by integration (HTTP 403)' }]);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(checkPrimaryChange(JSON.parse(result.stdout), head).reason, 'primary-change-unknown');
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(checkPrimaryChange(JSON.parse(result.stdout), head).reason, 'history-read-failed');
   assert.deepEqual(result.calls, [['api', prPath]]);
 });
 
 test('primary-change CLI fails closed on malformed JSON without retrying the successful read', (t) => {
   const result = runCli(t, [{ path: prPath, raw: '{invalid' }]);
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(checkPrimaryChange(JSON.parse(result.stdout), head).reason, 'primary-change-unknown');
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(checkPrimaryChange(JSON.parse(result.stdout), head).reason, 'history-read-failed');
   assert.deepEqual(result.calls, [['api', prPath]]);
 });
 

@@ -1,3 +1,4 @@
+import { createHistoryReader } from './ama/history-reader.mjs';
 import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 import { inspectCiBootstrap, recoverCancelledChecks, emptyExternalRollup } from './ci-recovery.mjs';
@@ -812,10 +813,7 @@ export async function runDaemonCleanMergeAttempt({
   // executor rather than a HAM audit head that may be absent or stale.
   const readPrimaryChange = (headSha) => fetchPrimaryChangeImpl({ repo: repoPath, prNumber, headSha, rootDir,
     builderHead: workerIdentity.resolvedBy === 'head-attestation' ? null : workerIdentity.rowHeadSha,
-    get: async (path) => {
-      const { stdout } = await execGhWithRetryImpl({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
-      return JSON.parse(stdout);
-    },
+    get: createHistoryReader({ execGhWithRetryImpl: execGhWithRetryImpl, execFileImpl, env, signal }),
   });
   const primaryChange = await readPrimaryChange(liveHead);
   let ciMergePathPending = false;
@@ -1107,13 +1105,13 @@ export async function runDaemonCleanMergeAttempt({
     logger,
   });
   const remediableGate = daemonResult?.reasons?.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
-  if (remediableGate && daemonResult?.reasons?.includes('primary-change-read-failed')) {
+  if (remediableGate && daemonResult?.reasons?.some(reason => ['primary-change-read-failed', 'history-read-failed'].includes(reason))) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
       reason: 'gate-not-eligible', needsOperator: false };
   }
-  if (daemonResult?.reasons?.includes('primary-change-read-failed')) {
+  if (daemonResult?.reasons?.some(reason => ['primary-change-read-failed', 'history-read-failed'].includes(reason))) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
-      reason: 'gate-read-failed', needsOperator: false };
+      reason: daemonResult.reasons.includes('history-read-failed') ? 'history-read-failed' : 'gate-read-failed', needsOperator: false };
   }
   if (daemonResult?.reasons?.some((reason) => ['primary-change-reverted', 'primary-change-unknown', 'primary-change-needs-operator'].includes(reason))) {
     return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,

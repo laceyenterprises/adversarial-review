@@ -1,3 +1,4 @@
+import { createHistoryReader } from './history-reader.mjs';
 import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
@@ -4195,9 +4196,9 @@ export async function maybeDispatchAmaCloser({
 
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
-  const primaryReadRepair = verdict.reasons.includes('primary-change-read-failed')
+  const primaryReadRepair = (verdict.reasons.includes('primary-change-read-failed') || verdict.reasons.includes('history-read-failed'))
     && verdict.reasons.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
-  if (!ownerProofRecovery && verdict.reasons.includes('primary-change-read-failed') && !primaryReadRepair) {
+  if (!ownerProofRecovery && (verdict.reasons.includes('primary-change-read-failed') || verdict.reasons.includes('history-read-failed')) && !primaryReadRepair) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       reason: 'gate-read-failed', reasons: verdict.reasons });
   }
@@ -4266,7 +4267,7 @@ export async function maybeDispatchAmaCloser({
     // Label reasons supplement ci-not-green; test the route without that
     // annotation before resolving/paging the independent label hold below.
     const routeReasons = (verdict.eligible ? eligibleHammerRouteReasons
-      : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed')
+      : primaryReadRepair ? verdict.reasons.filter((reason) => reason !== 'primary-change-read-failed' && reason !== 'history-read-failed')
         : verdict.reasons).filter(reason => !reason.startsWith('operator-label-required:'));
     if (!ownerProofRecovery && isHammerRouteStructurallyBlocked(routeReasons)) {
       return noAmaDispatch({
@@ -5294,10 +5295,7 @@ export async function maybeDispatchAmaCloser({
               const state = String(rollup?.state || '');
               return {
                 primaryChange: await fetchPrimaryChangeImpl({ repo, prNumber, rootDir, headSha: rollup?.headSha || rollup?.headRefOid || '',
-                  get: async (path) => {
-                    const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api', path], timeoutMs: 15000, env, signal });
-                    return JSON.parse(stdout);
-                  },
+                  get: createHistoryReader({ execGhWithRetryImpl: execGhWithRetry, execFileImpl, env, signal }),
                 }),
                 requirePrimaryChange: true,
                 strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,

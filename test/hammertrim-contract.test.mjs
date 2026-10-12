@@ -293,21 +293,24 @@ test('context bounds real primary patches and survives a failed compare', (t) =>
   writeFileSync(gh, `#!${process.execPath}
 const a = process.argv.join(' ');
 if (a.includes('/compare/')) {
-  if (process.env.FAIL_COMPARE) { process.stderr.write('HTTP 502'); process.exit(1); }
-  if (a.endsWith('${base}...${head}')) console.log(JSON.stringify({total_commits:1,commits:[{sha:'${head}',parents:[{sha:'${primary}'}],commit:{message:'Worker-Class: hammer'}}], merge_base_commit:{sha:'${base}'},files:[]}));
-  else console.log(JSON.stringify({merge_base_commit:{sha:'${base}'},files:Array.from({length:20},(_,i)=>({filename:'file'+i,patch:'@@ -1 +1 @@\\n+'+'x'.repeat(10000)}))}));
-} else if (a.includes('/reviews?')) console.log('[]');
+  if (require('node:fs').existsSync('${dir}/fail-compare')) { process.stderr.write('HTTP 502'); process.exit(1); }
+  if (a.includes('${base}...${head}')) console.log(JSON.stringify({total_commits:1,commits:[{sha:'${head}',parents:[{sha:'${primary}'}],commit:{message:'Worker-Class: hammer'}}], merge_base_commit:{sha:'${base}'},files:[]}));
+  else console.log(JSON.stringify({total_commits:0,commits:[],merge_base_commit:{sha:'${base}'}}));
+} else if (a.includes('/git/trees/')) console.log(JSON.stringify({tree:a.includes('${base}')?[]:Array.from({length:20},(_,i)=>({path:'file'+i,type:'blob',mode:'100644',sha:String(i).padStart(40,'0')})),truncated:false}));
+else if (a.includes('/git/blobs/')) { const text='x'.repeat(10000)+'\\n'; console.log(JSON.stringify({encoding:'base64',content:Buffer.from(text).toString('base64'),size:Buffer.byteLength(text)})); }
+else if (a.includes('/reviews?')) console.log('[]');
 else if (a.includes('/protection')) console.log('{}');
 else if (a.includes('pr view')) console.log('{"statusCheckRollup":[]}');
 else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${base}',ref:'main'},body:'intent'}));
 `); chmodSync(gh, 0o755);
   for (const failed of [false, true]) {
+    if (failed) writeFileSync(join(dir, 'fail-compare'), '');
     const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42'], {PATH: `${bin}:${process.env.PATH}`, ...(failed ? {FAIL_COMPARE:'1'} : {})});
     assert.equal(result.status, 0, result.stderr);
     assert.ok(Buffer.byteLength(result.stdout) < 8192);
     const snapshot = JSON.parse(result.stdout);
     assert.equal(snapshot.head, head);
-    assert.equal(snapshot.primaryChange.status, failed ? 'read-failed' : 'available');
+    assert.equal(snapshot.primaryChange.status, failed ? 'history-read-failed' : 'available');
     assert.doesNotMatch(result.stdout, /x{100}/);
   }
 });

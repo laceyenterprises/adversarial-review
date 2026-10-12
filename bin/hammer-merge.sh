@@ -124,7 +124,11 @@ fi
 if ! jq -e --arg head "$POST_REMEDIATION_SHA" \
   '.eligible == true and .trace.headMatch.current == $head' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
   echo "HAM hard-blocker: predicate is not eligible for the validated head" >&2
-  if jq -e '.reasons | index("primary-change-unknown") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
+  if jq -e '.reasons | index("history-read-failed") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
+    cat "$HAM_VERDICT_FILE" >&2
+    ham_append_terminal_audit failed-without-merge history-read-failed || true
+    ham_mark_merge_lease_retryable_abort history-read-failed
+  elif jq -e '.reasons | index("primary-change-unknown") != null' "$HAM_VERDICT_FILE" >/dev/null 2>&1; then
     cat "$HAM_VERDICT_FILE" >&2
     ham_append_terminal_audit deferred primary-change-unknown || true
     ham_mark_merge_lease_retryable_abort primary-change-unknown
@@ -258,6 +262,7 @@ ham_refresh_github_gate_once() {
   HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
+import { createHistoryReader } from '<<ROOT_DIR>>/src/ama/history-reader.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '<<ROOT_DIR>>/src/ama/primary-change.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '<<ROOT_DIR>>/src/ama/effective-policy.mjs';
 import { execGhWithRetry } from '<<ROOT_DIR>>/src/gh-cli.mjs';
@@ -297,10 +302,7 @@ const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
 // Resolve the same effective policy as bin/ama-check.mjs, including its strict default.
 const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: '<<ROOT_DIR>>' });
 const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
-  get: async (path) => {
-    const { stdout } = await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 });
-    return JSON.parse(stdout);
-  },
+  get: createHistoryReader(),
 });
 const eligibility = evaluateMergeEligibility({
   primaryChange,
@@ -434,10 +436,14 @@ while :; do
     ham_release_merge_lease
     return 20
   fi
-  HAM_PRIMARY_REFUSAL=$(jq -r '[.reasons[]? | select(. == "primary-change-reverted" or . == "primary-change-unknown")][0] // empty' "$HAM_GATE_JSON")
+  HAM_PRIMARY_REFUSAL=$(jq -r '[.reasons[]? | select(. == "primary-change-reverted" or . == "primary-change-unknown" or . == "history-read-failed")][0] // empty' "$HAM_GATE_JSON")
   if [ -n "$HAM_PRIMARY_REFUSAL" ]; then
     HAM_REMOTE_CI_STATUS="$HAM_PRIMARY_REFUSAL"
-    if [ "$HAM_PRIMARY_REFUSAL" = primary-change-unknown ]; then
+    if [ "$HAM_PRIMARY_REFUSAL" = history-read-failed ]; then
+      echo "HAM history-read-failed: $(jq -r ' .primaryChangeReason // "unnamed read error"' "$HAM_GATE_JSON")" >&2
+      ham_append_terminal_audit failed-without-merge history-read-failed || true
+      ham_mark_merge_lease_retryable_abort history-read-failed
+    elif [ "$HAM_PRIMARY_REFUSAL" = primary-change-unknown ]; then
       echo "HAM primary-change evidence unknown; defer for evidence recovery" >&2
       cat "$HAM_GATE_JSON" >&2
       ham_append_terminal_audit deferred "$HAM_PRIMARY_REFUSAL" || true

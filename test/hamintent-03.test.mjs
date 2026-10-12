@@ -155,6 +155,9 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
       let source;
       if (url.endsWith('/src/github-api.mjs')) {
         source = 'export async function fetchPullRequestRollup() { return ' + JSON.stringify(fixture.rollup) + '; }';
+      } else if (url.endsWith('/src/ama/history-reader.mjs')) {
+        source = 'const responses = ' + JSON.stringify(fixture.responses) + ';' +
+          'export function createHistoryReader() { return async path => { if (!(path in responses)) throw new Error(path); return responses[path]; }; }';
       } else if (url.endsWith('/src/gh-cli.mjs')) {
         source = 'const responses = ' + JSON.stringify(fixture.responses) + ';' +
           'export function isTransientGhError() { return false; }' +

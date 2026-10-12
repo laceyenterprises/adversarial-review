@@ -159,9 +159,15 @@ remediation, against its merge base. `hammer-context`
 includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
 `statedIntent` from the PR body (including Why or Operator decision sections).
 Use `bin/primary-change-context.mjs` for full patches. Use this context to understand intent; it does not suppress real blocking findings.
-If primary evidence is missing or unsupported, stop with a no-merge audit and
-print `primaryChange.reason` in the stop message, record `deferred` with reason
-`primary-change-unknown`, and retain the merge hold for automatic evidence recovery; repeated closer refusals page once per head with SEV1. Never substitute the latest hammer head for the original change.
+If primary evidence is missing or unsupported, stop before remediation and
+print `primaryChange.reason` in the stop message. When the snapshot status is
+`history-read-failed` or the helper reports `historyReadFailed: true`, record a
+no-merge audit with reason `history-read-failed`, `noExecution: true`, and
+`historyReadError` containing the underlying error; retain that error in the park
+record. Otherwise record `deferred` with reason `primary-change-unknown`.
+Retain the merge hold for automatic evidence recovery; repeated closer refusals
+page once per head with SEV1. Never substitute the latest hammer head for the
+original change.
 
 The syntactic preservation gate covers production and config paths only. Test
 paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
@@ -271,7 +277,7 @@ A predicate refusal `primary-change-reverted` requires
 no-merge closing status quoting the gate's missing-evidence line. Repair the branch or recover the evidence; a scoped
 operator `merge-agent-requested` can dispatch the recovery lane, without waiving
 this predicate. A proven reversal does not automatically dispatch another hammer.
-`primary-change-unknown` and `primary-change-read-failed` defer: evidence is
+`primary-change-unknown`, `primary-change-read-failed` and `history-read-failed` defer: evidence is
 recomputed on the next pipeline tick, and ordinary gates must pass before redispatch.
 
 ## Mandate

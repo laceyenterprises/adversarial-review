@@ -1552,11 +1552,24 @@ reasons:
 | `pr-not-mergeable` | The PR is closed, or GitHub's `mergeableState` is neither `MERGEABLE` nor `UNKNOWN` (usually a conflict; also strict-mode `BEHIND` or an empty/unrecognized enum). Hammer-remediable for a conflicting or behind open PR: the hammer resolves the conflict or rebases. A closed PR or an empty-state read gets no hammer fix. |
 | `pr-mergeability-unknown` | GitHub still reports `mergeableState` `UNKNOWN` after the watcher's bounded re-sampling (it recomputes after a push or base move). Transient: on a non-exhausted review cycle it is not hammer-remediable (an exhausted cycle still hammers any miss without `stale-review-head`), and it never produces a manual-close page; the next tick re-reads. On the daemon clean path an UNKNOWN-only miss inside the lease is re-sampled within the retry budget and then ends as the non-permanent `gate-read-failed`, so the head stays eligible for the daemon on the next tick (a diagnostics park record is still written, as for every non-merged daemon outcome). A pre-lease UNKNOWN decline is never counted as a closer→daemon route disagreement. |
 | `primary-change-reverted` | Trusted first-hammer-parent history shows an author-changed region returning to the merge base, a removed line being restored, or a rename undone. AMA stops both hammer closeout and daemon merge; `operator-approved` does not bypass this gate. The daemon records this park reason for pipeline-health. Inspect the primary and final diffs and the finding authorization described below. The closer pages once per refused head after three observations; both daemon and closer expose scoped operator recovery described below. |
-| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or a permanent permission/compare read failure. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Retain the merge hold while recovering evidence. Deterministic unknown evidence enters the existing scoped escalation route immediately; it never masquerades as `gate-read-failed`. The daemon park records `reason: primary-change-unknown` with an inspection remedy. The recovery router pages after its existing six observations for the same head, deduplicating subsequent pages. Hammer context and stop output include the missing-evidence reason. CAPROUTE-01 holds legacy unknown hammer stops on the live head, including hammer-owner routes, and probes evidence once per closer pass. A computable answer releases the evidence hold through `primary-change-evidence`; ordinary merge gates still apply. |
-| `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permanent permission, missing compare and malformed JSON errors are structural unknowns requiring evidence recovery. An actual in-lease read failure remains non-permanent; a structural unknown is a scoped primary-change refusal. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
+| `primary-change-unknown` | Evidence was read but cannot be evaluated: a capped history/file list, omitted patches without identical trusted blob evidence, truncated patches, or unsupported structural evidence. Head races are transient. Text renames (including pure renames) are supported through `previous_filename`. This fails closed without claiming a proven reversal; `operator-approved` does not bypass it. Retain the merge hold while recovering evidence. Deterministic unknown evidence enters the existing scoped escalation route immediately; it never masquerades as `gate-read-failed`. The daemon park records `reason: primary-change-unknown` with an inspection remedy. The recovery router pages after its existing six observations for the same head, deduplicating subsequent pages. Hammer context and stop output include the missing-evidence reason. CAPROUTE-01 holds legacy unknown hammer stops on the live head, including hammer-owner routes, and probes evidence once per closer pass. A computable answer releases the evidence hold through `primary-change-evidence`; ordinary merge gates still apply. |
+| `primary-change-read-failed` | A transient GitHub read failed after the reader's bounded retry budget, or the head raced the read. Installation-token auth outages and cancellation are retryable reads. Permission, missing compare, malformed JSON and process-output failures now produce `history-read-failed` with `historyReadFailed: true` and the underlying error. An actual in-lease read failure remains non-permanent; a structural unknown is a scoped primary-change refusal. This is a retryable outage, including on PRs without hammer commits, and defers closure as `gate-read-failed`. It does not require operator adjudication or write a permanent failed-head marker. The next tick retries. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
 
 ### Primary-change evidence, authorization and disputes (HAMINTENT-02 / LAC-1833)
+
+HAMENOBUFS-01: every production history reader projects compare metadata and
+commit identity into pages of 100 without compare patches. Because GitHub caps
+compare files at 300 with no file pagination, complete file evidence comes from
+immutable merge-base/head trees, skipping equal subtrees and diffing individual
+blob pairs locally; commit file reads paginate independently. Each child output
+is explicitly bounded at 25 MiB and exceeding that limit is a named read error.
+Any failed history read returns `historyReadFailed: true` with the underlying
+error, the dedicated helper exits non-zero, and the hammer records
+`history-read-failed` in its stop and park evidence. Preflight stops carry
+`noExecution: true`: the existing evidence hold refunds their charged launches,
+probes again each closer pass and pages once per head if evidence stays unreadable.
+Missing evidence never authorizes a reversal.
 
 Both merge paths use `src/ama/primary-change.mjs`. The protected baseline is the
 actual first parent of the first hammer commit still present in current PR
@@ -1596,8 +1609,8 @@ The hammer's `bin/primary-change-context.mjs` reads each GitHub endpoint through
 get at most three attempts with 500/1000ms backoff and a 15-second timeout per
 attempt. Permanent permission errors are not retried; rejected credentials use
 the helper's single forced token-refresh attempt. Exhausted reads and malformed
-JSON emit head-scoped `readFailed: true` evidence, which the predicate treats as
-`primary-change-read-failed` rather than a proven reversal. The hammer prompt's
+JSON emit head-scoped `historyReadFailed: true` evidence and a non-zero helper
+exit, which the predicate treats as `history-read-failed` rather than a proven reversal. The hammer prompt's
 90-second process limit still bounds the complete collection.
 
 A blocking finding may authorize a specific reversal. A non-blocking finding may

@@ -2,6 +2,8 @@
 // One bounded GitHub snapshot; no Agent OS installation or local daemon required.
 import { fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { spawnSync } from 'node:child_process';
+import { createHistoryReader } from '../src/ama/history-reader.mjs';
+import { GH_LOOKUP_MAX_BUFFER } from '../src/gh-cli.mjs';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +14,7 @@ if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(number || '') |
   process.exit(64);
 }
 function get(args) {
-  const result = spawnSync('gh', args, { encoding: 'utf8', timeout: 15000, maxBuffer: 1024 * 1024 });
+  const result = spawnSync('gh', args, { encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER });
   if (result.error || result.status !== 0) throw new Error(`${args[0]} ${args[1]} failed: ${(result.stderr || result.error?.message || '').slice(-500)}`);
   return JSON.parse(result.stdout);
 }
@@ -68,18 +70,19 @@ try {
       } catch { /* Unreadable local lease is reported as unavailable below. */ }
     }
   }
+  const historyReader = createHistoryReader();
   let primaryChange;
   try {
     const evidence = await fetchPrimaryChange({ repo, prNumber: number, headSha: head, rootDir: localRoot,
-      get: (path) => get(['api', path]) });
+      get: historyReader });
     if (evidence.hasHammerCommits === false) {
-      const authorDiff = get(['api', `repos/${repo}/compare/${pr.base.sha}...${head}`]);
+      const authorDiff = await historyReader(`repos/${repo}/compare/${pr.base.sha}...${head}`);
       evidence.primaryHead = head;
       evidence.mergeBase = authorDiff.merge_base_commit?.sha;
       evidence.primaryFiles = authorDiff.files;
     }
     primaryChange = {
-      status: evidence.readFailed ? 'read-failed' : evidence.hasHammerCommits === null ? 'unknown' : 'available',
+      status: evidence.historyReadFailed ? 'history-read-failed' : evidence.readFailed ? 'read-failed' : evidence.hasHammerCommits === null ? 'unknown' : 'available',
       reason: evidence.reason ? compact(evidence.reason, 300) : undefined, primaryHead: evidence.primaryHead, mergeBase: evidence.mergeBase,
       fullEvidenceCommand: `node bin/primary-change-context.mjs ${repo} ${number} ${head}`,
       files: [], truncated: false,
@@ -92,7 +95,7 @@ try {
       }
       primaryChange.files.push(item);
     }
-  } catch (error) { primaryChange = { status: 'read-failed', reason: compact(String(error.message || error), 300) }; }
+  } catch (error) { primaryChange = { status: 'history-read-failed', reason: compact(String(error.message || error), 300) }; }
   const output = {
     primaryChange,
     statedIntent: compact(pr.body, 800),

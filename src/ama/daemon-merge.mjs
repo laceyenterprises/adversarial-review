@@ -107,6 +107,7 @@ const PERMANENT_TERMINAL_REASONS = Object.freeze([
 export const TRANSIENT_GATE_READ_REASONS = new Set([
   'labels-unavailable',
   'primary-change-read-failed',
+  'history-read-failed',
   'ci-cost-read-failed',
   'ci-cost-check-failed',
   'ci-cost-unauthorized',
@@ -831,11 +832,13 @@ async function attemptDaemonCleanMergeInner({
       }
       terminal = {
         reason: elig.reasons.includes('primary-change-unknown') ? 'primary-change-unknown'
+          : elig.reasons.includes('history-read-failed') ? 'history-read-failed'
           : transientReadOnly ? 'gate-read-failed' : 'gate-not-eligible',
         // Evidence recovery can repair the same head; retain scoped escalation
         // without writing the permanent failed-head marker.
         permanent: !hasTransientRead && !noCiRevoked && !elig.reasons.includes('primary-change-unknown'),
         reasons: elig.reasons,
+        ...(elig.reasons.includes('history-read-failed') ? { historyReadError: live.primaryChange?.reason } : {}),
         liveGate: live,
       };
       break;
@@ -1000,6 +1003,7 @@ async function attemptDaemonCleanMergeInner({
           path: closureAuthority,
           attemptPhase: 'daemon-failed',
           reason: terminal.reason,
+          ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
           permanent: Boolean(terminal.permanent),
           ...(terminal.reasons ? { preMergeReasons: terminal.reasons } : {}),
           eligibilityReasons: terminal.reasons || [],
@@ -1052,6 +1056,7 @@ async function attemptDaemonCleanMergeInner({
   return {
     disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
     reason: terminal.reason,
+    ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
     permanent: Boolean(terminal.permanent),
     merged: false,
     attempts,

@@ -1,3 +1,4 @@
+import { createHistoryReader } from './history-reader.mjs';
 import { refundOperatorHeldHammerStop } from './operator-hold-refund.mjs';
 import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 // NOOWNER-01 (SEV1) — after a hammer stops without merging, the next hammer
@@ -58,7 +59,7 @@ import { readAmaAuditEntry } from './audit.mjs';
 export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
 export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
 
-export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed']);
+export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed', 'history-read-failed']);
 const execFileAsync = promisify(execFile);
 
 const STOP_OUTCOMES = new Set(['failed-without-merge', 'no-merge']);
@@ -200,6 +201,8 @@ export function readHammerStopForHead({
     })),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
     closingStatus: oneLine(attempt?.closingStatus),
+    ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
+      ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason) } : {}),
     next: oneLine(attempt?.next),
     recordedAt: attempt?.startedAt || attempt?.timestamp || attempt?.recordedAt || null,
     stopKey: `${latest.fileHead}:${attempt?.attemptNumber ?? latest.order}:${attempt?.startedAt || attempt?.timestamp || ''}`,
@@ -291,6 +294,7 @@ export async function evaluateHammerStopHold({
     : {
       stopKey: stop.stopKey,
       predicate: stop.predicate,
+      ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
       firstObservedAt: now,
       // A stop that follows a released hold read the inputs seen at release;
       // compare against those, not against this first observation.
@@ -302,7 +306,7 @@ export async function evaluateHammerStopHold({
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
     const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(entry.inputs, inputs);
-    if (holdReleased) {
+    if (holdReleased || stop.predicate === 'history-read-failed') {
       try {
         refundOperatorHeldHammerStop(rootDir, { repo, prNumber }, stop, { now });
       } catch (err) {
@@ -315,18 +319,17 @@ export async function evaluateHammerStopHold({
       try {
         const evidence = await fetchPrimaryChangeImpl({
           repo, prNumber, headSha, rootDir,
-          get: async (path) => {
-            const { stdout } = await execFileImpl('gh', ['api', path], { timeout: 15000, maxBuffer: 5 * 1024 * 1024 });
-            return JSON.parse(stdout);
-          },
+          get: createHistoryReader({ execFileImpl }),
         });
         const answer = checkPrimaryChange(evidence, headSha);
         if (!HAMMER_EVIDENCE_FAILURES.has(answer.reason)) changed.push('primary-change-evidence');
+        else if (stop.predicate === 'history-read-failed' && !holdReleased) changed.splice(0);
       } catch (err) {
+        if (stop.predicate === 'history-read-failed' && !holdReleased) changed.splice(0);
         logger?.warn?.(`[ama-closer] hammer evidence probe failed for ${repo}#${prNumber}: ${err?.message || err}`);
       }
     }
-    if (changed.length === 0 && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
+    if (changed.length === 0 && stop.predicate !== 'history-read-failed' && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
     if (changed.length > 0) {
       entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };
       dirty = true;
@@ -340,6 +343,7 @@ export async function evaluateHammerStopHold({
     headSha,
     predicate: stop.predicate,
     closingStatus: stop.closingStatus || null,
+    ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
     since: entry.firstObservedAt,
   };
   if (entry.releasedAt) {
@@ -350,6 +354,7 @@ export async function evaluateHammerStopHold({
   if (!entry.pagedAt && !PAGED_IN_PROCESS.has(debounceKey) && typeof deliverAlertImpl === 'function') {
     const text = `Adversarial-review hammer stopped without merging ${repo}#${prNumber} on head `
       + `${String(headSha).slice(0, 12)}: ${stop.predicate}. `
+      + (stop.historyReadError ? `Read error: ${stop.historyReadError}. ` : '')
       + (stop.closingStatus ? `Hammer said: ${stop.closingStatus} ` : '')
       + 'The PR has neither a reviewer nor a hammer. Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. '
       + 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; '
@@ -360,6 +365,7 @@ export async function evaluateHammerStopHold({
         payload: {
           repo, prNumber, headSha, predicate: stop.predicate, closingStatus: stop.closingStatus || null,
           next: stop.next || null, inputs,
+          ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
         },
       });
       entry.pagedAt = now;

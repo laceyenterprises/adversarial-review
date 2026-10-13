@@ -633,7 +633,9 @@ phase
     });
   }
 });
-for (const scenario of ['two lag polls', 'visibility timeout', 'third head', 'initial third head']) {
+for (const scenario of ['two lag polls', 'visibility timeout', 'third head', 'initial third head',
+  'transient TLS', 'transient HTTP 503', 'probe alarm', 'transient exhaustion',
+  'permanent error', 'malformed JSON', 'missing head', 'invalid head']) {
   test(`HAMCLOSE-07 verify-head: ${scenario}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-head-wait-'));
     const prNumber = String(2_000_000 + process.pid);
@@ -648,9 +650,28 @@ for (const scenario of ['two lag polls', 'visibility timeout', 'third head', 'in
     writeFileSync(join(dir, 'sleep'), '#!/bin/sh\nn=$(cat "$TMPDIR/clock"); echo $((n + $1)) > "$TMPDIR/clock"\n', { mode: 0o755 });
     writeFileSync(join(dir, 'gh'), `#!/bin/sh
 n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
+if [ "$n" -eq 3 ]; then cp /tmp/ham-${prNumber}-pr-after.json "$TMPDIR/cache-after-probe"; fi
+if [ "$n" -ge 2 ]; then
+  case "$HAM_TEST_SCENARIO" in
+    'transient TLS'|'transient HTTP 503'|'probe alarm'|'transient exhaustion'|'permanent error')
+      if [ "$n" -eq 2 ] || [ "$HAM_TEST_SCENARIO" = 'transient exhaustion' ]; then
+        printf '{partial'
+        case "$HAM_TEST_SCENARIO" in
+          'transient TLS') echo 'TLS handshake timeout' >&2 ;;
+          'transient HTTP 503'|'transient exhaustion') echo 'HTTP 503 Service Unavailable' >&2 ;;
+          'probe alarm') kill -ALRM $$ ;;
+          'permanent error') echo 'HTTP 403 Forbidden' >&2 ;;
+        esac
+        exit 1
+      fi ;;
+    'malformed JSON') printf '{'; exit 0 ;;
+    'missing head') printf '{}'; exit 0 ;;
+    'invalid head') printf '{"headRefOid":"not-a-sha"}'; exit 0 ;;
+  esac
+fi
 head=${before}
 case "$HAM_TEST_SCENARIO" in
-  'two lag polls') [ "$n" -lt 3 ] || head=${pushed} ;;
+  'two lag polls'|'transient TLS'|'transient HTTP 503'|'probe alarm') [ "$n" -lt 3 ] || head=${pushed} ;;
   'third head') [ "$n" -lt 2 ] || head=${third} ;;
   'initial third head') head=${third} ;;
 esac
@@ -709,15 +730,30 @@ rc=$?
 echo "OUTCOME=$HAM_PHASE_OUTCOME rc=$rc"
 ${checksContinuation}
 exit "$rc"`], env);
-    if (scenario === 'visibility timeout') {
+    assert.deepEqual(readdirSync('/tmp').filter(name => name.startsWith(`ham-${prNumber}-head-probe.`)), [], 'probe files are cleaned up');
+    if (['visibility timeout', 'transient exhaustion'].includes(scenario)) {
       assert.equal(result.status, 20, result.stderr);
       assert.match(result.stderr, /Waited 300s for the published head and 0s for required checks/);
       assert.match(result.stdout, /OUTCOME=published-head-timeout/);
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
+      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 20);
+      assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, before);
+    } else if (['permanent error', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stdout, /OUTCOME=verify-head-error rc=1/);
+      assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
+      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 2);
+      assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, before);
     } else {
       assert.equal(result.status, 0, result.stderr);
-      const expected = scenario === 'two lag polls' ? pushed : third;
+      const recovered = ['transient TLS', 'transient HTTP 503', 'probe alarm'].includes(scenario);
+      const expected = scenario === 'two lag polls' || recovered ? pushed : third;
       assert.match(result.stdout, new RegExp(`CONTINUE_TO_CHECKS head=${expected}`));
+      if (recovered) {
+        assert.match(result.stdout, /waited=30/);
+        assert.equal(JSON.parse(readFileSync(join(dir, 'cache-after-probe'), 'utf8')).headRefOid, before);
+        assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, pushed);
+      }
       if (scenario === 'two lag polls') {
         assert.match(result.stdout, /CHECKS_OUTCOME=github-gate-red STATUS=20/);
         assert.match(result.stdout, /Waited 30s for the published head and 15s for required checks/);
@@ -725,7 +761,7 @@ exit "$rc"`], env);
         assert.equal(reads.length, 2);
         assert.deepEqual(reads, [pushed, pushed]);
       }
-      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), scenario === 'two lag polls' ? 3 : scenario === 'third head' ? 2 : 1);
+      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), scenario === 'two lag polls' || recovered ? 3 : scenario === 'third head' ? 2 : 1);
     }
   });
 }

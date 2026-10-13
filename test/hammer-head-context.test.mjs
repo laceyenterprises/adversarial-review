@@ -202,14 +202,17 @@ for (const scenario of ['rebase-bot', 'rebase-user']) {
 }
 
 
-test('HAMCLOSE-07 activity loader follows Link cursors and parses REST actors', async () => {
+for (const headers of [
+  'Link: <https://api.github.com/repos/fixture/repo/activity?before=cursor>; rel="next"',
+  'Link: <https://api.github.com/repos/fixture/repo/activity?after=previous>; rel="prev"\r\nlInK: <https://api.github.com/repos/fixture/repo/activity?before=cursor>; rel="next"',
+]) test(`HAMCLOSE-07 activity loader follows Link cursors across ${headers.split('\r\n').length} header lines`, async () => {
   const source = readFileSync(cli, 'utf8');
   const loaderSource = source.slice(source.indexOf('const loadActivityPage ='), source.indexOf('const range ='));
   const calls = [];
   const load = runInNewContext(`${loaderSource}\nloadActivityPage`, { URL,
     execGhWithRetry: async options => {
       calls.push(options.args);
-      return { stdout: 'HTTP/2.0 200 OK\r\nLink: <https://api.github.com/repos/fixture/repo/activity?before=cursor>; rel="next"\r\n\r\n[]' };
+      return { stdout: `HTTP/2.0 200 OK\r\n${headers}\r\n\r\n[]` };
     },
   });
   const page = await load('repos/fixture/repo/activity?ref=refs%2Fheads%2Frepair');

@@ -2498,6 +2498,14 @@ Certified parks with pending CI skip daemon merge until the metadata checks sett
 Queue bounds and backoff use `evaluateHammerDeferralQueue`; missing or invalid
 start timestamps expire the queue. Park audits are read only on certified HAM
 routes; an unreadable audit explicitly requires operator recovery.
+Before lease acquisition, verify-head waits at most 300 seconds for the published
+`HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Each visibility probe is
+bounded to 30 seconds or the remaining deadline, whichever is shorter. Transport
+errors and probe alarms retry within that same deadline; permanent errors and
+malformed or missing head data remain fatal. Only successful reads with a full
+head SHA replace the cached PR JSON. Exhaustion reports `published-head-timeout`
+with the elapsed head/check wait times; a different live head leaves the wait
+and follows the existing race path.
 After reacquisition it re-runs the fail-closed changed-file overlap guard from
 verify-head against the live base before the final fresh exact-head gate. The
 comparison starts at the merge-base of the exact CI-validated head and fetched

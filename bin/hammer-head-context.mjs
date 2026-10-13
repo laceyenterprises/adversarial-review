@@ -49,7 +49,7 @@ const loadActivityPage = async path => {
   if (boundary < 0) return null;
   const headers = stdout.slice(0, boundary);
   const body = stdout.slice(boundary).trim();
-  const link = headers.match(/^link:\s*(.*)$/im)?.[1];
+  const link = Array.from(headers.matchAll(/^link:[ \t]*(.*)$/gim), match => match[1]).join(', ');
   const nextUrl = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1];
   const next = nextUrl ? new URL(nextUrl) : null;
   if (next && !next.pathname.endsWith('/activity')) return null;

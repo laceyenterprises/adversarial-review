@@ -81,13 +81,14 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
 }
 
 // A timeline read is all-or-nothing: incomplete pages cannot establish provenance.
+const FORCE_PUSH_TIMELINE_MAX_PAGES = 10;
 async function readForcePushEvents(loadTimelinePage) {
   if (!loadTimelinePage) return null;
   const events = [];
   const cursors = new Set();
   let cursor = null;
   try {
-    for (;;) {
+    for (let pageIndex = 0; pageIndex < FORCE_PUSH_TIMELINE_MAX_PAGES; pageIndex++) {
       const page = await loadTimelinePage(cursor);
       if (!Array.isArray(page?.nodes) || typeof page?.pageInfo?.hasNextPage !== 'boolean'
         || page.nodes.some(event => event?.__typename !== 'HeadRefForcePushedEvent')) return null;
@@ -98,6 +99,7 @@ async function readForcePushEvents(loadTimelinePage) {
       cursors.add(cursor);
     }
   } catch { return null; }
+  return null;
 }
 
 async function fleetForcePushProves(events, base, head, repo, get, fleetLogins) {
@@ -106,7 +108,8 @@ async function fleetForcePushProves(events, base, head, repo, get, fleetLogins) 
   let current = base;
   const visited = new Set([base]);
   for (let hop = 0; hop < 10; hop++) {
-    const event = events.find(event => event.beforeCommit?.oid === current);
+    // A reset can reuse a starting SHA; prefer the latest attempt in timeline order.
+    const event = events.findLast(event => event.beforeCommit?.oid === current);
     if (event?.actor?.__typename !== 'Bot' || !trusted.has(login(event.actor.login))
       || typeof event.afterCommit?.oid !== 'string' || !event.afterCommit.oid) return false;
     current = event.afterCommit.oid;

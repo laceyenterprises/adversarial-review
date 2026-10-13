@@ -2745,7 +2745,16 @@ reviewed current head goes through ordinary comparison validation.
 
 Completed remediation rounds provide another starting-base proof when their
 completed start/result edges link the reviewed head to the captured base and
-GitHub confirms every link is strictly ahead. The prompt exports `HAM_ROOT_DIR`
+GitHub confirms every link is strictly ahead, or a diverged link is proven by
+authenticated `HeadRefForcePushedEvent` records whose actors are fleet Bots
+(built-in or configured App identities). The timeline read is all-or-nothing,
+capped at ten pages of 100 events; incomplete, malformed or unreadable results
+provide no force-push proof. Each chain follows at most ten force pushes, rejects
+cycles, and uses the most recent event for a reused starting SHA after a branch
+reset. Every traversed event requires a trusted Bot actor; a link succeeds at its
+recorded result or when GitHub confirms that result is ahead of the event's new
+head. The CLI omits absent or invalid pagination cursors.
+The prompt exports `HAM_ROOT_DIR`
 from dispatch's `rootDir`; the CLI reads daemon-owned state beneath
 `$HAM_ROOT_DIR/data/follow-up-jobs/completed`. This is distinct from `HAM_HQ_ROOT`
 and the PR worktree. Manual CLI callers must export that runtime root to use

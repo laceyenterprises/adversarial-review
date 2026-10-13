@@ -37,7 +37,7 @@ const loadTimelinePage = async cursor => {
   }`;
   const args = ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`,
     '-f', `name=${name}`, '-F', `number=${prNumber}`];
-  if (cursor !== null) args.push('-f', `cursor=${cursor}`);
+  if (typeof cursor === 'string' && cursor) args.push('-f', `cursor=${cursor}`);
   const response = JSON.parse((await execGhWithRetry({ args, timeoutMs: 15000 })).stdout);
   if (response.errors) return null;
   return response.data?.repository?.pullRequest?.timelineItems;

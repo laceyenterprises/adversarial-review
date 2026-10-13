@@ -6,11 +6,33 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-head-context.mjs', import.meta.url));
 const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+
+test('timeline loader omits absent and invalid cursors and forwards a valid cursor', async () => {
+  // Isolate the CLI-local loader without executing the command's top-level flow.
+  const source = readFileSync(cli, 'utf8');
+  const loaderSource = source.slice(source.indexOf('const loadTimelinePage ='), source.indexOf('const range ='));
+  const calls = [];
+  const load = runInNewContext(`${loaderSource}\nloadTimelinePage`, {
+    repo: 'fixture/repo', prNumber: '1',
+    execGhWithRetry: async options => {
+      calls.push(options.args);
+      return { stdout: JSON.stringify({ data: { repository: { pullRequest: { timelineItems: {
+        nodes: [], pageInfo: { hasNextPage: false, endCursor: null },
+      } } } } }) };
+    },
+  });
+  await load();
+  for (const cursor of [null, '', 0, false, {}]) await load(cursor);
+  assert.ok(calls.every(args => !args.some(arg => arg.startsWith('cursor='))));
+  await load('next-page');
+  assert.ok(calls.at(-1).includes('cursor=next-page'));
+});
 
 function fixture(t, scenario) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-head-context-'));

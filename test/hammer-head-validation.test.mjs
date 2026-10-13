@@ -242,6 +242,10 @@ for (const [name, events, statuses, kinds] of [
   ['direct rebase', [forcePush('reviewed', 'head')], {}, ['fleet-force-push']],
   ['rebase then push', [forcePush('reviewed', 'middle')], { 'middle...head': 'ahead' }, ['fleet-force-push']],
   ['two hops', [forcePush('reviewed', 'middle'), forcePush('middle', 'head')], {}, ['fleet-force-push']],
+  ['retry after reset', [forcePush('reviewed', 'abandoned'), forcePush('abandoned', 'reviewed'),
+    forcePush('reviewed', 'head')], {}, ['fleet-force-push']],
+  ['latest User cannot inherit an older Bot proof', [forcePush('reviewed', 'head'),
+    forcePush('head', 'reviewed'), forcePush('reviewed', 'head', { __typename: 'User', login: 'lacey-codex-agent[bot]' })], {}, null],
   ['User actor', [forcePush('reviewed', 'head', { __typename: 'User', login: 'lacey-codex-agent[bot]' })], {}, null],
   ['foreign Bot', [forcePush('reviewed', 'head', { __typename: 'Bot', login: 'synthetic-other[bot]' })], {}, null],
   ['wrong start', [forcePush('other', 'head')], {}, null],
@@ -257,6 +261,25 @@ for (const [name, events, statuses, kinds] of [
       loadTimelinePage: async () => timelinePage(events) });
     assert.deepEqual(result?.linkKinds || null, kinds);
     if (kinds) assert.equal(result.proof, 'completed-remediation-round-chain');
+  });
+}
+
+for (const pages of [10, 11]) {
+  test(`HAMCLOSE-06: ${pages}-page timeline respects the all-or-nothing page bound`, async () => {
+    const calls = [];
+    const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
+      hammerBaseHead: 'head', env: {}, remediationRounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }],
+      get: async () => ({ status: 'diverged' }),
+      loadTimelinePage: async cursor => {
+        calls.push(cursor);
+        // An early valid edge cannot authorize a truncated timeline.
+        return timelinePage(calls.length === 1 ? [forcePush('reviewed', 'head')] : [],
+          calls.length < pages, `page-${calls.length}`);
+      } });
+    assert.equal(calls.length, 10);
+    assert.deepEqual(calls, [null, ...Array.from({ length: 9 }, (_, i) => `page-${i + 1}`)]);
+    if (pages === 10) assert.deepEqual(result.linkKinds, ['fleet-force-push']);
+    else assert.equal(result, null);
   });
 }
 

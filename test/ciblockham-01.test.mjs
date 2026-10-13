@@ -635,8 +635,11 @@ test('the CI-blocked prompt shares the cap route contract and caps the failing-c
   assert.match(composeCiBlockedHammerPrompt({}), /did not capture the failing check names/);
 });
 
-for (const state of ['failed', 'pending', 'hard-stop', 'draft', 'live-remediation', 'live-lease']) {
-  test(`CIBLOCKHAM-02: exhausted comment-only round routes on this pass (${state})`, async (t) => {
+// The shared exhausted-review route also admits CI-blocked heads: its
+// reviewCycleCapReached flag covers stale verdicts and blocking findings even
+// when the narrower ciBlockedFailureAdmit / ciBlockedReasonsCovered do not.
+for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'action-required', 'blocking-findings', 'pending', 'hard-stop', 'draft', 'live-remediation', 'live-lease']) {
+  test(`CIBLOCKHAM-02: exhausted round routes on this pass (${state})`, async (t) => {
     const rootDir = tempRoot(t, 'ci-blocked-next-pass-');
     const args = closerArgs(rootDir);
     args.dispatchContext.repo = 'example/review-fixture';
@@ -649,9 +652,16 @@ for (const state of ['failed', 'pending', 'hard-stop', 'draft', 'live-remediatio
     args.reviewState.completedRemediationRounds = 0;
     args.dispatchContext.ciBlockedReason = 'ci-regression-stopped';
     args.dispatchContext.ciFailedChecks = state === 'pending' ? [] : [{ name: 'unit', state: 'FAILURE' }];
+    const conclusion = { 'timed-out': 'TIMED_OUT', cancelled: 'CANCELLED',
+      'startup-failure': 'STARTUP_FAILURE', 'action-required': 'ACTION_REQUIRED' }[state] || 'FAILURE';
     args.prMetadata.statusCheckRollup = [{ __typename: 'CheckRun', name: 'unit',
       status: state === 'pending' ? 'IN_PROGRESS' : 'COMPLETED',
-      conclusion: state === 'pending' ? null : 'FAILURE' }];
+      conclusion: state === 'pending' ? null : conclusion }];
+    if (['blocking-findings', 'timed-out', 'cancelled', 'startup-failure', 'action-required'].includes(state)) {
+      args.reviewState.verdict = 'request-changes';
+      args.reviewState.blockingFindingCount = 1;
+      args.reviewState.nonBlockingFindingCount = 0;
+    }
     if (state === 'hard-stop') args.prMetadata.labels = ['do-not-merge'];
     if (state === 'draft') args.prMetadata.isDraft = true;
     if (state === 'live-remediation') args.reviewState.remediationPending = true;

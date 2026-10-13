@@ -12853,7 +12853,7 @@ for (const metadata of ['foreign-remote']) {
   });
 }
 
-for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'round-two', 'final-round']) {
+for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round']) {
   test(`CIBLOCKHAM-02: pushed round pending CI completion (${scenario})`, async (t) => {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'pending-ci-round-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -12861,8 +12861,12 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
     const endHead = scenario === 'unchanged' ? startHead : 'b'.repeat(40);
     const { claimed } = makeQueuedJob(rootDir, {
       repo: 'example/review-fixture', prNumber: 42, revisionRef: startHead, maxRemediationRounds: 2,
-      linearTicketId: 'SYNTH-42', reviewBody: '## Verdict\nComment only',
+      linearTicketId: 'SYNTH-42', reviewBody: scenario === 'blocking-rereview'
+        ? '## Blocking Issues\n- **Broken handoff**\n  - Remediation loses the handoff.\n\n## Verdict\nRequest changes'
+        : '## Verdict\nComment only',
     });
+    claimed.job.ciRegressionGuard = { firstObservedAt: '2026-04-21T10:00:00.000Z' };
+    writeFollowUpJob(claimed.jobPath, claimed.job);
     if (scenario === 'round-two') {
       claimed.job.remediationPlan.currentRound = 2;
       claimed.job.remediationPlan.rounds = [{ round: 1, state: 'completed' },
@@ -12880,7 +12884,10 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
     writeFileSync(outputPath, 'Addressed all findings and pushed.');
     writeValidReply(replyPath, claimed.job, {
       outcome: 'partial',
-      summary: scenario === 'normalized-rereview' ? `Addressed all findings and pushed ${endHead}.` : 'Addressed all findings.',
+      summary: ['normalized-rereview', 'blocking-rereview'].includes(scenario)
+        ? `Addressed all findings and pushed ${endHead}.` : 'Addressed all findings.',
+      addressed: scenario === 'blocking-rereview'
+        ? [{ title: 'Broken handoff', finding: 'Remediation loses the handoff.', action: 'Preserved the review handoff.' }] : [],
       operationalBlockers: [
         { kind: 'pending-ci', title: 'Checks running', finding: 'Checks are pending.', reasoning: 'One bounded wait ended.' },
         ...(scenario === 'other-blocker' ? [{ title: 'Missing input', finding: 'Input unavailable.', reasoning: 'Needs an operator.', needsHumanInput: 'Provide input.' }] : []),
@@ -12891,20 +12898,33 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
       model: 'codex', processId: 4242, state: 'spawned',
       workspaceDir: path.relative(rootDir, workspaceDir), outputPath: path.relative(rootDir, outputPath), replyPath,
     } });
-    const comments = [];
+    const comments = [], rereviewCalls = [];
     const result = await withHqRootEnv(hqRoot, () => reconcileFollowUpJob({
       rootDir, job: spawned.job, jobPath: spawned.jobPath, isWorkerRunning: () => false,
+      now: () => '2026-04-21T11:00:00.000Z',
       execFileImpl: scenario === 'final-round'
         ? finalRoundPushedExec({ jobId: claimed.job.jobId, pushedHead: endHead })
         : async () => ({ stdout: '[]', stderr: '' }),
       auditWorkspaceForContaminationImpl: cleanContaminationAudit,
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: endHead }),
       inspectRemediationCiRegressionImpl: async () => ({ state: 'pending', headSha: endHead }),
-      requestReviewRereviewImpl: () => assert.fail('pending CI completion must not need rereview'),
+      requestReviewRereviewImpl: (args) => {
+        rereviewCalls.push(args);
+        return { triggered: true, status: 'pending', reason: 'review-status-reset' };
+      },
       postCommentImpl: async (args) => { comments.push(args); return { posted: true }; },
       log: { log() {}, warn() {}, error() {} },
     }));
-    const expectedCompleted = ['pushed', 'normalized-rereview', 'round-two', 'final-round'].includes(scenario);
+    const expectedCompleted = ['pushed', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round'].includes(scenario);
+    const expectedRereview = ['normalized-rereview', 'blocking-rereview'].includes(scenario);
+    assert.equal(rereviewCalls.length, expectedRereview ? 1 : 0);
+    if (expectedRereview) {
+      assert.equal(rereviewCalls[0].targetRevisionRef, endHead);
+      assert.equal(result.job.reReview.requested, true);
+      assert.equal(result.job.reReview.triggered, true);
+      assert.equal(result.job.reReview.ciSettlement, 'pending-at-timeout');
+      assert.equal(result.job.remediationPlan.rounds.at(-1).reReview.requested, true);
+    }
     assert.equal(result.job.status, expectedCompleted ? 'completed' : 'stopped', JSON.stringify(result.job.failure));
     assert.equal(result.job.remediationPlan.rounds.at(-1).state, expectedCompleted ? 'completed' : 'stopped');
     assert.equal(comments.length, 1);

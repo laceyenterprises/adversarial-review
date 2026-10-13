@@ -626,9 +626,11 @@ function buildRemediationOutcomeCommentBody({
   if (action === 'refunded') {
     lines.push(`**Outcome:** ${sanitizeFailureText(failure?.message || 'not charged: infrastructure failure')}. Queued once more.`);
   } else if (action === 'completed' && job?.completion?.pendingCiOnly === true) {
+    const pushedHead = typeof job.completion.workerPushedHeadSha === 'string'
+      ? job.completion.workerPushedHeadSha.slice(0, 7) || 'unknown' : 'unknown';
     lines.push('**Outcome:** round finished; CI still running.');
     lines.push('');
-    lines.push(`All findings from this review were addressed and pushed as ${job.completion.workerPushedHeadSha.slice(0, 7)}. Required checks had not finished when the round ended.`);
+    lines.push(`All findings from this review were addressed and pushed as ${pushedHead}. Required checks had not finished when the round ended.`);
     lines.push('');
     lines.push('Nothing is needed from a person. The pipeline continues when CI finishes.');
   } else if (action === 'completed') {

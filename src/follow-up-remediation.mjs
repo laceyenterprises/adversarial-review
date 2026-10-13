@@ -2066,7 +2066,7 @@ async function reconcileFollowUpJob({
         }
       }
 
-      if (reply.reReview.requested && job?.finalRound !== 'comment-only' && !pendingCiCompletion) {
+      if (reply.reReview.requested && job?.finalRound !== 'comment-only') {
         // Pre-rereview branch-contamination gate. Even though the
         // remediator prompt forbids pushing patch-id duplicates of
         // upstream commits, workers can ignore the contract or run a

@@ -31,7 +31,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN","state":"OPEN","isDraft":false,"labels":[]}\' ;;\n  "api --paginate"*) echo \'{"id":42,"body":"<!-- hq:ham-terminal-remediation:audit --> HAM-Terminal-Remediation-Head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' ;;\n  "api --method PATCH"*) echo patched > "$TMPDIR/patched" ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
   chmodSync(gh, 0o755);
   const leaseNode = join(bin, 'lease-node');
-  writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  --input-type=module) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/merge-lease.mjs) echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\'; exit 70 ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
+  writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  --input-type=module) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/merge-lease.mjs) echo LEASE_PROGRESS >&2; echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\'; exit 70 ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
   chmodSync(leaseNode, 0o755);
   const wrapper = template.match(/For each phase,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
   assert.ok(wrapper);
@@ -53,7 +53,11 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
     assert.match(result.stdout, new RegExp(diagnostic));
     assert.match(result.stdout, new RegExp(`outcome=${outcome}`));
     assert.match(result.stdout, /SHELL_SURVIVED/);
-    if (phase === 'hammer-verify-head') assert.equal(readFileSync(join(dir, 'patched'), 'utf8').trim(), 'patched');
+    if (phase === 'hammer-verify-head') {
+      assert.equal(readFileSync(join(dir, 'patched'), 'utf8').trim(), 'patched');
+      assert.match(result.stderr, /LEASE_PROGRESS/);
+      assert.doesNotMatch(result.stdout, /LEASE_PROGRESS/);
+    }
     assert.deepEqual(readdirSync(dir).filter((file) => file.startsWith('ham-phase')), []);
   }
 });

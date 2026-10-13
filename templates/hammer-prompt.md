@@ -100,7 +100,8 @@ HAM_PHASE_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/ham-phase.XXXXXX") || exit 1
 node "${HAM_ROOT_DIR}/bin/hammer-procedure.mjs" "$PHASE" --render > "$HAM_PHASE_SCRIPT" || exit 1
 HAM_PHASE_LOG=$(mktemp "${TMPDIR:-/tmp}/ham-phase-log.XXXXXX") || exit 1
 HAM_PHASE_OUTCOME=not-run
-if source "$HAM_PHASE_SCRIPT" > "$HAM_PHASE_LOG" 2>&1; then
+# Descriptor 3 keeps sparse lease-wait progress live while diagnostics are buffered.
+if source "$HAM_PHASE_SCRIPT" 3>&2 > "$HAM_PHASE_LOG" 2>&1; then
   HAM_PHASE_STATUS=0
 else
   HAM_PHASE_STATUS=$?

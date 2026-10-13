@@ -172,6 +172,10 @@ NODE
   ' /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json >/dev/null; then
     ham_required_checks_green_args=(--required-checks-green)
   fi
+  # The procedure wrapper preserves live stderr on descriptor 3. Direct
+  # callers without that descriptor still receive progress on stderr.
+  local ham_lease_progress_fd=2
+  if ( : >&3 ) 2>/dev/null; then ham_lease_progress_fd=3; fi
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
     --repo <<REPO>> \
     --base "$BASE_BRANCH" \
@@ -180,7 +184,7 @@ NODE
     --owner-pid "$$" \
     --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" --wait-for-holder-deadline \
     "${ham_required_checks_green_args[@]+"${ham_required_checks_green_args[@]}"}" \
-    > /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json; then
+    > /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json 2>&"$ham_lease_progress_fd"; then
     HAM_MERGE_LEASE_ACQUIRE_EXIT=0
   else
     HAM_MERGE_LEASE_ACQUIRE_EXIT=$?

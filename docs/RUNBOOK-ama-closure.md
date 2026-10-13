@@ -1151,6 +1151,11 @@ Merged signals are read per PR, independent of the lease head SHA. Other
 terminal runs without audit/merge evidence record `superseded` after lease
 head advancement, otherwise `failed-without-merge`.
 
+Lease reconciliation forwards explicit `ledgerTarget` and `ledgerDbPath`
+options to launch-status, merged-completion and completion-producer reads, so
+all evidence uses the caller's session ledger. Terminal audit lookups use an
+explicit `hqRoot`, falling back to `rootDir` when it is omitted.
+
 A hammer LRQ that ends `succeeded` has only proven that its process exited 0.
 Headless Claude hammers backgrounded the close and ended the session (SEV2
 2026-09-29), leaving the PR open. When the closer observes a `succeeded` hammer

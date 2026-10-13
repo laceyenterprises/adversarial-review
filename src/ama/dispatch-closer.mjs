@@ -1506,7 +1506,7 @@ function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, head
  */
 export function reconcileAmaCloserLease({
   rootDir, repo, prNumber, now = new Date().toISOString(),
-  hqRoot = DEFAULT_HQ_ROOT, ledgerTarget = null, ledgerDbPath = null, env = process.env,
+  hqRoot = null, ledgerTarget = null, ledgerDbPath = null, env = process.env,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedger,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
@@ -1534,7 +1534,7 @@ export function reconcileAmaCloserLease({
     // Merged completion rows are PR-scoped (their SHA may be the merge commit),
     // so this also observes completion from a lease's original dispatch head.
     const mergedSignal = readMergedBuildCompletionSignal({
-      ...identity, hqRoot, rootDir, env,
+      ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env,
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
     // A successful exit can precede the merge webhook/audit. Preserve ownership
@@ -3569,6 +3569,8 @@ function readMergedBuildCompletionSignal({
   headSha,
   hqRoot,
   rootDir,
+  ledgerTarget = null,
+  ledgerDbPath = null,
   env = process.env,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
@@ -3579,6 +3581,8 @@ function readMergedBuildCompletionSignal({
     signalKind: 'merged',
     hqRoot,
     rootDir,
+    ledgerTarget,
+    ledgerDbPath,
     env,
   });
   if (!result) return { ok: false, reason: 'ledger-read-failed' };
@@ -3598,6 +3602,8 @@ function readMergedBuildCompletionSignal({
       signalKind: 'merged',
       hqRoot,
       rootDir,
+      ledgerTarget,
+      ledgerDbPath,
       env,
     });
     if (producerEvidence?.ok) {

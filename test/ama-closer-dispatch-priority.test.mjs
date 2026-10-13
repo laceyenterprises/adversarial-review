@@ -1361,7 +1361,7 @@ for (const scenario of [
   });
 }
 
-for (const evidence of ['merged signal', 'terminal audit']) {
+for (const evidence of ['merged signal', 'terminal audit', 'terminal audit without hqRoot']) {
   test(`CLOSERLEASE-01: success hold settles when delayed ${evidence} arrives`, t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-delayed-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -1382,6 +1382,7 @@ for (const evidence of ['merged signal', 'terminal audit']) {
       readBuildCompletionSignalForPrImpl: () => merged ? { ok: true, row: { head_sha: 'merge-commit' } }
         : { ok: false, reason: 'missing-build-completion-signal' },
     };
+    if (evidence === 'terminal audit without hqRoot') delete args.hqRoot;
     assert.equal(reconcileAmaCloserLease(args), false);
     assert.deepEqual(readAmaCloserLease(rootDir, identity), beforeLease, 'holding must not refresh the reclaim clock');
     assert.equal(readFileSync(recordPath, 'utf8'), beforeRecord);
@@ -1392,5 +1393,51 @@ for (const evidence of ['merged signal', 'terminal audit']) {
     const terminalRecord = readFileSync(recordPath, 'utf8');
     assert.equal(reconcileAmaCloserLease(args), false);
     assert.equal(readFileSync(recordPath, 'utf8'), terminalRecord, 'settlement is idempotent');
+  });
+}
+
+for (const routing of [
+  { ledgerTarget: { backend: 'postgres', databaseName: 'fixture-ledger' }, ledgerDbPath: null },
+  { ledgerTarget: null, ledgerDbPath: '/fixture/custom-ledger.sqlite' },
+]) {
+  test(`CLOSERLEASE-01: completion reads preserve explicit ${routing.ledgerTarget ? 'ledgerTarget' : 'ledgerDbPath'}`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-ledger-routing-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const now = '2026-07-20T12:00:00Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_routing', now });
+    const reads = [];
+    let merged = false;
+    const args = { rootDir, ...identity, hqRoot: rootDir, now, ...routing, env: {}, logger: { info() {} },
+      readLaunchRequestStatusImpl: input => {
+        reads.push(['launch', input]);
+        return { ok: true, row: { status: 'succeeded' } };
+      },
+      readBuildCompletionSignalForPrImpl: input => {
+        reads.push(['signal', input]);
+        const routed = input.ledgerTarget === routing.ledgerTarget && input.ledgerDbPath === routing.ledgerDbPath;
+        return merged && routed ? { ok: true, row: { head_sha: 'merge-commit' } }
+          : { ok: false, reason: 'missing-build-completion-signal' };
+      },
+      readBuildCompletionProducerEvidenceImpl: input => {
+        reads.push(['producer', input]);
+        return { ok: true, row: { producer_class: 'closer-hammer' } };
+      },
+    };
+    assert.equal(reconcileAmaCloserLease(args), false, 'producer evidence alone must retain the lease');
+    assert.deepEqual(reads.map(([kind]) => kind), ['launch', 'signal', 'producer']);
+    for (const [, input] of reads) {
+      assert.equal(input.ledgerTarget, routing.ledgerTarget);
+      assert.equal(input.ledgerDbPath, routing.ledgerDbPath);
+      assert.equal(input.rootDir, rootDir);
+      assert.equal(input.hqRoot, rootDir);
+      assert.equal(input.env, args.env);
+    }
+    reads.length = 0;
+    merged = true;
+    assert.equal(reconcileAmaCloserLease(args), true);
+    assert.deepEqual(reads.map(([kind]) => kind), ['launch', 'signal']);
+    assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
   });
 }

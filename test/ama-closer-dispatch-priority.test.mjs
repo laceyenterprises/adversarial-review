@@ -1575,3 +1575,24 @@ test('HAMCLOSE-07 a final live-probe head move defers instead of launching the s
   assert.equal(deps.calls.length, 0);
   assert.equal(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD }), null);
 });
+
+test('stale missing review context still reconciles a dispatched lease', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-stale-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const args = findingsRemediationArgs(rootDir, {
+    reviewState: { headSha: null }, prMetadata: { headSha: 'b'.repeat(40) },
+    dispatchContext: { reviewedSha: HEAD, targetRemediationSha: HEAD },
+  });
+  const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+  acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt });
+  updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'lrq_stale', now: args.dispatchContext.dispatchedAt });
+  let probes = 0;
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    readLaunchRequestStatusImpl: () => { probes++; return { ok: true, row: { status: 'failed' } }; },
+  });
+  assert.equal(probes, 1);
+  assert.equal(result.reason, 'dispatch-head-context-unavailable');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+  assert.equal(deps.calls.length, 0);
+});

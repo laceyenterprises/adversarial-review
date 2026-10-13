@@ -4252,33 +4252,6 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
-  // HAMCLOSE-07: historical launch records cannot pin a new hammer to an old
-  // target. Re-derive using the same review-state/current-head inputs as the
-  // orchestration path, before eligibility, identities, or prompt composition.
-  const suppliedTarget = dispatchContext?.targetRemediationSha || dispatchContext?.reviewedSha;
-  const suppliedRecordHead = dispatchContext?.dispatchRecordHeadSha || suppliedTarget;
-  const suppliedRecord = dispatchContext?.rootDir && dispatchContext?.repo && suppliedRecordHead
-    ? readAmaCloserDispatchRecord(dispatchContext.rootDir, {
-      repo: dispatchContext.repo, prNumber, headSha: suppliedRecordHead,
-    }) : null;
-  const recordedTarget = suppliedRecord?.targetRemediationSha || suppliedRecord?.headSha;
-  const staleDispatchTarget = prMetadata?.headSha && (
-    (suppliedTarget && suppliedTarget !== prMetadata.headSha)
-    || (recordedTarget && recordedTarget !== prMetadata.headSha)
-  );
-  if (staleDispatchTarget) {
-    const freshReviewedSha = String(reviewState?.headSha || '').trim();
-    const freshTargetSha = String(prMetadata.headSha || '').trim();
-    if (!freshReviewedSha || !freshTargetSha) return noAmaDispatch({
-      dispatched: false, skipMergeAgent: true, reason: 'dispatch-head-context-unavailable',
-      reasons: ['stale dispatch target has no current reviewed-head binding'],
-    });
-    dispatchContext = { ...dispatchContext, reviewedSha: freshReviewedSha,
-      targetRemediationSha: freshTargetSha,
-      dispatchRecordHeadSha: dispatchContext.closerAuthoredStale?.eligible === true
-        ? freshTargetSha : freshReviewedSha };
-  }
-
   let reconciledDispatchedLease = null;
   let earlyLaunchRequestProbe = null;
   const reconciliationRoot = dispatchContext?.rootDir;
@@ -4340,6 +4313,33 @@ export async function maybeDispatchAmaCloser({
         hammerStop: evidenceStopHold.hammerStop });
       if (evidenceStopHold.action === 'release') hammerStopRelease = evidenceStopHold;
     }
+  }
+
+  // HAMCLOSE-07: historical launch records cannot pin a new hammer to an old
+  // target. Re-derive using the same review-state/current-head inputs as the
+  // orchestration path, before eligibility, identities, or prompt composition.
+  const suppliedTarget = dispatchContext?.targetRemediationSha || dispatchContext?.reviewedSha;
+  const suppliedRecordHead = dispatchContext?.dispatchRecordHeadSha || suppliedTarget;
+  const suppliedRecord = dispatchContext?.rootDir && dispatchContext?.repo && suppliedRecordHead
+    ? readAmaCloserDispatchRecord(dispatchContext.rootDir, {
+      repo: dispatchContext.repo, prNumber, headSha: suppliedRecordHead,
+    }) : null;
+  const recordedTarget = suppliedRecord?.targetRemediationSha || suppliedRecord?.headSha;
+  const staleDispatchTarget = prMetadata?.headSha && (
+    (suppliedTarget && suppliedTarget !== prMetadata.headSha)
+    || (recordedTarget && recordedTarget !== prMetadata.headSha)
+  );
+  if (staleDispatchTarget) {
+    const freshReviewedSha = String(reviewState?.headSha || '').trim();
+    const freshTargetSha = String(prMetadata.headSha || '').trim();
+    if (!freshReviewedSha || !freshTargetSha) return noAmaDispatch({
+      dispatched: false, skipMergeAgent: true, reason: 'dispatch-head-context-unavailable',
+      reasons: ['stale dispatch target has no current reviewed-head binding'],
+    });
+    dispatchContext = { ...dispatchContext, reviewedSha: freshReviewedSha,
+      targetRemediationSha: freshTargetSha,
+      dispatchRecordHeadSha: dispatchContext.closerOnlyHeadDelta === true
+        ? freshTargetSha : freshReviewedSha };
   }
 
   const eligibilityOptions = { ...(options || {}) };

@@ -2806,13 +2806,22 @@ HAMCLOSE-07 adds branch activity as a fallback when existing proofs decline.
 It reads the PR's head-repository ref activity, including fork branches, through
 GitHub Link cursors with a ten-page all-or-nothing bound. From the latest
 departure from the reviewed SHA, every remaining event must be a contiguous
-push or force push on that ref by a built-in or configured fleet Bot. The chain
+push or force push on that ref by a built-in or configured fleet Bot. Each
+`after` commit must independently pass `fleetCommitIdentityMatches`: a valid
+GitHub signature, web-flow committer, and trusted fleet author. A push actor
+alone supplies no content authority. The chain
 must contain the captured hammer base (when supplied) and end at `currentHead`.
 Reaching the base or an intermediate target never skips trailing activity;
 untrusted pushes, other ref mutations, gaps, and a different final head refuse
 proof. A distinct current head is included only when activity proves every step
 to it, rather than being appended to a starting-base proof. Successful ranges
 report `proof: branch-activity` and the complete validated `steps`.
+
+Activity proof is scoped to the current hammer run. The closer does not load
+activity or reconstruct the captured starting base. A deferred hammer head must
+therefore have an independently provable App-attestation, completed-round or
+commit-DAG chain before the closer can certify it; activity success alone does
+not authorize daemon closure or waive an exact-head gate.
 
 The audit lookup uses `gh api --paginate --slurp` to read all comment pages
 as one JSON payload. `bin/hammer-audit-comment-id.mjs` parses that payload

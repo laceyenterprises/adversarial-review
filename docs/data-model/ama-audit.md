@@ -32,6 +32,9 @@ at mode `0640`.
 | `attempts[].closingKeywordRewrites` | optional array | Per-attempt message rewrites, including hammer shell attempts. Same item shape as the top-level field. |
 | `attempts[].resumeOwed` | optional boolean | Hammer terminal attempts set this to `true` only for `reason: required-checks-pending`; other reasons write `false`. Audit-only evidence that the bounded worker deferred for pending CI. Older and non-hammer attempts may omit it. |
 | `attempts[].resumeHead` | optional string or null | The exact validated head SHA when `resumeOwed` is `true`; otherwise `null`. Diagnostic evidence for operators, not a dispatch trigger or merge authorization. |
+| `attempts[].waitNote` | optional string | Terminal hammer merge phase formats the published-head and required-check elapsed seconds into a diagnostic note on every terminal append. |
+| `attempts[].headWaitedSeconds` | optional non-negative integer | Elapsed published-head visibility wait in seconds, measured by verify-head and persisted by the terminal merge phase. `0` means the wait never started. |
+| `attempts[].requiredChecksWaitedSeconds` | optional non-negative integer | Elapsed exact-head required-check wait in seconds, measured and persisted by the merge phase. `0` means the wait never started. |
 | `closureAuthority`, `reviewer`, `riskClass`, `flagState`, `ciMode` | optional provenance | Watcher-owned metadata, or caller-provided metadata when an append creates a missing record. `ciMode` is `github-checks` or `no-ci-bootstrap`. |
 | `ciConfigurationAdmission`, `attempts[].ciConfiguration` | optional `{ reason, repo, base, head, baseHead, checkedAt }` | Only the operator-authorized no-CI daemon route. Top-level admission metadata holds the pre-lease proof; the successful `daemon-merged` attempt holds its latest in-lease proof. All identity fields are strings; `checkedAt` is an ISO timestamp and `reason` is `no CI configured`. |
 
@@ -50,6 +53,9 @@ erDiagram
     int attemptNumber
     string startedAt
     string outcome
+    string waitNote
+    int headWaitedSeconds
+    int requiredChecksWaitedSeconds
   }
   RECONCILIATION {
     boolean needsRepair

@@ -281,6 +281,9 @@ export async function fetchHammerHeadRange(options) {
         || !['push', 'force_push'].includes(event.activity_type)
         || !fleetBotIdentityMatches({ ...event.actor, __typename: event.actor?.type }, fleetLogins)
         || typeof event.after !== 'string' || !event.after || !event.timestamp) return null;
+      // A trusted push actor alone cannot authenticate the pushed commit.
+      const afterCommit = await get(`repos/${headRepo}/commits/${event.after}`);
+      if (afterCommit?.sha !== event.after || !fleetCommitIdentityMatches(afterCommit, fleetLogins)) return null;
       steps.push({ before: event.before, after: event.after, kind: event.activity_type,
         actor: event.actor.login, time: event.timestamp });
       head = event.after;

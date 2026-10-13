@@ -635,7 +635,7 @@ phase
 });
 for (const scenario of ['two lag polls', 'visibility timeout', 'third head', 'initial third head',
   'transient TLS', 'transient HTTP 503', 'probe alarm', 'transient exhaustion',
-  'permanent error', 'malformed JSON', 'missing head', 'invalid head']) {
+  'permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head']) {
   test(`HAMCLOSE-07 verify-head: ${scenario}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-head-wait-'));
     const prNumber = String(2_000_000 + process.pid);
@@ -653,7 +653,7 @@ n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
 if [ "$n" -eq 3 ]; then cp /tmp/ham-${prNumber}-pr-after.json "$TMPDIR/cache-after-probe"; fi
 if [ "$n" -ge 2 ]; then
   case "$HAM_TEST_SCENARIO" in
-    'transient TLS'|'transient HTTP 503'|'probe alarm'|'transient exhaustion'|'permanent error')
+    'transient TLS'|'transient HTTP 503'|'probe alarm'|'transient exhaustion'|'permanent error'|'permanent numbered URL')
       if [ "$n" -eq 2 ] || [ "$HAM_TEST_SCENARIO" = 'transient exhaustion' ]; then
         printf '{partial'
         case "$HAM_TEST_SCENARIO" in
@@ -661,6 +661,7 @@ if [ "$n" -ge 2 ]; then
           'transient HTTP 503'|'transient exhaustion') echo 'HTTP 503 Service Unavailable' >&2 ;;
           'probe alarm') kill -ALRM $$ ;;
           'permanent error') echo 'HTTP 403 Forbidden' >&2 ;;
+          'permanent numbered URL') echo 'https://api.github.com/repos/fixture/repo/pulls/1503 HTTP 404 Not Found' >&2 ;;
         esac
         exit 1
       fi ;;
@@ -741,7 +742,7 @@ exit "$rc"`], env);
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
       assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 20);
       assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, before);
-    } else if (['permanent error', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
+    } else if (['permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stdout, /OUTCOME=verify-head-error rc=1/);
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);

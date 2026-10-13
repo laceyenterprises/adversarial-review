@@ -320,7 +320,8 @@ const activity = (before, after, kind = 'push', actor = { type: 'Bot', login: 's
 function activityOptions(events, extra = {}) {
   return { repo: 'fixture/repo', prNumber: 1, reviewedHead: 'reviewed', currentHead: 'head', hammerBaseHead: 'head',
     env: { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-remediator' },
-    get: async () => ({ head: { ref: 'repair', repo: { full_name: 'fixture/repo' } } }),
+    get: async path => path.includes('/commits/') ? fleet(path.split('/').at(-1))
+      : ({ head: { ref: 'repair', repo: { full_name: 'fixture/repo' } } }),
     loadActivityPage: async () => ({ nodes: events.toReversed(), next: null }), ...extra };
 }
 for (const [name, events, rounds] of [
@@ -410,4 +411,14 @@ test('HAMCLOSE-07 unchanged starting head and existing proofs avoid activity rea
   const attested = await fetchHammerHeadRange(activityOptions([], { loadActivityPage,
     comments: [{ author: 'hammer-worker', body: 'HAM-Base-Head: reviewed\nHAM-Validated-Head: head' }] }));
   assert.equal(attested.proof, 'hammer-app-attestation-chain');
+});
+
+test('activity declines unsigned or foreign pushed commits despite a trusted actor', async () => {
+  for (const commit of [{ ...fleet('head'), commit: { verification: { verified: false } } },
+    { ...fleet('head'), author: { login: 'foreign' } }, { ...fleet('wrong-sha') }]) {
+    const options = activityOptions([activity('reviewed', 'head')]);
+    const get = options.get;
+    options.get = path => path.includes('/commits/head') ? commit : get(path);
+    assert.equal(await fetchHammerHeadRange(options), null);
+  }
 });

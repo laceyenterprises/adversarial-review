@@ -61,6 +61,9 @@ if (scenario === 'activity' && args[1] === 'repos/fixture/repo/pulls/1') {
     before: 'reviewed', after: 'head', ref: 'refs/heads/repair', activity_type: 'push',
     actor: { type: 'Bot', login: 'synthetic-remediator[bot]' }, timestamp: '2026-01-01T00:00:00Z',
   }]));
+} else if (scenario === 'activity' && args[1] === 'repos/fixture/repo/commits/head') {
+  process.stdout.write(JSON.stringify({ sha: 'head', author: { login: 'synthetic-remediator[bot]' },
+    committer: { login: 'web-flow' }, commit: { verification: { verified: true, reason: 'valid' } } }));
 } else if (args[1] === 'graphql') {
   process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: { timelineItems: {
     nodes: [{ __typename: 'HeadRefForcePushedEvent', actor: { __typename: scenario === 'rebase-user' ? 'User' : 'Bot', login: 'lacey-codex-agent[bot]' },
@@ -228,5 +231,5 @@ test('HAMCLOSE-07 head-context CLI uses branch activity after existing proofs de
   assert.equal(result.proof, 'branch-activity');
   assert.deepEqual(result.steps, [{ before: 'reviewed', after: 'head', kind: 'push',
     actor: 'synthetic-remediator[bot]', time: '2026-01-01T00:00:00Z' }]);
-  assert.equal(f.calls().length, 3);
+  assert.equal(f.calls().length, 4);
 });

@@ -213,11 +213,17 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const state = db.prepare('SELECT * FROM heads WHERE head=?').get(headSha);
     const idleSince = db.prepare('SELECT idleSince FROM ownership WHERE id=1').get().idleSince;
     let ownership;
-    try {
-      const probe = await ownershipOperation(({ signal: childSignal }) => hasOwnerImpl({ rootDir, repo, prNumber,
-        headSha, reviewStateRow, labels, now, env, signal: childSignal || signal, timeoutMs: ownershipTimeoutMs, logger }));
-      ownership = typeof probe === 'boolean' ? { owned: probe } : probe;
-    } catch { ownership = { uncertain: true }; }
+    if (isOrphanRecoveryWait(result)) {
+      // A proof timeout must return at its serial deadline. Observing this
+      // wait only needs the clock; no ownership probe or recovery can run.
+      ownership = { owned: false };
+    } else {
+      try {
+        const probe = await ownershipOperation(({ signal: childSignal }) => hasOwnerImpl({ rootDir, repo, prNumber,
+          headSha, reviewStateRow, labels, now, env, signal: childSignal || signal, timeoutMs: ownershipTimeoutMs, logger }));
+        ownership = typeof probe === 'boolean' ? { owned: probe } : probe;
+      } catch { ownership = { uncertain: true }; }
+    }
     if (ownership?.owned) {
       db.prepare('UPDATE ownership SET idleSince=NULL WHERE id=1').run();
       db.prepare('UPDATE heads SET idleSince=NULL WHERE head=?').run(headSha);

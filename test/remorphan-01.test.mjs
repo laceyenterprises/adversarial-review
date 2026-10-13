@@ -351,3 +351,13 @@ test('HAMROUTE-01: CI-blocked ownership selects hammer even with no check rollup
   assert.equal(calls.reviews.length, 0);
   assert.equal(calls.launches.length, 1);
 });
+
+test('HAMROUTE-01: observing a proof wait never adds a live ownership read to the serial phase', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { result: { amaEnabled: true, reason: 'ama-coexistence-operation-timeout' },
+    hasOwnerImpl: async () => assert.fail('wait observations cannot start an ownership read') };
+  await tick(0, overrides);
+  const waiting = await tick(15, overrides);
+  assert.equal(waiting.amaClosureResult.ownerlessIdleMs, 15 * 60_000);
+  assert.equal(calls.pages.length + calls.launches.length + calls.reviews.length, 0);
+});

@@ -356,6 +356,37 @@ test('GHBUDGET-01: unfinished traces preserve async/sync errors and activate bou
   assert.equal(syncError.output[2], diagnostic);
 });
 
+test('metered gh preserves explicit budget env and inherits only missing settings', async t => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { meteredExecFile, meteredExecFileSync } = await import('../src/metered-gh.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'metered-env-'));
+  const keys = ['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'];
+  const previous = keys.map(key => process.env[key]);
+  process.env[keys[0]] = join(dir, 'ambient.json');
+  process.env[keys[1]] = '200';
+  t.after(() => {
+    keys.forEach((key, i) => {
+      if (previous[i] === undefined) delete process.env[key];
+      else process.env[key] = previous[i];
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+  for (const injected of [{}, { [keys[0]]: join(dir, 'explicit.json'), [keys[1]]: '50' }, { [keys[0]]: '', [keys[1]]: '' }]) {
+    const env = { FIXTURE: 'preserved', ...injected };
+    const inspect = (_command, _args, options) => {
+      for (const key of keys) assert.equal(options.env[key], injected[key] ?? process.env[key]);
+      assert.equal(options.env.FIXTURE, 'preserved');
+      assert.equal(options.env.GH_DEBUG, 'api');
+      return { stdout: '{}', stderr: '' };
+    };
+    await meteredExecFile(inspect, 'gh', ['api', 'repos/fixture/repo'], { env });
+    meteredExecFileSync(inspect, 'gh', ['api', 'repos/fixture/repo'], { env });
+    assert.deepEqual(env, { FIXTURE: 'preserved', ...injected });
+  }
+});
+
 test('GHBUDGET-01: fake gh keeps stdout and diagnostics while recording both pools', async t => {
   const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');

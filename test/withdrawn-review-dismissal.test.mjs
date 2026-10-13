@@ -103,6 +103,9 @@ for (const scenario of ['withdrawn', 'standing', 'dismissal refused']) {
     writeFileSync(join(bin, 'gh'), `#!${process.execPath}
 const fs = require('fs'), path = ${JSON.stringify(stateFile)};
 const s = JSON.parse(fs.readFileSync(path)), a = process.argv.slice(2);
+if (a[0] === 'pr' && a[1] === 'view' && a[a.indexOf('-R') + 1] !== ${JSON.stringify(repo)}) {
+  process.stderr.write('missing explicit repository selector'); process.exit(1);
+}
 let result;
 if (a[0] === 'api') {
   const p = a.find(x => x.startsWith('repos/'));
@@ -127,7 +130,7 @@ if (result) console.log(JSON.stringify(result));
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
-  */bin/hammer-pr-read.mjs) shift 2; number="$1"; shift; exec gh pr view "$number" "$@" ;;
+  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
   --input-type=module) cat >/dev/null; echo '{"ok":true,"state":"OPEN","headMatches":true,"checksConclusion":"SUCCESS"}' ;;
   */bin/dismiss-withdrawn-reviews.mjs|*/bin/merge-commit-body.mjs) exec "${process.execPath}" "$@" ;;
   *) exit 0 ;;

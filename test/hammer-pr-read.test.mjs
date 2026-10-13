@@ -51,6 +51,29 @@ test('commit statuses paginate individual contexts past 100 entries', async () =
   assert.equal(calls.length, 4);
 });
 
+for (const args of [[], ['--jq', '.statusCheckRollup[0].conclusion'], ['--json', 'statusCheckRollup', '--jq', '.statusCheckRollup[0].conclusion'], ['--json', 'headRefOid']]) {
+  test(`hammer PR CLI includes checks by default and honors explicit fields: ${args}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'hammer-pr-cli-checks-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+const path = process.argv[3];
+if (path === 'repos/fixture/repo/pulls/42') console.log(${JSON.stringify(JSON.stringify(pr))});
+else if (path.includes('/check-runs?')) console.log(JSON.stringify({check_runs:[{name:'ci',status:'completed',conclusion:'success'}]}));
+else if (path.includes('/statuses?')) console.log('[]');
+else process.exit(1);
+`, { mode: 0o755 });
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)), 'fixture/repo', '42', ...args], {
+      encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    if (args.includes('--jq')) assert.equal(result.stdout.trim(), 'SUCCESS');
+    else if (args.includes('--json')) assert.equal(JSON.parse(result.stdout).statusCheckRollup, undefined);
+    else assert.equal(JSON.parse(result.stdout).statusCheckRollup[0].conclusion, 'SUCCESS');
+  });
+}
+
 test('hammer PR CLI preserves synchronous jq exit status', t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-pr-cli-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

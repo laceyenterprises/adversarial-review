@@ -28,3 +28,8 @@ Other resource buckets remain independent.
 
 GitHub budget deferral applies to GitHub I/O. Local operator-alert enqueueing
 and non-GitHub alert delivery continue during deferred or rate-limited ticks.
+Each async budget scope evaluates the current resource observation independently:
+below the throttle floor, ordinary scopes defer immediately, while urgent closing
+scopes may use positive remaining capacity. Zero remaining defers both. Only
+un-scoped callers share in-process sleep promises; scoped callers never join
+another caller's wait or inherit its deferral decision.

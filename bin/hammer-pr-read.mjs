@@ -2,10 +2,11 @@
 import { execFileSync } from 'node:child_process';
 import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
 const [repo, prNumber, ...args] = process.argv.slice(2);
-const fields = args[args.indexOf('--json') + 1];
+const jsonIndex = args.indexOf('--json');
+const fields = jsonIndex >= 0 ? args[jsonIndex + 1] : '';
 const jqIndex = args.indexOf('--jq');
 try {
-  const snapshot = await fetchHammerPr(repo, prNumber, { withChecks: String(fields).includes('statusCheckRollup'), withReviews: String(fields).split(',').includes('reviews') });
+  const snapshot = await fetchHammerPr(repo, prNumber, { withChecks: jsonIndex < 0 || String(fields).includes('statusCheckRollup'), withReviews: String(fields).split(',').includes('reviews') });
   const json = JSON.stringify(snapshot);
   process.stdout.write(jqIndex < 0 ? `${json}\n` : execFileSync('jq', ['-r', args[jqIndex + 1]], { input: json, encoding: 'utf8' }));
 } catch (err) {

@@ -412,8 +412,22 @@ function createRateLimitThrottle({
 
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE) {
     const normalizedResource = normalizeResource(resource);
-    if (currentGitHubBudgetScope()?.rateLimited) {
+    const scope = currentGitHubBudgetScope();
+    if (scope?.rateLimited) {
       throw new GitHubBudgetDeferredError({ resource: normalizedResource, resetAt: null });
+    }
+    // Scoped callers must decide independently of another caller's sleep or
+    // deferral. Only un-scoped callers share the in-flight wait below.
+    if (scope) {
+      const floor = resolveThrottleFloor(env, logger);
+      const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
+      const current = currentObservations[normalizedResource] || null;
+      if (!current || current.remaining >= floor) return false;
+      // Reserve remaining capacity for an already-ready close; zero cannot
+      // serve any request, urgent or otherwise.
+      if (scope.urgent && current.remaining > 0) return false;
+      scope.deferred = true;
+      throw new GitHubBudgetDeferredError(current);
     }
     if (activeThrottlePromises.has(normalizedResource)) {
       return activeThrottlePromises.get(normalizedResource);
@@ -424,14 +438,6 @@ function createRateLimitThrottle({
         const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
         const current = currentObservations[normalizedResource] || null;
         if (!current || current.remaining >= floor) return false;
-        const scope = currentGitHubBudgetScope();
-        if (scope) {
-          // The configurable floor reserves capacity for an already-ready close.
-          // Zero remaining cannot serve any request, urgent or otherwise.
-          if (scope.urgent && current.remaining > 0) return false;
-          scope.deferred = true;
-          throw new GitHubBudgetDeferredError(current);
-        }
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
         const resolvedSharedStatePath = resolveSharedStatePathNow();
         recordApiCallImpl?.({

@@ -136,6 +136,56 @@ test('multiple call sites share one in-process throttle activation', async () =>
   }
 });
 
+for (const remaining of [100, 0]) {
+  test(`scoped callers decide independently of an un-scoped sleep with ${remaining} remaining`, { timeout: 2000 }, async t => {
+    const rootDir = makeRootDir();
+    const now = Date.parse('2026-06-06T12:00:00.000Z');
+    let releaseSleep, sleeping;
+    let signalSleep;
+    const sleepStarted = new Promise(resolve => { signalSleep = resolve; });
+    const throttle = makeThrottle({ rootDir, nowMs: () => now,
+      sleepImpl: () => new Promise(resolve => { releaseSleep = resolve; signalSleep(); }),
+    });
+    t.after(async () => {
+      releaseSleep?.();
+      await sleeping;
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+    await throttle.recordResponseRateLimit({ resource: 'graphql', remaining, resetAt: now + 60_000 });
+    sleeping = throttle.awaitThrottleIfNeeded('graphql');
+    await sleepStarted;
+    await Promise.all([false, true].map(urgent => withGitHubBudgetScope({ urgent }, async scope => {
+      if (urgent && remaining > 0) {
+        assert.equal(await throttle.awaitThrottleIfNeeded('graphql'), false);
+        assert.equal(scope.deferred, false);
+      } else {
+        await assert.rejects(throttle.awaitThrottleIfNeeded('graphql'), { name: 'GitHubBudgetDeferredError' });
+        assert.equal(scope.deferred, true);
+      }
+    })));
+    await withGitHubBudgetScope({ urgent: true, rateLimited: true }, async () => {
+      await assert.rejects(throttle.awaitThrottleIfNeeded('graphql'), { name: 'GitHubBudgetDeferredError' });
+    });
+  });
+}
+
+for (const order of [[false, true, false], [true, false, false]]) {
+  test(`concurrent budget scopes retain their own urgency and deferral flags: ${order}`, async t => {
+    const rootDir = makeRootDir();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const now = Date.parse('2026-06-06T12:00:00.000Z');
+    const throttle = makeThrottle({ rootDir, nowMs: () => now,
+      sleepImpl: () => { assert.fail('budget scopes must not sleep'); },
+    });
+    await throttle.recordResponseRateLimit({ remaining: 100, resetAt: now + 60_000 });
+    await Promise.all(order.map(urgent => withGitHubBudgetScope({ urgent }, async scope => {
+      if (urgent) assert.equal(await throttle.awaitThrottleIfNeeded(), false);
+      else await assert.rejects(throttle.awaitThrottleIfNeeded(), { name: 'GitHubBudgetDeferredError' });
+      assert.equal(scope.deferred, !urgent);
+    })));
+  });
+}
+
 test('shared-state inheritance and monotonic merge keep the lower remaining budget', async () => {
   const rootDir = makeRootDir();
   try {

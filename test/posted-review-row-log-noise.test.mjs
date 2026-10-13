@@ -1223,13 +1223,19 @@ test('handlePostedReviewRow: terminal PR result returns AMA closure details', as
   assert.equal(result.amaClosureResult, amaClosureResult);
 });
 
-test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit stalled events', async () => {
+test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit stalled events', async t => {
   const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
   const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
   const { meteredExecFile } = await import('../src/metered-gh.mjs');
   const { recordResponseRateLimit } = await import('../src/rate-limit-throttle.mjs');
   const rootDir = mkdtempSync(join(tmpdir(), 'rate-limit-progress-'));
   tempRoots.add(rootDir);
+  const previousStatePath = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(rootDir, 'rate-limit-state.json');
+  t.after(() => {
+    if (previousStatePath === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+    else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = previousStatePath;
+  });
   const events = [], notices = [];
   const identity = { repo: 'fixture/repo', prNumber: 42 };
   const laneGate = createNoProgressLaneGate({ rootDir, readReviewRow: () => ({ review_status: 'posted' }),

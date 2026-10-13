@@ -78,7 +78,7 @@ function isRateLimitedError(err) {
 function debugOptions(options = {}) {
   const env = { ...(options.env || process.env), GH_DEBUG: 'api' };
   for (const key of ['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR']) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
+    if (options.env?.[key] === undefined && process.env[key] !== undefined) env[key] = process.env[key];
   }
   return { ...options, env };
 }

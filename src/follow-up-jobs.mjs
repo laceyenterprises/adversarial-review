@@ -2445,7 +2445,7 @@ function maybeRevalidateQuotaHold({
   return { cleared: true, job: updatedJob };
 }
 
-function heldCloserForJob(rootDir, job, now, reconciliation) {
+function heldCloserForJob(rootDir, job, now, reconciliation = { probed: new Set(), options: {} }) {
   if (!job?.repo || !Number.isInteger(Number(job?.prNumber))) return false;
   let held;
   try { held = findLiveAmaCloserLease(rootDir, { repo: job.repo, prNumber: job.prNumber }); }

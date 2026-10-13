@@ -1155,6 +1155,11 @@ Lease reconciliation forwards explicit `ledgerTarget` and `ledgerDbPath`
 options to launch-status, merged-completion and completion-producer reads, so
 all evidence uses the caller's session ledger. Terminal audit lookups use an
 explicit `hqRoot`, falling back to `rootDir` when it is omitted.
+Direct follow-up reconciliation uses a bounded synchronous launch-request probe.
+It retains ownership when the request still reports `starting` or `running`,
+even if the worker run has already ended, until the request catches up or the
+existing reclaim timeout expires. Async closer dispatch resolves latest worker
+run status before passing its probe to the shared reconciliation helper.
 
 A hammer LRQ that ends `succeeded` has only proven that its process exited 0.
 Headless Claude hammers backgrounded the close and ended the session (SEV2

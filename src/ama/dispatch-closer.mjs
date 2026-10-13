@@ -1503,6 +1503,11 @@ function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, head
  * The synchronous ledger adapter bounds subprocess reads with its existing
  * timeout. Async callers may supply a previously awaited statusProbe together
  * with probedLaunchRequestId; unreadable evidence leaves ownership unchanged.
+ * The direct synchronous probe reads only the launch request; it cannot await
+ * the latest worker run when that request still reports starting/running.
+ * Async dispatch callers resolve that lag before supplying statusProbe. Direct
+ * follow-up callers retain ownership until the request catches up or the
+ * existing reclaim timeout expires.
  */
 export function reconcileAmaCloserLease({
   rootDir, repo, prNumber, now = new Date().toISOString(),
@@ -4229,7 +4234,7 @@ export async function maybeDispatchAmaCloser({
       const settled = reconcileAmaCloserLease({ ...dispatchContext, rootDir: reconciliationRoot,
         repo: reconciliationRepo, prNumber,
         now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
-        readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl });
+        readLaunchRequestStatusImpl, readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl });
       if (settled) reconciledDispatchedLease = held.lease;
     }
   }

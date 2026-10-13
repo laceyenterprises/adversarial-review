@@ -78,6 +78,12 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 - Active `dispatching` and `dispatched` records reserve the same `(repo, PR)`
   from follow-up consumption until the record reaches a terminal state or ages
   past the documented reclaim window.
+- A same-worker provision-slot lock timeout with a proven live holder and no
+  launch receipt settles as `dispatch-deferred-transient`, with
+  `lastFailureTransient: true`, the refusal in `lastError`, and unchanged
+  `retryCount`. The failed attempt releases its pending lease and no longer
+  reserves launch capacity, allowing provisioning to retry on the next poll.
+  A receipt retains ownership; a mixed diagnostic uses ordinary refusal rules.
 - Recovery checks age records from the latest parseable timestamp among
   `lastObservedAt`, `lastAttemptedAt`, `dispatchedAt`, and `createdAt`.
 - A `dispatching` record with no parseable timestamp is stale; a launch-only

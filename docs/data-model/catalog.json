@@ -493,6 +493,7 @@
       "nonExecutionRefundFields": ["unexecutedRefundCount", "previousUnexecutedLaunchRequestId"],
       "operatorLabelRefundFields": ["labelGateRefundedLaunchRequestId"],
       "operatorLabelRefundsLifetime": false,
+      "provisionSlotRefusalState": "dispatch-deferred-transient",
       "prelaunchRetryKinds": ["branch-holder", "dispatch-refused", "non-execution"],
       "prelaunchRetryFields": [
         "prelaunchRefusalSlowRetry.startedAt",

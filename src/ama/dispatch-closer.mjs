@@ -6970,15 +6970,6 @@ export async function maybeDispatchAmaCloser({
         await sleep(delayMs, signal);
         continue;
       }
-      if (isHammerWorkerClass(workerClass)
-        && sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl)) {
-        updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, current => {
-          if (current?.state !== 'dispatching' || current.lastAttemptedAt !== dispatchContext.dispatchedAt) return current;
-          return { ...current, retryCount: priorRetryCount, lastError: null };
-        });
-        return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-          inFlight: true, reason: 'ama-closer-launch-in-progress' });
-      }
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
@@ -7011,7 +7002,12 @@ export async function maybeDispatchAmaCloser({
       // which is exactly the cascade observed in the macOS-upgrade incident.
       const transientFailure = !ambiguousLaunch
         && !branchHolderBlocked
-        && isTransientHqDispatchError(err);
+        // A live provision-slot holder is competing work, not proof this
+        // exited HQ call launched. Use the refusal path to release our lease
+        // and dispatching intent while preserving the next poll's budget.
+        && (isTransientHqDispatchError(err)
+          || (isHammerWorkerClass(workerClass)
+            && sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl)));
       const budgetPreservingFailure = branchHolderBlocked || transientFailure;
       const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
         const currentBranchHolderBlockBase = existingRecordIsReclaimableBranchHolderBlock

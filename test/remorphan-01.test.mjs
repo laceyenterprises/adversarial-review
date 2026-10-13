@@ -225,6 +225,16 @@ for (const reason of ['lease-held', 'not-eligible', 'dispatch-status-unknown']) 
   });
 }
 
+test('REVIEWALERT-01 pending ownership defaults to the current timestamp when now is omitted', async t => {
+  const { args } = setup(t);
+  acquireAmaCloserLease({ rootDir: args.rootDir, repo: args.repo, prNumber: args.prNumber,
+    headSha: args.headSha, now: new Date().toISOString(), watcherPid: 123 });
+  const owner = await probeOrphanOwnership({ rootDir: args.rootDir, repo: args.repo,
+    prNumber: args.prNumber, headSha: args.headSha, processKillImpl: () => {},
+    readStatusImpl: async () => { throw new Error('pending ownership needs no ledger read'); } });
+  assert.deepEqual(owner, { owned: true, proof: 'pending-closer-lease' });
+});
+
 test('REVIEWALERT-01 pending provisioning owns the head despite a prior terminal launch', async t => {
   const { args, calls, tick } = setup(t);
   Object.assign(args, { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40),

@@ -908,7 +908,7 @@ test('HOLDRELEASE-01: removal on an unchanged stopped head dispatches one hammer
   } finally { db.close(); }
 });
 
-for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mixed-error']) {
+for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mixed-error', 'launch-receipt']) {
   test(`REVIEWALERT-01 provision-slot contention: ${kind}`, async t => {
     const rootDir = tmpRoot(t, 'reviewalert-slot-');
     const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
@@ -920,6 +920,7 @@ for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mix
       const error = new Error('synthetic provision lock wait');
       error.stderr = `[hq] error: hq_acquire_lockdir: waited 30s for '<root>/.hq/worker-provision-slot-locks/${kind === 'other-live' ? 'other-worker' : workerId}.lock.d' (holder pid=123 ppid=12 state=running start='synthetic-time' cmd='bash <script>')`;
       if (kind === 'mixed-error') error.stderr += '\n[hq] error: another refusal';
+      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       throw error;
     } });
     const args = closerArgs(rootDir, { ...identity, reviewedSha: identity.headSha,
@@ -928,17 +929,32 @@ for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mix
       processKillImpl: () => { if (['same-dead', 'same-unknown'].includes(kind)) { const error = new Error('unavailable holder'); error.code = kind === 'same-dead' ? 'ESRCH' : 'EINVAL'; throw error; } } });
     const record = readAmaCloserDispatchRecord(rootDir, identity);
     if (kind === 'same-live') {
-      assert.equal(result.inFlight, true);
-      assert.equal(result.reason, 'ama-closer-launch-in-progress');
-      assert.equal(record.lastError, null);
+      assert.equal(result.reason, 'dispatch-deferred-transient');
+      assert.equal(result.skipMergeAgent, true);
+      assert.equal(result.releasedPendingLease, true);
+      assert.equal(record.state, 'dispatch-deferred-transient');
+      assert.equal(record.lastFailureTransient, true);
+      assert.match(record.lastError, /hq_acquire_lockdir/);
       assert.equal(record.retryCount, 0);
       assert.equal(record.prelaunchRefusalSlowRetry, undefined);
-      assert.deepEqual(readAmaCloserLease(rootDir, identity), pendingLease);
+      assert.equal(readAmaCloserLease(rootDir, identity), null);
       assert.equal(pendingLease.status, 'pending');
       assert.equal(deps.alerts.length, 0);
-      const next = await maybeDispatchAmaCloser({ ...args, ...deps, processKillImpl: () => {} });
-      assert.equal(next.inFlight, true);
-      assert.equal(hqLaunches(deps).length, 1);
+      const recovered = closerDeps();
+      const nextArgs = { ...args, dispatchContext: { ...args.dispatchContext, dispatchedAt: minutesAfter(at, 1) } };
+      const next = await maybeDispatchAmaCloser({ ...nextArgs, ...recovered, processKillImpl: () => {} });
+      assert.equal(next.dispatched, true, JSON.stringify(next));
+      assert.equal(hqLaunches(recovered).length, 1);
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+      assert.equal(readAmaCloserDispatchRecord(rootDir, identity).retryCount, 1);
+      await maybeDispatchAmaCloser({ ...nextArgs, ...recovered, processKillImpl: () => {} });
+      assert.equal(hqLaunches(recovered).length, 1, 'successful retry retains duplicate-launch protection');
+    } else if (kind === 'launch-receipt') {
+      assert.equal(result.reason, 'dispatch-response-ambiguous');
+      assert.equal(result.releasedPendingLease, false);
+      assert.equal(record.state, 'dispatched');
+      assert.equal(record.launchRequestId, 'lrq_hammer');
+      assert.deepEqual(readAmaCloserLease(rootDir, identity), pendingLease);
     } else {
       assert.equal(result.reason, 'dispatch-failed');
       assert.match(record.lastError, /hq_acquire_lockdir/);

@@ -281,9 +281,6 @@ export async function fetchHammerHeadRange(options) {
         || !['push', 'force_push'].includes(event.activity_type)
         || !fleetBotIdentityMatches({ ...event.actor, __typename: event.actor?.type }, fleetLogins)
         || typeof event.after !== 'string' || !event.after || !event.timestamp) return null;
-      // A trusted push actor alone cannot authenticate the pushed commit.
-      const afterCommit = await get(`repos/${headRepo}/commits/${event.after}`);
-      if (afterCommit?.sha !== event.after || !fleetCommitIdentityMatches(afterCommit, fleetLogins)) return null;
       steps.push({ before: event.before, after: event.after, kind: event.activity_type,
         actor: event.actor.login, time: event.timestamp });
       head = event.after;
@@ -291,6 +288,16 @@ export async function fetchHammerHeadRange(options) {
     // Reaching the starting base is insufficient: every later ref mutation
     // must be trusted and the complete chain must end at the expected head.
     if (head === currentHead && steps.some(step => step.after === target)) {
+      // Validate the entire structure before fetching content. Bound concurrency
+      // so long activity histories cannot flood GitHub; settle every lookup
+      // before refusing proof, including transport and identity failures.
+      for (let offset = 0; offset < steps.length; offset += 4) {
+        const batch = steps.slice(offset, offset + 4);
+        const commits = await Promise.allSettled(batch.map(async step => get(`repos/${headRepo}/commits/${step.after}`)));
+        if (commits.some((result, index) => result.status !== 'fulfilled'
+          || result.value?.sha !== batch[index].after
+          || !fleetCommitIdentityMatches(result.value, fleetLogins))) return null;
+      }
       return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
         commits: steps.map(step => step.after), proof: 'branch-activity', steps };
     }

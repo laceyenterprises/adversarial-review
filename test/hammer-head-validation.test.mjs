@@ -422,3 +422,45 @@ test('activity declines unsigned or foreign pushed commits despite a trusted act
     assert.equal(await fetchHammerHeadRange(options), null);
   }
 });
+
+
+test('activity commit lookups overlap with bounded concurrency and retain order', async () => {
+  const events = Array.from({ length: 9 }, (_, i) => activity(i ? `step${i}` : 'reviewed', i === 8 ? 'head' : `step${i + 1}`));
+  const options = activityOptions(events);
+  const originalGet = options.get;
+  let active = 0, maximum = 0;
+  options.get = async path => {
+    if (!path.includes('/commits/')) return originalGet(path);
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise(resolve => setImmediate(resolve));
+    active--;
+    return originalGet(path);
+  };
+  const range = await fetchHammerHeadRange(options);
+  assert.equal(maximum, 4);
+  assert.equal(active, 0);
+  assert.deepEqual(range.commits, events.map(event => event.after));
+});
+
+test('activity refuses invalid structure before fetching commits', async () => {
+  const options = activityOptions([activity('reviewed', 'middle'), activity('gap', 'head')]);
+  const originalGet = options.get;
+  let calls = 0;
+  options.get = path => { if (path.includes('/commits/')) calls++; return originalGet(path); };
+  assert.equal(await fetchHammerHeadRange(options), null);
+  assert.equal(calls, 0);
+});
+
+test('activity settles concurrent lookups and refuses a failed lookup', async () => {
+  const options = activityOptions([activity('reviewed', 'middle'), activity('middle', 'head')]);
+  const originalGet = options.get;
+  let settled = false;
+  options.get = async path => {
+    if (path.endsWith('/commits/middle')) throw new Error('unreadable commit');
+    if (path.endsWith('/commits/head')) { await new Promise(resolve => setImmediate(resolve)); settled = true; }
+    return originalGet(path);
+  };
+  assert.equal(await fetchHammerHeadRange(options), null);
+  assert.equal(settled, true);
+});

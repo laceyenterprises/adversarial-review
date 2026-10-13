@@ -2826,7 +2826,9 @@ departure from the reviewed SHA, every remaining event must be a contiguous
 push or force push on that ref by a built-in or configured fleet Bot. Each
 `after` commit must independently pass `fleetCommitIdentityMatches`: a valid
 GitHub signature, web-flow committer, and trusted fleet author. A push actor
-alone supplies no content authority. The chain
+alone supplies no content authority. The complete chain structure is checked
+before commit lookups run in parallel batches of at most four. Any unreadable
+or untrusted commit refuses proof after the batch settles. The chain
 must contain the captured hammer base (when supplied) and end at `currentHead`.
 Reaching the base or an intermediate target never skips trailing activity;
 untrusted pushes, other ref mutations, gaps, and a different final head refuse

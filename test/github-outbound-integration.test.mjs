@@ -10,7 +10,7 @@ import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { findCapturedReviewerBody } from '../src/review-body-capture.mjs';
 import { reviewBodyDigest } from '../src/follow-up-review-claim.mjs';
 import { postRemediationCommentWithCapture } from '../src/follow-up-remediation.mjs';
-import { writeAdapterIssueComment } from '../src/github-adapter-client.mjs';
+import { writeAdapterIssueComment, writeAdapterPullRequestReview } from '../src/github-adapter-client.mjs';
 import { filterCreateBodyArgs } from '../src/adapters/subject/github-pr/pr-create-tagged.mjs';
 
 const snapshotRoot = '/Users/example/state/reviewer-snapshots';
@@ -58,6 +58,7 @@ test('posted, SQLite captured, attested and digested review text is identical', 
           assert.equal(command, 'gh');
           assert.equal(args[0], 'api');
           posted = JSON.parse(options.input).body;
+          assert.equal(JSON.parse(options.input).commit_id, head);
           return { stdout: JSON.stringify({ id: 1, commit_id: head }) };
         },
         emitReviewedAttestationImpl: async (args) => { attested = args.reviewBody; },
@@ -70,6 +71,20 @@ test('posted, SQLite captured, attested and digested review text is identical', 
       assert.equal(reviewBodyDigest(body, { repo, reviewerHeadSha: head }), reviewBodyDigest(stored));
     });
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+test('adapter review writes preserve either head SHA option and produce GitHub blob links', async () => {
+  await withWorkspaceEnv(async () => {
+    for (const shaOptions of [{ headSha: head }, { reviewerHeadSha: head }]) {
+      let args;
+      const result = await writeAdapterPullRequestReview(repo, 1, { body: `[example](${local})` }, {
+        ...shaOptions,
+        execFileImpl: async (_command, value) => { args = value; return { stdout: '{"ok":true}' }; },
+      });
+      assert.equal(result.ran, true);
+      assert.equal(args[args.indexOf('--body') + 1], `[example](${expectedLink})`);
+      assert.equal(args[args.indexOf('--head-sha') + 1], head);
+    }
+  });
 });
 test('remediation post and capture receive the same filtered body', async () => {
   await withWorkspaceEnv(async () => {

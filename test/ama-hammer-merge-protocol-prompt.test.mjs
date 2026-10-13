@@ -33,11 +33,15 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   assert.match(block, /--pr <<PR_URL>>/);
   for (const exitCode of [1, 65, 124]) {
     const script = block.replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, `(exit ${exitCode})`)
-      .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review');
+      .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review')
+      .replaceAll('<<ROOT_DIR>>', '"$HAM_TEST_ROOT"')
+      .replaceAll('<<REPO>>', 'fixture/repo');
     const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${script}`],
-      { encoding: 'utf8', timeout: 5000 });
+      { encoding: 'utf8', timeout: 5000,
+        env: { ...process.env, HAM_NODE_BIN: process.execPath, HAM_TEST_ROOT: REPO_ROOT } });
     assert.ifError(result.error);
-    assert.equal(result.status, 0);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
     assert.match(result.stdout, /re-review/);
   }
 });

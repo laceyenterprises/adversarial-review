@@ -573,9 +573,10 @@ async function readAdapterPullRequestDiff(repo, prNumber, options) {
   return diff.trim() ? diff : null;
 }
 
-async function writeAdapterPullRequestReview(repo, prNumber, { body, reviewerLogin = null } = {}, options) {
-  body = filterGitHubBody(body, { repo, ...options });
-  return writeGitHubAdapter('pull-request-review', { repo, prNumber, body, reviewerLogin }, options);
+async function writeAdapterPullRequestReview(repo, prNumber, { body, reviewerLogin = null } = {}, options = {}) {
+  const headSha = options.reviewerHeadSha || options.headSha;
+  body = filterGitHubBody(body, { ...options, repo, reviewerHeadSha: headSha });
+  return writeGitHubAdapter('pull-request-review', { repo, prNumber, body, reviewerLogin, headSha }, options);
 }
 
 async function writeAdapterIssueComment(repo, prNumber, { body, reviewerLogin = null } = {}, options) {

@@ -20,3 +20,10 @@ test('shared remediation reply instructions ask once for repository-relative cit
   const text = readFileSync(join(root, 'src/remediation-prompt-builder.mjs'), 'utf8').replaceAll('\\`', '`');
   assert.equal(text.split(sentence).length - 1, 1);
 });
+test('Argus citation directive follows the complete opening paragraph', () => {
+  const text = readFileSync(join(root, 'prompts/argus-security/reviewer.md'), 'utf8');
+  const [opening, citations] = text.split(/\n\s*\n/);
+  assert.match(opening, /A pull\s+request was routed to you/);
+  assert.match(opening, /change\.$/);
+  assert.equal(citations, sentence);
+});

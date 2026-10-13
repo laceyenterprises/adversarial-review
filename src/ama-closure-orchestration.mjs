@@ -488,6 +488,9 @@ export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = 180_000,
         }
       }
       const entry = entries.get(key);
+      // Keep hot proof scopes resident when unrelated proof scopes arrive.
+      entries.delete(key);
+      entries.set(key, entry);
       if (entry.evidenceVersion !== evidenceVersion) {
         for (const name of entry.reads.keys()) {
           if (name.startsWith('ham-terminal-remediation-evidence')) entry.reads.delete(name);
@@ -915,12 +918,15 @@ async function dispatchAmaClosureFor({
   operationTracker = null,
 }) {
   throwIfAborted(signal);
-  const proofScope = headProofScope(proveCloserAuthoredStaleHeadImpl, {
+  let proofScope;
+  // Ordinary current-head evaluations must not evict useful proofs by filling
+  // the bounded cache with scopes that never perform a proof read.
+  const getProofScope = () => proofScope ||= headProofScope(proveCloserAuthoredStaleHeadImpl, {
     rootDir, repoPath, prNumber, reviewStateRow, candidate, currentRevisionRef, dispatchJob,
   });
   const runCoexistenceOperation = (operation, fn, options) =>
     AMA_REUSABLE_PROOF_OPERATIONS.has(operation)
-      ? runAmaProofOperation(proofScope, operation, fn, options)
+      ? runAmaProofOperation(getProofScope(), operation, fn, options)
       : runTimedCoexistenceOperation(operation, fn, options);
   let cfg;
   let loadedConfig;
@@ -1129,9 +1135,9 @@ async function dispatchAmaClosureFor({
   const originalReviewedHead = reviewStateRow?.reviewer_head_sha;
   // Share immutable commit evidence across the ancestry walk, stale-head
   // resume and later passes for this reviewed/current head pair.
-  const cachedSuppression = options => proofScope.read(`suppression:${options.headSha}`,
+  const cachedSuppression = options => getProofScope().read(`suppression:${options.headSha}`,
     proofSignal => (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)({ ...options, signal: proofSignal }));
-  const cachedCommit = options => proofScope.read(`commit:${options.headSha}:${Boolean(options.includePrimaryChange)}`,
+  const cachedCommit = options => getProofScope().read(`commit:${options.headSha}:${Boolean(options.includePrimaryChange)}`,
     proofSignal => fetchHeadCloserVerifiedCommitImpl({ ...options, signal: proofSignal }));
   // Warm independent reads together. A serial timeout must not prevent the
   // other immutable proofs from making progress before the next watcher pass.
@@ -1150,7 +1156,7 @@ async function dispatchAmaClosureFor({
           || (suppression.reason !== 'hammer-validated-head'
             && amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer).length === 0)
           || typeof resolveHamTerminalRemediationEvidenceImpl !== 'function') return;
-        return proofScope.read(`ham-terminal-remediation-evidence:${originalReviewedHead}`, proofSignal =>
+        return getProofScope().read(`ham-terminal-remediation-evidence:${originalReviewedHead}`, proofSignal =>
           resolveHamTerminalRemediationEvidenceImpl({
             reviewState: { headSha: originalReviewedHead },
             prMetadata: { headSha: settledReviewHeadSha },

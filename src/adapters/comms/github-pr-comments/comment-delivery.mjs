@@ -1,3 +1,4 @@
+import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // Durable PR-comment delivery state for terminal follow-up jobs.
 //
 // Why this exists: reconcile must move a job to a terminal directory
@@ -101,6 +102,7 @@ function buildOwedDelivery({
   kind = 'remediation-reply',
   noticeRef = null,
 }) {
+  body = filterGitHubBody(body, { repo, reviewerHeadSha: revisionRef });
   const deliveryKey = buildDeliveryKey({ repo, prNumber, revisionRef, round, kind, noticeRef });
   return {
     posted: false,
@@ -417,6 +419,8 @@ function recordInitialCommentDelivery({
   // is done internally.
   postResult: precomputedPostResult = null,
 }) {
+  body = filterGitHubBody(body, { repo, rootDir, reviewerHeadSha: revisionRef });
+  if (postCommentArgs) postCommentArgs = { ...postCommentArgs, body };
   if (!jobPath) {
     return Promise.resolve(null);
   }
@@ -972,7 +976,7 @@ async function retryFailedCommentDeliveries({
       const previous = record.commentDelivery || delivery;
       record.commentDelivery = {
         ...previous,
-        body: previous.body || delivery.body,
+        body: filterGitHubBody(previous.body || delivery.body, { repo: delivery.repo, rootDir, reviewerHeadSha: delivery.revisionRef }),
         repo: previous.repo || delivery.repo,
         prNumber: previous.prNumber || delivery.prNumber,
         domainId: previous.domainId || delivery.domainId || sidecar.domainId || null,
@@ -1005,6 +1009,7 @@ async function retryFailedCommentDeliveries({
       continue;
     }
 
+    delivery.body = filterGitHubBody(delivery.body, { repo: delivery.repo, rootDir, reviewerHeadSha: delivery.revisionRef });
     retried += 1;
     /* eslint-disable no-await-in-loop */
     let result;
@@ -1059,7 +1064,7 @@ async function retryFailedCommentDeliveries({
       // For reconstructed candidates the existing record had no
       // body/addressing; fold the reconstructed shape in so the
       // record gains a complete delivery field.
-      body: previous.body || delivery.body,
+      body: filterGitHubBody(previous.body || delivery.body, { repo: delivery.repo, rootDir, reviewerHeadSha: delivery.revisionRef }),
       repo: previous.repo || delivery.repo,
       prNumber: previous.prNumber || delivery.prNumber,
       domainId: previous.domainId || delivery.domainId || null,

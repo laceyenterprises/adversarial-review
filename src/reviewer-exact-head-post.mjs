@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 // Bind a review write to the exact commit the reviewer inspected.  GitHub's
 // normal `gh pr review` command otherwise submits against the current head.
 
@@ -57,9 +58,11 @@ async function postExactHeadReview({
   repo,
   prNumber,
   reviewBody,
+  comments = [],
   reviewerHeadSha,
   env,
 } = {}) {
+  reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha });
   const response = await execFileImpl(
     'gh',
     [
@@ -70,6 +73,9 @@ async function postExactHeadReview({
       env,
       input: JSON.stringify({
         body: reviewBody,
+        ...(comments.length ? { comments: comments.map((comment) => ({
+          ...comment, body: filterGitHubBody(comment.body, { repo, reviewerHeadSha }),
+        })) } : {}),
         event: exactHeadReviewEventForBody(reviewBody),
         commit_id: reviewerHeadSha,
       }),

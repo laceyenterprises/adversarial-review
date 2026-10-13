@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
@@ -32,7 +33,7 @@ export async function closeEmptyPullRequest({ repo, prNumber, headSha,
     // Closing first means a retry after transport failure cannot duplicate the comment.
     await call(['pr', 'close', String(prNumber), '--repo', repo]);
     closed = true;
-    await call(['pr', 'comment', String(prNumber), '--repo', repo, '--body', EMPTY_PR_COMMENT]);
+    await call(['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(EMPTY_PR_COMMENT, { repo })]);
     return { closed: true, reason: 'empty-diff' };
   } catch (error) {
     logger.warn?.(`[watcher] empty-diff close deferred for ${repo} PR ${prNumber}: ${error.message}`);

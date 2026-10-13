@@ -1,3 +1,4 @@
+import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // PR comment poster for the remediation pipeline.
 //
 // Every terminal reconcile transition (completed / stopped / failed) emits a
@@ -1068,6 +1069,7 @@ async function postRemediationOutcomeComment({
     return { posted: false, reason: 'missing-pr-coordinates' };
   }
 
+  body = filterGitHubBody(body, { repo, rootDir, env });
   const tokenEnvName = resolveCommentBotTokenEnv(workerClass);
   if (!tokenEnvName) {
     log.error?.(

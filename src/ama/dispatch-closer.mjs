@@ -1,3 +1,4 @@
+import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { decideClosureOwner } from './closure-owner.mjs';
 import { createHistoryReader } from './history-reader.mjs';
@@ -5540,7 +5541,7 @@ export async function maybeDispatchAmaCloser({
                 '--subject',
                 subject,
                 '--body',
-                body,
+                filterGitHubBody(body, { repo: mergeRepo, reviewerHeadSha: head }),
               ];
               return runGhPrMergeWithTransientRetry({
                 execFileImpl,

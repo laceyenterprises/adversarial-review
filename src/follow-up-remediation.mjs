@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
 import { preserveUnsafeWorkspaceMetadata } from './workspace-identity.mjs';
@@ -1534,6 +1535,7 @@ async function postRemediationCommentWithCapture({
   postedAt = null,
   log = console,
 } = {}) {
+  body = filterGitHubBody(body, { repo, rootDir });
   const result = await postCommentImpl({
     repo,
     prNumber,

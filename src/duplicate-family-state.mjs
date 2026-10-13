@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { collectDuplicateContent } from './adapters/subject/github-pr/duplicate-content.mjs';
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -1419,7 +1420,7 @@ export async function reconcileDuplicateFamilyCloseouts({
           }
         }
         if (!alreadyCommented) {
-          await octokit.rest.issues.createComment({ owner, repo, issue_number: loser.pr_number, body });
+          await octokit.rest.issues.createComment({ owner, repo, issue_number: loser.pr_number, body: filterGitHubBody(body, { repo: repoPath }) });
         }
         await octokit.rest.pulls.update({ owner, repo, pull_number: loser.pr_number, state: 'closed' });
         db.prepare(

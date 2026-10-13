@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { buildMergeCommitBody } from './ama/closing-keywords.mjs';
 // Fast-merge processing / orchestration layer.
 //
@@ -735,7 +736,7 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, bod
       '--subject',
       subject,
       '--body',
-      body,
+      filterGitHubBody(body, { repo, reviewerHeadSha: matchHeadCommit }),
       '--delete-branch',
     ], {
       maxBuffer: 5 * 1024 * 1024,

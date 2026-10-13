@@ -67,7 +67,7 @@ if (command === 'gh') {
 
 test('API publisher retries every network subprocess and preserves mutation CAS and contents', async t => {
   const f = fixture(t, 'recover');
-  assert.deepEqual(await f.run(), { route: 'published', head: 'published', tree: 'tree' });
+  assert.deepEqual(await f.run(), { route: 'published', head: 'published', tree: 'tree', previousHead: 'before' });
   for (const key of ['pr', 'mutation', 'verification', 'fetch-before', 'fetch-published']) {
     assert.equal(f.calls().filter(call => call.key === key).length, 2, key);
   }

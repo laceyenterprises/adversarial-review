@@ -93,14 +93,14 @@ decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
 The publish helper rejects missing or placeholder inputs and releases the lease
 on failure. Keep these values in the same shell for the merge audit.
 
-For each phase, in that same persistent shell, run the following with `PHASE` set to the named helper (`hammer-verify-head`, `hammer-publish`, or `hammer-merge`):
+For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
 
 ```bash
 HAM_PHASE_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/ham-phase.XXXXXX") || exit 1
 node "${HAM_ROOT_DIR}/bin/hammer-procedure.mjs" "$PHASE" --render > "$HAM_PHASE_SCRIPT" || exit 1
 HAM_PHASE_LOG=$(mktemp "${TMPDIR:-/tmp}/ham-phase-log.XXXXXX") || exit 1
 HAM_PHASE_OUTCOME=not-run
-# Descriptor 3 keeps sparse lease-wait progress live while diagnostics are buffered.
+# Descriptor 3 streams lease-wait progress; buffer diagnostics.
 if source "$HAM_PHASE_SCRIPT" 3>&2 > "$HAM_PHASE_LOG" 2>&1; then
   HAM_PHASE_STATUS=0
 else
@@ -117,7 +117,7 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. Use a persistent shell session for all three phases; if the harness creates a fresh shell per tool call, run the full close flow in one shell invocation or stop before acquiring the lease. A failed render or source stops the close. Delete each temporary source file after use. The helpers require every value used by that
+Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. Use a persistent shell session for all three phases; if the harness creates a fresh shell per tool call, run the full close flow in one shell invocation or stop before acquiring the lease. A failed render or source stops the close. The helpers require every value used by that
 phase and fail with status 64 when one is absent. Preserve lease state between
 phases; `hammer-publish` and `hammer-merge` must run with the acquired lease
 held and fail closed otherwise. Use the scripts directly from this checkout;
@@ -299,6 +299,11 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    only comment for the successful merge path. If that audit was already posted
    before a later merge failure, edit it in place into the required no-merge
    closing-status comment; do not leave the audit and add a second comment.
+   Include `HAM_NO_MERGE_NOTE`, or the measured `HAM_HEAD_WAITED_SECONDS` and
+   `HAM_REQUIRED_CHECKS_WAITED_SECONDS`, in the note. Missing exact-head CI is
+   a terminal reason only after the published-head visibility wait and the
+   existing required-checks wait; if head visibility times out, report that
+   the checks wait could not start (0s). A different live head keeps the race handling.
    Either way, the comment must contain the line `HAM closing status — no merge.`
    In the audit comment for the current head, the closer reads that line as
    this head's terminal no-merge audit. Do
@@ -481,7 +486,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    required check bar is green may proceed to merge while still holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
-   prove the active hammer exact-head validation, a trustworthy starting base through App-authored attestations, PR audit
+   prove the active hammer exact-head validation, a trustworthy starting base through the range proof, PR audit
    comment from the entitled hammer identity, successful
    live-head checks, and non-waived gates, and it must record
    `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
@@ -591,13 +596,13 @@ fi
 
 ```
 
-Before validating the live head, export `HAM_COMMIT_PUBLICATION_ONLY=1` and render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with `GH_TOKEN` set to the hammer token. Stop on failure; unset the flag on success. This publishes ordinary remediation through the same guarded route as conflict repair.
+Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1`; render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the hammer `GH_TOKEN`. Stop on failure; unset the flag on success. Ordinary remediation uses the conflict-repair publication guards.
 
 Refresh and validate the live head:
 
 These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting the dispatch values above. Refresh the live head, acquire the merge lease, rebase under the existing bounded policy, and validate the rebased head. The wrapper prints the bounded diagnostic tail, status, outcome, and lease state before deleting its temporary files. A nonzero status blocks the next phase. Status 20 means parked or blocked; status 21 means a rebase conflict. On conflict, resolve it using "Resolving merge conflicts" below, revalidate, and rerun verify-head before continuing.
+In the same shell with dispatch values exported, render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
 
 
 ## Resolving merge conflicts
@@ -712,13 +717,14 @@ daemon closure, never operator escalation.
 
 Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
-Start from the captured `HAM_BASE_HEAD`. Trust only the reviewed head or an
-App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain from it, or daemon-recorded
-completed remediation rounds whose start/result heads link it to the starting
-head and whose links GitHub confirms are strictly ahead or rebased through fleet-Bot force-push events. After API or
-CAS git publication, confirm remote SHA equals HEAD and append both exact SHAs
-in the hammer App comment. Preserve earlier attestation edges. Signatures and
-commit metadata confer no trust; an unproven base requests re-review.
+Start from the captured `HAM_BASE_HEAD`. Prove it first using the reviewed head,
+an App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain, or completed
+remediation rounds linked by strictly-ahead comparisons or trusted fleet-Bot
+force-push events. If those fail, accept a complete branch-activity push/force-push
+chain by the same fleet Bots. After API or CAS git publication, confirm remote
+SHA equals HEAD and append both exact SHAs in the hammer App comment. Preserve
+earlier attestation edges. Signatures and commit metadata confer no trust;
+an unproven base requests re-review.
 
 API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use CAS git and the same base proof; push rejection releases the lease and aborts.
 

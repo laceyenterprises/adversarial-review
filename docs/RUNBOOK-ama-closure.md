@@ -2515,6 +2515,21 @@ Certified parks with pending CI skip daemon merge until the metadata checks sett
 Queue bounds and backoff use `evaluateHammerDeferralQueue`; missing or invalid
 start timestamps expire the queue. Park audits are read only on certified HAM
 routes; an unreadable audit explicitly requires operator recovery.
+Before lease acquisition, verify-head waits at most 300 seconds for the published
+`HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. If the initial read still
+shows the pre-publication head, the first retry follows a two-second delay;
+later retries use fifteen-second intervals, clamped to the remaining deadline.
+Each visibility probe is bounded to 30 seconds or the remaining deadline,
+whichever is shorter. Transport
+errors and probe alarms retry within that same deadline; permanent errors and
+malformed or missing head data remain fatal. Only successful reads with a full
+head SHA replace the cached PR JSON. Exhaustion reports `published-head-timeout`
+with the elapsed head/check wait times; a different live head leaves the wait
+and follows the existing race path.
+Publication and verify-head export `HAM_HEAD_WAITED_SECONDS` and
+`HAM_REQUIRED_CHECKS_WAITED_SECONDS` so subsequent child processes inherit the
+current wait totals for audit reporting. Phases that update them must run in
+the persistent shell; child-process changes do not propagate back to a parent.
 After reacquisition it re-runs the fail-closed changed-file overlap guard from
 verify-head against the live base before the final fresh exact-head gate. The
 comparison starts at the merge-base of the exact CI-validated head and fetched
@@ -2806,6 +2821,29 @@ blocking the event loop; unrelated historical jobs are not read or parsed.
 Completed-round proof is attempted before lazily fetching PR comment pages for
 the App-attestation fallback. Each immutable start/result comparison is evaluated
 at most once per proof attempt, including non-ahead and unreadable comparisons.
+
+HAMCLOSE-07 adds branch activity as a fallback when existing proofs decline.
+It reads the PR's head-repository ref activity, including fork branches, through
+GitHub Link cursors with a ten-page all-or-nothing bound. From the latest
+departure from the reviewed SHA, every remaining event must be a contiguous
+push or force push on that ref by a built-in or configured fleet Bot. Each
+`after` commit must independently pass `fleetCommitIdentityMatches`: a valid
+GitHub signature, web-flow committer, and trusted fleet author. A push actor
+alone supplies no content authority. The complete chain structure is checked
+before commit lookups run in parallel batches of at most four. Any unreadable
+or untrusted commit refuses proof after the batch settles. The chain
+must contain the captured hammer base (when supplied) and end at `currentHead`.
+Reaching the base or an intermediate target never skips trailing activity;
+untrusted pushes, other ref mutations, gaps, and a different final head refuse
+proof. A distinct current head is included only when activity proves every step
+to it, rather than being appended to a starting-base proof. Successful ranges
+report `proof: branch-activity` and the complete validated `steps`.
+
+Activity proof is scoped to the current hammer run. The closer does not load
+activity or reconstruct the captured starting base. A deferred hammer head must
+therefore have an independently provable App-attestation, completed-round or
+commit-DAG chain before the closer can certify it; activity success alone does
+not authorize daemon closure or waive an exact-head gate.
 
 The audit lookup uses `gh api --paginate --slurp` to read all comment pages
 as one JSON payload. `bin/hammer-audit-comment-id.mjs` parses that payload

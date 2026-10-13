@@ -39,6 +39,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `headSha` | string | Dispatch-record identity SHA and filename key. Current stale-head redrive writers use the live remediation target SHA. |
 | `reviewedSha` | string or null | Commit SHA that carried the posted review verdict; preserved for audit/freshness even when `headSha` targets newer remediation. |
 | `targetRemediationSha` | string or null | Live PR head SHA targeted by HAM remediation; may differ from `reviewedSha` during stale-review exhausted-lane redrive. |
+| `observedHeadSha` | optional string or null | Head returned by the last pre-launch live probe when it differs from the targeted head; null if unavailable. Diagnostic evidence only. |
 | `dispatchReason` | string or null | Operator-visible reason for dispatch, such as `exhausted-final-hammer`. |
 | `workerClass` | string | Logical closer class requested by AMA, usually `hammer`. |
 | `dispatchWorkerClass` | string | Physical worker class passed to HQ after harness fallback. |
@@ -173,3 +174,9 @@ Terminal-worker cleanup, lease settlement and pass/token accounting run before
 the label refund and hold.
 The label refund itself does not perform those operations. Its receipt is
 separate from dispatch ownership; see [Operator Label Holds](operator-label-holds.md).
+
+A final live-probe head movement writes `state: no-dispatch`,
+`reason: dispatch-head-context-changed`, and `observedHeadSha` before charging
+retry budget. Stale context with no reviewed-head binding returns
+`dispatch-head-context-unavailable` after lease reconciliation and evidence-hold
+probing; it does not create a new dispatch record or launch a worker.

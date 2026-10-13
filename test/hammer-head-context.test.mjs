@@ -53,7 +53,18 @@ if (scenario === 'recover' && attempt === 1) fail('TLS handshake timeout');
 if (scenario === 'exhaust') fail('HTTP 503 Service Unavailable');
 if (scenario === 'permanent') fail('HTTP 403 Forbidden');
 if (scenario === 'malformed') { process.stdout.write('{'); process.exit(0); }
-if (args[1] === 'graphql') {
+if (scenario === 'activity' && args[1] === 'repos/fixture/repo/pulls/1') {
+  process.stdout.write(JSON.stringify({ head: { ref: 'repair', repo: { full_name: 'fixture/repo' } } }));
+} else if (scenario === 'activity' && args[1] === '--include') {
+  if (args[2] !== 'repos/fixture/repo/activity?ref=refs%2Fheads%2Frepair&per_page=100&direction=desc') fail('unexpected activity reference');
+  process.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n' + JSON.stringify([{
+    before: 'reviewed', after: 'head', ref: 'refs/heads/repair', activity_type: 'push',
+    actor: { type: 'Bot', login: 'synthetic-remediator[bot]' }, timestamp: '2026-01-01T00:00:00Z',
+  }]));
+} else if (scenario === 'activity' && args[1] === 'repos/fixture/repo/commits/head') {
+  process.stdout.write(JSON.stringify({ sha: 'head', author: { login: 'synthetic-remediator[bot]' },
+    committer: { login: 'web-flow' }, commit: { verification: { verified: true, reason: 'valid' } } }));
+} else if (args[1] === 'graphql') {
   process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: { timelineItems: {
     nodes: [{ __typename: 'HeadRefForcePushedEvent', actor: { __typename: scenario === 'rebase-user' ? 'User' : 'Bot', login: 'lacey-codex-agent[bot]' },
       beforeCommit: { oid: 'reviewed' }, afterCommit: { oid: 'head' } }], pageInfo: { hasNextPage: false, endCursor: null }
@@ -107,7 +118,7 @@ for (const [scenario, count] of [['exhaust', 3], ['permanent', 1], ['malformed',
 test('head context distinguishes spoofed fleet ancestry from read failures', async t => {
   const f = fixture(t, 'spoof');
   await assert.rejects(f.run(), error => error.code === 65 && !error.stdout);
-  assert.equal(f.calls().length, 4);
+  assert.equal(f.calls().length, 5);
 });
 
 
@@ -192,3 +203,33 @@ for (const scenario of ['rebase-bot', 'rebase-user']) {
     else await assert.rejects(run(), error => error.code === 65 && error.stderr === 'hammer starting base or responsibility range could not be proven\n');
   });
 }
+
+
+for (const headers of [
+  'Link: <https://api.github.com/repos/fixture/repo/activity?before=cursor>; rel="next"',
+  'Link: <https://api.github.com/repos/fixture/repo/activity?after=previous>; rel="prev"\r\nlInK: <https://api.github.com/repos/fixture/repo/activity?before=cursor>; rel="next"',
+]) test(`HAMCLOSE-07 activity loader follows Link cursors across ${headers.split('\r\n').length} header lines`, async () => {
+  const source = readFileSync(cli, 'utf8');
+  const loaderSource = source.slice(source.indexOf('const loadActivityPage ='), source.indexOf('const range ='));
+  const calls = [];
+  const load = runInNewContext(`${loaderSource}\nloadActivityPage`, { URL,
+    execGhWithRetry: async options => {
+      calls.push(options.args);
+      return { stdout: `HTTP/2.0 200 OK\r\n${headers}\r\n\r\n[]` };
+    },
+  });
+  const page = await load('repos/fixture/repo/activity?ref=refs%2Fheads%2Frepair');
+  assert.equal(page.next, 'repos/fixture/repo/activity?before=cursor');
+  assert.deepEqual(Array.from(calls[0].slice(0, 2)), ['api', '--include']);
+});
+
+
+test('HAMCLOSE-07 head-context CLI uses branch activity after existing proofs decline', async t => {
+  const f = fixture(t, 'activity');
+  const result = JSON.parse((await f.run(undefined, { HAM_BASE_HEAD: 'head',
+    OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-remediator' })).stdout);
+  assert.equal(result.proof, 'branch-activity');
+  assert.deepEqual(result.steps, [{ before: 'reviewed', after: 'head', kind: 'push',
+    actor: 'synthetic-remediator[bot]', time: '2026-01-01T00:00:00Z' }]);
+  assert.equal(f.calls().length, 4);
+});

@@ -2165,6 +2165,7 @@ async function dispatchAmaClosureFor({
     reviewedSha: reviewState.headSha,
     targetRemediationSha: currentPrHeadSha || reviewState.headSha,
     dispatchRecordHeadSha: closerOnlyHeadDelta ? currentPrHeadSha : reviewState.headSha,
+    closerOnlyHeadDelta,
     closerAuthoredStale,
     dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
     reviewCycleCapReached,

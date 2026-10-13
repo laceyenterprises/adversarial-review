@@ -1,5 +1,7 @@
 You are performing an adversarial review of a research finding markdown file. You did NOT write this finding.
 
+Cite files as repository-relative `path:line`; never link to a local file.
+
 Your job is to find problems. Specifically:
 - Unsupported claims
 - Missing or weak evidence

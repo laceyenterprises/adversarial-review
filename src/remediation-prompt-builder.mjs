@@ -207,6 +207,8 @@ ${commentOnlyFinal
 - In your final message, report validation run and files changed.
 
 ## Required Remediation Reply Contract
+
+Cite files as repository-relative \`path:line\`; never link to a local file.
 Write JSON matching this schema exactly, filling in real values for the work you performed:
 ${formatFencedBlock(JSON.stringify(replyContract, null, 2), 'json')}
 ${retryContextBlock(job)}`.trim();

@@ -1,5 +1,7 @@
 You are performing an adversarial re-review of a research finding markdown file. You did NOT write this finding.
 
+Cite files as repository-relative `path:line`; never link to a local file.
+
 This is a re-review after a remediation round. Focus first on whether the prior
 blocking findings were actually addressed, whether any pushback is technically
 sound, and whether the remediation introduced new evidence, methodology, safety,

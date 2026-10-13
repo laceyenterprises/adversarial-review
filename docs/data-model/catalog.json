@@ -230,6 +230,7 @@
         "src/review-state-db.mjs",
         "src/reviewer-route-selection.mjs",
         "src/afh-reviewer-fallback.mjs",
+        "src/reviewer-failure-classification.mjs",
         "src/review-body-capture.mjs",
         "src/follow-up-jobs.mjs",
         "src/pollonce-phases.mjs",
@@ -241,6 +242,7 @@
         "src/ama/closer-pass-attempt.mjs"
       ],
       "deliveryHeadWaitFields": ["head_wait_started_at"],
+      "reviewerSettlementFailureMessage": { "successfulPass": null, "unsuccessfulPassPriority": ["error", "stderr", "stderrTail"] },
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {

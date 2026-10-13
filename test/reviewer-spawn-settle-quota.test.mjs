@@ -14,6 +14,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.
 import { recordReviewerCredentialFailure, readReviewerCredentialOutage, readCascadeState } from '../src/reviewer-cascade.mjs';
 import { readGeminiQuotaCooldown } from '../src/gemini-quota-cooldown.mjs';
 import { spawnReviewer, settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
+import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 
 async function withStatusFile(state, fn, { invalidJson = false } = {}) {
   const statusDir = await mkdtemp(join(tmpdir(), 'reviewer-quota-'));
@@ -293,7 +294,7 @@ test('GEMINIQUOTA-01: quota_exhausted without reset preserves both settlement bu
   }
 });
 
-for (const failureClass of ['stale-review-head', 'review-post', 'github-review-create-transient', 'unknown']) {
+for (const failureClass of ['stale-review-head', 'review-post', 'github-review-create-transient', 'unknown', 'reviewer-timeout', 'reviewer-empty-output', 'reviewer-output']) {
   test(`Gemini ${failureClass} quota-like text settles without provider cooldown or fallback`, async () => {
     const rootDir = await mkdtemp(join(tmpdir(), 'gemini-non-quota-'));
     try {
@@ -496,3 +497,180 @@ test('Gemini terminal run fallback transfers claim and survives bounce recovery'
       previousSessionUuid: originalSession, reviewerSessionUuid: randomUUID(), reviewerModel: 'codex' }), /lost session claim/);
   } finally { db.close(); await rm(rootDir, { recursive: true, force: true }); }
 });
+
+for (const diagnostic of ['adapter reported model unavailable', 'model Synthetic stale is not recognized as a known model\nAvailable models:\n  Stale alternative']) {
+  test(`REVIEWMODEL-02: structured refusal detail takes priority over ${diagnostic}`, async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'model-refusal-detail-'));
+    try {
+      const capture = newCapture();
+      const alerts = [];
+      const failureDetail = { refusedModel: 'Structured refused model', availableModels: ['Structured offered model'] };
+      const result = await spawnReviewer({
+        ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }, capture }),
+        rootDir, reviewerModel: 'gemini',
+        deliverAlertImpl: async (message, options) => alerts.push({ message, options }),
+        reviewerRuntimeAdapterOverride: {
+          async spawnReviewer() {
+            return { ok: false, failureClass: 'reviewer-model-unavailable', error: diagnostic, failureDetail };
+          },
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(alerts.length, 1);
+      assert.deepEqual(alerts[0].options.payload, failureDetail);
+      assert.match(alerts[0].message, /Structured refused model/);
+      assert.match(alerts[0].message, /Structured offered model/);
+      assert.deepEqual(capture.completed[0].metadata.failureDetail, failureDetail);
+    } finally { await rm(rootDir, { recursive: true, force: true }); }
+  });
+}
+
+for (const ok of [true, false]) {
+  for (const field of ['error', 'stderr', 'stderrTail']) {
+    test(`REVIEWMODEL-02: ${ok ? 'successful' : 'failed'} pass ${field} failure-message attribution`, async () => {
+      const rootDir = await mkdtemp(join(tmpdir(), 'reviewer-message-'));
+      try {
+        const result = await spawnReviewer({
+          ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }, capture: newCapture() }),
+          rootDir,
+          beginReviewerPassImpl: beginReviewerPass,
+          completeReviewerPassImpl: completeReviewerPass,
+          reviewerRuntimeAdapterOverride: {
+            async spawnReviewer() {
+              return { ok, [field]: 'Synthetic runtime notice', reviewBody: 'synthetic review', reviewBodyDelivery: 'adapter' };
+            },
+          },
+        });
+        assert.equal(result.ok, ok);
+        const db = openReviewStateDb(rootDir);
+        try {
+          const pass = db.prepare('SELECT status, metadata_json FROM reviewer_passes').get();
+          assert.equal(pass.status, ok ? 'completed' : 'failed');
+          assert.equal(JSON.parse(pass.metadata_json).failureMessage, ok ? null : 'Synthetic runtime notice');
+        } finally { db.close(); }
+      } finally { await rm(rootDir, { recursive: true, force: true }); }
+    });
+  }
+}
+
+test('REVIEWMODEL-02: first model refusal falls back immediately with the logical budget intact', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'model-refusal-'));
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const stderr = await readFile(new URL('./fixtures/reviewer-model-unavailable.txt', import.meta.url), 'utf8');
+    const models = [];
+    const settled = [];
+    const alerts = [];
+    let transferred = false;
+    const args = {
+      ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }, capture: newCapture() }),
+      rootDir, repo: 'example/synthetic', reviewerModel: 'gemini', builderTag: 'codex',
+      env: { ALERT_TO: 'synthetic-operator', ALERT_URL: 'http://example.invalid/alert' },
+      beginReviewerPassImpl: beginReviewerPass, completeReviewerPassImpl: completeReviewerPass,
+      geminiQuotaFallbackRoute: { reviewerModel: 'claude-code' },
+      onGeminiQuotaFallback: route => {
+        const db = openReviewStateDb(rootDir);
+        try {
+          transferGeminiFallbackSession(db, { ...route, repo: 'example/synthetic', prNumber: 99,
+            previousSessionUuid: args.reviewerSessionUuid });
+        } finally { db.close(); }
+        transferred = true;
+      },
+      onPostOperationSettled: result => settled.push(result),
+      deliverAlertImpl: async (message, options) => alerts.push({ message, options }),
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer({ model }) {
+          models.push(model);
+          if (model === 'gemini') return { ok: false, failureClass: 'reviewer-model-unavailable', error: stderr.split('\n')[0], stderr };
+          assert.equal(transferred, true);
+          return { ok: true, reviewBody: 'synthetic review', reviewBodyDelivery: 'adapter' };
+        },
+      },
+    };
+    const claimDb = openReviewStateDb(rootDir);
+    try {
+      ensureReviewStateSchema(claimDb);
+      claimDb.prepare(`INSERT INTO reviewed_prs (repo, pr_number, reviewer, review_status,
+        reviewer_session_uuid, review_attempts, infra_auto_recover_attempts, reviewed_at)
+        VALUES ('example/synthetic', 99, 'gemini', 'reviewing', ?, 2, 1, '2026-10-12T00:00:00Z')`).run(args.reviewerSessionUuid);
+    } finally { claimDb.close(); }
+    assert.equal((await spawnReviewer(args)).ok, true);
+    assert.deepEqual(models, ['gemini', 'claude-code']);
+    assert.equal(settled.length, 1);
+    assert.equal(settled[0].ok, true);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].options.payload.availableModels.length, 10);
+    assert.equal(alerts[0].options.env, args.env);
+    assert.equal(readGeminiQuotaCooldown({ rootDir, env: {} }), null);
+    const db = openReviewStateDb(rootDir);
+    try {
+      const claim = db.prepare("SELECT reviewer, review_attempts, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = 'example/synthetic' AND pr_number = 99").get();
+      assert.deepEqual(claim, { reviewer: 'claude-code', review_attempts: 2, infra_auto_recover_attempts: 1 });
+      const passes = db.prepare('SELECT metadata_json FROM reviewer_passes ORDER BY attempt_number').all();
+      assert.equal(JSON.parse(passes[1].metadata_json).reviewAttemptNumber, 1);
+      const failure = JSON.parse(passes[0].metadata_json);
+      assert.equal(failure.failureDetail.availableModels.length, 10);
+      assert.ok(failure.failureMessage.includes(stderr.split('\n')[0]));
+    } finally { db.close(); }
+  } finally { await rm(rootDir, { recursive: true, force: true }); }
+});
+
+for (const [name, fallback] of [
+  ['unset fallback', undefined],
+  ['quota-blocked fallback', { reviewerModel: 'claude-code', quotaBlocked: true }],
+  ['same-model fallback', { reviewerModel: 'gemini' }],
+  ['credential-held fallback', { reviewerModel: 'claude-code' }],
+]) {
+  test(`REVIEWMODEL-02: model refusal with ${name} settles terminal and cannot auto-retry`, async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'model-refusal-terminal-'));
+    try {
+      if (name === 'credential-held fallback') {
+        for (const prNumber of [1, 2]) {
+          recordReviewerCredentialFailure(rootDir, { reviewerModel: 'claude-code', repo: 'example/synthetic', prNumber });
+        }
+      }
+      const settled = [];
+      const alerts = [];
+      const capture = newCapture();
+      const env = { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' };
+      const result = await spawnReviewer({
+        ...spawnArgs({ env, capture }), rootDir, reviewerModel: 'gemini',
+        quotaCheckEnv: name === 'same-model fallback' ? undefined : env,
+        env,
+        readReviewerQuotaDecisionImpl: async () => ({ available: true }),
+        geminiQuotaFallbackRoute: fallback,
+        onPostOperationSettled: result => settled.push(result),
+        onGeminiQuotaFallback: () => assert.fail('unavailable fallback must not transfer the claim'),
+        deliverAlertImpl: async (_message, options) => alerts.push(options),
+        reviewerRuntimeAdapterOverride: {
+          async spawnReviewer() {
+            capture.spawnCalls++;
+            return { ok: false, failureClass: 'reviewer-model-unavailable', error: 'invalid model selection (--model retired-model)' };
+          },
+        },
+      });
+      assert.equal(capture.spawnCalls, 1);
+      assert.equal(result.failureClass, 'reviewer-model-unavailable');
+      assert.equal(alerts[0].env, env);
+      assert.equal(settled.length, 1);
+      assert.equal(settled[0], result);
+      const failures = [];
+      const retry = () => assert.fail('model refusal must not release the claim for retries');
+      settleReviewerAttempt({
+        rootDir, repoPath: 'example/synthetic', prNumber: 99, result,
+        leaseRecoveryEnabled: true,
+        env: { HQ_ROOT: rootDir },
+        statements: {
+          markFailed: { run: (...args) => failures.push(args) },
+          markOutageTransient: { run: retry }, releaseReviewLease: { run: retry },
+          markPendingUpstream: { run: retry },
+        },
+        log: { warn() {} },
+      });
+      assert.equal(failures.length, 1);
+      assert.match(failures[0][1], /^\[reviewer-model-unavailable\]/);
+      assert.equal(infraRecoverableFailureClass({ review_status: 'failed', failure_message: failures[0][1] }), null);
+      assert.equal(readCascadeState(rootDir, { repo: 'example/synthetic', prNumber: 99 }), null);
+    } finally { await rm(rootDir, { recursive: true, force: true }); }
+  });
+}

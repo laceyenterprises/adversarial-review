@@ -3921,7 +3921,7 @@ test('isolated Codex reviewer home persists a rollout for quota capture', () => 
 test('buildAgyReviewArgs binds --model before --print and carries the prompt as the --print value', () => {
   const prompt = '## Adversarial Review\n\n```diff\n+x\n```';
   const args = buildAgyReviewArgs({
-    model: 'Gemini 3.1 Pro (High)',
+    model: 'Gemini 3.8 Flash (High)',
     prompt,
     printTimeoutMs: 1_140_000,
     workspaceDir: '/tmp/reviewer-checkout',
@@ -3929,7 +3929,7 @@ test('buildAgyReviewArgs binds --model before --print and carries the prompt as 
   // agy's --print is a VALUE flag: the prompt must be its argument, and every
   // value-bearing flag (incl. --model) must precede --print so it binds.
   assert.deepEqual(args, [
-    '--model', 'Gemini 3.1 Pro (High)',
+    '--model', 'Gemini 3.8 Flash (High)',
     '--print-timeout', '1140s',
     '--sandbox',
     '--add-dir', '/tmp/reviewer-checkout',
@@ -3939,7 +3939,7 @@ test('buildAgyReviewArgs binds --model before --print and carries the prompt as 
   const modelIdx = args.indexOf('--model');
   const printIdx = args.indexOf('--print');
   assert.ok(modelIdx >= 0, '--model present');
-  assert.equal(args[modelIdx + 1], 'Gemini 3.1 Pro (High)', '--model bound to the agy display-name token');
+  assert.equal(args[modelIdx + 1], 'Gemini 3.8 Flash (High)', '--model bound to the agy display-name token');
   assert.ok(modelIdx < printIdx, '--model must precede --print so the model binds (was the silent-Flash bug)');
   // The prompt rides on argv as the --print value, NOT left to stdin (which
   // would let --print swallow the next token and unbind --model).
@@ -3951,7 +3951,7 @@ test('buildAgyReviewArgs binds --model before --print and carries the prompt as 
 test('agy print timeout is independently tunable and reviewer subprocess gets headroom', () => {
   const reviewerTimeoutMs = 20 * 60 * 1000;
   const printTimeoutMs = resolveAgyPrintTimeoutMs({});
-  const args = buildAgyReviewArgs({ model: 'Gemini 3.1 Pro (High)', prompt: 'p', printTimeoutMs });
+  const args = buildAgyReviewArgs({ model: 'Gemini 3.8 Flash (High)', prompt: 'p', printTimeoutMs });
   const printTimeoutArg = args[args.indexOf('--print-timeout') + 1];
 
   assert.equal(printTimeoutMs, 1_140_000);
@@ -4011,7 +4011,7 @@ test('spawnAgyReview delivers the prompt on argv (as the --print value) so the m
   await spawnAgyReview({
     agyCli: '/usr/local/bin/agy',
     prompt,
-    model: 'Gemini 3.1 Pro (High)',
+    model: 'Gemini 3.8 Flash (High)',
     env: { HOME: '/tmp/home', PATH: process.env.PATH },
     cwd: '/tmp/repo',
     timeout: 9_999,
@@ -4026,7 +4026,7 @@ test('spawnAgyReview delivers the prompt on argv (as the --print value) so the m
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, '/usr/local/bin/agy');
   assert.deepEqual(calls[0].args, [
-    '--model', 'Gemini 3.1 Pro (High)',
+    '--model', 'Gemini 3.8 Flash (High)',
     '--print-timeout', '9s',
     '--sandbox',
     '--add-dir', '/tmp/repo',
@@ -4037,7 +4037,7 @@ test('spawnAgyReview delivers the prompt on argv (as the --print value) so the m
   const modelIdx = calls[0].args.indexOf('--model');
   const printIdx = calls[0].args.indexOf('--print');
   assert.ok(modelIdx < printIdx, '--model must precede --print');
-  assert.equal(calls[0].args[modelIdx + 1], 'Gemini 3.1 Pro (High)');
+  assert.equal(calls[0].args[modelIdx + 1], 'Gemini 3.8 Flash (High)');
   // Prompt is on argv, stdin is closed (NOT fed the prompt — that unbinds the model).
   assert.equal(calls[0].args[printIdx + 1], prompt);
   assert.equal(calls[0].options.input, '');
@@ -4065,7 +4065,7 @@ test('spawnAgyReview refuses an oversized prompt rather than reverting to the mo
     () => spawnAgyReview({
       agyCli: '/usr/local/bin/agy',
       prompt: oversized,
-      model: 'Gemini 3.1 Pro (High)',
+      model: 'Gemini 3.8 Flash (High)',
       env: { HOME: '/tmp/home', PATH: process.env.PATH },
       printTimeoutMs: 9_000,
       spawnWithInputImpl: async () => { spawned = true; return { stdout: 'ok', stderr: '' }; },
@@ -4599,17 +4599,17 @@ test('oversized agy fallback alerts when cross-model route and chunking are unav
 test('resolveGeminiAntigravityModel: agy uses the display-name token while the cli path keeps its slug', () => {
   const modulePath = join(mkdtempSync(join(tmpdir(), 'agy-model-')), 'config.yaml');
   // Antigravity model comes from reviewer.gemini.model (agy display name).
-  writeFileSync(modulePath, 'reviewer:\n  gemini:\n    model: "Gemini 3.1 Pro (High)"\n', 'utf8');
+  writeFileSync(modulePath, 'reviewer:\n  gemini:\n    model: "Gemini 3.8 Flash (High)"\n', 'utf8');
   assert.equal(
     resolveGeminiAntigravityModel({ env: {}, topPath: '/dev/null', modulePaths: [modulePath] }),
-    'Gemini 3.1 Pro (High)',
+    'Gemini 3.8 Flash (High)',
   );
   // Default when unset is the agy display-name token, NOT a cli slug.
   const emptyPath = join(mkdtempSync(join(tmpdir(), 'agy-model-')), 'config.yaml');
   writeFileSync(emptyPath, 'reviewer:\n  gemini:\n    runtime: antigravity\n', 'utf8');
   assert.equal(
     resolveGeminiAntigravityModel({ env: {}, topPath: '/dev/null', modulePaths: [emptyPath] }),
-    'Gemini 3.1 Pro (High)',
+    'Gemini 3.8 Flash (High)',
   );
   // Env override (canonical + legacy alias).
   assert.equal(
@@ -4767,11 +4767,11 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(spawnCalls[0].agyCli, AGY_CLI);
   // antigravity runtime resolves the agy display-name token (default), NOT the
   // cli slug, and binds --model BEFORE --print with the prompt as the --print value.
-  assert.equal(spawnCalls[0].model, 'Gemini 3.1 Pro (High)');
+  assert.equal(spawnCalls[0].model, 'Gemini 3.8 Flash (High)');
   const aMi = spawnCalls[0].args.indexOf('--model');
   const aPi = spawnCalls[0].args.indexOf('--print');
   assert.ok(aMi >= 0 && aMi < aPi, '--model must be present and precede --print');
-  assert.equal(spawnCalls[0].args[aMi + 1], 'Gemini 3.1 Pro (High)');
+  assert.equal(spawnCalls[0].args[aMi + 1], 'Gemini 3.8 Flash (High)');
   assert.equal(spawnCalls[0].args[aPi + 1], spawnCalls[0].prompt, 'prompt rides on argv as --print value');
   assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
   assert.match(spawnCalls[0].prompt, /Review the PROVIDED diff/);
@@ -5630,7 +5630,7 @@ test('reviewWithGemini keeps successful antigravity review when spend report loo
     }));
 
     assert.deepEqual(result, { reviewText, tokenUsage: null,
-      execution: { harness: 'gemini', model: 'Gemini 3.1 Pro (High)', effort: null } });
+      execution: { harness: 'gemini', model: 'Gemini 3.8 Flash (High)', effort: null } });
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
     assert.equal(warnings.length, 1);
@@ -6414,4 +6414,135 @@ test('GEMINIQUOTA-01: checkout quota_exhausted preserves an optional broker rese
         && (!resetAt || err.message.includes(`resets at ${resetAt}`)),
     );
   }
+});
+
+test('REVIEWMODEL-02: Antigravity model refusal preserves diagnostics and never retries', async () => {
+  const { parseReviewerModelUnavailable, classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  const stderr = `Environment notice\n${readFileSync(new URL('./fixtures/reviewer-model-unavailable.txt', import.meta.url), 'utf8')}`;
+  const detail = parseReviewerModelUnavailable(stderr);
+  assert.equal(detail.refusedModel, 'Gemini 3.1 Pro (High)');
+  assert.deepEqual(detail.availableModels, [
+    'Gemini 3.8 Flash (High)', 'Gemini 3.8 Flash (Medium)', 'Gemini 3.8 Flash (Low)',
+    'Claude Opus 5.5 (Low)', 'Claude Opus 5.5 (Medium)', 'Claude Opus 5.5 (High)',
+    'Claude Sonnet 5.5 (Low)', 'Claude Sonnet 5.5 (Medium)', 'Claude Sonnet 5.5 (High)',
+    'GPT-OSS 120B (Medium)',
+  ]);
+  assert.equal(classifyReviewerFailure(stderr, 1), 'reviewer-model-unavailable');
+  const { reviewerFailureClassFromStoredRow, infraRecoverableFailureClass } = await import('../src/reviewer-failure-classification.mjs');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: `[reviewer-model-unavailable] ${stderr}` }), 'reviewer-model-unavailable');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: stderr }), 'reviewer-model-unavailable');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: '[reviewer-model-unavailable] synthetic refusal' }), 'reviewer-model-unavailable');
+  for (const failure_message of [stderr, `[reviewer-model-unavailable] ${stderr}`]) {
+    assert.equal(infraRecoverableFailureClass({ failure_message }), null);
+  }
+  let calls = 0;
+  await assert.rejects(reviewWithGemini('+synthetic diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'synthetic', oauthCreds: { access_token: 'synthetic' } }),
+    materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
+    releaseGeminiCredentialCheckoutImpl: async () => {},
+    assertAgyAuthImpl: async () => {},
+    retryDelaysMs: [1, 2],
+    sleepImpl: async () => assert.fail('model refusal must not wait'),
+    spawnAgyReviewImpl: async () => {
+      calls++;
+      throw Object.assign(new Error('Command failed with code 1'), { stderr });
+    },
+  }), error => {
+    assert.equal(error.failureClass, 'reviewer-model-unavailable');
+    assert.deepEqual(error.failureDetail, detail);
+    assert.ok(error.message.includes(stderr.trim()));
+    assert.equal(error.stderr, stderr);
+    return true;
+  });
+  assert.equal(calls, 1);
+});
+
+test('REVIEWMODEL-02: typed refusal retains original stdout diagnostics through catch', async () => {
+  const { parseReviewerModelUnavailable, classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  const stderr = `Environment notice\n${readFileSync(new URL('./fixtures/reviewer-model-unavailable.txt', import.meta.url), 'utf8')}`;
+  const detail = parseReviewerModelUnavailable(stderr);
+  assert.equal(detail.refusedModel, 'Gemini 3.1 Pro (High)');
+  assert.deepEqual(detail.availableModels, [
+    'Gemini 3.8 Flash (High)', 'Gemini 3.8 Flash (Medium)', 'Gemini 3.8 Flash (Low)',
+    'Claude Opus 5.5 (Low)', 'Claude Opus 5.5 (Medium)', 'Claude Opus 5.5 (High)',
+    'Claude Sonnet 5.5 (Low)', 'Claude Sonnet 5.5 (Medium)', 'Claude Sonnet 5.5 (High)',
+    'GPT-OSS 120B (Medium)',
+  ]);
+  assert.equal(classifyReviewerFailure(stderr, 1), 'reviewer-model-unavailable');
+  const { reviewerFailureClassFromStoredRow, infraRecoverableFailureClass } = await import('../src/reviewer-failure-classification.mjs');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: `[reviewer-model-unavailable] ${stderr}` }), 'reviewer-model-unavailable');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: stderr }), 'reviewer-model-unavailable');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: '[reviewer-model-unavailable] synthetic refusal' }), 'reviewer-model-unavailable');
+  for (const failure_message of [stderr, `[reviewer-model-unavailable] ${stderr}`]) {
+    assert.equal(infraRecoverableFailureClass({ failure_message }), null);
+  }
+  let calls = 0;
+  await assert.rejects(reviewWithGemini('+synthetic diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'synthetic', oauthCreds: { access_token: 'synthetic' } }),
+    materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
+    releaseGeminiCredentialCheckoutImpl: async () => {},
+    assertAgyAuthImpl: async () => {},
+    retryDelaysMs: [1, 2],
+    sleepImpl: async () => assert.fail('model refusal must not wait'),
+    spawnAgyReviewImpl: async () => {
+      calls++;
+      throw Object.assign(new Error('captured stdout refusal'), { stderr, failureClass: 'reviewer-model-unavailable', failureDetail: detail });
+    },
+  }), error => {
+    assert.equal(error.failureClass, 'reviewer-model-unavailable');
+    assert.deepEqual(error.failureDetail, detail);
+    assert.equal(error.message, 'captured stdout refusal');
+    assert.equal(error.stderr, stderr);
+    return true;
+  });
+  assert.equal(calls, 1);
+});
+
+test('REVIEWMODEL-02: refusal parsing handles quoted and bare CLI model tokens', async () => {
+  const { parseReviewerModelUnavailable } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  for (const [argument, expected] of [
+    ['"Gemini 3.8 Flash (High)"', 'Gemini 3.8 Flash (High)'],
+    ["'Gemini 3.8 Flash (High)'", 'Gemini 3.8 Flash (High)'],
+    ['gemini-retired', 'gemini-retired'],
+  ]) {
+    for (const suffix of ['', ' --effort high', ')\r\nAvailable models:\r\n  gemini-current']) {
+      const detail = parseReviewerModelUnavailable(`Error: invalid model selection (--model ${argument}${suffix}`);
+      assert.equal(detail.refusedModel, expected);
+    }
+  }
+  assert.equal(parseReviewerModelUnavailable('Error: invalid model selection (--model\nAvailable models:\n  gemini-current)').refusedModel, 'unknown');
+});
+
+test('REVIEWMODEL-02: Gemini execution errors preserve multiline stderr after notices', async () => {
+  const { classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  const stderr = 'Environment notice\r\n\r\ndyld[123]: Library not loaded: /synthetic/lib.dylib\r\n  Referenced from: /synthetic/gemini\r\n  Reason: tried missing paths\r\n';
+  await assert.rejects(reviewWithGemini('+synthetic diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'cli', assertOAuthImpl: async () => {},
+    retryDelaysMs: [],
+    spawnGeminiReviewImpl: async () => {
+      throw Object.assign(new Error('Command failed with code 1'), { stderr });
+    },
+  }), error => {
+    assert.ok(error.message.includes(stderr.trim()));
+    assert.equal(error.stderr, stderr);
+    assert.equal(classifyReviewerFailure(error.message, 1), 'infra-runtime-missing-library');
+    return true;
+  });
+});
+
+test('REVIEWMODEL-02: preserving stderr does not lose a Gemini subprocess timeout', async () => {
+  const { classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  await assert.rejects(reviewWithGemini('+synthetic diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'cli', assertOAuthImpl: async () => {},
+    retryDelaysMs: [],
+    spawnGeminiReviewImpl: async () => {
+      throw Object.assign(new Error('Command timed out after 1000ms'), { stderr: 'Synthetic progress output' });
+    },
+  }), error => {
+    assert.equal(classifyReviewerFailure(error.message, 1), 'reviewer-timeout');
+    assert.ok(error.message.includes('Synthetic progress output'));
+    return true;
+  });
 });

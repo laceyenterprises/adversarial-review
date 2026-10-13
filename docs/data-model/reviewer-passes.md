@@ -111,6 +111,20 @@ terminal. The base reviewer gets the next unused `attempt_number` from
 token evidence and completion all use the fallback's new ledger number and
 actual model. Subsequent polls allocate beyond both rows normally.
 
+Reviewer settlement writes `metadata_json.failureMessage` only for unsuccessful
+passes; successful passes store `null` even when the runtime emits non-fatal
+stderr notices. Failed passes retain the first available error, full stderr,
+or stderr tail. Historical metadata is not rewritten.
+
+Antigravity model refusals retain `failureClass: 'reviewer-model-unavailable'`
+and `failureDetail: { refusedModel, availableModels }` in pass metadata, with
+multiline subprocess stderr in the failure message. Immediate Gemini fallback
+leaves the refused pass failed and gives the fallback a new ledger attempt
+without charging the logical round. If fallback cannot run, the delivery row
+settles as `failed` with the normal terminal attempt charge and is excluded
+from automatic infrastructure recovery. Updating configuration alone does not
+re-arm the same head: an operator retrigger or a new head is required.
+
 For remediation passes, `attempt_number` is the next unused remediation
 attempt for the PR (`MAX(attempt_number) + 1`), assigned when the worker is
 spawned. It is monotonic across retries and is not the bounded remediation

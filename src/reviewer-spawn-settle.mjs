@@ -18,6 +18,8 @@
 //  - markWatcherReviewHeartbeat stays in watcher (references the mutable
 //    watcherHeartbeat singleton and is used elsewhere) and is threaded into
 //    settleReviewerAttempt as the injected `markReviewHeartbeat` param.
+import { deliverAlert } from './alert-delivery.mjs';
+import { parseReviewerModelUnavailable } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { randomUUID } from 'node:crypto';
 import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
 import { readGeminiQuotaCooldown, startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
@@ -514,7 +516,7 @@ function resolveReviewerOutageSignal({
 async function spawnReviewer(args) {
   if (normalizeReviewerModel(args.reviewerModel) !== 'gemini') return spawnReviewerOnce(args);
   const rootDir = args.rootDir || ROOT;
-  const env = args.quotaCheckEnv || process.env;
+  const env = args.quotaCheckEnv || args.env || process.env;
   const fallback = args.geminiQuotaFallbackRoute;
   const canFallback = fallback && !fallback.quotaBlocked && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
   const runFallback = async (quotaResult = null) => {
@@ -522,6 +524,7 @@ async function spawnReviewer(args) {
     if (gate.paused) {
       // Keep the triggering quota hold (and both retry budgets) while the
       // fallback credential is held. Do not manufacture an OAuth failure.
+      if (quotaResult) args.onPostOperationSettled?.(quotaResult);
       return quotaResult || {
         ok: false,
         failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
@@ -567,11 +570,28 @@ async function spawnReviewer(args) {
   }
   const result = await spawnReviewerOnce({
     ...args,
-    onPostOperationSettled: canFallback ? (result) => {
-      if (!result.ok && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) return;
+    onPostOperationSettled: (result) => {
+      if (!result.ok && (result.failureClass === 'reviewer-model-unavailable'
+        || (canFallback && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS))) return;
       args.onPostOperationSettled?.(result);
-    } : args.onPostOperationSettled,
+    },
   });
+  if (!result.ok && result.failureClass === 'reviewer-model-unavailable') {
+    const diagnostic = [result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n');
+    const detail = result.failureDetail || parseReviewerModelUnavailable(diagnostic) || { refusedModel: 'unknown', availableModels: [] };
+    console.warn(`[watcher] reviewer-model-unavailable: ${diagnostic}`);
+    try {
+      await (args.deliverAlertImpl || deliverAlert)(
+        `Adversarial reviewer model refused: ${detail.refusedModel}\nAvailable models:\n${detail.availableModels.join('\n')}\nUpdate the configured reviewer model.`,
+        { event: 'reviewer.model_unavailable', payload: detail, env: args.env || process.env },
+      );
+    } catch (error) {
+      console.warn(`[watcher] Failed to queue model-unavailable alert: ${error.message}`);
+    }
+    if (canFallback) return runFallback(result);
+    args.onPostOperationSettled?.(result);
+    return result;
+  }
   if (!result.ok && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
     // The runtime owns classification. Text here is used only to recover a
     // reset timestamp after typed quota evidence, never to select fallback.
@@ -1037,6 +1057,8 @@ async function spawnReviewerOnce({
           reattachToken: result.reattachToken || null,
           workerRunAttribution,
           failureClass: result.failureClass || null,
+          failureDetail: result.failureDetail || parseReviewerModelUnavailable([result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n')),
+          failureMessage: result.ok ? null : (result.error || result.stderr || result.stderrTail || null),
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
           reviewerTokenUsageArtifact,
         },
@@ -1368,6 +1390,17 @@ function settleReviewerAttempt({
   const baseFailureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
   const failureMessage = appendFailureDiagnostics(baseFailureMessage, result);
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
+
+  if (failureClass === 'reviewer-model-unavailable') {
+    // Immediate fallback was already tried by spawnReviewer. A deterministic
+    // refusal left here needs configuration repair, not another poll-time spawn.
+    withSqliteBusyRetrySync(
+      () => statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
+      { label: `reviewer-model-terminal:${repoPath}#${prNumber}`, log },
+    );
+    log.warn(`[watcher] Terminal reviewer model refusal on ${repoPath} PR ${prNumber}: ${failureMessage}`);
+    return;
+  }
 
   // A size ceiling is deterministic for this head; never release it to pending,
   // even during a coincident provider outage or with lease recovery enabled.

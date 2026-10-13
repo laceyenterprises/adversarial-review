@@ -53,6 +53,12 @@ Directory: `data/alert-delivery/`
 
 ## Operational Contract
 
+- Enqueue deduplication reads the real durable sink, matching its writes and
+  state-transition renames. `deliverAlert`'s `fsImpl` supplies token/config
+  reads, not a virtual outbox; tests use a temporary real state root. A mocked
+  token-file existence check cannot create or hide a durable alert receipt.
+  Model-refusal receipt checks accept a separate `receiptFsImpl.existsSync`
+  test seam, defaulting to the real sink; token/config mocks remain separate.
 - `deliverAlert` is enqueue-first: once the pending document and queued receipt
   are durable, callers receive `{ status: "queued" }`. Callers intentionally
   treat that durable enqueue as terminal for their own debounce; transport
@@ -74,6 +80,11 @@ Directory: `data/alert-delivery/`
   series can page again on the same head. If record persistence fails, no series
   ID is supplied and the normal outbox identity applies; the lane debounce still
   suppresses repeats. Legacy payloads without a series ID also use normal IDs.
+- Model-refusal `reviewer.model_unavailable` alerts use
+  `reviewer-model-<sha256(JSON.stringify([refusedModel, YYYY-MM-DD]))>`,
+  where the date is UTC. Daily deduplication reuses pending, inflight, delivered
+  and dead-letter documents for the same refused model; a new UTC day allows
+  a new alert.
 - AMA automated recovery exhaustion pages use
   `ama-recovery-<sha256(JSON.stringify([repo, pr, head, reason]))>`. Same-reason
   retries reuse pending, inflight, delivered and dead-letter documents; a later

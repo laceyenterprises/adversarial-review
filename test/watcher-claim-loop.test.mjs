@@ -966,6 +966,42 @@ try {
 `;
 }
 
+test('REVIEWMODEL-02: watcher never reclaims a terminal model refusal on the same head', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-model-refusal-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs
+          (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+           reviewer_head_sha, revision_ref, review_attempts, failed_at, failure_message)
+          VALUES ('laceyenterprises/adversarial-review', 101, '2026-10-12',
+            'gemini', 'open', 'failed', 'sha-happy-101', 'sha-happy-101', 1,
+            '2026-10-12T00:00:00Z', '[reviewer-model-unavailable] invalid model selection')\`).run();
+      `,
+      afterFirstPoll: `
+        await pollOnce(octokit, pollOptions);
+        const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+        assert.equal(row.review_status, 'failed');
+        assert.equal(row.review_attempts, 1);
+        assert.equal(row.infra_auto_recover_attempts, 0);
+        assert.ok(!claims.some(claim => claim.prNumber === 101));
+        assert.ok(!(globalThis.__watcherClaimLoopReviewerSpawns || [])
+          .some(spawn => spawn.subjectContext.prNumber === 101));
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(installGhFixture(tmp)), timeout: 20_000 });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
 test('watcher pollOnce claim loop records subject-state head SHAs and drives the happy path', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
   const loaderPath = path.join(tmp, 'fixture-loader.mjs');

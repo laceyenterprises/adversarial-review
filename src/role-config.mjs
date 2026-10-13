@@ -468,8 +468,8 @@ export function resolveGeminiRuntime({
 // token through the same file→env cascade as `resolveGeminiRuntime`. This is
 // the model passed to `agy --model <token>` and is DISTINCT from the
 // gemini-CLI model slug (`gemini-2.5-pro`): agy expects its verbatim display
-// names (e.g. `Gemini 3.1 Pro (High)`). Default `Gemini 3.1 Pro (High)`.
-export const DEFAULT_GEMINI_ANTIGRAVITY_MODEL = 'Gemini 3.1 Pro (High)';
+// names (e.g. `Gemini 3.8 Flash (High)`). Default `Gemini 3.8 Flash (High)`.
+export const DEFAULT_GEMINI_ANTIGRAVITY_MODEL = 'Gemini 3.8 Flash (High)';
 
 export function resolveGeminiAntigravityModel({
   env = process.env,

@@ -50,12 +50,25 @@ function hasProviderOverloadedSignal(value) {
   return hasProviderCapacitySignal(value);
 }
 
+// Vendor refusal is deterministic for the configured model, not a PR failure.
+function parseReviewerModelUnavailable(value) {
+  const text = String(value || '');
+  if (!/invalid model selection|is not recognized as a known model/i.test(text)) return null;
+  const modelArg = text.match(/--model[ \t]+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s"'()]+))/i);
+  const refusedModel = modelArg?.slice(1).find(Boolean)
+    || text.match(/model (.+?) is not recognized as a known model/i)?.[1]
+    || 'unknown';
+  const offered = text.match(/Available models:\s*\r?\n((?:[ \t]+[^\r\n]+(?:\r?\n|$))+)/i)?.[1] || '';
+  return { refusedModel, availableModels: offered.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) };
+}
+
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
   // Exit 75 is also EX_TEMPFAIL. Only the anchored refusal marker below
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
   if (exitCode === REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE) return 'reviewer-prompt-too-large';
+  if (parseReviewerModelUnavailable(text)) return 'reviewer-model-unavailable';
   const normalizedErrorCode = String(errorCode || '').toUpperCase();
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
   const mentionsReviewerTimeout =
@@ -291,6 +304,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 }
 
 export {
+  parseReviewerModelUnavailable,
   DIFF_TOO_LARGE_FAILURE_CLASS,
   INFRA_RUNTIME_MISSING_LIBRARY_FAILURE_CLASS,
   ATTESTATION_SIGN_FAILED_FAILURE_CLASS,

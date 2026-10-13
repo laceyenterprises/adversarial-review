@@ -2891,10 +2891,10 @@ async function reviewWithGemini(diff, extraContext = '', {
       throw new OAuthError('gemini', `CLI returned auth error: ${String(err.message || stderr || '').substring(0, 200)}`);
     }
     const modelUnavailable = runtime === 'antigravity' && parseReviewerModelUnavailable(msg);
-    const firstStderrLine = String(stderr).trim().split(/\r?\n/)[0];
+    const stderrText = String(stderr).trim();
     const detail = modelUnavailable
-      ? `${firstStderrLine || err.message}\nRefused model: ${modelUnavailable.refusedModel}\nAvailable models:\n${modelUnavailable.availableModels.map((name) => `  ${name}`).join('\n')}`
-      : [String(err.message || '').substring(0, 800), firstStderrLine].filter(Boolean).join('\n');
+      ? `${stderrText || err.message}\nRefused model: ${modelUnavailable.refusedModel}\nAvailable models:\n${modelUnavailable.availableModels.map((name) => `  ${name}`).join('\n')}`
+      : [String(err.message || '').substring(0, 800), stderrText].filter(Boolean).join('\n');
     throw Object.assign(new Error(`Gemini exec failed: ${detail}`), {
       stdout, stderr, ...(modelUnavailable ? { failureClass: 'reviewer-model-unavailable', failureDetail: modelUnavailable } : {}),
     });

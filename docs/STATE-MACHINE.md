@@ -187,6 +187,16 @@ new PR
   previews cannot select it; transient chunk errors retain their usual recovery
   path. A new head or operator retrigger re-arms a real size refusal. See the
   [prompt budgets](../README.md#oversized-reviewer-prompts) for override knobs.
+- An Antigravity model refusal (`reviewer-model-unavailable`) queues the
+  `reviewer.model_unavailable` operator alert with the refused model and full
+  offered-model list. Gemini immediately tries its configured eligible
+  cross-model fallback, preserving the logical round budget. If no fallback
+  can run, the delivery row settles as terminal `failed` on that head, even
+  with lease recovery or a coincident upstream outage. Model refusals are
+  excluded from automatic infrastructure retries. Update the configured model
+  and use `npm run retrigger-review` to re-arm the same head; a new head uses
+  the normal failed-row re-arm path. Subprocess failure messages retain full
+  multiline stderr so leading notices cannot hide the diagnostic.
 - A `failed` row is not reset by a standalone sweep. When the watcher
   rediscovers an open PR whose head differs from `reviewer_head_sha`,
   `requestReviewRereview` atomically archives the entire failed row in

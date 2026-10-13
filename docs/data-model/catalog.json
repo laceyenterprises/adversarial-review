@@ -229,6 +229,7 @@
         "src/review-state-db.mjs",
         "src/reviewer-route-selection.mjs",
         "src/afh-reviewer-fallback.mjs",
+        "src/reviewer-failure-classification.mjs",
         "src/review-body-capture.mjs",
         "src/follow-up-jobs.mjs",
         "src/pollonce-phases.mjs",

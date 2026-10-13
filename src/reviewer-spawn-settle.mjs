@@ -516,7 +516,7 @@ function resolveReviewerOutageSignal({
 async function spawnReviewer(args) {
   if (normalizeReviewerModel(args.reviewerModel) !== 'gemini') return spawnReviewerOnce(args);
   const rootDir = args.rootDir || ROOT;
-  const env = args.quotaCheckEnv || process.env;
+  const env = args.quotaCheckEnv || args.env || process.env;
   const fallback = args.geminiQuotaFallbackRoute;
   const canFallback = fallback && !fallback.quotaBlocked && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
   const runFallback = async (quotaResult = null) => {
@@ -582,7 +582,7 @@ async function spawnReviewer(args) {
     try {
       await (args.deliverAlertImpl || deliverAlert)(
         `Adversarial reviewer model refused: ${detail.refusedModel}\nAvailable models:\n${detail.availableModels.join('\n')}\nUpdate the configured reviewer model.`,
-        { event: 'reviewer.model_unavailable', payload: detail },
+        { event: 'reviewer.model_unavailable', payload: detail, env },
       );
     } catch (error) {
       console.warn(`[watcher] Failed to queue model-unavailable alert: ${error.message}`);
@@ -1391,11 +1391,13 @@ function settleReviewerAttempt({
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
 
   if (failureClass === 'reviewer-model-unavailable') {
+    // Immediate fallback was already tried by spawnReviewer. A deterministic
+    // refusal left here needs configuration repair, not another poll-time spawn.
     withSqliteBusyRetrySync(
-      () => statements.markOutageTransient.run(failureAt, classifiedMessage, null, repoPath, prNumber),
-      { label: `reviewer-model-hold:${repoPath}#${prNumber}`, log },
+      () => statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
+      { label: `reviewer-model-terminal:${repoPath}#${prNumber}`, log },
     );
-    log.warn(`[watcher] ${classifiedMessage}; review attempt budget unchanged`);
+    log.warn(`[watcher] Terminal reviewer model refusal on ${repoPath} PR ${prNumber}: ${failureMessage}`);
     return;
   }
 

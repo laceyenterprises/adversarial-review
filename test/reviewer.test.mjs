@@ -6418,7 +6418,7 @@ test('GEMINIQUOTA-01: checkout quota_exhausted preserves an optional broker rese
 
 test('REVIEWMODEL-02: Antigravity model refusal preserves diagnostics and never retries', async () => {
   const { parseReviewerModelUnavailable, classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
-  const stderr = readFileSync(new URL('./fixtures/reviewer-model-unavailable.txt', import.meta.url), 'utf8');
+  const stderr = `Environment notice\n${readFileSync(new URL('./fixtures/reviewer-model-unavailable.txt', import.meta.url), 'utf8')}`;
   const detail = parseReviewerModelUnavailable(stderr);
   assert.equal(detail.refusedModel, 'Gemini 3.1 Pro (High)');
   assert.deepEqual(detail.availableModels, [
@@ -6428,10 +6428,13 @@ test('REVIEWMODEL-02: Antigravity model refusal preserves diagnostics and never 
     'GPT-OSS 120B (Medium)',
   ]);
   assert.equal(classifyReviewerFailure(stderr, 1), 'reviewer-model-unavailable');
-  const { reviewerFailureClassFromStoredRow } = await import('../src/reviewer-failure-classification.mjs');
+  const { reviewerFailureClassFromStoredRow, infraRecoverableFailureClass } = await import('../src/reviewer-failure-classification.mjs');
   assert.equal(reviewerFailureClassFromStoredRow({ failure_message: `[reviewer-model-unavailable] ${stderr}` }), 'reviewer-model-unavailable');
   assert.equal(reviewerFailureClassFromStoredRow({ failure_message: stderr }), 'reviewer-model-unavailable');
   assert.equal(reviewerFailureClassFromStoredRow({ failure_message: '[reviewer-model-unavailable] synthetic refusal' }), 'reviewer-model-unavailable');
+  for (const failure_message of [stderr, `[reviewer-model-unavailable] ${stderr}`]) {
+    assert.equal(infraRecoverableFailureClass({ failure_message }), null);
+  }
   let calls = 0;
   await assert.rejects(reviewWithGemini('+synthetic diff\n', '', {
     resolveGeminiRuntimeImpl: () => 'antigravity',
@@ -6448,11 +6451,43 @@ test('REVIEWMODEL-02: Antigravity model refusal preserves diagnostics and never 
   }), error => {
     assert.equal(error.failureClass, 'reviewer-model-unavailable');
     assert.deepEqual(error.failureDetail, detail);
-    assert.ok(error.message.includes(stderr.split('\n')[0]));
+    assert.ok(error.message.includes(stderr.trim()));
     assert.equal(error.stderr, stderr);
     return true;
   });
   assert.equal(calls, 1);
+});
+
+test('REVIEWMODEL-02: refusal parsing handles quoted and bare CLI model tokens', async () => {
+  const { parseReviewerModelUnavailable } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  for (const [argument, expected] of [
+    ['"Gemini 3.8 Flash (High)"', 'Gemini 3.8 Flash (High)'],
+    ["'Gemini 3.8 Flash (High)'", 'Gemini 3.8 Flash (High)'],
+    ['gemini-retired', 'gemini-retired'],
+  ]) {
+    for (const suffix of ['', ' --effort high', ')\r\nAvailable models:\r\n  gemini-current']) {
+      const detail = parseReviewerModelUnavailable(`Error: invalid model selection (--model ${argument}${suffix}`);
+      assert.equal(detail.refusedModel, expected);
+    }
+  }
+  assert.equal(parseReviewerModelUnavailable('Error: invalid model selection (--model\nAvailable models:\n  gemini-current)').refusedModel, 'unknown');
+});
+
+test('REVIEWMODEL-02: Gemini execution errors preserve multiline stderr after notices', async () => {
+  const { classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  const stderr = 'Environment notice\r\n\r\ndyld[123]: Library not loaded: /synthetic/lib.dylib\r\n  Referenced from: /synthetic/gemini\r\n  Reason: tried missing paths\r\n';
+  await assert.rejects(reviewWithGemini('+synthetic diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'cli', assertOAuthImpl: async () => {},
+    retryDelaysMs: [],
+    spawnGeminiReviewImpl: async () => {
+      throw Object.assign(new Error('Command failed with code 1'), { stderr });
+    },
+  }), error => {
+    assert.ok(error.message.includes(stderr.trim()));
+    assert.equal(error.stderr, stderr);
+    assert.equal(classifyReviewerFailure(error.message, 1), 'infra-runtime-missing-library');
+    return true;
+  });
 });
 
 test('REVIEWMODEL-02: preserving stderr does not lose a Gemini subprocess timeout', async () => {

@@ -135,7 +135,7 @@ function classifyGitHubReviewCreateFailure(text) {
 
 // Infrastructure-class failures that the watcher may BOUNDEDLY auto-recover
 // after the normal dispatch path rediscovers the PR and atomically claims the
-// row as 'reviewing'. Superset of reviewerFailureClassFromStoredRow: it
+// row as 'reviewing'. Deterministic model refusals remain terminal. This
 // additionally includes 'oauth-broken', because a reviewer that failed to
 // *spawn* (command-failed before posting any verdict) is mislabeled
 // oauth-broken — that is infrastructure, not a review outcome. NOTE:
@@ -145,6 +145,9 @@ function classifyGitHubReviewCreateFailure(text) {
 // preserved once the cap is exhausted.
 function infraRecoverableFailureClass(reviewRow) {
   const known = reviewerFailureClassFromStoredRow(reviewRow);
+  // A refused model cannot recover without a configuration change. Keep its
+  // diagnostic class, but exclude it from automatic same-head infra retries.
+  if (known === 'reviewer-model-unavailable') return null;
   if (known) return known;
   const message = String(reviewRow?.failure_message || '').toLowerCase();
   if (message.includes('[oauth-broken]')) {

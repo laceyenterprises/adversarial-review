@@ -14,6 +14,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.
 import { recordReviewerCredentialFailure, readReviewerCredentialOutage, readCascadeState } from '../src/reviewer-cascade.mjs';
 import { readGeminiQuotaCooldown } from '../src/gemini-quota-cooldown.mjs';
 import { spawnReviewer, settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
+import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 
 async function withStatusFile(state, fn, { invalidJson = false } = {}) {
   const statusDir = await mkdtemp(join(tmpdir(), 'reviewer-quota-'));
@@ -543,6 +544,7 @@ test('REVIEWMODEL-02: first model refusal falls back immediately with the logica
     assert.equal(settled[0].ok, true);
     assert.equal(alerts.length, 1);
     assert.equal(alerts[0].options.payload.availableModels.length, 10);
+    assert.equal(alerts[0].options.env, args.quotaCheckEnv);
     assert.equal(readGeminiQuotaCooldown({ rootDir, env: {} }), null);
     const db = openReviewStateDb(rootDir);
     try {
@@ -554,16 +556,65 @@ test('REVIEWMODEL-02: first model refusal falls back immediately with the logica
       assert.equal(failure.failureDetail.availableModels.length, 10);
       assert.ok(failure.failureMessage.includes(stderr.split('\n')[0]));
     } finally { db.close(); }
-    const row = { review_attempts: 2, infra_auto_recover_attempts: 1 };
-    let held = false;
-    const charge = () => assert.fail('model refusal must not charge retries');
-    settleReviewerAttempt({ rootDir, repoPath: 'example/synthetic', prNumber: 1,
-      result: { ok: false, failureClass: 'reviewer-model-unavailable', error: stderr },
-      statements: { markOutageTransient: { run: () => { held = true; } },
-        markFailed: { run: charge }, releaseReviewLease: { run: charge } },
-      log: { warn() {} },
-    });
-    assert.equal(held, true);
-    assert.deepEqual(row, { review_attempts: 2, infra_auto_recover_attempts: 1 });
   } finally { await rm(rootDir, { recursive: true, force: true }); }
 });
+
+for (const [name, fallback] of [
+  ['unset fallback', undefined],
+  ['quota-blocked fallback', { reviewerModel: 'claude-code', quotaBlocked: true }],
+  ['same-model fallback', { reviewerModel: 'gemini' }],
+  ['credential-held fallback', { reviewerModel: 'claude-code' }],
+]) {
+  test(`REVIEWMODEL-02: model refusal with ${name} settles terminal and cannot auto-retry`, async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'model-refusal-terminal-'));
+    try {
+      if (name === 'credential-held fallback') {
+        for (const prNumber of [1, 2]) {
+          recordReviewerCredentialFailure(rootDir, { reviewerModel: 'claude-code', repo: 'example/synthetic', prNumber });
+        }
+      }
+      const settled = [];
+      const alerts = [];
+      const capture = newCapture();
+      const env = { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' };
+      const result = await spawnReviewer({
+        ...spawnArgs({ env, capture }), rootDir, reviewerModel: 'gemini',
+        quotaCheckEnv: name === 'same-model fallback' ? undefined : env,
+        env,
+        readReviewerQuotaDecisionImpl: async () => ({ available: true }),
+        geminiQuotaFallbackRoute: fallback,
+        onPostOperationSettled: result => settled.push(result),
+        onGeminiQuotaFallback: () => assert.fail('unavailable fallback must not transfer the claim'),
+        deliverAlertImpl: async (_message, options) => alerts.push(options),
+        reviewerRuntimeAdapterOverride: {
+          async spawnReviewer() {
+            capture.spawnCalls++;
+            return { ok: false, failureClass: 'reviewer-model-unavailable', error: 'invalid model selection (--model retired-model)' };
+          },
+        },
+      });
+      assert.equal(capture.spawnCalls, 1);
+      assert.equal(result.failureClass, 'reviewer-model-unavailable');
+      assert.equal(alerts[0].env, env);
+      // A held fallback defers the caller's settlement to the returned result.
+      assert.equal(settled.length, name === 'credential-held fallback' ? 0 : 1);
+      const failures = [];
+      const retry = () => assert.fail('model refusal must not release the claim for retries');
+      settleReviewerAttempt({
+        rootDir, repoPath: 'example/synthetic', prNumber: 99, result,
+        leaseRecoveryEnabled: true,
+        env: { HQ_ROOT: rootDir },
+        statements: {
+          markFailed: { run: (...args) => failures.push(args) },
+          markOutageTransient: { run: retry }, releaseReviewLease: { run: retry },
+          markPendingUpstream: { run: retry },
+        },
+        log: { warn() {} },
+      });
+      assert.equal(failures.length, 1);
+      assert.match(failures[0][1], /^\[reviewer-model-unavailable\]/);
+      assert.equal(infraRecoverableFailureClass({ review_status: 'failed', failure_message: failures[0][1] }), null);
+      assert.equal(readCascadeState(rootDir, { repo: 'example/synthetic', prNumber: 99 }), null);
+    } finally { await rm(rootDir, { recursive: true, force: true }); }
+  });
+}

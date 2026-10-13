@@ -54,7 +54,8 @@ function hasProviderOverloadedSignal(value) {
 function parseReviewerModelUnavailable(value) {
   const text = String(value || '');
   if (!/invalid model selection|is not recognized as a known model/i.test(text)) return null;
-  const refusedModel = text.match(/--model\s+"([^"]+)"/i)?.[1]
+  const modelArg = text.match(/--model[ \t]+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s"'()]+))/i);
+  const refusedModel = modelArg?.slice(1).find(Boolean)
     || text.match(/model (.+?) is not recognized as a known model/i)?.[1]
     || 'unknown';
   const offered = text.match(/Available models:\s*\r?\n((?:[ \t]+[^\r\n]+(?:\r?\n|$))+)/i)?.[1] || '';

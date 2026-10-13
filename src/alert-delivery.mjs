@@ -1,4 +1,3 @@
-import { closureLagAlertId } from './ama/closure-lag.mjs';
 import { HAMMER_OWNER_PAGE_EVENTS, hammerOwnerRouteForPageEvent } from './ama/review-cycle-cap-route.mjs';
 import {
   existsSync,
@@ -1383,6 +1382,8 @@ function readAlertSinkHealth({
   }
 }
 
+// Bound diagnostic work and output: at most 1,000 documents and 20 event
+// classes plus an overflow bucket. Quarantined files are never replayed.
 function quarantineEventCounts(rootDir) {
   const counts = Object.create(null);
   if (!existsSync(quarantineDir(rootDir))) return counts;
@@ -1442,7 +1443,7 @@ async function deliverAlert(text, {
   if (FIXED_RECOVERY_EVENTS.includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
-    doc.id = event === 'ama.closure_lag.slo_breach' ? fixedAlertId('ama-closure-lag', closureLagAlertId(payload).slice('ama-closure-lag-'.length))
+    doc.id = event === 'ama.closure_lag.slo_breach' ? fixedAlertId('ama-closure-lag', crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex'))
       : fixedAlertId('ama-recovery', crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex'));
     const legacyRecoveryId = event === 'ama.automated_recovery.exhausted' ? doc.id : null;
     if (legacyRecoveryId) {

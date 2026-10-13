@@ -272,3 +272,23 @@ test('REVIEWALERT-01 pending provisioning owns the head despite a prior terminal
   assert.equal((await probe({ ...args, now: '2026-10-11T17:00:00Z' })).owned, false);
   assert.equal((await probe({ ...args, headSha: 'different', now: at })).owned, false);
 });
+
+
+for (const status of ['failed', 'dead-letter', 'pending', 'inflight']) {
+  test(`ORPHANPAGE-01: unqueued ${status} page retries next pass`, async t => {
+    const { tick, calls } = setup(t);
+    await tick(0); await tick(15); await tick(30);
+    await tick(45, { pageImpl: async () => ({ queued: false, status }) });
+    await tick(60); await tick(75);
+    assert.equal(calls.launches.length, 2);
+    assert.equal(calls.pages.filter(page => page[1].event === 'ama.orphan_recovery.exhausted').length, 1);
+  });
+}
+
+test('ORPHANPAGE-01: already delivered page marks head paged', async t => {
+  const { tick, calls } = setup(t);
+  await tick(0); await tick(15); await tick(30);
+  await tick(45, { pageImpl: async () => ({ queued: false, status: 'delivered' }) });
+  await tick(60);
+  assert.equal(calls.pages.length, 0);
+});

@@ -17,6 +17,9 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  FIXED_RECOVERY_EVENTS,
+  queueAlertDoc,
+  validateAlertDocIdentity,
   assertAlertSinkOwner,
   alertPresentationForDoc,
   alertSinkRoot,
@@ -1203,4 +1206,112 @@ test('REVIEWMODEL-02: token filesystem mocks cannot create or hide durable refus
   assert.equal(second.status, 'delivered');
   assert.equal(second.queuePath, deliveredPath);
   assert.equal(existsSync(first.queuePath), false);
+});
+
+
+for (const event of [...FIXED_RECOVERY_EVENTS, 'reviewer.model_unavailable', 'adversarial_review.operator_decision_required']) {
+  test(`ORPHANPAGE-01: fixed identity validates and delivers once: ${event}`, async t => {
+    const { env, rootDir } = makeEnv();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    let sends = 0;
+    const options = { env, event,
+      payload: { repo: 'fixture/repo', pr: 1, head: 'synthetic', prNumber: 1, headSha: 'synthetic',
+        reason: 'synthetic', refusedModel: 'synthetic', decisionId: 'synthetic', decisionSeriesId: 'synthetic' },
+      fsImpl: { existsSync: () => true, readFileSync: () => 'synthetic-token' },
+      requestText: async () => { sends += 1; return { statusCode: 200, body: '{}' }; } };
+    const queued = await deliverAlert('synthetic page', options);
+    const doc = JSON.parse(readFileSync(queued.queuePath, 'utf8'));
+    assert.match(doc.id, /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u);
+    assert.equal(validateAlertDocIdentity(queued.queuePath, doc), doc);
+    assert.equal((await deliverAlert('synthetic duplicate', options)).queued, false);
+    await drainPendingAlerts(options);
+    assert.equal(existsSync(sinkPath(rootDir, 'delivered', `${doc.id}.json`)), true);
+    assert.equal((await deliverAlert('synthetic duplicate', options)).status, 'delivered');
+    await drainPendingAlerts(options);
+    assert.equal(sends, 1);
+  });
+}
+
+test('ORPHANPAGE-01: old dotted quarantine is reported but never suppresses or replays a page', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  ensureAlertSinkDirs(rootDir);
+  const event = 'ama.orphan_recovery.exhausted';
+  const payload = { repo: 'fixture/repo', prNumber: 1, headSha: 'synthetic' };
+  const oldId = `${event}-${createHash('sha256').update('fixture/repo#1@synthetic').digest('hex')}`;
+  const oldPath = sinkPath(rootDir, 'quarantine', `${oldId}.json`);
+  const bytes = JSON.stringify({ id: oldId, event, payload });
+  writeFileSync(oldPath, bytes);
+  let sends = 0;
+  const options = { env, event, payload,
+    fsImpl: { existsSync: () => true, readFileSync: () => 'synthetic-token' },
+    requestText: async () => { sends += 1; return { statusCode: 200, body: '{}' }; } };
+  assert.equal((await deliverAlert('synthetic page', options)).queued, true);
+  await drainPendingAlerts(options);
+  assert.equal(sends, 1);
+  assert.equal(readFileSync(oldPath, 'utf8'), bytes);
+  assert.equal(readAlertSinkHealth({ env }).quarantineEventCounts[event], 1);
+});
+
+test('ORPHANPAGE-01: unsafe enqueue identity is normalized with one warning and delivers', async t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = { env, fsImpl: { existsSync: () => true, readFileSync: () => 'synthetic-token' },
+    requestText: async () => ({ statusCode: 200, body: '{}' }) };
+  const original = await deliverAlert('synthetic page', { ...options, event: 'synthetic.event' });
+  const doc = JSON.parse(readFileSync(original.queuePath, 'utf8'));
+  rmSync(original.queuePath);
+  doc.id = 'unsafe.id';
+  const warnings = [];
+  const queued = queueAlertDoc(rootDir, doc, { logger: { warn: line => warnings.push(line) } });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /synthetic\.event/);
+  validateAlertDocIdentity(queued.filePath, JSON.parse(readFileSync(queued.filePath, 'utf8')));
+  await drainPendingAlerts(options);
+  assert.equal(existsSync(sinkPath(rootDir, 'delivered', `${doc.id}.json`)), true);
+  assert.equal(readdirSync(sinkPath(rootDir, 'quarantine')).length, 0);
+});
+
+
+for (const event of ['ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted',
+  'ama.closure_lag.slo_breach', 'reviewer.model_unavailable', 'adversarial_review.operator_decision_required']) {
+  for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
+    test(`ORPHANPAGE-01: previous valid ${event} id suppresses duplicate in ${state}`, async t => {
+      const { env, rootDir } = makeEnv();
+      t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+      const payload = { repo: 'fixture/repo', prNumber: 1, headSha: 'synthetic',
+        refusedModel: 'synthetic', decisionId: 'synthetic', decisionSeriesId: 'synthetic' };
+      const now = new Date('2026-10-13T12:00:00Z');
+      const options = { env, event, payload, now };
+      const queued = await deliverAlert('synthetic page', options);
+      const hashInput = event === 'ama_finding_dispute_exhausted' ? 'fixture/repo#1'
+        : event === 'ama_primary_change_refusal_exhausted' ? 'fixture/repo#1@synthetic'
+          : event === 'ama.closure_lag.slo_breach' ? JSON.stringify(payload)
+            : event === 'reviewer.model_unavailable' ? JSON.stringify(['synthetic', '2026-10-13'])
+              : JSON.stringify(['synthetic', 'synthetic']);
+      const prefix = event === 'ama.closure_lag.slo_breach' ? 'ama-closure-lag'
+        : event === 'reviewer.model_unavailable' ? 'reviewer-model'
+          : event === 'adversarial_review.operator_decision_required' ? 'review-decision' : event;
+      const oldId = `${prefix}-${createHash('sha256').update(hashInput).digest('hex')}`;
+      assert.equal(queued.id, oldId);
+      if (state !== 'pending') renameSync(queued.queuePath, sinkPath(rootDir, state, `${oldId}.json`));
+      assert.equal((await deliverAlert('synthetic duplicate', options)).status, state);
+      assert.equal((await deliverAlert('synthetic duplicate', options)).queued, false);
+    });
+  }
+}
+
+test('ORPHANPAGE-01: quarantine event diagnostics are bounded and watcher includes them', t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  ensureAlertSinkDirs(rootDir);
+  for (let index = 0; index < 30; index += 1) {
+    writeFileSync(sinkPath(rootDir, 'quarantine', `${index}.json`), JSON.stringify({ event: `synthetic.event.${index}` }));
+  }
+  const counts = readAlertSinkHealth({ env }).quarantineEventCounts;
+  assert.equal(Object.keys(counts).length, 21);
+  assert.equal(counts.other, 10);
+  assert.equal(Object.values(counts).reduce((sum, count) => sum + count, 0), 30);
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  assert.match(source, /quarantineEventCounts: sinkHealth\.quarantineEventCounts/);
 });

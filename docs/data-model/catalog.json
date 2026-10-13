@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "github-rate-limit-state",
+      "title": "GitHub Rate Limit State",
+      "path": "docs/data-model/github-rate-limit-state.md",
+      "store": "data/api-cache/rate-limit-state.json",
+      "schemaSurface": "src/rate-limit-throttle.mjs",
+      "relatedSchemaSurfaces": ["src/metered-gh.mjs", "bin/metered-gh.mjs", "src/runtime-status.mjs"],
+      "owner": "shared GitHub request throttle"
+    },
+    {
       "id": "operator-decision-notices",
       "title": "Operator Decision Notices",
       "path": "docs/data-model/operator-decision-notices.md",

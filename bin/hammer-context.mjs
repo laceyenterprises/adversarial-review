@@ -40,7 +40,9 @@ try {
     if (batch.length < 100) break;
     if (page === 10) throw new Error('review pagination exceeded ten pages');
   }
-  const checks = await fetchHammerPr(repo, number);
+  const checks = await fetchHammerPr(repo, number, {
+    read: path => path === `repos/${repo}/pulls/${number}` ? pr : get(['api', path]),
+  });
   let protection;
   try { protection = get(['api', `repos/${repo}/branches/${encodeURIComponent(pr.base?.ref || 'main')}/protection`]); }
   catch { protection = { required_status_checks: null, unavailable: true }; }

@@ -12,6 +12,7 @@ const MAX_THROTTLE_FLOOR = 1000;
 const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_RESOURCE = 'core';
+const UNKNOWN_RATE_LIMIT_RESET_MS = 60_000;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const TOOL_ROOT = dirname(MODULE_DIR);
 const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-limit-state.json');
@@ -363,12 +364,21 @@ function createRateLimitThrottle({
     return inMemoryObservations;
   }
 
-  async function recordResponseRateLimit(observation) {
-    const normalized = sanitizeObservation(observation, nowMs());
-    if (!normalized) return null;
+  async function recordRateLimit(observation, rateLimitedOnly = false) {
+    let normalized = sanitizeObservation(observation, nowMs());
+    if (!rateLimitedOnly && !normalized) return null;
     const resolvedSharedStatePath = resolveSharedStatePathNow();
     return withSharedStateLock(resolvedSharedStatePath, async () => {
       const current = await readStateFile(resolvedSharedStatePath, { nowMs: nowMs(), readFileImpl });
+      if (rateLimitedOnly) {
+        // Resolve missing-header failures under the lock so simultaneous first
+        // failures share one window and increment the same durable counter.
+        const resource = normalizeResource(observation.resource);
+        normalized = current[resource] || normalizeObservation({
+          resource, remaining: 0, resetAt: nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
+          observedAt: nowMs(),
+        });
+      }
       const previous = current[normalized.resource];
       const count = (previous?.resetAt === normalized.resetAt ? previous.rateLimitedCalls || 0 : 0)
         + (observation.rateLimited === true ? 1 : 0);
@@ -397,10 +407,13 @@ function createRateLimitThrottle({
     });
   }
 
+  async function recordResponseRateLimit(observation) {
+    return recordRateLimit(observation);
+  }
+
   async function recordRateLimitedCall(resource) {
-    const current = (await readSharedState())[normalizeResource(resource)];
-    if (current) await recordResponseRateLimit({ ...current, rateLimited: true });
     markGitHubRateLimited();
+    await recordRateLimit({ resource, rateLimited: true }, true);
   }
 
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE) {

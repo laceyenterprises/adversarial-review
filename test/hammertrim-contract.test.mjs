@@ -301,13 +301,18 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   };
   const fixturePath = join(dir, 'fixture.json');
   writeFileSync(fixturePath, JSON.stringify(fixture));
+  const callsPath = join(dir, 'calls.jsonl');
   const gh = join(bin, 'gh');
-  writeFileSync(gh, `#!/usr/bin/env node\nconst f=require(${JSON.stringify(fixturePath)}); const a=process.argv.join(' '); console.log(JSON.stringify(a.includes('/reviews?')?f.reviews:a.includes('/files?')?f.files:a.includes('/protection')?f.protection:a.includes('/check-runs?')?{check_runs:[]}:a.includes('/statuses?')?[]:a.includes('pr view')?f.checks:f.pr));\n`);
+  writeFileSync(gh, `#!/usr/bin/env node\nconst f=require(${JSON.stringify(fixturePath)}); const a=process.argv.join(' '); require('node:fs').appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2))+'\\n'); console.log(JSON.stringify(a.includes('/reviews?')?f.reviews:a.includes('/files?')?f.files:a.includes('/protection')?f.protection:a.includes('/check-runs?')?{check_runs:[]}:a.includes('/statuses?')?[]:a.includes('pr view')?f.checks:f.pr));\n`);
   chmodSync(gh, 0o755);
   const state = join(dir, 'state.json');
   writeFileSync(state, JSON.stringify({ activeRemediation: { jobId: 'job-1' }, activeLease: { leaseId: 'lease-1' } }));
   const result = run('node', [join(root, 'bin/hammer-context.mjs'), 'acme/repo', '42', '--state-file', state], { PATH: `${bin}:${process.env.PATH}` });
   assert.equal(result.status, 0, result.stderr);
+  const calls = readFileSync(callsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const beforeProtection = calls.slice(0, calls.findIndex(args => args[1].endsWith('/protection')));
+  assert.equal(beforeProtection.filter(args => args[1] === 'repos/acme/repo/pulls/42').length, 1,
+    'check snapshot must reuse the initial PR metadata read');
   assert.ok(Buffer.byteLength(result.stdout) < 8192);
   const snapshot = JSON.parse(result.stdout);
   assert.equal(snapshot.head, 'abc');

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   createRateLimitThrottle,
+  withGitHubBudgetScope,
   DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,
   resolveRateLimitSharedStatePath,
@@ -457,6 +458,32 @@ test('GHBUDGET-01: rate-limited counters are shared, atomic and scoped to a reso
   state = await b.readSharedState();
   assert.equal(state.graphql.rateLimitedCalls || 0, 0);
   assert.equal(state.core, undefined);
+});
+
+test('headerless rate limits initialize and renew an expired resource window atomically', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-01-01T00:00:00Z');
+  const a = makeThrottle({ rootDir, nowMs: () => now });
+  const b = makeThrottle({ rootDir, nowMs: () => now });
+  await Promise.all([a.recordRateLimitedCall('GraphQL'), b.recordRateLimitedCall('graphql')]);
+  let state = await b.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls, 2);
+  assert.equal(state.graphql.remaining, 0);
+  assert.equal(state.graphql.resetAt, new Date(now + 60_000).toISOString());
+  assert.equal(state.core, undefined);
+  await withGitHubBudgetScope({}, async () => {
+    await assert.rejects(a.awaitThrottleIfNeeded('graphql'), { name: 'GitHubBudgetDeferredError' });
+  });
+  now += 60_000;
+  await b.recordRateLimitedCall('graphql');
+  state = await a.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls, 1);
+  assert.equal(state.graphql.resetAt, new Date(now + 60_000).toISOString());
+  const persisted = JSON.parse(readFileSync(a.resolveSharedStatePath(), 'utf8'));
+  assert.deepEqual(persisted.buckets.graphql, state.graphql);
+  await a.recordRateLimitedCall();
+  assert.equal((await b.readSharedState()).core.rateLimitedCalls, 1);
 });
 
 test('GHBUDGET-01: a newly settled review gets closing priority before its published gate refresh', async () => {

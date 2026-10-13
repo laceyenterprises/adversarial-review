@@ -1364,7 +1364,7 @@ function readAlertSinkHealth({
       rootDir,
       ready: Object.values(counts).every((count) => count === 0),
       ...counts,
-      quarantineEventCounts: quarantineEventCounts(rootDir),
+      quarantineEventCounts: quarantineEventCounts(rootDir, counts.quarantineCount, fsImpl),
       healthCheckError: null,
     };
   } catch (error) {
@@ -1384,19 +1384,32 @@ function readAlertSinkHealth({
 
 // Bound diagnostic work and output: at most 1,000 documents and 20 event
 // classes plus an overflow bucket. Quarantined files are never replayed.
-function quarantineEventCounts(rootDir) {
+// Retain only the last sink's breakdown; unchanged quarantine counts must not
+// cause another batch of synchronous document reads on each watcher poll.
+let quarantineEventCountsCache = null;
+function quarantineEventCounts(rootDir, quarantineCount, fsImpl) {
+  if (quarantineCount === 0) {
+    quarantineEventCountsCache = null;
+    return {};
+  }
+  const read = fsImpl.readFileSync || readFileSync;
+  const list = fsImpl.readdirSync || readdirSync;
+  const cached = quarantineEventCountsCache;
+  if (cached?.rootDir === rootDir && cached.quarantineCount === quarantineCount
+    && cached.read === read && cached.list === list) return { ...cached.counts };
   const counts = Object.create(null);
-  if (!existsSync(quarantineDir(rootDir))) return counts;
-  for (const name of readdirSync(quarantineDir(rootDir)).slice(0, 1000)) {
+  for (const name of list(quarantineDir(rootDir)).filter(name => name.endsWith('.json')).sort().slice(0, 1000)) {
     let event = 'unknown';
     try {
-      const doc = JSON.parse(readFileSync(join(quarantineDir(rootDir), name), 'utf8'));
+      const doc = JSON.parse(read(join(quarantineDir(rootDir), name), 'utf8'));
       if (typeof doc.event === 'string') event = doc.event.slice(0, 120);
     } catch { /* Malformed documents still contribute to the unknown class. */ }
     if (!Object.hasOwn(counts, event) && Object.keys(counts).length >= 20) event = 'other';
     counts[event] = (counts[event] || 0) + 1;
   }
-  return counts;
+  const sortedCounts = Object.fromEntries(Object.entries(counts).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+  quarantineEventCountsCache = { rootDir, quarantineCount, read, list, counts: sortedCounts };
+  return { ...sortedCounts };
 }
 
 async function deliverAlert(text, {

@@ -1315,3 +1315,68 @@ test('ORPHANPAGE-01: quarantine event diagnostics are bounded and watcher includ
   const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
   assert.match(source, /quarantineEventCounts: sinkHealth\.quarantineEventCounts/);
 });
+
+test('quarantine diagnostics use injected reads, stable ordering and a count-invalidated cache', t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  ensureAlertSinkDirs(rootDir);
+  const directory = sinkPath(rootDir, 'quarantine');
+  let names = ['z.json', 'notes.txt', 'a.json', 'bad.json'];
+  const reads = [];
+  const fsImpl = {
+    existsSync, statSync,
+    readdirSync: path => path === directory ? names : readdirSync(path),
+    readFileSync: path => {
+      reads.push(path);
+      if (path.endsWith('bad.json')) throw new Error('unreadable fixture');
+      return JSON.stringify({ event: path.endsWith('a.json') ? 'z.event' : 'a.event' });
+    },
+  };
+  const health = () => readAlertSinkHealth({ env, fsImpl });
+  const first = health();
+  assert.equal(first.ready, false);
+  assert.deepEqual(first.quarantineEventCounts, { 'a.event': 1, unknown: 1, 'z.event': 1 });
+  assert.deepEqual(reads, ['a.json', 'bad.json', 'z.json'].map(name => join(directory, name)));
+  names.reverse();
+  assert.equal(JSON.stringify(health().quarantineEventCounts), JSON.stringify(first.quarantineEventCounts));
+  assert.equal(reads.length, 3, 'unchanged count reuses the breakdown');
+  first.quarantineEventCounts['a.event'] = 99;
+  assert.equal(health().quarantineEventCounts['a.event'], 1, 'callers cannot mutate the cache');
+  const fresh = readAlertSinkHealth({ env, fsImpl: { ...fsImpl, readdirSync: path => fsImpl.readdirSync(path) } });
+  assert.deepEqual(fresh.quarantineEventCounts, health().quarantineEventCounts, 'injected filesystem changes rescan deterministically');
+  names.push('new.json');
+  assert.equal(health().quarantineEventCounts['a.event'], 2, 'count changes refresh the breakdown');
+  names = [];
+  reads.length = 0;
+  assert.equal(health().ready, true);
+  assert.deepEqual(health().quarantineEventCounts, {});
+  names = ['z.json'];
+  assert.deepEqual(health().quarantineEventCounts, { 'a.event': 1 });
+  names = [];
+  assert.deepEqual(health().quarantineEventCounts, {});
+  names = ['a.json'];
+  assert.deepEqual(health().quarantineEventCounts, { 'z.event': 1 }, 'empty quarantine clears the cache');
+  names = [];
+  writeFileSync(sinkPath(rootDir, 'pending', 'pending.json'), '{}');
+  reads.length = 0;
+  assert.equal(health().ready, false);
+  assert.deepEqual(health().quarantineEventCounts, {});
+  assert.equal(reads.length, 0, 'empty quarantine never reads diagnostic documents, even when degraded');
+});
+
+test('quarantine diagnostics filter and sort before the 1,000-document cap', t => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  ensureAlertSinkDirs(rootDir);
+  const directory = sinkPath(rootDir, 'quarantine');
+  const names = Array.from({ length: 1005 }, (_, index) => `${String(index).padStart(4, '0')}.json`);
+  const reads = [];
+  const health = readAlertSinkHealth({ env, fsImpl: {
+    existsSync, statSync,
+    readdirSync: path => path === directory ? ['notes.txt', ...names.toReversed()] : readdirSync(path),
+    readFileSync: path => { reads.push(path); return '{"event":"fixture.event"}'; },
+  } });
+  assert.equal(health.quarantineCount, 1005);
+  assert.deepEqual(health.quarantineEventCounts, { 'fixture.event': 1000 });
+  assert.deepEqual(reads, names.slice(0, 1000).map(name => join(directory, name)));
+});

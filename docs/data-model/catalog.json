@@ -390,7 +390,8 @@
       "schemaSurface": "src/alert-delivery.mjs",
       "relatedSchemaSurfaces": ["src/ama/orphan-watchdog.mjs", "src/ama/automated-recovery.mjs"],
       "owner": "adversarial-review alert delivery",
-      "automatedRecoveryIdentityFields": ["repo", "pr", "head", "reason"]
+      "automatedRecoveryIdentityFields": ["repo", "pr", "head", "reason"],
+      "quarantineDiagnosticCacheKey": ["rootDir", "quarantineCount", "filesystemReaders"]
     },
     {
       "id": "daemon-merge-parks",
@@ -702,7 +703,8 @@
       "ownershipClock": "ownership.idleSince (singleton id=1; PR-wide across head changes)",
       "recoveryEvidenceFields": ["ownership.idleSince", "heads.idleSince", "heads.attempts", "heads.outcomes", "heads.evidence", "heads.paged"],
       "attemptOutcomeFields": ["action", "reason", "at", "dispatched", "launchRequestId", "triggered"],
-      "recoveryAttemptLimit": 2
+      "recoveryAttemptLimit": 2,
+      "pagedTerminalReceiptStatuses": ["delivered", "dead-letter"]
     },
     {
       "id": "ham-primary-change-refusals",

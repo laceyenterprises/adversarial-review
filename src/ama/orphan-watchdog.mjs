@@ -234,7 +234,12 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
           const pageResult = await pageImpl(`Ownerless PR recovery exhausted: ${repo} PR ${prNumber} head ${headSha}`, {
             event: 'ama.orphan_recovery.exhausted', payload: { repo, prNumber, headSha, attempts: state.attempts, outcomes,
               lastAttempt: previous } });
-          if (pageResult?.queued === false && pageResult?.status !== 'delivered') {
+          if (pageResult?.status === 'dead-letter') {
+            // Transport retries are exhausted; sink health remains degraded
+            // for operator action, but duplicate enqueue cannot revive it.
+            logger?.warn?.('Orphan recovery page is dead-lettered; operator action required');
+            db.prepare('UPDATE heads SET paged=1 WHERE head=?').run(headSha);
+          } else if (pageResult?.queued === false && pageResult?.status !== 'delivered') {
             logger?.warn?.('Orphan recovery page was not queued; retrying next pass');
           } else {
             db.prepare('UPDATE heads SET paged=1 WHERE head=?').run(headSha);

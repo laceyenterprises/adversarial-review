@@ -40,8 +40,12 @@ bounded reason, launch identity, dispatched flag and review-request result.
 Exceptions consume an attempt; missing receipts or refusal strings cannot
 refund it. Attempts do not prove ownership or restart the idle timer. At two attempts, the next
 ownerless observation pages with repo, PR, head and both outcomes. `paged` is set
-only after successful enqueue, allowing delivery failures to retry without
-another launch. Legacy evidence fills missing historical outcomes with explicit
+after successful enqueue or a deduplicated `delivered` or `dead-letter` receipt.
+Transient unqueued results (`failed`, `pending`, `inflight`) retry without
+another launch. A dead-letter receipt logs a distinct operator-action warning
+once and ends watchdog enqueue retries; it does not prove delivery. The alert
+sink remains degraded until the operator resolves the dead letter.
+Legacy evidence fills missing historical outcomes with explicit
 unknown summaries. `evidence` retains the latest summary for existing readers.
 
 Migration adds a singleton `ownership` clock table, nullable `heads.idleSince`, JSON `outcomes` (default `[]`) and the

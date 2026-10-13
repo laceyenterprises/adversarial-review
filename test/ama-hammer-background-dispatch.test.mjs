@@ -1101,7 +1101,7 @@ for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-
   });
 }
 
-test('OWNERPROOF-01: ownerless stale closer with pending CI requests bounded current-head review', async t => {
+test('HAMROUTE-01: ownerless stale closer with pending CI retains hammer-route wait', async t => {
   const { args, payloads } = closerResumeFixture('pending');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   const pages = [], reviews = [];
@@ -1115,12 +1115,11 @@ test('OWNERPROOF-01: ownerless stale closer with pending CI requests bounded cur
         requestRereviewImpl: async request => { reviews.push(request); return { triggered: true }; },
       },
     });
-    assert.equal(result.outcome, minutes === 61 ? 'recovery-exhausted' : 'ama-pending');
+    assert.equal(result.outcome, 'ama-pending');
   }
   assert.deepEqual(payloads, []);
-  assert.equal(pages.length, 1);
-  assert.equal(reviews.length, 2);
-  assert.ok(reviews.every(request => request.targetRevisionRef === 'H1'));
+  assert.equal(pages.length, 0);
+  assert.equal(reviews.length, 0);
 });
 
 // STALECLOSER-03: the real wake against a stubbed watcher, so the dedupe and
@@ -1367,4 +1366,115 @@ test('HAMROUTE-01: settled classification wait submits again in the consuming pa
   await queue.drain();
   assert.equal(runs, 2);
   assert.equal(queue.takeSettled('example/repo#42@' + HEAD).result.dispatched, true);
+});
+
+for (const largeEvidenceOnly of [false, true]) {
+  test(`HAMROUTE-01: ${largeEvidenceOnly ? 'large PR evidence' : 'traced slow proofs, failed job read and rate limit'} launches within two passes`, async t => {
+    const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.UTC(2026, 0, 1) });
+    const startedAt = Date.now();
+    const { args } = closerResumeFixture('red');
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    const queue = createAmaHammerBackgroundQueue();
+    const counters = { delta: 0, suppression: 0, evidence: 0, commits: 0, reads: 0, jobs: 0, launches: 0 };
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    Object.assign(args, {
+      repoPath: 'example/repo', prNumber: 42, currentRevisionRef: 'current',
+      dispatchJob: { ciBlockedHammerOwner: true },
+      liveReviewRetryDelaysMs: [],
+      resolveAmaHammerDispatchModeImpl: () => 'background', amaHammerBackgroundQueueImpl: () => queue,
+      proveCloserAuthoredStaleHeadImpl: async () => {
+        counters.delta++;
+        if (!largeEvidenceOnly) await sleep(12_000);
+        return { proven: true, anchorHead: 'reviewed', reviewedHead: 'reviewed', currentHead: 'current',
+          closerCommits: ['current'], reason: 'hammer-app-attestation-chain' };
+      },
+      resolveHeadCloserCommitSuppressionImpl: async () => {
+        counters.suppression++;
+        if (!largeEvidenceOnly) await sleep(12_000);
+        return { suppressed: true, reason: 'closer-commit-trailer' };
+      },
+      fetchHeadCloserVerifiedCommitImpl: async () => {
+        counters.commits++;
+        return { sha: 'current', parentSha: 'reviewed', message: 'Closed-By: hammer' };
+      },
+      resolveHamTerminalRemediationEvidenceImpl: async () => {
+        counters.evidence++;
+        if (largeEvidenceOnly) await sleep(12_000);
+        return null;
+      },
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === 'reviewed' ? [args.reviewStateRow.review_body] : [],
+      fetchCurrentPrStateImpl: async () => {
+        if (++counters.reads === 1 && !largeEvidenceOnly) throw new Error('HTTP 429 rate limited');
+        return { state: 'OPEN', headSha: 'current', isDraft: false, mergeable: 'MERGEABLE' };
+      },
+      maybeDispatchAmaCloserImpl: async payload => {
+        assert.equal(payload.prMetadata.headSha, 'current');
+        const classification = await resolveOperatorLabelGateFailuresWithRetry({
+          repo: 'example/repo', headSha: 'current', signal: payload.signal,
+          rollup: [{ name: 'repo-guards', conclusion: 'FAILURE',
+            detailsUrl: 'https://github.com/example/repo/actions/runs/1/job/2' }],
+          execFileImpl: async () => {
+            if (++counters.jobs === 1 && !largeEvidenceOnly) throw new Error('synthetic failed job read');
+            return { stdout: JSON.stringify({ head_sha: 'current', conclusion: 'failure',
+              steps: [{ name: 'External tests', conclusion: 'failure' }] }) };
+          },
+        }, { delaysMs: payload.operatorLabelClassificationRetryDelaysMs, sleepImpl: sleep });
+        assert.equal(classification.inconclusive, false);
+        counters.launches++;
+        return { dispatched: true, launchRequestId: 'synthetic-launch' };
+      },
+    });
+    args.reviewStateRow = { ...args.reviewStateRow, repo: 'example/repo', pr_number: 42, reviewer_head_sha: 'reviewed' };
+    args.candidate = { ...args.candidate, headSha: 'current', prAuthor: 'synthetic-builder' };
+    const run = () => resolveMergeAgentCoexistenceForWatcher({ ...args,
+      maybeDispatchAmaClosureForImpl: options => maybeDispatchAmaClosureFor({ ...args, ...options }),
+      orphanOptions: { now: new Date().toISOString(), hasOwnerImpl: async () => ({ owned: false }),
+        pageImpl: async () => assert.fail('waiting cannot exhaust recovery') },
+    });
+    const flush = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
+    const first = run();
+    await flush();
+    t.mock.timers.tick(5000);
+    await flush();
+    const waiting = await first;
+    assert.equal(waiting.outcome, 'ama-pending');
+    assert.equal(waiting.amaClosureResult.reason, 'ama-coexistence-operation-timeout');
+    assert.equal(counters.launches, 0);
+    t.mock.timers.tick(7000);
+    await flush();
+    const second = await run();
+    assert.equal(second.amaClosureResult.reason, AMA_HAMMER_BACKGROUND_REASON);
+    await flush();
+    if (!largeEvidenceOnly) {
+      t.mock.timers.tick(1000);
+      await flush();
+      t.mock.timers.tick(20_000);
+      await flush();
+    }
+    await queue.drain();
+    assert.equal(counters.launches, 1);
+    assert.equal(Date.now() - startedAt, largeEvidenceOnly ? 12_000 : 33_000);
+    assert.equal(counters.delta, 1);
+    assert.equal(counters.suppression, 1);
+    assert.equal(counters.evidence, 1);
+    assert.equal(queue.takeSettled('example/repo#42@current').result.dispatched, true);
+  });
+}
+
+test('HAMROUTE-01: a proof has a three-minute background bound and failures can retry', async t => {
+  const { createAmaProofCache } = await import('../src/ama-closure-orchestration.mjs');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const scope = createAmaProofCache().scope({ rootDir: 'fixture', repo: 'example/repo',
+    prNumber: 42, reviewedHead: 'reviewed', currentHead: 'current' });
+  let signal;
+  const pending = assert.rejects(scope.read('proof', proofSignal => {
+    signal = proofSignal;
+    return new Promise(() => {});
+  }), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT', timeoutMs: 180_000 });
+  await Promise.resolve();
+  t.mock.timers.tick(180_000);
+  await pending;
+  assert.equal(signal.aborted, true);
+  assert.equal(await scope.read('proof', async () => 'retry-success'), 'retry-success');
 });

@@ -227,6 +227,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     if (!idleSince) {
       db.prepare('UPDATE ownership SET idleSince=? WHERE id=1').run(now);
       db.prepare('UPDATE heads SET idleSince=? WHERE head=?').run(now, headSha);
+      pending.amaClosureResult = { ...pending.amaClosureResult, ownerlessIdleMs: 0, ownerlessSince: now };
       return pending;
     }
     const idleMs = Date.parse(now) - Date.parse(idleSince);
@@ -266,7 +267,8 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       return { ...pending, outcome: 'recovery-exhausted' };
     }
     // Reserve and record an unknown outcome before any external call. A crash or
-    // timeout spends the attempt; neither a reason nor a missing receipt refunds it.
+    // unknown outcome spends the attempt. A proven wait below refunds the
+    // reservation; a missing receipt never implies that no launch happened.
     const facts = result?.ownerProofFacts;
     const hasReview = facts ? facts.headSha === headSha && facts.reviewedHeadSha === headSha && Boolean(facts.verdict)
       : reviewStateRow?.reviewer_head_sha === headSha && reviewStateRow?.review_status === 'posted';

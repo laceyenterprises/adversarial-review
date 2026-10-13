@@ -667,7 +667,7 @@ test('addLabelToPRBestEffort swallows transient label-add errors so the dedupe m
   assert.match(warnings[0], /failed to add label/);
 });
 
-test('HAMROUTE-01: route logs start with the outcome and count consecutive passes by head', async t => {
+test('HAMROUTE-01: route logs start with the outcome and count consecutive passes by head', async () => {
   const { routeToHammerOwner } = await import('../src/hammer-owner-route.mjs');
   const logs = [];
   let headSha = 'current';
@@ -689,6 +689,9 @@ test('HAMROUTE-01: route logs start with the outcome and count consecutive passe
   decision.amaClosureResult.reason = 'operator-label-classification-pending';
   await routeToHammerOwner(args);
   assert.match(logs.at(-1), /^waiting: operator-label-classification-pending .*passes_without_launch=3$/);
+  decision = { outcome: 'ama-pending', amaClosureResult: { reason: 'ama-dispatch-failed' } };
+  await routeToHammerOwner(args);
+  assert.match(logs.at(-1), /^failed: ama-dispatch-failed .*passes_without_launch=4$/);
   decision = { outcome: 'ama-dispatched', amaClosureResult: { dispatched: true, launchRequestId: 'synthetic-launch' } };
   await routeToHammerOwner(args);
   assert.match(logs.at(-1), /^launched lrq=synthetic-launch .*passes_without_launch=0$/);

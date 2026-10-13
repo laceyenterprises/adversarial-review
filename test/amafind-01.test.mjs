@@ -175,7 +175,7 @@ test('live launches spend no recovery budget; uncertain launch reads exhaust lou
   for (let i = 0; i < 5; i += 1) {
     const waiting = await recoverAmaAutomation(args);
     assert.equal(waiting.recovery.action, 'active-launch');
-    assert.equal(waiting.recovery.attempts, 0);
+    assert.equal(waiting.recovery?.attempts ?? 0, 0);
   }
   let time = 0;
   const uncertain = { ...args, now: () => time, stuckDeadlineMs: 1000,

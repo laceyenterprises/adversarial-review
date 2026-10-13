@@ -39,10 +39,11 @@ function routeOutcomeLine({ rootDir, repoPath, prNumber, headSha, route, outcome
   passesWithoutLaunch.set(key, { headSha, count });
   while (passesWithoutLaunch.size > 256) passesWithoutLaunch.delete(passesWithoutLaunch.keys().next().value);
   const reason = error?.message || result?.reason || outcome || 'pending';
-  const waiting = isOrphanRecoveryWait(error || result) || outcome === 'ama-pending';
+  const waiting = isOrphanRecoveryWait(error || result) || (outcome === 'ama-pending'
+    && !result?.needsOperator && !/fail|reject|exhausted|cap-reached/i.test(reason));
   const prefix = launched ? `launched lrq=${result.launchRequestId || result.dispatchId || 'unknown'}`
     : `${waiting ? 'waiting' : 'failed'}: ${reason}`;
-  return `${prefix} route=${route} repo=${repoPath} pr=${prNumber} head=${headSha || 'unknown'} passes_without_launch=${count}`;
+  return `${prefix} route=${route} repo=${repoPath} pr=${prNumber} head=${headSha || 'unknown'} ownerless_idle_ms=${result?.ownerlessIdleMs ?? 'unknown'} passes_without_launch=${count}`;
 }
 
 async function defaultDeliverAlert(text, options) {
@@ -150,7 +151,6 @@ export async function routeToHammerOwner({
       logger,
     });
     const { outcome, amaClosureResult } = coexistenceDecision || {};
-    logOutcome(outcome, amaClosureResult);
     if (outcome === 'pr-terminal') {
       logger?.log?.(
         `[watcher] ${route} hammer route closed for ${repoPath}#${prNumber}: PR already ` +
@@ -158,6 +158,7 @@ export async function routeToHammerOwner({
       );
       return { handled: true, outcome, prTerminal: true };
     }
+    logOutcome(outcome, amaClosureResult);
     const finalOutcome = hammerOwnerRouteFinalOutcome(amaClosureResult);
     if (finalOutcome) {
       const headSha = candidate?.headSha || currentRevisionRef || subjectRef?.revisionRef || null;
@@ -186,6 +187,11 @@ export async function routeToHammerOwner({
     logger?.error?.(
       `[watcher] ${route} hammer route failed for ${repoPath}#${prNumber}: ${err?.message || err}`
     );
-    return { handled: false, error: err };
+    const waiting = isOrphanRecoveryWait(err);
+    return { handled: waiting, error: err,
+      ...(waiting ? { outcome: 'ama-pending', amaClosureResult: {
+        dispatched: false, skipMergeAgent: true, amaEnabled: true, reason: 'rate-limited-read',
+      } } : {}),
+    };
   }
 }

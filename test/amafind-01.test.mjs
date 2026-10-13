@@ -175,7 +175,7 @@ test('live launches spend no recovery budget; uncertain launch reads exhaust lou
   for (let i = 0; i < 5; i += 1) {
     const waiting = await recoverAmaAutomation(args);
     assert.equal(waiting.recovery.action, 'active-launch');
-    assert.equal(waiting.recovery?.attempts ?? 0, 0);
+    assert.equal(waiting.recovery.attempts, 0);
   }
   let time = 0;
   const uncertain = { ...args, now: () => time, stuckDeadlineMs: 1000,
@@ -221,7 +221,8 @@ for (const reason of ['hammer-closer-in-flight', 'lease-held', 'live-run-in-flig
       time += 60 * 60 * 1000;
       const waiting = await resolveMergeAgentCoexistenceForWatcher(watcherInput(args, result));
       assert.equal(waiting.outcome, 'ama-pending');
-      assert.equal(waiting.recovery.attempts, 0);
+      if (reason === 'ama-closer-dispatch-backgrounded') assert.equal(waiting.recovery, undefined);
+      else assert.equal(waiting.recovery.attempts, 0);
     }
     assert.equal(calls.hammer + calls.rereview.length + calls.page.length, 0);
   });

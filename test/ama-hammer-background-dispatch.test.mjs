@@ -1260,3 +1260,19 @@ test('pending exact-head orphan request skips repeated stale-tip review and cert
   args.resolveHamTerminalRemediationEvidenceImpl = async () => assert.fail('pending review owns this tip');
   await maybeDispatchAmaClosureFor(args);
 });
+
+test('HAMROUTE-01: head-bound proofs and commit reads survive passes and discard changed heads', async () => {
+  const { createAmaProofCache } = await import('../src/ama-closure-orchestration.mjs');
+  const cache = createAmaProofCache({ maxEntries: 2 });
+  const identity = { rootDir: 'fixture', repo: 'example/repo', prNumber: 42,
+    reviewedHead: 'reviewed', currentHead: 'current' };
+  let reads = 0;
+  const prove = async () => ++reads;
+  assert.equal(await cache.scope(identity).read('proof', prove), 1);
+  assert.equal(await cache.scope(identity).read('proof', prove), 1);
+  assert.equal(await cache.scope({ ...identity, currentHead: 'changed' }).read('proof', prove), 2);
+  assert.equal(await cache.scope(identity).read('proof', prove), 3);
+  await cache.scope({ ...identity, prNumber: 43 }).read('proof', prove);
+  await cache.scope({ ...identity, prNumber: 44 }).read('proof', prove);
+  assert.equal(await cache.scope(identity).read('proof', prove), 6);
+});

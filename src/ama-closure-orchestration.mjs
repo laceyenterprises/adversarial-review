@@ -463,7 +463,47 @@ function trackCoexistenceOperation(operationTracker, operation) {
   };
 }
 
-async function runCoexistenceOperation(
+// Head-bound read proofs only. Live review/CI reads and side effects are never
+// reusable merge authority; those operations still execute on every pass.
+export const AMA_REUSABLE_PROOF_OPERATIONS = new Set([
+  'closer-only-review-delta', 'stale-head-suppression-proof',
+  'head-closer-verified-commit', 'ham-terminal-remediation-evidence',
+]);
+export function createAmaProofCache({ maxEntries = 256 } = {}) {
+  const entries = new Map();
+  return {
+    scope({ rootDir, repo, prNumber, reviewedHead, currentHead }) {
+      const pr = JSON.stringify([rootDir, repo, prNumber]);
+      const key = JSON.stringify([rootDir, repo, prNumber, reviewedHead, currentHead]);
+      for (const [oldKey, entry] of entries) {
+        if (entry.pr === pr && oldKey !== key) entries.delete(oldKey);
+      }
+      if (!entries.has(key)) {
+        entries.set(key, { pr, reads: new Map() });
+        while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+      }
+      const reads = entries.get(key).reads;
+      return {
+        read(name, fn) {
+          if (!reads.has(name)) {
+            const work = Promise.resolve().then(fn);
+            reads.set(name, work);
+            work.catch(() => { if (reads.get(name) === work) reads.delete(name); });
+          }
+          return reads.get(name);
+        },
+      };
+    },
+  };
+}
+// Injected readers have independent caches, keeping offline fixtures isolated.
+const proofCaches = new WeakMap();
+function proofCacheFor(reader) {
+  if (!proofCaches.has(reader)) proofCaches.set(reader, createAmaProofCache());
+  return proofCaches.get(reader);
+}
+
+async function runTimedCoexistenceOperation(
   operation,
   fn,
   {
@@ -837,6 +877,14 @@ async function dispatchAmaClosureFor({
   operationTracker = null,
 }) {
   throwIfAborted(signal);
+  const proofScope = proofCacheFor(proveCloserAuthoredStaleHeadImpl).scope({
+    rootDir, repo: repoPath, prNumber, reviewedHead: reviewStateRow?.reviewer_head_sha,
+    currentHead: candidate?.headSha || currentRevisionRef,
+  });
+  const runCoexistenceOperation = (operation, fn, options) =>
+    AMA_REUSABLE_PROOF_OPERATIONS.has(operation)
+      ? proofScope.read(operation, () => runTimedCoexistenceOperation(operation, fn, options))
+      : runTimedCoexistenceOperation(operation, fn, options);
   let cfg;
   let loadedConfig;
   let orchestrationMode;
@@ -1044,18 +1092,10 @@ async function dispatchAmaClosureFor({
   const originalReviewedHead = reviewStateRow?.reviewer_head_sha;
   // Cache immutable commit evidence only within this evaluation. The ancestry
   // walk and stale-head resume must not issue duplicate probes for the tip.
-  const suppressionCache = new Map();
-  const commitCache = new Map();
-  const cachedSuppression = options => {
-    if (!suppressionCache.has(options.headSha)) suppressionCache.set(options.headSha,
-      (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)(options));
-    return suppressionCache.get(options.headSha);
-  };
-  const cachedCommit = options => {
-    if (!commitCache.has(options.headSha)) commitCache.set(options.headSha,
-      fetchHeadCloserVerifiedCommitImpl(options));
-    return commitCache.get(options.headSha);
-  };
+  const cachedSuppression = options => proofScope.read(`suppression:${options.headSha}`,
+    () => (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)(options));
+  const cachedCommit = options => proofScope.read(`commit:${options.headSha}:${Boolean(options.includePrimaryChange)}`,
+    () => fetchHeadCloserVerifiedCommitImpl(options));
   // STALECLOSER-03: the anchors are the reviewed head plus the comment-only
   // final-round pushes recorded for it, which already carry its verdict; the
   // hammer often stacks its closer commit on that push (agent-os#7818/#7822).
@@ -2659,7 +2699,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
         operationTimeoutMs, operationTracker, orphanRecovery,
         priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
       }),
-      ownershipOperation: (fn) => runCoexistenceOperation(
+      ownershipOperation: (fn) => runTimedCoexistenceOperation(
         'orphan-ownership', fn, { timeoutMs: operationTimeoutMs, parentSignal: signal,
           operationTracker, logger, repoPath, prNumber }),
       ownershipTimeoutMs: operationTimeoutMs,

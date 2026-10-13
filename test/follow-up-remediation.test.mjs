@@ -12853,7 +12853,7 @@ for (const metadata of ['foreign-remote']) {
   });
 }
 
-for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'round-two']) {
+for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'round-two', 'final-round']) {
   test(`CIBLOCKHAM-02: pushed round pending CI completion (${scenario})`, async (t) => {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'pending-ci-round-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -12867,6 +12867,10 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
       claimed.job.remediationPlan.currentRound = 2;
       claimed.job.remediationPlan.rounds = [{ round: 1, state: 'completed' },
         { round: 2, state: 'in_progress', startHeadSha: startHead }];
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
+    if (scenario === 'final-round') {
+      claimed.job.finalRound = 'comment-only';
       writeFollowUpJob(claimed.jobPath, claimed.job);
     }
     const workspaceDir = path.join(rootDir, 'workspace');
@@ -12890,14 +12894,17 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
     const comments = [];
     const result = await withHqRootEnv(hqRoot, () => reconcileFollowUpJob({
       rootDir, job: spawned.job, jobPath: spawned.jobPath, isWorkerRunning: () => false,
-      execFileImpl: async () => ({ stdout: '[]', stderr: '' }),
+      execFileImpl: scenario === 'final-round'
+        ? finalRoundPushedExec({ jobId: claimed.job.jobId, pushedHead: endHead })
+        : async () => ({ stdout: '[]', stderr: '' }),
+      auditWorkspaceForContaminationImpl: cleanContaminationAudit,
       resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: endHead }),
       inspectRemediationCiRegressionImpl: async () => ({ state: 'pending', headSha: endHead }),
       requestReviewRereviewImpl: () => assert.fail('pending CI completion must not need rereview'),
       postCommentImpl: async (args) => { comments.push(args); return { posted: true }; },
       log: { log() {}, warn() {}, error() {} },
     }));
-    const expectedCompleted = ['pushed', 'normalized-rereview', 'round-two'].includes(scenario);
+    const expectedCompleted = ['pushed', 'normalized-rereview', 'round-two', 'final-round'].includes(scenario);
     assert.equal(result.job.status, expectedCompleted ? 'completed' : 'stopped', JSON.stringify(result.job.failure));
     assert.equal(result.job.remediationPlan.rounds.at(-1).state, expectedCompleted ? 'completed' : 'stopped');
     assert.equal(comments.length, 1);

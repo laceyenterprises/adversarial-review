@@ -231,3 +231,85 @@ test('lazy comments retain App proof fallback when local rounds do not prove the
   assert.equal(range.proof, 'hammer-app-attestation-chain');
   assert.equal(loads, 1);
 });
+
+const forcePush = (before, after, actor = { __typename: 'Bot', login: 'lacey-codex-agent[bot]' }) => ({
+  __typename: 'HeadRefForcePushedEvent', beforeCommit: { oid: before },
+  afterCommit: after ? { oid: after } : null, actor,
+});
+const timelinePage = (nodes, hasNextPage = false, endCursor = null) => ({ nodes, pageInfo: { hasNextPage, endCursor } });
+
+for (const [name, events, statuses, kinds] of [
+  ['direct rebase', [forcePush('reviewed', 'head')], {}, ['fleet-force-push']],
+  ['rebase then push', [forcePush('reviewed', 'middle')], { 'middle...head': 'ahead' }, ['fleet-force-push']],
+  ['two hops', [forcePush('reviewed', 'middle'), forcePush('middle', 'head')], {}, ['fleet-force-push']],
+  ['retry after reset', [forcePush('reviewed', 'abandoned'), forcePush('abandoned', 'reviewed'),
+    forcePush('reviewed', 'head')], {}, ['fleet-force-push']],
+  ['latest User cannot inherit an older Bot proof', [forcePush('reviewed', 'head'),
+    forcePush('head', 'reviewed'), forcePush('reviewed', 'head', { __typename: 'User', login: 'lacey-codex-agent[bot]' })], {}, null],
+  ['User actor', [forcePush('reviewed', 'head', { __typename: 'User', login: 'lacey-codex-agent[bot]' })], {}, null],
+  ['foreign Bot', [forcePush('reviewed', 'head', { __typename: 'Bot', login: 'synthetic-other[bot]' })], {}, null],
+  ['wrong start', [forcePush('other', 'head')], {}, null],
+  ['missing result', [forcePush('reviewed', null)], {}, null],
+  ['missing start', [{ ...forcePush('reviewed', 'head'), beforeCommit: null }], {}, null],
+  ['ten hops', Array.from({ length: 10 }, (_, i) => forcePush(i ? `hop${i}` : 'reviewed', i === 9 ? 'head' : `hop${i + 1}`)), {}, ['fleet-force-push']],
+  ['eleven hops', Array.from({ length: 11 }, (_, i) => forcePush(i ? `hop${i}` : 'reviewed', i === 10 ? 'head' : `hop${i + 1}`)), {}, null],
+]) {
+  test(`HAMCLOSE-06: ${name}`, async () => {
+    const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
+      hammerBaseHead: 'head', env: {}, remediationRounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }],
+      get: async path => ({ status: statuses[path.split('/compare/')[1]] || 'diverged' }),
+      loadTimelinePage: async () => timelinePage(events) });
+    assert.deepEqual(result?.linkKinds || null, kinds);
+    if (kinds) assert.equal(result.proof, 'completed-remediation-round-chain');
+  });
+}
+
+for (const pages of [10, 11]) {
+  test(`HAMCLOSE-06: ${pages}-page timeline respects the all-or-nothing page bound`, async () => {
+    const calls = [];
+    const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
+      hammerBaseHead: 'head', env: {}, remediationRounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }],
+      get: async () => ({ status: 'diverged' }),
+      loadTimelinePage: async cursor => {
+        calls.push(cursor);
+        // An early valid edge cannot authorize a truncated timeline.
+        return timelinePage(calls.length === 1 ? [forcePush('reviewed', 'head')] : [],
+          calls.length < pages, `page-${calls.length}`);
+      } });
+    assert.equal(calls.length, 10);
+    assert.deepEqual(calls, [null, ...Array.from({ length: 9 }, (_, i) => `page-${i + 1}`)]);
+    if (pages === 10) assert.deepEqual(result.linkKinds, ['fleet-force-push']);
+    else assert.equal(result, null);
+  });
+}
+
+for (const mode of ['throw', 'malformed', 'pagination', 'ahead', 'mixed']) {
+  test(`HAMCLOSE-06: ${mode} timeline`, async () => {
+    const calls = [];
+    const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
+      hammerBaseHead: 'head', env: {}, remediationRounds: (mode === 'mixed'
+        ? [['reviewed', 'middle'], ['middle', 'head']] : [['reviewed', 'head']])
+        .map(([startHeadSha, resultingHeadSha]) => ({ state: 'completed', startHeadSha, resultingHeadSha })),
+      get: async path => ({ status: mode === 'ahead' || (mode === 'mixed' && path.endsWith('reviewed...middle')) ? 'ahead' : 'diverged' }),
+      loadTimelinePage: async cursor => {
+        calls.push(cursor);
+        if (mode === 'throw' || mode === 'ahead') throw new Error('synthetic read failure');
+        if (mode === 'malformed') return { nodes: [] };
+        if (mode === 'pagination' && cursor === null) return timelinePage([], true, 'second');
+        return timelinePage([forcePush(mode === 'mixed' ? 'middle' : 'reviewed', 'head')]);
+      } });
+    if (['throw', 'malformed'].includes(mode)) assert.equal(result, null);
+    else assert.deepEqual(result.linkKinds, mode === 'mixed' ? ['ahead', 'fleet-force-push'] : [mode === 'ahead' ? 'ahead' : 'fleet-force-push']);
+    assert.deepEqual(calls, mode === 'ahead' ? [] : mode === 'pagination' ? [null, 'second'] : [null]);
+  });
+}
+
+test('HAMCLOSE-06 configured fleet App identity proves a rebase', async () => {
+  const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
+    hammerBaseHead: 'head', env: { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-remediator' },
+    remediationRounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }],
+    get: async () => ({ status: 'diverged' }), loadTimelinePage: async () => timelinePage([
+      forcePush('reviewed', 'head', { __typename: 'Bot', login: 'synthetic-remediator[bot]' }),
+    ]) });
+  assert.deepEqual(result.linkKinds, ['fleet-force-push']);
+});

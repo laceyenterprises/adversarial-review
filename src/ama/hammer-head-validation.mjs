@@ -80,10 +80,53 @@ export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
   return rounds;
 }
 
-async function remediationChain(rounds, reviewedHead, target, repo, get) {
+// A timeline read is all-or-nothing: incomplete pages cannot establish provenance.
+const FORCE_PUSH_TIMELINE_MAX_PAGES = 10;
+async function readForcePushEvents(loadTimelinePage) {
+  if (!loadTimelinePage) return null;
+  const events = [];
+  const cursors = new Set();
+  let cursor = null;
+  try {
+    for (let pageIndex = 0; pageIndex < FORCE_PUSH_TIMELINE_MAX_PAGES; pageIndex++) {
+      const page = await loadTimelinePage(cursor);
+      if (!Array.isArray(page?.nodes) || typeof page?.pageInfo?.hasNextPage !== 'boolean'
+        || page.nodes.some(event => event?.__typename !== 'HeadRefForcePushedEvent')) return null;
+      events.push(...page.nodes);
+      if (!page.pageInfo.hasNextPage) return events;
+      cursor = page.pageInfo.endCursor;
+      if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) return null;
+      cursors.add(cursor);
+    }
+  } catch { return null; }
+  return null;
+}
+
+async function fleetForcePushProves(events, base, head, repo, get, fleetLogins) {
+  if (!events) return false;
+  const trusted = new Set(fleetLogins.map(login));
+  let current = base;
+  const visited = new Set([base]);
+  for (let hop = 0; hop < 10; hop++) {
+    // A reset can reuse a starting SHA; prefer the latest attempt in timeline order.
+    const event = events.findLast(event => event.beforeCommit?.oid === current);
+    if (event?.actor?.__typename !== 'Bot' || !trusted.has(login(event.actor.login))
+      || typeof event.afterCommit?.oid !== 'string' || !event.afterCommit.oid) return false;
+    current = event.afterCommit.oid;
+    if (current === head) return true;
+    if (visited.has(current)) return false;
+    visited.add(current);
+    const comparison = await get(`repos/${repo}/compare/${encodeURIComponent(current)}...${encodeURIComponent(head)}`);
+    if (comparison?.status === 'ahead') return true;
+  }
+  return false;
+}
+
+async function remediationChain(rounds, reviewedHead, target, repo, get, loadTimelinePage, fleetLogins) {
   if (!reviewedHead || !target || target === reviewedHead) return null;
   const trusted = new Map([[reviewedHead, []]]);
   const evaluated = new Set();
+  let timeline;
   for (let pass = 0; pass < rounds.length; pass++) {
     let changed = false;
     for (const round of rounds) {
@@ -94,9 +137,14 @@ async function remediationChain(rounds, reviewedHead, target, repo, get) {
       evaluated.add(edge);
       try {
         const comparison = await get(`repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`);
-        if (comparison?.status !== 'ahead') continue;
+        let kind = 'ahead';
+        if (comparison?.status === 'diverged') {
+          timeline ??= readForcePushEvents(loadTimelinePage);
+          if (!await fleetForcePushProves(await timeline, base, head, repo, get, fleetLogins)) continue;
+          kind = 'fleet-force-push';
+        } else if (comparison?.status !== 'ahead') continue;
+        trusted.set(head, [...trusted.get(base), { head, kind }]);
       } catch { continue; }
-      trusted.set(head, [...trusted.get(base), head]);
       changed = true;
     }
     if (trusted.get(target)?.length > 0) return trusted.get(target);
@@ -128,27 +176,27 @@ async function readComparison(path, get, limit) {
 
 // Read the complete head-only DAG, including side parents. The comparison with
 // the base excludes base history; foreign PR commits cannot hide behind a merge.
-export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], loadComments = null, hammerBaseHead = null, remediationRounds = [] }) {
+export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], loadComments = null, hammerBaseHead = null, remediationRounds = [], loadTimelinePage = null }) {
   // HAMCLOSE-01: the worker may start from the exact reviewed head. This is
   // a starting-base proof, not an App attestation or a completed round edge.
   if (reviewedHead && hammerBaseHead === reviewedHead) return { verified: true, reviewedHead, currentHead,
     baseSha: reviewedHead, commits: currentHead === reviewedHead ? [] : [currentHead], proof: 'reviewed-starting-base' };
-  const rounds = await remediationChain(remediationRounds, reviewedHead, hammerBaseHead || currentHead, repo, get);
-  const chain = rounds?.length > 0 ? null
-    : hammerAttestationChain(loadComments ? await loadComments() : comments, reviewedHead, hammerBaseHead || currentHead);
-  if (chain?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
-    commits: [...chain, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
-    proof: 'hammer-app-attestation-chain' };
-  if (rounds?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
-    commits: [...rounds, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
-    proof: 'completed-remediation-round-chain' };
-  if (hammerBaseHead) return null;
   const { resolveGitHubAppBotLogin } = await import('../github-app-identity.mjs');
   const fleetLogins = [...DEFAULT_FLEET_LOGINS];
   for (const identity of ['codex-agent', 'claude-agent', 'gemini-agent', 'clio-agent']) {
     const configured = resolveGitHubAppBotLogin({ identity, env, log: { warn() {} } });
     if (configured) fleetLogins.push(configured);
   }
+  const rounds = await remediationChain(remediationRounds, reviewedHead, hammerBaseHead || currentHead, repo, get, loadTimelinePage, fleetLogins);
+  const chain = rounds?.length > 0 ? null
+    : hammerAttestationChain(loadComments ? await loadComments() : comments, reviewedHead, hammerBaseHead || currentHead);
+  if (chain?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+    commits: [...chain, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
+    proof: 'hammer-app-attestation-chain' };
+  if (rounds?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+    commits: [...rounds.map(link => link.head), ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
+    proof: 'completed-remediation-round-chain', linkKinds: rounds.map(link => link.kind) };
+  if (hammerBaseHead) return null;
   const requestedLimit = Number(env.AMA_HAMMER_RANGE_MAX_COMMITS);
   const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0 ? requestedLimit : HAMMER_RANGE_MAX_COMMITS;
   const base = await get(`repos/${repo}/commits/${encodeURIComponent(baseRef)}`);

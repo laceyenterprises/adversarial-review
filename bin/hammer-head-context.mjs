@@ -24,7 +24,25 @@ const loadComments = async () => {
   }
   return comments;
 };
-const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef, loadComments, hammerBaseHead: process.env.HAM_BASE_HEAD,
+const loadTimelinePage = async cursor => {
+  const [owner, name] = repo.split('/');
+  const query = `query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+    repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+      timelineItems(first: 100, after: $cursor, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) {
+        nodes { __typename ... on HeadRefForcePushedEvent {
+          actor { __typename login } beforeCommit { oid } afterCommit { oid }
+        } } pageInfo { hasNextPage endCursor }
+      }
+    } }
+  }`;
+  const args = ['api', 'graphql', '-f', `query=${query}`, '-f', `owner=${owner}`,
+    '-f', `name=${name}`, '-F', `number=${prNumber}`];
+  if (typeof cursor === 'string' && cursor) args.push('-f', `cursor=${cursor}`);
+  const response = JSON.parse((await execGhWithRetry({ args, timeoutMs: 15000 })).stdout);
+  if (response.errors) return null;
+  return response.data?.repository?.pullRequest?.timelineItems;
+};
+const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, hammerBaseHead: process.env.HAM_BASE_HEAD,
   remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
   get: async path => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout) });
 if (!range) {

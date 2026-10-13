@@ -62,7 +62,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `prelaunchRefusalSlowRetry.exhaustedPagedAt` | optional ISO timestamp | Successful window-exhaustion alert delivery. |
 | `lastObservedStatus` | string or null | Most recent worker status observed through HQ/session-ledger probes. Lifecycle cancellation uses HQ's reported status, or `terminal` when HQ confirms termination without naming a status; both release dispatch reservations. |
 | `lastObservedAt` | string or null | ISO-8601 timestamp for the latest worker observation. |
-| `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded on `launch-terminal` records by launch-capacity reconciliation; cleared when launching again. |
+| `terminalLaunchStatus` | string, optional | Terminal session-ledger launch status, or `not-found` for an expired missing launch, recorded on `launch-terminal` records by launch-capacity reconciliation. PR ownership reconciliation also writes it when settling the matching dispatched lease; bare successful exits without audit/merge evidence preserve the record. Cleared when launching again. |
 | `reconciledAt` | string, optional | ISO-8601 timestamp when launch-capacity reconciliation wrote `launch-terminal`; cleared when launching again. |
 | `lastAttemptedAt` | string or null | ISO-8601 timestamp for the latest launch attempt. |
 | `dispatchedAt` | string or null | ISO-8601 timestamp for a confirmed or ambiguous launch. |

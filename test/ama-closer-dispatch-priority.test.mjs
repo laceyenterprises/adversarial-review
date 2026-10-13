@@ -7,12 +7,15 @@ import { join } from 'node:path';
 
 import {
   maybeDispatchAmaCloser,
+  amaCloserDispatchFilePath,
+  reconcileAmaCloserLease,
   resolveAmaCloserDispatchPriority,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import {
   findMalformedProtectivePredecessorLines,
   hasMergedDependentProtectingPr,
@@ -1316,9 +1319,78 @@ for (const status of ['succeeded', 'failed', 'running', 'starting', 'unreadable'
     assert.equal(result.reason, 'not-eligible');
     assert.equal(reads, status === 'pending' ? 0 : 1);
     const lease = readAmaCloserLease(rootDir, identity);
-    const terminal = ['succeeded', 'failed'].includes(status);
+    const terminal = status === 'failed';
     assert.equal(lease.status, terminal ? 'terminal' : status === 'pending' ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
     assert.equal(deps.calls.length, 0);
+  });
+}
+
+for (const scenario of [
+  { name: 'disabled AMA', enabled: false, prNumber: 404, reason: 'ama-disabled' },
+  { name: 'missing AMA config', missingConfig: true, prNumber: 404, reason: 'ama-disabled' },
+  { name: 'zero PR number', enabled: true, prNumber: 0, reason: 'invalid-pr-number' },
+  { name: 'negative PR number', enabled: true, prNumber: -1, reason: 'invalid-pr-number' },
+]) {
+  test(`CLOSERLEASE-01: ${scenario.name} cannot probe or settle ownership`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-gate-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = baseArgs(rootDir, { cfg: { enabled: scenario.enabled },
+      prMetadata: { prNumber: scenario.prNumber } });
+    if (scenario.missingConfig) args.cfg = undefined;
+    const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: scenario.prNumber, headSha: HEAD };
+    acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'lrq_disabled', now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+      ...identity, state: 'dispatched', launchRequestId: 'lrq_disabled', lastObservedStatus: 'running',
+    }));
+    const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+    const beforeLease = readAmaCloserLease(rootDir, identity);
+    const beforeRecord = readFileSync(recordPath, 'utf8');
+    let probes = 0;
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => { probes++; return { ok: true, row: { status: 'failed' } }; },
+      readBuildCompletionSignalForPrImpl: () => { probes++; return { ok: true }; },
+    });
+    assert.equal(result.reason, scenario.reason);
+    assert.equal(probes, 0);
+    assert.deepEqual(readAmaCloserLease(rootDir, identity), beforeLease);
+    assert.equal(readFileSync(recordPath, 'utf8'), beforeRecord);
+    assert.equal(deps.calls.length, 0);
+  });
+}
+
+for (const evidence of ['merged signal', 'terminal audit']) {
+  test(`CLOSERLEASE-01: success hold settles when delayed ${evidence} arrives`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-delayed-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const now = '2026-07-20T12:00:00Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_delayed', now });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+      ...identity, state: 'dispatched', launchRequestId: 'lrq_delayed', lastObservedStatus: 'running',
+    }));
+    const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+    const beforeLease = readAmaCloserLease(rootDir, identity);
+    const beforeRecord = readFileSync(recordPath, 'utf8');
+    let merged = false;
+    const args = { rootDir, ...identity, hqRoot: rootDir, now,
+      ...testDeps(),
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      readBuildCompletionSignalForPrImpl: () => merged ? { ok: true, row: { head_sha: 'merge-commit' } }
+        : { ok: false, reason: 'missing-build-completion-signal' },
+    };
+    assert.equal(reconcileAmaCloserLease(args), false);
+    assert.deepEqual(readAmaCloserLease(rootDir, identity), beforeLease, 'holding must not refresh the reclaim clock');
+    assert.equal(readFileSync(recordPath, 'utf8'), beforeRecord);
+    if (evidence === 'merged signal') merged = true;
+    else appendAmaAuditAttempt({ hqRoot: rootDir, ...identity, now, attempt: { outcome: 'succeeded' } });
+    assert.equal(reconcileAmaCloserLease(args), true);
+    assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
+    const terminalRecord = readFileSync(recordPath, 'utf8');
+    assert.equal(reconcileAmaCloserLease(args), false);
+    assert.equal(readFileSync(recordPath, 'utf8'), terminalRecord, 'settlement is idempotent');
   });
 }

@@ -26,9 +26,10 @@ import { fetchPrimaryChange, primaryChangeExactReviewEvidence } from './primary-
  * `{ dispatched: true, lrqId, dispatchId }`. The caller skips the
  * merge-agent dispatch on that tick.
  *
- * When `cfg.enabled === false` OR the eligibility predicate fails, this
- * module is a no-op — returns `{ dispatched: false, reason }` and the
- * caller falls through to the existing merge-agent dispatch path
+ * When `cfg.enabled === false`, this module is a no-op. Enabled calls
+ * reconcile terminal ownership before eligibility; an eligibility refusal
+ * returns `{ dispatched: false, reason }` and the caller falls through to
+ * the existing merge-agent dispatch path
  * (preserved verbatim until AMA-06A/06N flips that around).
  *
  * Default-off discipline (SPEC §4.8):
@@ -1530,11 +1531,17 @@ export function reconcileAmaCloserLease({
       || (record.launchRequestId && record.launchRequestId !== launchRequestId))) return false;
     const auditOutcome = readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
+    // Merged completion rows are PR-scoped (their SHA may be the merge commit),
+    // so this also observes completion from a lease's original dispatch head.
     const mergedSignal = readMergedBuildCompletionSignal({
       ...identity, hqRoot, rootDir, env,
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
-    const terminalOutcome = terminalLaunchLeaseOutcome({ status, auditOutcome, merged: mergedSignal?.ok === true });
+    // A successful exit can precede the merge webhook/audit. Preserve ownership
+    // until that evidence arrives; callers retain their existing reclaim bound.
+    if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) return false;
+    const terminalOutcome = terminalLaunchLeaseOutcome({ status, auditOutcome, merged: mergedSignal?.ok === true,
+      headAdvanced: Boolean(held.lease.rekeyedFromHeadSha && held.lease.rekeyedFromHeadSha !== held.headSha) });
     // Re-read after external evidence: ownership may have changed while reading.
     const current = readAmaCloserLease(rootDir, identity);
     if (current?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || current.lrqId !== launchRequestId) return false;
@@ -4180,28 +4187,6 @@ export async function maybeDispatchAmaCloser({
   signal = null,
 }) {
   throwIfAborted(signal);
-  let reconciledDispatchedLease = null;
-  let earlyLaunchRequestProbe = null;
-  const reconciliationRoot = dispatchContext?.rootDir;
-  const reconciliationRepo = dispatchContext?.repo;
-  if (reconciliationRoot && reconciliationRepo && Number.isInteger(Number(prMetadata?.prNumber))) {
-    let held = null;
-    try { held = findLiveAmaCloserLease(reconciliationRoot, { repo: reconciliationRepo, prNumber: prMetadata.prNumber }); }
-    catch { /* Preserve admission behavior on unreadable ownership. */ }
-    if (held?.lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED && held.lease.lrqId) {
-      const statusProbe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
-        launchRequestId: held.lease.lrqId, rootDir: reconciliationRoot,
-        hqRoot: dispatchContext.hqRoot, ledgerTarget: dispatchContext.ledgerTarget,
-        ledgerDbPath: dispatchContext.ledgerDbPath, env,
-      })).catch(() => ({ ok: false }));
-      earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
-      const settled = reconcileAmaCloserLease({ ...dispatchContext, rootDir: reconciliationRoot,
-        repo: reconciliationRepo, prNumber: Number(prMetadata.prNumber),
-        now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
-        readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl });
-      if (settled) reconciledDispatchedLease = held.lease;
-    }
-  }
   // The master gate. With no operator config, this is `false` per
   // AMA-01 schema defaults and the entire path is a no-op.
   if (!cfg?.enabled) {
@@ -4218,6 +4203,29 @@ export async function maybeDispatchAmaCloser({
       skipMergeAgent: true,
       reason: 'invalid-pr-number',
     });
+  }
+
+  let reconciledDispatchedLease = null;
+  let earlyLaunchRequestProbe = null;
+  const reconciliationRoot = dispatchContext?.rootDir;
+  const reconciliationRepo = dispatchContext?.repo;
+  if (reconciliationRoot && reconciliationRepo) {
+    let held = null;
+    try { held = findLiveAmaCloserLease(reconciliationRoot, { repo: reconciliationRepo, prNumber }); }
+    catch { /* Preserve admission behavior on unreadable ownership. */ }
+    if (held?.lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED && held.lease.lrqId) {
+      const statusProbe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+        launchRequestId: held.lease.lrqId, rootDir: reconciliationRoot,
+        hqRoot: dispatchContext.hqRoot, ledgerTarget: dispatchContext.ledgerTarget,
+        ledgerDbPath: dispatchContext.ledgerDbPath, env,
+      })).catch(() => ({ ok: false }));
+      earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
+      const settled = reconcileAmaCloserLease({ ...dispatchContext, rootDir: reconciliationRoot,
+        repo: reconciliationRepo, prNumber,
+        now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
+        readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl });
+      if (settled) reconciledDispatchedLease = held.lease;
+    }
   }
 
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true

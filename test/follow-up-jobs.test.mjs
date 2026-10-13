@@ -5309,9 +5309,11 @@ test('workspace retention removes terminal jobs after 72 hours and preserves act
 });
 
 for (const scenario of [
-  { name: 'terminal run without merge', status: 'succeeded', claimed: true, outcome: 'failed-without-merge' },
+  { name: 'successful exit without merge evidence', status: 'succeeded', claimed: false },
+  { name: 'successful exit with unreadable merge evidence', status: 'succeeded', mergeUnreadable: true, claimed: false },
+  { name: 'successful rekeyed exit without merge evidence', status: 'succeeded', rekeyed: true, claimed: false },
   { name: 'failed run', status: 'failed', claimed: true, outcome: 'failed-without-merge' },
-  { name: 'terminal rekeyed run', status: 'failed', rekeyed: true, claimed: true, outcome: 'failed-without-merge' },
+  { name: 'terminal rekeyed run', status: 'failed', rekeyed: true, claimed: true, outcome: 'superseded' },
   { name: 'running run', status: 'running', claimed: false },
   { name: 'starting run', status: 'starting', claimed: false },
   { name: 'ledger exception', error: new Error('synthetic read failure'), claimed: false },
@@ -5319,6 +5321,8 @@ for (const scenario of [
   { name: 'unreadable ledger', unreadable: true, claimed: false },
   { name: 'pending lease', pending: true, claimed: false },
   { name: 'terminal merged run', status: 'succeeded', merged: true, claimed: true, outcome: 'succeeded' },
+  { name: 'terminal rekeyed merged run', status: 'succeeded', rekeyed: true, merged: true, claimed: true, outcome: 'succeeded' },
+  { name: 'expired success hold', status: 'succeeded', old: true, claimed: true },
   { name: 'old lease with no terminal report', status: 'running', old: true, claimed: true },
 ]) {
   test(`CLOSERLEASE-01: follow-up claims with ${scenario.name}`, t => {
@@ -5355,9 +5359,12 @@ for (const scenario of [
           return scenario.unreadable ? { ok: false, reason: 'ledger-read-failed' }
             : { ok: true, row: { status: scenario.status } };
         },
-        readBuildCompletionSignalForPrImpl: () => scenario.merged
-          ? { ok: true, row: { head_sha: identity.headSha } }
-          : { ok: false, reason: 'missing-build-completion-signal' },
+        readBuildCompletionSignalForPrImpl: args => {
+          assert.equal(args.headSha, undefined, 'merged signals are scoped to PRs, not lease heads');
+          return scenario.merged
+            ? { ok: true, row: { head_sha: 'synthetic-head' } }
+            : { ok: false, reason: scenario.mergeUnreadable ? 'ledger-read-failed' : 'missing-build-completion-signal' };
+        },
         readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }),
         logger: { info: line => logs.push(JSON.parse(line)) },
       },

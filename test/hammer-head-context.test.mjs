@@ -31,7 +31,12 @@ if (scenario === 'recover' && attempt === 1) fail('TLS handshake timeout');
 if (scenario === 'exhaust') fail('HTTP 503 Service Unavailable');
 if (scenario === 'permanent') fail('HTTP 403 Forbidden');
 if (scenario === 'malformed') { process.stdout.write('{'); process.exit(0); }
-if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
+if (args[1] === 'graphql') {
+  process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: { timelineItems: {
+    nodes: [{ __typename: 'HeadRefForcePushedEvent', actor: { __typename: scenario === 'rebase-user' ? 'User' : 'Bot', login: 'lacey-codex-agent[bot]' },
+      beforeCommit: { oid: 'reviewed' }, afterCommit: { oid: 'head' } }], pageInfo: { hasNextPage: false, endCursor: null }
+  } } } } }));
+} else if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
   process.stdout.write(JSON.stringify([{ user: { login: 'the-hammer-lacey[bot]' },
     body: 'HAM-Base-Head: reviewed\\nHAM-Validated-Head: earlier' }]));
 } else if (args[0] === 'pr') {
@@ -40,7 +45,7 @@ if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
 } else if (args[1] === 'repos/fixture/repo/commits/release') {
   process.stdout.write(JSON.stringify({ sha: 'base' }));
 } else if (['repos/fixture/repo/compare/base...head', 'repos/fixture/repo/compare/reviewed...head'].includes(args[1])) {
-  process.stdout.write(JSON.stringify({ status: 'ahead', total_commits: 1, commits: [{ sha: 'head',
+  process.stdout.write(JSON.stringify({ status: scenario.startsWith('rebase') ? 'diverged' : 'ahead', total_commits: 1, commits: [{ sha: 'head',
     author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'web-flow' },
     commit: { verification: { verified: scenario !== 'spoof', reason: 'valid' } } }] }));
 } else fail('unexpected API call');
@@ -152,3 +157,16 @@ test('dispatched prompt exports the daemon root used by completed-round verifica
   });
   assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');
 });
+
+for (const scenario of ['rebase-bot', 'rebase-user']) {
+  test(`HAMCLOSE-06 helper: ${scenario}`, async t => {
+    const f = fixture(t, scenario);
+    const dir = join(f.root, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'fixture__repo-pr-1-round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
+      status: 'completed', remediationPlan: { rounds: [{ state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
+    const run = () => f.run(undefined, { HAM_BASE_HEAD: 'head' });
+    if (scenario === 'rebase-bot') assert.deepEqual(JSON.parse((await run()).stdout).linkKinds, ['fleet-force-push']);
+    else await assert.rejects(run(), error => error.code === 65 && error.stderr === 'hammer starting base or responsibility range could not be proven\n');
+  });
+}

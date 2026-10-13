@@ -26,9 +26,10 @@ import { fetchPrimaryChange, primaryChangeExactReviewEvidence } from './primary-
  * `{ dispatched: true, lrqId, dispatchId }`. The caller skips the
  * merge-agent dispatch on that tick.
  *
- * When `cfg.enabled === false` OR the eligibility predicate fails, this
- * module is a no-op — returns `{ dispatched: false, reason }` and the
- * caller falls through to the existing merge-agent dispatch path
+ * When `cfg.enabled === false`, this module is a no-op. Enabled calls
+ * reconcile terminal ownership before eligibility; an eligibility refusal
+ * returns `{ dispatched: false, reason }` and the caller falls through to
+ * the existing merge-agent dispatch path
  * (preserved verbatim until AMA-06A/06N flips that around).
  *
  * Default-off discipline (SPEC §4.8):
@@ -65,6 +66,7 @@ import {
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
   readLatestWorkerRunStatusFromLedger,
+  readLaunchRequestStatusFromLedger,
 } from '../session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -98,6 +100,7 @@ import {
   acquireAmaCloserLease,
   deleteAmaCloserLease,
   readAmaCloserLease,
+  findLiveAmaCloserLease,
   readAmaCloserDispatchLease, listAmaCloserLeaseNames,
   updateAmaCloserLease,
 } from './closer-lease.mjs';
@@ -1477,7 +1480,6 @@ function dispatchStatusReason(status) {
 }
 
 async function readLaunchRequestStatusFromLedgerDefault(args) {
-  const { readLaunchRequestStatusFromLedger, readLatestWorkerRunStatusFromLedger } = await import('../session-ledger-read-adapter.mjs');
   const launch = await readLaunchRequestStatusFromLedger(args);
   if (launch?.ok && ['starting', 'running'].includes(launch.row?.status)) {
     const worker = await readLatestWorkerRunStatusFromLedger(args);
@@ -1485,6 +1487,90 @@ async function readLaunchRequestStatusFromLedgerDefault(args) {
       workerStatus: worker.row.status, process_status: worker.row.process_status } };
   }
   return launch;
+}
+
+// Ownership settlement is independent of admission and retry authority. A
+// successful process exit alone is not evidence that the PR merged.
+function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, headAdvanced = false }) {
+  if (merged || auditOutcome === 'succeeded') return 'succeeded';
+  if (AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(status)) return 'deferred';
+  if (auditOutcome) return auditOutcome;
+  return headAdvanced ? 'superseded' : 'failed-without-merge';
+}
+
+/**
+ * Settle the current PR owner's terminal launch without evaluating eligibility.
+ * The synchronous ledger adapter bounds subprocess reads with its existing
+ * timeout. Async callers may supply a previously awaited statusProbe together
+ * with probedLaunchRequestId; unreadable evidence leaves ownership unchanged.
+ * The direct synchronous probe reads only the launch request; it cannot await
+ * the latest worker run when that request still reports starting/running.
+ * Async dispatch callers resolve that lag before supplying statusProbe. Direct
+ * follow-up callers retain ownership until the request catches up or the
+ * existing reclaim timeout expires.
+ */
+export function reconcileAmaCloserLease({
+  rootDir, repo, prNumber, now = new Date().toISOString(),
+  hqRoot = null, ledgerTarget = null, ledgerDbPath = null, env = process.env,
+  readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedger,
+  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
+  statusProbe, probedLaunchRequestId = null, logger = console,
+} = {}) {
+  try {
+    const held = findLiveAmaCloserLease(rootDir, { repo, prNumber });
+    if (held?.lease.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || !held.lease.lrqId) return false;
+    const launchRequestId = held.lease.lrqId;
+    if (probedLaunchRequestId && launchRequestId !== probedLaunchRequestId) return false;
+    const probe = statusProbe ?? readLaunchRequestStatusImpl({
+      launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env,
+    });
+    if (!probe?.ok) return false;
+    const status = normalizeWorkerRunStatus(probe.row?.status);
+    if (!AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) return false;
+    const identity = { repo, prNumber, headSha: held.headSha };
+    const dispatchIdentity = { ...identity, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
+    const record = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+    // Do not reconcile an old launch over a newer dispatch intent.
+    if (record && (record.state === 'dispatching'
+      || (record.launchRequestId && record.launchRequestId !== launchRequestId))) return false;
+    const auditOutcome = readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
+      || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
+    // Merged completion rows are PR-scoped (their SHA may be the merge commit),
+    // so this also observes completion from a lease's original dispatch head.
+    const mergedSignal = readMergedBuildCompletionSignal({
+      ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env,
+      readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
+    });
+    // A successful exit can precede the merge webhook/audit. Preserve ownership
+    // until that evidence arrives; callers retain their existing reclaim bound.
+    if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) return false;
+    const terminalOutcome = terminalLaunchLeaseOutcome({ status, auditOutcome, merged: mergedSignal?.ok === true,
+      headAdvanced: Boolean(held.lease.rekeyedFromHeadSha && held.lease.rekeyedFromHeadSha !== held.headSha) });
+    // Re-read after external evidence: ownership may have changed while reading.
+    const current = readAmaCloserLease(rootDir, identity);
+    if (current?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || current.lrqId !== launchRequestId) return false;
+    if (record) {
+      let updated = false;
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (live) => {
+        if (!live || live.state === 'dispatching'
+          || live.launchRequestId !== record.launchRequestId) return null;
+        updated = true;
+        return { ...live,
+          lastObservedStatus: amaCloserStatusFromTerminalLaunchRequestStatus(status),
+          lastObservedAt: now, terminalLaunchStatus: status };
+      });
+      if (!updated) return false;
+    }
+    if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
+      terminalOutcome, now, logger, repo, prNumber })) return false;
+    logger?.info?.(JSON.stringify({ event: 'ama_closer.terminal_lease_reconciled',
+      repo, prNumber, launchRequestId, terminalOutcome }));
+    return true;
+  } catch {
+    // Unreadable or timed-out evidence preserves the existing ownership answer.
+    return false;
+  }
 }
 
 /**
@@ -3488,6 +3574,8 @@ function readMergedBuildCompletionSignal({
   headSha,
   hqRoot,
   rootDir,
+  ledgerTarget = null,
+  ledgerDbPath = null,
   env = process.env,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
@@ -3498,6 +3586,8 @@ function readMergedBuildCompletionSignal({
     signalKind: 'merged',
     hqRoot,
     rootDir,
+    ledgerTarget,
+    ledgerDbPath,
     env,
   });
   if (!result) return { ok: false, reason: 'ledger-read-failed' };
@@ -3517,6 +3607,8 @@ function readMergedBuildCompletionSignal({
       signalKind: 'merged',
       hqRoot,
       rootDir,
+      ledgerTarget,
+      ledgerDbPath,
       env,
     });
     if (producerEvidence?.ok) {
@@ -4124,6 +4216,29 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  let reconciledDispatchedLease = null;
+  let earlyLaunchRequestProbe = null;
+  const reconciliationRoot = dispatchContext?.rootDir;
+  const reconciliationRepo = dispatchContext?.repo;
+  if (reconciliationRoot && reconciliationRepo) {
+    let held = null;
+    try { held = findLiveAmaCloserLease(reconciliationRoot, { repo: reconciliationRepo, prNumber }); }
+    catch { /* Preserve admission behavior on unreadable ownership. */ }
+    if (held?.lease.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED && held.lease.lrqId) {
+      const statusProbe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+        launchRequestId: held.lease.lrqId, rootDir: reconciliationRoot,
+        hqRoot: dispatchContext.hqRoot, ledgerTarget: dispatchContext.ledgerTarget,
+        ledgerDbPath: dispatchContext.ledgerDbPath, env,
+      })).catch(() => ({ ok: false }));
+      earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
+      const settled = reconcileAmaCloserLease({ ...dispatchContext, rootDir: reconciliationRoot,
+        repo: reconciliationRepo, prNumber,
+        now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
+        readLaunchRequestStatusImpl, readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl });
+      if (settled) reconciledDispatchedLease = held.lease;
+    }
+  }
+
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
     && dispatchContext.orphanRecovery.headSha === prMetadata?.headSha;
   if (ownerProofRecovery) {
@@ -4657,13 +4772,14 @@ export async function maybeDispatchAmaCloser({
     existingLeaseBeforeDispatch = targetLeaseBeforeDispatch;
     targetLeaseBeforeDispatch = null;
   }
-  let prefetchedLaunchRequestProbe = null;
+  let prefetchedLaunchRequestProbe = earlyLaunchRequestProbe && earlyLaunchRequestProbe.launchRequestId === existingRecord?.launchRequestId
+    ? earlyLaunchRequestProbe.probe : null;
   // HAMREFUND-01: reconcile terminal launches before the stale-lease tombstone
   // path can strand them. A real closing decision and authoritative terminal PR
   // state always win, even when the harness reports a signal/host failure.
   if (existingRecord?.launchRequestId && !existingDispatchHeadAdvanced
     && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
-    const probe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+    const probe = prefetchedLaunchRequestProbe || await Promise.resolve().then(() => readLaunchRequestStatusImpl({
       launchRequestId: existingRecord.launchRequestId,
       ledgerTarget: dispatchContext.ledgerTarget || null,
       ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -5037,6 +5153,10 @@ export async function maybeDispatchAmaCloser({
         promptPath: existingRecord.promptPath || null,
       });
     };
+    // Releasing ownership must not change retry admission on unknown merge
+    // evidence. Keep this pass's pre-settlement hold evidence for that decision.
+    const terminalSuccessHoldLease = reconciledDispatchedLease?.lrqId === existingRecord.launchRequestId
+      ? reconciledDispatchedLease : existingLeaseBeforeDispatch;
     let phantomActiveWorkerRun = null;
     // The LRQ's ledger row, when the unknown-status path below read it.
     let launchRequestProbe = prefetchedLaunchRequestProbe;
@@ -5107,8 +5227,8 @@ export async function maybeDispatchAmaCloser({
         // Preserve the terminal-success hold below before HAMBG-02 can infer
         // an exit without close from an OPEN PR whose merge may be queued.
         && !(mergedSignalUnknown && !existingDispatchHeadAdvanced
-          && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
-          && !isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
+          && terminalSuccessHoldLease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
+          && !isReclaimableDispatchedAmaCloserLease(terminalSuccessHoldLease, {
             now: dispatchContext.dispatchedAt,
           }))
       ) {
@@ -5549,8 +5669,8 @@ export async function maybeDispatchAmaCloser({
         && !existingDispatchHeadAdvanced
         && mergedSignalUnknown
         && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
-        && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
-        && !isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
+        && terminalSuccessHoldLease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
+        && !isReclaimableDispatchedAmaCloserLease(terminalSuccessHoldLease, {
           now: dispatchContext.dispatchedAt,
         })
       ) {
@@ -5615,7 +5735,7 @@ export async function maybeDispatchAmaCloser({
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
           leaseIdentity: existingRecordLeaseIdentity,
-          terminalOutcome: auditTerminalOutcome,
+          terminalOutcome: terminalLaunchLeaseOutcome({ status, auditOutcome: auditTerminalOutcome }),
           now: dispatchContext.dispatchedAt,
           logger,
           repo,
@@ -5773,7 +5893,7 @@ export async function maybeDispatchAmaCloser({
           finalizeAmaCloserLeaseBestEffort({
             rootDir,
             leaseIdentity: existingRecordLeaseIdentity,
-            terminalOutcome: 'deferred',
+            terminalOutcome: terminalLaunchLeaseOutcome({ status }),
             now: dispatchContext.dispatchedAt,
             logger,
             repo,
@@ -5811,9 +5931,8 @@ export async function maybeDispatchAmaCloser({
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
         leaseIdentity: existingRecordLeaseIdentity,
-        terminalOutcome: existingDispatchHeadAdvanced && !hammerEndedWithoutMerge
-          ? 'superseded'
-          : 'failed-without-merge',
+        terminalOutcome: terminalLaunchLeaseOutcome({ status,
+          headAdvanced: existingDispatchHeadAdvanced && !hammerEndedWithoutMerge }),
         now: dispatchContext.dispatchedAt,
         logger,
         repo,

@@ -7,12 +7,15 @@ import { join } from 'node:path';
 
 import {
   maybeDispatchAmaCloser,
+  amaCloserDispatchFilePath,
+  reconcileAmaCloserLease,
   resolveAmaCloserDispatchPriority,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import {
   findMalformedProtectivePredecessorLines,
   hasMergedDependentProtectingPr,
@@ -1287,3 +1290,154 @@ test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not ref
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(deps.calls.filter(c => c.args.includes('dispatch')).length, 1);
 });
+
+for (const status of ['succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout', 'pending']) {
+  test(`CLOSERLEASE-01: reconcile ${status} lease before red-CI remediation refusal`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = baseArgs(rootDir, {
+      reviewState: { remediationPending: true },
+      prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'FAILURE' }] },
+    });
+    const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt, host: 'synthetic', watcherPid: 123 });
+    if (status !== 'pending') updateAmaCloserLease({ ...identity, status: 'dispatched',
+      lrqId: 'lrq_synthetic', now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ repo: identity.repo, prNumber: 404,
+      headSha: HEAD, workerClass: 'hammer', state: 'dispatched', launchRequestId: 'lrq_synthetic',
+      lastObservedStatus: 'running', dispatchedAt: args.dispatchContext.dispatchedAt }));
+    let reads = 0;
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => {
+        reads++;
+        if (status === 'throws' || status === 'timeout') throw Object.assign(new Error('synthetic failure'),
+          { code: status === 'timeout' ? 'ETIMEDOUT' : 'EIO' });
+        return status === 'unreadable' ? { ok: false } : { ok: true, row: { status } };
+      },
+    });
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(reads, status === 'pending' ? 0 : 1);
+    const lease = readAmaCloserLease(rootDir, identity);
+    const terminal = status === 'failed';
+    assert.equal(lease.status, terminal ? 'terminal' : status === 'pending' ? 'pending' : 'dispatched');
+    assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
+    assert.equal(deps.calls.length, 0);
+  });
+}
+
+for (const scenario of [
+  { name: 'disabled AMA', enabled: false, prNumber: 404, reason: 'ama-disabled' },
+  { name: 'missing AMA config', missingConfig: true, prNumber: 404, reason: 'ama-disabled' },
+  { name: 'zero PR number', enabled: true, prNumber: 0, reason: 'invalid-pr-number' },
+  { name: 'negative PR number', enabled: true, prNumber: -1, reason: 'invalid-pr-number' },
+]) {
+  test(`CLOSERLEASE-01: ${scenario.name} cannot probe or settle ownership`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-gate-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = baseArgs(rootDir, { cfg: { enabled: scenario.enabled },
+      prMetadata: { prNumber: scenario.prNumber } });
+    if (scenario.missingConfig) args.cfg = undefined;
+    const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: scenario.prNumber, headSha: HEAD };
+    acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'lrq_disabled', now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+      ...identity, state: 'dispatched', launchRequestId: 'lrq_disabled', lastObservedStatus: 'running',
+    }));
+    const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+    const beforeLease = readAmaCloserLease(rootDir, identity);
+    const beforeRecord = readFileSync(recordPath, 'utf8');
+    let probes = 0;
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => { probes++; return { ok: true, row: { status: 'failed' } }; },
+      readBuildCompletionSignalForPrImpl: () => { probes++; return { ok: true }; },
+    });
+    assert.equal(result.reason, scenario.reason);
+    assert.equal(probes, 0);
+    assert.deepEqual(readAmaCloserLease(rootDir, identity), beforeLease);
+    assert.equal(readFileSync(recordPath, 'utf8'), beforeRecord);
+    assert.equal(deps.calls.length, 0);
+  });
+}
+
+for (const evidence of ['merged signal', 'terminal audit', 'terminal audit without hqRoot']) {
+  test(`CLOSERLEASE-01: success hold settles when delayed ${evidence} arrives`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-delayed-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const now = '2026-07-20T12:00:00Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_delayed', now });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+      ...identity, state: 'dispatched', launchRequestId: 'lrq_delayed', lastObservedStatus: 'running',
+    }));
+    const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+    const beforeLease = readAmaCloserLease(rootDir, identity);
+    const beforeRecord = readFileSync(recordPath, 'utf8');
+    let merged = false;
+    const args = { rootDir, ...identity, hqRoot: rootDir, now,
+      ...testDeps(),
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      readBuildCompletionSignalForPrImpl: () => merged ? { ok: true, row: { head_sha: 'merge-commit' } }
+        : { ok: false, reason: 'missing-build-completion-signal' },
+    };
+    if (evidence === 'terminal audit without hqRoot') delete args.hqRoot;
+    assert.equal(reconcileAmaCloserLease(args), false);
+    assert.deepEqual(readAmaCloserLease(rootDir, identity), beforeLease, 'holding must not refresh the reclaim clock');
+    assert.equal(readFileSync(recordPath, 'utf8'), beforeRecord);
+    if (evidence === 'merged signal') merged = true;
+    else appendAmaAuditAttempt({ hqRoot: rootDir, ...identity, now, attempt: { outcome: 'succeeded' } });
+    assert.equal(reconcileAmaCloserLease(args), true);
+    assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
+    const terminalRecord = readFileSync(recordPath, 'utf8');
+    assert.equal(reconcileAmaCloserLease(args), false);
+    assert.equal(readFileSync(recordPath, 'utf8'), terminalRecord, 'settlement is idempotent');
+  });
+}
+
+for (const routing of [
+  { ledgerTarget: { backend: 'postgres', databaseName: 'fixture-ledger' }, ledgerDbPath: null },
+  { ledgerTarget: null, ledgerDbPath: '/fixture/custom-ledger.sqlite' },
+]) {
+  test(`CLOSERLEASE-01: completion reads preserve explicit ${routing.ledgerTarget ? 'ledgerTarget' : 'ledgerDbPath'}`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-ledger-routing-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const now = '2026-07-20T12:00:00Z';
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_routing', now });
+    const reads = [];
+    let merged = false;
+    const args = { rootDir, ...identity, hqRoot: rootDir, now, ...routing, env: {}, logger: { info() {} },
+      readLaunchRequestStatusImpl: input => {
+        reads.push(['launch', input]);
+        return { ok: true, row: { status: 'succeeded' } };
+      },
+      readBuildCompletionSignalForPrImpl: input => {
+        reads.push(['signal', input]);
+        const routed = input.ledgerTarget === routing.ledgerTarget && input.ledgerDbPath === routing.ledgerDbPath;
+        return merged && routed ? { ok: true, row: { head_sha: 'merge-commit' } }
+          : { ok: false, reason: 'missing-build-completion-signal' };
+      },
+      readBuildCompletionProducerEvidenceImpl: input => {
+        reads.push(['producer', input]);
+        return { ok: true, row: { producer_class: 'closer-hammer' } };
+      },
+    };
+    assert.equal(reconcileAmaCloserLease(args), false, 'producer evidence alone must retain the lease');
+    assert.deepEqual(reads.map(([kind]) => kind), ['launch', 'signal', 'producer']);
+    for (const [, input] of reads) {
+      assert.equal(input.ledgerTarget, routing.ledgerTarget);
+      assert.equal(input.ledgerDbPath, routing.ledgerDbPath);
+      assert.equal(input.rootDir, rootDir);
+      assert.equal(input.hqRoot, rootDir);
+      assert.equal(input.env, args.env);
+    }
+    reads.length = 0;
+    merged = true;
+    assert.equal(reconcileAmaCloserLease(args), true);
+    assert.deepEqual(reads.map(([kind]) => kind), ['launch', 'signal']);
+    assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
+  });
+}

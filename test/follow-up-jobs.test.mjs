@@ -6,7 +6,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { openReviewStateDb } from '../src/review-state.mjs';
 import { activeRemediationStopDecision } from '../src/follow-up-lifecycle.mjs';
-import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
@@ -1649,7 +1649,9 @@ test('rekeyed active closer defers a reviewed-head job after the lease age thres
     headSha: 'rekeyed' }, () => ({ repo: job.repo, prNumber: job.prNumber,
     headSha: 'rekeyed', state: 'dispatched', lastObservedStatus: 'running',
     lastObservedAt: '2026-04-21T09:31:00.000Z' }));
-  assert.equal(claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T09:31:00.000Z' }), null);
+  assert.equal(claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T09:31:00.000Z',
+    closerReconciliationOptions: { readLaunchRequestStatusImpl: () => ({ ok: false }) },
+  }), null);
   assert.ok(existsSync(created.jobPath));
 });
 
@@ -5305,3 +5307,80 @@ test('workspace retention removes terminal jobs after 72 hours and preserves act
   assert.equal(existsSync(path.join(workspaceRootDir, 'active')), true);
   assert.equal(existsSync(path.join(workspaceRootDir, 'recent')), true);
 });
+
+for (const scenario of [
+  { name: 'successful exit without merge evidence', status: 'succeeded', claimed: false },
+  { name: 'successful exit with unreadable merge evidence', status: 'succeeded', mergeUnreadable: true, claimed: false },
+  { name: 'successful rekeyed exit without merge evidence', status: 'succeeded', rekeyed: true, claimed: false },
+  { name: 'failed run', status: 'failed', claimed: true, outcome: 'failed-without-merge' },
+  { name: 'terminal rekeyed run', status: 'failed', rekeyed: true, claimed: true, outcome: 'superseded' },
+  { name: 'running run', status: 'running', claimed: false },
+  { name: 'starting run', status: 'starting', claimed: false },
+  { name: 'ledger exception', error: new Error('synthetic read failure'), claimed: false },
+  { name: 'ledger timeout', error: Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' }), claimed: false },
+  { name: 'unreadable ledger', unreadable: true, claimed: false },
+  { name: 'pending lease', pending: true, claimed: false },
+  { name: 'terminal merged run', status: 'succeeded', merged: true, claimed: true, outcome: 'succeeded' },
+  { name: 'terminal rekeyed merged run', status: 'succeeded', rekeyed: true, merged: true, claimed: true, outcome: 'succeeded' },
+  { name: 'expired success hold', status: 'succeeded', old: true, claimed: true },
+  { name: 'old lease with no terminal report', status: 'running', old: true, claimed: true },
+]) {
+  test(`CLOSERLEASE-01: follow-up claims with ${scenario.name}`, t => {
+    const rootDir = makeTempRoot(t);
+    const created = createFollowUpJob(makeJobInput(rootDir));
+    const job = readFollowUpJob(created.jobPath);
+    const identity = { rootDir, repo: job.repo, prNumber: job.prNumber, headSha: 'synthetic-head' };
+    const now = '2026-04-21T10:00:00.000Z';
+    const acquiredAt = scenario.old ? '2026-04-21T09:00:00.000Z' : '2026-04-21T09:59:00.000Z';
+    acquireAmaCloserLease({ ...identity, now: acquiredAt, host: 'synthetic', watcherPid: 123 });
+    if (!scenario.pending) {
+      updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'lrq_synthetic', now: acquiredAt });
+      updateAmaCloserDispatchRecord(rootDir, identity, () => ({
+        repo: job.repo, prNumber: job.prNumber, headSha: identity.headSha,
+        state: 'dispatched', launchRequestId: 'lrq_synthetic',
+        lastObservedStatus: 'running', dispatchedAt: acquiredAt, lastObservedAt: acquiredAt,
+      }));
+    }
+    if (scenario.rekeyed) {
+      rekeyAmaCloserLease({ ...identity, fromHeadSha: identity.headSha,
+        toHeadSha: 'synthetic-new-head', now });
+      identity.headSha = 'synthetic-new-head';
+    }
+    let reads = 0;
+    const logs = [];
+    const delayedPendingPaths = new Set();
+    const claimed = claimNextFollowUpJob({ rootDir, claimedAt: now, delayedPendingPaths,
+      closerReconciliationOptions: {
+        hqRoot: rootDir,
+        readLaunchRequestStatusImpl: ({ launchRequestId }) => {
+          reads++;
+          assert.equal(launchRequestId, 'lrq_synthetic');
+          if (scenario.error) throw scenario.error;
+          return scenario.unreadable ? { ok: false, reason: 'ledger-read-failed' }
+            : { ok: true, row: { status: scenario.status } };
+        },
+        readBuildCompletionSignalForPrImpl: args => {
+          assert.equal(args.headSha, undefined, 'merged signals are scoped to PRs, not lease heads');
+          return scenario.merged
+            ? { ok: true, row: { head_sha: 'synthetic-head' } }
+            : { ok: false, reason: scenario.mergeUnreadable ? 'ledger-read-failed' : 'missing-build-completion-signal' };
+        },
+        readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }),
+        logger: { info: line => logs.push(JSON.parse(line)) },
+      },
+    });
+    assert.equal(Boolean(claimed), scenario.claimed);
+    if (!scenario.claimed) {
+      assert.equal(delayedPendingPaths.has(created.jobPath), true);
+      assert.equal(claimNextFollowUpJob({ rootDir, claimedAt: now, delayedPendingPaths,
+        closerReconciliationOptions: { readLaunchRequestStatusImpl: () => { reads++; throw new Error('duplicate probe'); } },
+      }), null);
+    }
+    assert.equal(reads, scenario.pending ? 0 : 1);
+    const lease = readAmaCloserLease(rootDir, identity);
+    assert.equal(lease.status, scenario.outcome ? 'terminal' : scenario.pending ? 'pending' : 'dispatched');
+    assert.equal(lease.terminalOutcome, scenario.outcome || null);
+    assert.equal(logs.length, scenario.outcome ? 1 : 0);
+    if (scenario.outcome) assert.equal(logs[0].terminalOutcome, scenario.outcome);
+  });
+}

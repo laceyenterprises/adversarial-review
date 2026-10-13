@@ -513,8 +513,9 @@
       "path": "docs/data-model/ama-closer-leases.md",
       "store": "data/ama-closer-leases/",
       "schemaSurface": "src/ama/closer-lease.mjs",
-      "relatedSchemaSurfaces": ["src/ama/closer-terminal-cancel.mjs", "bin/hammer-review-handoff.mjs"],
+      "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs", "src/ama/closer-terminal-cancel.mjs", "bin/hammer-review-handoff.mjs"],
       "owner": "AMA closer ownership and terminal settlement",
+      "terminalSuccessHoldStatuses": ["succeeded"],
       "statusValues": ["pending", "dispatched", "handed-to-review", "terminal"]
     },
     {

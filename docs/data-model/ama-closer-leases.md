@@ -38,3 +38,15 @@ dispatched lease. A
 closed PR's expired pending lease with no launch ID is deleted, allowing a
 reopened PR to acquire a fresh lease. `pr-closed-externally` and
 `no-merge:concurrent-writer` are reclaimable terminal outcomes.
+
+`reconcileAmaCloserLease` settles terminal launch ownership before ordinary
+closer admission or follow-up claims. A bare `succeeded` process exit retains
+`dispatched` ownership while both the terminal audit and merged completion
+signal are absent or unreadable. Holding leaves the reclaim clock unchanged;
+the existing 30-minute lease expiry and active dispatch-record guards still
+apply. A terminal audit or PR-scoped merged signal permits settlement. Merge
+signals cover rekeyed leases too: their stored SHA can be a merge commit,
+so lookup does not filter by the current or original lease head. Without an
+audit or merge evidence, other terminal launches settle as `superseded` when
+the lease was rekeyed to an advanced head, otherwise `failed-without-merge`;
+operator-triage statuses settle as `deferred`.

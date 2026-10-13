@@ -59,10 +59,15 @@ export function readCompletedRemediationRounds(rootDir, repo, prNumber) {
   try {
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
     return readdirSync(dir).filter(name => name.endsWith('.json')).flatMap(name => {
-      const job = JSON.parse(readFileSync(join(dir, name), 'utf8'));
-      if (job.repo !== repo || String(job.prNumber) !== String(prNumber) || job.status !== 'completed') return [];
-      return (job.remediationPlan?.rounds || []).filter(round => round.state === 'completed'
-        && round.startHeadSha && round.resultingHeadSha);
+      try {
+        const job = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+        if (job.repo !== repo || String(job.prNumber) !== String(prNumber) || job.status !== 'completed') return [];
+        return (job.remediationPlan?.rounds || []).filter(round => round.state === 'completed'
+          && round.startHeadSha && round.resultingHeadSha);
+      } catch {
+        // A damaged or concurrently removed record cannot invalidate other jobs.
+        return [];
+      }
     });
   } catch {
     return [];

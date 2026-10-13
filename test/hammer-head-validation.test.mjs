@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches } from '../src/ama/hammer-head-validation.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 
 const fleet = sha => ({ sha, author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'web-flow' },
   commit: { verification: { verified: true, reason: 'valid' } } });
@@ -89,6 +92,45 @@ test('HAMFINAL-02: complete paginated fleet histories are validated beyond the f
     } });
   assert.equal(range.verified, true);
   assert.equal(range.commits.length, 260);
+});
+
+for (const damage of ['invalid JSON', 'empty file', 'unreadable file', 'invalid job shape']) {
+  test(`HAMCLOSE-05: ${damage} cannot discard other completed jobs' round proofs`, t => {
+    const root = mkdtempSync(join(tmpdir(), 'completed-remediation-rounds-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const dir = join(root, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(dir, { recursive: true });
+    const rounds = [
+      { state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'round1' },
+      { state: 'completed', startHeadSha: 'round1', resultingHeadSha: 'head' },
+    ];
+    const job = { repo: 'fixture/repo', prNumber: 1, status: 'completed', remediationPlan: { rounds: [
+      rounds[0], { state: 'spawned', startHeadSha: 'reviewed', resultingHeadSha: 'unfinished' },
+      { state: 'completed', startHeadSha: 'reviewed' },
+    ] } };
+    writeFileSync(join(dir, '10-valid.json'), JSON.stringify(job));
+    writeFileSync(join(dir, '20-valid.json'), JSON.stringify({ ...job, remediationPlan: { rounds: [rounds[1]] } }));
+    // Damage both before and after valid records so no scan ordering can hide it.
+    for (const name of ['00-damaged.json', '99-damaged.json']) {
+      if (damage === 'unreadable file') mkdirSync(join(dir, name));
+      else writeFileSync(join(dir, name), damage === 'empty file' ? '' : damage === 'invalid job shape' ? 'null' : '{');
+    }
+    for (const [index, overrides] of [{ repo: 'fixture/other' }, { prNumber: 2 }, { status: 'failed' }].entries()) {
+      writeFileSync(join(dir, `unrelated-${index}.json`), JSON.stringify({ ...job, ...overrides }));
+    }
+    writeFileSync(join(dir, 'ignored.txt'), '{');
+    assert.deepEqual(readCompletedRemediationRounds(root, 'fixture/repo', '1'), rounds);
+  });
+}
+
+test('HAMCLOSE-05: missing completed directory or only damaged jobs yields no round proof', t => {
+  const root = mkdtempSync(join(tmpdir(), 'completed-remediation-rounds-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  assert.deepEqual(readCompletedRemediationRounds(root, 'fixture/repo', 1), []);
+  const dir = join(root, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'broken.json'), '{');
+  assert.deepEqual(readCompletedRemediationRounds(root, 'fixture/repo', 1), []);
 });
 
 for (const [name, rounds, target, diverged, proven] of [

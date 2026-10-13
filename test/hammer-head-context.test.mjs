@@ -118,6 +118,8 @@ test('HAMCLOSE-05 completed daemon round exits successfully instead of handing o
   writeFileSync(join(dir, 'round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
     status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
       startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
+  writeFileSync(join(dir, 'broken.json'), '{');
+  mkdirSync(join(dir, 'unreadable.json'));
   const { stdout } = await f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root });
   assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');
   for (const overrides of [{ repo: 'fixture/other' }, { prNumber: 2 }, { status: 'in_progress' }]) {

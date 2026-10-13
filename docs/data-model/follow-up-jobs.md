@@ -62,12 +62,25 @@ The persisted accounting fields are:
 - `remediationPlan.rounds[].publishedHeadSha`: the different authoritative live
   head observed when the round settles. This records head movement, not proof
   that the worker authored the commit; legacy settled rounds may lack it.
+- `remediationPlan.rounds[].resultingHeadSha`: the live PR head SHA observed by
+  the daemon when a round completes successfully. It is `null` without live
+  lifecycle confirmation; legacy completed rounds may lack it. Worker replies
+  cannot attest this field. Unlike `publishedHeadSha`, it may equal the start
+  head when no head movement occurred.
 - `remediationWorker.recordedOutcome`: optional `failureReason`, `exitCode` and
   `signal` captured from local child error/exit events. HQ outcomes instead come
   from dispatch status; failed terminal events must confirm that status first.
 - `remediationPlan.publishedRoundsForPR`: the ledger's count of rounds with
   `publishedHeadSha`, computed when a budget stop is recorded.
   It feeds budget-stop comments and cannot reconstruct historical publications.
+
+HAMCLOSE-05 uses completed jobs in `completed/` for the same repo and PR to
+connect `startHeadSha` to `resultingHeadSha`. The hammer head validator requires
+each link's GitHub comparison to be strictly `ahead`; missing heads, identical
+or diverged comparisons, and failed comparison reads cannot establish proof.
+Unreadable or malformed job files are skipped individually, preserving valid
+evidence from other completed jobs. If the directory cannot be read, no round
+evidence is available.
 
 The retry transition removes the claimed round and decrements `currentRound`;
 the next claim reuses that round number. `retryHistory[]` retains the removed

@@ -190,7 +190,7 @@ export async function routeToHammerOwner({
     const waiting = isOrphanRecoveryWait(err);
     return { handled: waiting, error: err,
       ...(waiting ? { outcome: 'ama-pending', amaClosureResult: {
-        dispatched: false, skipMergeAgent: true, amaEnabled: true, reason: 'rate-limited-read',
+        dispatched: false, skipMergeAgent: true, amaEnabled: true, reason: err?.code || err?.reason || 'rate-limited-read',
       } } : {}),
     };
   }

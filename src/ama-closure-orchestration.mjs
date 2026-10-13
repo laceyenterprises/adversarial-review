@@ -471,6 +471,7 @@ export const AMA_REUSABLE_PROOF_OPERATIONS = new Set([
 ]);
 export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = 180_000,
   setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
+  maxEntries = Number.isFinite(Number(maxEntries)) ? Math.max(1, Math.floor(Number(maxEntries))) : 256;
   const entries = new Map();
   return {
     scope({ rootDir, repo, prNumber, reviewedHead, currentHead, evidenceVersion }) {

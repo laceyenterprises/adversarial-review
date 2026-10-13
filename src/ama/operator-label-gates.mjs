@@ -123,7 +123,7 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
 
 // Background dispatch owns this retry window; the serial phase never sleeps.
 export async function resolveOperatorLabelGateFailuresWithRetry(args, {
-  delaysMs = [], sleepImpl = (ms, signal) => sleep(ms, undefined, { signal }),
+  delaysMs = [], sleepImpl = (ms, signal) => sleep(ms, undefined, signal ? { signal } : {}),
   resolveImpl = resolveOperatorLabelGateFailures,
 } = {}) {
   let result = await resolveImpl(args);

@@ -23,6 +23,43 @@ function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
 }
 
+test('classification retry accepts a null signal with the real timer', async () => {
+  const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
+  let reads = 0;
+  const result = await resolveOperatorLabelGateFailuresWithRetry({ signal: null }, {
+    delaysMs: [1], resolveImpl: async () => ({ inconclusive: ++reads === 1, gates: [] }),
+  });
+  assert.equal(reads, 2);
+  assert.equal(result.inconclusive, false);
+});
+
+test('proof cache sanitizes invalid capacities and retains reusable reads', async () => {
+  const { createAmaProofCache } = await import('../src/ama-closure-orchestration.mjs');
+  for (const maxEntries of [0, -1, 0.5, NaN, Infinity]) {
+    const cache = createAmaProofCache({ maxEntries });
+    const identity = { rootDir: 'fixture', repo: 'example/repo', prNumber: 42,
+      reviewedHead: 'reviewed', currentHead: 'current' };
+    let reads = 0;
+    assert.equal(await cache.scope(identity).read('proof', async () => ++reads), 1);
+    assert.equal(await cache.scope(identity).read('proof', async () => ++reads), 1);
+    assert.equal(reads, 1);
+  }
+});
+
+test('hammer owner route preserves timeout and classification wait reasons', async () => {
+  const { routeToHammerOwner } = await import('../src/hammer-owner-route.mjs');
+  for (const error of [Object.assign(new Error('timeout'), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' }),
+    Object.assign(new Error('classification wait'), { reason: 'operator-label-classification-pending' })]) {
+    const result = await routeToHammerOwner({ route: 'ci-blocked',
+      rootDir: 'fixture', repoPath: 'example/repo', prNumber: 42, logger: null,
+      fetchMergeAgentCandidateImpl: async () => { throw error; },
+    });
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(result.amaClosureResult.reason, error.code || error.reason);
+  }
+});
+
 function deferred() {
   let resolve;
   let reject;

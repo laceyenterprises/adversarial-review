@@ -1452,6 +1452,16 @@ for (const routing of [
 for (const scenario of [
   { name: 'open after 61 seconds', state: 'OPEN', age: 61, outcome: 'failed-without-merge' },
   { name: 'open at 60 seconds', state: 'OPEN', age: 60, outcome: 'failed-without-merge' },
+  { name: 'Date terminal time', state: 'OPEN', terminalAt: new Date('2026-07-20T11:59:00.000Z'), outcome: 'failed-without-merge' },
+  { name: 'numeric terminal time', state: 'OPEN', terminalAt: Date.parse('2026-07-20T11:59:00.000Z'), outcome: 'failed-without-merge' },
+  { name: 'epoch zero terminal time', state: 'OPEN', terminalAt: 0, outcome: 'failed-without-merge' },
+  { name: 'invalid Date terminal time', state: 'OPEN', terminalAt: new Date(NaN) },
+  { name: 'nonfinite numeric terminal time', state: 'OPEN', terminalAt: Infinity },
+  { name: 'boolean terminal time', state: 'OPEN', terminalAt: true },
+  { name: 'padded JSON output', state: 'OPEN', stdout: '\n {"state":"OPEN"} \n', age: 61, outcome: 'failed-without-merge' },
+  { name: 'whitespace-only output', stdout: '\n \t', age: 61 },
+  { name: 'empty output', stdout: '', age: 61 },
+  { name: 'malformed JSON output', stdout: 'warning: unavailable', age: 61 },
   { name: 'open after 59 seconds', state: 'OPEN', age: 59 },
   { name: 'merged immediately', state: 'MERGED', age: 0, outcome: 'succeeded' },
   { name: 'closed without merge', state: 'CLOSED', age: 0, outcome: 'pr-closed-externally' },
@@ -1484,7 +1494,7 @@ for (const scenario of [
     const logs = [];
     const args = { rootDir, ...identity, hqRoot: rootDir, now,
       readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: scenario.status || 'succeeded',
-        terminal_at: scenario.terminalAt || (scenario.age === undefined ? undefined
+        terminal_at: scenario.terminalAt ?? (scenario.age === undefined ? undefined
           : new Date(Date.parse(now) - scenario.age * 1000).toISOString()) } }),
       readBuildCompletionSignalForPrImpl: () => scenario.merged ? { ok: true, row: { head_sha: 'merge-head' } } : { ok: false },
       readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }),
@@ -1498,9 +1508,15 @@ for (const scenario of [
       },
       logger: { info: line => logs.push(JSON.parse(line)) },
     };
+    if (scenario.stdout !== undefined) {
+      // Exercise the production subprocess/parser without a token or network.
+      writeFileSync(join(rootDir, 'gh'), '#!/bin/sh\nprintf "%s" "$HAM_TEST_PR_STDOUT"\n', { mode: 0o755 });
+      args.env = { ...process.env, PATH: rootDir, HAM_TEST_PR_STDOUT: scenario.stdout };
+      delete args.readPullRequestStateImpl;
+    }
     const before = readAmaCloserLease(rootDir, identity);
     assert.equal(reconcileAmaCloserLease(args), Boolean(scenario.outcome));
-    assert.equal(reads, scenario.noRead ? 0 : 1);
+    assert.equal(reads, scenario.noRead || scenario.stdout !== undefined ? 0 : 1);
     const lease = readAmaCloserLease(rootDir, identity);
     if (scenario.outcome) {
       assert.equal(lease.status, 'terminal');
@@ -1508,7 +1524,7 @@ for (const scenario of [
       assert.equal(logs.length, 1);
       if (!scenario.noRead) assert.equal(logs[0].prState, scenario.state);
       assert.equal(reconcileAmaCloserLease(args), false);
-      assert.equal(reads, scenario.noRead ? 0 : 1);
+      assert.equal(reads, scenario.noRead || scenario.stdout !== undefined ? 0 : 1);
     } else assert.deepEqual(lease, before);
   });
 }

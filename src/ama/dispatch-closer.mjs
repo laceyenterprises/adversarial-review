@@ -1440,7 +1440,13 @@ function readAmaCloserPullRequestState({ repo, prNumber, env }) {
     'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state',
   ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   if (result.error || result.status !== 0) return null;
-  return JSON.parse(result.stdout || '{}');
+  const raw = result.stdout?.trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES = new Set([
   'operator_triage_required',
@@ -1562,7 +1568,10 @@ export function reconcileAmaCloserLease({
       if (!livePr) return false;
       decidingPrState = livePr.state;
       if (decidingPrState === 'OPEN') {
-        const terminalAt = typeof probe.row?.terminal_at === 'string' ? Date.parse(probe.row.terminal_at) : NaN;
+        const terminalTime = probe.row?.terminal_at;
+        const terminalAt = typeof terminalTime === 'number' ? terminalTime
+          : terminalTime instanceof Date ? terminalTime.getTime()
+            : typeof terminalTime === 'string' ? Date.parse(terminalTime) : NaN;
         const ageMs = Date.parse(now) - terminalAt;
         if (!Number.isFinite(ageMs) || ageMs < AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS) return false;
       }

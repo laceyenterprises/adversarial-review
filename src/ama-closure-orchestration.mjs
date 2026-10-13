@@ -469,32 +469,57 @@ export const AMA_REUSABLE_PROOF_OPERATIONS = new Set([
   'closer-only-review-delta', 'stale-head-suppression-proof',
   'head-closer-verified-commit', 'ham-terminal-remediation-evidence',
 ]);
-export function createAmaProofCache({ maxEntries = 256 } = {}) {
+export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = 180_000,
+  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
   const entries = new Map();
   return {
     scope({ rootDir, repo, prNumber, reviewedHead, currentHead }) {
       const pr = JSON.stringify([rootDir, repo, prNumber]);
       const key = JSON.stringify([rootDir, repo, prNumber, reviewedHead, currentHead]);
       for (const [oldKey, entry] of entries) {
-        if (entry.pr === pr && oldKey !== key) entries.delete(oldKey);
+        if (entry.pr === pr && oldKey !== key) { entry.controller.abort(); entries.delete(oldKey); }
       }
       if (!entries.has(key)) {
-        entries.set(key, { pr, reads: new Map() });
-        while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+        entries.set(key, { pr, reads: new Map(), controller: new AbortController() });
+        while (entries.size > maxEntries) {
+          const oldest = entries.keys().next().value;
+          entries.get(oldest).controller.abort();
+          entries.delete(oldest);
+        }
       }
-      const reads = entries.get(key).reads;
+      const { reads, controller: scopeController } = entries.get(key);
       return {
         read(name, fn) {
           if (!reads.has(name)) {
-            const work = Promise.resolve().then(fn);
+            const controller = new AbortController();
+            const signal = AbortSignal.any([scopeController.signal, controller.signal]);
+            let timer;
+            const deadline = new Promise((_, reject) => {
+              timer = setTimeoutFn(() => {
+                const error = new AmaCoexistenceOperationTimeoutError(name, workTimeoutMs);
+                controller.abort(error);
+                reject(error);
+              }, workTimeoutMs);
+              timer?.unref?.();
+            });
+            const work = Promise.race([Promise.resolve().then(() => {
+              throwIfAborted(signal);
+              return fn(signal);
+            }), deadline]).finally(() => clearTimeoutFn(timer));
             reads.set(name, work);
-            work.catch(() => { if (reads.get(name) === work) reads.delete(name); });
+            work.then(result => {
+              if (name === 'ham-terminal-remediation-evidence' && !result && reads.get(name) === work) reads.delete(name);
+            }, () => { if (reads.get(name) === work) reads.delete(name); });
           }
           return reads.get(name);
         },
       };
     },
   };
+}
+export function runAmaProofOperation(scope, operation, fn, options) {
+  return runTimedCoexistenceOperation(operation,
+    () => scope.read(operation, proofSignal => fn({ signal: proofSignal })), options);
 }
 // Injected readers have independent caches, keeping offline fixtures isolated.
 const proofCaches = new WeakMap();
@@ -883,7 +908,7 @@ async function dispatchAmaClosureFor({
   });
   const runCoexistenceOperation = (operation, fn, options) =>
     AMA_REUSABLE_PROOF_OPERATIONS.has(operation)
-      ? proofScope.read(operation, () => runTimedCoexistenceOperation(operation, fn, options))
+      ? runAmaProofOperation(proofScope, operation, fn, options)
       : runTimedCoexistenceOperation(operation, fn, options);
   let cfg;
   let loadedConfig;
@@ -1093,9 +1118,24 @@ async function dispatchAmaClosureFor({
   // Cache immutable commit evidence only within this evaluation. The ancestry
   // walk and stale-head resume must not issue duplicate probes for the tip.
   const cachedSuppression = options => proofScope.read(`suppression:${options.headSha}`,
-    () => (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)(options));
+    proofSignal => (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)({ ...options, signal: proofSignal }));
   const cachedCommit = options => proofScope.read(`commit:${options.headSha}:${Boolean(options.includePrimaryChange)}`,
-    () => fetchHeadCloserVerifiedCommitImpl(options));
+    proofSignal => fetchHeadCloserVerifiedCommitImpl({ ...options, signal: proofSignal }));
+  // Warm independent reads together. A serial timeout must not prevent the
+  // other immutable proofs from making progress before the next watcher pass.
+  if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha) {
+    cachedSuppression({ repoPath, prNumber, headSha: settledReviewHeadSha, logger })
+      .catch(() => {});
+    if (typeof resolveHamTerminalRemediationEvidenceImpl === 'function') {
+      proofScope.read('ham-terminal-remediation-evidence', proofSignal =>
+        resolveHamTerminalRemediationEvidenceImpl({
+          reviewState: { headSha: originalReviewedHead },
+          prMetadata: { headSha: settledReviewHeadSha },
+          repoPath, prNumber, execFileImpl: execFileAsync, rootDir, logger,
+          fetchHeadCloserVerifiedCommitImpl: cachedCommit, signal: proofSignal,
+        })).catch(() => {});
+    }
+  }
   // STALECLOSER-03: the anchors are the reviewed head plus the comment-only
   // final-round pushes recorded for it, which already carry its verdict; the
   // hammer often stacks its closer commit on that push (agent-os#7818/#7822).
@@ -1722,6 +1762,7 @@ async function dispatchAmaClosureFor({
             prNumber,
             execFileImpl: execFileAsync,
             closerCommitSuppression,
+            fetchHeadCloserVerifiedCommitImpl: cachedCommit,
             rootDir,
             logger,
             signal: operationSignal,

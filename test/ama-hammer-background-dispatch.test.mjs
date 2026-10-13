@@ -1276,3 +1276,41 @@ test('HAMROUTE-01: head-bound proofs and commit reads survive passes and discard
   await cache.scope({ ...identity, prNumber: 44 }).read('proof', prove);
   assert.equal(await cache.scope(identity).read('proof', prove), 6);
 });
+
+test('HAMROUTE-01: a 12-second proof survives the five-second pass deadline with one copy', async t => {
+  const { createAmaProofCache, runAmaProofOperation } = await import('../src/ama-closure-orchestration.mjs');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const cache = createAmaProofCache();
+  const identity = { rootDir: 'fixture', repo: 'example/repo', prNumber: 42,
+    reviewedHead: 'reviewed', currentHead: 'current' };
+  let copies = 0;
+  let proofSignal;
+  const prove = async ({ signal }) => {
+    copies++;
+    proofSignal = signal;
+    await new Promise(resolve => setTimeout(resolve, 12_000));
+    return { proven: true };
+  };
+  const run = () => runAmaProofOperation(cache.scope(identity), 'closer-only-review-delta', prove, { timeoutMs: 5000 });
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const first = assert.rejects(run(), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' });
+  await flush();
+  t.mock.timers.tick(5000);
+  await first;
+  assert.equal(proofSignal.aborted, false);
+  const overlapping = assert.rejects(run(), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' });
+  await flush();
+  t.mock.timers.tick(5000);
+  await overlapping;
+  assert.equal(copies, 1);
+  t.mock.timers.tick(2000);
+  await flush();
+  assert.deepEqual(await run(), { proven: true });
+  assert.equal(copies, 1);
+  cache.scope({ ...identity, currentHead: 'changed' });
+  assert.equal(proofSignal.aborted, true);
+  const changed = runAmaProofOperation(cache.scope({ ...identity, currentHead: 'changed' }),
+    'closer-only-review-delta', async () => { copies++; return { proven: false }; }, { timeoutMs: 5000 });
+  assert.deepEqual(await changed, { proven: false });
+  assert.equal(copies, 2);
+});

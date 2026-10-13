@@ -119,6 +119,7 @@ function closerDeps({ nextLaunch = NEXT_LRQ, launchStatus = 'failed', launchRows
     }
   };
   return {
+    readPullRequestStateImpl: () => null,
     statusProbes,
     launches,
     warnings,

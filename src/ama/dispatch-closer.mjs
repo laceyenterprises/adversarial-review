@@ -1431,6 +1431,17 @@ const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
   'reaped_stuck_requested',
 ]);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
+const AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS = 60_000;
+
+// Follow-up claims are synchronous: use the live metadata probe's timeout,
+// but read only state and make no retries or branch lookup.
+function readAmaCloserPullRequestState({ repo, prNumber, env }) {
+  const result = spawnSync('gh', [
+    'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state',
+  ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+  if (result.error || result.status !== 0) return null;
+  return JSON.parse(result.stdout || '{}');
+}
 const AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES = new Set([
   'operator_triage_required',
   'reaped_stuck_requested',
@@ -1515,6 +1526,7 @@ export function reconcileAmaCloserLease({
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedger,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
+  readPullRequestStateImpl = readAmaCloserPullRequestState,
   statusProbe, probedLaunchRequestId = null, logger = console,
 } = {}) {
   try {
@@ -1542,11 +1554,23 @@ export function reconcileAmaCloserLease({
       ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env,
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
-    // A successful exit can precede the merge webhook/audit. Preserve ownership
-    // until that evidence arrives; callers retain their existing reclaim bound.
-    if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) return false;
-    const terminalOutcome = terminalLaunchLeaseOutcome({ status, auditOutcome, merged: mergedSignal?.ok === true,
-      headAdvanced: Boolean(held.lease.rekeyedFromHeadSha && held.lease.rekeyedFromHeadSha !== held.headSha) });
+    // A terminal hammer cannot merge later. Allow webhook/audit lag briefly
+    // before releasing an open PR; unreadable evidence retains the reclaim bound.
+    let decidingPrState = null;
+    if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) {
+      const livePr = normalizeAmaLivePrProbeResult(readPullRequestStateImpl({ repo, prNumber, env }));
+      if (!livePr) return false;
+      decidingPrState = livePr.state;
+      if (decidingPrState === 'OPEN') {
+        const terminalAt = typeof probe.row?.terminal_at === 'string' ? Date.parse(probe.row.terminal_at) : NaN;
+        const ageMs = Date.parse(now) - terminalAt;
+        if (!Number.isFinite(ageMs) || ageMs < AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS) return false;
+      }
+    }
+    const terminalOutcome = decidingPrState === 'CLOSED' ? 'pr-closed-externally'
+      : terminalLaunchLeaseOutcome({ status, auditOutcome,
+        merged: mergedSignal?.ok === true || decidingPrState === 'MERGED',
+        headAdvanced: Boolean(held.lease.rekeyedFromHeadSha && held.lease.rekeyedFromHeadSha !== held.headSha) });
     // Re-read after external evidence: ownership may have changed while reading.
     const current = readAmaCloserLease(rootDir, identity);
     if (current?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || current.lrqId !== launchRequestId) return false;
@@ -1565,7 +1589,8 @@ export function reconcileAmaCloserLease({
     if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
       terminalOutcome, now, logger, repo, prNumber })) return false;
     logger?.info?.(JSON.stringify({ event: 'ama_closer.terminal_lease_reconciled',
-      repo, prNumber, launchRequestId, terminalOutcome }));
+      repo, prNumber, launchRequestId, terminalOutcome,
+      ...(decidingPrState ? { prState: decidingPrState } : {}) }));
     return true;
   } catch {
     // Unreadable or timed-out evidence preserves the existing ownership answer.
@@ -4186,6 +4211,7 @@ export async function maybeDispatchAmaCloser({
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
+  readPullRequestStateImpl = readAmaCloserPullRequestState,
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   resolveHamTerminalRemediationEvidenceImpl = null,
@@ -4234,7 +4260,8 @@ export async function maybeDispatchAmaCloser({
       const settled = reconcileAmaCloserLease({ ...dispatchContext, rootDir: reconciliationRoot,
         repo: reconciliationRepo, prNumber,
         now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
-        readLaunchRequestStatusImpl, readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl });
+        readLaunchRequestStatusImpl, readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
+        readPullRequestStateImpl });
       if (settled) reconciledDispatchedLease = held.lease;
     }
   }

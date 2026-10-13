@@ -5310,6 +5310,9 @@ test('workspace retention removes terminal jobs after 72 hours and preserves act
 
 for (const scenario of [
   { name: 'successful exit without merge evidence', status: 'succeeded', claimed: false },
+  { name: 'open success after settle delay', status: 'succeeded', liveState: 'OPEN', age: 61, claimed: true, outcome: 'failed-without-merge' },
+  { name: 'open success before settle delay', status: 'succeeded', liveState: 'OPEN', age: 59, claimed: false },
+  { name: 'open rekeyed success after settle delay', status: 'succeeded', liveState: 'OPEN', age: 61, rekeyed: true, claimed: true, outcome: 'superseded' },
   { name: 'successful exit with unreadable merge evidence', status: 'succeeded', mergeUnreadable: true, claimed: false },
   { name: 'successful rekeyed exit without merge evidence', status: 'succeeded', rekeyed: true, claimed: false },
   { name: 'failed run', status: 'failed', claimed: true, outcome: 'failed-without-merge' },
@@ -5327,7 +5330,7 @@ for (const scenario of [
 ]) {
   test(`CLOSERLEASE-01: follow-up claims with ${scenario.name}`, t => {
     const rootDir = makeTempRoot(t);
-    const created = createFollowUpJob(makeJobInput(rootDir));
+    const created = createFollowUpJob({ ...makeJobInput(rootDir), repo: 'example/repo', prNumber: 42 });
     const job = readFollowUpJob(created.jobPath);
     const identity = { rootDir, repo: job.repo, prNumber: job.prNumber, headSha: 'synthetic-head' };
     const now = '2026-04-21T10:00:00.000Z';
@@ -5347,17 +5350,20 @@ for (const scenario of [
       identity.headSha = 'synthetic-new-head';
     }
     let reads = 0;
+    let prReads = 0;
     const logs = [];
     const delayedPendingPaths = new Set();
     const claimed = claimNextFollowUpJob({ rootDir, claimedAt: now, delayedPendingPaths,
       closerReconciliationOptions: {
+        readPullRequestStateImpl: () => { prReads++; return scenario.liveState ? { state: scenario.liveState } : null; },
         hqRoot: rootDir,
         readLaunchRequestStatusImpl: ({ launchRequestId }) => {
           reads++;
           assert.equal(launchRequestId, 'lrq_synthetic');
           if (scenario.error) throw scenario.error;
           return scenario.unreadable ? { ok: false, reason: 'ledger-read-failed' }
-            : { ok: true, row: { status: scenario.status } };
+            : { ok: true, row: { status: scenario.status, terminal_at: scenario.age === undefined ? undefined
+              : new Date(Date.parse(now) - scenario.age * 1000).toISOString() } };
         },
         readBuildCompletionSignalForPrImpl: args => {
           assert.equal(args.headSha, undefined, 'merged signals are scoped to PRs, not lease heads');
@@ -5377,6 +5383,7 @@ for (const scenario of [
       }), null);
     }
     assert.equal(reads, scenario.pending ? 0 : 1);
+    assert.equal(prReads, scenario.status === 'succeeded' && !scenario.merged ? 1 : 0);
     const lease = readAmaCloserLease(rootDir, identity);
     assert.equal(lease.status, scenario.outcome ? 'terminal' : scenario.pending ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, scenario.outcome || null);

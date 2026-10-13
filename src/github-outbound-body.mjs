@@ -9,6 +9,15 @@ const decode = (text) => text.replace(/(?:%[0-9a-f]{2})+/gi, (part) => {
   try { return decodeURIComponent(part); } catch { return part.replace(/%2f/gi, '/').replace(/%5c/gi, '/'); }
 });
 const normalize = (text) => decode(text).replace(/\\/g, '/');
+function localUrlPath(value) {
+  let path = normalize(value);
+  if (/^file:\/\//i.test(path)) {
+    path = path.replace(/^file:\/\//i, '');
+    if (!path.startsWith('/') && !/^[a-z]:\//i.test(path)) path = path.slice(path.indexOf('/') >= 0 ? path.indexOf('/') : path.length);
+  }
+  return path.replace(/^\/([a-z]:\/)/i, '$1');
+}
+
 function rootPattern(root) {
   return [...normalize(root).replace(/\/+$/, '')].map((char) => {
     if (char === '/') return '(?:/|\\\\|%2f|%5c)';
@@ -44,9 +53,7 @@ export function filterGitHubBody(input, options = {}) {
     roots = [snapshotRoot, fallbackSnapshotRoot, stateDir, rootDir, options.tempDir || tmpdir(), options.homeDir || homedir()];
     roots = roots.filter((root) => typeof root === 'string' && root.replace(/[\\/]/g, '')).sort((a, b) => b.length - a.length);
     const snapshotPath = (value) => {
-      const path = normalize(value).replace(/^file:\/\//i, '');
-      // Windows file URLs have an extra slash before the drive letter.
-      const comparable = path.replace(/^\/([a-z]:\/)/i, '$1');
+      const comparable = localUrlPath(value);
       const root = roots.find((candidate) => comparable.toLowerCase().startsWith(`${normalize(candidate).replace(/\/+$/, '').toLowerCase()}/`));
       if (!root) return null;
       const marker = comparable.toLowerCase().indexOf('/reviewer-snapshots/');
@@ -62,7 +69,7 @@ export function filterGitHubBody(input, options = {}) {
         return `https://github.com/${options.repo}/blob/${options.reviewerHeadSha}/${name.split('/').map(encodeURIComponent).join('/')}${anchor}`;
       }
       if (path) return path;
-      let value = url.replace(/^file:\/\//i, '');
+      let value = localUrlPath(url);
       for (const root of roots) value = value.replace(new RegExp(`${rootPattern(root)}(?:/|\\\\|%2f|%5c)?`, 'gi'), '<local>/');
       if (value.includes('<local>/')) return value;
       return normalize(value).split('/').filter(Boolean).at(-1) || '<local>';
@@ -72,7 +79,7 @@ export function filterGitHubBody(input, options = {}) {
       if (/^file:\/\//i.test(target) && !roots.some((root) => new RegExp(rootPattern(root), 'i').test(target))) return rewriteUrl(target);
       return link;
     });
-    text = text.replace(/file:\/\/[^\s<>\)\]"'`]+/gi, rewriteUrl);
+    text = text.replace(/file:\/\/[^\s<>\)\]"'`]*/gi, rewriteUrl);
     for (const root of roots) {
       text = text.replace(new RegExp(`${rootPattern(root)}(?:[^\\s<>\\)\\]"'\x60]*)`, 'gi'), (value) => {
         const path = snapshotPath(value);

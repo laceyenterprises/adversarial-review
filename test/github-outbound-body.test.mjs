@@ -49,6 +49,9 @@ test('URL encoding, trailing root slash and mixed scheme case', () => {
   assert.equal(filter(`FILE://${snapshot.replaceAll('/', '%2F')}/tests/test_example.py#L4`, { stateDir: '/Users/example/state/' }), `${blob}#L4`);
   assert.equal(filter('/Users%2Fexample%2Fstate/jobs/x'), '<local>/jobs/x');
   assert.equal(filter('file:///unknown/location/example.txt'), 'example.txt');
+  assert.equal(filter('FILE://'), '<local>');
+  assert.equal(filter(`file://localhost${snapshot}/tests/test_example.py`), blob);
+  assert.equal(filter('file://localhost/Users/example/notes.txt'), '<local>/notes.txt');
 });
 test('Windows snapshot paths and file URLs', () => {
   const options = { stateDir: 'C:\\Users\\example\\state', homeDir: 'C:\\Users\\example', rootDir: 'C:\\service', tempDir: 'C:\\temp' };

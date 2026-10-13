@@ -9,7 +9,8 @@ import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
 import { classifyCheckRollup } from '../src/checks-summary.mjs';
 
 const head = 'a'.repeat(40);
-const pr = { state: 'open', head: { sha: head }, labels: [], mergeable: true };
+const label = { id: 123, node_id: 'LA_fixture', name: 'operator-hold', color: 'ff0000' };
+const pr = { state: 'open', head: { sha: head }, labels: [label], mergeable: true };
 
 test('REST snapshot preserves the lease green assertion for runs and contexts', async () => {
   const snapshot = await fetchHammerPr('fixture/repo', 42, { read: async path => {
@@ -21,6 +22,7 @@ test('REST snapshot preserves the lease green assertion for runs and contexts', 
     return pr;
   } });
   assert.equal(classifyCheckRollup(snapshot.checks), 'SUCCESS');
+  assert.deepEqual(snapshot.labels, [{ id: label.node_id, name: label.name, color: label.color }]);
   const source = readFileSync(new URL('../bin/hammer-verify-head.sh', import.meta.url), 'utf8');
   const filter = source.match(/if jq -e --arg head "\$POST_REMEDIATION_SHA"\s+'([^']+)'/)[1];
   const green = value => spawnSync('jq', ['-e', '--arg', 'head', head, filter], {
@@ -51,7 +53,7 @@ test('commit statuses paginate individual contexts past 100 entries', async () =
   assert.equal(calls.length, 4);
 });
 
-for (const args of [[], ['--jq', '.statusCheckRollup[0].conclusion'], ['--json', 'statusCheckRollup', '--jq', '.statusCheckRollup[0].conclusion'], ['--json', 'headRefOid']]) {
+for (const args of [[], ['--jq', '.statusCheckRollup[0].conclusion'], ['--json', 'statusCheckRollup', '--jq', '.statusCheckRollup[0].conclusion'], ['--json', 'headRefOid'], ['--json', 'labels', '--jq', '.labels[].name']]) {
   test(`hammer PR CLI includes checks by default and honors explicit fields: ${args}`, t => {
     const dir = mkdtempSync(join(tmpdir(), 'hammer-pr-cli-checks-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -68,7 +70,8 @@ else process.exit(1);
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr);
-    if (args.includes('--jq')) assert.equal(result.stdout.trim(), 'SUCCESS');
+    if (args.includes('labels')) assert.equal(result.stdout.trim(), label.name);
+    else if (args.includes('--jq')) assert.equal(result.stdout.trim(), 'SUCCESS');
     else if (args.includes('--json')) assert.equal(JSON.parse(result.stdout).statusCheckRollup, undefined);
     else assert.equal(JSON.parse(result.stdout).statusCheckRollup[0].conclusion, 'SUCCESS');
   });

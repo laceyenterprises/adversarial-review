@@ -3,7 +3,7 @@ import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,7 +31,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   writeFileSync(gh, '#!/bin/sh\ncase "$*" in\n  "pr view"*) echo \'{"headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"main","mergeStateStatus":"CLEAN","state":"OPEN","isDraft":false,"labels":[]}\' ;;\n  "api --paginate"*) echo \'{"id":42,"body":"<!-- hq:ham-terminal-remediation:audit --> HAM-Terminal-Remediation-Head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' ;;\n  "api --method PATCH"*) echo patched > "$TMPDIR/patched" ;;\n  *) echo \'{"strict":false}\' ;;\nesac\n');
   chmodSync(gh, 0o755);
   const leaseNode = join(bin, 'lease-node');
-  writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) shift 2; number="$1"; shift; exec gh pr view "$number" "$@" ;;\n  --input-type=module) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/merge-lease.mjs) echo LEASE_PROGRESS >&2; echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\'; exit 70 ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
+  writeFileSync(leaseNode, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;\n  --input-type=module) exec ' + JSON.stringify(process.execPath) + ' "$@" ;;\n  */bin/merge-lease.mjs) echo LEASE_PROGRESS >&2; echo \'{"parked":true,"reason":"max-gate-attempts","closingStatus":"Reset the capped head"}\'; exit 70 ;;\n  */bin/ama-audit.mjs) exit 0 ;;\nesac\nexit 1\n');
   chmodSync(leaseNode, 0o755);
   const wrapper = template.match(/For each phase,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
   assert.ok(wrapper);
@@ -81,7 +81,7 @@ esac
   chmodSync(gh, 0o755);
   writeFileSync(join(bin, 'git'), '#!/bin/sh\necho '+ 'a'.repeat(40) +'\n', { mode: 0o755 });
   const proof = join(bin, 'proof');
-  writeFileSync(proof, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) shift 2; number="$1"; shift; exec gh pr view "$number" "$@" ;; *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
+  writeFileSync(proof, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;; *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
   const env = {
     HAM_NODE_BIN: proof, REAL_NODE: process.execPath, HAM_BASE_HEAD: 'a'.repeat(40),
     HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
@@ -429,7 +429,7 @@ case "$*" in
     while [ "$#" -gt 1 ]; do
       case "$1" in
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
-  */bin/hammer-pr-read.mjs) shift 2; number="$1"; shift; exec gh pr view "$number" "$@" ;;
+  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
         --match-head-commit) printf '%s' "$2" > "$TMPDIR/merge-head" ;;
         --subject) printf '%s' "$2" > "$TMPDIR/merge-subject" ;;
         --body) printf '%s' "$2" > "$TMPDIR/merge-body" ;;
@@ -453,7 +453,7 @@ esac
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
   */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
-  */bin/hammer-pr-read.mjs) shift 2; number="$1"; shift; exec gh pr view "$number" "$@" ;;
+  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
   --input-type=module)
     cat >/dev/null
     if [ "$RECEIPT_SCENARIO" = 'gate read failed' ]; then exit 1; fi
@@ -908,15 +908,20 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
   const dir = mkdtempSync(join(tmpdir(), 'hammer-common-budget-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const { default: Database } = await import('better-sqlite3');
-  mkdirSync(join(root, 'data'), { recursive: true });
-  const db = new Database(join(root, 'data', 'reviews.db'));
+  // Render against an isolated root while reusing the checked-in procedures.
+  for (const name of ['bin', 'src', 'node_modules', 'domains']) {
+    symlinkSync(join(root, name), join(dir, name), 'dir');
+  }
+  symlinkSync(join(root, 'config.yaml'), join(dir, 'config.yaml'), 'file');
+  mkdirSync(join(dir, 'data'));
+  const db = new Database(join(dir, 'data', 'reviews.db'));
   db.exec(`CREATE TABLE IF NOT EXISTS ham_finding_disputes (identity TEXT, head_sha TEXT,
     finding_reviewed_head TEXT, evidence_sha256 TEXT, resolution TEXT, comment_id TEXT,
     comment_author TEXT, comment_sha256 TEXT, repo TEXT, pr_number INTEGER)`);
   db.close();
   const head = 'a'.repeat(40), base = 'b'.repeat(40);
   const env = {
-    HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
+    HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
     HAM_PR_URL: 'https://github.com/fixture/repo/pull/42', HAM_REVIEWED_SHA: head,
     HAM_TARGET_REMEDIATION_SHA: head, HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash',
     HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'fixture', HAM_AUDIT_PATH: join(dir, 'audit'), HAM_REVIEWER: 'fixture',

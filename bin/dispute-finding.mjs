@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { filterGitHubBody } from '../src/github-outbound-body.mjs';
 import { parseArgs } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { disputeFinding } from '../src/ama/finding-dispute.mjs';
@@ -25,7 +26,7 @@ try {
     db,
     get: async (path) => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout),
     postComment: async (body) => JSON.parse((await execGhWithRetry({ args: ['api', '--method', 'POST',
-      `repos/${values.repo}/issues/${values.pr}/comments`, '-f', `body=${body}`], timeoutMs: 15000 })).stdout),
+      `repos/${values.repo}/issues/${values.pr}/comments`, '-f', `body=${filterGitHubBody(body, { repo: values.repo, reviewerHeadSha: values['head-sha'], rootDir })}`], timeoutMs: 15000 })).stdout),
     wake: requestWatcherWake,
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);

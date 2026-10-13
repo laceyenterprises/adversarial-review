@@ -24,6 +24,7 @@ function visit(node, ancestors, callback) {
 // Inventory locks the number of body write sites, not line numbers. A new write
 // must join the shared transform and be explicitly accounted for here.
 const expected = {
+  '../bin/dispute-finding.mjs': 1,
   'duplicate-family-workflow-cli.mjs': 1,
   'argus-security-review-deps.mjs': 1,
   'daemon-clean-merge.mjs': 1,
@@ -96,8 +97,8 @@ function inventory(source, name) {
 }
 test('every GitHub body write site uses the shared outbound filter', () => {
   const actual = {};
-  for (const file of files(src)) {
-    const name = file.slice(src.length + 1);
+  for (const file of [...files(src), ...files(join(src, '../bin'))]) {
+    const name = file.startsWith(`${src}/`) ? file.slice(src.length + 1) : `../bin/${file.split('/').at(-1)}`;
     const source = readFileSync(file, 'utf8');
     const writes = inventory(source, name);
     if (!writes.length) continue;

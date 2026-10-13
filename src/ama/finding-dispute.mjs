@@ -1,3 +1,4 @@
+import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 import { normalizeEffectiveReviewVerdict } from '../kernel/verdict.mjs';
@@ -28,6 +29,7 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
   if (!hasConcreteExactHeadEvidence(evidence)) {
     throw new Error('dispute evidence must quote an exact-head repro command and output, or the head file, in a fenced block');
   }
+  evidence = filterGitHubBody(evidence, { repo, reviewerHeadSha: headSha, rootDir });
   const pr = await get(`repos/${repo}/pulls/${prNumber}`);
   if (pr.state !== 'open' || pr.draft || pr.head?.sha !== headSha) throw new Error('dispute head is not live/open');
   const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100`);
@@ -65,8 +67,8 @@ export async function disputeFinding({ rootDir, repo, prNumber, headSha, reviewR
     evidenceSha256: row.evidence_sha256, commentId: row.comment_id });
   if (reservation.done) return { ...result(reservation.done), alreadyRecorded: true };
   try {
-    const commentBody = buildWithdrawalComment({ reviewRef: review.html_url || review.node_id, findingNumber,
-      identity, headSha, findingReviewedHead: review.commit_id, evidence });
+    const commentBody = filterGitHubBody(buildWithdrawalComment({ reviewRef: review.html_url || review.node_id, findingNumber,
+      identity, headSha, findingReviewedHead: review.commit_id, evidence }), { repo, reviewerHeadSha: headSha, rootDir });
     const comment = await postComment(commentBody);
     if (!comment?.node_id || !hamAuditCommentAuthorMatches(comment.user?.login)
       || comment.body !== commentBody) throw new Error('dispute comment lacks trusted HAM provenance');

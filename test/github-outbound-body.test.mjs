@@ -62,7 +62,10 @@ test('Windows snapshot paths and file URLs', () => {
 });
 test('workspace override and snapshot beneath home root', () => {
   assert.equal(filter('file:///home/example/state/workspace/reviewer-snapshots/acme_widgets/hash/tests/test_example.py', { env: { ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR: '/home/example/state/workspace' } }), blob);
-  assert.equal(filter('file:///Users/example/.agent-os/reviewer-workspace/reviewer-snapshots/acme_widgets/hash/tests/test_example.py'), blob);
+  assert.equal(filter('file:///Users/example/.agent-os/adversarial-review/reviewer-workspace/reviewer-snapshots/acme_widgets/hash/tests/test_example.py'), blob);
+});
+test('snapshot-looking directories outside the runtime snapshot roots stay local references', () => {
+  assert.equal(filter('file:///Users/example/other/reviewer-snapshots/acme_widgets/hash/src/example.mjs'), '<local>/other/reviewer-snapshots/acme_widgets/hash/src/example.mjs');
 });
 test('odd input and internal failure do not throw or leak roots', () => {
   assert.equal(filter(null), '');

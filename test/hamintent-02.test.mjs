@@ -87,7 +87,7 @@ function disputeHarness(t, overrides = {}) {
   db.prepare(`INSERT INTO reviewed_prs(repo, pr_number, reviewer, review_status, pr_state, reviewed_at, revision_ref)
     VALUES ('fixture/repo', 1, 'codex', 'posted', 'open', '2026-10-03T00:00:00Z', ?)`).run(head);
   const calls = [];
-  const args = { rootDir: '/fixture', repo: 'fixture/repo', prNumber: 1, headSha: head,
+  const args = { rootDir: '/home/example/state/service', repo: 'fixture/repo', prNumber: 1, headSha: head,
     reviewRef: review.node_id, findingNumber: 1, evidence: jsonbEvidence };
   const deps = { db, get: async (url) => url.includes('/reviews?') ? [{ ...review, commit_id: head }]
     : { state: 'open', head: { sha: head } },
@@ -620,4 +620,18 @@ test('unlinked-author HAM reversal requires every terminal provenance trailer; b
   e.reversalAuthorizations[0].commit.commit.message = commit.commit.message.replace(
     'Closed-By: hammer (adversarial-pipe-mode)', '');
   assert.equal(checkPrimaryChange(e, head).reason, 'primary-change-reverted');
+});
+
+test('withdrawal evidence and comment digests use the filtered posted text', async (t) => {
+  const h = disputeHarness(t);
+  h.args.evidence = 'Exact-head command and output:\n```text\n/home/example/state/service/run\npassed\n```';
+  const filteredEvidence = h.args.evidence.replace('/home/example/state/service/', '<local>/');
+  const result = await disputeFinding(h.args, h.deps);
+  const posted = h.calls.find(([kind]) => kind === 'comment')[1];
+  assert.doesNotMatch(posted, /\/home\/example\/state/);
+  assert.ok(posted.includes(filteredEvidence));
+  const row = h.db.prepare('SELECT evidence_sha256, comment_sha256 FROM ham_finding_disputes').get();
+  assert.equal(row.evidence_sha256, createHash('sha256').update(filteredEvidence.trim()).digest('hex'));
+  assert.equal(result.evidenceSha256, row.evidence_sha256);
+  assert.equal(row.comment_sha256, createHash('sha256').update(posted).digest('hex'));
 });

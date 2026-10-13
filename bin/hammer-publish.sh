@@ -105,6 +105,8 @@ HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Hea
   "$HAM_AUDIT_REMEDIATED_TOTAL" \
   "$HAM_AUDIT_REMEDIATED_BLOCKING" \
   "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
+HAM_AUDIT_COMMENT_BODY=$(printf '%s' "$HAM_AUDIT_COMMENT_BODY" |
+  "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_AUDIT_COMMENT_BODY='<local>'
 # The worker-pool exports the hammer's entitled token as HAMMER_LACEY_GH_TOKEN
 # (entitlement the-hammer-lacey). agent-os#4762 split it from the merge-agent's
 # MERGE_AGENT_GH_TOKEN so the hammer stops inheriting the merge-agent[bot]

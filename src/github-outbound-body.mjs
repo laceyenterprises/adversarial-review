@@ -9,6 +9,7 @@ const decode = (text) => text.replace(/(?:%[0-9a-f]{2})+/gi, (part) => {
   try { return decodeURIComponent(part); } catch { return part.replace(/%2f/gi, '/').replace(/%5c/gi, '/'); }
 });
 const normalize = (text) => decode(text).replace(/\\/g, '/');
+const beneath = (root, ...parts) => `${normalize(root).replace(/\/+$/, '')}/${parts.join('/')}`;
 function localUrlPath(value) {
   let path = normalize(value);
   if (/^file:\/\//i.test(path)) {
@@ -44,21 +45,21 @@ export function filterGitHubBody(input, options = {}) {
     text = typeof input === 'string' ? input : String(input ?? '');
     const rootDir = options.rootDir || serviceRoot;
     const env = options.env || process.env;
-    const stateDir = options.stateDir || env.ADVERSARIAL_REVIEW_STATE_DIR || resolve(rootDir, 'data');
+    const stateDir = options.stateDir || resolve(env.ADVERSARIAL_REVIEW_STATE_DIR || resolve(rootDir, 'data'));
     const workspaceDir = env.ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR;
-    const snapshotRoot = options.snapshotRoot || resolve(workspaceDir || stateDir, 'reviewer-snapshots');
+    const snapshotRoot = options.snapshotRoot || beneath(workspaceDir ? resolve(workspaceDir) : stateDir, 'reviewer-snapshots');
     const fallbackSnapshotRoot = env.HQ_ROOT
-      ? resolve(env.HQ_ROOT, 'adversarial-review', 'reviewer-workspace', 'reviewer-snapshots')
-      : resolve(options.homeDir || homedir(), '.agent-os', 'adversarial-review', 'reviewer-workspace', 'reviewer-snapshots');
-    roots = [snapshotRoot, fallbackSnapshotRoot, stateDir, rootDir, options.tempDir || tmpdir(), options.homeDir || homedir()];
+      ? beneath(resolve(env.HQ_ROOT), 'adversarial-review', 'reviewer-workspace', 'reviewer-snapshots')
+      : beneath(options.homeDir || homedir(), '.agent-os', 'adversarial-review', 'reviewer-workspace', 'reviewer-snapshots');
+    const snapshotRoots = [snapshotRoot, fallbackSnapshotRoot,
+      beneath(stateDir, 'reviewer-snapshots'), beneath(stateDir, 'reviewer-workspace', 'reviewer-snapshots')].map((root) => normalize(root).replace(/\/+$/, ''));
+    roots = [...snapshotRoots, stateDir, rootDir, serviceRoot, options.tempDir || tmpdir(), options.homeDir || homedir()];
     roots = roots.filter((root) => typeof root === 'string' && root.replace(/[\\/]/g, '')).sort((a, b) => b.length - a.length);
     const snapshotPath = (value) => {
       const comparable = localUrlPath(value);
-      const root = roots.find((candidate) => comparable.toLowerCase().startsWith(`${normalize(candidate).replace(/\/+$/, '').toLowerCase()}/`));
+      const root = snapshotRoots.find((candidate) => comparable.toLowerCase().startsWith(`${candidate.toLowerCase()}/`));
       if (!root) return null;
-      const marker = comparable.toLowerCase().indexOf('/reviewer-snapshots/');
-      if (marker < 0) return null;
-      const parts = comparable.slice(marker + '/reviewer-snapshots/'.length).split('/');
+      const parts = comparable.slice(root.length + 1).split('/');
       return parts.length > 2 ? parts.slice(2).join('/') : null;
     };
     const rewriteUrl = (url) => {

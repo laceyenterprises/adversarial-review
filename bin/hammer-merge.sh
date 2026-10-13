@@ -778,7 +778,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
   export HAM_PR_TITLE
   HAM_COMMIT_BODY_JSON=$(printf '%s' "$HAM_PROTECTIVE_PREDECESSOR_BODY" |
-    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>>) || {
+    "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-commit-body.mjs <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA") || {
     HAM_SANITIZER_STATUS=$?
     if [ "$HAM_SANITIZER_STATUS" -eq 64 ] || [ "$HAM_SANITIZER_STATUS" -eq 78 ]; then
       ham_append_terminal_audit failed-without-merge commit-body-sanitization-failed || true

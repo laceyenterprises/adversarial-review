@@ -2827,7 +2827,7 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (rereviewBlocked && !pendingCiCompletion) {
+    if (rereviewBlocked) {
       const blockedReason = rereview.outcomeReason || rereview.status || 'rereview-blocked';
       const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
       const projectedStopJob = {

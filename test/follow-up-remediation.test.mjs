@@ -12853,12 +12853,15 @@ for (const metadata of ['foreign-remote']) {
   });
 }
 
-for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round']) {
+for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round',
+  'review-row-missing', 'pr-not-open', 'malformed-title-terminal', 'already-pending']) {
   test(`CIBLOCKHAM-02: pushed round pending CI completion (${scenario})`, async (t) => {
     const rootDir = mkdtempSync(path.join(tmpdir(), 'pending-ci-round-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const startHead = 'a'.repeat(40);
     const endHead = scenario === 'unchanged' ? startHead : 'b'.repeat(40);
+    const refusedReset = ['review-row-missing', 'pr-not-open', 'malformed-title-terminal'].includes(scenario);
+    const normalizedRereview = ['normalized-rereview', 'blocking-rereview', 'already-pending'].includes(scenario) || refusedReset;
     const { claimed } = makeQueuedJob(rootDir, {
       repo: 'example/review-fixture', prNumber: 42, revisionRef: startHead, maxRemediationRounds: 2,
       linearTicketId: 'SYNTH-42', reviewBody: scenario === 'blocking-rereview'
@@ -12884,7 +12887,7 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
     writeFileSync(outputPath, 'Addressed all findings and pushed.');
     writeValidReply(replyPath, claimed.job, {
       outcome: 'partial',
-      summary: ['normalized-rereview', 'blocking-rereview'].includes(scenario)
+      summary: normalizedRereview
         ? `Addressed all findings and pushed ${endHead}.` : 'Addressed all findings.',
       addressed: scenario === 'blocking-rereview'
         ? [{ title: 'Broken handoff', finding: 'Remediation loses the handoff.', action: 'Preserved the review handoff.' }] : [],
@@ -12910,18 +12913,21 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
       inspectRemediationCiRegressionImpl: async () => ({ state: 'pending', headSha: endHead }),
       requestReviewRereviewImpl: (args) => {
         rereviewCalls.push(args);
+        if (refusedReset) return { triggered: false, status: 'blocked', reason: scenario };
+        if (scenario === 'already-pending') return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
         return { triggered: true, status: 'pending', reason: 'review-status-reset' };
       },
-      postCommentImpl: async (args) => { comments.push(args); return { posted: true }; },
+      // Exercise durable comment rendering without a live comment-ID lookup.
+      postCommentImpl: async (args) => { comments.push(args); return { posted: false, reason: 'offline-fixture' }; },
       log: { log() {}, warn() {}, error() {} },
     }));
-    const expectedCompleted = ['pushed', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round'].includes(scenario);
-    const expectedRereview = ['normalized-rereview', 'blocking-rereview'].includes(scenario);
+    const expectedCompleted = ['pushed', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round', 'already-pending'].includes(scenario);
+    const expectedRereview = normalizedRereview;
     assert.equal(rereviewCalls.length, expectedRereview ? 1 : 0);
     if (expectedRereview) {
       assert.equal(rereviewCalls[0].targetRevisionRef, endHead);
       assert.equal(result.job.reReview.requested, true);
-      assert.equal(result.job.reReview.triggered, true);
+      assert.equal(result.job.reReview.triggered, !refusedReset && scenario !== 'already-pending');
       assert.equal(result.job.reReview.ciSettlement, 'pending-at-timeout');
       assert.equal(result.job.remediationPlan.rounds.at(-1).reReview.requested, true);
     }
@@ -12930,6 +12936,18 @@ for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rere
     assert.equal(comments.length, 1);
     const body = comments[0].body;
     assert.equal(result.job.commentDelivery.body, body, 'durable retry renders the same outcome');
+    if (refusedReset) {
+      assert.equal(result.action, 'stopped');
+      assert.equal(result.reason, 'rereview-blocked');
+      assert.equal(result.job.remediationPlan.stop.code, 'rereview-blocked');
+      assert.equal(result.job.reReview.outcomeReason, scenario);
+      assert.equal(result.job.completion.pendingCiOnly, true, 'pending CI evidence must not waive a refused reset');
+      assert.match(body, /Human intervention required/);
+      assert.match(body, /watcher refused the reset/);
+      assert.ok(body.includes(scenario));
+      assert.doesNotMatch(body, /The pipeline continues when CI finishes|Nothing is needed from a person/);
+      return;
+    }
     if (expectedCompleted) {
       assert.ok(body.includes('**Outcome:** round finished; CI still running.\n\nAll findings from this review were addressed and pushed as bbbbbbb. Required checks had not finished when the round ended.\n\nNothing is needed from a person. The pipeline continues when CI finishes.'));
       assert.doesNotMatch(body, /Human intervention required/);

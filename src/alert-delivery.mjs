@@ -683,7 +683,25 @@ function alertPresentationForDoc(doc) {
   };
 }
 
-function queueAlertDoc(rootDir, doc) {
+const ALERT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u;
+const FIXED_RECOVERY_EVENTS = Object.freeze([
+  'ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach',
+  'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted',
+  'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain',
+  'ama.orphan_recovery.store-error', ...HAMMER_OWNER_PAGE_EVENTS,
+]);
+
+function fixedAlertId(prefix, hash) {
+  const safePrefix = String(prefix || 'alert').replace(/[^A-Za-z0-9_-]/gu, '-').replace(/^[^A-Za-z0-9]+/u, '').slice(0, 135) || 'alert';
+  return `${safePrefix}-${hash}`;
+}
+
+function queueAlertDoc(rootDir, doc, { logger = console } = {}) {
+  if (typeof doc.id !== 'string' || !ALERT_ID_PATTERN.test(doc.id)) {
+    doc.id = fixedAlertId(doc.event, crypto.createHash('sha256').update(String(doc.id)).digest('hex'));
+    logger.warn?.(`[alert-delivery] normalized unsafe alert id for event ${doc.event || 'unknown'}`);
+  }
+  validateAlertDocIdentity(`${doc.id}.json`, doc);
   ensureAlertSinkDirs(rootDir);
   const filePath = alertDocPath(rootDir, 'pending', doc.id);
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, { overwrite: false });
@@ -701,7 +719,7 @@ function validateAlertDocIdentity(filePath, doc) {
     throw new Error(`Alert document ${basename(filePath)} must be a JSON object`);
   }
   const id = typeof doc.id === 'string' ? doc.id.trim() : '';
-  if (doc.id !== id || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u.test(id)) {
+  if (doc.id !== id || !ALERT_ID_PATTERN.test(id)) {
     throw new Error(`Alert document ${basename(filePath)} has an unsafe id`);
   }
   const expectedName = `${id}.json`;
@@ -1347,6 +1365,7 @@ function readAlertSinkHealth({
       rootDir,
       ready: Object.values(counts).every((count) => count === 0),
       ...counts,
+      quarantineEventCounts: quarantineEventCounts(rootDir),
       healthCheckError: null,
     };
   } catch (error) {
@@ -1362,6 +1381,21 @@ function readAlertSinkHealth({
       lastFailureReason: `alert sink health check failed: ${String(error?.message || error)}`,
     };
   }
+}
+
+function quarantineEventCounts(rootDir) {
+  const counts = Object.create(null);
+  if (!existsSync(quarantineDir(rootDir))) return counts;
+  for (const name of readdirSync(quarantineDir(rootDir)).slice(0, 1000)) {
+    let event = 'unknown';
+    try {
+      const doc = JSON.parse(readFileSync(join(quarantineDir(rootDir), name), 'utf8'));
+      if (typeof doc.event === 'string') event = doc.event.slice(0, 120);
+    } catch { /* Malformed documents still contribute to the unknown class. */ }
+    if (!Object.hasOwn(counts, event) && Object.keys(counts).length >= 20) event = 'other';
+    counts[event] = (counts[event] || 0) + 1;
+  }
+  return counts;
 }
 
 async function deliverAlert(text, {
@@ -1383,9 +1417,9 @@ async function deliverAlert(text, {
   // Deduplication must inspect the same real sink that queueAlertDoc writes.
   // fsImpl supplies token/config reads; virtual token presence is not a receipt.
   if (event === 'reviewer.model_unavailable') {
-    doc.id = `reviewer-model-${crypto.createHash('sha256').update(JSON.stringify([
+    doc.id = fixedAlertId('reviewer-model', crypto.createHash('sha256').update(JSON.stringify([
       payload?.refusedModel, new Date(now).toISOString().slice(0, 10),
-    ])).digest('hex')}`;
+    ])).digest('hex'));
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
       if ((receiptFsImpl?.existsSync || existsSync)(existingPath)) {
@@ -1396,7 +1430,7 @@ async function deliverAlert(text, {
   }
   if (event === 'adversarial_review.operator_decision_required' && payload?.decisionId && payload?.decisionSeriesId) {
     // A lane reset starts a new blocker series even when the PR head is unchanged.
-    doc.id = `review-decision-${crypto.createHash('sha256').update(JSON.stringify([payload.decisionId, payload.decisionSeriesId])).digest('hex')}`;
+    doc.id = fixedAlertId('review-decision', crypto.createHash('sha256').update(JSON.stringify([payload.decisionId, payload.decisionSeriesId])).digest('hex'));
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
       if (existsSync(existingPath)) {
@@ -1405,16 +1439,16 @@ async function deliverAlert(text, {
       }
     }
   }
-  if (['ama.automated_recovery.exhausted', 'ama.closure_lag.slo_breach', 'ama_finding_dispute_exhausted', 'ama_primary_change_refusal_exhausted', 'ama.orphan_recovery.exhausted', 'ama.orphan_recovery.ownership-uncertain', 'ama.orphan_recovery.store-error', ...HAMMER_OWNER_PAGE_EVENTS].includes(event)) {
+  if (FIXED_RECOVERY_EVENTS.includes(event)) {
     // Recovery retries after a crash or transport error reuse the same outbox
     // identity, even if the alert has already moved to a terminal directory.
-    doc.id = event === 'ama.closure_lag.slo_breach' ? closureLagAlertId(payload)
-      : `ama-recovery-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex')}`;
+    doc.id = event === 'ama.closure_lag.slo_breach' ? fixedAlertId('ama-closure-lag', closureLagAlertId(payload).slice('ama-closure-lag-'.length))
+      : fixedAlertId('ama-recovery', crypto.createHash('sha256').update(`${payload?.repo}#${payload?.pr}@${payload?.head}`).digest('hex'));
     const legacyRecoveryId = event === 'ama.automated_recovery.exhausted' ? doc.id : null;
     if (legacyRecoveryId) {
-      doc.id = `ama-recovery-${crypto.createHash('sha256').update(JSON.stringify([
+      doc.id = fixedAlertId('ama-recovery', crypto.createHash('sha256').update(JSON.stringify([
         payload?.repo, payload?.pr, payload?.head, payload?.reason,
-      ])).digest('hex')}`;
+      ])).digest('hex'));
       // Honor pre-upgrade enqueue receipts only for the same exhaustion reason.
       // A crash after enqueue but before recovery saves its receipt must not
       // duplicate that page; a different reason must get a fresh identity.
@@ -1434,7 +1468,7 @@ async function deliverAlert(text, {
     }
     if (event === 'ama_finding_dispute_exhausted' || event === 'ama_primary_change_refusal_exhausted' || event.startsWith('ama.orphan_recovery.')
       || HAMMER_OWNER_PAGE_EVENTS.includes(event)) {
-      doc.id = `${event}-${crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex')}`;
+      doc.id = fixedAlertId(event, crypto.createHash('sha256').update(`${payload?.repo}#${payload?.prNumber}${event !== 'ama_finding_dispute_exhausted' ? `@${payload?.headSha}` : ''}`).digest('hex'));
     }
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
@@ -1456,6 +1490,9 @@ async function deliverAlert(text, {
 }
 
 export {
+  FIXED_RECOVERY_EVENTS,
+  queueAlertDoc,
+  validateAlertDocIdentity,
   DEFAULT_ALERT_BUS_URL,
   assertAlertSinkOwner,
   alertSinkRoot,

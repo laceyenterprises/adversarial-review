@@ -1829,6 +1829,7 @@ async function main() {
           pendingCount: sinkHealth.pendingCount,
           inflightCount: sinkHealth.inflightCount,
           quarantineCount: sinkHealth.quarantineCount,
+          quarantineEventCounts: sinkHealth.quarantineEventCounts,
           deadLetterCount: sinkHealth.deadLetterCount,
           lastFailureReason: sinkHealth.lastFailureReason,
         });

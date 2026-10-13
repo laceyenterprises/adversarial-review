@@ -231,10 +231,14 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     if (state.attempts >= 2) {
       if (!state.paged) {
         try {
-          await pageImpl(`Ownerless PR recovery exhausted: ${repo} PR ${prNumber} head ${headSha}`, {
+          const pageResult = await pageImpl(`Ownerless PR recovery exhausted: ${repo} PR ${prNumber} head ${headSha}`, {
             event: 'ama.orphan_recovery.exhausted', payload: { repo, prNumber, headSha, attempts: state.attempts, outcomes,
               lastAttempt: previous } });
-          db.prepare('UPDATE heads SET paged=1 WHERE head=?').run(headSha);
+          if (pageResult?.queued === false && pageResult?.status !== 'delivered') {
+            logger?.warn?.('Orphan recovery page was not queued; retrying next pass');
+          } else {
+            db.prepare('UPDATE heads SET paged=1 WHERE head=?').run(headSha);
+          }
         } catch (error) {
           logger?.warn?.(`Orphan recovery page enqueue failed: ${text(error.message || error)}`);
         }

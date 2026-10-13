@@ -3,7 +3,7 @@ import { observeClosureWait } from './closure-wait.mjs';
 import { decideClosureOwner } from './closure-owner.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
-import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailures, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
+import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
@@ -4245,6 +4245,7 @@ export async function maybeDispatchAmaCloser({
   logGate = dispatchCloserLogGate,
   logger = console,
   env = process.env,
+  operatorLabelClassificationRetryDelaysMs = [],
   signal = null,
 }) {
   throwIfAborted(signal);
@@ -6243,9 +6244,10 @@ export async function maybeDispatchAmaCloser({
   // Resolve label holds only after route admission, stop releases, terminal
   // launch/lease reconciliation and same-PR remediation ownership checks.
   if (prMetadata?.isOpen === true && prMetadata?.headSha) {
-    const classification = await resolveOperatorLabelGateFailures({ rollup: prMetadata.statusCheckRollup,
+    const classification = await resolveOperatorLabelGateFailuresWithRetry({ rollup: prMetadata.statusCheckRollup,
       repo: dispatchContext?.repo, headSha: prMetadata.headSha, execFileImpl, env, signal,
-      requiredContexts: prMetadata.branchProtection?.requiredContexts });
+      requiredContexts: prMetadata.branchProtection?.requiredContexts },
+      { delaysMs: operatorLabelClassificationRetryDelaysMs });
     throwIfAborted(signal);
     if (classification.inconclusive) return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       recoveryWait: true, reason: 'operator-label-classification-pending' });

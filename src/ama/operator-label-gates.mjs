@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -54,7 +55,7 @@ const FAILED_JOB_READ_TTL_MS = 60_000;
 // Scope caches to the reader (including injected offline readers). Completed
 // steps are immutable per repo/job/head; negative transport reads retry later.
 const jobCaches = new WeakMap();
-export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, execFileImpl, env, signal, cfg = null, requiredContexts = [] }) {
+export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, execFileImpl, env, signal, cfg = null, requiredContexts = [], retryFailedReads = false }) {
   const none = { gates: [], inconclusive: false };
   const pending = { gates: [], inconclusive: true };
   const external = latestCheckRollupItems(rollup).filter(item =>
@@ -87,7 +88,7 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
     if (signal?.aborted) return pending;
     const key = JSON.stringify([repo, jobId, headSha]);
     let entry = cache.get(key);
-    if (entry && entry.expiresAt <= Date.now()) { cache.delete(key); entry = null; }
+    if (entry && (entry.expiresAt <= Date.now() || (retryFailedReads && entry.inconclusive))) { cache.delete(key); entry = null; }
     if (!entry) {
       const remaining = deadline - Date.now();
       if (reads >= MAX_JOB_READS_PER_PASS || remaining <= 0) return pending;
@@ -118,6 +119,21 @@ export async function resolveOperatorLabelGateFailures({ rollup, repo, headSha, 
       description: gate.reason })));
   }
   return { gates: operatorLabelGateFailures(expanded, { env, cfg: { requiredCheckContexts: [] } }), inconclusive: false };
+}
+
+// Background dispatch owns this retry window; the serial phase never sleeps.
+export async function resolveOperatorLabelGateFailuresWithRetry(args, {
+  delaysMs = [], sleepImpl = (ms, signal) => sleep(ms, undefined, { signal }),
+  resolveImpl = resolveOperatorLabelGateFailures,
+} = {}) {
+  let result = await resolveImpl(args);
+  for (const delayMs of delaysMs) {
+    if (!result.inconclusive || args.signal?.aborted) break;
+    await sleepImpl(delayMs, args.signal);
+    if (args.signal?.aborted) break;
+    result = await resolveImpl({ ...args, retryFailedReads: true });
+  }
+  return result;
 }
 
 // Separate from dispatch records: this hold must never look like a launch.

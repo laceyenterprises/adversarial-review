@@ -2322,6 +2322,11 @@ async function dispatchAmaClosureFor({
       maxConcurrent: cfg.amaCloserMaxConcurrentLaunches,
     });
     backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
+    // A settled classification wait is not a refusal. Submit fresh work in
+    // this pass instead of spending a whole pass consuming the wait.
+    if (backgroundSettled?.ok && backgroundSettled.result?.reason === 'operator-label-classification-pending') {
+      backgroundSettled = null;
+    }
     // A scoped request must observe the closer's gates before taking ownership.
     // Skipping a fresh run here would erase a consumed safety refusal on the
     // next tick, letting the same label bypass risk policy or a dispatch cap.
@@ -2387,7 +2392,8 @@ async function dispatchAmaClosureFor({
           if (liveMergeability !== 'MERGEABLE' && liveMergeability !== 'CONFLICTING') {
             return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
-          return maybeDispatchAmaCloserImpl({ ...closerArgs, signal: backgroundSignal });
+          return maybeDispatchAmaCloserImpl({ ...closerArgs, signal: backgroundSignal,
+            operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
         },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
           logger?.log?.(

@@ -1314,3 +1314,57 @@ test('HAMROUTE-01: a 12-second proof survives the five-second pass deadline with
   assert.deepEqual(await changed, { proven: false });
   assert.equal(copies, 2);
 });
+
+test('HAMROUTE-01: background classification retries two failed reads and launches in one run', async () => {
+  const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
+  let reads = 0;
+  let elapsed = 0;
+  let launches = 0;
+  const queue = createAmaHammerBackgroundQueue();
+  const key = 'example/repo#42@current';
+  queue.submit({ key, run: async () => {
+    const classification = await resolveOperatorLabelGateFailuresWithRetry({
+      repo: 'example/repo', headSha: 'current',
+      rollup: [{ name: 'repo-guards', conclusion: 'FAILURE',
+        detailsUrl: 'https://github.com/example/repo/actions/runs/1/job/2' }],
+      execFileImpl: async () => {
+        if (++reads <= 2) throw new Error('synthetic failed job read');
+        return { stdout: JSON.stringify({ head_sha: 'current', conclusion: 'failure',
+          steps: [{ name: 'Unit tests', conclusion: 'failure' }] }) };
+      },
+    }, { delaysMs: [20_000, 40_000], sleepImpl: async ms => { elapsed += ms; } });
+    assert.equal(classification.inconclusive, false);
+    assert.deepEqual(classification.gates, []);
+    launches++;
+    return { dispatched: true, launchRequestId: 'synthetic-launch' };
+  } });
+  await queue.drain();
+  assert.equal(reads, 3);
+  assert.equal(elapsed, 60_000);
+  assert.equal(launches, 1);
+  assert.equal(queue.takeSettled(key).result.dispatched, true);
+});
+
+test('HAMROUTE-01: settled classification wait submits again in the consuming pass', async t => {
+  const queue = createAmaHammerBackgroundQueue();
+  let runs = 0;
+  const args = closureArgs({
+    repoPath: 'example/repo', prNumber: 42,
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async payload => {
+      assert.deepEqual(payload.operatorLabelClassificationRetryDelaysMs, [20_000, 40_000]);
+      return ++runs === 1
+        ? { dispatched: false, reason: 'operator-label-classification-pending' }
+        : { dispatched: true, launchRequestId: 'synthetic-launch' };
+    },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  const consuming = await maybeDispatchAmaClosureFor(args);
+  assert.equal(consuming.reason, AMA_HAMMER_BACKGROUND_REASON);
+  await queue.drain();
+  assert.equal(runs, 2);
+  assert.equal(queue.takeSettled('example/repo#42@' + HEAD).result.dispatched, true);
+});

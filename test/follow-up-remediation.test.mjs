@@ -12852,3 +12852,63 @@ for (const metadata of ['foreign-remote']) {
     assert.equal(readFileSync(path.join(workspaceDir, 'repair-preserved.txt'), 'utf8'), 'unchanged');
   });
 }
+
+for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'round-two']) {
+  test(`CIBLOCKHAM-02: pushed round pending CI completion (${scenario})`, async (t) => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'pending-ci-round-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const startHead = 'a'.repeat(40);
+    const endHead = scenario === 'unchanged' ? startHead : 'b'.repeat(40);
+    const { claimed } = makeQueuedJob(rootDir, {
+      repo: 'example/review-fixture', prNumber: 42, revisionRef: startHead, maxRemediationRounds: 2,
+      linearTicketId: 'SYNTH-42', reviewBody: '## Verdict\nComment only',
+    });
+    if (scenario === 'round-two') {
+      claimed.job.remediationPlan.currentRound = 2;
+      claimed.job.remediationPlan.rounds = [{ round: 1, state: 'completed' },
+        { round: 2, state: 'in_progress', startHeadSha: startHead }];
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
+    const workspaceDir = path.join(rootDir, 'workspace');
+    mkdirSync(workspaceDir, { recursive: true });
+    const outputPath = path.join(workspaceDir, 'last-message.md');
+    const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
+    writeFileSync(outputPath, 'Addressed all findings and pushed.');
+    writeValidReply(replyPath, claimed.job, {
+      outcome: 'partial',
+      summary: scenario === 'normalized-rereview' ? `Addressed all findings and pushed ${endHead}.` : 'Addressed all findings.',
+      operationalBlockers: [
+        { kind: 'pending-ci', title: 'Checks running', finding: 'Checks are pending.', reasoning: 'One bounded wait ended.' },
+        ...(scenario === 'other-blocker' ? [{ title: 'Missing input', finding: 'Input unavailable.', reasoning: 'Needs an operator.', needsHumanInput: 'Provide input.' }] : []),
+      ],
+      reReview: { requested: false, reason: null },
+    });
+    const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, worker: {
+      model: 'codex', processId: 4242, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir), outputPath: path.relative(rootDir, outputPath), replyPath,
+    } });
+    const comments = [];
+    const result = await withHqRootEnv(hqRoot, () => reconcileFollowUpJob({
+      rootDir, job: spawned.job, jobPath: spawned.jobPath, isWorkerRunning: () => false,
+      execFileImpl: async () => ({ stdout: '[]', stderr: '' }),
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: endHead }),
+      inspectRemediationCiRegressionImpl: async () => ({ state: 'pending', headSha: endHead }),
+      requestReviewRereviewImpl: () => assert.fail('pending CI completion must not need rereview'),
+      postCommentImpl: async (args) => { comments.push(args); return { posted: true }; },
+      log: { log() {}, warn() {}, error() {} },
+    }));
+    const expectedCompleted = ['pushed', 'normalized-rereview', 'round-two'].includes(scenario);
+    assert.equal(result.job.status, expectedCompleted ? 'completed' : 'stopped', JSON.stringify(result.job.failure));
+    assert.equal(result.job.remediationPlan.rounds.at(-1).state, expectedCompleted ? 'completed' : 'stopped');
+    assert.equal(comments.length, 1);
+    const body = comments[0].body;
+    assert.equal(result.job.commentDelivery.body, body, 'durable retry renders the same outcome');
+    if (expectedCompleted) {
+      assert.ok(body.includes('**Outcome:** round finished; CI still running.\n\nAll findings from this review were addressed and pushed as bbbbbbb. Required checks had not finished when the round ended.\n\nNothing is needed from a person. The pipeline continues when CI finishes.'));
+      assert.doesNotMatch(body, /Human intervention required/);
+    } else {
+      assert.equal(result.job.remediationPlan.stop.code, 'no-progress');
+      assert.match(body, /Human intervention required/);
+    }
+  });
+}

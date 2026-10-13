@@ -634,3 +634,42 @@ test('the CI-blocked prompt shares the cap route contract and caps the failing-c
   assert.doesNotMatch(prompt, /check-20/);
   assert.match(composeCiBlockedHammerPrompt({}), /did not capture the failing check names/);
 });
+
+for (const state of ['failed', 'pending', 'hard-stop', 'live-lease']) {
+  test(`CIBLOCKHAM-02: exhausted comment-only round routes on this pass (${state})`, async (t) => {
+    const rootDir = tempRoot(t, 'ci-blocked-next-pass-');
+    const args = closerArgs(rootDir);
+    args.dispatchContext.repo = 'example/review-fixture';
+    args.dispatchContext.prUrl = 'https://github.com/example/review-fixture/pull/42';
+    args.dispatchContext.reviewedBy = 'fixture-reviewer';
+    args.prMetadata.prNumber = 42;
+    args.prMetadata.author = 'fixture-worker';
+    args.reviewState.prAuthor = 'fixture-worker';
+    args.reviewState.reviewCycleExhausted = false;
+    args.reviewState.completedRemediationRounds = 0;
+    args.dispatchContext.ciFailedChecks = [{ name: 'unit', state: 'FAILURE' }];
+    args.prMetadata.statusCheckRollup = [{ __typename: 'CheckRun', name: 'unit',
+      status: state === 'pending' ? 'IN_PROGRESS' : 'COMPLETED',
+      conclusion: state === 'pending' ? null : 'FAILURE' }];
+    if (state === 'hard-stop') args.prMetadata.labels = ['do-not-merge'];
+    const deps = closerDeps({ workerStatus: 'running' });
+    if (state === 'failed') {
+      const ordinary = await maybeDispatchAmaCloser({ ...args, ...deps,
+        dispatchContext: { ...args.dispatchContext, ciBlockedHammerOwner: false } });
+      assert.deepEqual(ordinary.reasons, ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green']);
+    }
+    const first = await maybeDispatchAmaCloser({ ...args, ...deps });
+    if (state === 'pending' || state === 'hard-stop') {
+      assert.equal(first.dispatched, false, JSON.stringify(first));
+      assert.equal(deps.launches.length, 0);
+    } else {
+      assert.equal(first.dispatched, true, JSON.stringify(first));
+      assert.equal(deps.launches.length, 1);
+      if (state === 'live-lease') {
+        const next = await maybeDispatchAmaCloser({ ...args, ...deps });
+        assert.equal(next.dispatched, false, JSON.stringify(next));
+        assert.equal(deps.launches.length, 1);
+      }
+    }
+  });
+}

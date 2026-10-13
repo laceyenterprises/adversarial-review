@@ -4448,6 +4448,13 @@ export async function maybeDispatchAmaCloser({
     // CYCLECAPHAM-01 / CIBLOCKHAM-01: a capped PR, or a red-CI head with no
     // remediation job left, is a final-hammer close. Codex-first still holds: a
     // remediator that owns the reviewed head is never preempted.
+    const ciBlockedRoute = hammerOwnerRouteOf(dispatchContext) === 'ci-blocked';
+    // CIBLOCKHAM-02: stale verdict/findings describe the pre-remediation head.
+    // Failed required CI with no remediator is owned by the hammer immediately.
+    // A parked route whose live checks are only pending still waits.
+    const ciBlockedFailureAdmit = ciBlockedRoute
+      && verdict.trace?.ciGreen?.conclusion === 'FAILURE'
+      && reviewState?.remediationPending !== true;
     const reviewCycleCapRoute = hammerOwnerRouteOf(dispatchContext) !== null
       && reviewState?.remediationPending !== true;
     const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
@@ -4463,6 +4470,10 @@ export async function maybeDispatchAmaCloser({
         reason: 'not-eligible',
         reasons: routeReasons,
       });
+    }
+    if (ciBlockedRoute && verdict.trace?.ciGreen?.conclusion === 'PENDING') {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+        reason: 'required-checks-pending', recoveryWait: true });
     }
     // NOOWNER-01: a hammer that stopped without merging on the live head is not
     // dispatched again until an input it read changes (src/ama/hammer-stop-hold.mjs).
@@ -4536,7 +4547,9 @@ export async function maybeDispatchAmaCloser({
     // Ordinary recovery widens worker-class admission only. Orphan recovery also
     // admits covered primary-repair/closer-head reasons after its ownerless grace.
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
-    const autoHammer = (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
+    const ciBlockedReasonsCovered = ciBlockedFailureAdmit && routeReasons.every((reason) =>
+      ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green'].includes(reason));
+    const autoHammer = ciBlockedReasonsCovered || (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||

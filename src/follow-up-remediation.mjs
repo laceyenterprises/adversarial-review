@@ -71,7 +71,7 @@ import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comm
 import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
-import { resolveCommentOnlyFinalRoundCompletion } from './comment-only-final-round-completion.mjs';
+import { classifyFinalRoundOperationalBlockers, resolveCommentOnlyFinalRoundCompletion } from './comment-only-final-round-completion.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { REREVIEW_WAKE_REASONS, requestRereviewWake } from './rereview-wake.mjs';
 import { requestHammerWakeForSettledReviewStop } from './hammer-wake.mjs';
@@ -2030,6 +2030,8 @@ async function reconcileFollowUpJob({
     // comment body falls back to the action / reReview signal alone.
     let parsedReply = null;
     let operationalBlockerRecovery = null;
+    let completionLifecycle = null;
+    let pendingCiCompletion = false;
 
     if (replyProbe.state === 'valid') {
       const reply = normalizeCiPendingOnlyReply(replyProbe.reply, { expectedJob: job });
@@ -2043,8 +2045,28 @@ async function reconcileFollowUpJob({
         path: worker.replyPath || job?.remediationReply?.path || null,
       };
       parsedReply = reply;
+      const operationalBlockers = reply.reReview?.originalOperationalBlockers || reply.operationalBlockers;
+      if (job?.finalRound !== 'comment-only' && operationalBlockers?.length > 0 && reply.blockers.length === 0) {
+        completionLifecycle = await resolveJobPRLifecycleSafe({
+          rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
+        });
+        const round = job.remediationPlan?.rounds?.find((entry) => entry.round === job.remediationPlan.currentRound);
+        const startHead = round?.startHeadSha || job.revisionRef;
+        const pushedHead = completionLifecycle?.source === 'live' ? completionLifecycle.headSha : null;
+        if (startHead && pushedHead && pushedHead !== startHead) {
+          const ciGate = await inspectRemediationCiRegressionImpl({
+            repo: job.repo, prNumber: job.prNumber, execFileImpl, log,
+          });
+          pendingCiCompletion = classifyFinalRoundOperationalBlockers(operationalBlockers, {
+            ciGate, pushedHead, outcome: reply.outcome,
+          }).pendingCiOnly;
+          if (pendingCiCompletion) job = { ...job, completion: {
+            ...job.completion, pendingCiOnly: true, workerPushedHeadSha: pushedHead,
+          } };
+        }
+      }
 
-      if (reply.reReview.requested && job?.finalRound !== 'comment-only') {
+      if (reply.reReview.requested && job?.finalRound !== 'comment-only' && !pendingCiCompletion) {
         // Pre-rereview branch-contamination gate. Even though the
         // remediator prompt forbids pushing patch-id duplicates of
         // upstream commits, workers can ignore the contract or run a
@@ -2679,10 +2701,22 @@ async function reconcileFollowUpJob({
     // and operator-visible completion records reflect what actually ran.
     // COMMENTCLOSE-01: every final round records its proven push; pending CI never demotes it.
     const finalRound = await resolveCommentOnlyFinalRoundCompletion({
-      job, jobPath, reply: parsedReply, worker, liveness, workspaceDir: paths.workspaceDir,
+      job, jobPath, reply: parsedReply?.reReview?.originalOperationalBlockers
+        ? { ...parsedReply, operationalBlockers: parsedReply.reReview.originalOperationalBlockers } : parsedReply,
+      worker, liveness, workspaceDir: paths.workspaceDir,
       auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
     if (finalRound.retryLater) return { action: 'active', reason: 'final-round-proof-transient', job: finalRound.job, jobPath };
+    if (finalRound.completed && finalRound.workerPushedHeadSha
+      && finalRound.completionFields.finalRoundOutcome?.ciState === 'pending'
+      && (parsedReply?.reReview?.originalOperationalBlockers || parsedReply?.operationalBlockers)?.length > 0) {
+      pendingCiCompletion = true;
+      completionLifecycle ||= await resolveJobPRLifecycleSafe({
+        rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
+      });
+      job = { ...job, completion: { ...job.completion, pendingCiOnly: true,
+        workerPushedHeadSha: finalRound.workerPushedHeadSha } };
+    }
     const workerModel = worker?.model || 'codex';
     const completionMetadata = {
       source: hasNonEmptyNarrative
@@ -2690,6 +2724,7 @@ async function reconcileFollowUpJob({
         : `${workerModel}-remediation-reply-only`,
       workerModel,
       ...finalRound.completionFields,
+      ...(pendingCiCompletion ? { pendingCiOnly: true, workerPushedHeadSha: job.completion.workerPushedHeadSha } : {}),
       note: hasNonEmptyNarrative
         ? 'Reconciled from detached worker exit plus non-empty final message artifact.'
         : 'Reconciled from detached worker exit plus validated remediation-reply.json (final message artifact was empty; success signaled via the durable reply contract).',
@@ -2754,7 +2789,7 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (!rereview.requested && !finalRound.completed) {
+    if (!rereview.requested && !finalRound.completed && !pendingCiCompletion) {
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
         rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
         retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
@@ -2826,7 +2861,7 @@ async function reconcileFollowUpJob({
       };
     }
 
-    if (rereviewBlocked) {
+    if (rereviewBlocked && !pendingCiCompletion) {
       const blockedReason = rereview.outcomeReason || rereview.status || 'rereview-blocked';
       const stopReasonText = `Worker requested re-review but the watcher refused the reset: ${blockedReason}. The PR's existing adversarial review verdict will not be replaced; human intervention required.`;
       const projectedStopJob = {
@@ -2885,7 +2920,7 @@ async function reconcileFollowUpJob({
       reply: parsedReply, reReview: rereview, now,
     });
     // The daemon observes the resulting head; worker replies cannot attest it.
-    const completionLifecycle = await resolveJobPRLifecycleSafe({
+    completionLifecycle ||= await resolveJobPRLifecycleSafe({
       rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
     });
     const completed = markFollowUpJobCompleted({

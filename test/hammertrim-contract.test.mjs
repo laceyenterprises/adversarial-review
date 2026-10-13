@@ -665,8 +665,8 @@ for (const scenario of ['first retry visible', 'already visible', 'two lag polls
     writeFileSync(join(dir, 'sleep'), '#!/bin/sh\necho "$1" >> "$TMPDIR/sleeps"\nn=$(cat "$TMPDIR/clock"); echo $((n + $1)) > "$TMPDIR/clock"\n', { mode: 0o755 });
     writeFileSync(join(dir, 'gh'), `#!/bin/sh
 case "$2" in
-  */check-runs\\?*) printf '{"check_runs":[]}'; exit 0 ;;
-  */statuses\\?*) printf '[]'; exit 0 ;;
+  */check-runs\\?*) echo "$2" >> "$TMPDIR/check-api-reads"; printf '{"check_runs":[]}'; exit 0 ;;
+  */statuses\\?*) echo "$2" >> "$TMPDIR/check-api-reads"; printf '[]'; exit 0 ;;
 esac
 n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
 if [ "$n" -eq 3 ]; then cp /tmp/ham-${prNumber}-pr-after.json "$TMPDIR/cache-after-probe"; fi
@@ -755,6 +755,8 @@ echo "OUTCOME=$HAM_PHASE_OUTCOME rc=$rc"
 ${checksContinuation}
 exit "$rc"`], env);
     assert.deepEqual(readdirSync('/tmp').filter(name => name.startsWith(`ham-${prNumber}-head-probe.`)), [], 'probe files are cleaned up');
+    const checkReads = readFileSync(join(dir, 'check-api-reads'), 'utf8').trim().split('\n');
+    assert.equal(checkReads.length, 2, 'only the initial full snapshot reads checks; visibility probes read PR metadata');
     if (['visibility timeout', 'transient exhaustion'].includes(scenario)) {
       assert.equal(result.status, 20, result.stderr);
       assert.match(result.stderr, /Waited 300s for the published head and 0s for required checks/);

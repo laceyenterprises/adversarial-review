@@ -2526,8 +2526,10 @@ later retries use fifteen-second intervals, clamped to the remaining deadline.
 Each visibility probe is bounded to 30 seconds or the remaining deadline,
 whichever is shorter. Transport
 errors and probe alarms retry within that same deadline; permanent errors and
-malformed or missing head data remain fatal. Only successful reads with a full
-head SHA replace the cached PR JSON. Exhaustion reports `published-head-timeout`
+malformed or missing head data remain fatal. Visibility probes read PR metadata
+without check runs or commit statuses; the subsequent lease check reads the full
+rollup on the visible head. Only successful reads with a full head SHA replace
+the cached PR JSON. Exhaustion reports `published-head-timeout`
 with the elapsed head/check wait times; a different live head leaves the wait
 and follows the existing race path.
 Publication and verify-head export `HAM_HEAD_WAITED_SECONDS` and

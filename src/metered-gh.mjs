@@ -24,6 +24,7 @@ function parseGhDebug(stderr) {
   const observations = [];
   const retained = [];
   let inRequest = false;
+  let diagnosticTail = [];
   let headers = {};
   let rateLimited = false;
   let forbidden = false;
@@ -37,15 +38,34 @@ function parseGhDebug(stderr) {
     limitMessage = false;
   }
   for (const line of String(stderr || '').split(/\r?\n/)) {
-    if (/^\* Request at /.test(line)) { flush(); inRequest = true; }
+    if (/^\* Request at /.test(line)) {
+      retained.push(...diagnosticTail);
+      diagnosticTail = [];
+      flush();
+      inRequest = true;
+    }
     const header = line.match(/^< (x-ratelimit-[\w-]+):\s*(.*)$/i);
     if (header) headers[header[1].toLowerCase()] = header[2];
     if (/^< HTTP\/\S+ 429\b/.test(line)) rateLimited = true;
     if (/^< HTTP\/\S+ 403\b/.test(line)) forbidden = true;
     if (inRequest && /rate limit|too many requests/i.test(line)) limitMessage = true;
-    if (/^\* Request took /.test(line)) { flush(); inRequest = false; continue; }
+    if (/^\* Request took /.test(line)) {
+      flush();
+      diagnosticTail = [];
+      inRequest = false;
+      continue;
+    }
+    // A transport failure can terminate the trace without Request took. Keep
+    // CLI/Go diagnostics (including their continuation lines), but do not expose
+    // arbitrary unprefixed HTTP bodies by treating every non-header as stderr.
+    // Buffer candidates until EOF so diagnostic-looking text in a completed
+    // response body is still discarded with its envelope.
+    if (inRequest && !/^[*<>] /.test(line) && (diagnosticTail.length || /^(?:gh: |(?:Get|Post|Put|Patch|Delete|Head|Options) "https?:\/\/[^"\r\n]+": |net\/http: |dial tcp |lookup |error\b|failed\b|TLS handshake\b|connection reset\b|network is unreachable\b|unexpected EOF\s*$|socket hang up\s*$)/i.test(line))) {
+      diagnosticTail.push(line);
+    }
     if (!inRequest) retained.push(line);
   }
+  retained.push(...diagnosticTail);
   flush();
   return { observations, stderr: retained.join('\n') };
 }

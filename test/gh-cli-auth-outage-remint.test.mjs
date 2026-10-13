@@ -302,6 +302,60 @@ test('GHBUDGET-01: debug envelopes record every resource and discard HTTP bodies
   assert.doesNotMatch(JSON.stringify(parsed), /fixture-secret|fixture-private-body/);
 });
 
+test('GHBUDGET-01: unfinished debug traces retain transport diagnostics without headers or bodies', async () => {
+  const { parseGhDebug } = await import('../src/metered-gh.mjs');
+  for (const diagnostic of [
+    'Post "https://api.github.com/graphql": net/http: TLS handshake timeout',
+    'Get "https://api.github.com/repos/fixture/repo": dial tcp: lookup api.github.com: no such host',
+    'gh: connection reset by peer\nCheck your internet connection.',
+    'net/http: TLS handshake timeout',
+    'error connecting: connection reset by peer',
+    'unexpected EOF',
+  ]) {
+    const parsed = parseGhDebug(`* Request at fixture\n* Request to https://api.github.com/graphql\n> Authorization: fixture-secret\n\n{"query":"fixture-private-body"}\n* dial tcp: transport failure\n${diagnostic}\n`);
+    assert.equal(parsed.stderr, `${diagnostic}\n`);
+    assert.deepEqual(parsed.observations, []);
+    assert.doesNotMatch(JSON.stringify(parsed), /fixture-secret|fixture-private-body|\* /);
+  }
+  const completed = parseGhDebug('* Request at fixture\n< HTTP/2.0 200 OK\n\nfailed to finish a task in this private body\nprivate continuation\n* Request took 1ms\n');
+  assert.equal(completed.stderr, '');
+});
+
+test('GHBUDGET-01: unfinished traces preserve async/sync errors and activate bounded retries', async t => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { meteredExecFileSync } = await import('../src/metered-gh.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'metered-transport-'));
+  const prior = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(dir, 'state.json');
+  t.after(() => {
+    if (prior === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+    else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = prior;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const diagnostic = 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout\n';
+  const stderr = `* Request at fixture\n> Authorization: fixture-secret\n${diagnostic}`;
+  let attempts = 0;
+  const delays = [];
+  let lastError;
+  await assert.rejects(execGhWithRetry({
+    args: ['pr', 'view', '7'], env: {}, log: SILENT_LOG,
+    execFileImpl: async () => { attempts++; lastError = ghError(stderr, { code: 1 }); throw lastError; },
+    sleep: async ms => { delays.push(ms); },
+    refreshGhAuthImpl: async () => { assert.fail('transport failure must not refresh authentication'); },
+  }), error => error === lastError && error.stderr === diagnostic && isTransientGhError(error));
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [500, 1000]);
+  assert.equal(lastError.message, `Command failed: gh\n${diagnostic}`);
+  const syncError = ghError(stderr, { status: 1, output: [null, '', stderr] });
+  assert.throws(() => meteredExecFileSync(() => { throw syncError; }, 'gh', ['api', 'graphql']),
+    error => error === syncError && isTransientGhError(error));
+  assert.equal(syncError.stderr, diagnostic);
+  assert.equal(syncError.message, `Command failed: gh\n${diagnostic}`);
+  assert.equal(syncError.output[2], diagnostic);
+});
+
 test('GHBUDGET-01: fake gh keeps stdout and diagnostics while recording both pools', async t => {
   const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');

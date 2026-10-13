@@ -36,7 +36,7 @@ ham_wait_for_published_head() {
     if [ "$probe_timeout" -gt 30 ]; then probe_timeout=30; fi
     probe_dir=$(mktemp -d /tmp/ham-<<PR_NUMBER>>-head-probe.XXXXXX) || return 1
     if /usr/bin/perl -e 'alarm shift; exec @ARGV' "$probe_timeout" "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> \
-      --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName \
+      --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,author,baseRefName \
       > "$probe_dir/pr.json" 2> "$probe_dir/stderr"; then
       if ! probe_head=$(jq -er '.headRefOid | select(type == "string") | select(test("^[0-9a-fA-F]{40}$"))' "$probe_dir/pr.json"); then
         rm -rf "$probe_dir"

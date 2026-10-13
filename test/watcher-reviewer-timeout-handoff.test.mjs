@@ -725,7 +725,7 @@ for (const scenario of ['escalate', 'paused', 'ham']) {
       } else {
         assert.equal(summary.capComments.length, 0, 'the cap comment is posted once per PR');
       }
-      assert.match(output, /review-cycle-cap routed laceyenterprises\/adversarial-review#164 to the hammer for final adjudication: ama-dispatched/);
+      assert.match(output, /^launched lrq=\S+ route=review-cycle-cap .*passes_without_launch=0$/m);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -778,7 +778,7 @@ test('watcher pollOnce routes a CI-blocked PR with no remediation job left to th
     assert.equal(summary.operatorWrites.length, 0);
     assert.equal(summary.dispatches.length, 0, 'the legacy merge-agent lane is not used');
     assert.deepEqual(summary.ciBlockedCloserCalls, [{ reviewCycleExhausted: true, failedChecks: [] }], output);
-    assert.match(output, /ci-blocked routed laceyenterprises\/adversarial-review#164 to the hammer for final adjudication: ama-dispatched/);
+    assert.match(output, /^launched lrq=\S+ route=ci-blocked .*passes_without_launch=0$/m);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -221,7 +221,8 @@ for (const reason of ['hammer-closer-in-flight', 'lease-held', 'live-run-in-flig
       time += 60 * 60 * 1000;
       const waiting = await resolveMergeAgentCoexistenceForWatcher(watcherInput(args, result));
       assert.equal(waiting.outcome, 'ama-pending');
-      assert.equal(waiting.recovery.attempts, 0);
+      if (reason === 'ama-closer-dispatch-backgrounded') assert.equal(waiting.recovery, undefined);
+      else assert.equal(waiting.recovery.attempts, 0);
     }
     assert.equal(calls.hammer + calls.rereview.length + calls.page.length, 0);
   });

@@ -304,3 +304,60 @@ test('ORPHANPAGE-01: dead-letter page is terminal and warns once across later po
   assert.equal(calls.pages.length, 0);
   assert.deepEqual(warnings, ['Orphan recovery page is dead-lettered; operator action required']);
 });
+
+for (const conclusion of ['FAILURE', 'PENDING']) {
+  test(`HAMROUTE-01: ${conclusion} external CI selects hammer recovery, never review reset`, async t => {
+    const { tick, calls } = setup(t);
+    const overrides = { reviewStateRow: { review_status: 'pending', reviewer_head_sha: 'old' },
+      candidate: { prState: 'open', headSha: 'current',
+        statusCheckRollup: [{ name: 'external-test', conclusion }] } };
+    await tick(0, overrides);
+    await tick(15, overrides);
+    assert.equal(calls.launches.length, 1);
+    assert.equal(calls.reviews.length, 0);
+  });
+}
+
+test('HAMROUTE-01: waits retain idle time and refund attempts; two real launch failures page', async t => {
+  const { tick, calls } = setup(t);
+  const reasons = ['ama-coexistence-operation-timeout', 'ama-closer-dispatch-backgrounded',
+    'operator-label-classification-pending', 'rate-limited-read'];
+  await tick(0);
+  for (const [index, reason] of reasons.entries()) {
+    const waiting = await tick(15 + index * 5, {
+      dispatchHammer: async () => ({ dispatched: false, reason }),
+    });
+    assert.equal(waiting.outcome, 'ama-pending');
+    assert.equal(waiting.amaClosureResult.ownerlessIdleMs, (15 + index * 5) * 60000);
+    assert.equal(calls.pages.length, 0);
+  }
+  const failed = { dispatchHammer: async () => ({ dispatched: false, reason: 'launch-failed' }) };
+  await tick(35, failed);
+  await tick(40, failed);
+  const waiting = await tick(45, { result: { amaEnabled: true, reason: reasons[0] } });
+  assert.equal(waiting.outcome, 'ama-pending');
+  assert.equal(calls.pages.length, 0);
+  assert.equal((await tick(50, failed)).outcome, 'recovery-exhausted');
+  assert.equal(calls.pages.length, 1);
+  assert.equal(calls.pages[0][1].payload.attempts, 2);
+  assert.deepEqual(calls.pages[0][1].payload.outcomes.map(outcome => outcome.reason), ['launch-failed', 'launch-failed']);
+});
+
+test('HAMROUTE-01: CI-blocked ownership selects hammer even with no check rollup', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { reviewStateRow: { review_status: 'ci-blocked', reviewer_head_sha: 'old' },
+    dispatchJob: { ciBlockedHammerOwner: true } };
+  await tick(0, overrides); await tick(15, overrides);
+  assert.equal(calls.reviews.length, 0);
+  assert.equal(calls.launches.length, 1);
+});
+
+test('HAMROUTE-01: observing a proof wait never adds a live ownership read to the serial phase', async t => {
+  const { tick, calls } = setup(t);
+  const overrides = { result: { amaEnabled: true, reason: 'ama-coexistence-operation-timeout' },
+    hasOwnerImpl: async () => assert.fail('wait observations cannot start an ownership read') };
+  await tick(0, overrides);
+  const waiting = await tick(15, overrides);
+  assert.equal(waiting.amaClosureResult.ownerlessIdleMs, 15 * 60_000);
+  assert.equal(calls.pages.length + calls.launches.length + calls.reviews.length, 0);
+});

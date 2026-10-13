@@ -23,10 +23,28 @@ import {
   hammerOwnerRouteFinalOutcome,
 } from './ama/review-cycle-cap-route.mjs';
 import { buildMergeAgentDispatchJob, fetchMergeAgentCandidate } from './follow-up-merge-agent.mjs';
+import { isOrphanRecoveryWait } from './ama/orphan-watchdog.mjs';
 import { normalizeLabelNames } from './review-cycle-cap-actions.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+const passesWithoutLaunch = new Map();
+function routeOutcomeLine({ rootDir, repoPath, prNumber, headSha, route, outcome, result, error }) {
+  const key = JSON.stringify([rootDir, repoPath, prNumber]);
+  const previous = passesWithoutLaunch.get(key);
+  const launched = result?.dispatched === true;
+  const count = launched ? 0 : (previous?.headSha === headSha ? previous.count : 0) + 1;
+  passesWithoutLaunch.delete(key);
+  passesWithoutLaunch.set(key, { headSha, count });
+  while (passesWithoutLaunch.size > 256) passesWithoutLaunch.delete(passesWithoutLaunch.keys().next().value);
+  const reason = error?.message || result?.reason || outcome || 'pending';
+  const waiting = isOrphanRecoveryWait(error || result) || (outcome === 'ama-pending'
+    && !result?.needsOperator && !/fail|reject|exhausted|cap-reached/i.test(reason));
+  const prefix = launched ? `launched lrq=${result.launchRequestId || result.dispatchId || 'unknown'}`
+    : `${waiting ? 'waiting' : 'failed'}: ${reason}`;
+  return `${prefix} route=${route} repo=${repoPath} pr=${prNumber} head=${headSha || 'unknown'} ownerless_idle_ms=${result?.ownerlessIdleMs ?? 'unknown'} passes_without_launch=${count}`;
+}
 
 async function defaultDeliverAlert(text, options) {
   const { deliverAlert } = await import('./alert-delivery.mjs');
@@ -108,8 +126,13 @@ export async function routeToHammerOwner({
 } = {}) {
   const routeSpec = HAMMER_OWNER_ROUTES[route];
   if (!routeSpec) throw new Error(`unknown hammer-owner route: ${route}`);
+  let routeHead = currentRevisionRef || subjectRef?.revisionRef || reviewedHeadSha;
+  const logOutcome = (outcome, result, error = null) => logger?.log?.(routeOutcomeLine({
+    rootDir, repoPath, prNumber, headSha: routeHead, route, outcome, result, error,
+  }));
   try {
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, { rootDir, execFileImpl });
+    routeHead = candidate?.headSha || routeHead;
     const dispatchJob = {
       ...buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db }),
       ...dispatchJobFields,
@@ -135,6 +158,7 @@ export async function routeToHammerOwner({
       );
       return { handled: true, outcome, prTerminal: true };
     }
+    logOutcome(outcome, amaClosureResult);
     const finalOutcome = hammerOwnerRouteFinalOutcome(amaClosureResult);
     if (finalOutcome) {
       const headSha = candidate?.headSha || currentRevisionRef || subjectRef?.revisionRef || null;
@@ -157,16 +181,17 @@ export async function routeToHammerOwner({
       );
       return { handled: true, outcome: 'hammer-unavailable', amaClosureResult };
     }
-    logger?.log?.(
-      `[watcher] ${route} routed ${repoPath}#${prNumber} to the hammer for final adjudication: ` +
-        `${outcome || 'unknown'} (${amaClosureResult?.reason || (amaClosureResult?.dispatched ? 'dispatched' : 'pending')}) ` +
-        `lrq=${amaClosureResult?.launchRequestId || amaClosureResult?.dispatchId || 'none'}`
-    );
     return { handled: true, outcome, amaClosureResult };
   } catch (err) {
+    logOutcome('failed', null, err);
     logger?.error?.(
       `[watcher] ${route} hammer route failed for ${repoPath}#${prNumber}: ${err?.message || err}`
     );
-    return { handled: false, error: err };
+    const waiting = isOrphanRecoveryWait(err);
+    return { handled: waiting, error: err,
+      ...(waiting ? { outcome: 'ama-pending', amaClosureResult: {
+        dispatched: false, skipMergeAgent: true, amaEnabled: true, reason: err?.code || err?.reason || 'rate-limited-read',
+      } } : {}),
+    };
   }
 }

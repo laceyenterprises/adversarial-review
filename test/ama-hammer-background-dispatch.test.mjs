@@ -23,6 +23,43 @@ function cfgReturning(value) {
   return { get: (key, fallback) => (value === undefined ? fallback : value) };
 }
 
+test('classification retry accepts a null signal with the real timer', async () => {
+  const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
+  let reads = 0;
+  const result = await resolveOperatorLabelGateFailuresWithRetry({ signal: null }, {
+    delaysMs: [1], resolveImpl: async () => ({ inconclusive: ++reads === 1, gates: [] }),
+  });
+  assert.equal(reads, 2);
+  assert.equal(result.inconclusive, false);
+});
+
+test('proof cache sanitizes invalid capacities and retains reusable reads', async () => {
+  const { createAmaProofCache } = await import('../src/ama-closure-orchestration.mjs');
+  for (const maxEntries of [0, -1, 0.5, NaN, Infinity]) {
+    const cache = createAmaProofCache({ maxEntries });
+    const identity = { rootDir: 'fixture', repo: 'example/repo', prNumber: 42,
+      reviewedHead: 'reviewed', currentHead: 'current' };
+    let reads = 0;
+    assert.equal(await cache.scope(identity).read('proof', async () => ++reads), 1);
+    assert.equal(await cache.scope(identity).read('proof', async () => ++reads), 1);
+    assert.equal(reads, 1);
+  }
+});
+
+test('hammer owner route preserves timeout and classification wait reasons', async () => {
+  const { routeToHammerOwner } = await import('../src/hammer-owner-route.mjs');
+  for (const error of [Object.assign(new Error('timeout'), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' }),
+    Object.assign(new Error('classification wait'), { reason: 'operator-label-classification-pending' })]) {
+    const result = await routeToHammerOwner({ route: 'ci-blocked',
+      rootDir: 'fixture', repoPath: 'example/repo', prNumber: 42, logger: null,
+      fetchMergeAgentCandidateImpl: async () => { throw error; },
+    });
+    assert.equal(result.handled, true);
+    assert.equal(result.outcome, 'ama-pending');
+    assert.equal(result.amaClosureResult.reason, error.code || error.reason);
+  }
+});
+
 function deferred() {
   let resolve;
   let reject;
@@ -1101,7 +1138,7 @@ for (const scenario of ['green', 'red', 'pending', 'pending-conflict', 'red-and-
   });
 }
 
-test('OWNERPROOF-01: ownerless stale closer with pending CI requests bounded current-head review', async t => {
+test('HAMROUTE-01: ownerless stale closer with pending CI retains hammer-route wait', async t => {
   const { args, payloads } = closerResumeFixture('pending');
   t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
   const pages = [], reviews = [];
@@ -1115,12 +1152,11 @@ test('OWNERPROOF-01: ownerless stale closer with pending CI requests bounded cur
         requestRereviewImpl: async request => { reviews.push(request); return { triggered: true }; },
       },
     });
-    assert.equal(result.outcome, minutes === 61 ? 'recovery-exhausted' : 'ama-pending');
+    assert.equal(result.outcome, 'ama-pending');
   }
   assert.deepEqual(payloads, []);
-  assert.equal(pages.length, 1);
-  assert.equal(reviews.length, 2);
-  assert.ok(reviews.every(request => request.targetRevisionRef === 'H1'));
+  assert.equal(pages.length, 0);
+  assert.equal(reviews.length, 0);
 });
 
 // STALECLOSER-03: the real wake against a stubbed watcher, so the dedupe and
@@ -1259,4 +1295,228 @@ test('pending exact-head orphan request skips repeated stale-tip review and cert
   args.fetchHeadCloserVerifiedCommitImpl = async () => assert.fail('pending review owns this tip');
   args.resolveHamTerminalRemediationEvidenceImpl = async () => assert.fail('pending review owns this tip');
   await maybeDispatchAmaClosureFor(args);
+});
+
+test('HAMROUTE-01: head-bound proofs and commit reads survive passes and discard changed heads', async () => {
+  const { createAmaProofCache } = await import('../src/ama-closure-orchestration.mjs');
+  const cache = createAmaProofCache({ maxEntries: 2 });
+  const identity = { rootDir: 'fixture', repo: 'example/repo', prNumber: 42,
+    reviewedHead: 'reviewed', currentHead: 'current' };
+  let reads = 0;
+  const prove = async () => ++reads;
+  assert.equal(await cache.scope(identity).read('proof', prove), 1);
+  assert.equal(await cache.scope(identity).read('proof', prove), 1);
+  assert.equal(await cache.scope({ ...identity, currentHead: 'changed' }).read('proof', prove), 2);
+  assert.equal(await cache.scope(identity).read('proof', prove), 3);
+  await cache.scope({ ...identity, prNumber: 43 }).read('proof', prove);
+  await cache.scope({ ...identity, prNumber: 44 }).read('proof', prove);
+  assert.equal(await cache.scope(identity).read('proof', prove), 6);
+  await cache.scope({ ...identity, prNumber: 43 }).read('proof', prove);
+  assert.equal(await cache.scope(identity).read('proof', prove), 6);
+  await cache.scope({ ...identity, prNumber: 44 }).read('proof', prove);
+  assert.equal(await cache.scope(identity).read('proof', prove), 6, 'hot evidence survives cache pressure');
+  assert.equal(reads, 8);
+});
+
+test('HAMROUTE-01: a 12-second proof survives the five-second pass deadline with one copy', async t => {
+  const { createAmaProofCache, runAmaProofOperation } = await import('../src/ama-closure-orchestration.mjs');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const cache = createAmaProofCache();
+  const identity = { rootDir: 'fixture', repo: 'example/repo', prNumber: 42,
+    reviewedHead: 'reviewed', currentHead: 'current' };
+  let copies = 0;
+  let proofSignal;
+  const prove = async ({ signal }) => {
+    copies++;
+    proofSignal = signal;
+    await new Promise(resolve => setTimeout(resolve, 12_000));
+    return { proven: true };
+  };
+  const run = () => runAmaProofOperation(cache.scope(identity), 'closer-only-review-delta', prove, { timeoutMs: 5000 });
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const first = assert.rejects(run(), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' });
+  await flush();
+  t.mock.timers.tick(5000);
+  await first;
+  assert.equal(proofSignal.aborted, false);
+  const overlapping = assert.rejects(run(), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT' });
+  await flush();
+  t.mock.timers.tick(5000);
+  await overlapping;
+  assert.equal(copies, 1);
+  t.mock.timers.tick(2000);
+  await flush();
+  assert.deepEqual(await run(), { proven: true });
+  assert.equal(copies, 1);
+  cache.scope({ ...identity, currentHead: 'changed' });
+  assert.equal(proofSignal.aborted, true);
+  const changed = runAmaProofOperation(cache.scope({ ...identity, currentHead: 'changed' }),
+    'closer-only-review-delta', async () => { copies++; return { proven: false }; }, { timeoutMs: 5000 });
+  assert.deepEqual(await changed, { proven: false });
+  assert.equal(copies, 2);
+});
+
+test('HAMROUTE-01: background classification retries two failed reads and launches in one run', async () => {
+  const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
+  let reads = 0;
+  let elapsed = 0;
+  let launches = 0;
+  const queue = createAmaHammerBackgroundQueue();
+  const key = 'example/repo#42@current';
+  queue.submit({ key, run: async () => {
+    const classification = await resolveOperatorLabelGateFailuresWithRetry({
+      repo: 'example/repo', headSha: 'current',
+      rollup: [{ name: 'repo-guards', conclusion: 'FAILURE',
+        detailsUrl: 'https://github.com/example/repo/actions/runs/1/job/2' }],
+      execFileImpl: async () => {
+        if (++reads <= 2) throw new Error('synthetic failed job read');
+        return { stdout: JSON.stringify({ head_sha: 'current', conclusion: 'failure',
+          steps: [{ name: 'Unit tests', conclusion: 'failure' }] }) };
+      },
+    }, { delaysMs: [20_000, 40_000], sleepImpl: async ms => { elapsed += ms; } });
+    assert.equal(classification.inconclusive, false);
+    assert.deepEqual(classification.gates, []);
+    launches++;
+    return { dispatched: true, launchRequestId: 'synthetic-launch' };
+  } });
+  await queue.drain();
+  assert.equal(reads, 3);
+  assert.equal(elapsed, 60_000);
+  assert.equal(launches, 1);
+  assert.equal(queue.takeSettled(key).result.dispatched, true);
+});
+
+test('HAMROUTE-01: settled classification wait submits again in the consuming pass', async t => {
+  const queue = createAmaHammerBackgroundQueue();
+  let runs = 0;
+  const args = closureArgs({
+    repoPath: 'example/repo', prNumber: 42,
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async payload => {
+      assert.deepEqual(payload.operatorLabelClassificationRetryDelaysMs, [20_000, 40_000]);
+      return ++runs === 1
+        ? { dispatched: false, reason: 'operator-label-classification-pending' }
+        : { dispatched: true, launchRequestId: 'synthetic-launch' };
+    },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  const consuming = await maybeDispatchAmaClosureFor(args);
+  assert.equal(consuming.reason, AMA_HAMMER_BACKGROUND_REASON);
+  await queue.drain();
+  assert.equal(runs, 2);
+  assert.equal(queue.takeSettled('example/repo#42@' + HEAD).result.dispatched, true);
+});
+
+for (const largeEvidenceOnly of [false, true]) {
+  test(`HAMROUTE-01: ${largeEvidenceOnly ? 'large PR evidence' : 'traced slow proofs, failed job read and rate limit'} launches within two passes`, async t => {
+    const { resolveOperatorLabelGateFailuresWithRetry } = await import('../src/ama/operator-label-gates.mjs');
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.UTC(2026, 0, 1) });
+    const startedAt = Date.now();
+    const { args } = closerResumeFixture('red');
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    const queue = createAmaHammerBackgroundQueue();
+    const counters = { delta: 0, suppression: 0, evidence: 0, commits: 0, reads: 0, jobs: 0, launches: 0 };
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    Object.assign(args, {
+      repoPath: 'example/repo', prNumber: 42, currentRevisionRef: 'current',
+      dispatchJob: { ciBlockedHammerOwner: true },
+      liveReviewRetryDelaysMs: [],
+      resolveAmaHammerDispatchModeImpl: () => 'background', amaHammerBackgroundQueueImpl: () => queue,
+      proveCloserAuthoredStaleHeadImpl: async () => {
+        counters.delta++;
+        if (!largeEvidenceOnly) await sleep(12_000);
+        return { proven: true, anchorHead: 'reviewed', reviewedHead: 'reviewed', currentHead: 'current',
+          closerCommits: ['current'], reason: 'hammer-app-attestation-chain' };
+      },
+      resolveHeadCloserCommitSuppressionImpl: async () => {
+        counters.suppression++;
+        if (!largeEvidenceOnly) await sleep(12_000);
+        return { suppressed: true, reason: 'closer-commit-trailer' };
+      },
+      fetchHeadCloserVerifiedCommitImpl: async () => {
+        counters.commits++;
+        return { sha: 'current', parentSha: 'reviewed', message: 'Closed-By: hammer' };
+      },
+      resolveHamTerminalRemediationEvidenceImpl: async () => {
+        counters.evidence++;
+        if (largeEvidenceOnly) await sleep(12_000);
+        return null;
+      },
+      fetchLatestHeadReviewBodiesImpl: async (_repo, _pr, head) => head === 'reviewed' ? [args.reviewStateRow.review_body] : [],
+      fetchCurrentPrStateImpl: async () => {
+        if (++counters.reads === 1 && !largeEvidenceOnly) throw new Error('HTTP 429 rate limited');
+        return { state: 'OPEN', headSha: 'current', isDraft: false, mergeable: 'MERGEABLE' };
+      },
+      maybeDispatchAmaCloserImpl: async payload => {
+        assert.equal(payload.prMetadata.headSha, 'current');
+        const classification = await resolveOperatorLabelGateFailuresWithRetry({
+          repo: 'example/repo', headSha: 'current', signal: payload.signal,
+          rollup: [{ name: 'repo-guards', conclusion: 'FAILURE',
+            detailsUrl: 'https://github.com/example/repo/actions/runs/1/job/2' }],
+          execFileImpl: async () => {
+            if (++counters.jobs === 1 && !largeEvidenceOnly) throw new Error('synthetic failed job read');
+            return { stdout: JSON.stringify({ head_sha: 'current', conclusion: 'failure',
+              steps: [{ name: 'External tests', conclusion: 'failure' }] }) };
+          },
+        }, { delaysMs: payload.operatorLabelClassificationRetryDelaysMs, sleepImpl: sleep });
+        assert.equal(classification.inconclusive, false);
+        counters.launches++;
+        return { dispatched: true, launchRequestId: 'synthetic-launch' };
+      },
+    });
+    args.reviewStateRow = { ...args.reviewStateRow, repo: 'example/repo', pr_number: 42, reviewer_head_sha: 'reviewed' };
+    args.candidate = { ...args.candidate, headSha: 'current', prAuthor: 'synthetic-builder' };
+    const run = () => resolveMergeAgentCoexistenceForWatcher({ ...args,
+      maybeDispatchAmaClosureForImpl: options => maybeDispatchAmaClosureFor({ ...args, ...options }),
+      orphanOptions: { now: new Date().toISOString(), hasOwnerImpl: async () => ({ owned: false }),
+        pageImpl: async () => assert.fail('waiting cannot exhaust recovery') },
+    });
+    const flush = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
+    const first = run();
+    await flush();
+    t.mock.timers.tick(5000);
+    await flush();
+    const waiting = await first;
+    assert.equal(waiting.outcome, 'ama-pending');
+    assert.equal(waiting.amaClosureResult.reason, 'ama-coexistence-operation-timeout');
+    assert.equal(counters.launches, 0);
+    t.mock.timers.tick(7000);
+    await flush();
+    const second = await run();
+    assert.equal(second.amaClosureResult.reason, AMA_HAMMER_BACKGROUND_REASON);
+    await flush();
+    if (!largeEvidenceOnly) {
+      t.mock.timers.tick(1000);
+      await flush();
+      t.mock.timers.tick(20_000);
+      await flush();
+    }
+    await queue.drain();
+    assert.equal(counters.launches, 1);
+    assert.equal(Date.now() - startedAt, largeEvidenceOnly ? 12_000 : 33_000);
+    assert.equal(counters.delta, 1);
+    assert.equal(counters.suppression, 1);
+    assert.equal(counters.evidence, 1);
+    assert.equal(queue.takeSettled('example/repo#42@current').result.dispatched, true);
+  });
+}
+
+test('HAMROUTE-01: a proof has a three-minute background bound and failures can retry', async t => {
+  const { createAmaProofCache } = await import('../src/ama-closure-orchestration.mjs');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const scope = createAmaProofCache().scope({ rootDir: 'fixture', repo: 'example/repo',
+    prNumber: 42, reviewedHead: 'reviewed', currentHead: 'current' });
+  let signal;
+  const pending = assert.rejects(scope.read('proof', proofSignal => {
+    signal = proofSignal;
+    return new Promise(() => {});
+  }), { code: 'AMA_COEXISTENCE_OPERATION_TIMEOUT', timeoutMs: 180_000 });
+  await Promise.resolve();
+  t.mock.timers.tick(180_000);
+  await pending;
+  assert.equal(signal.aborted, true);
+  assert.equal(await scope.read('proof', async () => 'retry-success'), 'retry-success');
 });

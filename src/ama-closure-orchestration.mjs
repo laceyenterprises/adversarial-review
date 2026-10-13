@@ -7,7 +7,7 @@ import { observeClosureWait } from './ama/closure-wait.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
-import { recoverOrphan } from './ama/orphan-watchdog.mjs';
+import { recoverOrphan, isOrphanRecoveryWait } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
@@ -463,7 +463,89 @@ function trackCoexistenceOperation(operationTracker, operation) {
   };
 }
 
-async function runCoexistenceOperation(
+// Head-bound read proofs only. Live review/CI reads and side effects are never
+// reusable merge authority; those operations still execute on every pass.
+export const AMA_REUSABLE_PROOF_OPERATIONS = new Set([
+  'closer-only-review-delta', 'stale-head-suppression-proof',
+  'head-closer-verified-commit', 'ham-terminal-remediation-evidence',
+]);
+export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = 180_000,
+  setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
+  maxEntries = Number.isFinite(Number(maxEntries)) ? Math.max(1, Math.floor(Number(maxEntries))) : 256;
+  const entries = new Map();
+  return {
+    scope({ rootDir, repo, prNumber, reviewedHead, currentHead, evidenceVersion }) {
+      const pr = JSON.stringify([rootDir, repo, prNumber]);
+      const key = JSON.stringify([rootDir, repo, prNumber, reviewedHead, currentHead]);
+      for (const [oldKey, entry] of entries) {
+        if (entry.pr === pr && oldKey !== key) { entry.controller.abort(); entries.delete(oldKey); }
+      }
+      if (!entries.has(key)) {
+        entries.set(key, { pr, reads: new Map(), controller: new AbortController(), evidenceVersion });
+        while (entries.size > maxEntries) {
+          const oldest = entries.keys().next().value;
+          entries.get(oldest).controller.abort();
+          entries.delete(oldest);
+        }
+      }
+      const entry = entries.get(key);
+      // Keep hot proof scopes resident when unrelated proof scopes arrive.
+      entries.delete(key);
+      entries.set(key, entry);
+      if (entry.evidenceVersion !== evidenceVersion) {
+        for (const name of entry.reads.keys()) {
+          if (name.startsWith('ham-terminal-remediation-evidence')) entry.reads.delete(name);
+        }
+        entry.evidenceVersion = evidenceVersion;
+      }
+      const { reads, controller: scopeController } = entry;
+      return {
+        read(name, fn) {
+          if (!reads.has(name)) {
+            const controller = new AbortController();
+            const signal = AbortSignal.any([scopeController.signal, controller.signal]);
+            let timer;
+            const deadline = new Promise((_, reject) => {
+              timer = setTimeoutFn(() => {
+                const error = new AmaCoexistenceOperationTimeoutError(name, workTimeoutMs);
+                controller.abort(error);
+                reject(error);
+              }, workTimeoutMs);
+              timer?.unref?.();
+            });
+            const work = Promise.race([Promise.resolve().then(() => {
+              throwIfAborted(signal);
+              return fn(signal);
+            }), deadline]).finally(() => clearTimeoutFn(timer));
+            reads.set(name, work);
+            work.catch(() => { if (reads.get(name) === work) reads.delete(name); });
+          }
+          return reads.get(name);
+        },
+      };
+    },
+  };
+}
+export function runAmaProofOperation(scope, operation, fn, options) {
+  return runTimedCoexistenceOperation(operation,
+    () => scope.read(options?.cacheKey || operation, proofSignal => fn({ signal: proofSignal })), options);
+}
+// Injected readers have independent caches, keeping offline fixtures isolated.
+const proofCaches = new WeakMap();
+function proofCacheFor(reader) {
+  if (!proofCaches.has(reader)) proofCaches.set(reader, createAmaProofCache());
+  return proofCaches.get(reader);
+}
+
+function headProofScope(reader, { rootDir, repoPath, prNumber, reviewStateRow, candidate, currentRevisionRef, dispatchJob }) {
+  return proofCacheFor(reader).scope({
+    rootDir, repo: repoPath, prNumber, reviewedHead: reviewStateRow?.reviewer_head_sha,
+    currentHead: candidate?.headSha || currentRevisionRef,
+    evidenceVersion: JSON.stringify([candidate?.prUpdatedAt, reviewStateRow?.review_body, dispatchJob?.reviewBody]),
+  });
+}
+
+async function runTimedCoexistenceOperation(
   operation,
   fn,
   {
@@ -837,6 +919,16 @@ async function dispatchAmaClosureFor({
   operationTracker = null,
 }) {
   throwIfAborted(signal);
+  let proofScope;
+  // Ordinary current-head evaluations must not evict useful proofs by filling
+  // the bounded cache with scopes that never perform a proof read.
+  const getProofScope = () => proofScope ||= headProofScope(proveCloserAuthoredStaleHeadImpl, {
+    rootDir, repoPath, prNumber, reviewStateRow, candidate, currentRevisionRef, dispatchJob,
+  });
+  const runCoexistenceOperation = (operation, fn, options) =>
+    AMA_REUSABLE_PROOF_OPERATIONS.has(operation)
+      ? runAmaProofOperation(getProofScope(), operation, fn, options)
+      : runTimedCoexistenceOperation(operation, fn, options);
   let cfg;
   let loadedConfig;
   let orchestrationMode;
@@ -1042,20 +1134,39 @@ async function dispatchAmaClosureFor({
   // HAMCIWAKE-01: resolve review evidence at its original identity only when
   // every intervening commit is the closer's own. All PR/CI inputs stay live.
   const originalReviewedHead = reviewStateRow?.reviewer_head_sha;
-  // Cache immutable commit evidence only within this evaluation. The ancestry
-  // walk and stale-head resume must not issue duplicate probes for the tip.
-  const suppressionCache = new Map();
-  const commitCache = new Map();
-  const cachedSuppression = options => {
-    if (!suppressionCache.has(options.headSha)) suppressionCache.set(options.headSha,
-      (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)(options));
-    return suppressionCache.get(options.headSha);
-  };
-  const cachedCommit = options => {
-    if (!commitCache.has(options.headSha)) commitCache.set(options.headSha,
-      fetchHeadCloserVerifiedCommitImpl(options));
-    return commitCache.get(options.headSha);
-  };
+  // Share immutable commit evidence across the ancestry walk, stale-head
+  // resume and later passes for this reviewed/current head pair.
+  const cachedSuppression = options => getProofScope().read(`suppression:${options.headSha}`,
+    proofSignal => (resolveHeadCloserCommitSuppressionImpl || getHeadCloserCommitSuppression)({ ...options, signal: proofSignal }));
+  const cachedCommit = options => getProofScope().read(`commit:${options.headSha}:${Boolean(options.includePrimaryChange)}`,
+    proofSignal => fetchHeadCloserVerifiedCommitImpl({ ...options, signal: proofSignal }));
+  // Warm independent reads together. A serial timeout must not prevent the
+  // other immutable proofs from making progress before the next watcher pass.
+  // Speculation belongs only to the CI-blocked hammer route; ordinary review
+  // and final-round CI handoffs must not start reads they would never reach.
+  if (ciBlockedHammerOwner && originalReviewedHead && settledReviewHeadSha
+    && originalReviewedHead !== settledReviewHeadSha
+    && !(isOrphanHeadReviewRequested(reviewStateRow, settledReviewHeadSha)
+      && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))) {
+    cachedSuppression({ repoPath, prNumber, headSha: settledReviewHeadSha, logger })
+      .then(suppression => {
+        // A certificate read depends on recognized closer provenance. Warm it
+        // after that proof, without performing unrelated reads on foreign heads.
+        if (suppression?.suppressed !== true
+          || !['closer-commit-trailer', 'hammer-validated-head'].includes(suppression.reason)
+          || (suppression.reason !== 'hammer-validated-head'
+            && amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer).length === 0)
+          || typeof resolveHamTerminalRemediationEvidenceImpl !== 'function') return;
+        return getProofScope().read(`ham-terminal-remediation-evidence:${originalReviewedHead}`, proofSignal =>
+          resolveHamTerminalRemediationEvidenceImpl({
+            reviewState: { headSha: originalReviewedHead },
+            prMetadata: { headSha: settledReviewHeadSha },
+            repoPath, prNumber, execFileImpl: execFileAsync, rootDir, logger,
+            closerCommitSuppression: suppression,
+            fetchHeadCloserVerifiedCommitImpl: cachedCommit, signal: proofSignal,
+          }));
+      }).catch(() => {});
+  }
   // STALECLOSER-03: the anchors are the reviewed head plus the comment-only
   // final-round pushes recorded for it, which already carry its verdict; the
   // hammer often stacks its closer commit on that push (agent-os#7818/#7822).
@@ -1682,11 +1793,13 @@ async function dispatchAmaClosureFor({
             prNumber,
             execFileImpl: execFileAsync,
             closerCommitSuppression,
+            fetchHeadCloserVerifiedCommitImpl: cachedCommit,
             rootDir,
             logger,
             signal: operationSignal,
           }),
           {
+            cacheKey: `ham-terminal-remediation-evidence:${reviewState.headSha}`,
             timeoutMs: operationTimeoutMs,
             parentSignal: signal,
             operationTracker,
@@ -2241,6 +2354,12 @@ async function dispatchAmaClosureFor({
       maxConcurrent: cfg.amaCloserMaxConcurrentLaunches,
     });
     backgroundSettled = backgroundQueue.takeSettled?.(backgroundKey) || null;
+    // A settled classification wait is not a refusal. Submit fresh work in
+    // this pass instead of spending a whole pass consuming the wait.
+    if (backgroundSettled?.ok && ['operator-label-classification-pending',
+      'background-pr-state-unavailable'].includes(backgroundSettled.result?.reason)) {
+      backgroundSettled = null;
+    }
     // A scoped request must observe the closer's gates before taking ownership.
     // Skipping a fresh run here would erase a consumed safety refusal on the
     // next tick, letting the same label bypass risk policy or a dispatch cap.
@@ -2258,7 +2377,16 @@ async function dispatchAmaClosureFor({
           // ticks. Recheck live state at launch, after it gets a queue slot.
           let live;
           try {
-            live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+            for (let attempt = 0; ; attempt++) {
+              throwIfAborted(backgroundSignal);
+              try {
+                live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+                break;
+              } catch (error) {
+                if (attempt >= 2 || !isOrphanRecoveryWait(error)) throw error;
+                await abortableSleep((attempt + 1) * 1000, backgroundSignal);
+              }
+            }
           } catch (err) {
             logger?.warn?.(
               `[watcher] AMA hammer background pre-dispatch PR probe failed for ${backgroundKey}: ` +
@@ -2306,7 +2434,8 @@ async function dispatchAmaClosureFor({
           if (liveMergeability !== 'MERGEABLE' && liveMergeability !== 'CONFLICTING') {
             return { dispatched: false, reason: 'background-pr-not-mergeable', mergeable: live?.mergeable || null };
           }
-          return maybeDispatchAmaCloserImpl({ ...closerArgs, signal: backgroundSignal });
+          return maybeDispatchAmaCloserImpl({ ...closerArgs, signal: backgroundSignal,
+            operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
         },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
           logger?.log?.(
@@ -2540,20 +2669,13 @@ export async function resolveMergeAgentCoexistenceForWatcher({
         `operation=${operation} timeout_ms=${err.timeoutMs || operationTimeoutMs || 'unknown'}. ` +
         'Skipping merge action for this PR on this tick so the posted-review phase can continue.',
     );
-    return {
-      outcome: 'ama-pending',
-      amaClosureResult: withAmaDispatchMetadata(
-        {
-          dispatched: false,
-          skipMergeAgent: true,
-          reason: 'ama-coexistence-operation-timeout',
-          namedReason: `ama-coexistence-operation-timeout:${operation}`,
-          timedOutOperation: operation,
-          timeoutMs: err.timeoutMs || operationTimeoutMs || null,
-        },
-        { amaEnabled: true },
-      ),
-    };
+    amaClosureResult = withAmaDispatchMetadata({
+      dispatched: false, skipMergeAgent: true,
+      reason: 'ama-coexistence-operation-timeout',
+      namedReason: `ama-coexistence-operation-timeout:${operation}`,
+      timedOutOperation: operation,
+      timeoutMs: err.timeoutMs || operationTimeoutMs || null,
+    }, { amaEnabled: true });
   }
   throwIfAborted(signal);
   logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
@@ -2659,7 +2781,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
         operationTimeoutMs, operationTracker, orphanRecovery,
         priorDaemonCleanMerge: amaClosureResult?.daemonCleanMerge,
       }),
-      ownershipOperation: (fn) => runCoexistenceOperation(
+      ownershipOperation: (fn) => runTimedCoexistenceOperation(
         'orphan-ownership', fn, { timeoutMs: operationTimeoutMs, parentSignal: signal,
           operationTracker, logger, repoPath, prNumber }),
       ownershipTimeoutMs: operationTimeoutMs,
@@ -2667,6 +2789,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     });
     if (orphan) return orphan;
   }
+  if (isOrphanRecoveryWait(amaClosureResult)) return { outcome: 'ama-pending', amaClosureResult };
   if (amaClosureResult?.commentOnlyFinalRoundAwaitingCi === true) {
     logger?.log?.(`[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only final-round head; not counted toward the retain-loop cap`);
     return { outcome: 'ama-pending', amaClosureResult };

@@ -302,7 +302,7 @@ test('one-shot context snapshot is bounded and describes fixture PR head', (t) =
   const fixturePath = join(dir, 'fixture.json');
   writeFileSync(fixturePath, JSON.stringify(fixture));
   const gh = join(bin, 'gh');
-  writeFileSync(gh, `#!/usr/bin/env node\nconst f=require(${JSON.stringify(fixturePath)}); const a=process.argv.join(' '); console.log(JSON.stringify(a.includes('/reviews?')?f.reviews:a.includes('/files?')?f.files:a.includes('/protection')?f.protection:a.includes('/check-runs?')?{check_runs:[]}:a.includes('/status?')?{statuses:[]}:a.includes('pr view')?f.checks:f.pr));\n`);
+  writeFileSync(gh, `#!/usr/bin/env node\nconst f=require(${JSON.stringify(fixturePath)}); const a=process.argv.join(' '); console.log(JSON.stringify(a.includes('/reviews?')?f.reviews:a.includes('/files?')?f.files:a.includes('/protection')?f.protection:a.includes('/check-runs?')?{check_runs:[]}:a.includes('/statuses?')?[]:a.includes('pr view')?f.checks:f.pr));\n`);
   chmodSync(gh, 0o755);
   const state = join(dir, 'state.json');
   writeFileSync(state, JSON.stringify({ activeRemediation: { jobId: 'job-1' }, activeLease: { leaseId: 'lease-1' } }));
@@ -351,7 +351,7 @@ else if (a.includes('/git/blobs/')) { const text='x'.repeat(10000)+'\\n'; consol
 else if (a.includes('/reviews?')) console.log('[]');
 else if (a.includes('/protection')) console.log('{}');
 else if (a.includes('/check-runs?')) console.log('{"check_runs":[]}');
-else if (a.includes('/status?')) console.log('{"statuses":[]}');
+else if (a.includes('/statuses?')) console.log('[]');
 else if (a.includes('pr view')) console.log('{"statusCheckRollup":[]}');
 else console.log(JSON.stringify({state:'open',head:{sha:'${head}'},base:{sha:'${base}',ref:'main'},body:'intent'}));
 `); chmodSync(gh, 0o755);
@@ -542,7 +542,7 @@ for (const scenario of ['recover', 'exhaust', 'permanent']) {
     writeFileSync(gh, `#!/bin/sh
 case "$*" in
   *'/check-runs?'*) echo '{"check_runs":[]}'; exit 0 ;;
-  *'/status?'*) echo '{"statuses":[]}'; exit 0 ;;
+  *'/statuses?'*) echo '[]'; exit 0 ;;
 esac
 n=0; [ ! -f "$TMPDIR/calls" ] || n=$(cat "$TMPDIR/calls")
 n=$((n + 1)); echo "$n" > "$TMPDIR/calls"
@@ -845,7 +845,7 @@ fs.appendFileSync(process.env.TMPDIR + '/calls.jsonl', JSON.stringify({args, at:
 const path = args[1];
 if (args[0] !== 'api') process.exit(1);
 if (path.includes('/check-runs?')) console.log(JSON.stringify({check_runs:[{name:'fixture-ci',status:'queued',conclusion:null,created_at:'2026-01-01T00:00:00Z'}]}));
-else if (path.includes('/status?')) console.log('{"statuses":[]}');
+else if (path.includes('/statuses?')) console.log('[]');
 else if (path.endsWith('/pulls/42')) console.log(JSON.stringify({number:42,state:'open',draft:false,head:{sha:'${head}'},base:{sha:'${'b'.repeat(40)}',ref:'main'},mergeable:true,mergeable_state:'clean',labels:[]}));
 else process.exit(1);
 `, { mode: 0o755 });
@@ -859,6 +859,7 @@ else process.exit(1);
   const script = `${rendered.stdout.slice(helperStart, helperEnd)}
 HAM_NODE_BIN=${process.execPath}
 HAM_REMOTE_CI_POLL_SECONDS=30 HAM_REMOTE_CI_WAIT_SECONDS=300 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=3
+export AMA_CI_COST_MODE=blocking
 HAM_BRANCH_PROTECTION_REQUIRED=false HAM_MERGE_RETRY_CAP=1 HAM_MERGE_LEASE_HELD=1
 POST_REMEDIATION_SHA=${head} HAM_GATE_JSON="$TMPDIR/gate.json"
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
@@ -885,7 +886,7 @@ test('GHBUDGET-01: REST hammer checks preserve latest reruns and commit statuses
       { name: 'CI', status: 'completed', conclusion: 'success', created_at: '2026-01-01T00:00:00Z' },
       { name: 'CI', status: 'queued', conclusion: null, created_at: '2026-01-01T00:01:00Z' },
     ] };
-    if (path.includes('/status?')) return { statuses: [{ context: 'external', state: 'success' }] };
+    if (path.includes('/statuses?')) return [{ context: 'external', state: 'success' }];
     return { state: 'open', head: { sha: 'a'.repeat(40) }, labels: [], mergeable: true, mergeable_state: 'clean' };
   } });
   assert.equal(classifyCheckRollup(snapshot.checks), 'PENDING');
@@ -943,7 +944,6 @@ if (args[0] === 'pr' && args[1] === 'comment') process.exit(0);
 const path = args.find(arg => arg.startsWith('repos/')) || '';
 if (path.includes('/check-runs')) console.log(JSON.stringify({total_count:1,check_runs:[{id:1,name:'fixture-ci',status:'completed',conclusion:'success',created_at:'2026-01-01T00:00:00Z'}]}));
 else if (path.includes('/statuses')) console.log('[]');
-else if (path.includes('/status?')) console.log('{"statuses":[]}');
 else if (path.includes('/reviews') || path.includes('/files?')) console.log('[]');
 else if (path.includes('/comments')) console.log('[[]]');
 else if (path.includes('/protection')) console.log('{"strict":false}');

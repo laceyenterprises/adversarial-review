@@ -10,5 +10,5 @@ try {
   process.stdout.write(jqIndex < 0 ? `${json}\n` : execFileSync('jq', ['-r', args[jqIndex + 1]], { input: json, encoding: 'utf8' }));
 } catch (err) {
   process.stderr.write(`${err.stderr || err.message}\n`);
-  process.exitCode = Number.isInteger(err.code) ? err.code : 1;
+  process.exitCode = Number.isInteger(err.status) ? err.status : Number.isInteger(err.code) ? err.code : 1;
 }

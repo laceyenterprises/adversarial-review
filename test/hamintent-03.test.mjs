@@ -207,6 +207,32 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
     assert.equal(closure.trace.primaryChange.ok, expected);
     assert.deepEqual(merge.reasons, expected ? [] : ['primary-change-reverted']);
   }
+  // Blocking cost mode must defer pending CI without inventing cost evidence.
+  // Once green, the real collector must still refuse unreadable cost evidence.
+  const gateInput = gate.replaceAll(`rootDir: '${root}'`, `rootDir: '${directory}'`);
+  const costEnv = { ...env, AGENT_OS_CONFIG_PATH: join(directory, 'global.yaml'), AMA_CI_COST_MODE: 'blocking' };
+  const greenWithCost = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { env: costEnv, input: gateInput }));
+  assert.equal(greenWithCost.ok, true);
+  assert.deepEqual(greenWithCost.reasons, []);
+  const greenWithoutCost = structuredClone(responses);
+  delete greenWithoutCost[`repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`];
+  json('github', { responses: greenWithoutCost, rollup });
+  const refused = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { env: costEnv, input: gateInput }));
+  assert.equal(refused.ok, false);
+  assert.deepEqual(refused.reasons, ['ci-cost-read-failed']);
+  for (const extra of [{}, { mergeable: 'CONFLICTING' }, { headSha: author, headRefOid: author }, { labels: null }]) {
+    json('github', { responses: {}, rollup: { ...rollup, ...extra,
+      statusCheckRollup: [{ name: 'test', status: 'QUEUED', conclusion: null }] } });
+    const pending = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { env: costEnv, input: gateInput }));
+    assert.equal(pending.ok, false);
+    assert.equal(pending.checksConclusion, 'PENDING');
+    assert.equal(pending.primaryChangeReason, null);
+    assert.equal(pending.primaryChangeMissingEvidence, null);
+    assert.deepEqual(pending.reasons, ['ci-not-green',
+      ...(extra.mergeable ? ['pr-not-mergeable'] : []),
+      ...(extra.headSha ? ['stale-head'] : []),
+      ...(extra.labels === null ? ['labels-unavailable'] : [])]);
+  }
 });
 
 test('collector deduplicates review pairs while all findings still authorize their own regions', async () => {

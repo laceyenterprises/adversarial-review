@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { withGitHubBudgetScope } from '../src/rate-limit-throttle.mjs';
 import {
   existsSync,
   mkdirSync,
@@ -1380,3 +1381,23 @@ test('quarantine diagnostics filter and sort before the 1,000-document cap', t =
   assert.deepEqual(health.quarantineEventCounts, { 'fixture.event': 1000 });
   assert.deepEqual(reads, names.slice(0, 1000).map(name => join(directory, name)));
 });
+for (const budgetState of ['rateLimited', 'deferred']) {
+  test(`operator alerts remain durable during a ${budgetState} GitHub tick`, async t => {
+    const { env, rootDir } = makeEnv();
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    await withGitHubBudgetScope({ [budgetState]: true }, async () => {
+      for (const event of ['ama.closure_lag.slo_breach', 'ama.orphan_recovery.exhausted',
+        'adversarial_review.operator_decision_required', 'ama.ci_blocked.hammer_final']) {
+        const queued = await deliverAlert('Operator action required', {
+          event, payload: { repo: 'fixture/repo', prNumber: 1, headSha: 'a'.repeat(40) },
+          env, requestText: async () => { throw new Error('offline'); },
+        });
+        assert.equal(queued.status, 'queued');
+        assert.equal(queued.queued, true);
+        assert.equal(JSON.parse(readFileSync(queued.queuePath, 'utf8')).event, event);
+        assert.ok(existsSync(queued.receiptPath));
+      }
+    });
+    assert.equal(readAlertSinkHealth({ env }).pendingCount, 4);
+  });
+}

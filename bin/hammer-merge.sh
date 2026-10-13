@@ -328,11 +328,12 @@ const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
 const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: '<<ROOT_DIR>>' });
 const primaryChange = checksConclusion === 'SUCCESS' ? await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
   get: createHistoryReader(),
-}) : { headSha: expectedHead, hasHammerCommits: false };
-// Pending/red checks cannot merge. History is refreshed when checks are green.
+}) : null;
+// Pending/red checks cannot merge. Defer preservation and cost evaluation until
+// green, when real exact-head evidence is fetched; never synthesize approval.
 const eligibility = evaluateMergeEligibility({
   primaryChange,
-  requirePrimaryChange: true,
+  requirePrimaryChange: checksConclusion === 'SUCCESS',
   strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
   verdict: 'settled-success',
   leaseHeld: true,
@@ -346,15 +347,15 @@ const eligibility = evaluateMergeEligibility({
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
 });
-const primaryIntent = checkPrimaryChange(primaryChange, expectedHead, {
+const primaryIntent = primaryChange ? checkPrimaryChange(primaryChange, expectedHead, {
   strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
-});
+}) : null;
 console.log(JSON.stringify({
   ok: eligibility.eligible,
   reasons: eligibility.reasons,
-  primaryChangeReason: primaryChange.reason || primaryIntent.detail || null,
+  primaryChangeReason: primaryChange?.reason || primaryIntent?.detail || null,
   // REVERSALREBASE-01: the closing status names the one missing piece.
-  primaryChangeMissingEvidence: primaryIntent.missingEvidence || null,
+  primaryChangeMissingEvidence: primaryIntent?.missingEvidence || null,
   state,
   open,
   headMatches,

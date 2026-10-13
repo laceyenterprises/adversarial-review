@@ -68,6 +68,30 @@ producer contract must be confirmed in agent-os. In particular, a worker that
 reports a publish refusal but finishes `succeeded` stays charged; covering that
 incident needs an agent-os dispatch-status follow-up, not narrative inference.
 
+## Operator decision notices (REVIEWNOTICE-01)
+
+When the watcher projects `operatorDecisionRequired`, it observes the PR head
+before enqueueing `adversarial_review.operator_decision_required`. A live closer
+lease, active closer dispatch, pending/in-progress remediation job for the PR,
+handoff awaiting review, or recorded available closer route holds the notice,
+even past the 45-minute backstop. After ownership ends, an operator-required
+closer outcome (`needsOperator` or closure owner `page`) sends `no-route`; a
+terminal hammer without a merged/succeeded outcome sends
+`hammer-ended-without-merge`. Otherwise the watcher sends `backstop-45m` after
+45 minutes from its first observation on that head. This observation does not
+change closer eligibility or dispatch.
+
+Before delivery, the watcher reads the live PR and requires it to remain open
+at the observed head. The GitHub subject's `terminal` flag represents PR
+closure, not completion of a review or remediation round. A stopped remediation
+job on an open PR therefore remains eligible for notification. PR closure or a
+decision no longer requiring an operator clears the held observation; a new
+head starts a fresh backstop. Notice-state reads are asynchronous so ordinary
+non-alerting polls do not synchronously read the notice store. Only successful
+durable alert enqueue stamps the per-head cascade marker; enqueue failure is
+logged and retried on a later poll. See the
+[notice observation data model](data-model/operator-decision-notices.md).
+
 ## Scope and current contract
 
 - This is a **bounded loop** with operator override. It is not an unbounded autonomous retry daemon.

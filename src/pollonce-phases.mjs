@@ -949,6 +949,8 @@ export async function processReviewSubject(entry, ctx) {
           try {
             await maybeDeliverOperatorDecisionNotice({ rootDir: ROOT, repo: repoPath,
               prNumber, headSha: subject.headSha, decision: projected.decision, reviewRow,
+              // GitHub subject terminal means PR closure, not review completion
+              // (stateFromSnapshot in the GitHub-PR subject adapter).
               terminal: subject.terminal || ['merged', 'closed'].includes(reviewRow?.pr_state),
               handoffAwaitingReview, deliverAlertFn,
               readLivePR: () => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),

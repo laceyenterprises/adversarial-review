@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { findLiveAmaCloserLease, readAmaCloserLease } from './ama/closer-lease.mjs';
@@ -33,11 +34,21 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   decision, reviewRow, terminal = false, handoffAwaitingReview = false,
   now = Date.now(), deliverAlertFn, readLivePR, logger = console }) {
   const identity = { repo, prNumber, headSha };
-  let state = readState(rootDir, identity);
+  // Keep observation cleanup on non-alerting polls without blocking the watcher
+  // on synchronous file reads (including the usual missing-state lookup).
   if (terminal || !decision?.operatorDecisionRequired) {
-    if (state.observation) writeState(rootDir, identity, { ...state, observation: null });
+    let observed;
+    try { observed = JSON.parse(await readFile(statePath(rootDir, identity), 'utf8')); }
+    catch { return; }
+    if (observed.observation) {
+      // A closer outcome may have arrived during the async read. Preserve that
+      // latest state when clearing the observation, without yielding again.
+      const state = readState(rootDir, identity);
+      if (state.observation) writeState(rootDir, identity, { ...state, observation: null });
+    }
     return;
   }
+  let state = readState(rootDir, identity);
   if (hasOperatorDecisionRequiredAlerted(rootDir, identity)) return;
   if (state.observation?.headSha !== headSha) {
     state = { ...state, observation: { headSha, startedAt: now } };

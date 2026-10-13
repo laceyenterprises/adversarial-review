@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "operator-decision-notices",
+      "title": "Operator Decision Notices",
+      "path": "docs/data-model/operator-decision-notices.md",
+      "store": "<runtime rootDir>/data/operator-decision-notices/",
+      "schemaSurface": "src/operator-decision-notice.mjs",
+      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/ama-closure-orchestration.mjs", "src/reviewer-cascade.mjs"],
+      "owner": "watcher operator-decision notification observation"
+    },
+    {
       "id": "nonempty-pr-heads",
       "title": "Nonempty PR Heads",
       "path": "docs/data-model/nonempty-pr-heads.md",

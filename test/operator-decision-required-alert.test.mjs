@@ -2,11 +2,14 @@
 // Budget exhaustion is handed to the hammer instead.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { processReviewSubject } from '../src/pollonce-phases.mjs';
+import { normalizePRSnapshot, stateFromSnapshot } from '../src/adapters/subject/github-pr/index.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { maybeFireOperatorDecisionRequiredAlert } from '../src/watcher-no-progress-lane.mjs';
 import { getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import {
@@ -66,7 +69,9 @@ function writeStoppedRequestChangesJob(root, stopCode = 'manual-stop') {
     subjectExternalId: `${REPO}#1`,
     revisionRef: HEAD,
     reviewerModel: 'gemini',
-    reviewBody: '## Summary\nStill blocked.\n\n## Verdict\nRequest changes',
+    // Suppress unrelated merge dispatch after gate projection so this watcher
+    // integration fixture cannot leave the offline notification path.
+    reviewBody: '## Summary\nStill blocked.\n\n## Scope Violation Finding\n```json\n{"kind":"scope-violation"}\n```\n\n## Verdict\nRequest changes',
     remediationPlan: {
       currentRound: 3,
       maxRounds: 3,
@@ -76,35 +81,51 @@ function writeStoppedRequestChangesJob(root, stopCode = 'manual-stop') {
   });
 }
 
-async function runMergedPostedSubject(root, { deliverAlertFn, errors = [], stopCode } = {}) {
+async function runPostedSubject(root, { deliverAlertFn, stopCode, prState = 'open', liveState = 'OPEN' } = {}) {
   writeStoppedRequestChangesJob(root, stopCode);
+  const subject = stateFromSnapshot(normalizePRSnapshot(REPO, {
+    number: 1, title: '[codex] operator decision fixture', labels: [],
+    state: prState, headRefOid: HEAD,
+  }), { completedRemediationRounds: 3, maxRemediationRounds: 3 });
+  // The production adapter keeps an open PR non-terminal even after all
+  // remediation rounds are complete. Merged/closed PRs alone are terminal.
+  assert.equal(subject.terminal, prState !== 'open');
+  const localDb = openReviewStateDb(root);
+  ensureReviewStateSchema(localDb);
+  localDb.prepare(`INSERT OR REPLACE INTO reviewed_prs
+    (repo, pr_number, domain_id, reviewed_at, reviewer, review_status, pr_state, reviewer_head_sha, posted_at)
+    VALUES (?, 1, 'github-pr', ?, 'gemini', 'posted', ?, ?, ?)`)
+    .run(REPO, '2026-09-04T12:00:00.000Z', prState, HEAD, '2026-09-04T12:00:00.000Z');
+  const current = localDb.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = 1').get(REPO);
+  localDb.close();
+  const postedReviewHandlers = [];
   await processReviewSubject({
-    subject: {
-      title: '[codex] operator decision fixture',
-      labels: [],
-      headSha: HEAD,
-      ref: { revisionRef: HEAD, subjectExternalId: `${REPO}#1` },
-    },
+    subject,
     prNumber: 1,
-    current: {
-      review_status: 'posted',
-      pr_state: 'merged',
-      reviewer_head_sha: HEAD,
-      review_attempts: 1,
-      posted_at: '2026-09-04T12:00:00.000Z',
-      failed_at: null,
-      merged_at: '2026-09-04T12:15:00.000Z',
-    },
+    current,
   }, {
     operatorSurface: { extractLinearTicketId: () => null },
     watcherDrain: { active: false },
-    postedReviewHandlers: [],
+    postedReviewHandlers,
     domainId: 'github-pr',
     repoPath: REPO,
     currentRepoPRs: [],
     activeMergeAgentPRs: [],
     ROOT: root,
-    execFileAsync: async () => ({ stdout: '', stderr: '' }),
+    execFileAsync: async (_file, args) => {
+      if (args[0] === 'api' && args.some(arg => arg === `repos/${REPO}/pulls/1/files`)) {
+        return { stdout: '[]', stderr: '' };
+      }
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return { stdout: JSON.stringify({ state: liveState, headRefOid: HEAD, labels: [],
+          isDraft: true, reviews: [], statusCheckRollup: [] }), stderr: '' };
+      }
+      assert.equal(args[0], 'api');
+      assert.ok(args.includes('graphql'));
+      return { stdout: JSON.stringify({ data: { repository: { pullRequest: {
+        state: liveState, headRefOid: HEAD, labels: { nodes: [] },
+      } } } }), stderr: '' };
+    },
     WATCHER_PRIMARY_DOMAIN_ID: 'github-pr',
     deliverAlertFn,
     adversarialGateProvider: {
@@ -120,7 +141,7 @@ async function runMergedPostedSubject(root, { deliverAlertFn, errors = [], stopC
     shouldDeferReviewForActiveFollowUp: () => ({ defer: false }),
     handlePollError: () => {},
   });
-  return errors;
+  for (const handler of postedReviewHandlers) await handler.run();
 }
 
 test('alerts once for a given head', () => {
@@ -183,7 +204,8 @@ test('the mark records why, for the operator reading state later', () => {
 test('the watcher never notifies an already merged PR', async () => {
   await withRootAsync(async (root) => {
     const alerts = [];
-    await runMergedPostedSubject(root, {
+    await runPostedSubject(root, {
+      prState: 'merged',
       deliverAlertFn: async (text) => alerts.push(text),
     });
     assert.equal(alerts.length, 0);
@@ -194,6 +216,10 @@ test('the watcher never notifies an already merged PR', async () => {
 
 const identity = { repo: REPO, prNumber: 1, headSha: HEAD };
 const decision = { operatorDecisionRequired: true, state: 'success', reason: 'remediation-stopped' };
+function noticeStatePath(root) {
+  const key = createHash('sha256').update(`${REPO}#1`).digest('hex');
+  return join(root, 'data', 'operator-decision-notices', `${key}.json`);
+}
 function fixtureJSON(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(value));
@@ -204,6 +230,64 @@ function noticeFixture(rootDir) {
     deliverAlertFn: async (text, meta) => alerts.push({ text, meta }),
     logger: { log: line => logs.push(line) } } };
 }
+
+for (const route of ['no-route', 'backstop-45m']) {
+  test(`watcher delivers once on an open PR with stopped remediation after ${route}`, async () => {
+    await withRootAsync(async root => {
+      const alerts = [];
+      if (route === 'no-route') recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+      else fixtureJSON(noticeStatePath(root), {
+        observation: { headSha: HEAD, startedAt: Date.now() - OPERATOR_DECISION_NOTICE_BACKSTOP_MS },
+      });
+      const options = { deliverAlertFn: async (text, meta) => alerts.push({ text, meta }) };
+      await runPostedSubject(root, options);
+      await runPostedSubject(root, options);
+      assert.equal(alerts.length, 1);
+      assert.equal(alerts[0].meta.payload.reason, route);
+      assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), true);
+    });
+  });
+}
+
+test('watcher retries failed notice delivery on an open PR without setting the marker', async () => {
+  await withRootAsync(async root => {
+    recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+    let attempts = 0;
+    const options = { deliverAlertFn: async () => {
+      if (++attempts === 1) throw new Error('synthetic bus failure');
+    } };
+    await runPostedSubject(root, options);
+    assert.equal(attempts, 1);
+    assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), false);
+    await runPostedSubject(root, options);
+    await runPostedSubject(root, options);
+    assert.equal(attempts, 2);
+    assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), true);
+  });
+});
+
+test('watcher live inspection suppresses a notice when the discovered open PR has since closed', async () => {
+  await withRootAsync(async root => {
+    recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+    const alerts = [];
+    await runPostedSubject(root, { liveState: 'CLOSED', deliverAlertFn: async text => alerts.push(text) });
+    assert.equal(alerts.length, 0);
+    assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), false);
+  });
+});
+
+test('a non-alerting poll clears the held observation and re-arms the full backstop', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    await maybeDeliverOperatorDecisionNotice(options);
+    await maybeDeliverOperatorDecisionNotice({ ...options, decision: { operatorDecisionRequired: false } });
+    assert.equal(JSON.parse(readFileSync(noticeStatePath(root), 'utf8')).observation, null);
+    await maybeDeliverOperatorDecisionNotice({ ...options, now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS });
+    assert.equal(alerts.length, 0);
+    await maybeDeliverOperatorDecisionNotice({ ...options, now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS * 2 });
+    assert.equal(alerts.length, 1);
+  });
+});
 
 for (const route of ['lease', 'eligible', 'pending', 'in-progress', 'handoff', 'dispatch']) {
   test(`notice held while ${route} route remains, including past backstop`, async () => {

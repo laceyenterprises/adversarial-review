@@ -7,6 +7,34 @@ import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 
 const sha = (c) => c.repeat(40);
 const oldBase = sha('0'), base = sha('b'), reviewedHead = sha('1'), author = sha('2'), head = sha('c');
+test('HAMREVERSAL-01: API-published reversal uses verification from the re-read commit', async () => {
+  const { transport } = await collect();
+  for (const verified of [true, false]) {
+    const reads = [];
+    const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head,
+      get: async path => {
+        reads.push(path);
+        const response = await transport(path);
+        if (path.endsWith(`/commits/${head}`)) return { ...response, committer: { login: 'web-flow' },
+          commit: { ...response.commit, verification: { verified, reason: 'valid' } } };
+        // The compare response deliberately retains the old identity shape;
+        // only the individual commit read supplies API verification.
+        return response;
+      } }, { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
+    assert.ok(reads.includes(`repos/fixture/repo/commits/${head}`));
+    const result = checkPrimaryChange(evidence, head);
+    if (verified) {
+      assert.equal(evidence.reversalAuthorizations.length, 1);
+      assert.equal(evidence.reversalAuthorizations[0].commit.commit.verification.verified, true);
+      assert.equal(result.ok, true);
+    } else {
+      assert.equal(evidence.reversalAuthorizations, undefined);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'commit-provenance');
+      assert.equal(result.reason, 'primary-change-reverted');
+    }
+  }
+});
+
 test('an authorized HAM reversal stays authorized after the branch is rebased onto a newer base', async () => {
   const { evidence, result } = await collect();
   assert.equal(evidence.reversalAuthorizations.length, 1);

@@ -389,6 +389,7 @@ export function normalizeVerifiedCloserCommit(commitJson = {}) {
     parentCount: commitJson?.parents?.length ?? commitJson?.parents?.nodes?.length ?? (parentSha ? 1 : 0),
     message,
     trailers: parseCommitTrailers(message),
+    ...(commitJson?.commit ? { commit: commitJson.commit } : {}),
     author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
     committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
     changedFiles,
@@ -542,7 +543,7 @@ export async function getHeadCloserCommitSuppression({
         'api',
         `repos/${repoPath}/commits/${sha}`,
         '--jq',
-        '{sha:.sha,message:.commit.message,authorLogin:.author.login,committerLogin:.committer.login}',
+        '{sha:.sha,message:.commit.message,authorLogin:.author.login,committerLogin:.committer.login,commit:{verification:.commit.verification}}',
       ],
       retries: retryDelays.length,
       backoffMs: Number(retryDelays[0]) || 500,
@@ -552,6 +553,7 @@ export async function getHeadCloserCommitSuppression({
     const commit = {
       sha: raw.sha || sha,
       message: raw.message || '',
+      commit: raw.commit,
       author: { login: raw.authorLogin || null },
       committer: { login: raw.committerLogin || null },
     };

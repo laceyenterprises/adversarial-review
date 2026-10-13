@@ -2245,6 +2245,8 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          // No environment alias: containment selection belongs to trusted config.
+          containment_mode: { __type: TYPE_STRING, __default: 'legacy', __enum: ['legacy', 'boundary-default'] },
           worker_process_niceness: { __type: TYPE_INT, __default: 10, __min: 0, __max: 19 },
           post_merge_actions: {
             __type: TYPE_DICT,

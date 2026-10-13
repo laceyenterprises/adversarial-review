@@ -16,3 +16,18 @@ use `fixture/repo`, synthetic heads and disposable state; no live calls.
 Tokens can belong to different installations. The existing shared budget file is
 conservative across these callers; it does not establish that their installations
 are identical. No token or configuration key is added.
+
+The rendered verify-head → audit-publish → merge common-path fixture records
+**44 gh invocations: 43 REST and 1 GraphQL command (`pr merge`)**. It starts with
+an eligible exact-head verdict, green checks, a reviewed starting base, no diff,
+no withdrawals, no workflow changes, no rebase and no retries. Only local lease,
+audit, wake and signal sinks are replaced. GitHub-reading helpers run against the
+fake gh. This is a phase-procedure command count, not GitHub points or the number
+of HTTP exchanges gh internally makes. Context collection, predicate preparation,
+remediation/publication, history size, pagination and retries add calls.
+
+A synthetic five-minute pending wait records eleven snapshots: eleven REST
+check-run queries, eleven REST commit-status queries and eleven REST PR-head
+queries; zero GraphQL commands, zero `--watch` arguments. Each endpoint is queried
+at most once per 30 seconds. History/cost evidence is read when checks turn green,
+and is refreshed again immediately before the guarded merge.

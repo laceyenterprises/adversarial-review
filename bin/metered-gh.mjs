@@ -23,7 +23,7 @@ if (action === 'wait' || action === 'record') {
   });
   try {
     const result = await meteredExecFile(execute, 'gh', args, {
-      encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      timeout: 30_000, killSignal: 'SIGKILL', encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
     });
     process.stdout.write(result.stdout || '');
     process.stderr.write(result.stderr || '');

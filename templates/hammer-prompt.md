@@ -93,6 +93,9 @@ decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
 The publish helper rejects missing or placeholder inputs and releases the lease
 on failure. Keep these values in the same shell for the merge audit.
 
+Use the shared-budget check-wait helper (minimum 30 seconds). Never use
+`--watch` or add polling loops.
+
 For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
 
 ```bash

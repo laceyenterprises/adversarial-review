@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { meteredExecFileSync } from '../src/metered-gh.mjs';
 import { execFileSync } from 'node:child_process';
 import { isTransientGhError } from '../src/gh-cli.mjs';
 import { publishHammerTree } from '../src/ama/hammer-api-publish.mjs';
@@ -10,7 +11,7 @@ const git = (...args) => execFileSync('git', args, { timeout: 30000, maxBuffer: 
 async function network(command, args, input) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return execFileSync(command, args, { input, timeout: 15000,
+      return meteredExecFileSync(execFileSync, command, args, { input, timeout: 15000,
         maxBuffer: 64 * 1024 * 1024, env: process.env });
     } catch (error) {
       const transient = isTransientGhError(error) || (command === 'git'

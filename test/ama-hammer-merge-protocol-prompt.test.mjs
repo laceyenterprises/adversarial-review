@@ -396,7 +396,7 @@ test('hammer fires watcher wake only after durable eligible audit append', () =>
   const mergeLoopIdx = HAMMER_PROMPT.indexOf(
     'while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ]',
   );
-  const mergeIdx = HAMMER_PROMPT.indexOf('gh pr merge <<PR_URL>>');
+  const mergeIdx = HAMMER_PROMPT.indexOf('ham_gh pr merge <<PR_URL>>');
 
   assert.ok(wakeFunctionIdx > 0, 'watcher wake helper must exist');
   assert.ok(remoteGreenIdx > 0, 'remote CI green gate must exist');
@@ -499,7 +499,7 @@ test('hammer audit deduplicates exact edges and preserves earlier App attestatio
   assert.match(lookup, /POST_REMEDIATION_SHA/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_HEAD=/);
   // An existing audit is refreshed IN PLACE (PATCH edit), not skipped or duplicated:
-  assert.match(HAMMER_PROMPT, /gh api --method PATCH/);
+  assert.match(HAMMER_PROMPT, /ham_gh api --method PATCH/);
   assert.match(HAMMER_PROMPT, /issues\/comments\/\$HAM_EXISTING_AUDIT_COMMENT_ID/);
   assert.match(HAMMER_PROMPT, /hammer audit comment refreshed in place/);
 });
@@ -513,7 +513,7 @@ test('terminal-remediation audit is written under the merge lease at the settled
   const leaseAcquireIdx = HAMMER_PROMPT.indexOf('ham_acquire_merge_lease');
   const predicateIdx = HAMMER_PROMPT.indexOf('ama-check.mjs');
   const capabilityIdx = HAMMER_PROMPT.indexOf('merge_capability_enforcement');
-  const mergeIdx = HAMMER_PROMPT.indexOf('gh pr merge <<PR_URL>>');
+  const mergeIdx = HAMMER_PROMPT.indexOf('ham_gh pr merge <<PR_URL>>');
   assert.ok(auditIdx > 0, 'audit block present');
   assert.ok(rebaseLoopIdx > 0 && leaseAcquireIdx > 0, 'rebase window + lease acquire present');
   assert.ok(predicateIdx > 0 && capabilityIdx > 0 && mergeIdx > 0, 'predicate + capability guard + merge present');
@@ -550,7 +550,7 @@ test('hammer prompt reads the entitled hammer token from HAMMER_LACEY_GH_TOKEN (
   assert.doesNotMatch(HAMMER_PROMPT, /\[ -z "\$\{MERGE_AGENT_GH_TOKEN:-\}" \]/);
   assert.match(HAMMER_PROMPT, /if \[ -z "\$\{HAM_GH_TOKEN:-\}" \]; then/);
   assert.ok(
-    (HAMMER_PROMPT.match(/GH_TOKEN="\$HAM_GH_TOKEN" gh /g) || []).length >= 3,
+    (HAMMER_PROMPT.match(/GH_TOKEN="\$HAM_GH_TOKEN" ham_gh /g) || []).length >= 3,
     'all three audit-comment gh calls (lookup, PATCH, comment) must use HAM_GH_TOKEN',
   );
 });

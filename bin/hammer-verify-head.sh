@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
+ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec "$@"; }
+ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
+
 ham_verify_head_phase() {
 HAM_PHASE_OUTCOME=verify-head-error
-gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
+ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 # Wait only for read-after-push lag. A third head retains the ordinary race path.
 HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
@@ -133,7 +136,7 @@ ham_lease_pr_view() {
   HAM_LEASE_PROBE_TRANSIENT=0
   err=$(mktemp "${TMPDIR:-/tmp}/ham-lease-probe.XXXXXX") || return 1
   while true; do
-    if /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr view <<PR_URL>> "$@" 2>"$err"; then
+    if ham_pr "$@" 2>"$err"; then
       HAM_LEASE_PROBE_TRANSIENT=0
       rm -f "$err"
       return 0
@@ -275,7 +278,7 @@ NODE
     if [ "$HAM_GATE_CAP_AUDIT_EXIT" -eq 65 ]; then
       # Sticky succeeded means a prior merge won. Confirm live state before
       # suppressing a no-merge status for this head.
-      HAM_GATE_CAP_LIVE_STATE=$(gh pr view <<PR_URL>> --json state --jq '.state') || return 1
+      HAM_GATE_CAP_LIVE_STATE=$(ham_pr --json state --jq '.state') || return 1
       [ "$HAM_GATE_CAP_LIVE_STATE" = "MERGED" ] || return 1
       HAM_PHASE_OUTCOME=already-merged
       return 20
@@ -298,7 +301,7 @@ HAM closing status — no merge. The gate-attempt cap stopped this head before l
       shift 2
       local ham_attempt=1
       while [ "$ham_attempt" -le 3 ]; do
-        if GH_TOKEN="$HAM_GH_TOKEN" gh "$@" > "$ham_out" 2> "$ham_err"; then
+        if GH_TOKEN="$HAM_GH_TOKEN" ham_gh "$@" > "$ham_out" 2> "$ham_err"; then
           return 0
         fi
         if [ "$ham_attempt" -ge 3 ] || ! ham_gate_cap_gh_transient "$ham_err"; then
@@ -469,7 +472,7 @@ ham_capture_current_base_sha() {
 ham_update_branch_with_retries() {
   ham_update_attempt=1
   while [ "$ham_update_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
-    if gh pr update-branch <<PR_URL>> --rebase > /tmp/ham-<<PR_NUMBER>>-update-branch.stdout 2> /tmp/ham-<<PR_NUMBER>>-update-branch.stderr; then
+    if ham_gh pr update-branch <<PR_URL>> --rebase > /tmp/ham-<<PR_NUMBER>>-update-branch.stdout 2> /tmp/ham-<<PR_NUMBER>>-update-branch.stderr; then
       return 0
     fi
     if ham_update_branch_conflict /tmp/ham-<<PR_NUMBER>>-update-branch.stderr; then
@@ -526,7 +529,7 @@ HAM_REQUIRES_UP_TO_DATE=1
 ham_rsc_json=/tmp/ham-<<PR_NUMBER>>-required-status-checks.json
 ham_rsc_err=/tmp/ham-<<PR_NUMBER>>-required-status-checks.stderr
 ham_base_enc_early=$(printf '%s' "$BASE_BRANCH" | jq -sRr @uri)
-if /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh api \
+if ham_gh api \
     "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
     > "$ham_rsc_json" 2> "$ham_rsc_err"; then
   if [ "$(jq -r '.strict // empty' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
@@ -588,7 +591,7 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
     HAM_PHASE_OUTCOME=update-branch-failed
     return 1
   fi
-  gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
+  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
   POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 done
 

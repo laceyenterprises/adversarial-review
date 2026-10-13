@@ -785,6 +785,7 @@ for (const route of ['API commit', 'git fallback', 'git fallback without API hea
       HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
       HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low',
       HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'), HAM_BASE_HEAD: before,
+      POST_REMEDIATION_SHA: '',
       HAM_REMOTE_CI_STARTED_AT: '1', HAM_NO_MERGE_NOTE: 'stale wait',
       PATH: `${dir}:${process.env.PATH}`, PUBLISH_RESULT: JSON.stringify(publication) };
     const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-publish', '--render'], env);

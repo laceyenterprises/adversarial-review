@@ -4,6 +4,58 @@ ham_verify_head_phase() {
 HAM_PHASE_OUTCOME=verify-head-error
 gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
+# Wait only for read-after-push lag. A third head retains the ordinary race path.
+HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
+HAM_REQUIRED_CHECKS_WAITED_SECONDS="${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}"
+export HAM_HEAD_WAITED_SECONDS HAM_REQUIRED_CHECKS_WAITED_SECONDS
+ham_wait_for_published_head() {
+  local started deadline now remaining probe_timeout probe_dir probe_exit probe_head
+  started=$(date +%s)
+  deadline=$((started + 300))
+  while [ -n "${HAM_PUSHED_HEAD:-}" ] && [ "$POST_REMEDIATION_SHA" != "$HAM_PUSHED_HEAD" ] \
+    && [ "$POST_REMEDIATION_SHA" = "${HAM_PUSHED_FROM_HEAD:-}" ]; do
+    now=$(date +%s)
+    HAM_HEAD_WAITED_SECONDS=$((now - started))
+    if [ "$now" -ge "$deadline" ]; then
+      HAM_NO_MERGE_NOTE="HAM closing status — no merge. Waited ${HAM_HEAD_WAITED_SECONDS}s for the published head and ${HAM_REQUIRED_CHECKS_WAITED_SECONDS}s for required checks on that exact head (checks wait could not start before the head appeared)."
+      echo "$HAM_NO_MERGE_NOTE" >&2
+      HAM_PHASE_OUTCOME=published-head-timeout
+      if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease || return 1; fi
+      return 20
+    fi
+    remaining=$((deadline - now))
+    if [ "$remaining" -gt 15 ]; then remaining=15; fi
+    sleep "$remaining"
+    remaining=$((deadline - $(date +%s)))
+    if [ "$remaining" -le 0 ]; then continue; fi
+    probe_timeout="$remaining"
+    if [ "$probe_timeout" -gt 30 ]; then probe_timeout=30; fi
+    probe_dir=$(mktemp -d /tmp/ham-<<PR_NUMBER>>-head-probe.XXXXXX) || return 1
+    if /usr/bin/perl -e 'alarm shift; exec @ARGV' "$probe_timeout" gh pr view <<PR_URL>> \
+      --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName \
+      > "$probe_dir/pr.json" 2> "$probe_dir/stderr"; then
+      if ! probe_head=$(jq -er '.headRefOid | select(type == "string") | select(test("^[0-9a-fA-F]{40}$"))' "$probe_dir/pr.json"); then
+        rm -rf "$probe_dir"
+        return 1
+      fi
+      mv "$probe_dir/pr.json" /tmp/ham-<<PR_NUMBER>>-pr-after.json || { rm -rf "$probe_dir"; return 1; }
+      POST_REMEDIATION_SHA="$probe_head"
+      rm -rf "$probe_dir"
+    else
+      probe_exit=$?
+      cat "$probe_dir/stderr" >&2
+      # Keep the last valid read; transport failures consume the visibility budget.
+      if [ "$probe_exit" -eq 142 ] || grep -Eiq 'timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$probe_dir/stderr"; then
+        rm -rf "$probe_dir"
+        continue
+      fi
+      rm -rf "$probe_dir"
+      return "$probe_exit"
+    fi
+    HAM_HEAD_WAITED_SECONDS=$(( $(date +%s) - started ))
+  done
+}
+ham_wait_for_published_head || return $?
 BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 HAM_VALIDATION_BASE_SHA="${HAM_VALIDATION_BASE_SHA:-}"
 HAM_FORCE_REVALIDATION=0
@@ -88,7 +140,7 @@ ham_lease_pr_view() {
       rc=$?
     fi
     cat "$err" >&2
-    if [ "$rc" -eq 142 ] || grep -Eiq 'timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]|502|503|504|bad gateway|service unavailable|gateway timeout' "$err"; then
+    if [ "$rc" -eq 142 ] || grep -Eiq 'timed? out|timeout|TLS|connection (reset|refused|aborted)|temporar(y|ily)|resource temporarily unavailable|rate limit|HTTP[ /]5[0-9][0-9]([^0-9]|$)|(^|[^0-9])50[234] (Bad Gateway|Service Unavailable|Gateway Timeout)|bad gateway|service unavailable|gateway timeout' "$err"; then
       HAM_LEASE_PROBE_TRANSIENT=1
     else
       HAM_LEASE_PROBE_TRANSIENT=0

@@ -25,6 +25,10 @@ HAM_PRE_MERGE_ELIGIBLE=0
 HAM_REMEDIATED_FINDINGS="${HAM_AUDIT_REMEDIATED_TOTAL:-} addressed (${HAM_AUDIT_REMEDIATED_BLOCKING:-} blocking, ${HAM_AUDIT_REMEDIATED_NON_BLOCKING:-} non-blocking)"
 
 ham_append_terminal_audit() {
+  if [ -n "${HAM_REMOTE_CI_STARTED_AT:-}" ]; then
+    HAM_REQUIRED_CHECKS_WAITED_SECONDS=$(( $(date +%s) - HAM_REMOTE_CI_STARTED_AT ))
+  fi
+  HAM_NO_MERGE_NOTE="Waited ${HAM_HEAD_WAITED_SECONDS:-0}s for the published head and ${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}s for required checks on that exact head."
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
   # Record confirmed execution or a refusal before other bookkeeping can fail.
@@ -46,6 +50,9 @@ ham_append_terminal_audit() {
   fi
   ham_audit_attempt_json=$(mktemp "${HAM_MERGE_TMP_PREFIX}.terminal-audit-attempt.XXXXXX") || return 1
   jq -n \
+    --arg waitNote "$HAM_NO_MERGE_NOTE" \
+    --argjson headWaitedSeconds "${HAM_HEAD_WAITED_SECONDS:-0}" \
+    --argjson requiredChecksWaitedSeconds "${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}" \
     --arg outcome "$ham_audit_outcome" \
     --arg reason "$ham_audit_reason" \
     --arg reviewedHead "<<REVIEWED_SHA>>" \
@@ -65,6 +72,9 @@ ham_append_terminal_audit() {
     --argjson eligibilityTrace "$([ -s "$HAM_VERDICT_FILE" ] && cat "$HAM_VERDICT_FILE" || printf '{}')" \
     --argjson githubGate "$([ -s "$HAM_GATE_JSON" ] && cat "$HAM_GATE_JSON" || printf '{}')" \
     '{
+      waitNote: $waitNote,
+      headWaitedSeconds: $headWaitedSeconds,
+      requiredChecksWaitedSeconds: $requiredChecksWaitedSeconds,
       preMergeEligible: ($preMergeEligible == 1),
       attemptPhase: "hammer-gh-pr-merge",
       headMatchEvidence: "ham_terminal_remediation_validated",
@@ -403,10 +413,12 @@ ham_merge_error_permanent() {
 HAM_LOCAL_CI_STATUS=local-battery-skipped-github-required-gate-authoritative
 
 HAM_REMOTE_CI_STATUS=waiting
-HAM_REMOTE_CI_DEADLINE=$(( $(date +%s) + HAM_REMOTE_CI_WAIT_SECONDS ))
+HAM_REMOTE_CI_STARTED_AT=$(date +%s)
+HAM_REMOTE_CI_DEADLINE=$(( HAM_REMOTE_CI_STARTED_AT + HAM_REMOTE_CI_WAIT_SECONDS ))
 HAM_REMOTE_CI_GATE_READ_FAILURES=0
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
 while :; do
+  HAM_REQUIRED_CHECKS_WAITED_SECONDS=$(( $(date +%s) - HAM_REMOTE_CI_STARTED_AT ))
   if ! ham_refresh_github_gate; then
     HAM_REMOTE_CI_GATE_READ_FAILURES=$((HAM_REMOTE_CI_GATE_READ_FAILURES + 1))
     HAM_REMOTE_CI_STATUS=gate-read-transient-failure

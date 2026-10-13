@@ -19,7 +19,7 @@ const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
 const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
-  /In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>\/bin\/hammer-procedure\.mjs (hammer-[a-z-]+) --render`[^\n]*\n/g,
+  /In (?:the persistent merge-lease shell, render and source|the same shell with dispatch values exported, render\/source) `node <<ROOT_DIR>>\/bin\/hammer-procedure\.mjs (hammer-[a-z-]+) --render`[^\n]*\n/g,
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 

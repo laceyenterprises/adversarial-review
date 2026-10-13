@@ -4343,6 +4343,33 @@ export async function maybeDispatchAmaCloser({
     }
   }
 
+  // HAMCLOSE-07: historical launch records cannot pin a new hammer to an old
+  // target. Re-derive using the same review-state/current-head inputs as the
+  // orchestration path, before eligibility, identities, or prompt composition.
+  const suppliedTarget = dispatchContext?.targetRemediationSha || dispatchContext?.reviewedSha;
+  const suppliedRecordHead = dispatchContext?.dispatchRecordHeadSha || suppliedTarget;
+  const suppliedRecord = dispatchContext?.rootDir && dispatchContext?.repo && suppliedRecordHead
+    ? readAmaCloserDispatchRecord(dispatchContext.rootDir, {
+      repo: dispatchContext.repo, prNumber, headSha: suppliedRecordHead,
+    }) : null;
+  const recordedTarget = suppliedRecord?.targetRemediationSha || suppliedRecord?.headSha;
+  const staleDispatchTarget = prMetadata?.headSha && (
+    (suppliedTarget && suppliedTarget !== prMetadata.headSha)
+    || (recordedTarget && recordedTarget !== prMetadata.headSha)
+  );
+  if (staleDispatchTarget) {
+    const freshReviewedSha = String(reviewState?.headSha || '').trim();
+    const freshTargetSha = String(prMetadata.headSha || '').trim();
+    if (!freshReviewedSha || !freshTargetSha) return noAmaDispatch({
+      dispatched: false, skipMergeAgent: true, reason: 'dispatch-head-context-unavailable',
+      reasons: ['stale dispatch target has no current reviewed-head binding'],
+    });
+    dispatchContext = { ...dispatchContext, reviewedSha: freshReviewedSha,
+      targetRemediationSha: freshTargetSha,
+      dispatchRecordHeadSha: dispatchContext.closerOnlyHeadDelta === true
+        ? freshTargetSha : freshReviewedSha };
+  }
+
   const eligibilityOptions = { ...(options || {}) };
   // STALECLOSER-03: the closer judges a closer-authored stale head with the same
   // predicate rescue and the hammer wake used (computed by the orchestrator).
@@ -6763,6 +6790,21 @@ export async function maybeDispatchAmaCloser({
       skipMergeAgent: true,
       reason: 'live-head-branch-missing',
       prState: livePrProbe.state,
+    });
+  }
+
+  // A head move during this dispatch attempt needs a fresh orchestration pass
+  // to bind its authoritative review. Never launch the already-composed prompt.
+  if (livePrProbe?.state === 'OPEN' && livePrProbe.headRefOid
+    && livePrProbe.headRefOid !== targetRemediationSha) {
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, current => current ? {
+      ...current, state: 'no-dispatch', reason: 'dispatch-head-context-changed',
+      retryCount: priorRetryCount, observedHeadSha: livePrProbe.headRefOid,
+    } : null);
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      reason: 'dispatch-head-context-changed',
+      reasons: ['live head moved after review context derivation; awaiting a fresh review binding'],
     });
   }
 

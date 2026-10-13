@@ -1528,3 +1528,71 @@ for (const scenario of [
     } else assert.deepEqual(lease, before);
   });
 }
+
+test('HAMCLOSE-07 reused stale target re-derives reviewed and target heads before composing', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-dispatch-head-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const current = 'b'.repeat(40);
+  updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD }, () => ({
+    state: 'failed', headSha: HEAD, reviewedSha: HEAD, targetRemediationSha: HEAD,
+  }));
+  const deps = testDeps();
+  let prompt;
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir, {
+    reviewState: { headSha: current, reviewCycleExhausted: true }, prMetadata: { headSha: current },
+    dispatchContext: { reviewedSha: HEAD, targetRemediationSha: HEAD, dispatchRecordHeadSha: HEAD,
+      livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true, headRefOid: current }) },
+  }), ...deps, writeFileImpl: (_dir, _path, body) => { prompt = body; } });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.ok(prompt.includes(`${current} ${current}`));
+  assert.ok(!prompt.includes(HEAD));
+  assert.equal(deps.calls.length, 1);
+});
+
+test('HAMCLOSE-07 stale target without a current review binding declines with a reason', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-dispatch-unbound-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir, {
+    reviewState: { headSha: null }, prMetadata: { headSha: 'b'.repeat(40) },
+    dispatchContext: { reviewedSha: HEAD, targetRemediationSha: HEAD },
+  }), ...deps });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'dispatch-head-context-unavailable');
+  assert.equal(deps.calls.length, 0);
+});
+
+test('HAMCLOSE-07 a final live-probe head move defers instead of launching the stale prompt', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-dispatch-race-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir, {
+    dispatchContext: { livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true,
+      headRefOid: 'b'.repeat(40) }) },
+  }), ...deps });
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'dispatch-head-context-changed');
+  assert.equal(deps.calls.length, 0);
+  assert.equal(readAmaCloserLease(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD }), null);
+});
+
+test('stale missing review context still reconciles a dispatched lease', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-stale-reconcile-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const args = findingsRemediationArgs(rootDir, {
+    reviewState: { headSha: null }, prMetadata: { headSha: 'b'.repeat(40) },
+    dispatchContext: { reviewedSha: HEAD, targetRemediationSha: HEAD },
+  });
+  const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+  acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt });
+  updateAmaCloserLease({ ...identity, status: 'dispatched', lrqId: 'lrq_stale', now: args.dispatchContext.dispatchedAt });
+  let probes = 0;
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    readLaunchRequestStatusImpl: () => { probes++; return { ok: true, row: { status: 'failed' } }; },
+  });
+  assert.equal(probes, 1);
+  assert.equal(result.reason, 'dispatch-head-context-unavailable');
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
+  assert.equal(deps.calls.length, 0);
+});

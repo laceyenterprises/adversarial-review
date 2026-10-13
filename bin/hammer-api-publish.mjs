@@ -23,9 +23,11 @@ async function network(command, args, input) {
 const api = async (path, input) => JSON.parse((await network('gh',
   ['api', path, ...(input ? ['--input', '-'] : [])], input ? JSON.stringify(input) : undefined)).toString());
 let fallback = {};
+let previousHead;
 try {
   if (git('status', '--porcelain').length) throw new Error('local tree has uncommitted changes');
   const info = JSON.parse(await network('gh', ['pr', 'view', pr, '--repo', repo, '--json', 'headRefName,headRefOid']));
+  previousHead = info.headRefOid;
   fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
   await network('git', ['fetch', 'origin', info.headRefOid]);
   // createCommitOnBranch preserves trees, not local ancestry. A rebased head
@@ -58,7 +60,7 @@ try {
     if (git('rev-parse', `${result.head}^{tree}`).toString().trim() !== result.tree) throw new Error('fetched tree mismatch');
     git('reset', '--hard', result.head);
   }
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  process.stdout.write(`${JSON.stringify({ ...result, previousHead })}\n`);
 } catch (error) {
-  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: error.message, ...fallback })}\n`);
+  process.stdout.write(`${JSON.stringify({ route: 're-review', reason: error.message, ...fallback, previousHead })}\n`);
 }

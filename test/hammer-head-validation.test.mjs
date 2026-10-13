@@ -313,3 +313,112 @@ test('HAMCLOSE-06 configured fleet App identity proves a rebase', async () => {
     ]) });
   assert.deepEqual(result.linkKinds, ['fleet-force-push']);
 });
+
+const activity = (before, after, kind = 'push', actor = { type: 'Bot', login: 'synthetic-remediator[bot]' }) => ({
+  before, after, activity_type: kind, actor, ref: 'refs/heads/repair', timestamp: '2026-01-01T00:00:00Z',
+});
+function activityOptions(events, extra = {}) {
+  return { repo: 'fixture/repo', prNumber: 1, reviewedHead: 'reviewed', currentHead: 'head', hammerBaseHead: 'head',
+    env: { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-remediator' },
+    get: async path => path.includes('/commits/') ? fleet(path.split('/').at(-1))
+      : ({ head: { ref: 'repair', repo: { full_name: 'fixture/repo' } } }),
+    loadActivityPage: async () => ({ nodes: events.toReversed(), next: null }), ...extra };
+}
+for (const [name, events, rounds] of [
+  ['one bot push', [activity('reviewed', 'head')], []],
+  ['force push then push', [activity('reviewed', 'middle', 'force_push'), activity('middle', 'head')], []],
+  ['three steps', [activity('reviewed', 'one'), activity('one', 'two', 'force_push'), activity('two', 'head')], []],
+  ['stopped round without result', [activity('reviewed', 'head')], [{ state: 'stopped', startHeadSha: 'reviewed' }]],
+  ['unrecorded force push', [activity('reviewed', 'head', 'force_push')], []],
+  ['earlier hammer repair', [activity('reviewed', 'repair'), activity('repair', 'head')], []],
+  ['trusted mutations return to expected head', [activity('reviewed', 'head'), activity('head', 'middle'), activity('middle', 'head', 'force_push')], []],
+]) {
+  test(`HAMCLOSE-07 activity: ${name}`, async () => {
+    const range = await fetchHammerHeadRange(activityOptions(events, { remediationRounds: rounds }));
+    assert.equal(range.proof, 'branch-activity');
+    assert.deepEqual(range.steps, events.map(event => ({ before: event.before, after: event.after,
+      kind: event.activity_type, actor: event.actor.login, time: event.timestamp })));
+  });
+}
+for (const [name, events] of [
+  ['untrusted actor', [activity('reviewed', 'middle'), activity('middle', 'head', 'push', { type: 'Bot', login: 'foreign-bot' })]],
+  ['non-bot actor with trusted login', [activity('reviewed', 'head', 'push', { type: 'User', login: 'synthetic-remediator[bot]' })]],
+  ['unknown actor', [activity('reviewed', 'head', 'push', null)]],
+  ['gap', [activity('reviewed', 'middle'), activity('other', 'head')]],
+  ['wrong ref', [{ ...activity('reviewed', 'head'), ref: 'refs/heads/other' }]],
+  ['untrusted push after target', [activity('reviewed', 'head'), activity('head', 'foreign', 'push', { type: 'User', login: 'human' })]],
+  ['non-bot force push after target', [activity('reviewed', 'head'), activity('head', 'foreign', 'force_push', { type: 'User', login: 'synthetic-remediator[bot]' })]],
+  ['untrusted mutation followed by trusted return to target', [activity('reviewed', 'head'), activity('head', 'foreign', 'push', { type: 'User', login: 'human' }), activity('foreign', 'head', 'force_push')]],
+  ['branch deletion after target', [activity('reviewed', 'head'), activity('head', '', 'branch_deletion')]],
+  ['trusted push beyond expected head', [activity('reviewed', 'head'), activity('head', 'newer')]],
+  ['wrong ref after target', [activity('reviewed', 'head'), { ...activity('head', 'newer'), ref: 'refs/heads/other' }]],
+]) {
+  test(`HAMCLOSE-07 activity declines ${name}`, async () => {
+    assert.equal(await fetchHammerHeadRange(activityOptions(events)), null);
+  });
+}
+test('HAMCLOSE-07 activity proves every step beyond a distinct hammer base', async () => {
+  const events = [activity('reviewed', 'base'), activity('base', 'middle', 'force_push'), activity('middle', 'head')];
+  const range = await fetchHammerHeadRange(activityOptions(events, { hammerBaseHead: 'base' }));
+  assert.equal(range.proof, 'branch-activity');
+  assert.deepEqual(range.commits, ['base', 'middle', 'head']);
+  assert.equal(range.steps.length, 3);
+});
+for (const [name, events] of [
+  ['missing current head', [activity('reviewed', 'base')]],
+  ['untrusted push', [activity('reviewed', 'base'), activity('base', 'head', 'push', { type: 'User', login: 'human' })]],
+  ['untrusted force push', [activity('reviewed', 'base'), activity('base', 'head', 'force_push', { type: 'Bot', login: 'foreign-bot' })]],
+  ['missing base', [activity('reviewed', 'head')]],
+]) {
+  test(`HAMCLOSE-07 activity declines distinct hammer base with ${name}`, async () => {
+    assert.equal(await fetchHammerHeadRange(activityOptions(events, { hammerBaseHead: 'base' })), null);
+  });
+}
+test('HAMCLOSE-07 activity errors and truncated history never escape or prove', async () => {
+  for (const loadActivityPage of [async () => { throw new Error('synthetic API failure'); },
+    async () => ({ nodes: [activity('reviewed', 'head')], next: 'another-page' }),
+    async () => ({ nodes: [activity('other', 'head')], next: null })]) {
+    assert.equal(await fetchHammerHeadRange(activityOptions([], { loadActivityPage })), null);
+  }
+});
+test('HAMCLOSE-07 activity paginates using supplied cursors', async () => {
+  const calls = [];
+  const result = await fetchHammerHeadRange(activityOptions([], { loadActivityPage: async path => {
+    calls.push(path);
+    return calls.length === 1 ? { nodes: [activity('middle', 'head')], next: 'next-cursor' }
+      : { nodes: [activity('reviewed', 'middle')], next: null };
+  } }));
+  assert.equal(result.proof, 'branch-activity');
+  assert.equal(calls[1], 'next-cursor');
+});
+test('HAMCLOSE-07 activity validates trailing events across page boundaries', async () => {
+  let calls = 0;
+  const result = await fetchHammerHeadRange(activityOptions([], { loadActivityPage: async () => {
+    calls++;
+    return calls === 1 ? { nodes: [activity('foreign', 'head', 'force_push'),
+      activity('head', 'foreign', 'push', { type: 'User', login: 'human' })], next: 'next-cursor' }
+      : { nodes: [activity('reviewed', 'head')], next: null };
+  } }));
+  assert.equal(result, null);
+  assert.equal(calls, 2);
+});
+test('HAMCLOSE-07 unchanged starting head and existing proofs avoid activity reads', async () => {
+  const loadActivityPage = () => { throw new Error('activity must not be read'); };
+  const unchanged = await fetchHammerHeadRange(activityOptions([], {
+    currentHead: 'reviewed', hammerBaseHead: 'reviewed', get() { throw new Error('no API needed'); }, loadActivityPage,
+  }));
+  assert.equal(unchanged.proof, 'reviewed-starting-base');
+  const attested = await fetchHammerHeadRange(activityOptions([], { loadActivityPage,
+    comments: [{ author: 'hammer-worker', body: 'HAM-Base-Head: reviewed\nHAM-Validated-Head: head' }] }));
+  assert.equal(attested.proof, 'hammer-app-attestation-chain');
+});
+
+test('activity declines unsigned or foreign pushed commits despite a trusted actor', async () => {
+  for (const commit of [{ ...fleet('head'), commit: { verification: { verified: false } } },
+    { ...fleet('head'), author: { login: 'foreign' } }, { ...fleet('wrong-sha') }]) {
+    const options = activityOptions([activity('reviewed', 'head')]);
+    const get = options.get;
+    options.get = path => path.includes('/commits/head') ? commit : get(path);
+    assert.equal(await fetchHammerHeadRange(options), null);
+  }
+});

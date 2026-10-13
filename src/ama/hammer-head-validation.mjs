@@ -102,15 +102,18 @@ async function readForcePushEvents(loadTimelinePage) {
   return null;
 }
 
+function fleetBotIdentityMatches(actor, fleetLogins) {
+  return actor?.__typename === 'Bot' && fleetLogins.map(login).includes(login(actor.login));
+}
+
 async function fleetForcePushProves(events, base, head, repo, get, fleetLogins) {
   if (!events) return false;
-  const trusted = new Set(fleetLogins.map(login));
   let current = base;
   const visited = new Set([base]);
   for (let hop = 0; hop < 10; hop++) {
     // A reset can reuse a starting SHA; prefer the latest attempt in timeline order.
     const event = events.findLast(event => event.beforeCommit?.oid === current);
-    if (event?.actor?.__typename !== 'Bot' || !trusted.has(login(event.actor.login))
+    if (!fleetBotIdentityMatches(event?.actor, fleetLogins)
       || typeof event.afterCommit?.oid !== 'string' || !event.afterCommit.oid) return false;
     current = event.afterCommit.oid;
     if (current === head) return true;
@@ -176,17 +179,12 @@ async function readComparison(path, get, limit) {
 
 // Read the complete head-only DAG, including side parents. The comparison with
 // the base excludes base history; foreign PR commits cannot hide behind a merge.
-export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], loadComments = null, hammerBaseHead = null, remediationRounds = [], loadTimelinePage = null }) {
+async function fetchExistingHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], loadComments = null, hammerBaseHead = null, remediationRounds = [], loadTimelinePage = null }) {
   // HAMCLOSE-01: the worker may start from the exact reviewed head. This is
   // a starting-base proof, not an App attestation or a completed round edge.
   if (reviewedHead && hammerBaseHead === reviewedHead) return { verified: true, reviewedHead, currentHead,
     baseSha: reviewedHead, commits: currentHead === reviewedHead ? [] : [currentHead], proof: 'reviewed-starting-base' };
-  const { resolveGitHubAppBotLogin } = await import('../github-app-identity.mjs');
-  const fleetLogins = [...DEFAULT_FLEET_LOGINS];
-  for (const identity of ['codex-agent', 'claude-agent', 'gemini-agent', 'clio-agent']) {
-    const configured = resolveGitHubAppBotLogin({ identity, env, log: { warn() {} } });
-    if (configured) fleetLogins.push(configured);
-  }
+  const fleetLogins = await resolveFleetLogins(env);
   const rounds = await remediationChain(remediationRounds, reviewedHead, hammerBaseHead || currentHead, repo, get, loadTimelinePage, fleetLogins);
   const chain = rounds?.length > 0 ? null
     : hammerAttestationChain(loadComments ? await loadComments() : comments, reviewedHead, hammerBaseHead || currentHead);
@@ -228,4 +226,74 @@ export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, ba
 export function hammerRangeMatches(range, reviewedHead, currentHead) {
   return range?.verified === true && range.reviewedHead === reviewedHead
     && range.currentHead === currentHead && Boolean(range.baseSha) && Array.isArray(range.commits);
+}
+
+async function resolveFleetLogins(env) {
+  const { resolveGitHubAppBotLogin } = await import('../github-app-identity.mjs');
+  const fleetLogins = [...DEFAULT_FLEET_LOGINS];
+  for (const identity of ['codex-agent', 'claude-agent', 'gemini-agent', 'clio-agent']) {
+    const configured = resolveGitHubAppBotLogin({ identity, env, log: { warn() {} } });
+    if (configured) fleetLogins.push(configured);
+  }
+  return fleetLogins;
+}
+
+// An additive fallback only: preserve every existing proof and refusal first.
+export async function fetchHammerHeadRange(options) {
+  const existing = await fetchExistingHammerHeadRange(options);
+  if (existing) return existing;
+  const { repo, reviewedHead, currentHead, hammerBaseHead, get, loadActivityPage,
+    prNumber, env = process.env } = options;
+  const target = hammerBaseHead || currentHead;
+  if (!reviewedHead || !target || reviewedHead === target || !loadActivityPage || !prNumber) return null;
+  try {
+    const pr = await get(`repos/${repo}/pulls/${prNumber}`);
+    // Activity belongs to the head repository, including fork PRs.
+    const headRepo = pr?.head?.repo?.full_name;
+    const branch = pr?.head?.ref;
+    if (!headRepo || !branch) return null;
+    const ref = `refs/heads/${branch}`;
+    let path = `repos/${headRepo}/activity?ref=${encodeURIComponent(ref)}&per_page=100&direction=desc`;
+    const visitedPages = new Set();
+    const events = [];
+    let complete = false;
+    for (let pageIndex = 0; pageIndex < 10; pageIndex++) {
+      if (visitedPages.has(path)) return null;
+      visitedPages.add(path);
+      const page = await loadActivityPage(path);
+      if (!Array.isArray(page?.nodes) || !(page.next === null || typeof page.next === 'string')) return null;
+      events.push(...page.nodes);
+      if (page.next === null) { complete = true; break; }
+      if (!page.next) return null;
+      path = page.next;
+    }
+    if (!complete) return null;
+    const fleetLogins = await resolveFleetLogins(env);
+    // Walk chronological updates, never skipping an untrusted update or reset.
+    // Choose the latest departure from the reviewed head, as the timeline proof does.
+    const chronological = events.toReversed();
+    const start = chronological.findLastIndex(event => event?.before === reviewedHead);
+    if (start < 0) return null;
+    let head = reviewedHead;
+    const steps = [];
+    for (const event of chronological.slice(start)) {
+      if (event?.ref !== ref || event.before !== head
+        || !['push', 'force_push'].includes(event.activity_type)
+        || !fleetBotIdentityMatches({ ...event.actor, __typename: event.actor?.type }, fleetLogins)
+        || typeof event.after !== 'string' || !event.after || !event.timestamp) return null;
+      // A trusted push actor alone cannot authenticate the pushed commit.
+      const afterCommit = await get(`repos/${headRepo}/commits/${event.after}`);
+      if (afterCommit?.sha !== event.after || !fleetCommitIdentityMatches(afterCommit, fleetLogins)) return null;
+      steps.push({ before: event.before, after: event.after, kind: event.activity_type,
+        actor: event.actor.login, time: event.timestamp });
+      head = event.after;
+    }
+    // Reaching the starting base is insufficient: every later ref mutation
+    // must be trusted and the complete chain must end at the expected head.
+    if (head === currentHead && steps.some(step => step.after === target)) {
+      return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+        commits: steps.map(step => step.after), proof: 'branch-activity', steps };
+    }
+  } catch { /* Unreadable activity contributes no new proof. */ }
+  return null;
 }

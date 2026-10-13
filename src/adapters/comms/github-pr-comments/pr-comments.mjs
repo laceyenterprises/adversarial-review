@@ -1,3 +1,4 @@
+import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // PR comment poster for the remediation pipeline.
 //
@@ -1012,7 +1013,7 @@ async function findExistingRemediationComment({
   if (!marker) return { found: false };
   try {
     await awaitThrottleIfNeeded();
-    const { stdout } = await execFileImpl(
+    const { stdout } = await meteredExecFile(execFileImpl,
       'gh',
       [
         'api',
@@ -1199,7 +1200,7 @@ async function postRemediationOutcomeComment({
     }
     if (!adapterHandled) {
       // The gh CLI fallback identity is token-driven via the allowlisted GH_TOKEN.
-      ghResult = await execFileImpl(
+      ghResult = await meteredExecFile(execFileImpl,
         'gh',
         ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],
         {

@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -321,7 +322,7 @@ function reviewBodyHasScopeViolationFinding(reviewBody) {
 }
 
 async function ghJson(path, { execFileImpl = execFileAsync } = {}) {
-  const { stdout } = await execFileImpl('gh', ['api', path], { maxBuffer: 10 * 1024 * 1024 });
+  const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['api', path], { maxBuffer: 10 * 1024 * 1024 });
   return JSON.parse(String(stdout || 'null'));
 }
 
@@ -408,7 +409,7 @@ async function fetchAdditiveOnlyScopeSnapshot({
 async function backfillAdditiveOnlyLabel({ repo, prNumber, execFileImpl = execFileAsync, logger = console } = {}) {
   const { owner, repoName } = splitRepo(repo);
   try {
-    await execFileImpl('gh', [
+    await meteredExecFile(execFileImpl, 'gh', [
       'api',
       `repos/${owner}/${repoName}/issues/${prNumber}/labels`,
       '-X',

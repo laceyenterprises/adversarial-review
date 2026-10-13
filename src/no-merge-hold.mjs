@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -55,7 +56,7 @@ function parseArgs(argv) {
 }
 
 async function ensureNoMergeHoldLabel({ repo, execFileImpl = execFileAsync } = {}) {
-  await execFileImpl('gh', [
+  await meteredExecFile(execFileImpl, 'gh', [
     'label',
     'create',
     NO_MERGE_HOLD_LABEL,
@@ -94,7 +95,7 @@ async function applyNoMergeHold({
     await ensureNoMergeHoldLabel({ repo, execFileImpl });
   }
   try {
-    await execFileImpl('gh', [
+    await meteredExecFile(execFileImpl, 'gh', [
       'pr',
       'edit',
       String(prNumber),

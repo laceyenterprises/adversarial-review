@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 // PR-side operator surface for the `retrigger-remediation` label.
 //
 // Mirrors `npm run retrigger-remediation` (src/retrigger-remediation.mjs)
@@ -105,7 +106,7 @@ async function removeLabelFromPR({
   prNumber,
   execFileImpl,
 }) {
-  await execFileImpl('gh', [
+  await meteredExecFile(execFileImpl, 'gh', [
     'pr',
     'edit',
     String(prNumber),
@@ -228,7 +229,7 @@ async function findExistingAckComment({
 }) {
   if (!marker) return { found: false };
   try {
-    const { stdout } = await execFileImpl('gh', [
+    const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
       'api',
       '--paginate',
       `repos/${repo}/issues/${encodeURIComponent(prNumber)}/comments`,

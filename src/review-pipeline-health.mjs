@@ -1,3 +1,4 @@
+import { meteredExecFileSync } from './metered-gh.mjs';
 import { excludingHeldOpenRows, isOperatorHeld, readHeldOpenPrCount } from './operator-hold-labels.mjs';
 import Database from 'better-sqlite3';
 import { listPipelineOpenPrs, readPipelineGithub } from './pipeline-health-github.mjs';
@@ -1435,7 +1436,7 @@ function fetchPRTerminalStateSync(repo, prNumber, {
   let lastError;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
-      const stdout = execFileSyncImpl('gh', args, options);
+      const stdout = meteredExecFileSync(execFileSyncImpl, 'gh', args, options);
       return normalizeGithubTerminalState(parseJson(stdout, {}));
     } catch (error) {
       lastError = error;
@@ -2681,7 +2682,7 @@ function execGhWithTransientRetry(args, {
   let lastError;
   for (let attempt = 0; attempt <= DEFAULT_GH_TERMINAL_STATE_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
-      return execFileSyncImpl('gh', args, options);
+      return meteredExecFileSync(execFileSyncImpl, 'gh', args, options);
     } catch (error) {
       const stdout = String(error?.stdout || '');
       if (acceptStdoutOnError && parseJsonArray(stdout).length > 0) return stdout;

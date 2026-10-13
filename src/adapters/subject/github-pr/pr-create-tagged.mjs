@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { meteredExecFile } from '../../../metered-gh.mjs';
 
 /**
  * GitHub PR creation helper for canonical code-pr title prefixes.
@@ -180,7 +181,7 @@ async function main(argv = process.argv.slice(2)) {
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync('gh', ghArgs, {
+    const { stdout, stderr } = await meteredExecFile(execFileAsync, 'gh', ghArgs, {
       env: process.env,
       maxBuffer: 1024 * 1024,
     });

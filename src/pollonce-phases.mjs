@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
@@ -852,7 +853,7 @@ export async function processReviewSubject(entry, ctx) {
           });
           let candidate = {};
           {
-            const { stdout } = await withApiTelemetry('hold-release-routing', { repo: repoPath, prNumber }, () => execFileAsync('gh', ['pr', 'view', String(prNumber), '--repo', repoPath,
+            const { stdout } = await withApiTelemetry('hold-release-routing', { repo: repoPath, prNumber }, () => meteredExecFile(execFileAsync, 'gh', ['pr', 'view', String(prNumber), '--repo', repoPath,
               '--json', 'state,headRefOid,labels,mergeable,mergeStateStatus,statusCheckRollup'],
             { timeout: 15000, maxBuffer: 5 * 1024 * 1024 }));
             const live = JSON.parse(stdout);

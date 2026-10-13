@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 // Workflow-file push-capability preflight for remediation.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave3). Self-contained leaf:
@@ -139,7 +140,7 @@ async function execWorkflowPushPreflightGh({
   let lastErr = null;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
-      return await execFileImpl('gh', args, options);
+      return await meteredExecFile(execFileImpl, 'gh', args, options);
     } catch (err) {
       lastErr = err;
       const transient = isTransientWorkflowPushPreflightError(err);

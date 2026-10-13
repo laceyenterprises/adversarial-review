@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { REVIEW_POST_RETRY_DELAYS_MS } from './reviewer-util.mjs';
 
 class AmbiguousReviewerPostUnreconciledError extends Error {
@@ -75,7 +76,7 @@ async function findMatchingSubmittedReviewAfterAmbiguousPost({
   const expectedState = exactHeadReviewStateForEvent(event);
   let response;
   try {
-    response = await execFileImpl(
+    response = await meteredExecFile(execFileImpl,
       'gh',
       ['api', `repos/${repo}/pulls/${prNumber}/reviews`, '--paginate', '--slurp'],
       {

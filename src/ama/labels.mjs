@@ -1,3 +1,4 @@
+import { meteredExecFile } from '../metered-gh.mjs';
 /**
  * AMA-05 — operator labels + auto-initializer.
  *
@@ -167,7 +168,7 @@ async function fetchRepoLabels(repo, {
   sleepImpl = sleep,
 } = {}) {
   const { stdout } = await withGhRetry(
-    () => execFileImpl(
+    () => meteredExecFile(execFileImpl,
       'gh',
       [
         'api',
@@ -219,7 +220,7 @@ async function createLabel(repo, spec, {
   sleepImpl = sleep,
 } = {}) {
   await withGhRetry(
-    () => execFileImpl(
+    () => meteredExecFile(execFileImpl,
       'gh',
       [
         'api',

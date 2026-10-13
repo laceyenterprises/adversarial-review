@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { hasCommentOnlyFinalRoundPush, scanPrFollowUpJobs } from './comment-only-final-round.mjs';
@@ -34,7 +35,7 @@ export async function applyMergeAgentStuckLabel({
       execFileImpl: ghExecFileImpl, env,
     });
     if (!adapterHandled) {
-      await ghExecFileImpl('gh', [
+      await meteredExecFile(ghExecFileImpl, 'gh', [
         'pr',
         'edit',
         String(prNumber),

@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -192,7 +193,7 @@ async function lookupRecentReviewArtifact({
   // field becomes a query-string parameter as intended. Without this fix
   // every reviewer/remediation body capture failed silently and
   // reviewer_passes.gh_comment_id stayed NULL forever.
-  const { stdout } = await execFileImpl(
+  const { stdout } = await meteredExecFile(execFileImpl,
     'gh',
     [
       'api',

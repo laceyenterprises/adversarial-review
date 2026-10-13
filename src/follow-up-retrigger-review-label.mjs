@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 // PR-side surface for the `retrigger-review` label.
 //
 // Lets ANY actor with PR-label permission (operator, merge-agent, codex
@@ -99,7 +100,7 @@ function normalizeRevisionRef(revisionRef) {
 }
 
 async function removeLabelFromPR({ repo, prNumber, execFileImpl }) {
-  await execFileImpl(
+  await meteredExecFile(execFileImpl,
     'gh',
     [
       'pr',
@@ -174,7 +175,7 @@ async function findExistingAckComment({
 }) {
   if (!marker) return { found: false };
   try {
-    const { stdout } = await execFileImpl(
+    const { stdout } = await meteredExecFile(execFileImpl,
       'gh',
       [
         'api',

@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -213,7 +214,7 @@ async function execGhWithRetry({
   while (attempt <= retries) {
     signal?.throwIfAborted();
     try {
-      return await execFileImpl(
+      return await meteredExecFile(execFileImpl,
         'gh',
         args,
         {

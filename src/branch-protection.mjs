@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -76,7 +77,7 @@ async function execGhApiWithTransientRetry(command, args, options, {
   let delayMs = Math.max(0, Number(retryDelayMs) || 0);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await command('gh', args, options);
+      return await meteredExecFile(command, 'gh', args, options);
     } catch (err) {
       if (attempt >= attempts || !isTransientGhProtectionError(err)) {
         throw err;

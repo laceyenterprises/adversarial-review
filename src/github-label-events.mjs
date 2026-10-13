@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { readAdapterLatestLabelEvent } from './github-adapter-client.mjs';
 
 function normalizeGithubLabelName(value) {
@@ -180,7 +181,7 @@ async function fetchLatestLabelEvent(repo, prNumber, labelName, {
     }
   `;
 
-  const { stdout } = await execFileImpl('gh', [
+  const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
     'api',
     'graphql',
     '-f',

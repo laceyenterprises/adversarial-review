@@ -3,6 +3,7 @@
 No credential is printed or returned to Node. Adapter installation and broker
 identity validation remain owned by agent_os_github_adapter.
 """
+
 import argparse
 import errno
 import json
@@ -27,19 +28,55 @@ TRANSIENT_GH_ERROR = re.compile(
 )
 
 
+def run_metered(command, *, env, capture_output, text, timeout, check):
+    del capture_output, check
+    # The meter adds one child layer. Let it reap gh before terminating the
+    # helper, including when the collector's outer deadline interrupts us.
+    proc = subprocess.Popen(
+        command,
+        env=env,
+        text=text,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+        raise
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
 def run_gh(command, child_env, kind, *, run, sleep):
     # Three 5s attempts plus 350ms backoff fit within Node's 20s outer
     # deadline. SIGTERM's TimeoutError must unwind, never restart a child.
     for attempt in range(len(GH_RETRY_DELAYS_SECONDS) + 1):
         try:
-            proc = run(command, env=child_env, capture_output=True, text=True,
-                       timeout=GH_ATTEMPT_TIMEOUT_SECONDS, check=False)
+            proc = run(
+                command,
+                env=child_env,
+                capture_output=True,
+                text=True,
+                timeout=GH_ATTEMPT_TIMEOUT_SECONDS,
+                check=False,
+            )
         except subprocess.TimeoutExpired:
             transient = True
         except TimeoutError:
             raise
         except OSError as error:
-            transient = error.errno in {errno.EAGAIN, errno.EIO, errno.EMFILE, errno.ENFILE}
+            transient = error.errno in {
+                errno.EAGAIN,
+                errno.EIO,
+                errno.EMFILE,
+                errno.ENFILE,
+            }
             if not transient:
                 raise ValueError("github read failed") from None
         else:
@@ -59,28 +96,51 @@ def run_gh(command, child_env, kind, *, run, sleep):
         sleep(GH_RETRY_DELAYS_SECONDS[attempt])
 
 
-def read(args, *, resolver_factory=None, run=subprocess.run, sleep=time.sleep):
+def read(args, *, resolver_factory=None, run=run_metered, sleep=time.sleep):
     adapter_src = Path(args.adapter_bin).resolve().parent.parent / "src"
     sys.path.insert(0, str(adapter_src))
     from agent_os_github_adapter.auth import AuthPolicy, AuthResolver
 
     policy = AuthPolicy.from_env(
-        selector=args.role, mode="broker", allow_ambient=False,
-        expected_app_id=args.app_id, expected_installation_id=args.installation_id,
+        selector=args.role,
+        mode="broker",
+        allow_ambient=False,
+        expected_app_id=args.app_id,
+        expected_installation_id=args.installation_id,
         broker_provider=args.provider,
     )
     auth = (resolver_factory or AuthResolver)(policy=policy).resolve()
     if not auth.token:
         raise ValueError("adapter returned no token")
-    child_env = {key: value for key, value in os.environ.items()
-                 if key not in {"GH_TOKEN", "GITHUB_TOKEN"}}
+    child_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
+    }
     child_env["GH_TOKEN"] = auth.token
-    command = ["gh", "pr"]
+    command = [
+        os.environ.get("HAM_NODE_BIN", "node"),
+        str(Path(__file__).resolve().parents[3] / "bin" / "metered-gh.mjs"),
+        "exec",
+        "pr",
+    ]
     if args.kind == "list":
-        command += ["list", "--state", "open", "--limit", "100", "--json",
-                    "number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels"]
+        command += [
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,url,title,headRefName,headRefOid,baseRefName,mergeable,isDraft,updatedAt,labels",
+        ]
     elif args.kind == "state":
-        command += ["view", args.number, "--json", "state,mergedAt,closedAt,headRefName,headRefOid"]
+        command += [
+            "view",
+            args.number,
+            "--json",
+            "state,mergedAt,closedAt,headRefName,headRefOid",
+        ]
     else:
         command += ["checks", args.number, "--json", "name,state,bucket"]
     command += ["--repo", args.repo]
@@ -104,7 +164,14 @@ def cancel_read(_signal, _frame):
 def main():
     signal.signal(signal.SIGTERM, cancel_read)
     parser = argparse.ArgumentParser()
-    for name in ("adapter-bin", "repo", "role", "app-id", "installation-id", "provider"):
+    for name in (
+        "adapter-bin",
+        "repo",
+        "role",
+        "app-id",
+        "installation-id",
+        "provider",
+    ):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--kind", choices=("list", "state", "checks"), required=True)
     parser.add_argument("--number")

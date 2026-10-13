@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { readReviewFailureDecision } from './review-retry-exhaustion.mjs';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
@@ -1243,7 +1244,7 @@ async function publishAdversarialGateStatus(rootDir, {
     }
   }
   if (!adapterHandled) {
-    await execFileImpl(
+    await meteredExecFile(execFileImpl,
       'gh',
       [
         'api',

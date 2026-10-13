@@ -6,7 +6,7 @@ import {
   getCachedEtag,
   putCachedEtag,
 } from './etag-cache.mjs';
-import { awaitThrottleIfNeeded, recordResponseRateLimit, extractRateLimitObservation, isGitHubRateLimitError, markGitHubRateLimited } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit, extractRateLimitObservation, isGitHubRateLimitError, markGitHubRateLimited, recordRateLimitedCall } from './rate-limit-throttle.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -215,7 +215,10 @@ function createWatcherOctokit({
       return response;
     } catch (err) {
       if (isGitHubRateLimitError(err)) markGitHubRateLimited();
-      await recordResponseRateLimit(extractRateLimitObservation(err?.response?.headers));
+      const observation = extractRateLimitObservation(err?.response?.headers);
+      const limited = isGitHubRateLimitError(err);
+      if (observation) await recordResponseRateLimit({ ...observation, rateLimited: limited });
+      else if (limited) await recordRateLimitedCall(resource);
       throw err;
     }
   });

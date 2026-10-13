@@ -435,3 +435,26 @@ test('GHBUDGET-01: watcher skips low-budget reads, serves ready closes, and resu
     serve: async () => {}, logger: { log: () => assert.fail('reset window must resume') } }), false);
   await withGitHubBudgetScope({}, async () => assert.equal(await throttle.awaitThrottleIfNeeded('graphql'), false));
 });
+
+test('GHBUDGET-01: rate-limited counters are shared, atomic and scoped to a resource window', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-01-01T00:00:00Z');
+  const a = makeThrottle({ rootDir, nowMs: () => now });
+  const b = makeThrottle({ rootDir, nowMs: () => now });
+  const observation = { resource: 'graphql', remaining: 4000, resetAt: now + 60_000 };
+  await Promise.all([a.recordResponseRateLimit({ ...observation, rateLimited: true }),
+    b.recordResponseRateLimit({ ...observation, rateLimited: true })]);
+  await a.recordResponseRateLimit(observation);
+  await b.recordResponseRateLimit({ ...observation, resource: 'core', rateLimited: true });
+  let state = await a.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls, 2);
+  assert.equal(state.core.rateLimitedCalls, 1);
+  await a.recordRateLimitedCall('graphql');
+  assert.equal((await b.readSharedState()).graphql.rateLimitedCalls, 3);
+  now += 60_000;
+  await a.recordResponseRateLimit({ ...observation, resetAt: now + 60_000 });
+  state = await b.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls || 0, 0);
+  assert.equal(state.core, undefined);
+});

@@ -1,7 +1,7 @@
 import { runLowBudgetClosingTick } from './watcher-github-budget.mjs';
 import { fetchHammerPr } from './hammer-pr-read.mjs';
 import { readGitHubBudgetState, currentGitHubBudgetScope, withGitHubBudgetScope } from './rate-limit-throttle.mjs';
-import { readGateRecord } from './adversarial-gate-status.mjs';
+import * as adversarialGateRecords from './adversarial-gate-status.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 /**
  * LAC-11: PR Watcher
@@ -1174,7 +1174,7 @@ async function pollOnceWithinBudget(
     if (await runLowBudgetClosingTick({
       budgets,
       rows: closingRows,
-      isReady: row => readGateRecord(ROOT, { repo: row.repo, prNumber: row.pr_number, headSha: row.reviewer_head_sha })?.state === 'success',
+      isReady: row => adversarialGateRecords.readGateRecord?.(ROOT, { repo: row.repo, prNumber: row.pr_number, headSha: row.reviewer_head_sha })?.state === 'success',
       serve: async row => {
         const pr = await fetchHammerPr(row.repo, row.pr_number, { withChecks: false });
         if (pr.state === 'MERGED') { stmtMarkMerged.run(pr.mergedAt, row.repo, row.pr_number); return; }

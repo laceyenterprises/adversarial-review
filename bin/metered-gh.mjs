@@ -2,13 +2,14 @@
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { meteredExecFile } from '../src/metered-gh.mjs';
-import { awaitThrottleIfNeeded, recordResponseRateLimit } from '../src/rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit, recordRateLimitedCall } from '../src/rate-limit-throttle.mjs';
 
 const [action, ...args] = process.argv.slice(2);
-if (action === 'wait' || action === 'record') {
+if (action === 'wait' || action === 'record' || action === 'limited') {
   const payload = JSON.parse(readFileSync(0, 'utf8'));
   for (const item of payload) {
     if (action === 'wait') await awaitThrottleIfNeeded(item);
+    else if (action === 'limited') await recordRateLimitedCall(item);
     else await recordResponseRateLimit(item);
   }
 } else if (action === 'exec') {

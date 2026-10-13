@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { readFileSync } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -105,6 +106,8 @@ function normalizeObservation(observation = null) {
     remaining: normalizedRemaining,
     resetAt: normalizedResetAt,
     observedAt: normalizedObservedAt,
+    ...(Number.isInteger(observation.rateLimitedCalls) && observation.rateLimitedCalls > 0
+      ? { rateLimitedCalls: observation.rateLimitedCalls } : {}),
   };
 }
 
@@ -136,6 +139,8 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   if (rightResetAtMs > leftResetAtMs) return right;
   if (rightResetAtMs < leftResetAtMs) return left;
   return {
+    ...(Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) > 0
+      ? { rateLimitedCalls: Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) } : {}),
     resource: left.resource,
     remaining: Math.min(left.remaining, right.remaining),
     resetAt: left.resetAt,
@@ -364,7 +369,11 @@ function createRateLimitThrottle({
     const resolvedSharedStatePath = resolveSharedStatePathNow();
     return withSharedStateLock(resolvedSharedStatePath, async () => {
       const current = await readStateFile(resolvedSharedStatePath, { nowMs: nowMs(), readFileImpl });
-      const merged = mergeObservationMaps(current, { [normalized.resource]: normalized }, nowMs());
+      const previous = current[normalized.resource];
+      const count = (previous?.resetAt === normalized.resetAt ? previous.rateLimitedCalls || 0 : 0)
+        + (observation.rateLimited === true ? 1 : 0);
+      const incoming = count > 0 ? { ...normalized, rateLimitedCalls: count } : normalized;
+      const merged = mergeObservationMaps(current, { [normalized.resource]: incoming }, nowMs());
       if (
         Object.keys(merged).length > 0
         && JSON.stringify(merged) !== JSON.stringify(current)
@@ -386,6 +395,12 @@ function createRateLimitThrottle({
       sleepImpl,
       nowMs,
     });
+  }
+
+  async function recordRateLimitedCall(resource) {
+    const current = (await readSharedState())[normalizeResource(resource)];
+    if (current) await recordResponseRateLimit({ ...current, rateLimited: true });
+    markGitHubRateLimited();
   }
 
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE) {
@@ -458,6 +473,7 @@ function createRateLimitThrottle({
   return {
     awaitThrottleIfNeeded,
     recordResponseRateLimit,
+    recordRateLimitedCall,
     readSharedState,
     resolveSharedStatePath: () => resolveSharedStatePathNow(),
     resolveThrottleFloor: () => resolveThrottleFloor(env, logger),
@@ -484,6 +500,20 @@ function recordResponseRateLimit(observation) {
 
 function readGitHubBudgetState() { return defaultThrottle.readSharedState(); }
 
+function recordRateLimitedCall(resource) { return defaultThrottle.recordRateLimitedCall(resource); }
+
+function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs = Date.now() } = {}) {
+  const sharedStatePath = env.GHO_RATE_LIMIT_SHARED_STATE_PATH || resolve(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
+  let buckets = {};
+  try { buckets = normalizeObservationMap(JSON.parse(readFileSync(sharedStatePath, 'utf8')), nowMs); }
+  catch { /* Status is read-only and unknown evidence is displayed as unknown. */ }
+  return Object.fromEntries([...new Set(['core', 'graphql', ...Object.keys(buckets)])].map(resource => [resource, {
+    remaining: buckets[resource]?.remaining ?? null,
+    resetAt: buckets[resource]?.resetAt ?? null,
+    rateLimitedCalls: buckets[resource]?.rateLimitedCalls || 0,
+  }]));
+}
+
 export {
   awaitThrottleIfNeeded,
   currentGitHubBudgetScope,
@@ -492,6 +522,8 @@ export {
   markGitHubRateLimited,
   withGitHubBudgetScope,
   readGitHubBudgetState,
+  readGitHubBudgetStatus,
+  recordRateLimitedCall,
   createRateLimitThrottle,
   DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,

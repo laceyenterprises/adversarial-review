@@ -5,7 +5,7 @@ import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
-import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit, resolveRateLimitSharedStatePath, resolveThrottleFloor, markGitHubRateLimited } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit, resolveRateLimitSharedStatePath, resolveThrottleFloor, markGitHubRateLimited, recordRateLimitedCall, currentGitHubBudgetScope, GitHubBudgetDeferredError } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const bridge = fileURLToPath(new URL('../bin/metered-gh.mjs', import.meta.url));
@@ -22,17 +22,23 @@ function parseGhDebug(stderr) {
   let inRequest = false;
   let headers = {};
   let rateLimited = false;
+  let forbidden = false;
+  let limitMessage = false;
   function flush() {
     const observation = extractRateLimitObservation(headers);
-    if (observation) observations.push({ ...observation, rateLimited });
+    if (observation) observations.push({ ...observation, rateLimited: rateLimited || (forbidden && (observation.remaining === 0 || limitMessage)) });
     headers = {};
     rateLimited = false;
+    forbidden = false;
+    limitMessage = false;
   }
   for (const line of String(stderr || '').split(/\r?\n/)) {
     if (/^\* Request at /.test(line)) { flush(); inRequest = true; }
     const header = line.match(/^< (x-ratelimit-[\w-]+):\s*(.*)$/i);
     if (header) headers[header[1].toLowerCase()] = header[2];
-    if (/^< HTTP\/\S+ (?:429|403)\b/.test(line)) rateLimited = true;
+    if (/^< HTTP\/\S+ 429\b/.test(line)) rateLimited = true;
+    if (/^< HTTP\/\S+ 403\b/.test(line)) forbidden = true;
+    if (inRequest && /rate limit|too many requests/i.test(line)) limitMessage = true;
     if (/^\* Request took /.test(line)) { flush(); inRequest = false; continue; }
     if (!inRequest) retained.push(line);
   }
@@ -49,12 +55,32 @@ function debugOptions(options = {}) {
   return { ...options, env: { ...(options.env || process.env), GHO_RATE_LIMIT_SHARED_STATE_PATH: process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH, GHO_RATE_LIMIT_THROTTLE_FLOOR: process.env.GHO_RATE_LIMIT_THROTTLE_FLOOR, GH_DEBUG: 'api' } };
 }
 
-async function finish(result) {
-  const parsed = parseGhDebug(result?.stderr);
-  for (const observation of parsed.observations) await recordResponseRateLimit(observation);
+function responseRateLimited(result, parsed, failed) {
+  // Successful PR bodies can discuss rate limits. Only actual API errors and
+  // failed commands contribute to the resource failure count.
+  let graphqlLimited = false;
+  try {
+    const text = String(result?.stdout || '').replace(/^HTTP\/[\s\S]*?\r?\n\r?\n/, '');
+    const payload = JSON.parse(text);
+    graphqlLimited = Array.isArray(payload.errors) && payload.errors.some(error =>
+      error.type === 'RATE_LIMITED' || /rate limit|too many requests/i.test(error.message || ''));
+  } catch { /* High-level commands need not produce JSON. */ }
+  const limited = parsed.observations.some(observation => observation.rateLimited)
+    || graphqlLimited || (failed && isRateLimitedError(result));
+  if (limited && !parsed.observations.some(observation => observation.rateLimited) && parsed.observations.length) {
+    parsed.observations.at(-1).rateLimited = true;
+  }
   if (result?.message && result.stderr) result.message = result.message.replace(String(result.stderr), parsed.stderr);
   if (result && 'stderr' in result) result.stderr = parsed.stderr;
-  if (isRateLimitedError(result)) { result.rateLimited = true; markGitHubRateLimited(); }
+  if (limited) { result.rateLimited = true; markGitHubRateLimited(); }
+  return limited;
+}
+
+async function finish(result, { failed = false, resource = 'core' } = {}) {
+  const parsed = parseGhDebug(result?.stderr);
+  const limited = responseRateLimited(result, parsed, failed);
+  for (const observation of parsed.observations) await recordResponseRateLimit(observation);
+  if (limited && !parsed.observations.length) await recordRateLimitedCall(resource);
   return result;
 }
 
@@ -66,7 +92,7 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
     try {
       return await finish(await execFileImpl(command, args, debugOptions(options)));
     } catch (err) {
-      await finish(err);
+      await finish(err, { failed: true, resource: args[0] === 'api' ? ghResources(args)[0] : 'graphql' });
       throw err;
     }
   }
@@ -79,12 +105,11 @@ function bridgeCall(action, payload) {
   });
 }
 
-function finishSync(result) {
+function finishSync(result, { failed = false, resource = 'core' } = {}) {
   const parsed = parseGhDebug(result?.stderr);
+  const limited = responseRateLimited(result, parsed, failed || Number(result?.status) > 0);
   if (parsed.observations.length) bridgeCall('record', parsed.observations);
-  if (result?.message && result.stderr) result.message = result.message.replace(String(result.stderr), parsed.stderr);
-  if (result && 'stderr' in result) result.stderr = parsed.stderr;
-  if (isRateLimitedError(result)) { result.rateLimited = true; markGitHubRateLimited(); }
+  else if (limited) bridgeCall('limited', [resource]);
   return result;
 }
 
@@ -92,8 +117,16 @@ function meteredExecFileSync(execFileImpl, command, args, options = {}) {
   if (command !== 'gh') return execFileImpl(command, args, options);
   let buckets = {};
   try { buckets = JSON.parse(readFileSync(resolveRateLimitSharedStatePath(), 'utf8')).buckets || {}; } catch { /* No observation yet. */ }
-  if (ghResources(args).some(resource => buckets[resource]?.remaining < resolveThrottleFloor()
-    && Date.parse(buckets[resource]?.resetAt) > Date.now())) bridgeCall('wait', ghResources(args));
+  const scope = currentGitHubBudgetScope();
+  for (const resource of ghResources(args)) {
+    const bucket = buckets[resource];
+    if (scope?.rateLimited) throw new GitHubBudgetDeferredError(bucket || { resource, resetAt: null });
+    if (bucket?.remaining < resolveThrottleFloor() && Date.parse(bucket.resetAt) > Date.now()) {
+      if (scope?.urgent && bucket.remaining > 0) continue;
+      if (scope) { scope.deferred = true; throw new GitHubBudgetDeferredError(bucket); }
+      bridgeCall('wait', [resource]);
+    }
+  }
   try {
     // execFileSync normally returns only stdout. Capture stderr as well so all
     // successful responses are accounted for; injected executors keep their seam.
@@ -110,7 +143,7 @@ function meteredExecFileSync(execFileImpl, command, args, options = {}) {
     if (result && typeof result === 'object' && 'status' in result) finishSync(result);
     return result;
   } catch (err) {
-    finishSync(err);
+    finishSync(err, { failed: true, resource: args[0] === 'api' ? ghResources(args)[0] : 'graphql' });
     throw err;
   }
 }

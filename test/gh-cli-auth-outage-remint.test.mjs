@@ -331,3 +331,36 @@ process.stderr.write('fixture diagnostic\\n');
   assert.equal(state.buckets.graphql.remaining, 4900);
   assert.doesNotMatch(JSON.stringify(state), /fixture-secret|fixture-body/);
 });
+
+test('GHBUDGET-01: successful body text and ordinary 403 permissions are not rate-limited reads', async () => {
+  const { meteredExecFile, parseGhDebug } = await import('../src/metered-gh.mjs');
+  const { withGitHubBudgetScope } = await import('../src/rate-limit-throttle.mjs');
+  await withGitHubBudgetScope({}, async scope => {
+    const result = await meteredExecFile(async () => ({ stdout: JSON.stringify({ body: 'Fix rate limit exhaustion' }), stderr: '' }), 'gh', ['api', 'repos/fixture/repo/pulls/42']);
+    assert.equal(result.rateLimited, undefined);
+    assert.equal(scope.rateLimited, false);
+  });
+  const parsed = parseGhDebug('* Request at fixture\n< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Resource: core\n< X-Ratelimit-Remaining: 4000\n< X-Ratelimit-Reset: 4102444800\n{"message":"Resource not accessible"}\n* Request took 1ms\n');
+  assert.equal(parsed.observations[0].rateLimited, false);
+});
+
+test('GHBUDGET-01: failed fake gh responses record the window count and preserve the original error', async t => {
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { meteredExecFile } = await import('../src/metered-gh.mjs');
+  const { recordResponseRateLimit, withGitHubBudgetScope } = await import('../src/rate-limit-throttle.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'metered-errors-'));
+  const prior = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(dir, 'state.json');
+  t.after(() => { process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = prior; rmSync(dir, { recursive: true, force: true }); });
+  await recordResponseRateLimit({ resource: 'graphql', remaining: 4900, resetAt: 4102444800 });
+  const err = Object.assign(new Error('Command failed'), { stderr: '* Request at fixture\n< HTTP/2.0 429 Too Many Requests\n< X-Ratelimit-Resource: graphql\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: 4102444800\nfixture-private-body\n* Request took 1ms\ngh: rate limit exceeded\n', code: 1 });
+  await withGitHubBudgetScope({}, async scope => {
+    await assert.rejects(meteredExecFile(async () => { throw err; }, 'gh', ['api', 'graphql']), candidate => candidate === err);
+    assert.equal(scope.rateLimited, true);
+  });
+  assert.equal(err.stderr, 'gh: rate limit exceeded\n');
+  assert.equal(err.code, 1);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')).buckets.graphql.rateLimitedCalls, 1);
+});

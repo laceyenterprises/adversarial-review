@@ -5,7 +5,7 @@ import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
-import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit, resolveRateLimitSharedStatePath, resolveThrottleFloor } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit, resolveRateLimitSharedStatePath, resolveThrottleFloor, markGitHubRateLimited } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const bridge = fileURLToPath(new URL('../bin/metered-gh.mjs', import.meta.url));
@@ -54,7 +54,7 @@ async function finish(result) {
   for (const observation of parsed.observations) await recordResponseRateLimit(observation);
   if (result?.message && result.stderr) result.message = result.message.replace(String(result.stderr), parsed.stderr);
   if (result && 'stderr' in result) result.stderr = parsed.stderr;
-  if (isRateLimitedError(result)) result.rateLimited = true;
+  if (isRateLimitedError(result)) { result.rateLimited = true; markGitHubRateLimited(); }
   return result;
 }
 
@@ -84,7 +84,7 @@ function finishSync(result) {
   if (parsed.observations.length) bridgeCall('record', parsed.observations);
   if (result?.message && result.stderr) result.message = result.message.replace(String(result.stderr), parsed.stderr);
   if (result && 'stderr' in result) result.stderr = parsed.stderr;
-  if (isRateLimitedError(result)) result.rateLimited = true;
+  if (isRateLimitedError(result)) { result.rateLimited = true; markGitHubRateLimited(); }
   return result;
 }
 

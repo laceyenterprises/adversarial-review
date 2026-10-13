@@ -401,3 +401,37 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('GHBUDGET-01: watcher skips low-budget reads, serves ready closes, and resumes at reset', async t => {
+  const { withGitHubBudgetScope, GitHubBudgetDeferredError } = await import('../src/rate-limit-throttle.mjs');
+  const { runLowBudgetClosingTick } = await import('../src/watcher-github-budget.mjs');
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-01-01T00:00:00Z');
+  const throttle = makeThrottle({ rootDir, nowMs: () => now, sleepImpl: () => { throw new Error('poll must not sleep'); } });
+  await throttle.recordResponseRateLimit({ resource: 'graphql', remaining: 100, resetAt: now + 60_000 });
+  let nonUrgent = 0, closing = 0, noProgressTicks = 0;
+  const logs = [];
+  for (let tick = 0; tick < 2; tick++) {
+    await withGitHubBudgetScope({}, async scope => {
+      await assert.rejects(throttle.awaitThrottleIfNeeded('graphql'), GitHubBudgetDeferredError);
+      assert.equal(scope.deferred, true);
+    });
+    const deferred = await runLowBudgetClosingTick({ budgets: await throttle.readSharedState(),
+      rows: [{ ready: false }, { ready: true }], isReady: row => row.ready,
+      serve: async () => { assert.equal(await throttle.awaitThrottleIfNeeded('graphql'), false); closing++; },
+      logger: { log: line => logs.push(line) },
+    });
+    if (!deferred) { nonUrgent++; noProgressTicks++; }
+    now += 20_000;
+  }
+  assert.equal(nonUrgent, 0);
+  assert.equal(closing, 2);
+  assert.equal(noProgressTicks, 0);
+  assert.equal(logs.length, 2);
+  assert.ok(logs.every(line => line.includes('remaining=100') && line.includes('reset=2026-01-01T00:01:00.000Z')));
+  now += 20_000;
+  assert.equal(await runLowBudgetClosingTick({ budgets: await throttle.readSharedState(), rows: [], isReady: () => true,
+    serve: async () => {}, logger: { log: () => assert.fail('reset window must resume') } }), false);
+  await withGitHubBudgetScope({}, async () => assert.equal(await throttle.awaitThrottleIfNeeded('graphql'), false));
+});

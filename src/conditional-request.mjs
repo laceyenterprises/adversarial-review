@@ -6,7 +6,7 @@ import {
   getCachedEtag,
   putCachedEtag,
 } from './etag-cache.mjs';
-import { awaitThrottleIfNeeded, recordResponseRateLimit } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit, extractRateLimitObservation, isGitHubRateLimitError, markGitHubRateLimited } from './rate-limit-throttle.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -130,6 +130,7 @@ async function fetchConditionalRestPage({
     }
     return response;
   } catch (err) {
+    if (isGitHubRateLimitError(err)) markGitHubRateLimited();
     await recordResponseRateLimit({
       remaining: getResponseHeader(err?.response?.headers, 'x-ratelimit-remaining'),
       resetAt: getResponseHeader(err?.response?.headers, 'x-ratelimit-reset'),
@@ -205,6 +206,19 @@ function createWatcherOctokit({
       }
     });
   }
+  octokit?.hook?.wrap?.('request', async (request, options) => {
+    const resource = String(options.url || '').includes('/graphql') ? 'graphql' : 'core';
+    await awaitThrottleIfNeeded(resource);
+    try {
+      const response = await request(options);
+      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+      return response;
+    } catch (err) {
+      if (isGitHubRateLimitError(err)) markGitHubRateLimited();
+      await recordResponseRateLimit(extractRateLimitObservation(err?.response?.headers));
+      throw err;
+    }
+  });
   return octokit;
 }
 

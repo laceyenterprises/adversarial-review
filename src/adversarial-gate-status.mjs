@@ -1352,6 +1352,7 @@ export {
   pickAdversarialGateStatus,
   projectAdversarialGateStatus,
   pruneGateRecordsForPR,
+  readGateRecord,
   publishAdversarialGateStatus,
   resolveProvenReviewedHead,
   resolveSettledReviewVerdict,

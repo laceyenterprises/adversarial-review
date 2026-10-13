@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -13,6 +14,36 @@ const DEFAULT_RESOURCE = 'core';
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const TOOL_ROOT = dirname(MODULE_DIR);
 const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-limit-state.json');
+
+const budgetScopes = new AsyncLocalStorage();
+
+function withGitHubBudgetScope(options, fn) {
+  const scope = { urgent: false, rateLimited: false, deferred: false, ...options };
+  return budgetScopes.run(scope, () => fn(scope));
+}
+
+function currentGitHubBudgetScope() { return budgetScopes.getStore(); }
+
+function markGitHubRateLimited() {
+  const scope = currentGitHubBudgetScope();
+  if (scope) scope.rateLimited = true;
+}
+
+function isGitHubRateLimitError(err) {
+  return err?.rateLimited === true || err?.status === 429
+    || /rate limit|too many requests|HTTP\s+429/i.test(
+      [err?.message, err?.stderr, err?.stdout, err?.response?.data?.message].join('\n'));
+}
+
+class GitHubBudgetDeferredError extends Error {
+  constructor(observation) {
+    super(`GitHub ${observation.resource} budget deferred until ${observation.resetAt}`);
+    this.name = 'GitHubBudgetDeferredError';
+    this.rateLimited = true;
+    this.budgetDeferred = true;
+    this.observation = observation;
+  }
+}
 
 function defaultSleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -359,6 +390,9 @@ function createRateLimitThrottle({
 
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE) {
     const normalizedResource = normalizeResource(resource);
+    if (currentGitHubBudgetScope()?.rateLimited) {
+      throw new GitHubBudgetDeferredError({ resource: normalizedResource, resetAt: null });
+    }
     if (activeThrottlePromises.has(normalizedResource)) {
       return activeThrottlePromises.get(normalizedResource);
     }
@@ -368,6 +402,14 @@ function createRateLimitThrottle({
         const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
         const current = currentObservations[normalizedResource] || null;
         if (!current || current.remaining >= floor) return false;
+        const scope = currentGitHubBudgetScope();
+        if (scope) {
+          // The configurable floor reserves capacity for an already-ready close.
+          // Zero remaining cannot serve any request, urgent or otherwise.
+          if (scope.urgent && current.remaining > 0) return false;
+          scope.deferred = true;
+          throw new GitHubBudgetDeferredError(current);
+        }
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
         const resolvedSharedStatePath = resolveSharedStatePathNow();
         recordApiCallImpl?.({
@@ -440,8 +482,16 @@ function recordResponseRateLimit(observation) {
   return defaultThrottle.recordResponseRateLimit(observation);
 }
 
+function readGitHubBudgetState() { return defaultThrottle.readSharedState(); }
+
 export {
   awaitThrottleIfNeeded,
+  currentGitHubBudgetScope,
+  GitHubBudgetDeferredError,
+  isGitHubRateLimitError,
+  markGitHubRateLimited,
+  withGitHubBudgetScope,
+  readGitHubBudgetState,
   createRateLimitThrottle,
   DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,

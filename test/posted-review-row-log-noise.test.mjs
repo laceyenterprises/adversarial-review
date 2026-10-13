@@ -1222,3 +1222,39 @@ test('handlePostedReviewRow: terminal PR result returns AMA closure details', as
   assert.equal(result.prTerminal, true);
   assert.equal(result.amaClosureResult, amaClosureResult);
 });
+
+test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit stalled events', async () => {
+  const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
+  const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
+  const { meteredExecFile } = await import('../src/metered-gh.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'rate-limit-progress-'));
+  tempRoots.add(rootDir);
+  const events = [], notices = [];
+  const identity = { repo: 'fixture/repo', prNumber: 42 };
+  const laneGate = createNoProgressLaneGate({ rootDir, readReviewRow: () => ({ review_status: 'posted' }),
+    emitStalledEventFn: event => events.push(event), deliverAlertFn: notice => notices.push(notice),
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  const handler = { repoPath: identity.repo, prNumber: identity.prNumber, headSha: 'a'.repeat(40), run: async () => ({ handled: true }) };
+  const run = () => runPostedReviewHandlersFairly({ handlers: [handler], laneGate, logger: { log() {}, warn() {}, error() {} } });
+  await run();
+  const baseline = readNoProgressLane(rootDir, identity);
+  for (let tick = 0; tick < 4; tick++) {
+    handler.run = async () => {
+      try {
+        await meteredExecFile(async () => { const err = new Error('API rate limit already exceeded'); err.stderr = err.message; throw err; }, 'gh', ['api', 'repos/fixture/repo/pulls/42']);
+      } catch { /* Production handlers can handle read failures internally. */ }
+      return { handled: true };
+    };
+    await run();
+    assert.equal(readNoProgressLane(rootDir, identity).noProgressTicks, baseline.noProgressTicks);
+  }
+  handler.run = async () => {
+    await meteredExecFile(async () => ({ stdout: '{}', stderr: '' }), 'gh', ['api', 'repos/fixture/repo/pulls/42']);
+    return { handled: true };
+  };
+  await run();
+  assert.equal(readNoProgressLane(rootDir, identity).noProgressTicks, baseline.noProgressTicks + 1);
+  assert.deepEqual(events, []);
+  assert.deepEqual(notices, []);
+});

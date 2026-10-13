@@ -1,3 +1,4 @@
+import { currentGitHubBudgetScope, isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 // ── Posted-review row: per-row post-review dispatch hub ───────────────────────
 //
@@ -897,7 +898,9 @@ export function createNoProgressLaneGate({
       }
       return { run: decision.due, ...decision };
     },
-    async record(handler, { timedOut = false, value = null, laneAdmission = null } = {}) {
+    async record(handler, { timedOut = false, error = null, value = null, laneAdmission = null } = {}) {
+      const scope = currentGitHubBudgetScope();
+      if (scope?.rateLimited || scope?.deferred || isGitHubRateLimitError(error) || value?.rateLimited) return null;
       // Without a head there is no series to key on; skip the row read too.
       if (!handler.headSha) return null;
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };

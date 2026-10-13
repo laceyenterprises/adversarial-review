@@ -1,3 +1,4 @@
+import { currentGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { HAMMER_OWNER_PAGE_EVENTS, hammerOwnerRouteForPageEvent } from './ama/review-cycle-cap-route.mjs';
 import {
   existsSync,
@@ -1422,6 +1423,8 @@ async function deliverAlert(text, {
   now = new Date(),
   loadConfigRuntimeImpl = null,
 } = {}) {
+  const scope = currentGitHubBudgetScope();
+  if (scope?.rateLimited || scope?.deferred) return { delivered: false, skipped: 'github-rate-limit' };
   const config = resolveAlertDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
     loadConfigRuntimeImpl,

@@ -513,14 +513,16 @@ test('sweepEtagCache removes entries older than the configured retention window'
   }
 });
 
-test('createWatcherOctokit does not install a global 304 rewrite hook', () => {
+test('createWatcherOctokit meters requests without rewriting global 304 errors', async () => {
   let hookInstalled = false;
+  let wrapper;
   const fakeOctokit = {
     hook: {
       wrap(name, callback) {
         assert.equal(name, 'request');
         assert.equal(typeof callback, 'function');
         hookInstalled = true;
+        wrapper = callback;
       },
     },
   };
@@ -530,5 +532,7 @@ test('createWatcherOctokit does not install a global 304 rewrite hook', () => {
     octokitFactory: () => fakeOctokit,
   });
   assert.equal(octokit, fakeOctokit);
-  assert.equal(hookInstalled, false);
+  assert.equal(hookInstalled, true);
+  const err = Object.assign(new Error('Not modified'), { status: 304 });
+  await assert.rejects(wrapper(async () => { throw err; }, { url: '/fixture' }), candidate => candidate === err);
 });

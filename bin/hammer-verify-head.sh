@@ -9,7 +9,7 @@ HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
 HAM_REQUIRED_CHECKS_WAITED_SECONDS="${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}"
 export HAM_HEAD_WAITED_SECONDS HAM_REQUIRED_CHECKS_WAITED_SECONDS
 ham_wait_for_published_head() {
-  local started deadline now remaining probe_timeout probe_dir probe_exit probe_head
+  local started deadline now remaining poll_interval=2 probe_timeout probe_dir probe_exit probe_head
   started=$(date +%s)
   deadline=$((started + 300))
   while [ -n "${HAM_PUSHED_HEAD:-}" ] && [ "$POST_REMEDIATION_SHA" != "$HAM_PUSHED_HEAD" ] \
@@ -24,8 +24,9 @@ ham_wait_for_published_head() {
       return 20
     fi
     remaining=$((deadline - now))
-    if [ "$remaining" -gt 15 ]; then remaining=15; fi
+    if [ "$remaining" -gt "$poll_interval" ]; then remaining="$poll_interval"; fi
     sleep "$remaining"
+    poll_interval=15
     remaining=$((deadline - $(date +%s)))
     if [ "$remaining" -le 0 ]; then continue; fi
     probe_timeout="$remaining"

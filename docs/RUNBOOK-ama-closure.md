@@ -2513,8 +2513,11 @@ Queue bounds and backoff use `evaluateHammerDeferralQueue`; missing or invalid
 start timestamps expire the queue. Park audits are read only on certified HAM
 routes; an unreadable audit explicitly requires operator recovery.
 Before lease acquisition, verify-head waits at most 300 seconds for the published
-`HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Each visibility probe is
-bounded to 30 seconds or the remaining deadline, whichever is shorter. Transport
+`HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. If the initial read still
+shows the pre-publication head, the first retry follows a two-second delay;
+later retries use fifteen-second intervals, clamped to the remaining deadline.
+Each visibility probe is bounded to 30 seconds or the remaining deadline,
+whichever is shorter. Transport
 errors and probe alarms retry within that same deadline; permanent errors and
 malformed or missing head data remain fatal. Only successful reads with a full
 head SHA replace the cached PR JSON. Exhaustion reports `published-head-timeout`

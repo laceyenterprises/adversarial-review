@@ -633,7 +633,7 @@ phase
     });
   }
 });
-for (const scenario of ['two lag polls', 'visibility timeout', 'third head', 'initial third head',
+for (const scenario of ['first retry visible', 'already visible', 'two lag polls', 'visibility timeout', 'third head', 'initial third head',
   'transient TLS', 'transient HTTP 503', 'probe alarm', 'transient exhaustion',
   'permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head']) {
   test(`HAMCLOSE-07 verify-head: ${scenario}`, t => {
@@ -647,7 +647,7 @@ for (const scenario of ['two lag polls', 'visibility timeout', 'third head', 'in
     writeFileSync(join(dir, 'clock'), '0');
     writeFileSync(join(dir, 'polls'), '0');
     writeFileSync(join(dir, 'date'), '#!/bin/sh\ncat "$TMPDIR/clock"\n', { mode: 0o755 });
-    writeFileSync(join(dir, 'sleep'), '#!/bin/sh\nn=$(cat "$TMPDIR/clock"); echo $((n + $1)) > "$TMPDIR/clock"\n', { mode: 0o755 });
+    writeFileSync(join(dir, 'sleep'), '#!/bin/sh\necho "$1" >> "$TMPDIR/sleeps"\nn=$(cat "$TMPDIR/clock"); echo $((n + $1)) > "$TMPDIR/clock"\n', { mode: 0o755 });
     writeFileSync(join(dir, 'gh'), `#!/bin/sh
 n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
 if [ "$n" -eq 3 ]; then cp /tmp/ham-${prNumber}-pr-after.json "$TMPDIR/cache-after-probe"; fi
@@ -672,6 +672,8 @@ if [ "$n" -ge 2 ]; then
 fi
 head=${before}
 case "$HAM_TEST_SCENARIO" in
+  'first retry visible') [ "$n" -lt 2 ] || head=${pushed} ;;
+  'already visible') head=${pushed} ;;
   'two lag polls'|'transient TLS'|'transient HTTP 503'|'probe alarm') [ "$n" -lt 3 ] || head=${pushed} ;;
   'third head') [ "$n" -lt 2 ] || head=${third} ;;
   'initial third head') head=${third} ;;
@@ -740,7 +742,9 @@ exit "$rc"`], env);
       assert.match(result.stdout, /OUTCOME=published-head-timeout/);
       assert.match(result.stdout, /CHILD_HEAD_WAIT=300 CHILD_CHECK_WAIT=0/);
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
-      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 20);
+      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 21);
+      assert.deepEqual(readFileSync(join(dir, 'sleeps'), 'utf8').trim().split('\n').map(Number),
+        [2, ...Array(19).fill(15), 13], 'polling clamps its last delay to the deadline');
       assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, before);
     } else if (['permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
       assert.equal(result.status, 1, result.stderr);
@@ -751,22 +755,27 @@ exit "$rc"`], env);
     } else {
       assert.equal(result.status, 0, result.stderr);
       const recovered = ['transient TLS', 'transient HTTP 503', 'probe alarm'].includes(scenario);
-      const expected = scenario === 'two lag polls' || recovered ? pushed : third;
+      const expected = ['first retry visible', 'already visible', 'two lag polls'].includes(scenario) || recovered ? pushed : third;
       assert.match(result.stdout, new RegExp(`CONTINUE_TO_CHECKS head=${expected}`));
       if (recovered) {
-        assert.match(result.stdout, /waited=30/);
+        assert.match(result.stdout, /waited=17/);
         assert.equal(JSON.parse(readFileSync(join(dir, 'cache-after-probe'), 'utf8')).headRefOid, before);
         assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, pushed);
       }
       if (scenario === 'two lag polls') {
-        assert.match(result.stdout, /CHILD_HEAD_WAIT=30 CHILD_CHECK_WAIT=0/);
+        assert.match(result.stdout, /CHILD_HEAD_WAIT=17 CHILD_CHECK_WAIT=0/);
         assert.match(result.stdout, /CHECKS_OUTCOME=github-gate-red STATUS=20/);
-        assert.match(result.stdout, /Waited 30s for the published head and 15s for required checks/);
+        assert.match(result.stdout, /Waited 17s for the published head and 15s for required checks/);
         const reads = readFileSync(join(dir, 'check-reads'), 'utf8').trim().split('\n');
         assert.equal(reads.length, 2);
         assert.deepEqual(reads, [pushed, pushed]);
       }
-      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), scenario === 'two lag polls' || recovered ? 3 : scenario === 'third head' ? 2 : 1);
+      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), scenario === 'two lag polls' || recovered ? 3 : ['first retry visible', 'third head'].includes(scenario) ? 2 : 1);
+      const sleeps = existsSync(join(dir, 'sleeps')) ? readFileSync(join(dir, 'sleeps'), 'utf8').trim().split('\n').map(Number) : [];
+      assert.deepEqual(sleeps, scenario === 'two lag polls' ? [2, 15, 15]
+        : recovered ? [2, 15] : ['first retry visible', 'third head'].includes(scenario) ? [2] : []);
+      if (scenario === 'first retry visible') assert.match(result.stdout, /CHILD_HEAD_WAIT=2 CHILD_CHECK_WAIT=0/);
+      if (['already visible', 'initial third head'].includes(scenario)) assert.match(result.stdout, /CHILD_HEAD_WAIT=0 CHILD_CHECK_WAIT=0/);
     }
   });
 }

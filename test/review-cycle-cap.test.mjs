@@ -666,3 +666,39 @@ test('addLabelToPRBestEffort swallows transient label-add errors so the dedupe m
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /failed to add label/);
 });
+
+test('HAMROUTE-01: route logs start with the outcome and count consecutive passes by head', async t => {
+  const { routeToHammerOwner } = await import('../src/hammer-owner-route.mjs');
+  const logs = [];
+  let headSha = 'current';
+  let decision = { outcome: 'ama-pending', amaClosureResult: { reason: 'ama-coexistence-operation-timeout' } };
+  const args = {
+    route: 'ci-blocked', rootDir: 'synthetic-log-fixture', repoPath: 'example/repo', prNumber: 42,
+    reviewedHeadSha: 'reviewed', currentRevisionRef: 'current',
+    fetchMergeAgentCandidateImpl: async () => ({ headSha }),
+    buildMergeAgentDispatchJobImpl: () => ({}),
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => decision,
+    logger: { log: line => logs.push(line), warn() {}, error() {} },
+    deliverAlertImpl: async () => assert.fail('fixture has no terminal page'),
+  };
+  await routeToHammerOwner(args);
+  assert.match(logs.at(-1), /^waiting: ama-coexistence-operation-timeout .*passes_without_launch=1$/);
+  decision = { outcome: 'ama-pending', amaClosureResult: { reason: 'ama-closer-dispatch-backgrounded' } };
+  await routeToHammerOwner(args);
+  assert.match(logs.at(-1), /^waiting: ama-closer-dispatch-backgrounded .*passes_without_launch=2$/);
+  decision.amaClosureResult.reason = 'operator-label-classification-pending';
+  await routeToHammerOwner(args);
+  assert.match(logs.at(-1), /^waiting: operator-label-classification-pending .*passes_without_launch=3$/);
+  decision = { outcome: 'ama-dispatched', amaClosureResult: { dispatched: true, launchRequestId: 'synthetic-launch' } };
+  await routeToHammerOwner(args);
+  assert.match(logs.at(-1), /^launched lrq=synthetic-launch .*passes_without_launch=0$/);
+  const failedRead = { ...args, fetchMergeAgentCandidateImpl: async () => { throw new Error('rate-limited read'); } };
+  await routeToHammerOwner(failedRead);
+  assert.match(logs.at(-1), /^waiting: rate-limited read .*passes_without_launch=1$/);
+  await routeToHammerOwner({ ...failedRead, fetchMergeAgentCandidateImpl: async () => { throw new Error('synthetic failure'); } });
+  assert.match(logs.at(-1), /^failed: synthetic failure .*passes_without_launch=2$/);
+  headSha = 'changed';
+  decision = { outcome: 'ama-pending', amaClosureResult: { reason: 'ama-coexistence-operation-timeout' } };
+  await routeToHammerOwner(args);
+  assert.match(logs.at(-1), /^waiting: ama-coexistence-operation-timeout .*passes_without_launch=1$/);
+});

@@ -473,21 +473,26 @@ export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = 180_000,
   setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
   const entries = new Map();
   return {
-    scope({ rootDir, repo, prNumber, reviewedHead, currentHead }) {
+    scope({ rootDir, repo, prNumber, reviewedHead, currentHead, evidenceVersion }) {
       const pr = JSON.stringify([rootDir, repo, prNumber]);
       const key = JSON.stringify([rootDir, repo, prNumber, reviewedHead, currentHead]);
       for (const [oldKey, entry] of entries) {
         if (entry.pr === pr && oldKey !== key) { entry.controller.abort(); entries.delete(oldKey); }
       }
       if (!entries.has(key)) {
-        entries.set(key, { pr, reads: new Map(), controller: new AbortController() });
+        entries.set(key, { pr, reads: new Map(), controller: new AbortController(), evidenceVersion });
         while (entries.size > maxEntries) {
           const oldest = entries.keys().next().value;
           entries.get(oldest).controller.abort();
           entries.delete(oldest);
         }
       }
-      const { reads, controller: scopeController } = entries.get(key);
+      const entry = entries.get(key);
+      if (entry.evidenceVersion !== evidenceVersion) {
+        entry.reads.delete('ham-terminal-remediation-evidence');
+        entry.evidenceVersion = evidenceVersion;
+      }
+      const { reads, controller: scopeController } = entry;
       return {
         read(name, fn) {
           if (!reads.has(name)) {
@@ -507,9 +512,7 @@ export function createAmaProofCache({ maxEntries = 256, workTimeoutMs = 180_000,
               return fn(signal);
             }), deadline]).finally(() => clearTimeoutFn(timer));
             reads.set(name, work);
-            work.then(result => {
-              if (name === 'ham-terminal-remediation-evidence' && !result && reads.get(name) === work) reads.delete(name);
-            }, () => { if (reads.get(name) === work) reads.delete(name); });
+            work.catch(() => { if (reads.get(name) === work) reads.delete(name); });
           }
           return reads.get(name);
         },
@@ -905,6 +908,8 @@ async function dispatchAmaClosureFor({
   const proofScope = proofCacheFor(proveCloserAuthoredStaleHeadImpl).scope({
     rootDir, repo: repoPath, prNumber, reviewedHead: reviewStateRow?.reviewer_head_sha,
     currentHead: candidate?.headSha || currentRevisionRef,
+    evidenceVersion: JSON.stringify([candidate?.prUpdatedAt, reviewStateRow?.review_body,
+      dispatchJob?.reviewBody]),
   });
   const runCoexistenceOperation = (operation, fn, options) =>
     AMA_REUSABLE_PROOF_OPERATIONS.has(operation)

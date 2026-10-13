@@ -78,6 +78,11 @@ export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
 ```
 
+`HAM_ROOT_DIR` is the adversarial-review daemon runtime root supplied by
+dispatch, containing `data/follow-up-jobs/completed`. Keep it exported for
+`hammer-head-context.mjs`; `HAM_HQ_ROOT` is a separate HQ root. Manual callers
+must supply `HAM_ROOT_DIR` when relying on completed-round proof.
+
 Before entering the merge-lease window, write the complete audit markdown to
 an absolute-path file. It must contain the `**Findings addressed**` heading and
 one single-line bullet per finding with the exact review title, blocking class,

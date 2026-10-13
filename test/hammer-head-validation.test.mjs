@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
+import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches, hammerAttestationChain, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 
 const fleet = sha => ({ sha, author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'web-flow' },
   commit: { verification: { verified: true, reason: 'valid' } } });
@@ -108,15 +108,17 @@ for (const damage of ['invalid JSON', 'empty file', 'unreadable file', 'invalid 
       rounds[0], { state: 'spawned', startHeadSha: 'reviewed', resultingHeadSha: 'unfinished' },
       { state: 'completed', startHeadSha: 'reviewed' },
     ] } };
-    writeFileSync(join(dir, '10-valid.json'), JSON.stringify(job));
-    writeFileSync(join(dir, '20-valid.json'), JSON.stringify({ ...job, remediationPlan: { rounds: [rounds[1]] } }));
+    const prefix = 'fixture__repo-pr-1-';
+    writeFileSync(join(dir, `${prefix}10-valid.json`), JSON.stringify(job));
+    writeFileSync(join(dir, `${prefix}20-valid.json`), JSON.stringify({ ...job, remediationPlan: { rounds: [rounds[1]] } }));
     // Damage both before and after valid records so no scan ordering can hide it.
-    for (const name of ['00-damaged.json', '99-damaged.json']) {
+    for (const suffix of ['00-damaged.json', '99-damaged.json']) {
+      const name = `${prefix}${suffix}`;
       if (damage === 'unreadable file') mkdirSync(join(dir, name));
       else writeFileSync(join(dir, name), damage === 'empty file' ? '' : damage === 'invalid job shape' ? 'null' : '{');
     }
     for (const [index, overrides] of [{ repo: 'fixture/other' }, { prNumber: 2 }, { status: 'failed' }].entries()) {
-      writeFileSync(join(dir, `unrelated-${index}.json`), JSON.stringify({ ...job, ...overrides }));
+      writeFileSync(join(dir, `${prefix}unrelated-${index}.json`), JSON.stringify({ ...job, ...overrides }));
     }
     writeFileSync(join(dir, 'ignored.txt'), '{');
     assert.deepEqual(readCompletedRemediationRounds(root, 'fixture/repo', '1'), rounds);
@@ -129,8 +131,48 @@ test('HAMCLOSE-05: missing completed directory or only damaged jobs yields no ro
   assert.deepEqual(readCompletedRemediationRounds(root, 'fixture/repo', 1), []);
   const dir = join(root, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'broken.json'), '{');
+  writeFileSync(join(dir, 'fixture__repo-pr-1-broken.json'), '{');
   assert.deepEqual(readCompletedRemediationRounds(root, 'fixture/repo', 1), []);
+});
+
+test('completed round lookup selects job prefixes and matches GitHub repo casing', t => {
+  const root = mkdtempSync(join(tmpdir(), 'completed-remediation-rounds-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const round = { state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' };
+  const job = { repo: 'Fixture/Repo', prNumber: 1, status: 'completed', remediationPlan: { rounds: [round] } };
+  writeFileSync(join(dir, 'Fixture__Repo-pr-1-2026-10-12.json'), JSON.stringify(job));
+  // Even apparently matching contents in other PR/repo files are not scanned.
+  for (const name of ['fixture__repo-pr-10-old.json', 'fixture__other-pr-1-old.json']) {
+    writeFileSync(join(dir, name), JSON.stringify(job));
+  }
+  assert.deepEqual(readCompletedRemediationRounds(root, 'fixture/repo', 1), [round]);
+});
+
+test('zero-edge proofs cannot masquerade as App or completed-round chains', async () => {
+  const rounds = [{ state: 'completed', startHeadSha: 'other', resultingHeadSha: 'unrelated' }];
+  assert.equal(hammerAttestationChain([], 'reviewed', 'reviewed'), null);
+  for (const remediationRounds of [[], rounds]) {
+    const f = fixture([], { status: 'identical' });
+    const range = await fetchHammerHeadRange({ ...f.options, currentHead: 'reviewed', remediationRounds,
+      get: async path => {
+        f.calls.push(path);
+        if (path.endsWith('/commits/main')) return { sha: 'base' };
+        return { status: 'identical', total_commits: 0, commits: [] };
+      } });
+    assert.equal(range.verified, true);
+    assert.equal(range.proof, undefined);
+    assert.equal(f.calls.length, 3, 'exact head takes the ordinary comparison path');
+  }
+});
+
+test('reviewed starting base has an explicit proof, independent of completed rounds', async () => {
+  const range = await fetchHammerHeadRange({ reviewedHead: 'reviewed', currentHead: 'head',
+    hammerBaseHead: 'reviewed', remediationRounds: [{ state: 'completed', startHeadSha: 'other', resultingHeadSha: 'unrelated' }],
+    get() { throw new Error('HAMCLOSE-01 reviewed starting base needs no ancestry reads'); } });
+  assert.equal(range.proof, 'reviewed-starting-base');
+  assert.deepEqual(range.commits, ['head']);
 });
 
 for (const [name, rounds, target, diverged, proven] of [

@@ -6,9 +6,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-head-context.mjs', import.meta.url));
+const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
 
 function fixture(t, scenario) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-head-context-'));
@@ -85,7 +87,7 @@ test('head context distinguishes spoofed fleet ancestry from read failures', asy
 test('HAMCLOSE-01 reviewed starting base bypasses irrelevant signature and ancestry reads', async t => {
   const f = fixture(t, 'spoof');
   const result = JSON.parse((await f.run(undefined, { HAM_BASE_HEAD: 'reviewed', HAM_PR_NUMBER: '1' })).stdout);
-  assert.equal(result.proof, 'hammer-app-attestation-chain');
+  assert.equal(result.proof, 'reviewed-starting-base');
   assert.equal(f.calls().length, 0);
 });
 
@@ -115,19 +117,38 @@ test('HAMCLOSE-05 completed daemon round exits successfully instead of handing o
   const f = fixture(t, 'spoof');
   const dir = join(f.root, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
+  const roundFile = join(dir, 'fixture__repo-pr-1-round.json');
+  writeFileSync(roundFile, JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
     status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
       startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
-  writeFileSync(join(dir, 'broken.json'), '{');
-  mkdirSync(join(dir, 'unreadable.json'));
+  writeFileSync(join(dir, 'fixture__repo-pr-1-broken.json'), '{');
+  mkdirSync(join(dir, 'fixture__repo-pr-1-unreadable.json'));
   const { stdout } = await f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root });
   assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');
   for (const overrides of [{ repo: 'fixture/other' }, { prNumber: 2 }, { status: 'in_progress' }]) {
-    writeFileSync(join(dir, 'round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
+    writeFileSync(roundFile, JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
       status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
         startHeadSha: 'reviewed', resultingHeadSha: 'head' }] }, ...overrides }));
     await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root }), error => error.code === 65);
   }
-  writeFileSync(join(dir, 'round.json'), '{');
+  writeFileSync(roundFile, '{');
   await assert.rejects(f.run(undefined, { HAM_BASE_HEAD: 'head', HAM_ROOT_DIR: f.root }), error => error.code === 65);
+});
+
+test('dispatched prompt exports the daemon root used by completed-round verification', async t => {
+  const f = fixture(t, 'spoof');
+  const dir = join(f.root, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'fixture__repo-pr-1-round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
+    status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
+      startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
+  const prompt = composeCloserPrompt({ rootDir: f.root, hqRoot: join(f.root, 'hq'), hqOwnerUser: 'fixture',
+    templateBody: template });
+  const exportLine = prompt.split('\n').find(line => line.startsWith('export HAM_ROOT_DIR='));
+  assert.ok(exportLine);
+  const { stdout } = await exec('bash', ['-c', `${exportLine}\nexec "$HAM_TEST_NODE" "$HAM_TEST_CLI" fixture/repo reviewed head --pr https://github.com/fixture/repo/pull/1`], {
+    env: { ...process.env, HAM_ROOT_DIR: '', HAM_BASE_HEAD: 'head', HAM_PR_NUMBER: '',
+      HAM_TEST_NODE: process.execPath, HAM_TEST_CLI: cli, PATH: `${f.root}:${process.env.PATH}` }, timeout: 15000,
+  });
+  assert.equal(JSON.parse(stdout).proof, 'completed-remediation-round-chain');
 });

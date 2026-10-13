@@ -12852,3 +12852,108 @@ for (const metadata of ['foreign-remote']) {
     assert.equal(readFileSync(path.join(workspaceDir, 'repair-preserved.txt'), 'utf8'), 'unchanged');
   });
 }
+
+for (const scenario of ['pushed', 'unchanged', 'other-blocker', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round',
+  'review-row-missing', 'pr-not-open', 'malformed-title-terminal', 'already-pending']) {
+  test(`CIBLOCKHAM-02: pushed round pending CI completion (${scenario})`, async (t) => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), 'pending-ci-round-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const startHead = 'a'.repeat(40);
+    const endHead = scenario === 'unchanged' ? startHead : 'b'.repeat(40);
+    const refusedReset = ['review-row-missing', 'pr-not-open', 'malformed-title-terminal'].includes(scenario);
+    const normalizedRereview = ['normalized-rereview', 'blocking-rereview', 'already-pending'].includes(scenario) || refusedReset;
+    const { claimed } = makeQueuedJob(rootDir, {
+      repo: 'example/review-fixture', prNumber: 42, revisionRef: startHead, maxRemediationRounds: 2,
+      linearTicketId: 'SYNTH-42', reviewBody: scenario === 'blocking-rereview'
+        ? '## Blocking Issues\n- **Broken handoff**\n  - Remediation loses the handoff.\n\n## Verdict\nRequest changes'
+        : '## Verdict\nComment only',
+    });
+    claimed.job.ciRegressionGuard = { firstObservedAt: '2026-04-21T10:00:00.000Z' };
+    writeFollowUpJob(claimed.jobPath, claimed.job);
+    if (scenario === 'round-two') {
+      claimed.job.remediationPlan.currentRound = 2;
+      claimed.job.remediationPlan.rounds = [{ round: 1, state: 'completed' },
+        { round: 2, state: 'in_progress', startHeadSha: startHead }];
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
+    if (scenario === 'final-round') {
+      claimed.job.finalRound = 'comment-only';
+      writeFollowUpJob(claimed.jobPath, claimed.job);
+    }
+    const workspaceDir = path.join(rootDir, 'workspace');
+    mkdirSync(workspaceDir, { recursive: true });
+    const outputPath = path.join(workspaceDir, 'last-message.md');
+    const { hqRoot, replyPath } = prepareCanonicalReply(rootDir, claimed.job);
+    writeFileSync(outputPath, 'Addressed all findings and pushed.');
+    writeValidReply(replyPath, claimed.job, {
+      outcome: 'partial',
+      summary: normalizedRereview
+        ? `Addressed all findings and pushed ${endHead}.` : 'Addressed all findings.',
+      addressed: scenario === 'blocking-rereview'
+        ? [{ title: 'Broken handoff', finding: 'Remediation loses the handoff.', action: 'Preserved the review handoff.' }] : [],
+      operationalBlockers: [
+        { kind: 'pending-ci', title: 'Checks running', finding: 'Checks are pending.', reasoning: 'One bounded wait ended.' },
+        ...(scenario === 'other-blocker' ? [{ title: 'Missing input', finding: 'Input unavailable.', reasoning: 'Needs an operator.', needsHumanInput: 'Provide input.' }] : []),
+      ],
+      reReview: { requested: false, reason: null },
+    });
+    const spawned = markFollowUpJobSpawned({ jobPath: claimed.jobPath, worker: {
+      model: 'codex', processId: 4242, state: 'spawned',
+      workspaceDir: path.relative(rootDir, workspaceDir), outputPath: path.relative(rootDir, outputPath), replyPath,
+    } });
+    const comments = [], rereviewCalls = [];
+    const result = await withHqRootEnv(hqRoot, () => reconcileFollowUpJob({
+      rootDir, job: spawned.job, jobPath: spawned.jobPath, isWorkerRunning: () => false,
+      now: () => '2026-04-21T11:00:00.000Z',
+      execFileImpl: scenario === 'final-round'
+        ? finalRoundPushedExec({ jobId: claimed.job.jobId, pushedHead: endHead })
+        : async () => ({ stdout: '[]', stderr: '' }),
+      auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+      resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: endHead }),
+      inspectRemediationCiRegressionImpl: async () => ({ state: 'pending', headSha: endHead }),
+      requestReviewRereviewImpl: (args) => {
+        rereviewCalls.push(args);
+        if (refusedReset) return { triggered: false, status: 'blocked', reason: scenario };
+        if (scenario === 'already-pending') return { triggered: false, status: 'already-pending', reason: 'review-already-pending' };
+        return { triggered: true, status: 'pending', reason: 'review-status-reset' };
+      },
+      // Exercise durable comment rendering without a live comment-ID lookup.
+      postCommentImpl: async (args) => { comments.push(args); return { posted: false, reason: 'offline-fixture' }; },
+      log: { log() {}, warn() {}, error() {} },
+    }));
+    const expectedCompleted = ['pushed', 'normalized-rereview', 'blocking-rereview', 'round-two', 'final-round', 'already-pending'].includes(scenario);
+    const expectedRereview = normalizedRereview;
+    assert.equal(rereviewCalls.length, expectedRereview ? 1 : 0);
+    if (expectedRereview) {
+      assert.equal(rereviewCalls[0].targetRevisionRef, endHead);
+      assert.equal(result.job.reReview.requested, true);
+      assert.equal(result.job.reReview.triggered, !refusedReset && scenario !== 'already-pending');
+      assert.equal(result.job.reReview.ciSettlement, 'pending-at-timeout');
+      assert.equal(result.job.remediationPlan.rounds.at(-1).reReview.requested, true);
+    }
+    assert.equal(result.job.status, expectedCompleted ? 'completed' : 'stopped', JSON.stringify(result.job.failure));
+    assert.equal(result.job.remediationPlan.rounds.at(-1).state, expectedCompleted ? 'completed' : 'stopped');
+    assert.equal(comments.length, 1);
+    const body = comments[0].body;
+    assert.equal(result.job.commentDelivery.body, body, 'durable retry renders the same outcome');
+    if (refusedReset) {
+      assert.equal(result.action, 'stopped');
+      assert.equal(result.reason, 'rereview-blocked');
+      assert.equal(result.job.remediationPlan.stop.code, 'rereview-blocked');
+      assert.equal(result.job.reReview.outcomeReason, scenario);
+      assert.equal(result.job.completion.pendingCiOnly, true, 'pending CI evidence must not waive a refused reset');
+      assert.match(body, /Human intervention required/);
+      assert.match(body, /watcher refused the reset/);
+      assert.ok(body.includes(scenario));
+      assert.doesNotMatch(body, /The pipeline continues when CI finishes|Nothing is needed from a person/);
+      return;
+    }
+    if (expectedCompleted) {
+      assert.ok(body.includes('**Outcome:** round finished; CI still running.\n\nAll findings from this review were addressed and pushed as bbbbbbb. Required checks had not finished when the round ended.\n\nNothing is needed from a person. The pipeline continues when CI finishes.'));
+      assert.doesNotMatch(body, /Human intervention required/);
+    } else {
+      assert.equal(result.job.remediationPlan.stop.code, 'no-progress');
+      assert.match(body, /Human intervention required/);
+    }
+  });
+}

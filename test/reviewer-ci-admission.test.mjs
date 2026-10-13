@@ -309,3 +309,30 @@ test('buildRereviewCiRegressionReason includes failed checks for the next worker
   assert.match(reason, /Ruff lint and format baseline=FAILURE/);
   assert.match(reason, /repo-guards=CANCELLED/);
 });
+
+test('CIBLOCKHAM-02: completed pending-CI round uses its remaining remediation round', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ci-round-requeue-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const repo = 'example/review-fixture';
+  const job = buildFollowUpJob({ repo, prNumber: 42, reviewerModel: 'codex', reviewBody: '## Verdict\nComment only' });
+  job.status = 'completed';
+  job.completedAt = '2026-10-01T10:00:00Z';
+  job.reReview = { requested: false };
+  job.completion = { pendingCiOnly: true, workerPushedHeadSha: 'b'.repeat(40) };
+  job.remediationPlan.currentRound = 1;
+  job.remediationPlan.maxRounds = 2;
+  job.remediationPlan.rounds = [{ round: 1, state: 'completed' }];
+  const dir = join(rootDir, 'data/follow-up-jobs/completed');
+  mkdirSync(dir, { recursive: true });
+  writeFollowUpJob(join(dir, `${job.jobId}.json`), job);
+  const result = await guardRereviewCiBeforeReviewer({ rootDir, repo, prNumber: 42,
+    passKind: 'rereview', reviewerHeadSha: 'b'.repeat(40), log: silentLog(),
+    inspectCiImpl: async () => ({ state: 'failed', headSha: 'b'.repeat(40), failedChecks: [{ name: 'unit', state: 'FAILURE' }] }),
+  });
+  assert.equal(result.reason, 'ci-regression-requeued');
+  assert.equal(result.job.status, 'pending');
+  assert.equal(result.job.remediationPlan.currentRound, 1, 'claiming the next worker consumes round 2');
+  assert.equal(result.job.remediationPlan.maxRounds, 2);
+  assert.equal(result.job.remediationPlan.nextAction.round, 2);
+  assert.equal(result.job.completion, null, 'the next round must not inherit the completion exception');
+});

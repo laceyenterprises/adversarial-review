@@ -164,6 +164,7 @@
       "conflictedBaseProbeRetryCode": "hq-conflicted-base-probe-transient",
       "conflictedBaseProbeExhaustionCode": "hq-conflicted-base-probe-retries-exhausted",
       "pendingCiRereviewEvidenceFields": ["reReview.ciSettlement", "reReview.ciGate", "remediationPlan.rounds[].reReview.ciSettlement", "remediationPlan.rounds[].reReview.ciGate"],
+      "pendingCiCompletionEvidenceFields": ["completion.pendingCiOnly", "completion.workerPushedHeadSha"],
       "workflowPublicationEvidenceFields": ["operationalBlockerRecovery.retry.pendingNativePublication", "operationalBlockerRecovery.retry.nativePublicationReceipt", "operationalBlockerRecovery.retry.retryLater"]
     },
     {

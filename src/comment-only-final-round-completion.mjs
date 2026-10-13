@@ -19,7 +19,9 @@ import { FINAL_ROUND_REPLAY_PROOF, isTransientGitFailure, proveFinalRoundWorkerP
 import {
   OPERATIONAL_BLOCKER_KIND_PENDING_CI,
   isDeclaredOperationalBlockerCode,
+  normalizeCiPendingOnlyReply,
 } from './kernel/remediation-reply.mjs';
+import { resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { isWorkflowPath } from './remediation-workflow-push-capability.mjs';
 import { ensureJobBaseBranch } from './remediation-git-pr-io.mjs';
 import { parseHqWorkerWorkspaceFromPayload, resolveHqWorkerWorkspace } from './remediation-hq-dispatch.mjs';
@@ -79,6 +81,61 @@ export function classifyFinalRoundOperationalBlockers(operationalBlockers, {
   if (ciGate.state !== 'pending') return { pendingCiOnly: false, reason: 'untagged-blocker-ci-not-pending' };
   if (outcome === 'blocked') return { pendingCiOnly: false, reason: 'untagged-blocker-outcome-blocked' };
   return { pendingCiOnly: true, reason: 'ci-probe-pending-ci' };
+}
+
+// Project CI-only completion evidence without suppressing a durable re-review
+// request. Final rounds use their independent push proof; other rounds require
+// a live moved head and a CI probe of that exact head.
+export async function resolvePendingCiCompletion({
+  rootDir, job, reply, worker = null, remediationReply = null,
+  finalRound = null, completionLifecycle = null,
+  pendingCiCompletion = false, resolvePRLifecycleImpl, execFileImpl,
+  inspectRemediationCiRegressionImpl, log = console,
+}) {
+  if (!finalRound) {
+    reply = normalizeCiPendingOnlyReply(reply, { expectedJob: job });
+    if (reply.reReview.normalizedFrom) {
+      job = { ...job, reReview: { ...job.reReview, normalizedFrom: reply.reReview.normalizedFrom } };
+      log.log?.(`[follow-up-remediation] normalized ${job.repo}#${job.prNumber}: ci-pending-only`);
+    }
+    remediationReply = {
+      ...remediationReply,
+      state: 'worker-wrote-reply',
+      path: worker?.replyPath || job?.remediationReply?.path || null,
+    };
+  }
+  const operationalBlockers = reply?.reReview?.originalOperationalBlockers || reply?.operationalBlockers;
+  let pushedHead = null;
+  if (finalRound) {
+    if (finalRound.completed && finalRound.workerPushedHeadSha
+      && finalRound.completionFields.finalRoundOutcome?.ciState === 'pending'
+      && operationalBlockers?.length > 0) {
+      pendingCiCompletion = true;
+      completionLifecycle ||= await resolveJobPRLifecycleSafe({
+        rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
+      });
+      pushedHead = finalRound.workerPushedHeadSha;
+    }
+  } else if (job?.finalRound !== 'comment-only' && operationalBlockers?.length > 0 && reply.blockers.length === 0) {
+    completionLifecycle = await resolveJobPRLifecycleSafe({
+      rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
+    });
+    const round = job.remediationPlan?.rounds?.find((entry) => entry.round === job.remediationPlan.currentRound);
+    const startHead = round?.startHeadSha || job.revisionRef;
+    pushedHead = completionLifecycle?.source === 'live' ? completionLifecycle.headSha : null;
+    if (startHead && pushedHead && pushedHead !== startHead) {
+      const ciGate = await inspectRemediationCiRegressionImpl({
+        repo: job.repo, prNumber: job.prNumber, execFileImpl, log,
+      });
+      pendingCiCompletion = classifyFinalRoundOperationalBlockers(operationalBlockers, {
+        ciGate, pushedHead, outcome: reply.outcome,
+      }).pendingCiOnly;
+    }
+  }
+  if (pendingCiCompletion && pushedHead) {
+    job = { ...job, completion: { ...job.completion, pendingCiOnly: true, workerPushedHeadSha: pushedHead } };
+  }
+  return { reply, job, remediationReply, completionLifecycle, pendingCiCompletion };
 }
 
 // Resolve exactly one historical workflow-auth blocker from a native-owned

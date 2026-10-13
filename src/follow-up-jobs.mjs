@@ -3347,10 +3347,13 @@ function requeueFollowUpJobForNextRound({
   const currentJob = readFollowUpJob(jobPath);
   const currentRound = Number(currentJob?.remediationPlan?.currentRound || 0);
   const maxRounds = Number(currentJob?.remediationPlan?.maxRounds || DEFAULT_MAX_REMEDIATION_ROUNDS);
+  // A pushed round waiting only on CI made progress without needing re-review.
+  const completedWithoutProgress = currentJob.status === 'completed'
+    && currentJob?.reReview?.requested !== true && currentJob.completion?.pendingCiOnly !== true;
   const stopCode = selectStopCode({
     currentRound,
     maxRounds,
-    requestedStopCode: currentJob.status === 'completed' && currentJob?.reReview?.requested !== true
+    requestedStopCode: completedWithoutProgress
       ? 'no-progress'
       : 'max-rounds-reached',
   });
@@ -3382,7 +3385,7 @@ function requeueFollowUpJobForNextRound({
     });
   }
 
-  if (currentJob.status === 'completed' && currentJob?.reReview?.requested !== true) {
+  if (completedWithoutProgress) {
     return markFollowUpJobStopped({
       rootDir,
       jobPath,

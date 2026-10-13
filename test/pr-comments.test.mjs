@@ -34,6 +34,17 @@ function makeJob(overrides = {}) {
   };
 }
 
+for (const workerPushedHeadSha of [undefined, null, 42, '', 'b'.repeat(40)]) {
+  test(`pending-CI outcome tolerates worker head SHA ${String(workerPushedHeadSha)}`, () => {
+    const body = buildRemediationOutcomeCommentBody({
+      workerClass: 'codex', action: 'completed',
+      job: makeJob({ completion: { pendingCiOnly: true, workerPushedHeadSha } }),
+    });
+    assert.match(body, /round finished; CI still running/);
+    assert.ok(body.includes(`pushed as ${workerPushedHeadSha === 'b'.repeat(40) ? 'bbbbbbb' : 'unknown'}.`));
+  });
+}
+
 function seedAutoDiscoveredAdapter(rootDir) {
   const adapterBin = path.join(rootDir, 'modules', 'github-adapter', 'bin', 'github-adapter');
   mkdirSync(path.dirname(adapterBin), { recursive: true });

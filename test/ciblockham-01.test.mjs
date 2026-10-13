@@ -634,3 +634,55 @@ test('the CI-blocked prompt shares the cap route contract and caps the failing-c
   assert.doesNotMatch(prompt, /check-20/);
   assert.match(composeCiBlockedHammerPrompt({}), /did not capture the failing check names/);
 });
+
+// The shared exhausted-review route also admits CI-blocked heads: its
+// reviewCycleCapReached flag covers stale verdicts and blocking findings even
+// when the narrower ciBlockedFailureAdmit / ciBlockedReasonsCovered do not.
+for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'action-required', 'error', 'blocking-findings', 'pending', 'hard-stop', 'draft', 'live-remediation', 'live-lease']) {
+  test(`CIBLOCKHAM-02: exhausted round routes on this pass (${state})`, async (t) => {
+    const rootDir = tempRoot(t, 'ci-blocked-next-pass-');
+    const args = closerArgs(rootDir);
+    args.dispatchContext.repo = 'example/review-fixture';
+    args.dispatchContext.prUrl = 'https://github.com/example/review-fixture/pull/42';
+    args.dispatchContext.reviewedBy = 'fixture-reviewer';
+    args.prMetadata.prNumber = 42;
+    args.prMetadata.author = 'fixture-worker';
+    args.reviewState.prAuthor = 'fixture-worker';
+    args.reviewState.reviewCycleExhausted = false;
+    args.reviewState.completedRemediationRounds = 0;
+    args.dispatchContext.ciBlockedReason = 'ci-regression-stopped';
+    args.dispatchContext.ciFailedChecks = state === 'pending' ? [] : [{ name: 'unit', state: 'FAILURE' }];
+    const conclusion = { 'timed-out': 'TIMED_OUT', cancelled: 'CANCELLED',
+      'startup-failure': 'STARTUP_FAILURE', 'action-required': 'ACTION_REQUIRED', error: 'ERROR' }[state] || 'FAILURE';
+    args.prMetadata.statusCheckRollup = [{ __typename: 'CheckRun', name: 'unit',
+      status: state === 'pending' ? 'IN_PROGRESS' : 'COMPLETED',
+      conclusion: state === 'pending' ? null : conclusion }];
+    if (state === 'blocking-findings') {
+      args.reviewState.verdict = 'request-changes';
+      args.reviewState.blockingFindingCount = 1;
+      args.reviewState.nonBlockingFindingCount = 0;
+    }
+    if (state === 'hard-stop') args.prMetadata.labels = ['do-not-merge'];
+    if (state === 'draft') args.prMetadata.isDraft = true;
+    if (state === 'live-remediation') args.reviewState.remediationPending = true;
+    const deps = closerDeps({ workerStatus: 'running' });
+    if (state === 'failed') {
+      const ordinary = await maybeDispatchAmaCloser({ ...args, ...deps,
+        dispatchContext: { ...args.dispatchContext, ciBlockedHammerOwner: false } });
+      assert.deepEqual(ordinary.reasons, ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green']);
+    }
+    const first = await maybeDispatchAmaCloser({ ...args, ...deps });
+    if (['pending', 'hard-stop', 'draft', 'live-remediation'].includes(state)) {
+      assert.equal(first.dispatched, false, JSON.stringify(first));
+      assert.equal(deps.launches.length, 0);
+    } else {
+      assert.equal(first.dispatched, true, JSON.stringify(first));
+      assert.equal(deps.launches.length, 1);
+      if (state === 'live-lease') {
+        const next = await maybeDispatchAmaCloser({ ...args, ...deps });
+        assert.equal(next.dispatched, false, JSON.stringify(next));
+        assert.equal(deps.launches.length, 1);
+      }
+    }
+  });
+}

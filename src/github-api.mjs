@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -782,7 +783,7 @@ async function execGhJson(execFileImpl, args) {
     try {
       await awaitThrottleIfNeeded(throttleResource);
       const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
-      const { stdout } = await execFileImpl('gh', effectiveArgs, {
+      const { stdout } = await meteredExecFile(execFileImpl, 'gh', effectiveArgs, {
         maxBuffer: GH_MAX_BUFFER,
         timeout: GH_EXEC_TIMEOUT_MS,
         killSignal: 'SIGKILL',
@@ -2095,7 +2096,7 @@ async function fetchPullRequestMergeability(repo, prNumber, {
     let stdout = null;
     for (let attempt = 0; attempt <= GH_EXEC_RETRIES; attempt += 1) {
       try {
-        ({ stdout } = await execFileImpl('gh', [
+        ({ stdout } = await meteredExecFile(execFileImpl, 'gh', [
           'pr',
           'view',
           String(normalizedPrNumber),

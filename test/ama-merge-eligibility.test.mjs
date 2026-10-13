@@ -547,9 +547,10 @@ test('classifier enforces required check contexts when specified', () => {
   );
 });
 
-test('hammer in-lease merge independently fetches required primary evidence', () => {
+test('hammer in-lease merge requires real primary evidence once checks are green', () => {
   const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
   assert.match(source, /await fetchPrimaryChange\(\{/);
   assert.match(source, /headSha: expectedHead/);
-  assert.match(source, /primaryChange,\s*requirePrimaryChange: true/);
+  assert.match(source, /checksConclusion === 'SUCCESS' \? await fetchPrimaryChange\(/);
+  assert.match(source, /primaryChange,\s*requirePrimaryChange: checksConclusion === 'SUCCESS'/);
 });

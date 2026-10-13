@@ -72,8 +72,8 @@ if (scenario === 'activity' && args[1] === 'repos/fixture/repo/pulls/1') {
 } else if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
   process.stdout.write(JSON.stringify([{ user: { login: 'the-hammer-lacey[bot]' },
     body: 'HAM-Base-Head: reviewed\\nHAM-Validated-Head: earlier' }]));
-} else if (args[0] === 'pr') {
-  if (args.join(' ') !== 'pr view https://github.com/fixture/repo/pull/1 --json baseRefName --jq .baseRefName') fail('unexpected PR call');
+} else if (args[1] === 'repos/fixture/repo/pulls/1') {
+  if (args.join(' ') !== 'api repos/fixture/repo/pulls/1 --jq .base.ref') fail('unexpected PR call');
   process.stdout.write('release\\n');
 } else if (args[1] === 'repos/fixture/repo/commits/release') {
   process.stdout.write(JSON.stringify({ sha: 'base' }));

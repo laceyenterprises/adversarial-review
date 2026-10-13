@@ -2477,8 +2477,12 @@ than launching remediation again only while verdict misses are limited to pendin
 CI. Structural policy holds and operator-required refusals remain authoritative;
 red CI or conflicts route back to hammer remediation. A pending-check timeout
 is deferred only when pending CI is the sole live gate miss; conflicts, strict
-BEHIND, closed PRs and labels retain a failed-without-merge audit. Required checks,
-primary-change, exact-head,
+BEHIND, closed PRs and labels retain a failed-without-merge audit.
+During the remote-check wait, the hammer defers primary-change and CI-cost
+evaluation until checks are green, then fetches real exact-head evidence before
+allowing merge. This applies in both advisory and blocking CI-cost modes;
+pending checks never supply synthetic cost approval. The other live gates
+remain active throughout the wait. Required checks, primary-change, exact-head,
 protective predecessors, branch protection and the autonomous execution switch
 remain mandatory, including the live read inside the lease. Moving the head
 invalidates the certification and removes the old audit from the active queue.

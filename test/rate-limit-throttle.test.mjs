@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   createRateLimitThrottle,
+  withGitHubBudgetScope,
   DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,
   resolveRateLimitSharedStatePath,
@@ -398,6 +399,111 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
     assert.equal(existsSync(sidecarPath), false);
   } finally {
     releaseSleep?.();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('GHBUDGET-01: watcher skips low-budget reads, serves ready closes, and resumes at reset', async t => {
+  const { withGitHubBudgetScope, GitHubBudgetDeferredError } = await import('../src/rate-limit-throttle.mjs');
+  const { runLowBudgetClosingTick } = await import('../src/watcher-github-budget.mjs');
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-01-01T00:00:00Z');
+  const throttle = makeThrottle({ rootDir, nowMs: () => now, sleepImpl: () => { throw new Error('poll must not sleep'); } });
+  await throttle.recordResponseRateLimit({ resource: 'graphql', remaining: 100, resetAt: now + 60_000 });
+  let nonUrgent = 0, closing = 0, noProgressTicks = 0;
+  const logs = [];
+  for (let tick = 0; tick < 2; tick++) {
+    await withGitHubBudgetScope({}, async scope => {
+      await assert.rejects(throttle.awaitThrottleIfNeeded('graphql'), GitHubBudgetDeferredError);
+      assert.equal(scope.deferred, true);
+    });
+    const deferred = await runLowBudgetClosingTick({ budgets: await throttle.readSharedState(),
+      rows: [{ ready: false }, { ready: true }], isReady: row => row.ready,
+      serve: async () => { assert.equal(await throttle.awaitThrottleIfNeeded('graphql'), false); closing++; },
+      logger: { log: line => logs.push(line) },
+    });
+    if (!deferred) { nonUrgent++; noProgressTicks++; }
+    now += 20_000;
+  }
+  assert.equal(nonUrgent, 0);
+  assert.equal(closing, 2);
+  assert.equal(noProgressTicks, 0);
+  assert.equal(logs.length, 2);
+  assert.ok(logs.every(line => line.includes('remaining=100') && line.includes('reset=2026-01-01T00:01:00.000Z')));
+  now += 20_000;
+  assert.equal(await runLowBudgetClosingTick({ budgets: await throttle.readSharedState(), rows: [], isReady: () => true,
+    serve: async () => {}, logger: { log: () => assert.fail('reset window must resume') } }), false);
+  await withGitHubBudgetScope({}, async () => assert.equal(await throttle.awaitThrottleIfNeeded('graphql'), false));
+});
+
+test('GHBUDGET-01: rate-limited counters are shared, atomic and scoped to a resource window', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-01-01T00:00:00Z');
+  const a = makeThrottle({ rootDir, nowMs: () => now });
+  const b = makeThrottle({ rootDir, nowMs: () => now });
+  const observation = { resource: 'graphql', remaining: 4000, resetAt: now + 60_000 };
+  await Promise.all([a.recordResponseRateLimit({ ...observation, rateLimited: true }),
+    b.recordResponseRateLimit({ ...observation, rateLimited: true })]);
+  await a.recordResponseRateLimit(observation);
+  await b.recordResponseRateLimit({ ...observation, resource: 'core', rateLimited: true });
+  let state = await a.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls, 2);
+  assert.equal(state.core.rateLimitedCalls, 1);
+  await a.recordRateLimitedCall('graphql');
+  assert.equal((await b.readSharedState()).graphql.rateLimitedCalls, 3);
+  now += 60_000;
+  await a.recordResponseRateLimit({ ...observation, resetAt: now + 60_000 });
+  state = await b.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls || 0, 0);
+  assert.equal(state.core, undefined);
+});
+
+test('headerless rate limits initialize and renew an expired resource window atomically', async t => {
+  const rootDir = makeRootDir();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let now = Date.parse('2026-01-01T00:00:00Z');
+  const a = makeThrottle({ rootDir, nowMs: () => now });
+  const b = makeThrottle({ rootDir, nowMs: () => now });
+  await Promise.all([a.recordRateLimitedCall('GraphQL'), b.recordRateLimitedCall('graphql')]);
+  let state = await b.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls, 2);
+  assert.equal(state.graphql.remaining, 0);
+  assert.equal(state.graphql.resetAt, new Date(now + 60_000).toISOString());
+  assert.equal(state.core, undefined);
+  await withGitHubBudgetScope({}, async () => {
+    await assert.rejects(a.awaitThrottleIfNeeded('graphql'), { name: 'GitHubBudgetDeferredError' });
+  });
+  now += 60_000;
+  await b.recordRateLimitedCall('graphql');
+  state = await a.readSharedState();
+  assert.equal(state.graphql.rateLimitedCalls, 1);
+  assert.equal(state.graphql.resetAt, new Date(now + 60_000).toISOString());
+  const persisted = JSON.parse(readFileSync(a.resolveSharedStatePath(), 'utf8'));
+  assert.deepEqual(persisted.buckets.graphql, state.graphql);
+  await a.recordRateLimitedCall();
+  assert.equal((await b.readSharedState()).core.rateLimitedCalls, 1);
+});
+
+test('GHBUDGET-01: a newly settled review gets closing priority before its published gate refresh', async () => {
+  const { isClosingRowReady } = await import('../src/watcher-github-budget.mjs');
+  const row = { repo: 'fixture/repo', pr_number: 42, reviewer_head_sha: 'a'.repeat(40), review_status: 'posted' };
+  const readGate = () => ({ state: 'pending' });
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'comment-only', remediationPending: false }) }), true);
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'approved', remediationPending: false }) }), true);
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'request-changes', remediationPending: false }) }), false);
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'comment-only', remediationPending: true }) }), false);
+});
+
+test('reading an unobserved budget leaves the state directory absent', async () => {
+  const rootDir = makeRootDir();
+  try {
+    const throttle = makeThrottle({ rootDir });
+    assert.deepEqual(await throttle.readSharedState(), {});
+    assert.equal(await throttle.awaitThrottleIfNeeded(), false);
+    assert.equal(existsSync(path.join(rootDir, 'data')), false);
+  } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

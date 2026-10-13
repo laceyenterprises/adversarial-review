@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { inspectCiBootstrap, recoverCancelledChecks } from './ci-recovery.mjs';
@@ -44,7 +45,7 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
   mergeAgentRequestEvent = undefined, signal = null,
   branchProtectionCache = null,
 } = {}) {
-  const { stdout } = await execFileImpl(
+  const { stdout } = await meteredExecFile(execFileImpl,
     'gh',
     [
       'pr',

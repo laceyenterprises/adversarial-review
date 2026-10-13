@@ -1,3 +1,4 @@
+import { meteredExecFile } from '../metered-gh.mjs';
 /**
  * AMG-01 — durable merge lease keyed by `(repo, base)`.
  *
@@ -1161,7 +1162,7 @@ async function ghPrState({ repo, holderPr, execFileImpl, timeoutMs = DEFAULT_GH_
     timeout: timeoutMs,
   };
   const result = runner === execFileAsync
-    ? await runner('gh', ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state'], options)
+    ? await meteredExecFile(runner, 'gh', ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state'], options)
     : await execFileToPromise(
       runner,
       'gh',

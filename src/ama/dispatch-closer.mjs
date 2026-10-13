@@ -1,3 +1,4 @@
+import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
 import { decideClosureOwner } from './closure-owner.mjs';
@@ -644,7 +645,7 @@ async function execAmaLivePrProbeCommandWithTransientRetry(
   for (let attempt = 0; ; attempt += 1) {
     try {
       throwIfAborted(signal);
-      return await execFileImpl(cmd, args, options);
+      return await meteredExecFile(execFileImpl, cmd, args, options);
     } catch (err) {
       throwIfAborted(signal);
       if (attempt >= retryDelaysMs.length || !isTransientHqDispatchError(err)) {
@@ -1131,7 +1132,7 @@ async function runGhPrMergeWithTransientRetry({
   let lastFailure = null;
   for (let attempt = 1; attempt <= AMA_CLOSER_MERGE_RETRY_CAP; attempt += 1) {
     try {
-      const { stdout, stderr } = await execFileImpl('gh', args, {
+      const { stdout, stderr } = await meteredExecFile(execFileImpl, 'gh', args, {
         maxBuffer: 5 * 1024 * 1024,
         timeout: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
       });
@@ -1170,7 +1171,7 @@ async function fetchMergeCommitShaBestEffort({
   let lastError = null;
   for (let attempt = 1; attempt <= AMA_CLOSER_MERGE_RETRY_CAP; attempt += 1) {
     try {
-      const { stdout } = await execFileImpl('gh', [
+      const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
         'pr',
         'view',
         String(prNumber),
@@ -1437,7 +1438,7 @@ const AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS = 60_000;
 // Follow-up claims are synchronous: use the live metadata probe's timeout,
 // but read only state and make no retries or branch lookup.
 function readAmaCloserPullRequestState({ repo, prNumber, env }) {
-  const result = spawnSync('gh', [
+  const result = meteredExecFileSync(spawnSync, 'gh', [
     'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state',
   ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   if (result.error || result.status !== 0) return null;
@@ -2783,7 +2784,7 @@ function holderCommand({ worktreePath, execFileImpl, ownerUid = statSync(worktre
     ownerUser,
     run: (cmd, args, options) => ownerUser
       ? execFileImpl('sudo', ['-A', '-H', '-u', ownerUser, cmd, ...args], options)
-      : execFileImpl(cmd, args, options),
+      : meteredExecFile(execFileImpl, cmd, args, options),
   };
 }
 

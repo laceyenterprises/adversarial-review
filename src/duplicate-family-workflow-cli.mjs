@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -41,7 +42,7 @@ function parseArgs(argv, env = process.env) {
 }
 
 async function ghJson(execFileImpl, args) {
-  const { stdout } = await execFileImpl('gh', args, { timeout: 30_000, maxBuffer: 1024 * 1024 });
+  const { stdout } = await meteredExecFile(execFileImpl, 'gh', args, { timeout: 30_000, maxBuffer: 1024 * 1024 });
   return JSON.parse(String(stdout || '{}'));
 }
 
@@ -88,7 +89,7 @@ async function postSelectionComment({ repo, prNumber, selection, execFileImpl })
     '',
     'This selection does not bypass adversarial review, CI, mergeability, exact-head, or lease gates.',
   ].join('\n');
-  await execFileImpl('gh', ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo })], {
+  await meteredExecFile(execFileImpl, 'gh', ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo })], {
     timeout: 30_000, maxBuffer: 1024 * 1024,
   });
 }

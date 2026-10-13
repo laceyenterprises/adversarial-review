@@ -1,3 +1,4 @@
+import { meteredExecFile } from '../../../metered-gh.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 /**
  * GitHub Pull Request comments implementation of the comms-channel adapter.
@@ -381,7 +382,7 @@ function createGitHubPRCommentsAdapter({
       deliveryIdentityByRole,
     });
 
-    const result = await execFileImpl('gh', [
+    const result = await meteredExecFile(execFileImpl, 'gh', [
       'pr',
       'comment',
       String(prNumber),

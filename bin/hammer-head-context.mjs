@@ -5,12 +5,12 @@ const [repo, reviewedHead, currentHead, baseArg, prUrl] = process.argv.slice(2);
 if (!repo || !reviewedHead || !currentHead || !baseArg || (baseArg === '--pr' && !prUrl)) {
   throw new Error('usage: hammer-head-context REPO REVIEWED HEAD BASE | REPO REVIEWED HEAD --pr PR_URL');
 }
+const prNumber = process.env.HAM_PR_NUMBER || (baseArg === '--pr' ? prUrl.match(/\/pull\/(\d+)(?:[/?#]|$)/)?.[1] : undefined);
 // Keep PR-base discovery inside the same bounded, classified retry path as ancestry reads.
 const baseRef = process.env.HAM_BASE_HEAD ? (baseArg === '--pr' ? 'main' : baseArg) : baseArg === '--pr' ? (await execGhWithRetry({
-  args: ['pr', 'view', prUrl, '--json', 'baseRefName', '--jq', '.baseRefName'], timeoutMs: 15000,
+  args: ['api', `repos/${repo}/pulls/${prNumber}`, '--jq', '.base.ref'], timeoutMs: 15000,
 })).stdout.trim() : baseArg;
 if (!baseRef) throw new Error('hammer PR base is missing');
-const prNumber = process.env.HAM_PR_NUMBER || (baseArg === '--pr' ? prUrl.match(/\/pull\/(\d+)(?:[/?#]|$)/)?.[1] : undefined);
 if (process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead && !prNumber) {
   throw new Error('hammer PR number is missing; supply a PR URL or HAM_PR_NUMBER');
 }

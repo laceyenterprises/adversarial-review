@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -174,7 +175,7 @@ async function fetchPullRequestCreatedAt({
   } catch {
     // Optional adapter metadata is a preferred source only; preserve gh fallback.
   }
-  const { stdout } = await execFileImpl(
+  const { stdout } = await meteredExecFile(execFileImpl,
     'gh',
     ['api', `repos/${repo}/pulls/${encodeURIComponent(prNumber)}`],
     {
@@ -223,7 +224,7 @@ async function scraperFetchIssueComments({
     // The closeout scraper already records debt on hard failures. Treat the
     // optional adapter as a preferred read source and preserve the gh fallback.
   }
-  const { stdout, stderr } = await execFileImpl(
+  const { stdout, stderr } = await meteredExecFile(execFileImpl,
     'gh',
     [
       'api',

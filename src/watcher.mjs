@@ -1,3 +1,5 @@
+import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
+import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 /**
  * LAC-11: PR Watcher
@@ -1140,7 +1142,11 @@ async function refreshOrgRepos(octokit) {
  * failures are logged and ignored so a mistaken callback cannot suppress
  * operator sync or reviewer spawn.
  */
-async function pollOnce(
+async function pollOnce(octokit, options = {}) {
+  return withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options));
+}
+
+async function pollOnceWithinBudget(
   octokit,
   {
     healthProbe = watcherHealthProbe,
@@ -1160,6 +1166,11 @@ async function pollOnce(
   const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
   try {
+    if (await runLowBudgetWatcherPoll({ db, activeRepos, rootDir: ROOT,
+      domainId: WATCHER_PRIMARY_DOMAIN_ID, execFileImpl: execFileAsync,
+      handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus,
+      markMerged: (...args) => stmtMarkMerged.run(...args), markClosed: (...args) => stmtMarkClosed.run(...args),
+    })) return;
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
     startPendingReviewedAttestationRetryForWatcher({
       rootDir: ROOT,

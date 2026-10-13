@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
 import { applyMergeAgentStuckLabel as applyStuckLabel } from './merge-agent-stuck-label.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
@@ -1737,7 +1738,7 @@ async function removeConsumedTriggerLabel({
       execFileImpl: ghExecFileImpl, env,
     });
     if (!adapterHandled) {
-      await ghExecFileImpl('gh', [
+      await meteredExecFile(ghExecFileImpl, 'gh', [
         'pr',
         'edit',
         String(prNumber),
@@ -1798,7 +1799,7 @@ async function addMergeAgentDispatchedLabel({
       execFileImpl: ghExecFileImpl, env,
     });
     if (!adapterHandled) {
-      await ghExecFileImpl('gh', [
+      await meteredExecFile(ghExecFileImpl, 'gh', [
         'pr',
         'edit',
         String(prNumber),
@@ -1977,7 +1978,7 @@ async function cancelMergeAgentDispatchOnMerge({
         execFileImpl: ghExecFileImpl, env,
       });
       if (!adapterHandled) {
-        await ghExecFileImpl('gh', [
+        await meteredExecFile(ghExecFileImpl, 'gh', [
           'pr',
           'edit',
           String(prNumber),

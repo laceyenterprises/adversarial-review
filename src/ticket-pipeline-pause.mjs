@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -139,7 +140,7 @@ function isAbsentLabelRemovalError(err) {
 }
 
 async function ensureTicketPipelinePauseLabel({ repo, execFileImpl = execFileAsync } = {}) {
-  await execFileImpl('gh', [
+  await meteredExecFile(execFileImpl, 'gh', [
     'label',
     'create',
     TICKET_PIPELINE_PAUSED_LABEL,
@@ -163,7 +164,7 @@ async function setPRTicketPipelinePause({
     await ensureTicketPipelinePauseLabel({ repo, execFileImpl });
   }
   try {
-    await execFileImpl('gh', [
+    await meteredExecFile(execFileImpl, 'gh', [
       'pr',
       'edit',
       String(prNumber),

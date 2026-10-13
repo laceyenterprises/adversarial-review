@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { createHash } from 'node:crypto';
 import { hamAuditCommentAuthorMatches } from './ama/ham-provenance.mjs';
 import { HAMMER_WITHDRAWN_RESOLUTION } from './ama/hammer-adjudication.mjs';
@@ -98,7 +99,7 @@ export async function fetchLinkedSpecContents(repo, prNumber, {
 
   const sections = await Promise.all(linked.map(async (relPath) => {
     try {
-      const { stdout } = await execFileImpl(
+      const { stdout } = await meteredExecFile(execFileImpl,
         'gh',
         ['api', `repos/${repo}/contents/${relPath}?ref=${pr.headRefOid}`, '--jq', '.content'],
         { maxBuffer: 10 * 1024 * 1024 }

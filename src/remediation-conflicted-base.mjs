@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 // REMCONFLICT-01 (SEV1, 2026-10-10) — remediation can start on a CONFLICTING PR.
 //
 // Operator, 2026-10-10: "How is it possible that retriever remediation doesn't
@@ -60,7 +61,7 @@ function classifyRemediationMergeability(reading) {
 }
 
 async function readLivePrMergeability({ repo, prNumber, execFileImpl }) {
-  const { stdout } = await execFileImpl('gh', [
+  const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
     'pr', 'view', String(prNumber), '--repo', repo, '--json', 'mergeable,mergeStateStatus',
   ], { maxBuffer: 1024 * 1024, timeout: PR_READ_TIMEOUT_MS });
   const parsed = JSON.parse(String(stdout || '').trim() || '{}');

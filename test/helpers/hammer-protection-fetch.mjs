@@ -43,6 +43,7 @@ export function runHammerProtectionFetch({ stdout = '', stderr = '', exitCode = 
     chmodSync(ghStub, 0o755);
     const protectionPath = join(dir, `ham-${PR_NUMBER}-protection.json`);
     const script = [
+      `ham_gh() { "${process.execPath}" "${REPO_ROOT}/bin/metered-gh.mjs" exec "$@"; }`,
       'base_enc=main',
       'ham_release_merge_lease() { :; }',
       hammerProtectionFetchScript()

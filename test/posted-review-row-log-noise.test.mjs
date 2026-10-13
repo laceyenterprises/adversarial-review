@@ -1227,6 +1227,7 @@ test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit 
   const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
   const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
   const { meteredExecFile } = await import('../src/metered-gh.mjs');
+  const { recordResponseRateLimit } = await import('../src/rate-limit-throttle.mjs');
   const rootDir = mkdtempSync(join(tmpdir(), 'rate-limit-progress-'));
   tempRoots.add(rootDir);
   const events = [], notices = [];
@@ -1249,11 +1250,17 @@ test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit 
     await run();
     assert.equal(readNoProgressLane(rootDir, identity).noProgressTicks, baseline.noProgressTicks);
   }
+  // Headerless failures now persist an exhausted resource window. Model its
+  // recovery before expecting another API call to make ordinary progress.
+  await recordResponseRateLimit({ resource: 'core', remaining: 5000, limit: 5000,
+    resetAt: new Date(Date.now() + 60_000).toISOString() });
+  let recoveredReads = 0;
   handler.run = async () => {
-    await meteredExecFile(async () => ({ stdout: '{}', stderr: '' }), 'gh', ['api', 'repos/fixture/repo/pulls/42']);
+    await meteredExecFile(async () => { recoveredReads++; return { stdout: '{}', stderr: '' }; }, 'gh', ['api', 'repos/fixture/repo/pulls/42']);
     return { handled: true };
   };
   await run();
+  assert.equal(recoveredReads, 1);
   assert.equal(readNoProgressLane(rootDir, identity).noProgressTicks, baseline.noProgressTicks + 1);
   assert.deepEqual(events, []);
   assert.deepEqual(notices, []);

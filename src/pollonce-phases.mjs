@@ -1,3 +1,4 @@
+import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
 import { observeClosureWait } from './ama/closure-wait.mjs';
 import { CODE_PR_DOMAIN_ID } from './identity-shapes.mjs';
@@ -198,9 +199,7 @@ import {
   restorePendingReviewedHeadDedupRow,
 } from './reviewed-head-dispatch-gate.mjs';
 import {
-  hasOperatorDecisionRequiredAlerted,
   markCascadeCapExhaustedAlerted,
-  markOperatorDecisionRequiredAlerted,
   recordCascadeFailure,
   releaseReviewerCredentialProbe,
   shouldBackoffReviewerSpawn,
@@ -945,56 +944,19 @@ export async function processReviewSubject(entry, ctx) {
                 ? ' — NOT CONVERGED: findings unresolved, operator decision required'
                 : '')
           );
-          // "operator decision required" was a log line and nothing else. A PR that
-          // exhausts its remediation budget lands in `success (remediation-stopped)`
-          // and stops moving: AMA refuses it (correctly -- findings still stand), no
-          // further remediation runs (correctly -- the budget is spent), and nobody is
-          // told. It sits until a human happens to look. Observed on agent-os#6156,
-          // stuck from 10:30Z until an operator asked hours later.
-          //
-          // Fail-soft on purpose: a delivery error must never break the poll cycle,
-          // exactly as the cascade-cap alert does. The durable debounce marker is
-          // committed only after delivery succeeds so a transient alert-bus outage is
-          // retried on a later poll instead of being recorded as delivered.
-          if (projected?.decision?.operatorDecisionRequired) {
-            if (!hasOperatorDecisionRequiredAlerted(ROOT, {
-              repo: repoPath,
-              prNumber,
-              headSha: subject.headSha,
-            })) {
-              try {
-                const gateStateText = projected.decision.state || 'unknown state';
-                const gateReasonText = projected.decision.reason || 'no reason provided';
-                await deliverAlertFn(
-                  `Adversarial review needs an operator decision for ` +
-                    `${repoPath}#${prNumber}: ${gateStateText} ` +
-                    `(${gateReasonText}). Findings are unresolved and ` +
-                    `remediation will not run again on this head. The PR will not merge ` +
-                    `until someone remediates or explicitly approves.`,
-                  {
-                    event: 'adversarial_review.operator_decision_required',
-                    payload: {
-                      repo: repoPath,
-                      pr_number: prNumber,
-                      head_sha: subject.headSha || null,
-                      gate_state: projected.decision.state || null,
-                      gate_reason: projected.decision.reason || null,
-                    },
-                  },
-                );
-                markOperatorDecisionRequiredAlerted(ROOT, {
-                  repo: repoPath,
-                  prNumber,
-                  headSha: subject.headSha,
-                  reason: projected.decision.reason || null,
-                });
-              } catch (err) {
-                console.error(
-                  `[watcher] operator-decision alert delivery failed for ` +
-                    `${repoPath}#${prNumber}: ${err?.message || err}`
-                );
-              }
-            }
+          // Wait until the terminal closer route has also finished. Delivery errors
+          // remain fail-soft; the durable marker follows successful delivery only.
+          try {
+            await maybeDeliverOperatorDecisionNotice({ rootDir: ROOT, repo: repoPath,
+              prNumber, headSha: subject.headSha, decision: projected.decision, reviewRow,
+              // GitHub subject terminal means PR closure, not review completion
+              // (stateFromSnapshot in the GitHub-PR subject adapter).
+              terminal: subject.terminal || ['merged', 'closed'].includes(reviewRow?.pr_state),
+              handoffAwaitingReview, deliverAlertFn,
+              readLivePR: () => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),
+            });
+          } catch (err) {
+            console.error(`[watcher] operator-decision alert delivery failed for ${repoPath}#${prNumber}: ${err?.message || err}`);
           }
           return projected;
         } catch (err) {

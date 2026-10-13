@@ -1,3 +1,4 @@
+import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
 import { decideClosureOwner } from './ama/closure-owner.mjs';
@@ -763,6 +764,14 @@ export async function maybeDispatchAmaClosureFor({
         retryAfterMs: result.boundedWait.retryAfterMs }
       : closureOwnerSink.value };
   if (result && ownerProofFactsSink.value) result = { ...result, ownerProofFacts: ownerProofFactsSink.value };
+  try {
+    recordOperatorNoticeCloserOutcome(options.rootDir || ROOT, {
+      repo: options.repoPath, prNumber: options.prNumber,
+      headSha: options.candidate?.headSha || options.currentRevisionRef || null,
+    }, result);
+  } catch (error) {
+    options.logger?.warn?.(`[watcher] operator notice closer observation failed: ${error.message}`);
+  }
   const decision = closerAuthoredStaleSink.value?.decision;
   return decision && decision !== 'not-applicable' && result && typeof result === 'object'
     && !result.closerAuthoredStale

@@ -569,3 +569,22 @@ test('primary-change transport failure beside red CI dispatches hammer without m
     assert.equal(existsSync(parkRecordPath(rootDir, REPO, PR)), false);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+test('REVIEWNOTICE-01: closer final operator outcome is available to the next notice evaluation', async () => {
+  const rootDir = tempRoot();
+  try {
+    const { maybeDeliverOperatorDecisionNotice } = await import('../src/operator-decision-notice.mjs');
+    const result = await maybeDispatchAmaClosureFor(closureArgs(rootDir, {
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, needsOperator: true, reason: 'synthetic-structural-hold' }),
+    }));
+    assert.equal(result.needsOperator, true);
+    const alerts = [];
+    await maybeDeliverOperatorDecisionNotice({ rootDir, repo: REPO, prNumber: PR, headSha: HEAD,
+      decision: { operatorDecisionRequired: true, state: 'success', reason: 'remediation-stopped' },
+      now: 0, deliverAlertFn: async (_text, meta) => alerts.push(meta) });
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].payload.reason, 'no-route');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

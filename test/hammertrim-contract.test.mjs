@@ -77,9 +77,9 @@ esac
   chmodSync(gh, 0o755);
   writeFileSync(join(bin, 'git'), '#!/bin/sh\necho '+ 'a'.repeat(40) +'\n', { mode: 0o755 });
   const proof = join(bin, 'proof');
-  writeFileSync(proof, '#!/bin/sh\ncase "$1" in *hammer-audit-comment-id.mjs) exit 0;; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
+  writeFileSync(proof, '#!/bin/sh\ncase "$1" in *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
   const env = {
-    HAM_NODE_BIN: proof, HAM_BASE_HEAD: 'a'.repeat(40),
+    HAM_NODE_BIN: proof, REAL_NODE: process.execPath, HAM_BASE_HEAD: 'a'.repeat(40),
     HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
     HAM_PR_NUMBER: '424242', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
     HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
@@ -446,7 +446,7 @@ case "$1" in
       if [ -f "$TMPDIR/polled" ]; then cat "$TMPDIR/red.json";
       else touch "$TMPDIR/polled"; cat "$TMPDIR/pending.json"; fi
     else cat "$TMPDIR/gate.json"; fi ;;
-  */bin/merge-action-receipt.mjs|*/bin/merge-commit-body.mjs) exec "$REAL_NODE" "$@" ;;
+  */bin/merge-action-receipt.mjs|*/bin/merge-commit-body.mjs|*/bin/github-outbound-body.mjs) exec "$REAL_NODE" "$@" ;;
   */bin/ama-audit.mjs)
     echo "AUDIT $*"
     while [ "$#" -gt 1 ]; do

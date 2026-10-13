@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 // COMMENTCLOSE-01: queue one follow-up per posted review.
 //
 // The reviewer process queues a follow-up when it posts a review, and the
@@ -42,14 +43,14 @@ const REVIEW_CLAIM_MAX_WAIT_MS = 2 * REVIEW_CLAIM_STALE_MS;
 export const DUPLICATE_REVIEW_FOLLOW_UP = 'duplicate-review-follow-up';
 export const REVIEW_FOLLOW_UP_IN_FLIGHT = 'review-follow-up-in-flight';
 
-export function reviewBodyDigest(reviewBody) {
-  const normalized = String(reviewBody ?? '').replace(/\r\n/gu, '\n').trim();
+export function reviewBodyDigest(reviewBody, context = {}) {
+  const normalized = filterGitHubBody(reviewBody, context).replace(/\r\n/gu, '\n').trim();
   return normalized ? createHash('sha256').update(normalized).digest('hex') : null;
 }
 
 function findFollowUpForReview(rootDir, { repo, prNumber, revisionRef, digest }, log) {
   const sameReview = (job) => (
-    String(job.revisionRef || '').trim() === revisionRef && reviewBodyDigest(job.reviewBody) === digest
+    String(job.revisionRef || '').trim() === revisionRef && reviewBodyDigest(job.reviewBody, { repo, reviewerHeadSha: revisionRef, rootDir }) === digest
   );
   for (const status of FOLLOW_UP_STATUS_DIRS) {
     const match = scanPrFollowUpJobs(rootDir, status, repo, prNumber, log).find(sameReview);
@@ -145,6 +146,7 @@ export function claimFollowUpForReview(rootDir, job, {
   log = console,
 } = {}) {
   const revisionRef = String(job?.revisionRef || '').trim();
+  if (job) job.reviewBody = filterGitHubBody(job.reviewBody, { repo: job.repo, reviewerHeadSha: job.revisionRef, rootDir });
   const digest = reviewBodyDigest(job?.reviewBody);
   if (!SHA.test(revisionRef) || !digest || !job?.repo) return { release() {} };
   const review = { repo: job.repo, prNumber: job.prNumber, revisionRef, digest };

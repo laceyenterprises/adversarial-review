@@ -1,3 +1,4 @@
+import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 /**
  * GitHub Pull Request comments implementation of the comms-channel adapter.
  *
@@ -354,7 +355,7 @@ function createGitHubPRCommentsAdapter({
 } = {}) {
   async function postRawComment({ key, body, event = null, roleId = null }) {
     const { repo, prNumber } = parseSubjectExternalId(key.subjectExternalId);
-    const safeBody = redactPublicSafeText(body, 60_000);
+    const safeBody = filterGitHubBody(redactPublicSafeText(body, 60_000), { repo, rootDir, env, reviewerHeadSha: key.revisionRef });
 
     if (octokit?.rest?.issues?.createComment) {
       const { owner, repo: repoName } = splitRepo(repo);

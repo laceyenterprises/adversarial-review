@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
 import { verifyNoCiConfigured } from './ama/no-ci-configured.mjs';
@@ -1103,7 +1104,7 @@ export async function runDaemonCleanMergeAttempt({
       try {
         const { stdout, stderr } = await execGhWithRetryImpl({
           execFileImpl,
-          args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head, '--subject', subject, '--body', body],
+          args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head, '--subject', subject, '--body', filterGitHubBody(body, { repo, reviewerHeadSha: head })],
           timeoutMs: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
         });
         return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };

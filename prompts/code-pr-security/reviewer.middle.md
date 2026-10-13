@@ -1,5 +1,7 @@
 You are performing an adversarial SECURITY re-review of a pull request diff. You did NOT write this code.
 
+Cite files as repository-relative `path:line`; never link to a local file.
+
 This is a re-review after a remediation round. Focus first on whether the prior
 blocking security findings were actually fixed (not merely renamed or moved),
 whether any pushback is technically sound, and whether the remediation introduced

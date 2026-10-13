@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -87,7 +88,7 @@ async function postSelectionComment({ repo, prNumber, selection, execFileImpl })
     '',
     'This selection does not bypass adversarial review, CI, mergeability, exact-head, or lease gates.',
   ].join('\n');
-  await execFileImpl('gh', ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body], {
+  await execFileImpl('gh', ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo })], {
     timeout: 30_000, maxBuffer: 1024 * 1024,
   });
 }

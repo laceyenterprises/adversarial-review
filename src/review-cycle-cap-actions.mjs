@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import {
   PAUSED_FOR_REDESIGN_LABEL,
   REVIEWER_CYCLE_CAP_REACHED_LABEL,
@@ -247,6 +248,7 @@ export async function postReviewCycleCapEscalation(octokit, {
   env = process.env,
   logger = console,
 }) {
+  body = filterGitHubBody(body, { repo: repoPath, env });
   const [owner, repo] = String(repoPath || '').split('/');
   if (!owner || !repo) throw new Error(`Invalid repo slug: ${repoPath}`);
   const preexisting = await findMatchingReviewCycleCapEscalationComment(octokit, {

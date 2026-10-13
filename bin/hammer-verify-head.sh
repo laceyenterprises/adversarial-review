@@ -272,10 +272,14 @@ HAM closing status — no merge. The gate-attempt cap stopped this head before l
 
 $HAM_GATE_CAP_COMMENT"
       fi
+      HAM_GATE_CAP_COMMENT=$(printf '%s' "$HAM_GATE_CAP_COMMENT" |
+        "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_GATE_CAP_COMMENT='<local>'
       ham_gate_cap_gh "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR" api --method PATCH \
         "repos/<<REPO>>/issues/comments/$HAM_GATE_CAP_COMMENT_ID" \
         -f body="$HAM_GATE_CAP_COMMENT" || { rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"; return 1; }
     else
+      HAM_GATE_CAP_COMMENT=$(printf '%s' "$HAM_GATE_CAP_COMMENT" |
+        "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_GATE_CAP_COMMENT='<local>'
       ham_gate_cap_gh "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR" pr comment <<PR_URL>> \
         --body "$HAM_GATE_CAP_COMMENT" || { rm -f "$HAM_GATE_CAP_OUT" "$HAM_GATE_CAP_ERR"; return 1; }
     fi

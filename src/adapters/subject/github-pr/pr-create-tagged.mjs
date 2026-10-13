@@ -6,6 +6,8 @@
  * @typedef {import('../../../kernel/contracts.d.ts').SubjectRef} SubjectRef
  */
 
+import { filterGitHubBody } from '../../../github-outbound-body.mjs';
+import { readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
@@ -115,6 +117,22 @@ function validatePassthroughArgs(passthrough) {
   }
 }
 
+// Materialize file/stdin bodies before gh sees them so these use the same filter.
+function filterCreateBodyArgs(args, readBody = (file) => readFileSync(file === '-' ? 0 : file, 'utf8')) {
+  const result = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (['--body', '-b', '--body-file', '-F'].includes(arg)) {
+      const value = args[++i] ?? '';
+      result.push('--body', filterGitHubBody(arg === '--body-file' || arg === '-F' ? readBody(value) : value));
+    } else if (/^--body(?:-file)?=/.test(arg)) {
+      const value = arg.slice(arg.indexOf('=') + 1);
+      result.push('--body', filterGitHubBody(arg.startsWith('--body-file=') ? readBody(value) : value));
+    } else result.push(arg);
+  }
+  return result;
+}
+
 function shellQuote(arg) {
   if (/^[A-Za-z0-9_./:=@+-]+$/.test(arg)) return arg;
   return `'${String(arg).replace(/'/g, `'\\''`)}'`;
@@ -153,7 +171,7 @@ async function main(argv = process.argv.slice(2)) {
 
   console.log(`[pr-create-tagged] Final PR title: ${finalTitle}`);
 
-  const ghArgs = ['pr', 'create', '--title', finalTitle, ...passthrough];
+  const ghArgs = ['pr', 'create', '--title', finalTitle, ...filterCreateBodyArgs(passthrough)];
   console.log(`[pr-create-tagged] Command (shell-escaped): ${formatCommandForLog('gh', ghArgs)}`);
 
   if (dryRun) {
@@ -188,6 +206,7 @@ if (isDirectExecution()) {
 }
 
 export {
+  filterCreateBodyArgs,
   formatCommandForLog,
   main,
   parseArgs,

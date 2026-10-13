@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
@@ -399,7 +400,7 @@ function appendMergeAgentServiceAuthAdapterArgs(args, kind, params = {}, env = {
 function makeAdapterWriteArgs(kind, params = {}, env = {}) {
   const args = ['write', '--kind', kind, '--json'];
   appendCommonAdapterArgs(args, params);
-  if (params.body !== undefined) args.push('--body', String(params.body));
+  if (params.body !== undefined) args.push('--body', filterGitHubBody(params.body, { repo: params.repo, reviewerHeadSha: params.headSha }));
   if (params.state !== undefined) args.push('--state', String(params.state));
   if (params.context !== undefined) args.push('--context', String(params.context));
   if (params.description !== undefined) args.push('--description', String(params.description));
@@ -572,11 +573,14 @@ async function readAdapterPullRequestDiff(repo, prNumber, options) {
   return diff.trim() ? diff : null;
 }
 
-async function writeAdapterPullRequestReview(repo, prNumber, { body, reviewerLogin = null } = {}, options) {
-  return writeGitHubAdapter('pull-request-review', { repo, prNumber, body, reviewerLogin }, options);
+async function writeAdapterPullRequestReview(repo, prNumber, { body, reviewerLogin = null } = {}, options = {}) {
+  const headSha = options.reviewerHeadSha || options.headSha;
+  body = filterGitHubBody(body, { ...options, repo, reviewerHeadSha: headSha });
+  return writeGitHubAdapter('pull-request-review', { repo, prNumber, body, reviewerLogin, headSha }, options);
 }
 
 async function writeAdapterIssueComment(repo, prNumber, { body, reviewerLogin = null } = {}, options) {
+  body = filterGitHubBody(body, { repo, ...options });
   return writeGitHubAdapter('issue-comment', { repo, prNumber, body, reviewerLogin }, options);
 }
 

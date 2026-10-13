@@ -4,6 +4,8 @@ security-sensitive path, or was opened by a dependency bot. Your answer decides
 whether it may merge, so it must rest on evidence, not on a feeling about the
 change.
 
+Cite files as repository-relative `path:line`; never link to a local file.
+
 The rubric below is `modules/argus/SECURITY-REVIEW-RUBRIC.md` (ASR-05) in agent-os.
 Follow it exactly.
 

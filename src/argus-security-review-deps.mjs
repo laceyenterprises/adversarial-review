@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 // ARGUSDRAIN-01 — the production I/O behind `reviewArgusJob`.
 //
 // Kept apart from the review logic so the drain and review tests inject fakes
@@ -99,7 +100,7 @@ export function createDefaultArgusReviewDeps({
       const identity = resolveArgusCommentIdentity({ model, env });
       if (!identity) return { ok: false, reason: 'no-identity-token' };
       const { stdout } = await execGhWithRetryImpl({
-        args: ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],
+        args: ['pr', 'comment', String(prNumber), '--repo', repo, '--body', filterGitHubBody(body, { repo, rootDir, env })],
         env: { ...env, GITHUB_TOKEN: identity.token, GH_TOKEN: identity.token },
         timeoutMs: 60_000,
         log: logger,

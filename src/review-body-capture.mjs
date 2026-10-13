@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -277,6 +278,7 @@ function updateReviewerPassBodyCapture(rootDir, {
   allowExistingBodyUpdate = false,
   log = console,
 } = {}) {
+  bodyMd = filterGitHubBody(bodyMd, { repo, rootDir });
   return withSqliteBusyRetrySync(() => {
     if (!repo || !Number.isInteger(Number(prNumber)) || !Number.isInteger(Number(attemptNumber)) || !bodyMd) {
       throw new TypeError('Missing required reviewer-pass capture fields');
@@ -505,6 +507,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
   sleepImpl = sleep,
   allowExistingBodyUpdate = false,
 } = {}) {
+  reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha, rootDir, env });
   const singleReviewPatch = singleReview?.applied === true
     ? { singleReview: { applied: true, basis: singleReview.basis || null, stats: singleReview.stats || null } } : {};
   let ghCommentId = null;
@@ -666,6 +669,7 @@ async function captureRemediationBodyAfterPost(rootDir, {
   log = console,
 } = {}) {
   try {
+    body = filterGitHubBody(body, { repo, rootDir, env });
     const logins = resolveReviewerBotLoginAliases(workerClass);
     let ghCommentId = null;
     if (logins.length > 0) {

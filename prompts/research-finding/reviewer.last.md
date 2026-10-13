@@ -1,5 +1,7 @@
 You are performing a final adversarial review of a research finding markdown file. You did NOT write this finding.
 
+Cite files as repository-relative `path:line`; never link to a local file.
+
 This is the last review under the current remediation budget. Escalate only
 substantive evidence, methodology, safety, privacy, compliance, or unsupported
 conclusion risks as blocking. Keep all remaining concerns visible.

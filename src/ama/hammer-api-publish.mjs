@@ -1,6 +1,8 @@
+import { filterGitHubBody } from '../github-outbound-body.mjs';
 // API publication is an optimization. Every unsupported change or read failure
 // returns the ordinary exact-head review route; it never grants merge authority.
 export async function publishHammerTree({ repo, branch, expectedHead, localTree, message, changes, api }) {
+  message = filterGitHubBody(message, { repo, reviewerHeadSha: expectedHead });
   let publishedHead;
   try {
     const additions = [], deletions = [];

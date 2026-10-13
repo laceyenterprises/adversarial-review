@@ -725,7 +725,9 @@ API-publish only one single-parent commit above the fetched remote head. Preserv
   > /tmp/ham-<<PR_NUMBER>>-range.json || {
     # Every failed provenance proof uses exact-head review.
     ham_release_merge_lease
-    GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr comment <<PR_URL>> --body "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review."
+    HAM_REVIEW_ROUTE_NOTICE=$(printf '%s' "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review." |
+      "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_REVIEW_ROUTE_NOTICE='<local>'
+    GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr comment <<PR_URL>> --body "$HAM_REVIEW_ROUTE_NOTICE"
     # Write daemon state as its canonical owner.
     HAM_REVIEW_HANDOFF_RUN=()
     if [ "$(id -un)" != "$HAM_HQ_OWNER" ]; then

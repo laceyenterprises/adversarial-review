@@ -1,3 +1,4 @@
+import { filterGitHubBody } from './github-outbound-body.mjs';
 /**
  * LAC-12 + LAC-13: Reviewer Agent + Linear Integration
  *
@@ -1449,6 +1450,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   const writeIdentity = appSelfLogin || refreshIdentity;
   let refreshedAfterAuthFailure = false;
 
+  reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha: opts.reviewerHeadSha, rootDir: opts.rootDir || ROOT, env: sourceEnv });
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, sourceEnv);
   let reviewerFence = null;
   try {
@@ -1668,6 +1670,7 @@ async function postGitHubReviewWithCapture({
   emitReviewedAttestationImpl = emitReviewedAttestation,
   enqueuePendingReviewedAttestationImpl = enqueuePendingReviewedAttestation,
 } = {}) {
+  reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha, rootDir });
   const normalizedHeadSha = String(reviewerHeadSha || '').trim().toLowerCase();
   const normalizedCurrentHeadSha = String(currentHeadSha || '').trim().toLowerCase();
   if (
@@ -1710,7 +1713,7 @@ async function postGitHubReviewWithCapture({
   }
   const alreadyCaptured = capturedReviewBody !== null;
   const recoveringPendingCapture = pendingCapture !== null;
-  const effectiveReviewBody = capturedReviewBody ?? pendingCapture?.bodyMd ?? reviewBody;
+  const effectiveReviewBody = filterGitHubBody(capturedReviewBody ?? pendingCapture?.bodyMd ?? reviewBody, { repo, reviewerHeadSha, rootDir });
   let postedReviewArtifact = null;
   let initialToken = null;
   if (!alreadyCaptured) {
@@ -1724,7 +1727,7 @@ async function postGitHubReviewWithCapture({
       throw new Error(`Missing env var: ${botTokenEnv}`);
     }
     if (!recoveringPendingCapture) {
-      const postResult = await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+      const postResult = await postGitHubReview(repo, prNumber, effectiveReviewBody, botTokenEnv, execFileImpl, {
         rootDir, fetchImpl, readFileImpl, log, prepareReviewWrite,
         reviewerSpawnToken, reviewerIdentity,
         reviewerTokenFetchTimeoutMs,
@@ -2276,14 +2279,14 @@ async function main() {
     scopeViolationFinding, repo, prNumber, diff, prContext,
     labels: verdictModeResolution.labels, reviewerHeadSha, log: console,
   });
-  const fullComment = buildReviewCommentBody({
+  const fullComment = filterGitHubBody(buildReviewCommentBody({
     reviewerMetadata,
     verdictMode,
     execution: reviewerExecution,
     waiverAuditBlock,
     reviewModeAuditBlock: buildReviewModeAuditBlock(reviewModeDecision),
     reviewText: reviewTextForPost,
-  });
+  }), { repo, reviewerHeadSha, rootDir: ROOT, snapshotRoot: join(reviewerWorkspaceStateDir, 'reviewer-snapshots') });
   const localShadowEligibility = evaluateLocalReviewShadowEligibility({
     labels,
     builderTag,

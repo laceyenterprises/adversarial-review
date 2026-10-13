@@ -204,10 +204,11 @@ function leaseJson({ result, waitedSeconds }) {
   };
 }
 
-function timeoutJson({ repo, base, waitedSeconds, refundFailed = false }) {
+function timeoutJson({ repo, base, waitedSeconds, configuredSeconds, refundFailed = false }) {
   return {
     acquired: false,
     timedOut: true,
+    configured_s: configuredSeconds,
     key: deriveLeaseKey({ repo, base }).key,
     waited_s: waitedSeconds,
     ...(refundFailed ? { refundFailed: true } : {}),
@@ -335,6 +336,16 @@ async function runAcquire(argv, deps) {
   const acquisitionSeconds = waitSeconds;
   const deadlineMs = startedMs + acquisitionSeconds * 1000;
 
+  let nextProgressMs = startedMs;
+  const reportProgress = () => {
+    if (deps.nowMs() < nextProgressMs) return;
+    const status = inspectMergeLease({ rootDir, repo, base, now: deps.nowIso(), host: deps.host, pidAliveFn: deps.pidAliveFn });
+    const queue = readMergeLeaseWaiters(rootDir, { repo, base });
+    const position = queue.findIndex((w) => Number(w.pr) === pr && w.head === head && Number(w.holderPid) === ownerPid);
+    deps.stderr.write(`HAM merge lease wait: waited=${Math.floor((deps.nowMs() - startedMs) / 1000)}s allowed=${waitSeconds}s holder=${status.holder?.holderPr ?? 'none'} queue=${position < 0 ? 'unregistered' : position + 1}\n`);
+    // Leave slack for the bounded lock retries and the next polling tick.
+    nextProgressMs = deps.nowMs() + 25000;
+  };
   let gateAttempt = null;
   while (!gateAttempt) {
     try {
@@ -351,12 +362,14 @@ async function runAcquire(argv, deps) {
       if (!isMutationLockBusyError(err)) throw err;
       if (deps.nowMs() >= deadlineMs) {
         jsonLine(deps.stdout, timeoutJson({
+          configuredSeconds: waitSeconds,
           repo,
           base,
           waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
         }));
         return EXIT_TIMEOUT;
       }
+      reportProgress();
       await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
     }
   }
@@ -434,6 +447,7 @@ async function runAcquire(argv, deps) {
       }
     }
 
+    reportProgress();
     if (deps.nowMs() >= deadlineMs) {
       removeWaiterForTimeout({
         rootDir,
@@ -458,6 +472,7 @@ async function runAcquire(argv, deps) {
         }
       }
       jsonLine(deps.stdout, timeoutJson({
+        configuredSeconds: waitSeconds,
         repo,
         base,
         waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),

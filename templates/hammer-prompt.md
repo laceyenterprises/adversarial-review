@@ -100,7 +100,8 @@ HAM_PHASE_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/ham-phase.XXXXXX") || exit 1
 node "${HAM_ROOT_DIR}/bin/hammer-procedure.mjs" "$PHASE" --render > "$HAM_PHASE_SCRIPT" || exit 1
 HAM_PHASE_LOG=$(mktemp "${TMPDIR:-/tmp}/ham-phase-log.XXXXXX") || exit 1
 HAM_PHASE_OUTCOME=not-run
-if source "$HAM_PHASE_SCRIPT" > "$HAM_PHASE_LOG" 2>&1; then
+# Descriptor 3 keeps sparse lease-wait progress live while diagnostics are buffered.
+if source "$HAM_PHASE_SCRIPT" 3>&2 > "$HAM_PHASE_LOG" 2>&1; then
   HAM_PHASE_STATUS=0
 else
   HAM_PHASE_STATUS=$?
@@ -593,6 +594,8 @@ fi
 Before validating the live head, export `HAM_COMMIT_PUBLICATION_ONLY=1` and render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with `GH_TOKEN` set to the hammer token. Stop on failure; unset the flag on success. This publishes ordinary remediation through the same guarded route as conflict repair.
 
 Refresh and validate the live head:
+
+These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
 In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting the dispatch values above. Refresh the live head, acquire the merge lease, rebase under the existing bounded policy, and validate the rebased head. The wrapper prints the bounded diagnostic tail, status, outcome, and lease state before deleting its temporary files. A nonzero status blocks the next phase. Status 20 means parked or blocked; status 21 means a rebase conflict. On conflict, resolve it using "Resolving merge conflicts" below, revalidate, and rerun verify-head before continuing.
 

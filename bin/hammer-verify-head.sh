@@ -172,6 +172,10 @@ NODE
   ' /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json >/dev/null; then
     ham_required_checks_green_args=(--required-checks-green)
   fi
+  # The procedure wrapper preserves live stderr on descriptor 3. Direct
+  # callers without that descriptor still receive progress on stderr.
+  local ham_lease_progress_fd=2
+  if ( : >&3 ) 2>/dev/null; then ham_lease_progress_fd=3; fi
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
     --repo <<REPO>> \
     --base "$BASE_BRANCH" \
@@ -180,7 +184,7 @@ NODE
     --owner-pid "$$" \
     --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" --wait-for-holder-deadline \
     "${ham_required_checks_green_args[@]+"${ham_required_checks_green_args[@]}"}" \
-    > /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json; then
+    > /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json 2>&"$ham_lease_progress_fd"; then
     HAM_MERGE_LEASE_ACQUIRE_EXIT=0
   else
     HAM_MERGE_LEASE_ACQUIRE_EXIT=$?
@@ -289,10 +293,11 @@ $HAM_GATE_CAP_COMMENT"
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75 ] \
     && [ "$(jq -r '.timedOut // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
-    HAM_PARK_WAITED=$(jq -r '.waited_s // "unknown"' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
-    echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s" >&2
+    HAM_PARK_WAITED=$(jq -c '.waited_s // null' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
+    echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s (configured ${HAM_MERGE_LEASE_WAIT_SECONDS}s); no merge" >&2
     ham_park_json=$(mktemp "${TMPDIR:-/tmp}/ham-lease-park.XXXXXX") || return 1
-    jq -n '{outcome:"deferred",reason:"merge-lease-timeout"}' > "$ham_park_json"
+    jq -n --argjson waited_s "$HAM_PARK_WAITED" --argjson configured_s "$HAM_MERGE_LEASE_WAIT_SECONDS" \
+      '{outcome:"deferred",reason:"merge-lease-timeout",waited_s:$waited_s,configured_s:$configured_s}' > "$ham_park_json"
     if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append --hq-root <<HQ_ROOT>> \
       --repo <<REPO>> --pr <<PR_NUMBER>> --head "$POST_REMEDIATION_SHA" \
       --outcome deferred --closure-authority ham-terminal-remediation \

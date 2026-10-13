@@ -23,6 +23,8 @@ at mode `0640`.
 | `attempts[].attemptNumber` | positive integer | Sequential, starting at `1`. |
 | `attempts[].startedAt` | ISO timestamp | Append time. |
 | `attempts[].outcome` | string | `in_progress`, `deferred`, `superseded`, `succeeded`, or `failed-without-merge`. Other attempt fields carry caller evidence, including `closingStatus` for gate-cap parks. |
+| `attempts[].waited_s` | optional number or null | Merge-lease timeout elapsed seconds from the lease CLI; missing or null duration evidence is recorded as JSON `null` so the deferred audit remains valid. |
+| `attempts[].configured_s` | optional number | Procedure-enforced merge-lease wait budget in seconds for a timeout attempt. |
 | `attempts[].attemptPhase`, `attempts[].path` | optional strings | Per-attempt producer provenance. Daemon phases are `daemon-pre-merge`, `daemon-merged`, and `daemon-failed`; `path` names its closure authority, including `ham-terminal-remediation` for a daemon call on a HAM-certified head. Hammer phases include `hammer-gh-pr-merge`, `hammer-gate-attempt-cap` and `hammer-lease-admission`. Document-level authority alone does not identify the producer of a marked attempt. |
 | `reconciliation.needsRepair` | boolean | Latest append's repair signal. Present on records auto-created by append. |
 | `reconciliation.lastVerifiedAt` | ISO timestamp | Latest append time. Present on records auto-created by append. |

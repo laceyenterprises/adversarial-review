@@ -109,6 +109,7 @@
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
       "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
       "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
+      "leaseTimeoutEvidence": { "waited_s": "number or null when duration evidence is absent", "configured_s": "number" },
       "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },
       "compatibilityFields": ["appendedRecords"]
     },

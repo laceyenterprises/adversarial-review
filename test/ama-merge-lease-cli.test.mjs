@@ -529,7 +529,7 @@ test('merge-lease acquire retries mutation-lock contention until the wait deadli
     assert.equal(out.acquired, true);
     assert.equal(out.holder, 126);
     assert.equal(out.holderHead, 'after-lock');
-    assert.equal(io.stderrText, '');
+    assert.match(io.stderrText, /waited=0s allowed=1s holder=none queue=unregistered/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -1074,6 +1074,46 @@ test('ordinary and holder-aware acquire preserve the explicit caller budget', as
         });
       assert.equal(code, 75);
       assert.equal(jsonOutput(io).waited_s, 3600);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  }
+});
+
+test('HAMLEASE-01 long lease wait reports progress, acquires after 400s or cleans up at 900s', async () => {
+  for (const releases of [true, false]) {
+    const rootDir = freshRoot();
+    try {
+      const holder = acquireFixture(rootDir, { deadlineSeconds: 7200 });
+      let released = false;
+      const started = Date.parse('2026-06-20T18:00:00Z');
+      const { code, io } = await runCli(rootDir, ['acquire', '--repo', REPO, '--base', BASE,
+        '--pr', '7702', '--head', 'certified', '--owner-pid', '8123', '--wait', '900'], {
+        onSleep: ({ nowMs, advance }) => {
+          const target = started + (releases ? 400000 : 900000);
+          const delta = Math.min(29750, target - nowMs);
+          advance(delta);
+          if (releases && !released && nowMs + delta >= target) {
+            releaseMergeLease({ rootDir, repo: REPO, base: BASE, leaseId: holder.lease.leaseId,
+              holderPr: holder.lease.holderPr, holderHead: holder.lease.holderHead, acquiredAt: holder.lease.acquiredAt });
+            released = true;
+          }
+        },
+      });
+      const out = jsonOutput(io);
+      assert.equal(code, releases ? 0 : 75);
+      assert.equal(out.waited_s, releases ? 400 : 900);
+      if (!releases) {
+        assert.equal(out.configured_s, 900);
+        assert.equal(out.timedOut, true);
+      }
+      assert.equal(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }).some((w) => w.pr === 7702), false);
+      const lines = io.stderrText.trim().split('\n');
+      const times = lines.map((line) => {
+        assert.match(line, /allowed=900s holder=100 queue=1$/);
+        return Number(line.match(/waited=(\d+)s/)[1]);
+      });
+      assert.equal(times[0], 0);
+      for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] <= 30);
+      assert.ok(out.waited_s - times.at(-1) <= 30);
     } finally { rmSync(rootDir, { recursive: true, force: true }); }
   }
 });

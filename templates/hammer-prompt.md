@@ -481,7 +481,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    required check bar is green may proceed to merge while still holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
-   prove the active hammer exact-head validation, a trustworthy starting base through App-authored attestations, PR audit
+   prove the active hammer exact-head validation, a trustworthy starting base through the range proof, PR audit
    comment from the entitled hammer identity, successful
    live-head checks, and non-waived gates, and it must record
    `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
@@ -712,13 +712,14 @@ daemon closure, never operator escalation.
 
 Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
-Start from the captured `HAM_BASE_HEAD`. Trust only the reviewed head or an
-App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain from it, or daemon-recorded
-completed remediation rounds whose start/result heads link it to the starting
-head and whose links GitHub confirms are strictly ahead or rebased through fleet-Bot force-push events. After API or
-CAS git publication, confirm remote SHA equals HEAD and append both exact SHAs
-in the hammer App comment. Preserve earlier attestation edges. Signatures and
-commit metadata confer no trust; an unproven base requests re-review.
+Start from the captured `HAM_BASE_HEAD`. Prove it first using the reviewed head,
+an App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain, or completed
+remediation rounds linked by strictly-ahead comparisons or trusted fleet-Bot
+force-push events. If those fail, accept a complete branch-activity push/force-push
+chain by the same fleet Bots. After API or CAS git publication, confirm remote
+SHA equals HEAD and append both exact SHAs in the hammer App comment. Preserve
+earlier attestation edges. Signatures and commit metadata confer no trust;
+an unproven base requests re-review.
 
 API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use CAS git and the same base proof; push rejection releases the lease and aborts.
 

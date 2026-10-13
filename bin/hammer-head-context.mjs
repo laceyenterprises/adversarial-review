@@ -42,7 +42,20 @@ const loadTimelinePage = async cursor => {
   if (response.errors) return null;
   return response.data?.repository?.pullRequest?.timelineItems;
 };
-const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, hammerBaseHead: process.env.HAM_BASE_HEAD,
+// Use GitHub's Link cursor rather than inventing page numbers for activity.
+const loadActivityPage = async path => {
+  const { stdout } = await execGhWithRetry({ args: ['api', '--include', path], timeoutMs: 15000 });
+  const boundary = stdout.search(/\r?\n\r?\n/);
+  if (boundary < 0) return null;
+  const headers = stdout.slice(0, boundary);
+  const body = stdout.slice(boundary).trim();
+  const link = headers.match(/^link:\s*(.*)$/im)?.[1];
+  const nextUrl = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1];
+  const next = nextUrl ? new URL(nextUrl) : null;
+  if (next && !next.pathname.endsWith('/activity')) return null;
+  return { nodes: JSON.parse(body), next: next ? `${next.pathname.replace(/^\//, '')}${next.search}` : null };
+};
+const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
   remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
   get: async path => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout) });
 if (!range) {

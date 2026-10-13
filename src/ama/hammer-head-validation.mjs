@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { opendir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
 
@@ -55,37 +55,43 @@ export function hammerAttestationChain(comments, reviewedHead, currentHead) {
 
 // Read only daemon-owned state under the supplied runtime root. Old rounds
 // without a resulting head cannot establish an edge.
-export function readCompletedRemediationRounds(rootDir, repo, prNumber) {
+export async function readCompletedRemediationRounds(rootDir, repo, prNumber) {
   if (!rootDir || !repo || !prNumber) return [];
+  const rounds = [];
   try {
     const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
-    // Match the existing follow-up job ID convention before opening records.
     const prefix = `${String(repo).replace(/\//g, '__').replace(/[^a-zA-Z0-9_.-]/g, '-')}-pr-${prNumber}-`.toLowerCase();
-    return readdirSync(dir).filter(name => name.endsWith('.json') && name.toLowerCase().startsWith(prefix)).flatMap(name => {
+    for await (const entry of await opendir(dir)) {
+      const name = entry.name;
+      if (!name.endsWith('.json') || !name.toLowerCase().startsWith(prefix)) continue;
       try {
-        const job = JSON.parse(readFileSync(join(dir, name), 'utf8'));
+        const job = JSON.parse(await readFile(join(dir, name), 'utf8'));
         if (String(job.repo).toLowerCase() !== String(repo).toLowerCase()
-          || String(job.prNumber) !== String(prNumber) || job.status !== 'completed') return [];
-        return (job.remediationPlan?.rounds || []).filter(round => round.state === 'completed'
-          && round.startHeadSha && round.resultingHeadSha);
+          || String(job.prNumber) !== String(prNumber) || job.status !== 'completed') continue;
+        rounds.push(...(job.remediationPlan?.rounds || []).filter(round => round.state === 'completed'
+          && round.startHeadSha && round.resultingHeadSha));
       } catch {
         // A damaged or concurrently removed record cannot invalidate other jobs.
-        return [];
       }
-    });
+    }
   } catch {
     return [];
   }
+  return rounds;
 }
 
 async function remediationChain(rounds, reviewedHead, target, repo, get) {
   if (!reviewedHead || !target || target === reviewedHead) return null;
   const trusted = new Map([[reviewedHead, []]]);
+  const evaluated = new Set();
   for (let pass = 0; pass < rounds.length; pass++) {
     let changed = false;
     for (const round of rounds) {
       const { startHeadSha: base, resultingHeadSha: head } = round;
       if (round.state !== 'completed' || !base || !head || !trusted.has(base) || trusted.has(head)) continue;
+      const edge = JSON.stringify([base, head]);
+      if (evaluated.has(edge)) continue;
+      evaluated.add(edge);
       try {
         const comparison = await get(`repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`);
         if (comparison?.status !== 'ahead') continue;
@@ -122,16 +128,17 @@ async function readComparison(path, get, limit) {
 
 // Read the complete head-only DAG, including side parents. The comparison with
 // the base excludes base history; foreign PR commits cannot hide behind a merge.
-export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], hammerBaseHead = null, remediationRounds = [] }) {
+export async function fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef = 'main', get, env = process.env, comments = [], loadComments = null, hammerBaseHead = null, remediationRounds = [] }) {
   // HAMCLOSE-01: the worker may start from the exact reviewed head. This is
   // a starting-base proof, not an App attestation or a completed round edge.
   if (reviewedHead && hammerBaseHead === reviewedHead) return { verified: true, reviewedHead, currentHead,
     baseSha: reviewedHead, commits: currentHead === reviewedHead ? [] : [currentHead], proof: 'reviewed-starting-base' };
-  const chain = hammerAttestationChain(comments, reviewedHead, hammerBaseHead || currentHead);
+  const rounds = await remediationChain(remediationRounds, reviewedHead, hammerBaseHead || currentHead, repo, get);
+  const chain = rounds?.length > 0 ? null
+    : hammerAttestationChain(loadComments ? await loadComments() : comments, reviewedHead, hammerBaseHead || currentHead);
   if (chain?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
     commits: [...chain, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
     proof: 'hammer-app-attestation-chain' };
-  const rounds = await remediationChain(remediationRounds, reviewedHead, hammerBaseHead || currentHead, repo, get);
   if (rounds?.length > 0) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
     commits: [...rounds, ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
     proof: 'completed-remediation-round-chain' };

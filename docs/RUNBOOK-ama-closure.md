@@ -2754,7 +2754,11 @@ other starting-base proof exists, the CLI exits 65 and requests exact-head
 review. Lookup opens only JSON filenames with the existing
 `<sanitized-repo>-pr-<number>-` job ID prefix, compares repo names without case
 sensitivity, and still validates each record's repo, PR and completed status.
-It lists the flat directory but does not read or parse unrelated historical jobs.
+It asynchronously iterates the flat directory and reads matching records without
+blocking the event loop; unrelated historical jobs are not read or parsed.
+Completed-round proof is attempted before lazily fetching PR comment pages for
+the App-attestation fallback. Each immutable start/result comparison is evaluated
+at most once per proof attempt, including non-ahead and unreadable comparisons.
 
 The audit lookup uses `gh api --paginate --slurp` to read all comment pages
 as one JSON payload. `bin/hammer-audit-comment-id.mjs` parses that payload

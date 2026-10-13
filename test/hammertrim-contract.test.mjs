@@ -574,13 +574,23 @@ close
   });
 }
 
+test('rendered hammer phases preserve their executable shebang', () => {
+  const env = Object.fromEntries([...template.matchAll(/<<([A-Z_]+)>>/g)].map((m) => [`HAM_${m[1]}`, 'fixture']));
+  for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
+    const rendered = run(process.execPath, ['bin/hammer-procedure.mjs', phase, '--render'], env);
+    assert.equal(rendered.status, 0, rendered.stderr);
+    assert.ok(rendered.stdout.startsWith('#!/usr/bin/env bash\n'), phase);
+  }
+});
+
 test('HAMLEASE-01 rendered waits have procedure floors and permit increases', () => {
   const env = Object.fromEntries([...template.matchAll(/<<([A-Z_]+)>>/g)].map((m) => [`HAM_${m[1]}`, 'fixture']));
   for (const phase of ['hammer-verify-head', 'hammer-merge']) {
     const rendered = run(process.execPath, ['bin/hammer-procedure.mjs', phase, '--render'], env);
     assert.equal(rendered.status, 0, rendered.stderr);
     assert.match(rendered.stdout, /Waits are fixed by the procedure; do not export or shorten them/);
-    const helper = rendered.stdout.slice(0, rendered.stdout.indexOf('#!/usr/bin/env bash'));
+    const helper = rendered.stdout.match(/ham_procedure_floor\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.ok(helper);
     const assignments = rendered.stdout.match(/^ham_procedure_floor .*$/gm).join('\n');
     for (const given of ['120', '180', '1800', 'invalid', '0', '0001800', '1000000000']) {
       const result = run('bash', ['-c', `${helper}\n${assignments}\necho "$HAM_MERGE_LEASE_WAIT_SECONDS $HAM_REMOTE_CI_WAIT_SECONDS"`], {
@@ -610,14 +620,16 @@ test('HAMLEASE-01 lease timeout note and audit retain waited and configured seco
   const end = rendered.stdout.indexOf('  if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -ne 0 ]', start);
   const stub = join(dir, 'audit-node');
   writeFileSync(stub, '#!/bin/sh\nwhile [ "$#" -gt 1 ]; do\nif [ "$1" = --attempt-json ]; then cat "$2"; exit 0; fi\nshift\ndone\nexit 1\n', { mode: 0o755 });
-  writeFileSync(`/tmp/ham-${pr}-merge-lease-acquire.json`, JSON.stringify({ timedOut: true, waited_s: 900, configured_s: 900 }));
-  const result = run('bash', ['-c', `HAM_MERGE_LEASE_ACQUIRE_EXIT=75 HAM_MERGE_LEASE_WAIT_SECONDS=900 HAM_NODE_BIN="$1" POST_REMEDIATION_SHA=${'a'.repeat(40)}
+  for (const evidence of [{ waited_s: 900 }, { waited_s: 0 }, { waited_s: null }, {}]) {
+    writeFileSync(`/tmp/ham-${pr}-merge-lease-acquire.json`, JSON.stringify({ timedOut: true, configured_s: 900, ...evidence }));
+    const result = run('bash', ['-c', `HAM_MERGE_LEASE_ACQUIRE_EXIT=75 HAM_MERGE_LEASE_WAIT_SECONDS=900 HAM_NODE_BIN="$1" POST_REMEDIATION_SHA=${'a'.repeat(40)}
 phase() { ${rendered.stdout.slice(start, end)} }
 phase
 `, '_', stub], { TMPDIR: dir });
-  assert.equal(result.status, 20, result.stderr);
-  assert.match(result.stderr, /after 900s \(configured 900s\); no merge/);
-  const audit = JSON.parse(result.stdout);
-  assert.equal(audit.waited_s, 900);
-  assert.equal(audit.configured_s, 900);
+    assert.equal(result.status, 20, result.stderr);
+    assert.ok(result.stderr.includes(`after ${evidence.waited_s ?? 'null'}s (configured 900s); no merge`));
+    assert.deepEqual(JSON.parse(result.stdout), {
+      outcome: 'deferred', reason: 'merge-lease-timeout', waited_s: evidence.waited_s ?? null, configured_s: 900,
+    });
+  }
 });

@@ -19,7 +19,7 @@ source = source.replace(
   /^(HAM_[A-Z_]*(?:WAIT_SECONDS|POLL_SECONDS|RETRY_CAP|ATTEMPT_CAP|FAILURE_LIMIT|BACKOFF_BASE_SECONDS|NOMINAL_SECONDS))="\$\{\1:-([0-9]+)\}"$/gm,
   (_match, name, floor) => `ham_procedure_floor ${name} ${floor}`,
 );
-source = `# Waits are fixed by the procedure; do not export or shorten them.
+const procedureFloor = `# Waits are fixed by the procedure; do not export or shorten them.
 # A hammer that has only the lease left waits for it.
 ham_procedure_floor() {
   local name="$1" floor="$2" given normalized used
@@ -39,7 +39,12 @@ ham_procedure_floor() {
   fi
   printf -v "$name" '%s' "$used"
 }
-${source}`;
+`;
+// Keep the interpreter header at byte zero for executable rendered scripts.
+const shebang = source.match(/^#![^\n]*\n/)?.[0];
+source = shebang
+  ? `${shebang}${procedureFloor}${source.slice(shebang.length)}`
+  : `${procedureFloor}${source}`;
 const missing = new Set();
 source = source.replace(/<<([A-Z_]+)>>/g, (_match, key) => {
   const value = process.env[`HAM_${key}`];

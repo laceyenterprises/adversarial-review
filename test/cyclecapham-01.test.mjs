@@ -369,6 +369,7 @@ function closerDeps({ nextLaunch = LRQ_FIRST, comments = [], alerts = [], prompt
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
     writeFileImpl: (_dir, path, content) => { prompts.push({ path, content: String(content) }); },
     resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+    readPullRequestStateImpl: () => null,
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
     // A missing PR signal is authoritative only when the repo producer is readable.
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),

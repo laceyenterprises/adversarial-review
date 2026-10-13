@@ -14,7 +14,7 @@ import {
 } from '../src/ama/dispatch-closer.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
-import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
 import {
   findMalformedProtectivePredecessorLines,
@@ -54,6 +54,7 @@ function testDeps() {
   const calls = [];
   return {
     calls,
+    readPullRequestStateImpl: () => null,
     execFileImpl: async (cmd, args, options = {}) => {
       calls.push({ cmd, args, options });
       return { stdout: JSON.stringify({ dispatchId: 'lrq_hammer_1', launchRequestId: 'lrq_hammer_1' }), stderr: '' };
@@ -1291,7 +1292,7 @@ test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not ref
   assert.equal(deps.calls.filter(c => c.args.includes('dispatch')).length, 1);
 });
 
-for (const status of ['succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout', 'pending']) {
+for (const status of ['succeeded-open', 'succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout', 'pending']) {
   test(`CLOSERLEASE-01: reconcile ${status} lease before red-CI remediation refusal`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -1309,17 +1310,22 @@ for (const status of ['succeeded', 'failed', 'running', 'starting', 'unreadable'
       lastObservedStatus: 'running', dispatchedAt: args.dispatchContext.dispatchedAt }));
     let reads = 0;
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readPullRequestStateImpl: () => status === 'succeeded-open' ? { state: 'OPEN' } : null,
       readLaunchRequestStatusImpl: () => {
         reads++;
         if (status === 'throws' || status === 'timeout') throw Object.assign(new Error('synthetic failure'),
           { code: status === 'timeout' ? 'ETIMEDOUT' : 'EIO' });
-        return status === 'unreadable' ? { ok: false } : { ok: true, row: { status } };
+        return status === 'unreadable' ? { ok: false } : { ok: true, row: {
+          status: status === 'succeeded-open' ? 'succeeded' : status,
+          terminal_at: new Date(Date.parse(args.dispatchContext.dispatchedAt) - 61_000).toISOString(),
+        } };
       },
     });
     assert.equal(result.reason, 'not-eligible');
+    assert.notEqual(result.reason, 'active-remediation-job');
     assert.equal(reads, status === 'pending' ? 0 : 1);
     const lease = readAmaCloserLease(rootDir, identity);
-    const terminal = status === 'failed';
+    const terminal = status === 'failed' || status === 'succeeded-open';
     assert.equal(lease.status, terminal ? 'terminal' : status === 'pending' ? 'pending' : 'dispatched');
     assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
     assert.equal(deps.calls.length, 0);
@@ -1410,6 +1416,7 @@ for (const routing of [
     const reads = [];
     let merged = false;
     const args = { rootDir, ...identity, hqRoot: rootDir, now, ...routing, env: {}, logger: { info() {} },
+      readPullRequestStateImpl: () => null,
       readLaunchRequestStatusImpl: input => {
         reads.push(['launch', input]);
         return { ok: true, row: { status: 'succeeded' } };
@@ -1439,5 +1446,85 @@ for (const routing of [
     assert.equal(reconcileAmaCloserLease(args), true);
     assert.deepEqual(reads.map(([kind]) => kind), ['launch', 'signal']);
     assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
+  });
+}
+
+for (const scenario of [
+  { name: 'open after 61 seconds', state: 'OPEN', age: 61, outcome: 'failed-without-merge' },
+  { name: 'open at 60 seconds', state: 'OPEN', age: 60, outcome: 'failed-without-merge' },
+  { name: 'Date terminal time', state: 'OPEN', terminalAt: new Date('2026-07-20T11:59:00.000Z'), outcome: 'failed-without-merge' },
+  { name: 'numeric terminal time', state: 'OPEN', terminalAt: Date.parse('2026-07-20T11:59:00.000Z'), outcome: 'failed-without-merge' },
+  { name: 'epoch zero terminal time', state: 'OPEN', terminalAt: 0, outcome: 'failed-without-merge' },
+  { name: 'invalid Date terminal time', state: 'OPEN', terminalAt: new Date(NaN) },
+  { name: 'nonfinite numeric terminal time', state: 'OPEN', terminalAt: Infinity },
+  { name: 'boolean terminal time', state: 'OPEN', terminalAt: true },
+  { name: 'padded JSON output', state: 'OPEN', stdout: '\n {"state":"OPEN"} \n', age: 61, outcome: 'failed-without-merge' },
+  { name: 'whitespace-only output', stdout: '\n \t', age: 61 },
+  { name: 'empty output', stdout: '', age: 61 },
+  { name: 'malformed JSON output', stdout: 'warning: unavailable', age: 61 },
+  { name: 'open after 59 seconds', state: 'OPEN', age: 59 },
+  { name: 'merged immediately', state: 'MERGED', age: 0, outcome: 'succeeded' },
+  { name: 'closed without merge', state: 'CLOSED', age: 0, outcome: 'pr-closed-externally' },
+  { name: 'throwing read', throws: true, age: 61 },
+  { name: 'timed out read', timeout: true, age: 61 },
+  { name: 'malformed read', age: 61 },
+  { name: 'missing terminal time', state: 'OPEN' },
+  { name: 'invalid terminal time', state: 'OPEN', terminalAt: 'invalid' },
+  { name: 'future terminal time', state: 'OPEN', age: -1 },
+  { name: 'running launch', status: 'running', state: 'OPEN', age: 61, noRead: true },
+  { name: 'pending lease', pending: true, state: 'OPEN', age: 61, noRead: true },
+  { name: 'merged signal', merged: true, age: 61, outcome: 'succeeded', noRead: true },
+  { name: 'terminal audit', audit: true, age: 61, outcome: 'failed-without-merge', noRead: true },
+  { name: 'advanced head', rekeyed: true, state: 'OPEN', age: 61, outcome: 'superseded' },
+]) {
+  test(`CLOSERLEASE-02: ${scenario.name}`, t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-state-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const now = '2026-07-20T12:00:00.000Z';
+    const identity = { repo: 'example/repo', prNumber: 42, headSha: HEAD };
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    if (!scenario.pending) updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_state', now });
+    if (scenario.rekeyed) {
+      rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: HEAD, toHeadSha: 'b'.repeat(40), now });
+      identity.headSha = 'b'.repeat(40);
+    }
+    if (scenario.audit) appendAmaAuditAttempt({ hqRoot: rootDir, ...identity, now,
+      attempt: { outcome: 'failed-without-merge' } });
+    let reads = 0;
+    const logs = [];
+    const args = { rootDir, ...identity, hqRoot: rootDir, now,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: scenario.status || 'succeeded',
+        terminal_at: scenario.terminalAt ?? (scenario.age === undefined ? undefined
+          : new Date(Date.parse(now) - scenario.age * 1000).toISOString()) } }),
+      readBuildCompletionSignalForPrImpl: () => scenario.merged ? { ok: true, row: { head_sha: 'merge-head' } } : { ok: false },
+      readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }),
+      readPullRequestStateImpl: input => {
+        reads++;
+        assert.equal(input.repo, identity.repo);
+        assert.equal(input.prNumber, identity.prNumber);
+        if (scenario.throws || scenario.timeout) throw Object.assign(new Error('synthetic read failure'),
+          { code: scenario.timeout ? 'ETIMEDOUT' : 'EIO' });
+        return scenario.state ? { state: scenario.state } : { unexpected: true };
+      },
+      logger: { info: line => logs.push(JSON.parse(line)) },
+    };
+    if (scenario.stdout !== undefined) {
+      // Exercise the production subprocess/parser without a token or network.
+      writeFileSync(join(rootDir, 'gh'), '#!/bin/sh\nprintf "%s" "$HAM_TEST_PR_STDOUT"\n', { mode: 0o755 });
+      args.env = { ...process.env, PATH: rootDir, HAM_TEST_PR_STDOUT: scenario.stdout };
+      delete args.readPullRequestStateImpl;
+    }
+    const before = readAmaCloserLease(rootDir, identity);
+    assert.equal(reconcileAmaCloserLease(args), Boolean(scenario.outcome));
+    assert.equal(reads, scenario.noRead || scenario.stdout !== undefined ? 0 : 1);
+    const lease = readAmaCloserLease(rootDir, identity);
+    if (scenario.outcome) {
+      assert.equal(lease.status, 'terminal');
+      assert.equal(lease.terminalOutcome, scenario.outcome);
+      assert.equal(logs.length, 1);
+      if (!scenario.noRead) assert.equal(logs[0].prState, scenario.state);
+      assert.equal(reconcileAmaCloserLease(args), false);
+      assert.equal(reads, scenario.noRead || scenario.stdout !== undefined ? 0 : 1);
+    } else assert.deepEqual(lease, before);
   });
 }

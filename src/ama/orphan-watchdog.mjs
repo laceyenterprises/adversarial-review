@@ -1,3 +1,5 @@
+import { summarizeExternalChecks } from '../remediation-ci-regression.mjs';
+import { REREVIEW_CI_BLOCKED_STATUS } from '../review-statuses.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 // REMORPHAN-01: dispatch admission only. HAM retains all live merge predicates.
 import Database from 'better-sqlite3';
@@ -141,6 +143,15 @@ async function defaultRereview(options) {
   const { requestReviewRereview } = await import('../review-state.mjs');
   return requestReviewRereview(options);
 }
+export function isOrphanRecoveryWait(result) {
+  const reason = String(result?.reason || result?.code || result?.message || '');
+  return result?.recoveryWait === true || [
+    'ama-coexistence-operation-timeout', 'ama-closer-dispatch-backgrounded',
+    'operator-label-classification-pending', 'AMA_COEXISTENCE_OPERATION_TIMEOUT',
+  ].includes(reason) || result?.code === 'AMA_COEXISTENCE_OPERATION_TIMEOUT' || result?.status === 429 || result?.statusCode === 429
+    || /rate[-_ ]limit|secondary limit|HTTP 429/i.test(reason);
+}
+
 function attemptSummary(retry) {
   return { dispatched: retry?.dispatched === true, reason: text(retry?.reason),
     launchRequestId: text(retry?.launchRequestId || retry?.dispatchId) };
@@ -175,7 +186,7 @@ export async function recoverOrphan(options) {
 }
 
 async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candidate,
-  labels = candidate?.labels || [], result, reviewStateRow, dispatchHammer,
+  labels = candidate?.labels || [], result, reviewStateRow, dispatchJob, dispatchHammer,
   hasOwnerImpl = probeOrphanOwnership, pageImpl = defaultPage, requestRereviewImpl = defaultRereview,
   ownershipOperation = fn => fn({}), ownershipTimeoutMs = 5000,
   logger = console, signal = null, now = new Date().toISOString(), env = process.env,
@@ -220,7 +231,11 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     }
     const idleMs = Date.parse(now) - Date.parse(idleSince);
     if (!Number.isFinite(idleMs)) throw new Error('orphan watchdog ownership clock is malformed');
-    if (idleMs < ownerlessBoundMs(env)) return pending;
+    pending.amaClosureResult = { ...pending.amaClosureResult, ownerlessIdleMs: idleMs,
+      ownerlessSince: idleSince };
+    // The route already owns a proof/read/dispatch wait. Keep the ownerless
+    // clock, but neither spend recovery nor page an exhausted launch budget.
+    if (isOrphanRecoveryWait(result) || idleMs < ownerlessBoundMs(env)) return pending;
     const previous = readEvidence(state.evidence);
     const outcomes = JSON.parse(state.outcomes || '[]');
     if (!Array.isArray(outcomes)) throw new Error('orphan watchdog outcomes are malformed');
@@ -255,7 +270,13 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
     const facts = result?.ownerProofFacts;
     const hasReview = facts ? facts.headSha === headSha && facts.reviewedHeadSha === headSha && Boolean(facts.verdict)
       : reviewStateRow?.reviewer_head_sha === headSha && reviewStateRow?.review_status === 'posted';
-    const action = hasReview ? 'hammer' : 'review';
+    const rollup = facts?.headSha === headSha ? facts.checks : candidate?.statusCheckRollup;
+    const external = Array.isArray(rollup) ? summarizeExternalChecks(rollup, { env }) : null;
+    const reviewerRefused = dispatchJob?.ciBlockedHammerOwner === true
+      || reviewStateRow?.review_status === REREVIEW_CI_BLOCKED_STATUS
+      || (external && (external.conclusion !== 'SUCCESS'
+        || external.failedChecks.length > 0 || external.pendingChecks.length > 0));
+    const action = hasReview || reviewerRefused ? 'hammer' : 'review';
     const attempt = { action, reason: 'outcome-unknown', at: now };
     outcomes.push(attempt);
     db.prepare('UPDATE heads SET attempts=attempts+1, outcomes=?, evidence=? WHERE head=?')
@@ -273,10 +294,17 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       Object.assign(attempt, attemptSummary(retry), { triggered: retry?.triggered === true });
     } catch (error) {
       attempt.reason = text(error.message || error);
+      retry = { ...attempt, code: error.code, status: error.status || error.statusCode };
       if (signal?.aborted) throw error;
     } finally {
-      db.prepare('UPDATE heads SET outcomes=?, evidence=? WHERE head=?')
-        .run(JSON.stringify(outcomes), JSON.stringify(attempt), headSha);
+      if (isOrphanRecoveryWait(retry || attempt)) {
+        outcomes.pop();
+        db.prepare('UPDATE heads SET attempts=attempts-1, outcomes=?, evidence=? WHERE head=?')
+          .run(JSON.stringify(outcomes), JSON.stringify(attempt), headSha);
+      } else {
+        db.prepare('UPDATE heads SET outcomes=?, evidence=? WHERE head=?')
+          .run(JSON.stringify(outcomes), JSON.stringify(attempt), headSha);
+      }
     }
     return retry?.dispatched ? { outcome: 'ama-dispatched', amaClosureResult: retry } : pending;
   } finally { try { db?.close(); } finally { fsImpl.closeSync(fd); } }

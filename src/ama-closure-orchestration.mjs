@@ -7,7 +7,7 @@ import { observeClosureWait } from './ama/closure-wait.mjs';
 import { OPERATOR_HOLD_LABELS } from './operator-hold-labels.mjs';
 import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 import { recoverStrandedCloserHead } from './ama/closer-head-recovery.mjs';
-import { recoverOrphan } from './ama/orphan-watchdog.mjs';
+import { recoverOrphan, isOrphanRecoveryWait } from './ama/orphan-watchdog.mjs';
 import { observeClosureLag } from './ama/closure-lag.mjs';
 // ── AMA closure orchestration: dispatch decision + coexistence + audit ────────
 //
@@ -1123,7 +1123,9 @@ async function dispatchAmaClosureFor({
     proofSignal => fetchHeadCloserVerifiedCommitImpl({ ...options, signal: proofSignal }));
   // Warm independent reads together. A serial timeout must not prevent the
   // other immutable proofs from making progress before the next watcher pass.
-  if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha) {
+  if (originalReviewedHead && settledReviewHeadSha && originalReviewedHead !== settledReviewHeadSha
+    && !(isOrphanHeadReviewRequested(reviewStateRow, settledReviewHeadSha)
+      && ['pending', 'reviewing'].includes(reviewStateRow?.review_status))) {
     cachedSuppression({ repoPath, prNumber, headSha: settledReviewHeadSha, logger })
       .catch(() => {});
     if (typeof resolveHamTerminalRemediationEvidenceImpl === 'function') {
@@ -2627,20 +2629,13 @@ export async function resolveMergeAgentCoexistenceForWatcher({
         `operation=${operation} timeout_ms=${err.timeoutMs || operationTimeoutMs || 'unknown'}. ` +
         'Skipping merge action for this PR on this tick so the posted-review phase can continue.',
     );
-    return {
-      outcome: 'ama-pending',
-      amaClosureResult: withAmaDispatchMetadata(
-        {
-          dispatched: false,
-          skipMergeAgent: true,
-          reason: 'ama-coexistence-operation-timeout',
-          namedReason: `ama-coexistence-operation-timeout:${operation}`,
-          timedOutOperation: operation,
-          timeoutMs: err.timeoutMs || operationTimeoutMs || null,
-        },
-        { amaEnabled: true },
-      ),
-    };
+    amaClosureResult = withAmaDispatchMetadata({
+      dispatched: false, skipMergeAgent: true,
+      reason: 'ama-coexistence-operation-timeout',
+      namedReason: `ama-coexistence-operation-timeout:${operation}`,
+      timedOutOperation: operation,
+      timeoutMs: err.timeoutMs || operationTimeoutMs || null,
+    }, { amaEnabled: true });
   }
   throwIfAborted(signal);
   logger?.info?.(JSON.stringify({ event: 'ama.closure_blocker', repo: repoPath, pr: prNumber,
@@ -2754,6 +2749,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     });
     if (orphan) return orphan;
   }
+  if (isOrphanRecoveryWait(amaClosureResult)) return { outcome: 'ama-pending', amaClosureResult };
   if (amaClosureResult?.commentOnlyFinalRoundAwaitingCi === true) {
     logger?.log?.(`[watcher] AMA holding ${repoPath}#${prNumber} for PR-head CI on a proven comment-only final-round head; not counted toward the retain-loop cap`);
     return { outcome: 'ama-pending', amaClosureResult };

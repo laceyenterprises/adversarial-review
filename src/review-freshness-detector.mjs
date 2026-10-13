@@ -89,6 +89,7 @@ export async function maybeFireReviewStalledAlert({
   pendingReviewCount,
   held = 0,
   lastPostedReviewMs,
+  oldestPendingSinceMs,
   stallThresholdMs = REVIEW_STALL_THRESHOLD_MS,
   debounceMs = REVIEW_STALL_ALERT_DEBOUNCE_MS,
   stateDir = REVIEW_FRESHNESS_STATE_DIR,
@@ -112,7 +113,8 @@ export async function maybeFireReviewStalledAlert({
     recordPostedReview(now, { stateDir, fsImpl });
     return { fired: false, reason: 'no posted-review baseline yet; seeded' };
   }
-  const ageMs = now - lastPosted;
+  const oldestPending = Number.isFinite(oldestPendingSinceMs) ? oldestPendingSinceMs : null;
+  const ageMs = now - Math.max(lastPosted, oldestPending ?? lastPosted);
   if (ageMs < stallThresholdMs) {
     return { fired: false, reason: 'reviews fresh', ageMs };
   }
@@ -134,6 +136,7 @@ export async function maybeFireReviewStalledAlert({
         age_ms: ageMs,
         pending_review_count: pendingReviewCount,
         held,
+        oldest_pending_since: oldestPending === null ? null : new Date(oldestPending).toISOString(),
         threshold_ms: stallThresholdMs,
         last_posted_review_at: new Date(lastPosted).toISOString(),
       },

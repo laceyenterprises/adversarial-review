@@ -992,7 +992,7 @@ test('LEASEDEFER-01 stale eligibility miss cannot transfer a live hammer lease t
   args.recoverStrandedCloserHeadImpl = options => recoverStrandedCloserHead({ ...options,
     requestRereviewImpl: () => assert.fail('hammer still owns H1') });
   const result = await maybeDispatchAmaClosureFor(args);
-  assert.equal(result.reason, 'not-eligible');
+  assert.equal(result.reason, `in-flight:${process.pid}`);
   assert.equal(result.retryAfterMs, 30_000);
   assert.equal(isHeldAmaCloserLease(args.rootDir, { repo: args.repoPath,
     prNumber: args.prNumber, headSha: 'H1' }), true);

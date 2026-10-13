@@ -1661,6 +1661,20 @@ function isPidAlive(pid, processKillImpl = process.kill) {
   }
 }
 
+function sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl = process.kill) {
+  const stderr = String(err?.stderr || '').trim();
+  // Accept only the provision-slot diagnostic, never a mixed refusal or receipt.
+  if (String(err?.stdout || '').trim()) return false;
+  const match = stderr.match(/^\[hq\] error: hq_acquire_lockdir: waited \d+s for '([^'\r\n]*\/worker-provision-slot-locks\/([^/'\r\n]+)\.lock\.d)' \(holder pid=(\d+) ppid=\d+ [^\r\n]* start='[^'\r\n]*' cmd='(?:(?!\r?\n\[hq\])[^])*'\)$/);
+  if (!match || match[2] !== workerId || Number(match[3]) <= 0) return false;
+  try {
+    processKillImpl(Number(match[3]), 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
 function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl = process.kill } = {}) {
   if (lease?.status !== AMA_CLOSER_LEASE_STATUS.PENDING) return false;
 
@@ -4276,6 +4290,20 @@ export async function maybeDispatchAmaCloser({
     }
   }
 
+  // Ownerless recovery can observe an old terminal receipt while a new launch
+  // is still provisioning. Its proof never supersedes a live pending lease.
+  const pendingLaunchLease = reconciliationRoot && reconciliationRepo && prMetadata?.headSha
+    ? readAmaCloserLease(reconciliationRoot, {
+      repo: reconciliationRepo, prNumber, headSha: prMetadata.headSha,
+    }) : null;
+  if (pendingLaunchLease?.status === AMA_CLOSER_LEASE_STATUS.PENDING
+    && !isReclaimablePendingAmaCloserLease(pendingLaunchLease, {
+      now: dispatchContext.dispatchedAt, processKillImpl,
+    })) {
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+      inFlight: true, reason: 'closer-lease-held-by-other-process', existingLease: pendingLaunchLease });
+  }
+
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
     && dispatchContext.orphanRecovery.headSha === prMetadata?.headSha;
   if (ownerProofRecovery) {
@@ -6512,44 +6540,9 @@ export async function maybeDispatchAmaCloser({
       },
     });
   }
-  writeAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, {
-    schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
-    repo,
-    prNumber,
-    headSha: targetRemediationSha,
-    reviewedSha,
-    targetRemediationSha,
-    dispatchReason,
-    workerClass,
-    dispatchWorkerClass,
-    workerId,
-    promptPath,
-    promptDir,
-    hqRoot,
-    dispatchTimeoutMs,
-    lastAttemptedAt: dispatchContext.dispatchedAt,
-    dispatchedAt: null,
-    dispatchId: existingRecord?.dispatchId || null,
-    launchRequestId: existingRecord?.launchRequestId || null,
-    retryCount: priorRetryCount + 1,
-    unexecutedRefundCount: existingDispatchHeadAdvanced ? 0 : Number(existingRecord?.unexecutedRefundCount || 0),
-    previousUnexecutedLaunchRequestId: existingRecord?.previousUnexecutedLaunchRequestId || null,
-    branchHolderBlockCount: existingBranchHolderBlockCount,
-    state: 'dispatching',
-    lastObservedStatus: existingRecord?.lastObservedStatus || null,
-    lastObservedAt: existingRecord?.lastObservedAt || null,
-    lastError: null,
-    // NOOWNER-01: a slow-cadence attempt keeps its window and page markers.
-    ...((slowRetryNote?.slowRetry || existingRecord?.prelaunchRefusalSlowRetry)
-      && !(existingDispatchHeadAdvanced && existingRecord?.prelaunchRefusalSlowRetry?.kind === 'non-execution')
-      ? { prelaunchRefusalSlowRetry: slowRetryNote?.slowRetry || existingRecord.prelaunchRefusalSlowRetry }
-      : {}),
-  });
 
-  // AMA-07 — acquire the duplicate-dispatch lease immediately before
-  // the hq launch, after every watcher-local preflight that can fail
-  // without creating a live closer. This keeps transient local write
-  // failures from leaving a permanent `pending` lease behind.
+  // Acquire the duplicate-dispatch lease before publishing launch intent.
+  // A losing caller must preserve the admitted launch's record and lease.
   let leaseResult = acquireAmaCloserLease({
     rootDir,
     fromReviewHandoff: reviewHandoffFindings,
@@ -6560,7 +6553,10 @@ export async function maybeDispatchAmaCloser({
   });
   if (!leaseResult.acquired) {
     const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
-    if ((ownerProofRecovery && (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
+    if (existingLease?.status === AMA_CLOSER_LEASE_STATUS.PENDING
+      && !isReclaimablePendingAmaCloserLease(existingLease, { now: dispatchContext.dispatchedAt, processKillImpl })) {
+      // A concurrent launch won the CAS after the initial observation.
+    } else if ((ownerProofRecovery && (existingLease?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
       || Date.parse(dispatchContext.dispatchedAt || new Date().toISOString()) - Date.parse(existingLease?.updatedAt) >= ownerlessBoundMs()))
       || (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded')) {
       deleteAmaCloserLease(rootDir, leaseIdentity);
@@ -6595,15 +6591,7 @@ export async function maybeDispatchAmaCloser({
     }
   }
   if (!leaseResult.acquired) {
-    // The intent record precedes lease acquisition. A refusal never reaches HQ,
-    // so it must not reserve the PR as an in-flight dispatch for the next hour.
-    // Preserve the competing lease and any prior receipt; no retry was admitted.
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
-      if (!current) return null;
-      return {
-        ...current, state: 'no-dispatch', reason: 'lease-held', retryCount: priorRetryCount,
-      };
-    });
+    // The competing launch owns its record as well as its pending lease.
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
@@ -6612,9 +6600,49 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  try {
+    writeAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, {
+      schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
+      repo,
+      prNumber,
+      headSha: targetRemediationSha,
+      reviewedSha,
+      targetRemediationSha,
+      dispatchReason,
+      workerClass,
+      dispatchWorkerClass,
+      workerId,
+      promptPath,
+      promptDir,
+      hqRoot,
+      dispatchTimeoutMs,
+      lastAttemptedAt: dispatchContext.dispatchedAt,
+      dispatchedAt: null,
+      dispatchId: existingRecord?.dispatchId || null,
+      launchRequestId: existingRecord?.launchRequestId || null,
+      retryCount: priorRetryCount + 1,
+      unexecutedRefundCount: existingDispatchHeadAdvanced ? 0 : Number(existingRecord?.unexecutedRefundCount || 0),
+      previousUnexecutedLaunchRequestId: existingRecord?.previousUnexecutedLaunchRequestId || null,
+      branchHolderBlockCount: existingBranchHolderBlockCount,
+      state: 'dispatching',
+      lastObservedStatus: existingRecord?.lastObservedStatus || null,
+      lastObservedAt: existingRecord?.lastObservedAt || null,
+      lastError: null,
+      // NOOWNER-01: a slow-cadence attempt keeps its window and page markers.
+      ...((slowRetryNote?.slowRetry || existingRecord?.prelaunchRefusalSlowRetry)
+        && !(existingDispatchHeadAdvanced && existingRecord?.prelaunchRefusalSlowRetry?.kind === 'non-execution')
+        ? { prelaunchRefusalSlowRetry: slowRetryNote?.slowRetry || existingRecord.prelaunchRefusalSlowRetry }
+        : {}),
+    });
+  } catch (error) {
+    // No command launched; a failed intent write must not strand ownership.
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    throw error;
+  }
+
   if (ownerProofRecovery) {
     const owner = await probeOrphanOwnership({ rootDir, repo, prNumber, headSha: prMetadata.headSha,
-      signal, logger, readStatusImpl: readLaunchRequestStatusImpl });
+      signal, logger, readStatusImpl: readLaunchRequestStatusImpl, excludeWatcherPid: process.pid });
     if (owner.owned) {
       deleteAmaCloserLease(rootDir, leaseIdentity);
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'live-run-in-flight' });
@@ -6974,7 +7002,12 @@ export async function maybeDispatchAmaCloser({
       // which is exactly the cascade observed in the macOS-upgrade incident.
       const transientFailure = !ambiguousLaunch
         && !branchHolderBlocked
-        && isTransientHqDispatchError(err);
+        // A live provision-slot holder is competing work, not proof this
+        // exited HQ call launched. Use the refusal path to release our lease
+        // and dispatching intent while preserving the next poll's budget.
+        && (isTransientHqDispatchError(err)
+          || (isHammerWorkerClass(workerClass)
+            && sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl)));
       const budgetPreservingFailure = branchHolderBlocked || transientFailure;
       const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
         const currentBranchHolderBlockBase = existingRecordIsReclaimableBranchHolderBlock

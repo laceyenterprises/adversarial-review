@@ -57,7 +57,8 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   const record = readAmaCloserDispatchRecord(rootDir, identity);
   const lease = readAmaCloserLease(rootDir, identity);
   const outcome = state.closer?.headSha === headSha ? state.closer.result : null;
-  const operatorNeeded = outcome?.needsOperator || outcome?.closureOwner?.owner === 'page';
+  const operatorNeeded = outcome?.needsOperator || outcome?.closureOwner?.owner === 'page'
+    || ['dispatch-retry-exhausted', 'hammer-retry-cap'].includes(outcome?.reason);
   const ended = Boolean(record?.launchRequestId) && isHammerWorkerClass(record?.workerClass)
     && ['failed', 'failed-without-merge', 'cancelled', 'canceled', 'stopped', 'aborted', 'succeeded', 'completed', 'terminal', 'unverified-terminal-success', 'operator_triage_required', 'reaped_stuck_requested'].includes(record?.lastObservedStatus)
     && !['merged', 'succeeded'].includes(record?.outcome);
@@ -70,9 +71,12 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
       && ['pending', 'pending-upstream', 'reviewing'].includes(reviewRow?.review_status)) ? 'handoff-review-active'
     : outcome && !operatorNeeded && ((!ended && outcome.dispatched) || outcome.inFlight
       || outcome.recoveryWait || outcome.retryAfterMs || outcome.backgroundDispatch
-      || (!record?.launchRequestId && ['hammer', 'conflict-rebase'].includes(outcome.closureOwner?.owner))) ? 'closer-route-available'
+      || (['hammer', 'conflict-rebase'].includes(outcome.closureOwner?.owner)
+        && now - state.observation.startedAt < OPERATOR_DECISION_NOTICE_BACKSTOP_MS)) ? 'closer-route-available'
     : null;
   const reason = held ? null : operatorNeeded ? 'no-route'
+    : ['hammer', 'conflict-rebase'].includes(outcome?.closureOwner?.owner)
+      && now - state.observation.startedAt >= OPERATOR_DECISION_NOTICE_BACKSTOP_MS ? 'backstop-45m'
     : ended ? 'hammer-ended-without-merge'
     : now - state.observation.startedAt >= OPERATOR_DECISION_NOTICE_BACKSTOP_MS ? 'backstop-45m' : null;
   if (!reason) {

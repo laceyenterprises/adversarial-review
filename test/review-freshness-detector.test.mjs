@@ -160,3 +160,27 @@ test('delivery failure does not persist the debounce marker (retries next tick)'
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+for (const [reviewMinutes, waitMinutes, fired, ageMinutes] of [
+  [120, 2, false, 2], [120, 70, true, 70], [10, 180, false, 10],
+  [120, null, true, 120],
+]) {
+  test(`stall uses waiting age: review=${reviewMinutes}, wait=${waitMinutes}`, async t => {
+    const stateDir = tmpState();
+    t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+    const calls = [];
+    const result = await maybeFireReviewStalledAlert({ now: T0, stateDir,
+      lastPostedReviewMs: T0 - reviewMinutes * 60000,
+      oldestPendingSinceMs: waitMinutes === null ? null : T0 - waitMinutes * 60000,
+      pendingReviewCount: 1, stallThresholdMs: 60 * 60000,
+      deliverAlertFn: async (text, meta) => calls.push({ text, meta }),
+    });
+    assert.equal(result.fired, fired);
+    assert.equal(result.ageMs, ageMinutes * 60000);
+    if (fired) {
+      assert.match(calls[0].text, new RegExp(`for ${ageMinutes}m`));
+      assert.equal(calls[0].meta.payload.oldest_pending_since,
+        waitMinutes === null ? null : new Date(T0 - waitMinutes * 60000).toISOString());
+    }
+  });
+}

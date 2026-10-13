@@ -33,6 +33,11 @@ for operator readability.
 - The watcher passes `latestPostedReviewAtMs()` from `data/reviews.db` as the
   primary freshness baseline. The filesystem `last-posted-review.json` value is
   consulted only when no primary value is supplied or available.
+- The stall clock starts at the later of the last genuine posted review and
+  the oldest valid `reviewed_at` admission timestamp in the first-pass waiting
+  population. Malformed admission timestamps are ignored when valid timestamps
+  remain; an unreadable query or no valid admissions falls back to the posting
+  baseline. The shared database handle reuses a prepared admission query.
 - Pending work is counted from open PR rows with `posted_at IS NULL`. This keeps
   the page unmaskable: a stale or mistaken `review_status='posted'` cannot hide
   a PR that never received a real published review.

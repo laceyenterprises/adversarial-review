@@ -15,6 +15,7 @@ import {
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { amaAuditFilePath, readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import {
   _resetPrelaunchRefusalPageDebounceForTests,
@@ -905,4 +906,119 @@ test('HOLDRELEASE-01: removal on an unchanged stopped head dispatches one hammer
     await maybeDispatchAmaCloser({ ...podiumArgs(rootDir, { at: '2026-10-11T17:02:00Z' }), ...next });
     assert.equal(hqLaunches(next).length, 0);
   } finally { db.close(); }
+});
+
+for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'other-live', 'same-dead', 'same-unknown', 'mixed-error', 'multiline-mixed-error', 'launch-receipt']) {
+  test(`REVIEWALERT-01 provision-slot contention: ${kind}`, async t => {
+    const rootDir = tmpRoot(t, 'reviewalert-slot-');
+    const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
+    const at = '2026-10-01T12:00:00Z';
+    let pendingLease;
+    const deps = closerDeps({ dispatch: async (_cmd, args) => {
+      pendingLease = readAmaCloserLease(rootDir, identity);
+      const workerId = args[args.indexOf('--worker-id') + 1];
+      const error = new Error('synthetic provision lock wait');
+      error.stderr = `[hq] error: hq_acquire_lockdir: waited 30s for '<root>/.hq/worker-provision-slot-locks/${kind === 'other-live' ? 'other-worker' : workerId}.lock.d' (holder pid=123 ppid=12 state=running start='synthetic-time' cmd='bash <script>')`;
+      if (kind === 'same-live-quoted') error.stderr = error.stderr.replace('bash <script>', "bash -c 'echo synthetic'");
+      if (kind === 'same-live-multiline' || kind === 'multiline-mixed-error') error.stderr = error.stderr.replace('bash <script>', 'bash -c echo\nsynthetic');
+      if (kind === 'mixed-error') error.stderr += '\n[hq] error: another refusal';
+      if (kind === 'multiline-mixed-error') error.stderr += '\n[hq] error: another refusal';
+      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      throw error;
+    } });
+    const args = closerArgs(rootDir, { ...identity, reviewedSha: identity.headSha,
+      dispatchContext: { dispatchedAt: at } });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      processKillImpl: () => { if (['same-dead', 'same-unknown'].includes(kind)) { const error = new Error('unavailable holder'); error.code = kind === 'same-dead' ? 'ESRCH' : 'EINVAL'; throw error; } } });
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    if (['same-live', 'same-live-quoted', 'same-live-multiline'].includes(kind)) {
+      assert.equal(result.reason, 'dispatch-deferred-transient');
+      assert.equal(result.skipMergeAgent, true);
+      assert.equal(result.releasedPendingLease, true);
+      assert.equal(record.state, 'dispatch-deferred-transient');
+      assert.equal(record.lastFailureTransient, true);
+      assert.match(record.lastError, /hq_acquire_lockdir/);
+      assert.equal(record.retryCount, 0);
+      assert.equal(record.prelaunchRefusalSlowRetry, undefined);
+      assert.equal(readAmaCloserLease(rootDir, identity), null);
+      assert.equal(pendingLease.status, 'pending');
+      assert.equal(deps.alerts.length, 0);
+      const recovered = closerDeps();
+      const nextArgs = { ...args, dispatchContext: { ...args.dispatchContext, dispatchedAt: minutesAfter(at, 1) } };
+      const next = await maybeDispatchAmaCloser({ ...nextArgs, ...recovered, processKillImpl: () => {} });
+      assert.equal(next.dispatched, true, JSON.stringify(next));
+      assert.equal(hqLaunches(recovered).length, 1);
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+      assert.equal(readAmaCloserDispatchRecord(rootDir, identity).retryCount, 1);
+      await maybeDispatchAmaCloser({ ...nextArgs, ...recovered, processKillImpl: () => {} });
+      assert.equal(hqLaunches(recovered).length, 1, 'successful retry retains duplicate-launch protection');
+    } else if (kind === 'launch-receipt') {
+      assert.equal(result.reason, 'dispatch-response-ambiguous');
+      assert.equal(result.releasedPendingLease, false);
+      assert.equal(record.state, 'dispatched');
+      assert.equal(record.launchRequestId, 'lrq_hammer');
+      assert.deepEqual(readAmaCloserLease(rootDir, identity), pendingLease);
+    } else {
+      assert.equal(result.reason, 'dispatch-failed');
+      assert.match(record.lastError, /hq_acquire_lockdir/);
+      assert.equal(readAmaCloserLease(rootDir, identity), null);
+    }
+  });
+}
+
+test('OWNERPROOF-01 recovery dispatch ignores its freshly acquired pending lease', async t => {
+  const rootDir = tmpRoot(t, 'ownerproof-self-lease-');
+  const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
+  const deps = closerDeps({ dispatch: async () => {
+    const lease = readAmaCloserLease(rootDir, identity);
+    assert.equal(lease.status, 'pending');
+    assert.equal(lease.watcherPid, process.pid);
+    return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+  } });
+  const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ...identity,
+    reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: new Date().toISOString(),
+      orphanRecovery: { ownerProof: true, headSha: identity.headSha } } }), ...deps });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(hqLaunches(deps).length, 1);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+});
+
+test('REVIEWALERT-01 ownerless recovery honours a live pending lease and earlier terminal receipt', async t => {
+  const rootDir = tmpRoot(t, 'reviewalert-pending-');
+  const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
+  const at = '2026-10-01T12:00:00Z';
+  const lease = acquireAmaCloserLease({ rootDir, ...identity, now: at, watcherPid: 123 }).lease;
+  const receipt = { ...identity, state: 'dispatched', workerClass: 'hammer', retryCount: 1,
+    launchRequestId: 'synthetic-old-launch', lastObservedStatus: 'failed', outcome: 'failed-without-merge' };
+  updateAmaCloserDispatchRecord(rootDir, identity, () => receipt);
+  const deps = closerDeps();
+  const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ...identity,
+    reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: minutesAfter(at, 1),
+      orphanRecovery: { ownerProof: true, headSha: identity.headSha } } }), ...deps, processKillImpl: () => {} });
+  assert.equal(result.inFlight, true);
+  assert.equal(hqLaunches(deps).length, 0);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
+  assert.deepEqual(readAmaCloserDispatchRecord(rootDir, identity), receipt);
+  assert.equal(deps.alerts.length, 0);
+});
+
+test('REVIEWALERT-01 a competing launch wins the late lease CAS without losing its receipt', async t => {
+  const rootDir = tmpRoot(t, 'reviewalert-cas-');
+  const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
+  const at = '2026-10-01T12:00:00Z';
+  const receipt = { ...identity, state: 'dispatching', workerClass: 'hammer',
+    retryCount: 1, lastAttemptedAt: at };
+  let lease;
+  const deps = closerDeps();
+  const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ...identity,
+    reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: at } }), ...deps,
+    processKillImpl: () => {}, observeCloserBacklogImpl: async () => {
+      lease = acquireAmaCloserLease({ rootDir, ...identity, now: at, watcherPid: 123 }).lease;
+      updateAmaCloserDispatchRecord(rootDir, identity, () => receipt);
+      return 0;
+    } });
+  assert.equal(result.reason, 'lease-held');
+  assert.equal(hqLaunches(deps).length, 0);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), lease);
+  assert.deepEqual(readAmaCloserDispatchRecord(rootDir, identity), receipt);
 });

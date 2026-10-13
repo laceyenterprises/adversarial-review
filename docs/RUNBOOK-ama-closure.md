@@ -1866,8 +1866,12 @@ the primary-change predicate. OWNERPROOF-01 replaces REMORPHAN-01's tick and
 reason admission with a PR-wide elapsed absence-of-owner clock. On an open,
 non-draft, unheld PR, a live reviewer/remediator process, a nonterminal launch in
 the session ledger, or a current-head review request younger than the bound
-proves ownership. Queued jobs, leases, refusal reasons and unreadable ledger
-results alone do not. A proven owner clears the clock; head movement does not.
+proves ownership. A current-head pending closer lease also proves ownership
+while its watcher PID is live and its launch expiry has not elapsed. Recovery's
+post-acquisition ownership probe excludes its own watcher PID from that lease
+check; competing leases and other live ownership evidence still hold dispatch.
+Queued jobs, other leases, refusal reasons and unreadable ledger results alone
+do not prove ownership. A proven owner clears the clock; head movement does not.
 After 15 minutes (`OWNERPROOF_IDLE_MINUTES` accepts a positive override), request
 current-head review when no authoritative review exists, otherwise request HAM
 repair. Historical stops and retry counters do not prevent that dispatch.
@@ -2347,6 +2351,16 @@ belongs to the CLI. The first unreadable ledger result stops further queries in
 that scan, and cancellation is checked between probes. In-flight `dispatching`
 intents are never probed or rewritten, because retries may carry a previous LRQ.
 New launch writes clear old `terminalLaunchStatus` and `reconciledAt` annotations.
+When HQ exits with only a same-worker provision-slot lock timeout and the
+holder PID is live, the closer records `dispatch-deferred-transient`, preserves
+the retry budget, and releases the failed attempt's pending lease. The next
+watcher poll can retry provisioning after contention clears; the refusal is
+logged through `ama_closer.pending_lease_released_after_dispatch_refusal`.
+A launch receipt or mixed diagnostic does not qualify for this slot-timeout
+classification. Embedded newlines in the holder's `cmd` metadata are accepted;
+an additional HQ diagnostic still refuses this classification. Launch receipts
+retain ownership for normal reconciliation,
+and competing live pending leases remain protected from duplicate dispatch.
 The capacity-only `reaped`/`cancelled` statuses do not expand per-PR retry authority.
 Launch completion is not merge success:
 reconciliation leaves closer leases and merge leases untouched, and successful

@@ -361,7 +361,7 @@ for (const route of ['lease', 'eligible', 'pending', 'in-progress', 'handoff', '
         ...identity, state: 'dispatched', lastObservedStatus: 'running' });
       if (['pending', 'in-progress'].includes(route)) writeFollowUpJob(join(getFollowUpJobDir(root, route === 'in-progress' ? 'inProgress' : route), 'synthetic.json'), {
         ...identity, status: route, kind: 'adversarial-review-follow-up' });
-      for (const now of [0, 44 * 60_000, 60 * 60_000]) await maybeDeliverOperatorDecisionNotice({ ...options, now,
+      for (const now of route === 'eligible' ? [0, 44 * 60_000] : [0, 44 * 60_000, 60 * 60_000]) await maybeDeliverOperatorDecisionNotice({ ...options, now,
         reviewRow: { review_status: 'pending' } });
       assert.equal(alerts.length, 0);
       assert.equal(logs.length, 1);
@@ -476,3 +476,26 @@ test('a queued retry keeps ownership after the previous hammer ended', async () 
     assert.equal(hasOperatorDecisionRequiredAlerted(root, identity), false);
   });
 });
+
+for (const owner of ['hammer', 'conflict-rebase']) {
+  for (const outcome of [{ closureOwner: { owner } }, { closureOwner: { owner }, needsOperator: true },
+    { closureOwner: { owner }, reason: 'dispatch-retry-exhausted' }, { closureOwner: { owner: 'page' } }]) {
+    test(`terminal launch retains latest route: ${JSON.stringify(outcome)}`, async () => {
+      await withRootAsync(async root => {
+        const { alerts, logs, options } = noticeFixture(root);
+        fixtureJSON(amaCloserDispatchFilePath(root, identity), { ...identity, workerClass: 'hammer',
+          launchRequestId: 'synthetic-launch', state: 'dispatched', lastObservedStatus: 'failed', outcome: 'failed-without-merge' });
+        recordOperatorNoticeCloserOutcome(root, identity, outcome);
+        await maybeDeliverOperatorDecisionNotice(options);
+        const operator = outcome.needsOperator || outcome.reason || outcome.closureOwner.owner === 'page';
+        assert.equal(alerts.length, operator ? 1 : 0);
+        if (!operator) {
+          assert.match(logs[0], /closer-route-available/);
+          await maybeDeliverOperatorDecisionNotice({ ...options, now: OPERATOR_DECISION_NOTICE_BACKSTOP_MS });
+          assert.equal(alerts.length, 1);
+          assert.equal(alerts[0].meta.payload.reason, 'backstop-45m');
+        }
+      });
+    });
+  }
+}

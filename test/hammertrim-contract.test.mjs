@@ -722,12 +722,14 @@ echo "CHECKS_OUTCOME=$HAM_PHASE_OUTCOME STATUS=$?"
 echo "$HAM_NO_MERGE_NOTE"
 exit 0`;
     }
-    const result = run('/bin/bash', ['-c', `${prefix}
+    const result = run('/bin/bash', ['-c', `unset HAM_HEAD_WAITED_SECONDS HAM_REQUIRED_CHECKS_WAITED_SECONDS
+${prefix}
 echo "CONTINUE_TO_CHECKS head=$POST_REMEDIATION_SHA waited=$HAM_HEAD_WAITED_SECONDS"
 }
 ham_verify_head_phase
 rc=$?
 echo "OUTCOME=$HAM_PHASE_OUTCOME rc=$rc"
+/bin/bash -c 'echo "CHILD_HEAD_WAIT=$HAM_HEAD_WAITED_SECONDS CHILD_CHECK_WAIT=$HAM_REQUIRED_CHECKS_WAITED_SECONDS"'
 ${checksContinuation}
 exit "$rc"`], env);
     assert.deepEqual(readdirSync('/tmp').filter(name => name.startsWith(`ham-${prNumber}-head-probe.`)), [], 'probe files are cleaned up');
@@ -735,6 +737,7 @@ exit "$rc"`], env);
       assert.equal(result.status, 20, result.stderr);
       assert.match(result.stderr, /Waited 300s for the published head and 0s for required checks/);
       assert.match(result.stdout, /OUTCOME=published-head-timeout/);
+      assert.match(result.stdout, /CHILD_HEAD_WAIT=300 CHILD_CHECK_WAIT=0/);
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
       assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 20);
       assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, before);
@@ -755,6 +758,7 @@ exit "$rc"`], env);
         assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, pushed);
       }
       if (scenario === 'two lag polls') {
+        assert.match(result.stdout, /CHILD_HEAD_WAIT=30 CHILD_CHECK_WAIT=0/);
         assert.match(result.stdout, /CHECKS_OUTCOME=github-gate-red STATUS=20/);
         assert.match(result.stdout, /Waited 30s for the published head and 15s for required checks/);
         const reads = readFileSync(join(dir, 'check-reads'), 'utf8').trim().split('\n');
@@ -786,8 +790,12 @@ for (const route of ['API commit', 'git fallback', 'git fallback without API hea
     assert.equal(render.status, 0, render.stderr);
     const script = join(dir, 'publish.sh');
     writeFileSync(script, render.stdout);
-    const result = run('/bin/bash', ['-c', `source "$1" || exit $?\necho "PUSHED=$HAM_PUSHED_HEAD FROM=$HAM_PUSHED_FROM_HEAD CHECK_START=\${HAM_REMOTE_CI_STARTED_AT:-unset} NOTE=$HAM_NO_MERGE_NOTE"`, '_', script], env);
+    const result = run('/bin/bash', ['-c', `unset HAM_HEAD_WAITED_SECONDS HAM_REQUIRED_CHECKS_WAITED_SECONDS
+source "$1" || exit $?
+echo "PUSHED=$HAM_PUSHED_HEAD FROM=$HAM_PUSHED_FROM_HEAD CHECK_START=\${HAM_REMOTE_CI_STARTED_AT:-unset} NOTE=$HAM_NO_MERGE_NOTE"
+/bin/bash -c 'echo "CHILD_HEAD_WAIT=$HAM_HEAD_WAITED_SECONDS CHILD_CHECK_WAIT=$HAM_REQUIRED_CHECKS_WAITED_SECONDS"'`, '_', script], env);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, new RegExp(`PUSHED=${pushed} FROM=${before} CHECK_START=unset NOTE=$`, 'm'));
+    assert.match(result.stdout, /CHILD_HEAD_WAIT=0 CHILD_CHECK_WAIT=0/);
   });
 }

@@ -602,7 +602,7 @@ Refresh and validate the live head:
 
 These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting dispatch values. Wait up to five minutes for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`; transient errors and probe alarms retry within that deadline, preserving cached JSON. Permanent errors or invalid heads stop the phase; a third head follows the race path. Then acquire the lease, rebase under the existing bounded policy, and validate. The wrapper prints the bounded tail, status, outcome, and lease state before cleanup. Nonzero status blocks continuation: 20 means parked/blocked, 21 means rebase conflict. Resolve conflicts below, revalidate, and rerun verify-head.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` with exported dispatch values. Wait at most 300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`; retry transient errors/alarms within that bound, preserving cached JSON. Permanent errors/invalid heads stop; a third head takes the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve conflicts, revalidate, rerun verify-head.
 
 
 ## Resolving merge conflicts

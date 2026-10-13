@@ -7,6 +7,7 @@ POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 # Wait only for read-after-push lag. A third head retains the ordinary race path.
 HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
 HAM_REQUIRED_CHECKS_WAITED_SECONDS="${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}"
+export HAM_HEAD_WAITED_SECONDS HAM_REQUIRED_CHECKS_WAITED_SECONDS
 ham_wait_for_published_head() {
   local started deadline now remaining probe_timeout probe_dir probe_exit probe_head
   started=$(date +%s)

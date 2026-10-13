@@ -284,9 +284,12 @@ export async function fetchHammerHeadRange(options) {
       steps.push({ before: event.before, after: event.after, kind: event.activity_type,
         actor: event.actor.login, time: event.timestamp });
       head = event.after;
-      if (head === target) return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
-        commits: [...steps.map(step => step.after), ...(hammerBaseHead && hammerBaseHead !== currentHead ? [currentHead] : [])],
-        proof: 'branch-activity', steps };
+    }
+    // Reaching the starting base is insufficient: every later ref mutation
+    // must be trusted and the complete chain must end at the expected head.
+    if (head === currentHead && steps.some(step => step.after === target)) {
+      return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
+        commits: steps.map(step => step.after), proof: 'branch-activity', steps };
     }
   } catch { /* Unreadable activity contributes no new proof. */ }
   return null;

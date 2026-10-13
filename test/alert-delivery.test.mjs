@@ -1163,6 +1163,23 @@ test('REVIEWMODEL-02: model refusal alerts deduplicate across PRs by model and U
   assert.notEqual(otherModel.id, first.id);
 });
 
+test('REVIEWMODEL-02: refusal receipt checks use their injected filesystem', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inspected = [];
+  const result = await deliverAlert('synthetic refusal', {
+    event: 'reviewer.model_unavailable', env,
+    payload: { refusedModel: 'Synthetic model', availableModels: [] },
+    now: new Date('2026-10-12T01:00:00Z'),
+    receiptFsImpl: { existsSync: path => { inspected.push(path); return path.includes('/delivered/'); } },
+  });
+  assert.equal(result.queued, false);
+  assert.equal(result.status, 'delivered');
+  assert.equal(inspected.length, 3);
+  assert.equal(inspected[2], result.queuePath);
+  assert.equal(existsSync(result.queuePath), false);
+});
+
 test('REVIEWMODEL-02: token filesystem mocks cannot create or hide durable refusal receipts', async (t) => {
   const { env, rootDir } = makeEnv();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

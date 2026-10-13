@@ -1369,6 +1369,7 @@ async function deliverAlert(text, {
   payload = null,
   env = process.env,
   fsImpl = { readFileSync, existsSync },
+  receiptFsImpl = { existsSync },
   requestText = httpRequestText,
   now = new Date(),
   loadConfigRuntimeImpl = null,
@@ -1387,7 +1388,7 @@ async function deliverAlert(text, {
     ])).digest('hex')}`;
     for (const state of ['pending', 'inflight', 'delivered', 'dead-letter']) {
       const existingPath = alertDocPath(rootDir, state, doc.id);
-      if (existsSync(existingPath)) {
+      if ((receiptFsImpl?.existsSync || existsSync)(existingPath)) {
         if (state === 'pending' || state === 'inflight') scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
         return { status: state, queued: false, id: doc.id, queuePath: existingPath };
       }

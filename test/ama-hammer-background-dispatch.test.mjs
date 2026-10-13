@@ -1474,7 +1474,17 @@ for (const largeEvidenceOnly of [false, true]) {
       orphanOptions: { now: new Date().toISOString(), hasOwnerImpl: async () => ({ owned: false }),
         pageImpl: async () => assert.fail('waiting cannot exhaust recovery') },
     });
-    const flush = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
+    // Metered GitHub reads also await filesystem I/O. Drain real event-loop
+    // turns before advancing the mocked clock so retries schedule at that time.
+    const flush = async () => { for (let i = 0; i < 100; i++) await new Promise(resolve => setImmediate(resolve)); };
+    const waitFor = async predicate => {
+      const deadline = performance.now() + 10_000;
+      while (!predicate()) {
+        assert.ok(performance.now() < deadline, 'background classification did not reach the expected stage');
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      await flush();
+    };
     const first = run();
     await flush();
     t.mock.timers.tick(5000);
@@ -1489,11 +1499,12 @@ for (const largeEvidenceOnly of [false, true]) {
     assert.equal(second.amaClosureResult.reason, AMA_HAMMER_BACKGROUND_REASON);
     await flush();
     if (!largeEvidenceOnly) {
+      await waitFor(() => counters.reads === 1);
       t.mock.timers.tick(1000);
-      await flush();
+      await waitFor(() => counters.jobs === 1);
       t.mock.timers.tick(20_000);
-      await flush();
     }
+    await waitFor(() => counters.launches === 1);
     await queue.drain();
     assert.equal(counters.launches, 1);
     assert.equal(Date.now() - startedAt, largeEvidenceOnly ? 12_000 : 33_000);

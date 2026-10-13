@@ -2682,11 +2682,9 @@ async function reconcileFollowUpJob({
     if (job?.finalRound === 'comment-only') {
       ({ job, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
         rootDir, job, reply: parsedReply, finalRound, completionLifecycle, pendingCiCompletion,
-        resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log,
-      }));
+        resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log }));
     }
-    const workerModel = worker?.model || 'codex';
-    const completionMetadata = {
+    const workerModel = worker?.model || 'codex', completionMetadata = {
       source: hasNonEmptyNarrative
         ? `${workerModel}-output-last-message`
         : `${workerModel}-remediation-reply-only`,

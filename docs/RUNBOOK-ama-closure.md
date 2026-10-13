@@ -1942,7 +1942,10 @@ Every recovery writes an `outcome-unknown` entry before the external call and
 settles it with bounded reason, action, timestamp and launch/review-request
 results. There are no refusal or exception refunds. Legacy missing outcomes
 remain explicit unknown summaries. Page enqueue failures retry without another
-launch. SQLite state and a nonblocking flock live under
+launch. Deduplicated delivered or dead-letter exhaustion pages end watchdog
+enqueue retries. Dead-letter pages warn once and remain an operator-actionable
+alert sink failure; the page guard does not assert successful transport.
+SQLite state and a nonblocking flock live under
 `data/follow-up-jobs/orphan-watchdog`; restarts preserve budgets and page guards.
 Filesystem, flock, SQLite and malformed-evidence failures log and page through
 `ama.orphan_recovery.store-error`, retaining `ama-pending` and `skipMergeAgent`.

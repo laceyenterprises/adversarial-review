@@ -116,6 +116,14 @@ Directory: `data/alert-delivery/`
   delivery failures.
 - Quarantine is intentionally operator-visible. A non-empty quarantine directory
   keeps `readAlertSinkHealth().ready` false even when no pending alerts remain.
+  Its returned `quarantineEventCounts` diagnostic samples the first 1,000 sorted
+  JSON filenames using the injected filesystem, with at most 20 event classes
+  plus an overflow bucket and sorted event keys. Empty quarantine skips document
+  reads. The last sink's breakdown is cached in memory until its quarantine
+  count or filesystem reader changes; empty quarantine clears the cache. Editing
+  or replacing files without changing the count can leave this diagnostic stale
+  until restart or a count change; live lane counts and ownership/readability
+  checks still run on every health read. Quarantined documents are never replayed.
 - Sink health resolves only the principal-owned state root; it does not require
   `ALERT_TO`. A missing recipient can therefore never hide already-owed work
   from the watcher health log or an operator probe.

@@ -290,9 +290,10 @@ $HAM_GATE_CAP_COMMENT"
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75 ] \
     && [ "$(jq -r '.timedOut // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
     HAM_PARK_WAITED=$(jq -r '.waited_s // "unknown"' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
-    echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s" >&2
+    echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s (configured ${HAM_MERGE_LEASE_WAIT_SECONDS}s); no merge" >&2
     ham_park_json=$(mktemp "${TMPDIR:-/tmp}/ham-lease-park.XXXXXX") || return 1
-    jq -n '{outcome:"deferred",reason:"merge-lease-timeout"}' > "$ham_park_json"
+    jq -n --argjson waited_s "$HAM_PARK_WAITED" --argjson configured_s "$HAM_MERGE_LEASE_WAIT_SECONDS" \
+      '{outcome:"deferred",reason:"merge-lease-timeout",waited_s:$waited_s,configured_s:$configured_s}' > "$ham_park_json"
     if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-audit.mjs append --hq-root <<HQ_ROOT>> \
       --repo <<REPO>> --pr <<PR_NUMBER>> --head "$POST_REMEDIATION_SHA" \
       --outcome deferred --closure-authority ham-terminal-remediation \

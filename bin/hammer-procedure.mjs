@@ -22,11 +22,18 @@ source = source.replace(
 source = `# Waits are fixed by the procedure; do not export or shorten them.
 # A hammer that has only the lease left waits for it.
 ham_procedure_floor() {
-  local name="$1" floor="$2" given used
+  local name="$1" floor="$2" given normalized used
   given="\${!name-}"
   used="$floor"
-  if [[ "$given" =~ ^[0-9]+$ ]] && [ "\${#given}" -le 9 ] && [ "$((10#$given))" -ge "$floor" ]; then
-    used="$((10#$given))"
+  normalized="$given"
+  while [[ "$normalized" == 0* ]] && [ "\${#normalized}" -gt 1 ]; do
+    normalized="\${normalized:1}"
+  done
+  if [[ "$normalized" =~ ^[0-9]+$ ]] && {
+    [ "\${#normalized}" -gt "\${#floor}" ] ||
+    { [ "\${#normalized}" -eq "\${#floor}" ] && [[ "$normalized" > "$floor" || "$normalized" == "$floor" ]]; }
+  }; then
+    used="$normalized"
   elif [ -n "$given" ]; then
     echo "HAM procedure floor: $name given=$given used=$used" >&2
   fi

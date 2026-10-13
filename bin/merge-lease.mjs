@@ -343,7 +343,8 @@ async function runAcquire(argv, deps) {
     const queue = readMergeLeaseWaiters(rootDir, { repo, base });
     const position = queue.findIndex((w) => Number(w.pr) === pr && w.head === head && Number(w.holderPid) === ownerPid);
     deps.stderr.write(`HAM merge lease wait: waited=${Math.floor((deps.nowMs() - startedMs) / 1000)}s allowed=${waitSeconds}s holder=${status.holder?.holderPr ?? 'none'} queue=${position < 0 ? 'unregistered' : position + 1}\n`);
-    nextProgressMs = deps.nowMs() + 30000;
+    // Leave slack for the bounded lock retries and the next polling tick.
+    nextProgressMs = deps.nowMs() + 25000;
   };
   let gateAttempt = null;
   while (!gateAttempt) {

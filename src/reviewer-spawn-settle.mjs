@@ -524,6 +524,7 @@ async function spawnReviewer(args) {
     if (gate.paused) {
       // Keep the triggering quota hold (and both retry budgets) while the
       // fallback credential is held. Do not manufacture an OAuth failure.
+      if (quotaResult) args.onPostOperationSettled?.(quotaResult);
       return quotaResult || {
         ok: false,
         failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
@@ -582,7 +583,7 @@ async function spawnReviewer(args) {
     try {
       await (args.deliverAlertImpl || deliverAlert)(
         `Adversarial reviewer model refused: ${detail.refusedModel}\nAvailable models:\n${detail.availableModels.join('\n')}\nUpdate the configured reviewer model.`,
-        { event: 'reviewer.model_unavailable', payload: detail, env },
+        { event: 'reviewer.model_unavailable', payload: detail, env: args.env || process.env },
       );
     } catch (error) {
       console.warn(`[watcher] Failed to queue model-unavailable alert: ${error.message}`);

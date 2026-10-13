@@ -80,6 +80,11 @@ Directory: `data/alert-delivery/`
   series can page again on the same head. If record persistence fails, no series
   ID is supplied and the normal outbox identity applies; the lane debounce still
   suppresses repeats. Legacy payloads without a series ID also use normal IDs.
+- Model-refusal `reviewer.model_unavailable` alerts use
+  `reviewer-model-<sha256(JSON.stringify([refusedModel, YYYY-MM-DD]))>`,
+  where the date is UTC. Daily deduplication reuses pending, inflight, delivered
+  and dead-letter documents for the same refused model; a new UTC day allows
+  a new alert.
 - AMA automated recovery exhaustion pages use
   `ama-recovery-<sha256(JSON.stringify([repo, pr, head, reason]))>`. Same-reason
   retries reuse pending, inflight, delivered and dead-letter documents; a later

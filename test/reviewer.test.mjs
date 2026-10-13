@@ -6458,6 +6458,48 @@ test('REVIEWMODEL-02: Antigravity model refusal preserves diagnostics and never 
   assert.equal(calls, 1);
 });
 
+test('REVIEWMODEL-02: typed refusal retains original stdout diagnostics through catch', async () => {
+  const { parseReviewerModelUnavailable, classifyReviewerFailure } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
+  const stderr = `Environment notice\n${readFileSync(new URL('./fixtures/reviewer-model-unavailable.txt', import.meta.url), 'utf8')}`;
+  const detail = parseReviewerModelUnavailable(stderr);
+  assert.equal(detail.refusedModel, 'Gemini 3.1 Pro (High)');
+  assert.deepEqual(detail.availableModels, [
+    'Gemini 3.8 Flash (High)', 'Gemini 3.8 Flash (Medium)', 'Gemini 3.8 Flash (Low)',
+    'Claude Opus 5.5 (Low)', 'Claude Opus 5.5 (Medium)', 'Claude Opus 5.5 (High)',
+    'Claude Sonnet 5.5 (Low)', 'Claude Sonnet 5.5 (Medium)', 'Claude Sonnet 5.5 (High)',
+    'GPT-OSS 120B (Medium)',
+  ]);
+  assert.equal(classifyReviewerFailure(stderr, 1), 'reviewer-model-unavailable');
+  const { reviewerFailureClassFromStoredRow, infraRecoverableFailureClass } = await import('../src/reviewer-failure-classification.mjs');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: `[reviewer-model-unavailable] ${stderr}` }), 'reviewer-model-unavailable');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: stderr }), 'reviewer-model-unavailable');
+  assert.equal(reviewerFailureClassFromStoredRow({ failure_message: '[reviewer-model-unavailable] synthetic refusal' }), 'reviewer-model-unavailable');
+  for (const failure_message of [stderr, `[reviewer-model-unavailable] ${stderr}`]) {
+    assert.equal(infraRecoverableFailureClass({ failure_message }), null);
+  }
+  let calls = 0;
+  await assert.rejects(reviewWithGemini('+synthetic diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'synthetic', oauthCreds: { access_token: 'synthetic' } }),
+    materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
+    releaseGeminiCredentialCheckoutImpl: async () => {},
+    assertAgyAuthImpl: async () => {},
+    retryDelaysMs: [1, 2],
+    sleepImpl: async () => assert.fail('model refusal must not wait'),
+    spawnAgyReviewImpl: async () => {
+      calls++;
+      throw Object.assign(new Error('captured stdout refusal'), { stderr, failureClass: 'reviewer-model-unavailable', failureDetail: detail });
+    },
+  }), error => {
+    assert.equal(error.failureClass, 'reviewer-model-unavailable');
+    assert.deepEqual(error.failureDetail, detail);
+    assert.equal(error.message, 'captured stdout refusal');
+    assert.equal(error.stderr, stderr);
+    return true;
+  });
+  assert.equal(calls, 1);
+});
+
 test('REVIEWMODEL-02: refusal parsing handles quoted and bare CLI model tokens', async () => {
   const { parseReviewerModelUnavailable } = await import('../src/adapters/reviewer-runtime/cli-direct/classification.mjs');
   for (const [argument, expected] of [

@@ -565,6 +565,7 @@ test('REVIEWMODEL-02: first model refusal falls back immediately with the logica
     const args = {
       ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }, capture: newCapture() }),
       rootDir, repo: 'example/synthetic', reviewerModel: 'gemini', builderTag: 'codex',
+      env: { ALERT_TO: 'synthetic-operator', ALERT_URL: 'http://example.invalid/alert' },
       beginReviewerPassImpl: beginReviewerPass, completeReviewerPassImpl: completeReviewerPass,
       geminiQuotaFallbackRoute: { reviewerModel: 'claude-code' },
       onGeminiQuotaFallback: route => {
@@ -599,7 +600,7 @@ test('REVIEWMODEL-02: first model refusal falls back immediately with the logica
     assert.equal(settled[0].ok, true);
     assert.equal(alerts.length, 1);
     assert.equal(alerts[0].options.payload.availableModels.length, 10);
-    assert.equal(alerts[0].options.env, args.quotaCheckEnv);
+    assert.equal(alerts[0].options.env, args.env);
     assert.equal(readGeminiQuotaCooldown({ rootDir, env: {} }), null);
     const db = openReviewStateDb(rootDir);
     try {
@@ -651,8 +652,8 @@ for (const [name, fallback] of [
       assert.equal(capture.spawnCalls, 1);
       assert.equal(result.failureClass, 'reviewer-model-unavailable');
       assert.equal(alerts[0].env, env);
-      // A held fallback defers the caller's settlement to the returned result.
-      assert.equal(settled.length, name === 'credential-held fallback' ? 0 : 1);
+      assert.equal(settled.length, 1);
+      assert.equal(settled[0], result);
       const failures = [];
       const retry = () => assert.fail('model refusal must not release the claim for retries');
       settleReviewerAttempt({

@@ -2880,6 +2880,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       }
     }
   } catch (err) {
+    if (err.failureClass === 'reviewer-model-unavailable') throw err;
     stdout = err.stdout || '';
     stderr = err.stderr || '';
     quotaSignal = runtime === 'antigravity' && looksLikeGeminiQuotaError(err, stdout, stderr);

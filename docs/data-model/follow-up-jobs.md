@@ -128,6 +128,17 @@ optional fields accompany the ordinary request fields (`requested`,
 `requestedAt`, `reason`, `triggered`, `status`, `outcomeReason`, `reviewRow`). The
 watcher still gates reviewer dispatch on live green external CI.
 
+For a reply whose operational blockers are only CI, reconciliation also projects
+`completion.pendingCiOnly: true` and `completion.workerPushedHeadSha`. For ordinary
+rounds, the live PR head must differ from the current round's `startHeadSha`
+(falling back to `revisionRef`), and an independent CI probe must match that head
+and satisfy `classifyFinalRoundOperationalBlockers`. Comment-only final rounds
+instead require the worker push proof described below and probed pending CI.
+`resolvePendingCiCompletion` in `src/comment-only-final-round-completion.mjs`
+owns this projection and reply normalization. The fields select the public
+CI-running completion comment; they do not suppress an ordinary requested
+re-review or grant merge authority.
+
 Automatic failed-CI admission leaves a stopped `no-progress` job stopped and
 hands ownership to the hammer; it cannot reopen that job on a later CI probe.
 Explicit operator remediation retriggers retain their existing allowlist.
@@ -183,7 +194,7 @@ A zero-blocker `Comment only` review with non-blocking findings creates a job
 marked `finalRound: "comment-only"`. Every final-round job that reconciles a
 worker reply records `reReview.suppressed: "comment-only-final-round"`, whatever
 directory it lands in. The optional
-`completion.workerPushedHeadSha` is a 40-character commit SHA written only when
+For these final rounds, `completion.workerPushedHeadSha` is a 40-character commit SHA written only when
 the worker workspace's local `HEAD` matches a retried live GitHub PR-head lookup,
 its commit carries the matching `Worker-Job-Id` trailer, and a local replay
 proof holds (COMMENTCLOSE-01): every reviewed commit has a patch-equivalent in

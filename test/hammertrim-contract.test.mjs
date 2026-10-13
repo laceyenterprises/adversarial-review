@@ -489,7 +489,7 @@ esac
         .replace('if ! ham_mark_ama_closer_lease_succeeded; then', 'if ! ham_fixture_mark_ama_closer_lease_succeeded; then')
       : render.stdout);
     // Advance the CI deadline with a fake clock, never by lowering procedure waits.
-    writeFileSync(join(dir, 'clock'), '0');
+    writeFileSync(join(dir, 'clock'), '1700000000');
     writeFileSync(join(bin, 'date'), `#!/bin/sh
 if [ "$1" = +%s ]; then
   value=$(cat "$TMPDIR/clock")
@@ -659,7 +659,7 @@ for (const scenario of ['first retry visible', 'already visible', 'two lag polls
       rmSync(`/tmp/ham-${prNumber}-pr-after.json`, { force: true });
     });
     const before = 'a'.repeat(40), pushed = 'b'.repeat(40), third = 'c'.repeat(40);
-    writeFileSync(join(dir, 'clock'), '0');
+    writeFileSync(join(dir, 'clock'), '1700000000');
     writeFileSync(join(dir, 'polls'), '0');
     writeFileSync(join(dir, 'date'), '#!/bin/sh\ncat "$TMPDIR/clock"\n', { mode: 0o755 });
     writeFileSync(join(dir, 'sleep'), '#!/bin/sh\necho "$1" >> "$TMPDIR/sleeps"\nn=$(cat "$TMPDIR/clock"); echo $((n + $1)) > "$TMPDIR/clock"\n', { mode: 0o755 });

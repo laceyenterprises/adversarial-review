@@ -1057,7 +1057,7 @@ test('publishAdversarialGateStatus skips duplicate decisions already recorded fo
   assert.equal(second.reason, 'unchanged');
   assert.equal(ghCalls.length, 1);
   assert.deepEqual(writeOptions, [{ mode: 0o640 }]);
-  assert.deepEqual(Object.keys(ghCalls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH']);
+  assert.deepEqual(Object.keys(ghCalls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH', 'GH_DEBUG', ...['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'].filter(key => process.env[key] !== undefined)].sort());
 
   const record = records.get(JSON.stringify({
     repo: 'laceyenterprises/adversarial-review',

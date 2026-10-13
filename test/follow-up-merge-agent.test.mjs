@@ -6012,9 +6012,11 @@ test('dispatchMergeAgentForPR retries consumed-label cleanup even when agent-os 
   assert.equal(ghCalls[0].args.at(-1), 'merge-agent-requested');
 });
 
-test('fetchMergeAgentCandidate fetches operator label events in parallel', async () => {
+test('fetchMergeAgentCandidate fetches operator label events in parallel', { timeout: 5000 }, async () => {
   const eventResolvers = [];
   let eventFetchesStarted = 0;
+  let resolveEventStart;
+  const eventsStarted = new Promise(resolve => { resolveEventStart = resolve; });
   const candidatePromise = fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
     env: { GITHUB_TOKEN: 'test-token' },
     execFileImpl: async (_cmd, args) => {
@@ -6046,11 +6048,12 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
       eventFetchesStarted += 1;
       return new Promise((resolve) => {
         eventResolvers.push(resolve);
+        if (eventFetchesStarted === 2) resolveEventStart();
       });
     },
   });
 
-  await new Promise((resolve) => setImmediate(resolve));
+  await eventsStarted;
   assert.equal(eventFetchesStarted, 2);
   for (const resolve of eventResolvers) {
     resolve({
@@ -6104,9 +6107,11 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   assert.equal(candidate.mergeAgentRequestEvent.label, 'merge-agent-requested');
 });
 
-test('fetchMergeAgentCandidate shares one branch-protection read per poll repo/base', async () => {
+test('fetchMergeAgentCandidate shares one branch-protection read per poll repo/base', { timeout: 5000 }, async () => {
   const branchProtectionCache = new Map();
   let protectionReads = 0;
+  let resolveProtectionStart;
+  const protectionStarted = new Promise(resolve => { resolveProtectionStart = resolve; });
   let releaseProtection;
   const protectionBlocked = new Promise((resolve) => {
     releaseProtection = resolve;
@@ -6131,6 +6136,7 @@ test('fetchMergeAgentCandidate shares one branch-protection read per poll repo/b
     assert.equal(args[0], 'api');
     assert.match(String(args[1]), /\/branches\/main\/protection$/);
     protectionReads += 1;
+    resolveProtectionStart();
     await protectionBlocked;
     return {
       stdout: JSON.stringify({
@@ -6148,7 +6154,7 @@ test('fetchMergeAgentCandidate shares one branch-protection read per poll repo/b
       branchProtectionCache,
     },
   ));
-  await new Promise((resolve) => setImmediate(resolve));
+  await protectionStarted;
   assert.equal(protectionReads, 1, 'concurrent candidates reuse the in-flight REST read');
   releaseProtection();
 

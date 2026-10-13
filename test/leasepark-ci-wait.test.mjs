@@ -44,7 +44,7 @@ HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1
 ${render(release).replace(' release \\', ' release --root-dir "$TEST_ROOT" \\')}
 ${helpers}
 ${acquire}
-gh() { printf '{"headRefOid":"%s","state":"OPEN","isDraft":false,"labels":[],"statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"; }
+ham_pr() { printf '{"headRefOid":"%s","state":"OPEN","isDraft":false,"labels":[],"statusCheckRollup":[]}' "$POST_REMEDIATION_SHA"; }
 ham_is_full_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
 HAM_MERGE_LEASE_WAIT_SECONDS=0
 ${fixture ? `${overlapHelper}
@@ -225,7 +225,7 @@ TEST_ROOT=${quote(dir)}
 POST_REMEDIATION_SHA=${head}
 BASE_BRANCH=main
 HAM_MERGE_LEASE_WAIT_SECONDS=1
-gh() {
+ham_pr() {
   if [[ "$*" == *--jq* ]]; then echo ${state}; else echo '{"statusCheckRollup":[]}'; fi
 }
 ${acquire}

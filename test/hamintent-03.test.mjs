@@ -153,7 +153,9 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
     const fixture = JSON.parse(readFileSync(${JSON.stringify(fixturePath)}, 'utf8'));
     export async function load(url, context, nextLoad) {
       let source;
-      if (url.endsWith('/src/github-api.mjs')) {
+      if (url.endsWith('/src/hammer-pr-read.mjs')) {
+        source = 'export async function fetchHammerPr() { return ' + JSON.stringify(fixture.rollup) + '; }';
+      } else if (url.endsWith('/src/github-api.mjs')) {
         source = 'export async function fetchPullRequestRollup() { return ' + JSON.stringify(fixture.rollup) + '; }';
       } else if (url.endsWith('/src/ama/history-reader.mjs')) {
         source = 'const responses = ' + JSON.stringify(fixture.responses) + ';' +
@@ -168,7 +170,8 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
       return source === undefined ? nextLoad(url, context) : { format: 'module', source, shortCircuit: true };
     }
   `);
-  const env = { ...process.env, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '1',
+  writeFileSync(join(directory, 'gh'), '#!/bin/sh\necho offline-fixture-gh >&2\nexit 1\n', { mode: 0o755 });
+  const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '1',
     HAM_PR_URL: 'https://github.com/fixture/repo/pull/1',
     HAM_REVIEWED_SHA: author, HAM_TARGET_REMEDIATION_SHA: head, HAM_MERGE_METHOD: 'squash',
     HAM_HQ_ROOT: directory, HAM_REVIEWER: 'claude', HAM_RISK_CLASS: 'low',

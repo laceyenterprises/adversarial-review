@@ -126,6 +126,8 @@ if (result) console.log(JSON.stringify(result));
     const nodeStub = join(bin, 'fixture-node');
     writeFileSync(nodeStub, `#!/bin/sh
 case "$1" in
+  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
+  */bin/hammer-pr-read.mjs) shift 2; number="$1"; shift; exec gh pr view "$number" "$@" ;;
   --input-type=module) cat >/dev/null; echo '{"ok":true,"state":"OPEN","headMatches":true,"checksConclusion":"SUCCESS"}' ;;
   */bin/dismiss-withdrawn-reviews.mjs|*/bin/merge-commit-body.mjs) exec "${process.execPath}" "$@" ;;
   *) exit 0 ;;

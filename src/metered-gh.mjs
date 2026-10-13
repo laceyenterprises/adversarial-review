@@ -5,7 +5,11 @@ import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
-import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit, resolveRateLimitSharedStatePath, resolveThrottleFloor, markGitHubRateLimited, recordRateLimitedCall, currentGitHubBudgetScope, GitHubBudgetDeferredError } from './rate-limit-throttle.mjs';
+import {
+  awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit,
+  resolveRateLimitSharedStatePath, resolveThrottleFloor, markGitHubRateLimited,
+  recordRateLimitedCall, currentGitHubBudgetScope, GitHubBudgetDeferredError,
+} from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const bridge = fileURLToPath(new URL('../bin/metered-gh.mjs', import.meta.url));
@@ -52,7 +56,11 @@ function isRateLimitedError(err) {
 }
 
 function debugOptions(options = {}) {
-  return { ...options, env: { ...(options.env || process.env), GHO_RATE_LIMIT_SHARED_STATE_PATH: process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH, GHO_RATE_LIMIT_THROTTLE_FLOOR: process.env.GHO_RATE_LIMIT_THROTTLE_FLOOR, GH_DEBUG: 'api' } };
+  const env = { ...(options.env || process.env), GH_DEBUG: 'api' };
+  for (const key of ['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR']) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return { ...options, env };
 }
 
 function responseRateLimited(result, parsed, failed) {
@@ -71,7 +79,10 @@ function responseRateLimited(result, parsed, failed) {
     parsed.observations.at(-1).rateLimited = true;
   }
   if (result?.message && result.stderr) result.message = result.message.replace(String(result.stderr), parsed.stderr);
-  if (result && 'stderr' in result) result.stderr = parsed.stderr;
+  if (result && 'stderr' in result) {
+    result.stderr = Buffer.isBuffer(result.stderr) ? Buffer.from(parsed.stderr) : parsed.stderr;
+    if (Array.isArray(result.output)) result.output[2] = result.stderr;
+  }
   if (limited) { result.rateLimited = true; markGitHubRateLimited(); }
   return limited;
 }
@@ -131,13 +142,13 @@ function meteredExecFileSync(execFileImpl, command, args, options = {}) {
     // execFileSync normally returns only stdout. Capture stderr as well so all
     // successful responses are accounted for; injected executors keep their seam.
     if (execFileImpl === execFileSync) {
-      const result = finishSync(spawnSync(command, args, { ...debugOptions(options), stdio: 'pipe' }));
+      const result = spawnSync(command, args, { ...debugOptions(options), stdio: 'pipe' });
       if (result.error || result.status !== 0) {
         const err = result.error || new Error(`Command failed: gh ${args.slice(0, 2).join(' ')}`);
         Object.assign(err, { stdout: result.stdout, stderr: result.stderr, status: result.status, signal: result.signal });
         throw err;
       }
-      return result.stdout;
+      return finishSync(result).stdout;
     }
     const result = execFileImpl(command, args, debugOptions(options));
     if (result && typeof result === 'object' && 'status' in result) finishSync(result);

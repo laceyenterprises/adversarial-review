@@ -121,8 +121,8 @@ test('a different role selects a different bot identity for the same subject', a
     makeKey({ revisionRef: 'sha-b' }),
   );
   assert.equal(calls[0].options.env.GH_TOKEN, 'gemini-bot-token');
-  // The comms env is allowlisted: only PATH/HOME/GH_TOKEN survive.
-  assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH']);
+  // The comms env is allowlisted: only token routing and meter transport controls survive.
+  assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH', 'GH_DEBUG', ...['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'].filter(key => process.env[key] !== undefined)].sort());
 });
 
 test('role identity takes precedence over the adapter-level worker class', async () => {

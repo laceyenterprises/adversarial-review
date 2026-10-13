@@ -1,7 +1,5 @@
-import { runLowBudgetClosingTick } from './watcher-github-budget.mjs';
-import { fetchHammerPr } from './hammer-pr-read.mjs';
-import { readGitHubBudgetState, currentGitHubBudgetScope, withGitHubBudgetScope } from './rate-limit-throttle.mjs';
-import * as adversarialGateRecords from './adversarial-gate-status.mjs';
+import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
+import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
 /**
  * LAC-11: PR Watcher
@@ -1168,32 +1166,11 @@ async function pollOnceWithinBudget(
   const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
   try {
-    const budgets = await readGitHubBudgetState();
-    const closingRows = db.prepare("SELECT * FROM reviewed_prs WHERE pr_state = 'open' AND review_status = 'posted'").all()
-      .filter(row => activeRepos.includes(row.repo));
-    if (await runLowBudgetClosingTick({
-      budgets,
-      rows: closingRows,
-      isReady: row => adversarialGateRecords.readGateRecord?.(ROOT, { repo: row.repo, prNumber: row.pr_number, headSha: row.reviewer_head_sha })?.state === 'success',
-      serve: async row => {
-        const pr = await fetchHammerPr(row.repo, row.pr_number, { withChecks: false });
-        if (pr.state === 'MERGED') { stmtMarkMerged.run(pr.mergedAt, row.repo, row.pr_number); return; }
-        if (pr.state === 'CLOSED') { stmtMarkClosed.run(pr.closedAt, row.repo, row.pr_number); return; }
-        if (pr.headRefOid !== row.reviewer_head_sha) return;
-        const subjectRef = { domainId: row.domain_id || WATCHER_PRIMARY_DOMAIN_ID,
-          subjectExternalId: `${row.repo}#${row.pr_number}`, revisionRef: pr.headRefOid };
-        await handlePostedReviewRow({
-          rootDir: ROOT, repoPath: row.repo, prNumber: row.pr_number, existing: row,
-          subjectRef, currentRevisionRef: pr.headRefOid, labelNames: pr.labels || [],
-          operatorSurface: createWatcherOperatorSurface(), domainId: subjectRef.domainId,
-          projectGateStatusSafe: reviewRow => projectAdversarialGateStatus(ROOT, {
-            repo: row.repo, prNumber: row.pr_number, headSha: pr.headRefOid,
-            labels: pr.labels, prAuthor: pr.author, reviewRow, domainId: subjectRef.domainId,
-            execFileImpl: execFileAsync,
-          }),
-        });
-      },
-    })) { currentGitHubBudgetScope().deferred = true; return; }
+    if (await runLowBudgetWatcherPoll({ db, activeRepos, rootDir: ROOT,
+      domainId: WATCHER_PRIMARY_DOMAIN_ID, execFileImpl: execFileAsync,
+      handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus,
+      markMerged: (...args) => stmtMarkMerged.run(...args), markClosed: (...args) => stmtMarkClosed.run(...args),
+    })) return;
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
     startPendingReviewedAttestationRetryForWatcher({
       rootDir: ROOT,

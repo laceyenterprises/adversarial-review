@@ -276,8 +276,11 @@ test('GHBUDGET-01: src gh executions use the shared meter', async () => {
       if (node.arguments[0]?.value === 'gh' && callee !== 'formatCommandForLog') {
         offenders.push(`${file}:${node.loc.start.line}`);
       }
-      if (/^(?:exec|execSync|spawn|spawnSync|execFile|execFileSync)(?:Impl|Async)?$/.test(callee)
-        && node.arguments.some(arg => arg.type === 'Literal' && /\bgh\s+(?:api|pr|repo)\b/.test(String(arg.value)))) {
+      let shellGh = false;
+      for (const arg of node.arguments) visit(arg, child => {
+        if (child.type === 'Literal' && /\bgh\s+/.test(String(child.value))) shellGh = true;
+      });
+      if (/^(?:exec|execSync|spawn|spawnSync|execFile|execFileSync)(?:Impl|Async)?$/.test(callee) && shellGh) {
         offenders.push(`${file}:${node.loc.start.line}: shell command`);
       }
     });
@@ -363,4 +366,25 @@ test('GHBUDGET-01: failed fake gh responses record the window count and preserve
   assert.equal(err.stderr, 'gh: rate limit exceeded\n');
   assert.equal(err.code, 1);
   assert.equal(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')).buckets.graphql.rateLimitedCalls, 1);
+});
+
+test('GHBUDGET-01: native synchronous gh accounts a rejected response exactly once', async t => {
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { meteredExecFileSync } = await import('../src/metered-gh.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'metered-sync-'));
+  const prior = process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(dir, 'state.json');
+  t.after(() => { if (prior === undefined) delete process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH; else process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = prior; rmSync(dir, { recursive: true, force: true }); });
+  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+process.stderr.write('* Request at fixture\\n< HTTP/2.0 429 Too Many Requests\\n< X-Ratelimit-Resource: graphql\\n< X-Ratelimit-Remaining: 4900\\n< X-Ratelimit-Reset: 4102444800\\nfixture-private-body\\n* Request took 1ms\\ngh: rate limit exceeded\\n');
+process.exit(1);
+`, { mode: 0o755 });
+  assert.throws(() => meteredExecFileSync(execFileSync, 'gh', ['api', 'graphql'], {
+    env: { PATH: `${dir}:${process.env.PATH}` }, encoding: 'utf8', timeout: 2000,
+  }), err => err.stderr === 'gh: rate limit exceeded\n' && !err.message.includes('fixture-private-body'));
+  const state = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
+  assert.equal(state.buckets.graphql.rateLimitedCalls, 1);
 });

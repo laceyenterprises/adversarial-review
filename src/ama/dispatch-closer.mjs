@@ -1665,7 +1665,7 @@ function sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl) {
   const stderr = String(err?.stderr || '').trim();
   // Accept only the provision-slot diagnostic, never a mixed refusal or receipt.
   if (String(err?.stdout || '').trim() || stderr.split('\n').length !== 1) return false;
-  const match = stderr.match(/^\[hq\] error: hq_acquire_lockdir: waited \d+s for '([^']*\/worker-provision-slot-locks\/([^/']+)\.lock\.d)' \(holder pid=(\d+) ppid=\d+ .* start='[^']*' cmd='[^']*'\)$/);
+  const match = stderr.match(/^\[hq\] error: hq_acquire_lockdir: waited \d+s for '([^']*\/worker-provision-slot-locks\/([^/']+)\.lock\.d)' \(holder pid=(\d+) ppid=\d+ .* start='[^']*' cmd='.*'\)$/);
   if (!match || match[2] !== workerId || Number(match[3]) <= 0) return false;
   try {
     processKillImpl(Number(match[3]), 0);
@@ -6642,7 +6642,7 @@ export async function maybeDispatchAmaCloser({
 
   if (ownerProofRecovery) {
     const owner = await probeOrphanOwnership({ rootDir, repo, prNumber, headSha: prMetadata.headSha,
-      signal, logger, readStatusImpl: readLaunchRequestStatusImpl });
+      signal, logger, readStatusImpl: readLaunchRequestStatusImpl, excludeWatcherPid: process.pid });
     if (owner.owned) {
       deleteAmaCloserLease(rootDir, leaseIdentity);
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'live-run-in-flight' });

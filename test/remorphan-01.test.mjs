@@ -235,6 +235,18 @@ test('REVIEWALERT-01 pending ownership defaults to the current timestamp when no
   assert.deepEqual(owner, { owned: true, proof: 'pending-closer-lease' });
 });
 
+test('pending lease exclusion is explicit and does not exclude other ownership evidence', async t => {
+  const { args } = setup(t);
+  const now = new Date().toISOString();
+  acquireAmaCloserLease({ ...args, now, watcherPid: process.pid });
+  const probe = options => probeOrphanOwnership({ ...args, now, processKillImpl: () => {}, ...options });
+  assert.equal((await probe({})).proof, 'pending-closer-lease');
+  assert.equal((await probe({ excludeWatcherPid: process.pid + 1 })).proof, 'pending-closer-lease');
+  assert.equal((await probe({ excludeWatcherPid: String(process.pid) })).owned, false);
+  assert.equal((await probe({ excludeWatcherPid: process.pid,
+    reviewStateRow: { reviewer_head_sha: args.headSha, reviewer_pgid: process.pid } })).proof, 'live-reviewer');
+});
+
 test('REVIEWALERT-01 pending provisioning owns the head despite a prior terminal launch', async t => {
   const { args, calls, tick } = setup(t);
   Object.assign(args, { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40),

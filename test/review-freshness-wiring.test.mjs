@@ -444,3 +444,23 @@ test('oldest waiting timestamp shares the first-pass count exclusions and normal
   });
   assert.equal(oldestOpenPrAwaitingFirstPassReviewAtMs({ prepare() { throw new Error('unreadable'); } }), null);
 });
+
+test('invalid admission rows do not hide valid waiting timestamps', async () => {
+  await withTempDbAsync(async db => {
+    const valid = seed(db, { prState: 'open', reviewStatus: 'pending' });
+    db.prepare('UPDATE reviewed_prs SET reviewed_at = ? WHERE pr_number = ?').run('2026-10-01T11:58:00Z', valid);
+    for (const stamp of ['', 'unreadable']) {
+      const invalid = seed(db, { prState: 'open', reviewStatus: 'pending' });
+      db.prepare('UPDATE reviewed_prs SET reviewed_at = ? WHERE pr_number = ?').run(stamp, invalid);
+    }
+    const oldestPendingSinceMs = oldestOpenPrAwaitingFirstPassReviewAtMs(db);
+    assert.equal(oldestPendingSinceMs, Date.parse('2026-10-01T11:58:00Z'));
+    const result = await maybeFireReviewStalledAlert({ now: Date.parse('2026-10-01T12:00:00Z'),
+      pendingReviewCount: countOpenPrsAwaitingFirstPassReview(db), oldestPendingSinceMs,
+      lastPostedReviewMs: Date.parse('2026-10-01T09:00:00Z'), stallThresholdMs: 60 * 60000,
+      deliverAlertFn: async () => assert.fail('fresh admissions must suppress premature stall alerts') });
+    assert.equal(result.fired, false);
+    db.prepare('DELETE FROM reviewed_prs WHERE pr_number = ?').run(valid);
+    assert.equal(oldestOpenPrAwaitingFirstPassReviewAtMs(db), null);
+  });
+});

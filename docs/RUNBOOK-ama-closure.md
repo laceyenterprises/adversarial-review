@@ -1866,8 +1866,12 @@ the primary-change predicate. OWNERPROOF-01 replaces REMORPHAN-01's tick and
 reason admission with a PR-wide elapsed absence-of-owner clock. On an open,
 non-draft, unheld PR, a live reviewer/remediator process, a nonterminal launch in
 the session ledger, or a current-head review request younger than the bound
-proves ownership. Queued jobs, leases, refusal reasons and unreadable ledger
-results alone do not. A proven owner clears the clock; head movement does not.
+proves ownership. A current-head pending closer lease also proves ownership
+while its watcher PID is live and its launch expiry has not elapsed. Recovery's
+post-acquisition ownership probe excludes its own watcher PID from that lease
+check; competing leases and other live ownership evidence still hold dispatch.
+Queued jobs, other leases, refusal reasons and unreadable ledger results alone
+do not prove ownership. A proven owner clears the clock; head movement does not.
 After 15 minutes (`OWNERPROOF_IDLE_MINUTES` accepts a positive override), request
 current-head review when no authoritative review exists, otherwise request HAM
 repair. Historical stops and retry counters do not prevent that dispatch.

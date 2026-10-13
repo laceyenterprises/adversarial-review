@@ -908,7 +908,7 @@ test('HOLDRELEASE-01: removal on an unchanged stopped head dispatches one hammer
   } finally { db.close(); }
 });
 
-for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mixed-error', 'launch-receipt']) {
+for (const kind of ['same-live', 'same-live-quoted', 'other-live', 'same-dead', 'same-unknown', 'mixed-error', 'launch-receipt']) {
   test(`REVIEWALERT-01 provision-slot contention: ${kind}`, async t => {
     const rootDir = tmpRoot(t, 'reviewalert-slot-');
     const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
@@ -919,6 +919,7 @@ for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mix
       const workerId = args[args.indexOf('--worker-id') + 1];
       const error = new Error('synthetic provision lock wait');
       error.stderr = `[hq] error: hq_acquire_lockdir: waited 30s for '<root>/.hq/worker-provision-slot-locks/${kind === 'other-live' ? 'other-worker' : workerId}.lock.d' (holder pid=123 ppid=12 state=running start='synthetic-time' cmd='bash <script>')`;
+      if (kind === 'same-live-quoted') error.stderr = error.stderr.replace('bash <script>', "bash -c 'echo synthetic'");
       if (kind === 'mixed-error') error.stderr += '\n[hq] error: another refusal';
       if (kind === 'launch-receipt') error.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       throw error;
@@ -928,7 +929,7 @@ for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mix
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
       processKillImpl: () => { if (['same-dead', 'same-unknown'].includes(kind)) { const error = new Error('unavailable holder'); error.code = kind === 'same-dead' ? 'ESRCH' : 'EINVAL'; throw error; } } });
     const record = readAmaCloserDispatchRecord(rootDir, identity);
-    if (kind === 'same-live') {
+    if (kind === 'same-live' || kind === 'same-live-quoted') {
       assert.equal(result.reason, 'dispatch-deferred-transient');
       assert.equal(result.skipMergeAgent, true);
       assert.equal(result.releasedPendingLease, true);
@@ -962,6 +963,23 @@ for (const kind of ['same-live', 'other-live', 'same-dead', 'same-unknown', 'mix
     }
   });
 }
+
+test('OWNERPROOF-01 recovery dispatch ignores its freshly acquired pending lease', async t => {
+  const rootDir = tmpRoot(t, 'ownerproof-self-lease-');
+  const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
+  const deps = closerDeps({ dispatch: async () => {
+    const lease = readAmaCloserLease(rootDir, identity);
+    assert.equal(lease.status, 'pending');
+    assert.equal(lease.watcherPid, process.pid);
+    return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+  } });
+  const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ...identity,
+    reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: new Date().toISOString(),
+      orphanRecovery: { ownerProof: true, headSha: identity.headSha } } }), ...deps });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(hqLaunches(deps).length, 1);
+  assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+});
 
 test('REVIEWALERT-01 ownerless recovery honours a live pending lease and earlier terminal receipt', async t => {
   const rootDir = tmpRoot(t, 'reviewalert-pending-');

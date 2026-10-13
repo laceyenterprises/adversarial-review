@@ -454,6 +454,10 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
 );
+const SQL_FIRST_PASS_ADMISSION_TIMES = SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW.replace(
+  'COUNT(*) AS n', 'reviewed_at',
+);
+export const stmtOldestOpenPrAwaitingFirstPassReview = db.prepare(SQL_FIRST_PASS_ADMISSION_TIMES);
 export const stmtCountOpenPrsAwaitingRereview = db.prepare(SQL_COUNT_OPEN_AWAITING_REREVIEW);
 
 // Normalize a reviewed_prs timestamp to epoch ms. SQLite CURRENT_TIMESTAMP is
@@ -508,11 +512,11 @@ export function countOpenPrsAwaitingFirstPassReview(handle = db) {
 // Use the exact first-pass population; reviewed_at is the row admission time.
 export function oldestOpenPrAwaitingFirstPassReviewAtMs(handle = db) {
   try {
-    const rows = handle.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW.replace(
-      'COUNT(*) AS n', 'reviewed_at',
-    )).all();
-    const times = rows.map(row => parsePostedAtMs(row.reviewed_at));
-    if (!times.length || times.some(time => time === null)) return null;
+    const stmt = handle === db
+      ? stmtOldestOpenPrAwaitingFirstPassReview
+      : handle.prepare(SQL_FIRST_PASS_ADMISSION_TIMES);
+    const times = stmt.all().map(row => parsePostedAtMs(row.reviewed_at)).filter(Number.isFinite);
+    if (!times.length) return null;
     return times.reduce((oldest, time) => Math.min(oldest, time), Infinity);
   } catch {
     return null;

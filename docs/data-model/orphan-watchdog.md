@@ -11,9 +11,12 @@ paging. Existing attempt counts survive migration and process restarts.
 
 Ownership requires a live current-head reviewer process, a remediation job
 with a live worker process, a PR-scoped launch ID with a nonterminal session
-ledger status, or a current-head pending review request younger than the bound.
-Queued jobs, leases, dispatch receipts and refusal reasons alone do not prove
-ownership. Unreadable ledger evidence is unknown; it advances the same idle
+ledger status, a current-head pending review request younger than the bound,
+or a current-head pending closer lease with a live watcher PID before launch
+expiry. Recovery excludes its own watcher PID from the pending-lease check
+after acquiring its reservation; other ownership evidence is still checked.
+Queued jobs, other leases, dispatch receipts and refusal reasons alone do not
+prove ownership. Unreadable ledger evidence is unknown; it advances the same idle
 clock as absence of an owner. A proven owner clears `idleSince`.
 
 `OWNERLESS_BOUND_MS` defaults to 15 minutes. `OWNERPROOF_IDLE_MINUTES` accepts a

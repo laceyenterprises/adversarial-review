@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
+import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
 
 // Only immutable terminal ledger results are cached; bound fleet memory usage.
@@ -28,6 +29,15 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
     if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return false;
     try { processKillImpl(group ? -Number(pid) : Number(pid), 0); return true; } catch (error) { return error.code === 'EPERM'; }
   };
+  // A terminal receipt can belong to the previous attempt while its replacement
+  // is provisioning. The pending lease owns this head before an LRQ exists.
+  const pendingLease = readAmaCloserLease(rootDir, { repo, prNumber, headSha });
+  const pendingAge = Date.parse(now) - Date.parse(pendingLease?.acquiredAt);
+  if (pendingLease?.status === 'pending' && alive(pendingLease.watcherPid)
+    && Number.isFinite(pendingAge) && pendingAge >= 0
+    && pendingAge < amaCloserPendingLeaseExpiryMs(pendingLease.dispatchTimeoutMs)) {
+    return { owned: true, proof: 'pending-closer-lease' };
+  }
   const rowHead = reviewStateRow?.revision_ref || reviewStateRow?.head_sha || reviewStateRow?.reviewer_head_sha;
   if (reviewStateRow?.reviewer_head_sha === headSha && alive(reviewStateRow?.reviewer_pgid, true)) {
     return { owned: true, proof: 'live-reviewer' };

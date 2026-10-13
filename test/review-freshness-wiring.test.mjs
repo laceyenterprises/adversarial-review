@@ -13,6 +13,7 @@ import path from 'node:path';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import {
   parsePostedAtMs,
+  oldestOpenPrAwaitingFirstPassReviewAtMs,
   latestPostedReviewAtMs,
   countOpenPrsAwaitingFirstPassReview,
   stmtLatestGenuinePostedReviewAt,
@@ -399,4 +400,47 @@ test('healthy remediation churn stays quiet across the freshness window', async 
       rmSync(stateDir, { recursive: true, force: true });
     }
   });
+});
+
+for (const [reviewMinutes, waitMinutes, fired] of [[120, 2, false], [120, 70, true], [10, 180, false], [120, null, true]]) {
+  test(`waiting admission timestamp wiring: ${reviewMinutes}/${waitMinutes}`, async () => {
+    await withTempDbAsync(async db => {
+      const now = Date.parse('2026-10-01T12:00:00Z');
+      const waiting = seed(db, { prState: 'open', reviewStatus: 'pending' });
+      db.prepare('UPDATE reviewed_prs SET reviewed_at = ? WHERE pr_number = ?').run(
+        waitMinutes === null ? 'unreadable' : new Date(now - waitMinutes * 60000).toISOString(), waiting);
+      const posted = seed(db, { prState: 'merged', reviewStatus: 'posted' });
+      seedReviewerPass(db, { prNumber: posted, ghCommentId: 'synthetic-review',
+        endedAt: new Date(now - reviewMinutes * 60000).toISOString() });
+      const calls = [];
+      const result = await maybeFireReviewStalledAlert({ now,
+        pendingReviewCount: countOpenPrsAwaitingFirstPassReview(db),
+        oldestPendingSinceMs: oldestOpenPrAwaitingFirstPassReviewAtMs(db),
+        lastPostedReviewMs: latestPostedReviewAtMs(db), stallThresholdMs: 60 * 60000,
+        fsImpl: { readFileSync() { throw new Error('missing'); }, existsSync() { return true; }, writeFileSync() {} },
+        deliverAlertFn: async (text, meta) => calls.push({ text, meta }),
+      });
+      assert.equal(result.fired, fired);
+      if (fired && waitMinutes !== null) {
+        assert.match(calls[0].text, /for 70m/);
+        assert.equal(calls[0].meta.payload.oldest_pending_since, new Date(now - waitMinutes * 60000).toISOString());
+      }
+    });
+  });
+}
+
+test('oldest waiting timestamp shares the first-pass count exclusions and normalizes dates', () => {
+  withTempDb(db => {
+    const first = seed(db, { prState: 'open', reviewStatus: 'pending' });
+    const second = seed(db, { prState: 'open', reviewStatus: 'reviewing' });
+    db.prepare('UPDATE reviewed_prs SET reviewed_at = ? WHERE pr_number = ?').run('2026-10-01 10:00:00', first);
+    db.prepare('UPDATE reviewed_prs SET reviewed_at = ? WHERE pr_number = ?').run('2026-10-01T08:00:00-01:00', second);
+    seed(db, { prState: 'closed', reviewStatus: 'pending' });
+    seed(db, { prState: 'open', reviewStatus: 'malformed' });
+    const posted = seed(db, { prState: 'open', reviewStatus: 'posted' });
+    seedReviewerPass(db, { prNumber: posted, ghCommentId: 'synthetic-posted' });
+    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 2);
+    assert.equal(oldestOpenPrAwaitingFirstPassReviewAtMs(db), Date.parse('2026-10-01T09:00:00Z'));
+  });
+  assert.equal(oldestOpenPrAwaitingFirstPassReviewAtMs({ prepare() { throw new Error('unreadable'); } }), null);
 });

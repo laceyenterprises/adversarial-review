@@ -505,6 +505,20 @@ export function countOpenPrsAwaitingFirstPassReview(handle = db) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// Use the exact first-pass population; reviewed_at is the row admission time.
+export function oldestOpenPrAwaitingFirstPassReviewAtMs(handle = db) {
+  try {
+    const rows = handle.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW.replace(
+      'COUNT(*) AS n', 'reviewed_at',
+    )).all();
+    const times = rows.map(row => parsePostedAtMs(row.reviewed_at));
+    if (!times.length || times.some(time => time === null)) return null;
+    return times.reduce((oldest, time) => Math.min(oldest, time), Infinity);
+  } catch {
+    return null;
+  }
+}
+
 export function countOpenPrsAwaitingRereview(handle = db) {
   const stmt = handle === db
     ? stmtCountOpenPrsAwaitingRereview

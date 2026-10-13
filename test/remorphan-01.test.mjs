@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
 import { recoverOrphan, probeOrphanOwnership, ownerlessBoundMs, OWNERLESS_BOUND_MS } from '../src/ama/orphan-watchdog.mjs';
 
@@ -223,3 +224,29 @@ for (const reason of ['lease-held', 'not-eligible', 'dispatch-status-unknown']) 
       ['test-admission-refused', 'test-admission-refused']);
   });
 }
+
+test('REVIEWALERT-01 pending provisioning owns the head despite a prior terminal launch', async t => {
+  const { args, calls, tick } = setup(t);
+  Object.assign(args, { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40),
+    candidate: { prState: 'open', headSha: 'a'.repeat(40) },
+    reviewStateRow: { review_status: 'posted', reviewer_head_sha: 'a'.repeat(40) } });
+  const at = '2026-10-11T16:00:00Z';
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...args, now: at, watcherPid: 123 });
+  const dir = join(args.rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `example__project-pr-1-${args.headSha}.json`), JSON.stringify({
+    repo: args.repo, prNumber: args.prNumber, headSha: args.headSha,
+    state: 'dispatching', launchRequestId: 'synthetic-previous-launch' }));
+  const probe = options => probeOrphanOwnership({ ...options, processKillImpl: () => {},
+    readStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }) });
+  const live = await probe({ ...args, now: at });
+  assert.equal(live.proof, 'pending-closer-lease');
+  for (const minutes of [0, 15, 16, 17]) await tick(minutes, { hasOwnerImpl: probe });
+  assert.equal(calls.launches.length, 0);
+  assert.equal(calls.pages.length, 0);
+  assert.equal((await probeOrphanOwnership({ ...args, now: at,
+    processKillImpl: () => { const error = new Error('dead'); error.code = 'ESRCH'; throw error; },
+    readStatusImpl: async () => ({ ok: true, row: { status: 'failed' } }) })).owned, false);
+  assert.equal((await probe({ ...args, now: '2026-10-11T17:00:00Z' })).owned, false);
+  assert.equal((await probe({ ...args, headSha: 'different', now: at })).owned, false);
+});

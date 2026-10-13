@@ -139,7 +139,7 @@ import {
   stmtMarkMerged,
   stmtMarkClosed,
   latestPostedReviewAtMs,
-  countHeldOpenPrs, countOpenPrsAwaitingFirstPassReview, countOpenPrsAwaitingRereview, readBurstScopedReviewerSpendUsd,
+  countHeldOpenPrs, oldestOpenPrAwaitingFirstPassReviewAtMs, countOpenPrsAwaitingFirstPassReview, countOpenPrsAwaitingRereview, readBurstScopedReviewerSpendUsd,
 } from './review-state-db.mjs';
 import {
   retryPendingMergeCloseouts,
@@ -1573,6 +1573,7 @@ async function pollOnce(
       await maybeFireReviewStalledAlert({
         deliverAlertFn: defaultDeliverAlert,
         pendingReviewCount: countOpenPrsAwaitingFirstPassReview(),
+        oldestPendingSinceMs: oldestOpenPrAwaitingFirstPassReviewAtMs(),
         held: countHeldOpenPrs(),
         lastPostedReviewMs: latestPostedReviewAtMs(),
         logger: console,

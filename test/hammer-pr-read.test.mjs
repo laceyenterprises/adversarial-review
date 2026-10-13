@@ -63,3 +63,16 @@ test('hammer PR CLI preserves synchronous jq exit status', t => {
   assert.ifError(result.error);
   assert.equal(result.status, 7, result.stderr);
 });
+
+test('hammer PR CLI preserves alarm status for bounded visibility retries', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-pr-alarm-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'gh'), '#!/bin/sh\nkill -ALRM $$\n', { mode: 0o755 });
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/hammer-pr-read.mjs', import.meta.url)),
+    'fixture/repo', '42', '--json', 'headRefOid'], {
+    encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 142, result.stderr);
+});

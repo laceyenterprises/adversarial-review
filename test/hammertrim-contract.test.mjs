@@ -664,6 +664,10 @@ for (const scenario of ['first retry visible', 'already visible', 'two lag polls
     writeFileSync(join(dir, 'date'), '#!/bin/sh\ncat "$TMPDIR/clock"\n', { mode: 0o755 });
     writeFileSync(join(dir, 'sleep'), '#!/bin/sh\necho "$1" >> "$TMPDIR/sleeps"\nn=$(cat "$TMPDIR/clock"); echo $((n + $1)) > "$TMPDIR/clock"\n', { mode: 0o755 });
     writeFileSync(join(dir, 'gh'), `#!/bin/sh
+case "$2" in
+  */check-runs\\?*) printf '{"check_runs":[]}'; exit 0 ;;
+  */statuses\\?*) printf '[]'; exit 0 ;;
+esac
 n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
 if [ "$n" -eq 3 ]; then cp /tmp/ham-${prNumber}-pr-after.json "$TMPDIR/cache-after-probe"; fi
 if [ "$n" -ge 2 ]; then
@@ -693,7 +697,7 @@ case "$HAM_TEST_SCENARIO" in
   'third head') [ "$n" -lt 2 ] || head=${third} ;;
   'initial third head') head=${third} ;;
 esac
-printf '{"headRefOid":"%s","baseRefName":"main"}\\n' "$head"
+printf '{"head":{"sha":"%s"},"base":{"ref":"main"}}\\n' "$head"
 `, { mode: 0o755 });
     const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: prNumber,
       HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
@@ -780,14 +784,14 @@ exit "$rc"`], env);
       if (scenario === 'two lag polls') {
         assert.match(result.stdout, /CHILD_HEAD_WAIT=17 CHILD_CHECK_WAIT=0/);
         assert.match(result.stdout, /CHECKS_OUTCOME=github-gate-red STATUS=20/);
-        assert.match(result.stdout, /Waited 17s for the published head and 15s for required checks/);
+        assert.match(result.stdout, /Waited 17s for the published head and 30s for required checks/);
         const reads = readFileSync(join(dir, 'check-reads'), 'utf8').trim().split('\n');
         assert.equal(reads.length, 2);
         assert.deepEqual(reads, [pushed, pushed]);
       }
       assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), scenario === 'two lag polls' || recovered ? 3 : ['first retry visible', 'third head'].includes(scenario) ? 2 : 1);
       const sleeps = existsSync(join(dir, 'sleeps')) ? readFileSync(join(dir, 'sleeps'), 'utf8').trim().split('\n').map(Number) : [];
-      assert.deepEqual(sleeps, scenario === 'two lag polls' ? [2, 15, 15]
+      assert.deepEqual(sleeps, scenario === 'two lag polls' ? [2, 15, 30]
         : recovered ? [2, 15] : ['first retry visible', 'third head'].includes(scenario) ? [2] : []);
       if (scenario === 'first retry visible') assert.match(result.stdout, /CHILD_HEAD_WAIT=2 CHILD_CHECK_WAIT=0/);
       if (['already visible', 'initial third head'].includes(scenario)) assert.match(result.stdout, /CHILD_HEAD_WAIT=0 CHILD_CHECK_WAIT=0/);

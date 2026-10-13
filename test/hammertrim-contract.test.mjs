@@ -473,6 +473,15 @@ esac
       ? render.stdout.replace('if ! ham_emit_git_merge_signal; then', 'if ! ham_fixture_emit_git_merge_signal; then')
         .replace('if ! ham_mark_ama_closer_lease_succeeded; then', 'if ! ham_fixture_mark_ama_closer_lease_succeeded; then')
       : render.stdout);
+    // Advance the CI deadline with a fake clock, never by lowering procedure waits.
+    writeFileSync(join(dir, 'clock'), '0');
+    writeFileSync(join(bin, 'date'), `#!/bin/sh
+if [ "$1" = +%s ]; then
+  value=$(cat "$TMPDIR/clock")
+  echo "$value"
+  echo $((value + 1000)) > "$TMPDIR/clock"
+else exec /bin/date "$@"; fi
+`, { mode: 0o755 });
     const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=lease POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_REMOTE_CI_WAIT_SECONDS=${scenario === 'red CI after pending' ? 60 : 0} HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT=1 HAM_MERGE_RETRY_CAP=1
 ham_fixture_emit_git_merge_signal() { echo FIXTURE_MERGE_SIGNAL; }
 ham_fixture_mark_ama_closer_lease_succeeded() { echo FIXTURE_CLOSER_SUCCEEDED; }
@@ -560,3 +569,23 @@ close
     else assert.doesNotMatch(result.stdout, /AUDIT:/);
   });
 }
+
+test('HAMLEASE-01 rendered waits have procedure floors and permit increases', () => {
+  const env = Object.fromEntries([...template.matchAll(/<<([A-Z_]+)>>/g)].map((m) => [`HAM_${m[1]}`, 'fixture']));
+  for (const phase of ['hammer-verify-head', 'hammer-merge']) {
+    const rendered = run(process.execPath, ['bin/hammer-procedure.mjs', phase, '--render'], env);
+    assert.equal(rendered.status, 0, rendered.stderr);
+    assert.match(rendered.stdout, /Waits are fixed by the procedure; do not export or shorten them/);
+    const helper = rendered.stdout.slice(0, rendered.stdout.indexOf('#!/usr/bin/env bash'));
+    const assignments = rendered.stdout.match(/^ham_procedure_floor .*$/gm).join('\n');
+    for (const given of ['120', '180', '1800', 'invalid', '0', '0001800']) {
+      const result = run('bash', ['-c', `${helper}\n${assignments}\necho "$HAM_MERGE_LEASE_WAIT_SECONDS $HAM_REMOTE_CI_WAIT_SECONDS"`], {
+        HAM_MERGE_LEASE_WAIT_SECONDS: given, HAM_REMOTE_CI_WAIT_SECONDS: given,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const name = phase === 'hammer-merge' ? 'HAM_REMOTE_CI_WAIT_SECONDS' : 'HAM_MERGE_LEASE_WAIT_SECONDS';
+      assert.match(result.stdout, /1800/.test(given) ? /1800/ : /900/);
+      if (!/1800/.test(given)) assert.match(result.stderr, new RegExp(`${name} given=${given} used=900`));
+    }
+  }
+});

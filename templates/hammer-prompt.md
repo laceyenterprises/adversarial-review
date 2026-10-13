@@ -594,6 +594,8 @@ Before validating the live head, export `HAM_COMMIT_PUBLICATION_ONLY=1` and rend
 
 Refresh and validate the live head:
 
+These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
+
 In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting the dispatch values above. Refresh the live head, acquire the merge lease, rebase under the existing bounded policy, and validate the rebased head. The wrapper prints the bounded diagnostic tail, status, outcome, and lease state before deleting its temporary files. A nonzero status blocks the next phase. Status 20 means parked or blocked; status 21 means a rebase conflict. On conflict, resolve it using "Resolving merge conflicts" below, revalidate, and rerun verify-head before continuing.
 
 

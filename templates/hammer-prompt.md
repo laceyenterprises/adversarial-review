@@ -33,7 +33,7 @@ recursive searches over `/tmp`, `/private/tmp`, `$HOME`,
 `/Users/airlock/agent-os-hq`, or an entire checkout when looking for review
 state. Prefer the live PR, the final review body, this prompt's audit inputs,
 and narrow repo-local paths. If GitHub GraphQL has no quota, use REST endpoints
-such as `gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or the dispatch
+such as `ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or the dispatch
 prompt/audit files already named by this run; do not fall back to broad host
 scans.
 
@@ -76,6 +76,8 @@ export HAM_RISK_CLASS='<<RISK_CLASS>>' HAM_MERGE_METHOD='<<MERGE_METHOD>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
+ham_gh() { "${HAM_NODE_BIN:-node}" "$HAM_ROOT_DIR/bin/metered-gh.mjs" exec "$@"; }
+ham_pr() { "${HAM_NODE_BIN:-node}" "$HAM_ROOT_DIR/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
 ```
 
 `HAM_ROOT_DIR` is the adversarial-review daemon runtime root supplied by
@@ -94,7 +96,7 @@ The publish helper rejects missing or placeholder inputs and releases the lease
 on failure. Keep these values in the same shell for the merge audit.
 
 Use the shared-budget check-wait helper (minimum 30 seconds). Never use
-`--watch` or add polling loops.
+`--watch` or add polling loops. All GitHub calls use these metered helpers.
 
 For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
 
@@ -120,12 +122,7 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. Use a persistent shell session for all three phases; if the harness creates a fresh shell per tool call, run the full close flow in one shell invocation or stop before acquiring the lease. A failed render or source stops the close. The helpers require every value used by that
-phase and fail with status 64 when one is absent. Preserve lease state between
-phases; `hammer-publish` and `hammer-merge` must run with the acquired lease
-held and fail closed otherwise. Use the scripts directly from this checkout;
-the context and bounded-runner helpers work without an Agent OS
-installation; the merge phase retains its existing HQ merge-signal integration.
+Build the terminal-remediation claim JSON and run the predicate before `hammer-merge`. Never execute these phases as separate processes: keep the verified head and lease in one persistent shell. If tool calls create fresh shells, run the whole close in one invocation or stop before lease acquisition. Failed render/source stops the close. Delete temporary scripts. Missing dispatch values exit 64; publish/merge require the held lease. Use this checkout's helpers; context/bounded runner need no Agent OS install. Keep the existing HQ merge-signal integration.
 
 Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. When true, required non-blocking findings may authorize specifically cited reversions. When false, advisory non-blocking findings never authorize reverting protected author code; preserve it and record the conflict rationale. The live predicate independently resolves policy.
 
@@ -520,7 +517,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
 Fetch the live PR and final review:
 
 ```bash
-gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > /tmp/ham-<<PR_NUMBER>>-pr-before.json
+ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > /tmp/ham-<<PR_NUMBER>>-pr-before.json
 ```
 
 Identify the newest authoritative adversarial review whose commit is
@@ -621,7 +618,7 @@ after `ham_release_merge_lease` has completed:
 
 ```bash
 BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
-HEAD_BRANCH=$(gh pr view <<PR_URL>> --json headRefName --jq '.headRefName')
+HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName')
 ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
 git checkout "$HEAD_BRANCH"
 if ! git rebase "origin/$BASE_BRANCH"; then
@@ -673,7 +670,7 @@ In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/ha
 
 
 ```bash
-gh pr view <<PR_URL>> --json reviews > /tmp/ham-<<PR_NUMBER>>-reviews.json
+ham_pr --json reviews > /tmp/ham-<<PR_NUMBER>>-reviews.json
 
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" | jq -sRr @uri)
 protection_err="/tmp/ham-<<PR_NUMBER>>-protection.stderr"
@@ -689,7 +686,7 @@ protection_attempt=1
 protection_max_attempts=3
 while true; do
   : > "$protection_err"
-  if gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ham-<<PR_NUMBER>>-protection.json 2> "$protection_err"; then
+  if ham_gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ham-<<PR_NUMBER>>-protection.json 2> "$protection_err"; then
     break
   fi
   if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
@@ -710,8 +707,8 @@ while true; do
   cat "$protection_err" >&2
   exit 1
 done
-gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR_NUMBER>>-timeline.json
-gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
+ham_gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR_NUMBER>>-timeline.json
+ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
 ```
 
 Remediate, rebase and validate; reuse an already-fixed head. Proven fleet
@@ -739,7 +736,7 @@ API-publish only one single-parent commit above the fetched remote head. Preserv
     ham_release_merge_lease
     HAM_REVIEW_ROUTE_NOTICE=$(printf '%s' "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review." |
       "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_REVIEW_ROUTE_NOTICE='<local>'
-    GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh pr comment <<PR_URL>> --body "$HAM_REVIEW_ROUTE_NOTICE"
+    GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" ham_gh pr comment <<PR_URL>> --body "$HAM_REVIEW_ROUTE_NOTICE"
     # Write daemon state as its canonical owner.
     HAM_REVIEW_HANDOFF_RUN=()
     if [ "$(id -un)" != "$HAM_HQ_OWNER" ]; then

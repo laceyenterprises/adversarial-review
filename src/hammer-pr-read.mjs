@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { meteredExecFile } from './metered-gh.mjs';
 
-async function fetchHammerPr(repo, prNumber, { withChecks = true, read = null } = {}) {
+async function fetchHammerPr(repo, prNumber, { withChecks = true, withReviews = false, read = null } = {}) {
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo) || !/^[1-9]\d*$/.test(String(prNumber))) {
     throw new TypeError('Invalid GitHub PR reference');
   }
@@ -44,6 +44,17 @@ async function fetchHammerPr(repo, prNumber, { withChecks = true, read = null } 
     }
     snapshot.statusCheckRollup = checks;
     snapshot.checks = checks;
+  }
+  if (withReviews) {
+    snapshot.reviews = [];
+    for (let page = 1; ; page++) {
+      const reviews = await get(`repos/${repo}/pulls/${prNumber}/reviews?per_page=100&page=${page}`);
+      if (!Array.isArray(reviews)) throw new Error('Invalid review response');
+      snapshot.reviews.push(...reviews.map(review => ({ ...review,
+        author: review.user, submittedAt: review.submitted_at, commit: { oid: review.commit_id },
+      })));
+      if (reviews.length < 100) break;
+    }
   }
   return snapshot;
 }

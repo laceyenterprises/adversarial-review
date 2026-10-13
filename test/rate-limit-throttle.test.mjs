@@ -458,3 +458,13 @@ test('GHBUDGET-01: rate-limited counters are shared, atomic and scoped to a reso
   assert.equal(state.graphql.rateLimitedCalls || 0, 0);
   assert.equal(state.core, undefined);
 });
+
+test('GHBUDGET-01: a newly settled review gets closing priority before its published gate refresh', async () => {
+  const { isClosingRowReady } = await import('../src/watcher-github-budget.mjs');
+  const row = { repo: 'fixture/repo', pr_number: 42, reviewer_head_sha: 'a'.repeat(40), review_status: 'posted' };
+  const readGate = () => ({ state: 'pending' });
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'comment-only', remediationPending: false }) }), true);
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'approved', remediationPending: false }) }), true);
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'request-changes', remediationPending: false }) }), false);
+  assert.equal(isClosingRowReady('/fixture', row, { readGate, resolveSettled: () => ({ verdict: 'comment-only', remediationPending: true }) }), false);
+});

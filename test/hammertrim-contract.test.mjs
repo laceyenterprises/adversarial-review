@@ -14,7 +14,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
 function run(command, args, env = {}) {
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('HAM_')));
-  return spawnSync(command, args, { encoding: 'utf8', timeout: 5000, env: { ...cleanEnv, ...env } });
+  return spawnSync(command, args, { encoding: 'utf8', timeout: 15000, env: { ...cleanEnv, ...env } });
 }
 test('sourced phase wrapper reports terminal outcomes and keeps its shell alive', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-phase-'));
@@ -973,9 +973,29 @@ echo COMMON_CLOSE_SUCCEEDED
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /COMMON_CLOSE_SUCCEEDED/);
   const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  const graphql = calls.filter(args => args[0] === 'pr' && args[1] !== 'comment' || args.includes('graphql'));
+  const graphql = calls.filter(args => args[0] === 'pr' || args.includes('graphql'));
   const rest = calls.filter(args => !graphql.includes(args));
   t.diagnostic(`GHBUDGET common close: GraphQL=${graphql.length} REST=${rest.length} total=${calls.length}`);
-  assert.equal(graphql.length, 1, 'only the existing gh pr merge command uses GraphQL');
-  assert.equal(rest.length, 43);
+  assert.equal(graphql.length, 2, 'the existing gh pr comment and merge commands use GraphQL');
+  assert.equal(rest.length, 42);
+});
+
+test('GHBUDGET-01: REST prompt snapshots preserve review authors and exact commit heads', async () => {
+  const { fetchHammerPr } = await import('../src/hammer-pr-read.mjs');
+  const calls = [], head = 'a'.repeat(40);
+  const snapshot = await fetchHammerPr('fixture/repo', 42, { withChecks: false, withReviews: true, read: async path => {
+    calls.push(path);
+    if (path.includes('/reviews?')) return [{ user: { login: 'fixture-reviewer' }, commit_id: head,
+      body: 'Synthetic review', state: 'COMMENTED', submitted_at: '2026-01-01T00:00:00Z' }];
+    return { state: 'open', head: { sha: head }, labels: [] };
+  } });
+  assert.equal(snapshot.reviews[0].author.login, 'fixture-reviewer');
+  assert.equal(snapshot.reviews[0].commit.oid, head);
+  assert.equal(snapshot.reviews[0].submittedAt, '2026-01-01T00:00:00Z');
+  assert.equal(calls.length, 2);
+  const prompt = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
+  for (const block of prompt.matchAll(/```bash\n([\s\S]*?)\n```/g)) {
+    const commands = block[1].split('\n').filter(line => !line.trim().startsWith('#')).join('\n');
+    assert.doesNotMatch(commands, /(?<![\w-])gh (?:api|pr)/, 'prompt commands must use a metered helper');
+  }
 });

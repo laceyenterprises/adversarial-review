@@ -27,7 +27,9 @@ let fallback = {};
 let previousHead;
 try {
   if (git('status', '--porcelain').length) throw new Error('local tree has uncommitted changes');
-  const info = JSON.parse(await network('gh', ['pr', 'view', pr, '--repo', repo, '--json', 'headRefName,headRefOid']));
+  const number = String(pr).match(/\/pull\/([1-9]\d*)/)?.[1] || pr;
+  const live = JSON.parse(await network('gh', ['api', `repos/${repo}/pulls/${number}`]));
+  const info = { headRefName: live.head?.ref, headRefOid: live.head?.sha };
   previousHead = info.headRefOid;
   fallback = { fallbackHead: info.headRefOid, branch: info.headRefName };
   await network('git', ['fetch', 'origin', info.headRefOid]);

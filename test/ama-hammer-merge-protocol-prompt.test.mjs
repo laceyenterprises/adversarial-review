@@ -33,6 +33,7 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   assert.match(block, /--pr <<PR_URL>>/);
   for (const exitCode of [1, 65, 124]) {
     const script = block.replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, `(exit ${exitCode})`)
+      .replace(/[^\n]*ham_gh pr comment[^\n]+/g, 'echo re-review')
       .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review')
       .replaceAll('<<ROOT_DIR>>', '"$HAM_TEST_ROOT"')
       .replaceAll('<<REPO>>', 'fixture/repo');
@@ -74,7 +75,7 @@ process.exit(${handoffStatus});
     const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
     const block = HAMMER_TEMPLATE.slice(start, HAMMER_TEMPLATE.indexOf('\n```', start))
       .replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, '(exit 65)')
-      .replace(/[^\n]*30 gh pr comment[^\n]*/, ':')
+      .replace(/[^\n]*ham_gh pr comment[^\n]*/, ':')
       .replace(/<<ROOT_DIR>>/g, '/fixture').replace(/<<REPO>>/g, 'fixture/repo').replace(/<<PR_NUMBER>>/g, '42');
     const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${block}`], {
       encoding: 'utf8', timeout: 5000,

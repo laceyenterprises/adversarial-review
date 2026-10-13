@@ -38,6 +38,6 @@ process.stdout.write(scenario === 'malformed' ? 'null\\n' : '${head}\\n');
     const calls = JSON.parse(readFileSync(callsPath, 'utf8'));
     assert.equal(calls.length, attempts);
     for (const args of calls) assert.deepEqual(args,
-      ['pr', 'view', 'https://github.com/fixture/repo/pull/42', '--json', 'headRefOid', '--jq', '.headRefOid']);
+      ['api', 'repos/fixture/repo/pulls/42', '--jq', '.head.sha']);
   });
 }

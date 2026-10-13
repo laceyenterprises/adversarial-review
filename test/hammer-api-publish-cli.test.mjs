@@ -24,7 +24,7 @@ const target = ${JSON.stringify(target)};
 const callsFile = ${JSON.stringify(callsFile)};
 const args = process.argv.slice(2);
 const input = args.includes('--input') ? JSON.parse(readFileSync(0, 'utf8')) : undefined;
-const key = command === 'gh' ? (args[0] === 'pr' ? 'pr' : args[1] === 'graphql' ? 'mutation' : 'verification')
+const key = command === 'gh' ? (args[0] === 'pr' || args[1]?.endsWith('/pulls/1') ? 'pr' : args[1] === 'graphql' ? 'mutation' : 'verification')
   : args[0] === 'fetch' ? 'fetch-' + args[2] : args[0];
 const calls = JSON.parse(readFileSync(callsFile, 'utf8'));
 const attempt = calls.filter(call => call.key === key).length + 1;
@@ -41,7 +41,7 @@ if (key === target) {
   if (scenario === 'malformed') { process.stdout.write('{'); process.exit(0); }
 }
 if (command === 'gh') {
-  if (key === 'pr') process.stdout.write(JSON.stringify({ headRefName: 'worker', headRefOid: 'before' }));
+  if (key === 'pr') process.stdout.write(JSON.stringify({ head: { ref: 'worker', sha: 'before' } }));
   else if (key === 'mutation') process.stdout.write(JSON.stringify({ data: { createCommitOnBranch: { commit: { oid: 'published' } } } }));
   else if (key === 'verification') process.stdout.write(JSON.stringify({ commit: { tree: { sha: 'tree' } } }));
   else fail('unexpected gh call');
@@ -148,8 +148,8 @@ test('a real rebase onto a moved base retains local ancestry and refuses the API
   writeFileSync(join(bin, 'gh'), `#!${process.execPath}
 import { appendFileSync } from 'node:fs';
 appendFileSync(${JSON.stringify(callsFile)}, process.argv.slice(2).join(' ') + '\\n');
-if (process.argv[2] !== 'pr') process.exit(1);
-console.log(JSON.stringify({ headRefName: 'worker', headRefOid: ${JSON.stringify(remoteHead)} }));
+if (process.argv[2] !== 'api' || !process.argv[3].endsWith('/pulls/1')) process.exit(1);
+console.log(JSON.stringify({ head: { ref: 'worker', sha: ${JSON.stringify(remoteHead)} } }));
 `, { mode: 0o755 });
   const result = JSON.parse((await exec(process.execPath, [cli, 'fixture/repo', '1'], {
     cwd: work, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, timeout: 20000,
@@ -157,7 +157,7 @@ console.log(JSON.stringify({ headRefName: 'worker', headRefOid: ${JSON.stringify
   assert.equal(result.route, 're-review');
   assert.match(result.reason, /does not descend/);
   assert.equal(result.fallbackHead, remoteHead);
-  assert.doesNotMatch(readFileSync(callsFile, 'utf8'), /api/);
+  assert.equal(readFileSync(callsFile, 'utf8'), 'api repos/fixture/repo/pulls/1\n');
   assert.equal((await git('rev-parse', 'HEAD')).stdout.trim(), localHead);
   await git('merge-base', '--is-ancestor', baseHead, 'HEAD');
   assert.equal((await git('ls-remote', 'origin', 'refs/heads/worker')).stdout.split(/\s/)[0], remoteHead);

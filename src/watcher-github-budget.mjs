@@ -19,6 +19,18 @@ async function runLowBudgetClosingTick({ budgets, rows, isReady, serve, logger =
   return true;
 }
 
+function isClosingRowReady(rootDir, row, {
+  readGate = adversarialGateRecords.readGateRecord,
+  resolveSettled = adversarialGateRecords.resolveSettledReviewVerdict,
+} = {}) {
+  const identity = { repo: row.repo, prNumber: row.pr_number, headSha: row.reviewer_head_sha };
+  if (readGate?.(rootDir, identity)?.state === 'success') return true;
+  // A review can settle after the last published gate. Local evidence is only
+  // a priority hint; serve still runs the normal live exact-head merge gates.
+  const settled = resolveSettled?.(rootDir, { ...identity, reviewRow: row, currentHeadSha: identity.headSha });
+  return settled?.remediationPending === false && ['comment-only', 'approved'].includes(settled.verdict);
+}
+
 async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, execFileImpl,
   handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus, markMerged, markClosed,
 }) {
@@ -28,9 +40,7 @@ async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, exe
     .filter(row => activeRepos.includes(row.repo));
   const handled = await runLowBudgetClosingTick({
     budgets, rows,
-    isReady: row => adversarialGateRecords.readGateRecord?.(rootDir, {
-      repo: row.repo, prNumber: row.pr_number, headSha: row.reviewer_head_sha,
-    })?.state === 'success',
+    isReady: row => isClosingRowReady(rootDir, row),
     serve: async row => {
       const pr = await fetchHammerPr(row.repo, row.pr_number, { withChecks: false });
       if (pr.state === 'MERGED') { markMerged(pr.mergedAt, row.repo, row.pr_number); return; }
@@ -54,4 +64,4 @@ async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, exe
   return handled;
 }
 
-export { runLowBudgetClosingTick, runLowBudgetWatcherPoll };
+export { isClosingRowReady, runLowBudgetClosingTick, runLowBudgetWatcherPoll };

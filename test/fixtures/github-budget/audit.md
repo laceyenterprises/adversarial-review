@@ -18,7 +18,7 @@ conservative across these callers; it does not establish that their installation
 are identical. No token or configuration key is added.
 
 The rendered verify-head → audit-publish → merge common-path fixture records
-**44 gh invocations: 43 REST and 1 GraphQL command (`pr merge`)**. It starts with
+**44 gh invocations: 42 REST API commands and 2 GraphQL commands (`pr comment`, `pr merge`)**. It starts with
 an eligible exact-head verdict, green checks, a reviewed starting base, no diff,
 no withdrawals, no workflow changes, no rebase and no retries. Only local lease,
 audit, wake and signal sinks are replaced. GitHub-reading helpers run against the

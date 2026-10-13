@@ -8722,6 +8722,8 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
     },
   });
 
+  let lifecycleReads = 0;
+  const resultingHead = 'b'.repeat(40);
   const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
     rootDir,
     topic: 'health.worker.terminal.lrq_apc05_topic_success',
@@ -8738,7 +8740,8 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
     execFileImpl: async (command, args) => {
       throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
     },
-    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: claimed.job.revisionRef }),
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open',
+      headSha: ++lifecycleReads === 1 ? claimed.job.revisionRef : resultingHead }),
     postCommentImpl: async () => ({ posted: false, error: 'offline fixture' }),
     requestReviewRereviewImpl: () => ({
       triggered: true,
@@ -8750,10 +8753,12 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
     inspectRemediationCiRegressionImpl: async () => greenCiGate(),
   }));
 
+  assert.equal(lifecycleReads, 2);
   assert.equal(result.action, 'completed');
   assert.equal(result.reason, 'final-message-artifact-present');
   assert.equal(result.job.status, 'completed');
   assert.equal(result.job.remediationWorker.state, 'completed');
+  assert.equal(result.job.remediationPlan.rounds.at(-1).resultingHeadSha, resultingHead);
   assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_apc05_topic_success');
   assert.equal(result.job.completion.dispatchStatus.source, 'app-contract-topic');
   assert.equal(result.job.completion.dispatchStatus.status, 'succeeded');

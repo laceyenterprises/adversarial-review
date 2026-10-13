@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches } from '../src/ama/hammer-head-validation.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { exactHammerValidation, fetchHammerHeadRange, fleetCommitIdentityMatches, hammerAttestationChain, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 
 const fleet = sha => ({ sha, author: { login: 'lacey-codex-agent[bot]' }, committer: { login: 'web-flow' },
   commit: { verification: { verified: true, reason: 'valid' } } });
@@ -89,4 +92,142 @@ test('HAMFINAL-02: complete paginated fleet histories are validated beyond the f
     } });
   assert.equal(range.verified, true);
   assert.equal(range.commits.length, 260);
+});
+
+for (const damage of ['invalid JSON', 'empty file', 'unreadable file', 'invalid job shape']) {
+  test(`HAMCLOSE-05: ${damage} cannot discard other completed jobs' round proofs`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'completed-remediation-rounds-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const dir = join(root, 'data', 'follow-up-jobs', 'completed');
+    mkdirSync(dir, { recursive: true });
+    const rounds = [
+      { state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'round1' },
+      { state: 'completed', startHeadSha: 'round1', resultingHeadSha: 'head' },
+    ];
+    const job = { repo: 'fixture/repo', prNumber: 1, status: 'completed', remediationPlan: { rounds: [
+      rounds[0], { state: 'spawned', startHeadSha: 'reviewed', resultingHeadSha: 'unfinished' },
+      { state: 'completed', startHeadSha: 'reviewed' },
+    ] } };
+    const prefix = 'fixture__repo-pr-1-';
+    writeFileSync(join(dir, `${prefix}10-valid.json`), JSON.stringify(job));
+    writeFileSync(join(dir, `${prefix}20-valid.json`), JSON.stringify({ ...job, remediationPlan: { rounds: [rounds[1]] } }));
+    // Damage both before and after valid records so no scan ordering can hide it.
+    for (const suffix of ['00-damaged.json', '99-damaged.json']) {
+      const name = `${prefix}${suffix}`;
+      if (damage === 'unreadable file') mkdirSync(join(dir, name));
+      else writeFileSync(join(dir, name), damage === 'empty file' ? '' : damage === 'invalid job shape' ? 'null' : '{');
+    }
+    for (const [index, overrides] of [{ repo: 'fixture/other' }, { prNumber: 2 }, { status: 'failed' }].entries()) {
+      writeFileSync(join(dir, `${prefix}unrelated-${index}.json`), JSON.stringify({ ...job, ...overrides }));
+    }
+    writeFileSync(join(dir, 'ignored.txt'), '{');
+    assert.deepEqual((await readCompletedRemediationRounds(root, 'fixture/repo', '1')).sort((a, b) => a.startHeadSha.localeCompare(b.startHeadSha)), [...rounds].sort((a, b) => a.startHeadSha.localeCompare(b.startHeadSha)));
+  });
+}
+
+test('HAMCLOSE-05: missing completed directory or only damaged jobs yields no round proof', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'completed-remediation-rounds-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  assert.deepEqual(await readCompletedRemediationRounds(root, 'fixture/repo', 1), []);
+  const dir = join(root, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'fixture__repo-pr-1-broken.json'), '{');
+  assert.deepEqual(await readCompletedRemediationRounds(root, 'fixture/repo', 1), []);
+});
+
+test('completed round lookup selects job prefixes and matches GitHub repo casing', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'completed-remediation-rounds-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = join(root, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  const round = { state: 'completed', startHeadSha: 'reviewed', resultingHeadSha: 'head' };
+  const job = { repo: 'Fixture/Repo', prNumber: 1, status: 'completed', remediationPlan: { rounds: [round] } };
+  writeFileSync(join(dir, 'Fixture__Repo-pr-1-2026-10-12.json'), JSON.stringify(job));
+  // Even apparently matching contents in other PR/repo files are not scanned.
+  for (const name of ['fixture__repo-pr-10-old.json', 'fixture__other-pr-1-old.json']) {
+    writeFileSync(join(dir, name), JSON.stringify(job));
+  }
+  assert.deepEqual(await readCompletedRemediationRounds(root, 'fixture/repo', 1), [round]);
+});
+
+test('zero-edge proofs cannot masquerade as App or completed-round chains', async () => {
+  const rounds = [{ state: 'completed', startHeadSha: 'other', resultingHeadSha: 'unrelated' }];
+  assert.equal(hammerAttestationChain([], 'reviewed', 'reviewed'), null);
+  for (const remediationRounds of [[], rounds]) {
+    const f = fixture([], { status: 'identical' });
+    const range = await fetchHammerHeadRange({ ...f.options, currentHead: 'reviewed', remediationRounds,
+      get: async path => {
+        f.calls.push(path);
+        if (path.endsWith('/commits/main')) return { sha: 'base' };
+        return { status: 'identical', total_commits: 0, commits: [] };
+      } });
+    assert.equal(range.verified, true);
+    assert.equal(range.proof, undefined);
+    assert.equal(f.calls.length, 3, 'exact head takes the ordinary comparison path');
+  }
+});
+
+test('reviewed starting base has an explicit proof, independent of completed rounds', async () => {
+  const range = await fetchHammerHeadRange({ reviewedHead: 'reviewed', currentHead: 'head',
+    hammerBaseHead: 'reviewed', remediationRounds: [{ state: 'completed', startHeadSha: 'other', resultingHeadSha: 'unrelated' }],
+    get() { throw new Error('HAMCLOSE-01 reviewed starting base needs no ancestry reads'); } });
+  assert.equal(range.proof, 'reviewed-starting-base');
+  assert.deepEqual(range.commits, ['head']);
+});
+
+for (const [name, rounds, target, diverged, proven] of [
+  ['one round', [['reviewed', 'head']], 'head', false, true],
+  ['two rounds', [['reviewed', 'round1'], ['round1', 'head']], 'head', false, true],
+  ['extra commit', [['reviewed', 'head']], 'extra', false, false],
+  ['wrong start', [['other', 'head']], 'head', false, false],
+  ['unfinished', [['reviewed', 'head', 'spawned']], 'head', false, false],
+  ['identical link', [['reviewed', 'head']], 'head', 'identical', false],
+  ['unreadable compare', [['reviewed', 'head']], 'head', 'unreadable', false],
+  ['diverged link', [['reviewed', 'round1'], ['round1', 'head']], 'head', true, false],
+  ['no records', [], 'head', false, false],
+  ['legacy missing result', [['reviewed', null]], 'head', false, false],
+]) {
+  test(`HAMCLOSE-05: ${name}`, async () => {
+    const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed',
+      currentHead: target, hammerBaseHead: target,
+      remediationRounds: rounds.map(([startHeadSha, resultingHeadSha, state = 'completed']) => ({ startHeadSha, resultingHeadSha, state })),
+      get: async path => {
+        if (diverged === 'unreadable') throw new Error('synthetic read failure');
+        return { status: diverged === 'identical' ? 'identical'
+          : diverged && path.endsWith('round1...head') ? 'diverged' : 'ahead' };
+      },
+    });
+    assert.equal(Boolean(range), proven);
+    if (proven) assert.equal(range.proof, 'completed-remediation-round-chain');
+  });
+}
+
+for (const status of ['diverged', 'identical', 'error']) {
+  test(`immutable ${status} remediation edges are evaluated once across passes`, async () => {
+    const calls = [];
+    const rounds = [['middle', 'head'], ['reviewed', 'bad'], ['reviewed', 'middle'], ['reviewed', 'bad']]
+      .map(([startHeadSha, resultingHeadSha]) => ({ state: 'completed', startHeadSha, resultingHeadSha }));
+    const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
+      hammerBaseHead: 'head', remediationRounds: rounds, get: async path => {
+        calls.push(path);
+        if (path.endsWith('reviewed...bad')) {
+          if (status === 'error') throw new Error('unreadable comparison');
+          return { status };
+        }
+        return { status: 'ahead' };
+      }, loadComments() { throw new Error('completed round proof must avoid comment pagination'); } });
+    assert.equal(range.proof, 'completed-remediation-round-chain');
+    assert.equal(calls.filter(path => path.endsWith('reviewed...bad')).length, 1);
+  });
+}
+
+test('lazy comments retain App proof fallback when local rounds do not prove the base', async () => {
+  let loads = 0;
+  const range = await fetchHammerHeadRange({ reviewedHead: 'reviewed', currentHead: 'head', hammerBaseHead: 'head',
+    remediationRounds: [], loadComments: async () => {
+      loads++;
+      return [{ author: 'hammer-worker', body: 'HAM-Base-Head: reviewed\nHAM-Validated-Head: head' }];
+    }, get() { throw new Error('App proof needs no comparison'); } });
+  assert.equal(range.proof, 'hammer-app-attestation-chain');
+  assert.equal(loads, 1);
 });

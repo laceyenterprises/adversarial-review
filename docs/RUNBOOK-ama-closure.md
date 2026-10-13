@@ -2736,6 +2736,30 @@ bind immutable content, while the reviewed head comes from the review record.
 Builder-authored text, commit authors, committers and signatures are not needed
 for this proof. Earlier edges remain available; retries deduplicate only the
 same App-authored base/head edge.
+
+The worker's exact reviewed starting base is reported as
+`proof: reviewed-starting-base`; it does not claim any traversed App or
+remediation-round edges. App-attestation and completed-remediation-round chain
+proofs require at least one edge. Without a captured starting base, an exact
+reviewed current head goes through ordinary comparison validation.
+
+Completed remediation rounds provide another starting-base proof when their
+completed start/result edges link the reviewed head to the captured base and
+GitHub confirms every link is strictly ahead. The prompt exports `HAM_ROOT_DIR`
+from dispatch's `rootDir`; the CLI reads daemon-owned state beneath
+`$HAM_ROOT_DIR/data/follow-up-jobs/completed`. This is distinct from `HAM_HQ_ROOT`
+and the PR worktree. Manual CLI callers must export that runtime root to use
+round evidence. Missing/unreadable directories supply no round proof; if no
+other starting-base proof exists, the CLI exits 65 and requests exact-head
+review. Lookup opens only JSON filenames with the existing
+`<sanitized-repo>-pr-<number>-` job ID prefix, compares repo names without case
+sensitivity, and still validates each record's repo, PR and completed status.
+It asynchronously iterates the flat directory and reads matching records without
+blocking the event loop; unrelated historical jobs are not read or parsed.
+Completed-round proof is attempted before lazily fetching PR comment pages for
+the App-attestation fallback. Each immutable start/result comparison is evaluated
+at most once per proof attempt, including non-ahead and unreadable comparisons.
+
 The audit lookup uses `gh api --paginate --slurp` to read all comment pages
 as one JSON payload. `bin/hammer-audit-comment-id.mjs` parses that payload
 once and searches across the pages, including pretty-printed responses.

@@ -151,6 +151,7 @@
       "infrastructureOutcomeLockRetries": 5,
       "publishedRoundsMeaning": "observed-head-movement-since-tracking-began",
       "infrastructureRefundEvidenceFields": ["remediationPlan.rounds[].startHeadSha", "remediationPlan.rounds[].publishedHeadSha", "remediationWorker.recordedOutcome", "remediationPlan.publishedRoundsForPR", "remediationPlan.retryHistory[].retryMetadata"],
+      "completedRemediationHeadEvidenceFields": ["remediationPlan.rounds[].state", "remediationPlan.rounds[].startHeadSha", "remediationPlan.rounds[].resultingHeadSha"],
       "conflictedBaseProbeRetryCode": "hq-conflicted-base-probe-transient",
       "conflictedBaseProbeExhaustionCode": "hq-conflicted-base-probe-retries-exhausted",
       "pendingCiRereviewEvidenceFields": ["reReview.ciSettlement", "reReview.ciGate", "remediationPlan.rounds[].reReview.ciSettlement", "remediationPlan.rounds[].reReview.ciGate"],

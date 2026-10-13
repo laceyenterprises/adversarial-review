@@ -34,7 +34,7 @@ test('HAMCLOSE-01 git publication and earlier App-attested bases need no signatu
       get() { throw new Error('App proof must not read commit identities or signatures'); } });
     assert.equal(range.verified, true);
     assert.equal(range.currentHead, next);
-    assert.equal(range.proof, 'hammer-app-attestation-chain');
+    assert.equal(range.proof, base === reviewed ? 'reviewed-starting-base' : 'hammer-app-attestation-chain');
   }
 });
 

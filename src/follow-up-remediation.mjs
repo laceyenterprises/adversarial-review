@@ -2882,10 +2882,15 @@ async function reconcileFollowUpJob({
       job, worker, action: 'completed',
       reply: parsedReply, reReview: rereview, now,
     });
+    // The daemon observes the resulting head; worker replies cannot attest it.
+    const completionLifecycle = await resolveJobPRLifecycleSafe({
+      rootDir, job, resolvePRLifecycleImpl, execFileImpl, log,
+    });
     const completed = markFollowUpJobCompleted({
       rootDir,
       jobPath,
       completedAt,
+      resultingHeadSha: completionLifecycle?.source === 'live' ? completionLifecycle.headSha || null : null,
       remediationWorker: {
         ...workerState,
         state: 'completed',

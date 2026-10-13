@@ -638,7 +638,7 @@ test('the CI-blocked prompt shares the cap route contract and caps the failing-c
 // The shared exhausted-review route also admits CI-blocked heads: its
 // reviewCycleCapReached flag covers stale verdicts and blocking findings even
 // when the narrower ciBlockedFailureAdmit / ciBlockedReasonsCovered do not.
-for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'action-required', 'blocking-findings', 'pending', 'hard-stop', 'draft', 'live-remediation', 'live-lease']) {
+for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'action-required', 'error', 'blocking-findings', 'pending', 'hard-stop', 'draft', 'live-remediation', 'live-lease']) {
   test(`CIBLOCKHAM-02: exhausted round routes on this pass (${state})`, async (t) => {
     const rootDir = tempRoot(t, 'ci-blocked-next-pass-');
     const args = closerArgs(rootDir);
@@ -653,11 +653,11 @@ for (const state of ['failed', 'timed-out', 'cancelled', 'startup-failure', 'act
     args.dispatchContext.ciBlockedReason = 'ci-regression-stopped';
     args.dispatchContext.ciFailedChecks = state === 'pending' ? [] : [{ name: 'unit', state: 'FAILURE' }];
     const conclusion = { 'timed-out': 'TIMED_OUT', cancelled: 'CANCELLED',
-      'startup-failure': 'STARTUP_FAILURE', 'action-required': 'ACTION_REQUIRED' }[state] || 'FAILURE';
+      'startup-failure': 'STARTUP_FAILURE', 'action-required': 'ACTION_REQUIRED', error: 'ERROR' }[state] || 'FAILURE';
     args.prMetadata.statusCheckRollup = [{ __typename: 'CheckRun', name: 'unit',
       status: state === 'pending' ? 'IN_PROGRESS' : 'COMPLETED',
       conclusion: state === 'pending' ? null : conclusion }];
-    if (['blocking-findings', 'timed-out', 'cancelled', 'startup-failure', 'action-required'].includes(state)) {
+    if (state === 'blocking-findings') {
       args.reviewState.verdict = 'request-changes';
       args.reviewState.blockingFindingCount = 1;
       args.reviewState.nonBlockingFindingCount = 0;

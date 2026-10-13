@@ -2679,10 +2679,12 @@ async function reconcileFollowUpJob({
       auditWorkspaceForContaminationImpl, inspectRemediationCiRegressionImpl, deliverAlertImpl, execFileImpl, log,
     });
     if (finalRound.retryLater) return { action: 'active', reason: 'final-round-proof-transient', job: finalRound.job, jobPath };
-    ({ job, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
-      rootDir, job, reply: parsedReply, finalRound, completionLifecycle, pendingCiCompletion,
-      resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log,
-    }));
+    if (job?.finalRound === 'comment-only') {
+      ({ job, completionLifecycle, pendingCiCompletion } = await resolvePendingCiCompletion({
+        rootDir, job, reply: parsedReply, finalRound, completionLifecycle, pendingCiCompletion,
+        resolvePRLifecycleImpl, execFileImpl, inspectRemediationCiRegressionImpl, log,
+      }));
+    }
     const workerModel = worker?.model || 'codex';
     const completionMetadata = {
       source: hasNonEmptyNarrative

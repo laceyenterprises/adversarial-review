@@ -4453,7 +4453,8 @@ export async function maybeDispatchAmaCloser({
     // Failed required CI with no remediator is owned by the hammer immediately.
     // A parked route whose live checks are only pending still waits.
     const ciBlockedFailureAdmit = ciBlockedRoute
-      && verdict.trace?.ciGreen?.conclusion === 'FAILURE'
+      && ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']
+        .includes(verdict.trace?.ciGreen?.conclusion)
       && reviewState?.remediationPending !== true;
     const reviewCycleCapRoute = hammerOwnerRouteOf(dispatchContext) !== null
       && reviewState?.remediationPending !== true;

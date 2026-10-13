@@ -1379,6 +1379,8 @@ async function deliverAlert(text, {
   });
   const rootDir = config.rootDir;
   const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
+  // Deduplication must inspect the same real sink that queueAlertDoc writes.
+  // fsImpl supplies token/config reads; virtual token presence is not a receipt.
   if (event === 'reviewer.model_unavailable') {
     doc.id = `reviewer-model-${crypto.createHash('sha256').update(JSON.stringify([
       payload?.refusedModel, new Date(now).toISOString().slice(0, 10),

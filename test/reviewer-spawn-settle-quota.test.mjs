@@ -498,6 +498,61 @@ test('Gemini terminal run fallback transfers claim and survives bounce recovery'
   } finally { db.close(); await rm(rootDir, { recursive: true, force: true }); }
 });
 
+for (const diagnostic of ['adapter reported model unavailable', 'model Synthetic stale is not recognized as a known model\nAvailable models:\n  Stale alternative']) {
+  test(`REVIEWMODEL-02: structured refusal detail takes priority over ${diagnostic}`, async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'model-refusal-detail-'));
+    try {
+      const capture = newCapture();
+      const alerts = [];
+      const failureDetail = { refusedModel: 'Structured refused model', availableModels: ['Structured offered model'] };
+      const result = await spawnReviewer({
+        ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }, capture }),
+        rootDir, reviewerModel: 'gemini',
+        deliverAlertImpl: async (message, options) => alerts.push({ message, options }),
+        reviewerRuntimeAdapterOverride: {
+          async spawnReviewer() {
+            return { ok: false, failureClass: 'reviewer-model-unavailable', error: diagnostic, failureDetail };
+          },
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(alerts.length, 1);
+      assert.deepEqual(alerts[0].options.payload, failureDetail);
+      assert.match(alerts[0].message, /Structured refused model/);
+      assert.match(alerts[0].message, /Structured offered model/);
+      assert.deepEqual(capture.completed[0].metadata.failureDetail, failureDetail);
+    } finally { await rm(rootDir, { recursive: true, force: true }); }
+  });
+}
+
+for (const ok of [true, false]) {
+  for (const field of ['error', 'stderr', 'stderrTail']) {
+    test(`REVIEWMODEL-02: ${ok ? 'successful' : 'failed'} pass ${field} failure-message attribution`, async () => {
+      const rootDir = await mkdtemp(join(tmpdir(), 'reviewer-message-'));
+      try {
+        const result = await spawnReviewer({
+          ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }, capture: newCapture() }),
+          rootDir,
+          beginReviewerPassImpl: beginReviewerPass,
+          completeReviewerPassImpl: completeReviewerPass,
+          reviewerRuntimeAdapterOverride: {
+            async spawnReviewer() {
+              return { ok, [field]: 'Synthetic runtime notice', reviewBody: 'synthetic review', reviewBodyDelivery: 'adapter' };
+            },
+          },
+        });
+        assert.equal(result.ok, ok);
+        const db = openReviewStateDb(rootDir);
+        try {
+          const pass = db.prepare('SELECT status, metadata_json FROM reviewer_passes').get();
+          assert.equal(pass.status, ok ? 'completed' : 'failed');
+          assert.equal(JSON.parse(pass.metadata_json).failureMessage, ok ? null : 'Synthetic runtime notice');
+        } finally { db.close(); }
+      } finally { await rm(rootDir, { recursive: true, force: true }); }
+    });
+  }
+}
+
 test('REVIEWMODEL-02: first model refusal falls back immediately with the logical budget intact', async () => {
   const rootDir = await mkdtemp(join(tmpdir(), 'model-refusal-'));
   try {

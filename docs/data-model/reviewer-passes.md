@@ -111,6 +111,11 @@ terminal. The base reviewer gets the next unused `attempt_number` from
 token evidence and completion all use the fallback's new ledger number and
 actual model. Subsequent polls allocate beyond both rows normally.
 
+Reviewer settlement writes `metadata_json.failureMessage` only for unsuccessful
+passes; successful passes store `null` even when the runtime emits non-fatal
+stderr notices. Failed passes retain the first available error, full stderr,
+or stderr tail. Historical metadata is not rewritten.
+
 Antigravity model refusals retain `failureClass: 'reviewer-model-unavailable'`
 and `failureDetail: { refusedModel, availableModels }` in pass metadata, with
 multiline subprocess stderr in the failure message. Immediate Gemini fallback

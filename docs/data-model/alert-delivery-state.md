@@ -53,6 +53,10 @@ Directory: `data/alert-delivery/`
 
 ## Operational Contract
 
+- Enqueue deduplication reads the real durable sink, matching its writes and
+  state-transition renames. `deliverAlert`'s `fsImpl` supplies token/config
+  reads, not a virtual outbox; tests use a temporary real state root. A mocked
+  token-file existence check cannot create or hide a durable alert receipt.
 - `deliverAlert` is enqueue-first: once the pending document and queued receipt
   are durable, callers receive `{ status: "queued" }`. Callers intentionally
   treat that durable enqueue as terminal for their own debounce; transport

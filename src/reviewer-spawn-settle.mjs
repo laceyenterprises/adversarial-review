@@ -577,7 +577,7 @@ async function spawnReviewer(args) {
   });
   if (!result.ok && result.failureClass === 'reviewer-model-unavailable') {
     const diagnostic = [result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n');
-    const detail = parseReviewerModelUnavailable(diagnostic) || { refusedModel: 'unknown', availableModels: [] };
+    const detail = result.failureDetail || parseReviewerModelUnavailable(diagnostic) || { refusedModel: 'unknown', availableModels: [] };
     console.warn(`[watcher] reviewer-model-unavailable: ${diagnostic}`);
     try {
       await (args.deliverAlertImpl || deliverAlert)(
@@ -1057,7 +1057,7 @@ async function spawnReviewerOnce({
           workerRunAttribution,
           failureClass: result.failureClass || null,
           failureDetail: result.failureDetail || parseReviewerModelUnavailable([result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n')),
-          failureMessage: result.error || result.stderr || result.stderrTail || null,
+          failureMessage: result.ok ? null : (result.error || result.stderr || result.stderrTail || null),
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
           reviewerTokenUsageArtifact,
         },

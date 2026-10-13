@@ -1162,3 +1162,28 @@ test('REVIEWMODEL-02: model refusal alerts deduplicate across PRs by model and U
   assert.notEqual(nextDay.id, first.id);
   assert.notEqual(otherModel.id, first.id);
 });
+
+test('REVIEWMODEL-02: token filesystem mocks cannot create or hide durable refusal receipts', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const options = {
+    event: 'reviewer.model_unavailable', env,
+    payload: { refusedModel: 'Synthetic model', availableModels: ['Offered model'] },
+    now: new Date('2026-10-12T01:00:00Z'),
+    requestText: async () => { throw new Error('synthetic offline transport'); },
+  };
+  const first = await deliverAlert('synthetic refusal', {
+    ...options, fsImpl: { readFileSync: () => 'synthetic-token', existsSync: () => true },
+  });
+  assert.equal(first.queued, true, 'virtual token presence must not suppress enqueue');
+  assert.equal(existsSync(first.queuePath), true);
+  const deliveredPath = sinkPath(rootDir, 'delivered', `${first.id}.json`);
+  renameSync(first.queuePath, deliveredPath);
+  const second = await deliverAlert('synthetic refusal', {
+    ...options, fsImpl: { readFileSync: () => 'synthetic-token', existsSync: () => false },
+  });
+  assert.equal(second.queued, false, 'virtual token absence must not hide an actual receipt');
+  assert.equal(second.status, 'delivered');
+  assert.equal(second.queuePath, deliveredPath);
+  assert.equal(existsSync(first.queuePath), false);
+});

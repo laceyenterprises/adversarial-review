@@ -1274,6 +1274,11 @@ test('HAMROUTE-01: head-bound proofs and commit reads survive passes and discard
   await cache.scope({ ...identity, prNumber: 43 }).read('proof', prove);
   await cache.scope({ ...identity, prNumber: 44 }).read('proof', prove);
   assert.equal(await cache.scope(identity).read('proof', prove), 6);
+  await cache.scope({ ...identity, prNumber: 43 }).read('proof', prove);
+  assert.equal(await cache.scope(identity).read('proof', prove), 6);
+  await cache.scope({ ...identity, prNumber: 44 }).read('proof', prove);
+  assert.equal(await cache.scope(identity).read('proof', prove), 6, 'hot evidence survives cache pressure');
+  assert.equal(reads, 8);
 });
 
 test('HAMROUTE-01: a 12-second proof survives the five-second pass deadline with one copy', async t => {

@@ -1287,3 +1287,38 @@ test('OWNERPROOF-01: terminal closer lease and spent dispatch counter do not ref
   assert.equal(result.dispatched, true, JSON.stringify(result));
   assert.equal(deps.calls.filter(c => c.args.includes('dispatch')).length, 1);
 });
+
+for (const status of ['succeeded', 'failed', 'running', 'starting', 'unreadable', 'throws', 'timeout', 'pending']) {
+  test(`CLOSERLEASE-01: reconcile ${status} lease before red-CI remediation refusal`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'closerlease-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const deps = testDeps();
+    const args = baseArgs(rootDir, {
+      reviewState: { remediationPending: true },
+      prMetadata: { statusCheckRollup: [{ __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'FAILURE' }] },
+    });
+    const identity = { rootDir, repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    acquireAmaCloserLease({ ...identity, now: args.dispatchContext.dispatchedAt, host: 'synthetic', watcherPid: 123 });
+    if (status !== 'pending') updateAmaCloserLease({ ...identity, status: 'dispatched',
+      lrqId: 'lrq_synthetic', now: args.dispatchContext.dispatchedAt });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ repo: identity.repo, prNumber: 404,
+      headSha: HEAD, workerClass: 'hammer', state: 'dispatched', launchRequestId: 'lrq_synthetic',
+      lastObservedStatus: 'running', dispatchedAt: args.dispatchContext.dispatchedAt }));
+    let reads = 0;
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => {
+        reads++;
+        if (status === 'throws' || status === 'timeout') throw Object.assign(new Error('synthetic failure'),
+          { code: status === 'timeout' ? 'ETIMEDOUT' : 'EIO' });
+        return status === 'unreadable' ? { ok: false } : { ok: true, row: { status } };
+      },
+    });
+    assert.equal(result.reason, 'not-eligible');
+    assert.equal(reads, status === 'pending' ? 0 : 1);
+    const lease = readAmaCloserLease(rootDir, identity);
+    const terminal = ['succeeded', 'failed'].includes(status);
+    assert.equal(lease.status, terminal ? 'terminal' : status === 'pending' ? 'pending' : 'dispatched');
+    assert.equal(lease.terminalOutcome, terminal ? 'failed-without-merge' : null);
+    assert.equal(deps.calls.length, 0);
+  });
+}

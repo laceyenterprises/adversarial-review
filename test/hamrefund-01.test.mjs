@@ -338,7 +338,7 @@ for (const signalRead of [
   { ok: false, reason: 'ledger-read-failed' },
   { ok: false, reason: 'missing-build-completion-signal' },
 ]) {
-  test(`HAMREFUND-01: succeeded with a DISPATCHED lease retains ownership on unknown merged evidence (${signalRead.reason})`, async (t) => {
+  test(`HAMREFUND-01: succeeded run releases ownership but retains retry hold on unknown merged evidence (${signalRead.reason})`, async (t) => {
     const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-success-hold-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     seedDeadHammer(rootDir, { retryCount: 1 });
@@ -359,7 +359,8 @@ for (const signalRead of [
     assert.equal(record.launchRequestId, DEAD_LRQ);
     assert.equal(record.lastError, 'terminal-success-awaiting-audit-or-merged-signal');
     assert.equal(record.unexecutedRefundCount, undefined);
-    assert.equal(readAmaCloserLease(rootDir, identity).status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+    assert.equal(readAmaCloserLease(rootDir, identity).status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+    assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'failed-without-merge');
     const ledger = readHammerRetryCapLedger(rootDir, identity);
     assert.equal(ledger.attemptCount, 1);
     assert.equal(ledger.lifetimeAttemptCount, 1);

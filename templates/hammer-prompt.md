@@ -93,14 +93,14 @@ decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
 The publish helper rejects missing or placeholder inputs and releases the lease
 on failure. Keep these values in the same shell for the merge audit.
 
-For each phase, in that same persistent shell, run the following with `PHASE` set to the named helper (`hammer-verify-head`, `hammer-publish`, or `hammer-merge`):
+For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
 
 ```bash
 HAM_PHASE_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/ham-phase.XXXXXX") || exit 1
 node "${HAM_ROOT_DIR}/bin/hammer-procedure.mjs" "$PHASE" --render > "$HAM_PHASE_SCRIPT" || exit 1
 HAM_PHASE_LOG=$(mktemp "${TMPDIR:-/tmp}/ham-phase-log.XXXXXX") || exit 1
 HAM_PHASE_OUTCOME=not-run
-# Descriptor 3 keeps sparse lease-wait progress live while diagnostics are buffered.
+# Descriptor 3 streams lease-wait progress; buffer diagnostics.
 if source "$HAM_PHASE_SCRIPT" 3>&2 > "$HAM_PHASE_LOG" 2>&1; then
   HAM_PHASE_STATUS=0
 else
@@ -117,7 +117,7 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. Use a persistent shell session for all three phases; if the harness creates a fresh shell per tool call, run the full close flow in one shell invocation or stop before acquiring the lease. A failed render or source stops the close. Delete each temporary source file after use. The helpers require every value used by that
+Build the terminal-remediation claim JSON and run the predicate CLI as described below before sourcing `hammer-merge`. Never execute these phases as separate processes: the verified head and merge lease must survive between them. Use a persistent shell session for all three phases; if the harness creates a fresh shell per tool call, run the full close flow in one shell invocation or stop before acquiring the lease. A failed render or source stops the close. The helpers require every value used by that
 phase and fail with status 64 when one is absent. Preserve lease state between
 phases; `hammer-publish` and `hammer-merge` must run with the acquired lease
 held and fail closed otherwise. Use the scripts directly from this checkout;
@@ -596,13 +596,13 @@ fi
 
 ```
 
-Before validating the live head, export `HAM_COMMIT_PUBLICATION_ONLY=1` and render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with `GH_TOKEN` set to the hammer token. Stop on failure; unset the flag on success. This publishes ordinary remediation through the same guarded route as conflict repair.
+Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1`; render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the hammer `GH_TOKEN`. Stop on failure; unset the flag on success. Ordinary remediation uses the conflict-repair publication guards.
 
 Refresh and validate the live head:
 
 These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` with exported dispatch values. Wait at most 300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`; retry transient errors/alarms within that bound, preserving cached JSON. Permanent errors/invalid heads stop; a third head takes the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve conflicts, revalidate, rerun verify-head.
+In the same shell with dispatch values exported, render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
 
 
 ## Resolving merge conflicts

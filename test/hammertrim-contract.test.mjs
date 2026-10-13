@@ -633,3 +633,125 @@ phase
     });
   }
 });
+for (const scenario of ['two lag polls', 'visibility timeout', 'third head', 'initial third head']) {
+  test(`HAMCLOSE-07 verify-head: ${scenario}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'hammer-head-wait-'));
+    const prNumber = String(2_000_000 + process.pid);
+    t.after(() => {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(`/tmp/ham-${prNumber}-pr-after.json`, { force: true });
+    });
+    const before = 'a'.repeat(40), pushed = 'b'.repeat(40), third = 'c'.repeat(40);
+    writeFileSync(join(dir, 'clock'), '0');
+    writeFileSync(join(dir, 'polls'), '0');
+    writeFileSync(join(dir, 'date'), '#!/bin/sh\ncat "$TMPDIR/clock"\n', { mode: 0o755 });
+    writeFileSync(join(dir, 'sleep'), '#!/bin/sh\nn=$(cat "$TMPDIR/clock"); echo $((n + $1)) > "$TMPDIR/clock"\n', { mode: 0o755 });
+    writeFileSync(join(dir, 'gh'), `#!/bin/sh
+n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
+head=${before}
+case "$HAM_TEST_SCENARIO" in
+  'two lag polls') [ "$n" -lt 3 ] || head=${pushed} ;;
+  'third head') [ "$n" -lt 2 ] || head=${third} ;;
+  'initial third head') head=${third} ;;
+esac
+printf '{"headRefOid":"%s","baseRefName":"main"}\\n' "$head"
+`, { mode: 0o755 });
+    const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: prNumber,
+      HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
+      HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low', HAM_MERGE_METHOD: 'squash', HAM_TARGET_REMEDIATION_SHA: before, HAM_PUSHED_HEAD: pushed,
+      HAM_PUSHED_FROM_HEAD: before, HAM_TEST_SCENARIO: scenario, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir };
+    const rendered = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-verify-head', '--render'], env);
+    assert.equal(rendered.status, 0, rendered.stderr);
+    // Execute the actual visibility gate and intercept the following phase boundary.
+    const prefix = rendered.stdout.slice(0, rendered.stdout.indexOf('BASE_BRANCH='));
+    let checksContinuation = '';
+    if (scenario === 'two lag polls') {
+      const verdict = join(dir, 'verdict.json');
+      writeFileSync(verdict, JSON.stringify({ eligible: true, trace: {
+        headMatch: { current: pushed }, branchProtection: { required: false },
+      } }));
+      const gate = { ok: false, state: 'OPEN', headMatches: true, expectedHead: pushed,
+        liveHead: pushed, checksConclusion: 'PENDING', reasons: ['ci-not-green'] };
+      const nodeStub = join(dir, 'gate-node');
+      writeFileSync(nodeStub, `#!/bin/sh
+case "$1" in
+  --input-type=module)
+    cat >/dev/null
+    echo "$POST_REMEDIATION_SHA" >> "$TMPDIR/check-reads"
+    if [ -f "$TMPDIR/checked" ]; then echo '${JSON.stringify({ ...gate, checksConclusion: 'FAILURE' })}';
+    else touch "$TMPDIR/checked"; echo '${JSON.stringify(gate)}'; fi ;;
+  */bin/ama-audit.mjs)
+    while [ "$#" -gt 1 ]; do
+      if [ "$1" = --attempt-json ]; then cat "$2"; break; fi
+      shift
+    done ;;
+  *) exit 0 ;;
+esac
+`, { mode: 0o755 });
+      const merge = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+      assert.equal(merge.status, 0, merge.stderr);
+      const mergeScript = join(dir, 'merge.sh');
+      writeFileSync(mergeScript, merge.stdout);
+      checksContinuation = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=synthetic-lease
+HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict}
+HAM_PUBLISHED_AUDIT_HEAD=$POST_REMEDIATION_SHA
+ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
+source ${mergeScript}
+echo "CHECKS_OUTCOME=$HAM_PHASE_OUTCOME STATUS=$?"
+echo "$HAM_NO_MERGE_NOTE"
+exit 0`;
+    }
+    const result = run('/bin/bash', ['-c', `${prefix}
+echo "CONTINUE_TO_CHECKS head=$POST_REMEDIATION_SHA waited=$HAM_HEAD_WAITED_SECONDS"
+}
+ham_verify_head_phase
+rc=$?
+echo "OUTCOME=$HAM_PHASE_OUTCOME rc=$rc"
+${checksContinuation}
+exit "$rc"`], env);
+    if (scenario === 'visibility timeout') {
+      assert.equal(result.status, 20, result.stderr);
+      assert.match(result.stderr, /Waited 300s for the published head and 0s for required checks/);
+      assert.match(result.stdout, /OUTCOME=published-head-timeout/);
+      assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
+    } else {
+      assert.equal(result.status, 0, result.stderr);
+      const expected = scenario === 'two lag polls' ? pushed : third;
+      assert.match(result.stdout, new RegExp(`CONTINUE_TO_CHECKS head=${expected}`));
+      if (scenario === 'two lag polls') {
+        assert.match(result.stdout, /CHECKS_OUTCOME=github-gate-red STATUS=20/);
+        assert.match(result.stdout, /Waited 30s for the published head and 15s for required checks/);
+        const reads = readFileSync(join(dir, 'check-reads'), 'utf8').trim().split('\n');
+        assert.equal(reads.length, 2);
+        assert.deepEqual(reads, [pushed, pushed]);
+      }
+      assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), scenario === 'two lag polls' ? 3 : scenario === 'third head' ? 2 : 1);
+    }
+  });
+}
+
+
+for (const route of ['API commit', 'git fallback', 'git fallback without API head']) {
+  test(`HAMCLOSE-07 publication remembers its exact head: ${route}`, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'hammer-pushed-head-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const before = 'a'.repeat(40), pushed = 'b'.repeat(40);
+    writeFileSync(join(dir, 'publisher'), '#!/bin/sh\nprintf "%s\\n" "$PUBLISH_RESULT"\n', { mode: 0o755 });
+    writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$1" in rev-parse) echo ${pushed};; push) exit 0;; *) exit 1;; esac\n`, { mode: 0o755 });
+    const publication = route === 'API commit' ? { route: 'published', head: pushed, previousHead: before }
+      : { route: 're-review', ...(route === 'git fallback' ? { previousHead: before, fallbackHead: before, branch: 'repair' } : {}) };
+    const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: '1',
+      HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
+      HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low',
+      HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'), HAM_BASE_HEAD: before,
+      HAM_REMOTE_CI_STARTED_AT: '1', HAM_NO_MERGE_NOTE: 'stale wait',
+      PATH: `${dir}:${process.env.PATH}`, PUBLISH_RESULT: JSON.stringify(publication) };
+    const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-publish', '--render'], env);
+    assert.equal(render.status, 0, render.stderr);
+    const script = join(dir, 'publish.sh');
+    writeFileSync(script, render.stdout);
+    const result = run('/bin/bash', ['-c', `source "$1" || exit $?\necho "PUSHED=$HAM_PUSHED_HEAD FROM=$HAM_PUSHED_FROM_HEAD CHECK_START=\${HAM_REMOTE_CI_STARTED_AT:-unset} NOTE=$HAM_NO_MERGE_NOTE"`, '_', script], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`PUSHED=${pushed} FROM=${before} CHECK_START=unset NOTE=$`, 'm'));
+  });
+}

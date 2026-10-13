@@ -193,8 +193,13 @@ return 0
 # Called before the hammer's ordinary git publication. The audit phase remains
 # separate, under the merge lease, after remote CI validates the published SHA.
 if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
+  HAM_PUBLICATION_PREVIOUS_HEAD="${POST_REMEDIATION_SHA:-${HAM_BASE_HEAD:-}}"
   HAM_API_PUBLISH_RESULT=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 120 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-api-publish.mjs <<REPO>> <<PR_URL>>) || HAM_API_PUBLISH_RESULT='{"route":"re-review","reason":"API publication timed out"}'
   printf '%s\n' "$HAM_API_PUBLISH_RESULT"
+  HAM_PUSHED_FROM_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.previousHead // empty')
+  if [ -z "$HAM_PUSHED_FROM_HEAD" ]; then HAM_PUSHED_FROM_HEAD="$HAM_PUBLICATION_PREVIOUS_HEAD"; fi
+  HAM_PUSHED_HEAD=""
+
   if [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = re-review ]; then
     # Preserve the existing lease-protected git route. Range proof below will
     # request one exact-head review, rather than turning this into an escalation.
@@ -213,7 +218,15 @@ if [ "${HAM_COMMIT_PUBLICATION_ONLY:-0}" -eq 1 ]; then
         return 1
       }
     fi
+    HAM_PUSHED_HEAD=$(git rev-parse HEAD) || return 1
+  elif [ "$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.route')" = published ]; then
+    HAM_PUSHED_HEAD=$(printf '%s' "$HAM_API_PUBLISH_RESULT" | jq -r '.head')
   fi
+  unset HAM_REMOTE_CI_STARTED_AT
+  HAM_NO_MERGE_NOTE=""
+  HAM_HEAD_WAITED_SECONDS=0
+  HAM_REQUIRED_CHECKS_WAITED_SECONDS=0
+  export HAM_PUSHED_HEAD HAM_PUSHED_FROM_HEAD
 else
   ham_publish_phase
 fi

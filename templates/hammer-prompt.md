@@ -299,6 +299,11 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    only comment for the successful merge path. If that audit was already posted
    before a later merge failure, edit it in place into the required no-merge
    closing-status comment; do not leave the audit and add a second comment.
+   Include `HAM_NO_MERGE_NOTE`, or the measured `HAM_HEAD_WAITED_SECONDS` and
+   `HAM_REQUIRED_CHECKS_WAITED_SECONDS`, in the note. Missing exact-head CI is
+   a terminal reason only after the published-head visibility wait and the
+   existing required-checks wait; if head visibility times out, report that
+   the checks wait could not start (0s). A different live head keeps the race handling.
    Either way, the comment must contain the line `HAM closing status — no merge.`
    In the audit comment for the current head, the closer reads that line as
    this head's terminal no-merge audit. Do
@@ -597,7 +602,7 @@ Refresh and validate the live head:
 
 These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting the dispatch values above. Refresh the live head, acquire the merge lease, rebase under the existing bounded policy, and validate the rebased head. The wrapper prints the bounded diagnostic tail, status, outcome, and lease state before deleting its temporary files. A nonzero status blocks the next phase. Status 20 means parked or blocked; status 21 means a rebase conflict. On conflict, resolve it using "Resolving merge conflicts" below, revalidate, and rerun verify-head before continuing.
+In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render` after exporting the dispatch values above. Wait up to five minutes for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD` in the live PR read, then acquire the merge lease, rebase under the existing bounded policy, and validate the rebased head. The wrapper prints the bounded diagnostic tail, status, outcome, and lease state before deleting its temporary files. A nonzero status blocks the next phase. Status 20 means parked or blocked; status 21 means a rebase conflict. On conflict, resolve it using "Resolving merge conflicts" below, revalidate, and rerun verify-head before continuing.
 
 
 ## Resolving merge conflicts

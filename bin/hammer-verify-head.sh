@@ -4,6 +4,39 @@ ham_verify_head_phase() {
 HAM_PHASE_OUTCOME=verify-head-error
 gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
+# Wait only for read-after-push lag. A third head retains the ordinary race path.
+HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
+HAM_REQUIRED_CHECKS_WAITED_SECONDS="${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}"
+ham_wait_for_published_head() {
+  local started deadline now remaining probe_timeout
+  started=$(date +%s)
+  deadline=$((started + 300))
+  while [ -n "${HAM_PUSHED_HEAD:-}" ] && [ "$POST_REMEDIATION_SHA" != "$HAM_PUSHED_HEAD" ] \
+    && [ "$POST_REMEDIATION_SHA" = "${HAM_PUSHED_FROM_HEAD:-}" ]; do
+    now=$(date +%s)
+    HAM_HEAD_WAITED_SECONDS=$((now - started))
+    if [ "$now" -ge "$deadline" ]; then
+      HAM_NO_MERGE_NOTE="HAM closing status — no merge. Waited ${HAM_HEAD_WAITED_SECONDS}s for the published head and ${HAM_REQUIRED_CHECKS_WAITED_SECONDS}s for required checks on that exact head (checks wait could not start before the head appeared)."
+      echo "$HAM_NO_MERGE_NOTE" >&2
+      HAM_PHASE_OUTCOME=published-head-timeout
+      if declare -F ham_release_merge_lease >/dev/null; then ham_release_merge_lease || return 1; fi
+      return 20
+    fi
+    remaining=$((deadline - now))
+    if [ "$remaining" -gt 15 ]; then remaining=15; fi
+    sleep "$remaining"
+    remaining=$((deadline - $(date +%s)))
+    if [ "$remaining" -le 0 ]; then continue; fi
+    probe_timeout="$remaining"
+    if [ "$probe_timeout" -gt 30 ]; then probe_timeout=30; fi
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' "$probe_timeout" gh pr view <<PR_URL>> \
+      --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName \
+      > /tmp/ham-<<PR_NUMBER>>-pr-after.json || return 1
+    POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
+    HAM_HEAD_WAITED_SECONDS=$(( $(date +%s) - started ))
+  done
+}
+ham_wait_for_published_head || return $?
 BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
 HAM_VALIDATION_BASE_SHA="${HAM_VALIDATION_BASE_SHA:-}"
 HAM_FORCE_REVALIDATION=0

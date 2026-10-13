@@ -50,9 +50,9 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
   }
   let state = readState(rootDir, identity);
   if (hasOperatorDecisionRequiredAlerted(rootDir, identity)) return;
-  if (state.observation?.headSha !== headSha) {
+  const observationChanged = state.observation?.headSha !== headSha;
+  if (observationChanged) {
     state = { ...state, observation: { headSha, startedAt: now } };
-    writeState(rootDir, identity, state);
   }
   const record = readAmaCloserDispatchRecord(rootDir, identity);
   const lease = readAmaCloserLease(rootDir, identity);
@@ -76,13 +76,18 @@ export async function maybeDeliverOperatorDecisionNotice({ rootDir, repo, prNumb
     : ended ? 'hammer-ended-without-merge'
     : now - state.observation.startedAt >= OPERATOR_DECISION_NOTICE_BACKSTOP_MS ? 'backstop-45m' : null;
   if (!reason) {
-    if (!state.heldHeads?.[headSha]) {
+    const firstHold = !state.heldHeads?.[headSha];
+    if (firstHold) {
       state.heldHeads = { ...state.heldHeads, [headSha]: true };
-      writeState(rootDir, identity, state);
+    }
+    if (observationChanged || firstHold) writeState(rootDir, identity, state);
+    if (firstHold) {
       logger.log(`[watcher] operator-decision notice held for ${repo}#${prNumber}@${headSha}: ${held || 'awaiting-route-outcome'}`);
     }
     return;
   }
+  // Persist the observation before yielding to live PR lookup or delivery.
+  if (observationChanged) writeState(rootDir, identity, state);
   if (readLivePR) {
     const live = await readLivePR();
     if (String(live?.state).toUpperCase() !== 'OPEN' || live?.headRefOid !== headSha) return;

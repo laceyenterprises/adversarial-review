@@ -3,6 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -230,6 +232,64 @@ function noticeFixture(rootDir) {
     deliverAlertFn: async (text, meta) => alerts.push({ text, meta }),
     logger: { log: line => logs.push(line) } } };
 }
+
+test('held observations use one atomic replacement per changed head and none on repeat polls', async t => {
+  await withRootAsync(async root => {
+    const { alerts, logs, options } = noticeFixture(root);
+    const closer = { needsOperator: false, reason: 'synthetic-outcome' };
+    recordOperatorNoticeCloserOutcome(root, identity, closer);
+    const rename = fs.renameSync;
+    let replacements = 0;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (to === noticeStatePath(root)) replacements++;
+      return rename(from, to);
+    });
+    syncBuiltinESMExports();
+    try {
+      await maybeDeliverOperatorDecisionNotice(options);
+      assert.equal(replacements, 1);
+      assert.deepEqual(JSON.parse(readFileSync(noticeStatePath(root), 'utf8')), {
+        closer: { headSha: HEAD, result: closer },
+        observation: { headSha: HEAD, startedAt: 0 },
+        heldHeads: { [HEAD]: true },
+      });
+      await maybeDeliverOperatorDecisionNotice({ ...options, now: 1 });
+      assert.equal(replacements, 1);
+      const nextHead = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      await maybeDeliverOperatorDecisionNotice({ ...options, headSha: nextHead, now: 2 });
+      assert.equal(replacements, 2);
+      // An already-logged head still needs a fresh observation if it returns.
+      await maybeDeliverOperatorDecisionNotice({ ...options, now: 3 });
+      assert.equal(replacements, 3);
+      const state = JSON.parse(readFileSync(noticeStatePath(root), 'utf8'));
+      assert.deepEqual(state.observation, { headSha: HEAD, startedAt: 3 });
+      assert.deepEqual(state.heldHeads, { [HEAD]: true, [nextHead]: true });
+      assert.deepEqual(state.closer, { headSha: HEAD, result: closer });
+      assert.equal(logs.length, 2);
+      assert.equal(alerts.length, 0);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  });
+});
+
+test('immediate delivery persists the observation before live lookup without overwriting a newer outcome', async () => {
+  await withRootAsync(async root => {
+    const { alerts, options } = noticeFixture(root);
+    recordOperatorNoticeCloserOutcome(root, identity, { needsOperator: true });
+    const newerOutcome = { needsOperator: true, reason: 'updated-during-lookup' };
+    await maybeDeliverOperatorDecisionNotice({ ...options, readLivePR: async () => {
+      assert.deepEqual(JSON.parse(readFileSync(noticeStatePath(root), 'utf8')).observation,
+        { headSha: HEAD, startedAt: 0 });
+      recordOperatorNoticeCloserOutcome(root, identity, newerOutcome);
+      return { state: 'OPEN', headRefOid: HEAD };
+    } });
+    assert.equal(alerts.length, 1);
+    assert.deepEqual(JSON.parse(readFileSync(noticeStatePath(root), 'utf8')).closer,
+      { headSha: HEAD, result: newerOutcome });
+  });
+});
 
 for (const route of ['no-route', 'backstop-45m']) {
   test(`watcher delivers once on an open PR with stopped remediation after ${route}`, async () => {

@@ -123,6 +123,43 @@ test('closer identity accepts normalized strings and rejects foreign committers'
   }
 });
 
+test('HAMREVERSAL-01: API identity requires a HAM author and valid GitHub verification', () => {
+  const hammer = { login: 'the-hammer-lacey[bot]' };
+  const message = 'repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)\nVerified: true\nReason: valid';
+  for (const [verification, expected] of [
+    [{ verified: true, reason: 'valid' }, true],
+    [{ verified: false, reason: 'valid' }, false],
+    [{ verified: true, reason: 'unsigned' }, false],
+    [undefined, false],
+  ]) {
+    const commit = { author: hammer, committer: { login: 'web-flow' }, commit: { message, verification } };
+    assert.equal(hamCommitIdentityMatches(commit), expected);
+    assert.equal(hamCommitIdentityMatches(normalizeVerifiedCloserCommit(commit)), expected);
+    for (const author of [{ login: 'some-human-contributor' }, null]) {
+      assert.equal(hamCommitIdentityMatches({ ...commit, author }), false);
+    }
+  }
+  const unsigned = { author: hammer, committer: hammer, commit: { message, verification: { verified: false, reason: 'unsigned' } } };
+  assert.equal(hamCommitIdentityMatches(unsigned), true);
+  assert.equal(hamCommitIdentityMatches({ ...unsigned, author: null }), true);
+  assert.equal(hamCommitIdentityMatches({ ...unsigned, committer: { login: 'some-human-contributor' } }), false);
+});
+
+test('HAMREVERSAL-01: remote closer probe preserves API verification', async () => {
+  for (const verified of [true, false]) {
+    const result = await getHeadCloserCommitSuppression({
+      repoPath: 'fixture/repo', headSha: 'a'.repeat(40),
+      fetchVerifiedCommitFromLocalGitImpl: async () => null,
+      execGhWithRetryImpl: async ({ args }) => {
+        assert.match(args.at(-1), /verification:\.commit\.verification/);
+        return { stdout: JSON.stringify({ authorLogin: 'the-hammer-lacey[bot]', committerLogin: 'web-flow',
+          message: 'repair\n\nWorker-Ticket: HAM', commit: { verification: { verified, reason: 'valid' } } }) };
+      },
+    });
+    assert.equal(result.suppressed, verified);
+  }
+});
+
 test('merge-agent finalize commits with production PR tickets remain reviewable', () => {
   const commit = { author: { login: 'merge-agent-lacey' }, committer: { login: 'merge-agent-lacey' },
     message: 'Finalize PR\n\nWorker-Class: merge-agent\nWorker-Ticket: PR-1223' };

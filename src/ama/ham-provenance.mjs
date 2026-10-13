@@ -95,7 +95,8 @@ export function hamAuditCommentAuthorMatches(authorOrComment) {
 }
 
 // Linked logins are provenance signals, not cryptographic identity proof.
-// Either linked foreign identity disqualifies the commit. Only an unlinked
+// A linked foreign author disqualifies the commit. GitHub's web-flow committer
+// is accepted only for a HAM author with valid GitHub verification. Only an unlinked
 // author may fall back to a HAM committer with the full terminal trailer set.
 export function hamCommitIdentityMatches(commit, {
   trailers = parseCommitTrailers(commit?.commit?.message || commit?.message || ''),
@@ -104,7 +105,12 @@ export function hamCommitIdentityMatches(commit, {
   const login = (identity) => normalizeHamLogin(typeof identity === 'object' ? identity?.login : identity);
   const author = login(commit?.author);
   const committer = login(commit?.committer);
-  if ((author && !loginMatches(author)) || (committer && !loginMatches(committer))) return false;
+  if (author && !loginMatches(author)) return false;
+  if (committer && !loginMatches(committer)) {
+    return Boolean(author) && committer === 'web-flow'
+      && commit?.commit?.verification?.verified === true
+      && commit.commit.verification.reason === 'valid';
+  }
   if (author) return true;
   return Boolean(committer)
     && /^hammer(?:-corp|-claude)?$/i.test(trailers['worker-class'] || '')

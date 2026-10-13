@@ -635,7 +635,7 @@ test('the CI-blocked prompt shares the cap route contract and caps the failing-c
   assert.match(composeCiBlockedHammerPrompt({}), /did not capture the failing check names/);
 });
 
-for (const state of ['failed', 'pending', 'hard-stop', 'live-lease']) {
+for (const state of ['failed', 'pending', 'hard-stop', 'draft', 'live-remediation', 'live-lease']) {
   test(`CIBLOCKHAM-02: exhausted comment-only round routes on this pass (${state})`, async (t) => {
     const rootDir = tempRoot(t, 'ci-blocked-next-pass-');
     const args = closerArgs(rootDir);
@@ -647,11 +647,14 @@ for (const state of ['failed', 'pending', 'hard-stop', 'live-lease']) {
     args.reviewState.prAuthor = 'fixture-worker';
     args.reviewState.reviewCycleExhausted = false;
     args.reviewState.completedRemediationRounds = 0;
-    args.dispatchContext.ciFailedChecks = [{ name: 'unit', state: 'FAILURE' }];
+    args.dispatchContext.ciBlockedReason = 'ci-regression-stopped';
+    args.dispatchContext.ciFailedChecks = state === 'pending' ? [] : [{ name: 'unit', state: 'FAILURE' }];
     args.prMetadata.statusCheckRollup = [{ __typename: 'CheckRun', name: 'unit',
       status: state === 'pending' ? 'IN_PROGRESS' : 'COMPLETED',
       conclusion: state === 'pending' ? null : 'FAILURE' }];
     if (state === 'hard-stop') args.prMetadata.labels = ['do-not-merge'];
+    if (state === 'draft') args.prMetadata.isDraft = true;
+    if (state === 'live-remediation') args.reviewState.remediationPending = true;
     const deps = closerDeps({ workerStatus: 'running' });
     if (state === 'failed') {
       const ordinary = await maybeDispatchAmaCloser({ ...args, ...deps,
@@ -659,7 +662,7 @@ for (const state of ['failed', 'pending', 'hard-stop', 'live-lease']) {
       assert.deepEqual(ordinary.reasons, ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green']);
     }
     const first = await maybeDispatchAmaCloser({ ...args, ...deps });
-    if (state === 'pending' || state === 'hard-stop') {
+    if (['pending', 'hard-stop', 'draft', 'live-remediation'].includes(state)) {
       assert.equal(first.dispatched, false, JSON.stringify(first));
       assert.equal(deps.launches.length, 0);
     } else {

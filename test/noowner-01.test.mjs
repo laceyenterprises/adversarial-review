@@ -908,7 +908,7 @@ test('HOLDRELEASE-01: removal on an unchanged stopped head dispatches one hammer
   } finally { db.close(); }
 });
 
-for (const kind of ['same-live', 'same-live-quoted', 'other-live', 'same-dead', 'same-unknown', 'mixed-error', 'launch-receipt']) {
+for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'other-live', 'same-dead', 'same-unknown', 'mixed-error', 'multiline-mixed-error', 'launch-receipt']) {
   test(`REVIEWALERT-01 provision-slot contention: ${kind}`, async t => {
     const rootDir = tmpRoot(t, 'reviewalert-slot-');
     const identity = { repo: 'example/project', prNumber: 1, headSha: 'a'.repeat(40) };
@@ -920,7 +920,9 @@ for (const kind of ['same-live', 'same-live-quoted', 'other-live', 'same-dead', 
       const error = new Error('synthetic provision lock wait');
       error.stderr = `[hq] error: hq_acquire_lockdir: waited 30s for '<root>/.hq/worker-provision-slot-locks/${kind === 'other-live' ? 'other-worker' : workerId}.lock.d' (holder pid=123 ppid=12 state=running start='synthetic-time' cmd='bash <script>')`;
       if (kind === 'same-live-quoted') error.stderr = error.stderr.replace('bash <script>', "bash -c 'echo synthetic'");
+      if (kind === 'same-live-multiline' || kind === 'multiline-mixed-error') error.stderr = error.stderr.replace('bash <script>', 'bash -c echo\nsynthetic');
       if (kind === 'mixed-error') error.stderr += '\n[hq] error: another refusal';
+      if (kind === 'multiline-mixed-error') error.stderr += '\n[hq] error: another refusal';
       if (kind === 'launch-receipt') error.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       throw error;
     } });
@@ -929,7 +931,7 @@ for (const kind of ['same-live', 'same-live-quoted', 'other-live', 'same-dead', 
     const result = await maybeDispatchAmaCloser({ ...args, ...deps,
       processKillImpl: () => { if (['same-dead', 'same-unknown'].includes(kind)) { const error = new Error('unavailable holder'); error.code = kind === 'same-dead' ? 'ESRCH' : 'EINVAL'; throw error; } } });
     const record = readAmaCloserDispatchRecord(rootDir, identity);
-    if (kind === 'same-live' || kind === 'same-live-quoted') {
+    if (['same-live', 'same-live-quoted', 'same-live-multiline'].includes(kind)) {
       assert.equal(result.reason, 'dispatch-deferred-transient');
       assert.equal(result.skipMergeAgent, true);
       assert.equal(result.releasedPendingLease, true);

@@ -454,6 +454,9 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
 );
+if (!SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW.includes('COUNT(*) AS n')) {
+  throw new Error('First-pass admission query requires the COUNT(*) AS n projection');
+}
 const SQL_FIRST_PASS_ADMISSION_TIMES = SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW.replace(
   'COUNT(*) AS n', 'reviewed_at',
 );

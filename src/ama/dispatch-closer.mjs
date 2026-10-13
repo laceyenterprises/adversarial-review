@@ -1661,11 +1661,11 @@ function isPidAlive(pid, processKillImpl = process.kill) {
   }
 }
 
-function sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl) {
+function sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl = process.kill) {
   const stderr = String(err?.stderr || '').trim();
   // Accept only the provision-slot diagnostic, never a mixed refusal or receipt.
-  if (String(err?.stdout || '').trim() || stderr.split('\n').length !== 1) return false;
-  const match = stderr.match(/^\[hq\] error: hq_acquire_lockdir: waited \d+s for '([^']*\/worker-provision-slot-locks\/([^/']+)\.lock\.d)' \(holder pid=(\d+) ppid=\d+ .* start='[^']*' cmd='.*'\)$/);
+  if (String(err?.stdout || '').trim()) return false;
+  const match = stderr.match(/^\[hq\] error: hq_acquire_lockdir: waited \d+s for '([^'\r\n]*\/worker-provision-slot-locks\/([^/'\r\n]+)\.lock\.d)' \(holder pid=(\d+) ppid=\d+ [^\r\n]* start='[^'\r\n]*' cmd='(?:(?!\r?\n\[hq\])[^])*'\)$/);
   if (!match || match[2] !== workerId || Number(match[3]) <= 0) return false;
   try {
     processKillImpl(Number(match[3]), 0);

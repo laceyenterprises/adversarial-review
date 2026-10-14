@@ -12,6 +12,22 @@ const head = 'a'.repeat(40);
 const label = { id: 123, node_id: 'LA_fixture', name: 'operator-hold', color: 'ff0000' };
 const pr = { state: 'open', head: { sha: head }, labels: [label], mergeable: true };
 
+test('REST mergeCommit represents a completed merge, never an open PR test merge', async () => {
+  const mergeSha = 'b'.repeat(40);
+  for (const mergedAt of [null, '2026-10-13T12:00:00Z']) {
+    const snapshot = await fetchHammerPr('fixture/repo', 42, { withChecks: false,
+      read: async () => ({ ...pr, merged_at: mergedAt, merge_commit_sha: mergeSha }),
+    });
+    assert.equal(snapshot.state, mergedAt ? 'MERGED' : 'OPEN');
+    assert.deepEqual(snapshot.mergeCommit, mergedAt ? { oid: mergeSha } : null);
+  }
+  const snapshot = await fetchHammerPr('fixture/repo', 42, { withChecks: false,
+    read: async () => ({ ...pr, state: 'closed', merged_at: null, merge_commit_sha: mergeSha }),
+  });
+  assert.equal(snapshot.state, 'CLOSED');
+  assert.equal(snapshot.mergeCommit, null);
+});
+
 test('REST snapshot preserves the lease green assertion for runs and contexts', async () => {
   const snapshot = await fetchHammerPr('fixture/repo', 42, { read: async path => {
     if (path.includes('/check-runs?')) return { check_runs: ['success', 'neutral', 'skipped'].map(conclusion => ({

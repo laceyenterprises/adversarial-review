@@ -129,52 +129,54 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
   }
 }
 
-function bridgeCall(action, payload) {
+function bridgeCall(action, payload, env) {
   return execFileSync(process.execPath, [bridge, action], {
-    input: JSON.stringify(payload), encoding: 'utf8', env: process.env,
+    input: JSON.stringify(payload), encoding: 'utf8', env,
     maxBuffer: 1024 * 1024,
   });
 }
 
-function finishSync(result, { failed = false, resource = 'core' } = {}) {
+function finishSync(result, { failed = false, resource = 'core', env } = {}) {
   const parsed = parseGhDebug(result?.stderr);
   const limited = responseRateLimited(result, parsed, failed || Number(result?.status) > 0);
-  if (parsed.observations.length) bridgeCall('record', parsed.observations);
-  else if (limited) bridgeCall('limited', [resource]);
+  if (parsed.observations.length) bridgeCall('record', parsed.observations, env);
+  else if (limited) bridgeCall('limited', [resource], env);
   return result;
 }
 
 function meteredExecFileSync(execFileImpl, command, args, options = {}) {
   if (command !== 'gh') return execFileImpl(command, args, options);
+  const activeOptions = debugOptions(options);
+  const { env } = activeOptions;
   let buckets = {};
-  try { buckets = JSON.parse(readFileSync(resolveRateLimitSharedStatePath(), 'utf8')).buckets || {}; } catch { /* No observation yet. */ }
+  try { buckets = JSON.parse(readFileSync(resolveRateLimitSharedStatePath(env), 'utf8')).buckets || {}; } catch { /* No observation yet. */ }
   const scope = currentGitHubBudgetScope();
   for (const resource of ghResources(args)) {
     const bucket = buckets[resource];
     if (scope?.rateLimited) throw new GitHubBudgetDeferredError(bucket || { resource, resetAt: null });
-    if (bucket?.remaining < resolveThrottleFloor() && Date.parse(bucket.resetAt) > Date.now()) {
+    if (bucket?.remaining < resolveThrottleFloor(env) && Date.parse(bucket.resetAt) > Date.now()) {
       if (scope?.urgent && bucket.remaining > 0) continue;
       if (scope) { scope.deferred = true; throw new GitHubBudgetDeferredError(bucket); }
-      bridgeCall('wait', [resource]);
+      bridgeCall('wait', [resource], env);
     }
   }
   try {
     // execFileSync normally returns only stdout. Capture stderr as well so all
     // successful responses are accounted for; injected executors keep their seam.
     if (execFileImpl === execFileSync) {
-      const result = spawnSync(command, args, { ...debugOptions(options), stdio: 'pipe' });
+      const result = spawnSync(command, args, { ...activeOptions, stdio: 'pipe' });
       if (result.error || result.status !== 0) {
         const err = result.error || new Error(`Command failed: gh ${args.slice(0, 2).join(' ')}`);
         Object.assign(err, { stdout: result.stdout, stderr: result.stderr, status: result.status, signal: result.signal });
         throw err;
       }
-      return finishSync(result).stdout;
+      return finishSync(result, { env }).stdout;
     }
-    const result = execFileImpl(command, args, debugOptions(options));
-    if (result && typeof result === 'object' && 'status' in result) finishSync(result);
+    const result = execFileImpl(command, args, activeOptions);
+    if (result && typeof result === 'object' && 'status' in result) finishSync(result, { env });
     return result;
   } catch (err) {
-    finishSync(err, { failed: true, resource: args[0] === 'api' ? ghResources(args)[0] : 'graphql' });
+    finishSync(err, { failed: true, resource: args[0] === 'api' ? ghResources(args)[0] : 'graphql', env });
     throw err;
   }
 }

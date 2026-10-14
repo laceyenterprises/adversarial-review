@@ -428,8 +428,6 @@ case "$*" in
     echo attempted > "$TMPDIR/merge-attempted"
     while [ "$#" -gt 1 ]; do
       case "$1" in
-  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;
-  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;;
         --match-head-commit) printf '%s' "$2" > "$TMPDIR/merge-head" ;;
         --subject) printf '%s' "$2" > "$TMPDIR/merge-subject" ;;
         --body) printf '%s' "$2" > "$TMPDIR/merge-body" ;;

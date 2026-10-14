@@ -33,3 +33,9 @@ below the throttle floor, ordinary scopes defer immediately, while urgent closin
 scopes may use positive remaining capacity. Zero remaining defers both. Only
 un-scoped callers share in-process sleep promises; scoped callers never join
 another caller's wait or inherit its deferral decision.
+
+Synchronous `meteredExecFileSync` calls use the effective caller environment for
+budget reads, the throttle floor, and the `wait`, `record`, and `limited` bridge
+processes. Explicit `options.env` budget settings take precedence; missing budget
+settings inherit from `process.env`. An isolated caller's observations therefore
+stay in its selected store, including failures without rate-limit headers.

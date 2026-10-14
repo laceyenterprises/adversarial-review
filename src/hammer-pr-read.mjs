@@ -22,7 +22,7 @@ async function fetchHammerPr(repo, prNumber, { withChecks = true, withReviews = 
     mergeable: pr.mergeable === true ? 'MERGEABLE' : pr.mergeable === false ? 'CONFLICTING' : 'UNKNOWN',
     mergeStateStatus: String(pr.mergeable_state || '').toUpperCase(),
     labels: Array.isArray(pr.labels) ? pr.labels.map(label => ({ id: label.node_id, name: label.name, color: label.color })) : null,
-    mergeCommit: pr.merge_commit_sha ? { oid: pr.merge_commit_sha } : null,
+    mergeCommit: pr.merged_at && pr.merge_commit_sha ? { oid: pr.merge_commit_sha } : null,
   };
   if (withChecks && snapshot.headRefOid) {
     const checks = [];

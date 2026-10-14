@@ -50,7 +50,7 @@ async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, exe
         subjectExternalId: `${row.repo}#${row.pr_number}`, revisionRef: pr.headRefOid };
       await handlePostedReviewRow({
         rootDir, repoPath: row.repo, prNumber: row.pr_number, existing: row,
-        subjectRef, currentRevisionRef: pr.headRefOid, labelNames: pr.labels || [],
+        subjectRef, currentRevisionRef: pr.headRefOid, labelNames: (pr.labels || []).map(label => label.name),
         operatorSurface: createWatcherOperatorSurface(), domainId: subjectRef.domainId,
         projectGateStatusSafe: reviewRow => projectAdversarialGateStatus(rootDir, {
           repo: row.repo, prNumber: row.pr_number, headSha: pr.headRefOid,

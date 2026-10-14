@@ -15,10 +15,28 @@ test('invalid starting-head arguments return a clean usage error without GitHub 
   const dir = mkdtempSync(join(tmpdir(), 'hammer-base-usage-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'gh'), '#!/bin/sh\necho unexpected GitHub call >&2\nexit 99\n', { mode: 0o755 });
-  for (const args of [[], ['not-a-url'], ['github.com/fixture/repo/pull/42'], ['https://github.com/fixture/repo/issues/42']]) {
+  for (const args of [[], ['not-a-url'], ['github.com/fixture/repo/pull/42'], ['https://github.com/fixture/repo/issues/42'],
+    ['https://github.com/fixture/repo/pull/0/files'], ['https://github.com/fixture/repo/pull/42suffix']]) {
     await assert.rejects(execute(process.execPath, [cli, ...args], {
       env: { ...process.env, PATH: `${dir}:${process.env.PATH}` }, timeout: 5000,
     }), error => error.code === 64 && error.stdout === '' && error.stderr === 'usage: hammer-base-head PR_URL\n');
+  }
+});
+
+test('starting-head lookup accepts browser PR tabs, queries and fragments', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'hammer-base-tabs-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, 'gh'), `#!${process.execPath}
+import assert from 'node:assert/strict';
+assert.deepEqual(process.argv.slice(2), ['api', 'repos/fixture/repo/pulls/42', '--jq', '.head.sha']);
+console.log('${head}');
+`, { mode: 0o755 });
+  for (const suffix of ['', '/', '/files', '/commits', '?diff=split', '/files?diff=split#diff-fixture']) {
+    const { stdout } = await execute(process.execPath, [cli, `https://github.com/fixture/repo/pull/42${suffix}`], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(dir, 'budget.json') },
+      timeout: 5000,
+    });
+    assert.equal(stdout, `${head}\n`);
   }
 });
 

@@ -675,6 +675,48 @@ test('AGYDRIFT-01: an added identity is ready with the dedicated keychain and no
   }
 });
 
+test('AGYDRIFT-01: first-pass proxy drift logs once per distinct reason set until first ready', async () => {
+  const fake = makeFakeInstall({ users: ['reviewer-b'] });
+  try {
+    const settings = 'AGY_KEYCHAIN_PATH=~/Library/Keychains/agy-reviewer.keychain-db\nHTTPS_PROXY=synthetic-proxy\n';
+    writeFileSync(fake.settingsPath('reviewer-b'), settings);
+    const log = quietLog();
+    const pool = makeSettingsReadinessPool(fake, log);
+    const failures = () => log.lines.filter((line) => line.includes('identity=reviewer-b not ready:'));
+    const driftReason = 'settings drift: HTTPS_PROXY is set for the identity but not on the HQ-owner path';
+    assert.equal(await pool.refreshReadiness(), 0);
+    assert.equal(pool.snapshot()[0].ready, false);
+    assert.deepEqual(pool.snapshot()[0].reasons, [driftReason]);
+    assert.deepEqual(failures(), [`warn [agy-identities] identity=reviewer-b not ready: ${driftReason}`]);
+    assert.equal(await pool.acquire({ reviewId: 'agy-drift-held' }), null);
+    await pool.refreshReadiness();
+    assert.equal(failures().length, 1, 'repeated failures do not repeat the log');
+
+    // A second reason set is reported once, including when the first recurs.
+    writeFileSync(join(fake.home('reviewer-b'), '.item-missing'), '');
+    await pool.refreshReadiness();
+    await pool.refreshReadiness();
+    assert.deepEqual(failures(), [
+      `warn [agy-identities] identity=reviewer-b not ready: ${driftReason}`,
+      `warn [agy-identities] identity=reviewer-b not ready: agy keychain item missing; ${driftReason}`,
+    ]);
+    rmSync(join(fake.home('reviewer-b'), '.item-missing'));
+    await pool.refreshReadiness();
+    assert.equal(failures().length, 2);
+
+    writeFileSync(fake.settingsPath('reviewer-b'), settings.split('\n')[0] + '\n');
+    assert.equal(await pool.refreshReadiness(), 1);
+    assert.ok(log.lines.includes('log [agy-identities] identity=reviewer-b ready'));
+    writeFileSync(fake.settingsPath('reviewer-b'), settings);
+    assert.equal(await pool.refreshReadiness(), 0);
+    assert.ok(log.lines.includes(`warn [agy-identities] identity=reviewer-b isolated: ${driftReason}`));
+    await pool.refreshReadiness();
+    assert.equal(failures().length, 2, 'after first ready, existing transition logging takes over');
+  } finally {
+    fake.cleanup();
+  }
+});
+
 test('CCX-08: a failed review isolates only its identity, and a passing readiness check re-admits it', async () => {
   const fake = makeFakeInstall();
   try {

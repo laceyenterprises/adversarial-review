@@ -696,6 +696,7 @@ function createAgyReviewerIdentityPool({
         hqOwner: identity.hqOwner,
         ready: identity.hqOwner,
         reasons: identity.hqOwner ? [] : ['no readiness pass yet'],
+        initialFailureReasonSets: new Set(),
         needsProbe: false,
         draining: !identity.hqOwner,
         drainingSince: identity.hqOwner ? null : now(),
@@ -718,6 +719,14 @@ function createAgyReviewerIdentityPool({
       log.warn?.(`[agy-identities] identity=${state.user} isolated: ${reasons.join('; ') || 'readiness failed'}`);
     } else if (!was && ready) {
       log.log?.(`[agy-identities] identity=${state.user} ${state.everReady ? 're-admitted' : 'ready'}`);
+    } else if (!ready && !state.hqOwner && !state.everReady) {
+      // Added identities start not ready: report each distinct initial failure
+      // even without a ready -> not-ready transition, but do not repeat it.
+      const reasonSet = JSON.stringify([...new Set(reasons)].sort());
+      if (!state.initialFailureReasonSets.has(reasonSet)) {
+        state.initialFailureReasonSets.add(reasonSet);
+        log.warn?.(`[agy-identities] identity=${state.user} not ready: ${reasons.join('; ') || 'readiness failed'}`);
+      }
     }
     if (ready) state.everReady = true;
   }

@@ -9,8 +9,23 @@ import { createHash } from 'node:crypto';
 import { storedPrimaryChange } from '../src/ama/primary-change-store.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
-import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { primaryChangeFixture, primaryRenameRepository } from './helpers/primary-change.mjs';
+import { decideClosureOwner } from '../src/ama/closure-owner.mjs';
 const head = 'c'.repeat(40);
+
+test('PRIMARYRENAME-01: an added-file rename loses the builder path in the base-to-head diff', async t => {
+  const fixture = primaryRenameRepository(t);
+  const evidence = await fetchPrimaryChange(fixture.args);
+  assert.equal(evidence.primaryHead, fixture.builder);
+  assert.equal(evidence.primaryFiles[0].filename, fixture.source);
+  assert.equal(evidence.primaryFiles[0].sha, fixture.blob);
+  assert.equal(evidence.finalFiles[0].filename, fixture.destination);
+  assert.equal(evidence.finalFiles[0].status, 'added');
+  assert.equal(evidence.finalFiles[0].sha, fixture.blob);
+  assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).reason, 'primary-change-reverted');
+  assert.equal(decideClosureOwner({ primaryChange: evidence, currentHead: fixture.args.headSha }).reason,
+    'primary-change-needs-operator');
+});
 // This suite isolates history semantics; ci-cost.test.mjs exercises the live collector.
 const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {
   fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true }),

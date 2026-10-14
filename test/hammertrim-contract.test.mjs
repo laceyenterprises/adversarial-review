@@ -7,6 +7,8 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeVerifiedCloserCommit } from '../src/head-closer-commit-suppression.mjs';
+import { buildHamTerminalRemediationEvidenceFromGroundTruth } from '../src/ama/dispatch-closer.mjs';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 import { composeAmaTrailers } from '../src/ama/audit.mjs';
 
@@ -90,6 +92,7 @@ esac
     HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
     HAM_AUDIT_DETAILS_FILE: detailsPath, HAM_AUDIT_REMEDIATED_TOTAL: '1',
     HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
+    HAM_DOC_CURRENCY: 'not applicable', HAM_DOC_CURRENCY_REASON: 'changed files covered: bin/gate.sh',
     HAM_FAILING_TESTS_FIXED: 'suite already green', HAMMER_LACEY_GH_TOKEN: 'fixture',
     POSTED_BODY_PATH: bodyPath, PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
   };
@@ -107,10 +110,45 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   const success = run('/bin/bash', ['-c', shell, '_', script], env);
   assert.equal(success.status, 0, success.stderr);
   assert.match(success.stdout, /STATUS=0 HELD=1 PUBLISHED=aaaaaaaa/);
+  function assertDocPredicate(body, changedFiles) {
+    const head = 'a'.repeat(40), reviewed = 'b'.repeat(40);
+    // Bind the rendered body to a synthetic reviewed parent for the predicate.
+    body = body.replaceAll(`HAM-Base-Head: ${head}`, `HAM-Base-Head: ${reviewed}`);
+    const commit = { ...normalizeVerifiedCloserCommit({ sha: head, parents: [{ sha: reviewed }],
+      author: { login: 'hammer-worker' }, committer: { login: 'hammer-worker' },
+      commit: { message: `Repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${reviewed}\nClosed-By: hammer (adversarial-pipe-mode)\nRemediated-Findings: 1 addressed (1 blocking, 0 non-blocking)` },
+      files: changedFiles.map(filename => ({ filename })) }),
+      primaryChange: { headSha: head, hasHammerCommits: false, ciCost: { headSha: head, ok: true } } };
+    const auditComment = { body, author: 'hammer-worker' };
+    const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({ reviewedHead: reviewed,
+      verifiedCommit: commit, verifiedAuditComment: auditComment });
+    const verdict = isEligibleForAmaClosure({ headSha: reviewed, verdict: 'request-changes', riskClass: 'low',
+      blockingFindingState: 'known', blockingFindingCount: 1, remediationPending: false,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+    { headSha: head, isOpen: true, isDraft: false, mergeableState: 'MERGEABLE', labels: [],
+      statusCheckRollup: [{ name: 'test', conclusion: 'SUCCESS' }] },
+    { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
+    { hamTerminalRemediation: evidence, hamTerminalRemediationGroundTruth: { commit, auditComment,
+      range: { verified: true, reviewedHead: reviewed, currentHead: head, baseSha: reviewed, commits: [head] } } });
+    assert.equal(verdict.trace.hamTerminalRemediation.checks.docCurrency, true, JSON.stringify(verdict));
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict));
+  }
   const body = readFileSync(bodyPath, 'utf8');
+  assertDocPredicate(body, ['bin/gate.sh']);
   assert.match(body, /Remediated-Findings: 1 addressed \(1 blocking, 0 non-blocking\)/);
   assert.match(body, /\*\*Fix gate\*\*/);
   assert.doesNotMatch(body, /<finding title>/);
+  assert.match(body, /^Doc-currency: not applicable; changed files covered: bin\/gate.sh$/m);
+  const applicable = run('/bin/bash', ['-c', shell, '_', script], { ...env,
+    HAM_DOC_CURRENCY: 'applicable', HAM_DOC_CURRENCY_REASON: 'updated README.md for changed files bin/gate.sh, README.md' });
+  assert.match(applicable.stdout, /STATUS=0 HELD=1/);
+  assert.match(readFileSync(bodyPath, 'utf8'), /^Doc-currency: updated; updated README.md/m);
+  assertDocPredicate(readFileSync(bodyPath, 'utf8'), ['bin/gate.sh', 'README.md']);
+  for (const missing of [{ HAM_DOC_CURRENCY: '' }, { HAM_DOC_CURRENCY_REASON: '' }]) {
+    const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...missing });
+    assert.match(refused.stderr, /hammer-publish: supply/);
+    assert.match(refused.stdout, /STATUS=1 HELD=0 PUBLISHED=$/m);
+  }
   rmSync(bodyPath);
   for (const refusal of [{ FAIL_PROOF: '1' }]) {
     const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...refusal });
@@ -926,6 +964,7 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
     HAM_BASE_HEAD: head, HAM_VALIDATION_BASE_SHA: base,
     HAM_AUDIT_DETAILS_FILE: join(dir, 'details'), HAMMER_LACEY_GH_TOKEN: 'fixture-token',
     HAM_AUDIT_REMEDIATED_TOTAL: '0', HAM_AUDIT_REMEDIATED_BLOCKING: '0', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
+    HAM_DOC_CURRENCY: 'not applicable', HAM_DOC_CURRENCY_REASON: 'synthetic no-diff close',
     HAM_FAILING_TESTS_FIXED: 'fixture CI green', HAM_AMA_TRAILERS: 'Worker-Class: hammer\nTicket: GHBUDGET-01',
     REAL_NODE: process.execPath, HAM_NODE_BIN: join(dir, 'node-stub'),
     PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,

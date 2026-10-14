@@ -85,15 +85,17 @@ dispatch, containing `data/follow-up-jobs/completed`. Keep it exported for
 `hammer-head-context.mjs`; `HAM_HQ_ROOT` is a separate HQ root. Manual callers
 must supply `HAM_ROOT_DIR` when relying on completed-round proof.
 
-Before entering the merge-lease window, write the complete audit markdown to
-an absolute-path file. It must contain the `**Findings addressed**` heading and
-one single-line bullet per finding with the exact review title, blocking class,
-changed files and fix. Export its path as `HAM_AUDIT_DETAILS_FILE`. Also export
-decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
-`HAM_AUDIT_REMEDIATED_NON_BLOCKING` (the latter two must sum to the total), plus
-`HAM_FAILING_TESTS_FIXED` with the actual test repairs or `suite already green`.
-The publish helper rejects missing or placeholder inputs and releases the lease
-on failure. Keep these values in the same shell for the merge audit.
+Before the merge lease, write audit markdown to an absolute-path file and export
+`HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
+bullet per finding: exact review title, blocking class, changed files and fix.
+Export decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`,
+`HAM_AUDIT_REMEDIATED_NON_BLOCKING` (the classes sum to the total), and
+`HAM_FAILING_TESTS_FIXED` (actual repairs or `suite already green`).
+Export `HAM_DOC_CURRENCY` (`applicable` or `not applicable`) and
+`HAM_DOC_CURRENCY_REASON`: one line naming covered changed files and updated
+docs when applicable. The publication step renders Doc-currency; omit it from
+the details file. Missing or placeholder inputs release the lease. Keep these
+values in the same shell for the merge audit.
 
 Use the shared-budget check-wait helper (minimum 30 seconds). Never use
 `--watch` or add polling loops. All GitHub calls use these metered helpers.

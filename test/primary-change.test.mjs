@@ -43,13 +43,25 @@ test('PRIMARYRENAME-01: an added-file rename loses the builder path in the base-
 });
 
 test('PRIMARYRENAME-01: identical renames preserve modified files and survive later unrelated hammer repairs', async t => {
-  for (const options of [{ modified: true }, { laterHammer: true }, { binary: true },
+  for (const options of [{ modified: true }, { laterHammer: true }, { binary: true }, { baseMerge: true },
     { author: null }, { committer: 'web-flow', verification: { verified: true, reason: 'valid' } }]) {
     const fixture = primaryRenameRepository(t, options);
     const evidence = await fetchPrimaryChange(fixture.args);
     assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true, JSON.stringify(options));
     assert.equal(evidence.renameProofs[0].commit.sha, fixture.renameSha);
   }
+});
+
+test('PRIMARYRENAME-01: a base-merge rename retains the second-parent ancestry proof', async t => {
+  const fixture = primaryRenameRepository(t, { baseMerge: true });
+  const evidence = await fetchPrimaryChange(fixture.args);
+  assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true);
+  const noProof = structuredClone(evidence);
+  delete noProof.renameProofs[0].baseParentProof;
+  assert.equal(checkPrimaryChange(noProof, fixture.args.headSha).reason, 'primary-change-reverted');
+  const foreignParent = structuredClone(evidence);
+  foreignParent.renameProofs[0].baseParentProof.status = 'diverged';
+  assert.equal(checkPrimaryChange(foreignParent, fixture.args.headSha).reason, 'primary-change-reverted');
 });
 
 test('PRIMARYRENAME-01: web-flow verification is added only to rename proof, never legacy commit evidence', async t => {

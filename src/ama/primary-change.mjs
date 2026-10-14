@@ -99,14 +99,17 @@ function commitRenamesBlob(commit, source, destination, blob) {
 function identicalHammerRename(evidence, file) {
   if (!evidence.renameProofs?.length) return false;
   const destinations = renameDestinations(file, evidence.finalFiles);
-  return (evidence.renameProofs || []).some(({ source, destination, commit }) => {
+  return (evidence.renameProofs || []).some(({ source, destination, commit, baseParentProof }) => {
     const range = evidence.diagnosticCommitRange || [];
     const index = range.findIndex(entry => entry.sha === commit?.sha);
     const parent = commit?.parents?.[0]?.sha;
     return source === file.filename && destinations.some(entry => entry.filename === destination)
       && SHA.test(commit?.sha || '') && isHammerCommit(commit, true) && hamCommitIdentityMatches(commit)
-      && commit.parents?.length === 1 && SHA.test(parent || '') && index >= 0
+      && [1, 2].includes(commit.parents?.length) && SHA.test(parent || '') && index >= 0
       && (parent === evidence.primaryHead || range.slice(0, index).some(entry => entry.sha === parent))
+      && (commit.parents.length === 1 || baseParentProof?.parentSha === commit.parents[1].sha
+        && SHA.test(commit.parents[1].sha || '') && SHA.test(baseParentProof.baseSha || '')
+        && ['ahead', 'identical'].includes(baseParentProof.status))
       && commitRenamesBlob(commit, source, destination, file.sha);
   });
 }
@@ -724,13 +727,22 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             commit = { ...commit, commit: { ...commit.commit, verification: verification.verification } };
           }
           if (!isHammerCommit(commit, true) || !hamCommitIdentityMatches(commit)
-            || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha || '')) continue;
+            || ![1, 2].includes(commit.parents?.length) || !SHA.test(commit.parents[0].sha || '')) continue;
           const destination = destinations.find(entry => commitRenamesBlob(commit, file.filename, entry.filename, file.sha));
           if (!destination) continue;
           const ancestry = commit.parents[0].sha === primaryHead ? { status: 'identical' }
             : await metadata(`repos/${repo}/compare/${primaryHead}...${commit.parents[0].sha}`);
           if (!['ahead', 'identical'].includes(ancestry.status)) continue;
-          renameProofs.push({ source: file.filename, destination: destination.filename, commit });
+          let baseParentProof;
+          if (commit.parents.length === 2) {
+            const parentSha = commit.parents[1].sha;
+            if (!SHA.test(parentSha || '')) continue;
+            const baseParent = await metadata(`repos/${repo}/compare/${parentSha}...${pr.base.sha}`);
+            if (!['ahead', 'identical'].includes(baseParent.status)) continue;
+            baseParentProof = { parentSha, baseSha: pr.base.sha, status: baseParent.status };
+          }
+          renameProofs.push({ source: file.filename, destination: destination.filename, commit,
+            ...(baseParentProof ? { baseParentProof } : {}) });
           break;
         } catch (error) {
           // Unavailable optional proof retains today's refusal; it must not

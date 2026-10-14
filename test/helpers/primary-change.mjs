@@ -16,7 +16,8 @@ import { createHistoryReader } from '../../src/ama/history-reader.mjs';
 // inference for files which were not present at the merge base.
 export function primaryRenameRepository(t, { changed = false, deleted = false,
   modified = false, author = 'hammer-worker', committer = 'hammer-worker',
-  verification = undefined, laterHammer = false, existingDestination = false, binary = false, restored = false } = {}) {
+  verification = undefined, laterHammer = false, existingDestination = false, binary = false, restored = false,
+  baseMerge = false } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-rename-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: rootDir, encoding: 'utf8', timeout: 5000,
@@ -42,6 +43,11 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
     if (restored) { writeFileSync(join(rootDir, source), 'Base guide\n'); git('add', source); }
   }
   git('commit', '-q', '-m', 'Repair guide name\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)');
+  if (baseMerge) {
+    const merge = git('commit-tree', git('rev-parse', 'HEAD^{tree}'), '-p', builder, '-p', base,
+      '-m', git('show', '-s', '--format=%B', 'HEAD'));
+    git('update-ref', 'HEAD', merge);
+  }
   const renameSha = git('rev-parse', 'HEAD');
   if (laterHammer) {
     writeFileSync(join(rootDir, 'other-guide.txt'), 'Unrelated repair\n');
@@ -75,7 +81,7 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
       data = { encoding: 'base64', content: bytes.toString('base64'), size: bytes.length };
     } else if (path.includes('/commits/')) {
       const sha = path.split('/commits/')[1].split('?')[0];
-      const files = git('diff-tree', '--no-commit-id', '-r', '-M', '--name-status', sha).split('\n').filter(Boolean).map(line => {
+      const files = git('diff', '-M', '--name-status', `${sha}^1`, sha).split('\n').filter(Boolean).map(line => {
         const [status, first, second] = line.split('\t');
         const filename = second || first;
         return { filename, ...(second ? { previous_filename: first } : {}),

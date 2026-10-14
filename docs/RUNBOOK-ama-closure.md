@@ -1627,7 +1627,9 @@ Test paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
 evidence. CI verifies tests against the final head; test repairs mandated by
 findings are allowed. Reviewers must still flag inversions or neutralizations of
 the tested primary-change behavior. Renaming production code into a test path
-does not exempt its protected baseline.
+does not preserve its protected baseline, even with identical bytes and a
+trusted hammer rename proof. Both rename-proof destinations and the final
+diff's renamed paths enforce this production-to-test boundary.
 
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,

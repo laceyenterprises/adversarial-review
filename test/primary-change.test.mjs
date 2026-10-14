@@ -52,6 +52,32 @@ test('PRIMARYRENAME-01: identical renames preserve modified files and survive la
   }
 });
 
+test('PRIMARYRENAME-01: identical hammer renames into test paths cannot preserve production changes', async t => {
+  for (const destination of ['test/fixtures/guide.txt', 'tests/guide.txt', 'src/__tests__/guide.txt',
+    'guide.test.mjs', 'guide.test.js']) {
+    const fixture = primaryRenameRepository(t, { destination });
+    const evidence = await fetchPrimaryChange(fixture.args);
+    assert.equal(evidence.finalFiles[0].sha, fixture.blob);
+    assert.equal(evidence.renameProofs, undefined, destination);
+    assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).reason, 'primary-change-reverted', destination);
+  }
+});
+
+test('PRIMARYRENAME-01: evaluator rejects cached rename proofs crossing into test paths', async t => {
+  const fixture = primaryRenameRepository(t);
+  const evidence = await fetchPrimaryChange(fixture.args);
+  assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true);
+  for (const status of ['added', 'renamed']) {
+    const invalid = structuredClone(evidence);
+    const destination = 'test/fixtures/guide.txt';
+    Object.assign(invalid.finalFiles[0], { filename: destination, status,
+      ...(status === 'renamed' ? { previous_filename: fixture.source } : {}) });
+    invalid.renameProofs[0].destination = destination;
+    invalid.renameProofs[0].commit.files[0].filename = destination;
+    assert.equal(checkPrimaryChange(invalid, fixture.args.headSha).reason, 'primary-change-reverted', status);
+  }
+});
+
 test('PRIMARYRENAME-01: a base-merge rename retains the second-parent ancestry proof', async t => {
   const fixture = primaryRenameRepository(t, { baseMerge: true });
   const evidence = await fetchPrimaryChange(fixture.args);
@@ -561,11 +587,13 @@ test('HAMINTENT-01R: collector reports restored and newly added test regions', a
 });
 
 test('renaming production into a test directory cannot waive preservation', () => {
-  const evidence = primaryChangeFixture(head);
-  evidence.finalFiles = [{ ...evidence.primaryFiles[0], status: 'renamed',
-    previous_filename: 'src/config-loader.mjs', filename: 'test/config-loader.mjs',
-    additions: 0, deletions: 0, patch: '' }];
-  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  for (const preserveRegions of [false, true]) {
+    const evidence = primaryChangeFixture(head);
+    evidence.finalFiles = [{ ...evidence.primaryFiles[0], status: 'renamed',
+      previous_filename: 'src/config-loader.mjs', filename: 'test/config-loader.mjs',
+      ...(preserveRegions ? {} : { additions: 0, deletions: 0, patch: '' }) }];
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  }
 });
 
 

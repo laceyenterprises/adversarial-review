@@ -5,9 +5,9 @@ export function primaryChangeFixture(headSha) {
     primaryFiles: [file], finalFiles: [file] };
 }
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createHistoryReader } from '../../src/ama/history-reader.mjs';
 
 
@@ -17,7 +17,7 @@ import { createHistoryReader } from '../../src/ama/history-reader.mjs';
 export function primaryRenameRepository(t, { changed = false, deleted = false,
   modified = false, author = 'hammer-worker', committer = 'hammer-worker',
   verification = undefined, laterHammer = false, existingDestination = false, binary = false, restored = false,
-  baseMerge = false } = {}) {
+  baseMerge = false, destination = 'named-guide.txt' } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-rename-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: rootDir, encoding: 'utf8', timeout: 5000,
@@ -26,7 +26,8 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
       GIT_COMMITTER_NAME: 'Fixture Committer', GIT_COMMITTER_EMAIL: 'committer@example.invalid',
       GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z' } }).trimEnd();
   git('init', '-q');
-  const source = 'guide.txt', destination = 'named-guide.txt';
+  const source = 'guide.txt';
+  mkdirSync(dirname(join(rootDir, destination)), { recursive: true });
   if (modified) { writeFileSync(join(rootDir, source), 'Base guide\n'); git('add', source); }
   if (existingDestination) { writeFileSync(join(rootDir, destination), 'Builder guide\n'); git('add', destination); }
   git('commit', '-q', '--allow-empty', '-m', 'Fixture base');

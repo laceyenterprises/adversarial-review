@@ -83,6 +83,7 @@ function primaryPathAbsent(file, finalFiles) {
 function renameDestinations(file, finalFiles) {
   if (!primaryPathAbsent(file, finalFiles) || !SHA.test(file.sha || '')) return [];
   return finalFiles.filter(entry => entry.filename !== file.filename && entry.sha === file.sha
+    && (!isTestPath(entry.filename) || isTestPath(file.filename))
     && ['added', 'renamed'].includes(entry.status));
 }
 
@@ -504,6 +505,9 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       const actual = final.get(path);
       if (isTestPath(path) && isTestPath(change.filename)
         && (!actual || isTestPath(actual.filename))) continue;
+      if (!isTestPath(change.filename) && actual && isTestPath(actual.filename)) {
+        return reverted(path, 'rename-preservation');
+      }
       const file = evidence.primaryFiles.find(entry => (entry.previous_filename || entry.filename) === path);
       if (identicalHammerRename(evidence, file)) continue;
       if ((change.renamed && actual?.filename === path) || (!actual

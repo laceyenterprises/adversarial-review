@@ -450,7 +450,7 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
     ? `no verified Reversal-Authorized-By covers the reverted ${path} region (${accepted} verified`
       + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason})`).join(', ')}` : ''})`
     : `the reverted ${path} change cannot be authorized by a finding (${missing})`;
-  const regionDiagnostics = (evidence.revertedRegionDiagnostics || evidence.primaryPathChanges || [])
+  const regionDiagnostics = [...(evidence.revertedRegionDiagnostics || []), ...(evidence.primaryPathChanges || [])]
     .filter(entry => entry.path === path);
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
     `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
@@ -710,9 +710,14 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       if (isTestPath(file.filename) || !primaryPathAbsent(file, final.files || [])) continue;
       const destinations = renameDestinations(file, final.files || []);
       const attribution = { path: file.filename, start: null, end: null, commits: [] };
+      let candidateReadFailed = false;
       // Refusal details reuse commit-file metadata, without snapshot or
       // comment-history scans. Attribution never grants authority.
-      const range = history.commits.slice(history.commits.indexOf(first));
+      const fullRange = history.commits.slice(history.commits.indexOf(first));
+      // No destination can prove preservation: bound reads used only for
+      // removal diagnostics, while keeping the full range for rename proof.
+      const range = destinations.length ? fullRange : fullRange.slice(0, 20);
+      if (range.length < fullRange.length) attribution.error = `diagnostic commit range truncated after 20 of ${fullRange.length} commits`;
       for (const candidate of range) {
         try {
           const commitPath = `repos/${repo}/commits/${candidate.sha}`;
@@ -747,15 +752,19 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           }
           renameProofs.push({ source: file.filename, destination: destination.filename, commit,
             ...(baseParentProof ? { baseParentProof } : {}) });
+          candidateReadFailed = false;
           break;
         } catch (error) {
           // Unavailable optional proof retains today's refusal; it must not
           // turn an existing decision into a new fail-closed condition.
           if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
-          if (destinations.length) renameProofReadFailed = true;
+          if (destinations.length) candidateReadFailed = true;
         }
       }
-      if (attribution.commits.length) primaryPathChanges.push(attribution);
+      // Successful proof resolves earlier candidate failures for this path
+      // only. Another path's unresolved proof must still prevent caching.
+      renameProofReadFailed ||= candidateReadFailed;
+      if (attribution.commits.length || attribution.error) primaryPathChanges.push(attribution);
     }
     const reversalAuthorizations = [];
     const rejectedReversalAuthorizations = [];

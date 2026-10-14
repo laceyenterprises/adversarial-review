@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkPrimaryChange, fetchPrimaryChangeContext as fetchContext, fetchPrimaryChange as fetchPrimaryChangeWithCost, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
@@ -207,6 +207,101 @@ test('PRIMARYRENAME-01: an optional proof read outage cannot cache a permanent r
   unavailable = false;
   const recovered = await fetchPrimaryChange({ ...fixture.args, get });
   assert.equal(checkPrimaryChange(recovered, fixture.args.headSha).ok, true);
+});
+
+test('PRIMARYRENAME-01: valid later rename proof resolves earlier failures and is reused from disk', async t => {
+  for (const failure of ['outage', 'capped']) {
+    const fixture = primaryRenameRepository(t, { earlierHammer: true });
+    let commitReads = 0;
+    const get = Object.assign(async path => {
+      if (path.includes('/commits/')) commitReads++;
+      if (path.endsWith(`/commits/${fixture.earlierHammerSha}`)) {
+        if (failure === 'outage') throw new Error('Fixture earlier commit unavailable');
+        const commit = await fixture.args.get(path);
+        return { ...commit, filesComplete: false, files: Array(300).fill({ filename: 'unrelated.txt' }) };
+      }
+      return fixture.args.get(path);
+    }, { metadata: fixture.args.get.metadata, persistPrimaryChange: true });
+    const args = { ...fixture.args, get };
+    const evidence = await fetchPrimaryChange(args);
+    assert.equal(evidence.renameProofs[0].commit.sha, fixture.renameSha);
+    assert.equal(evidence.renameProofReadFailed, undefined, failure);
+    assert.equal(checkPrimaryChange(evidence, args.headSha).ok, true);
+    assert.equal(commitReads, 2);
+    const dir = join(fixture.rootDir, 'data', 'primary-change-history');
+    const records = readdirSync(dir);
+    assert.equal(records.length, 1);
+    const record = JSON.parse(readFileSync(join(dir, records[0]), 'utf8'));
+    assert.equal(record.history.renameProofReadFailed, undefined);
+    assert.equal(record.key[7], 'primary-rename-v1');
+    assert.deepEqual(await fetchPrimaryChange(args), evidence);
+    assert.equal(commitReads, 2, 'approved history must not repeat commit reads');
+  }
+});
+
+test('PRIMARYRENAME-01: one valid path cannot clear another path\'s unresolved proof failure', async t => {
+  for (const unresolvedFirst of [true, false]) {
+    const fixture = primaryRenameRepository(t, { earlierHammer: true });
+    let commitReads = 0;
+    const get = Object.assign(async path => {
+      if (path.includes('/commits/')) commitReads++;
+      if (path.endsWith(`/commits/${fixture.earlierHammerSha}`)) throw new Error('Fixture earlier commit unavailable');
+      const data = await fixture.args.get(path);
+      if (!path.includes('/compare/') || !data.files?.length) return data;
+      const primary = path.endsWith(`...${fixture.builder}`);
+      const extra = { ...data.files[0], filename: primary ? 'missing.txt' : 'unproven-destination.txt', sha: 'f'.repeat(40) };
+      return { ...data, files: unresolvedFirst ? [extra, ...data.files] : [...data.files, extra] };
+    }, { metadata: fixture.args.get.metadata, persistPrimaryChange: true });
+    const args = { ...fixture.args, get };
+    const evidence = await fetchPrimaryChange(args);
+    assert.equal(evidence.renameProofs.length, 1);
+    assert.equal(evidence.renameProofReadFailed, true);
+    assert.equal(checkPrimaryChange(evidence, args.headSha).reason, 'primary-change-reverted');
+    assert.equal(existsSync(join(fixture.rootDir, 'data', 'primary-change-history')), false);
+    await fetchPrimaryChange(args);
+    assert.equal(commitReads, 4, 'unresolved optional proof must be retried');
+  }
+});
+
+test('missing-path diagnostics combine snapshot and commit-file attribution before filtering', () => {
+  const evidence = { ...primaryChangeFixture(head), finalFiles: [] };
+  const path = evidence.primaryFiles[0].filename;
+  const fileAttribution = { path, start: null, end: null,
+    commits: [{ sha: head, author: 'hammer-worker', pipelineRepair: null }] };
+  const other = { ...fileAttribution, path: 'another.txt' };
+  const snapshot = { ...fileAttribution, start: 1, end: 2 };
+  for (const diagnostics of [[], [other], [snapshot, other]]) {
+    const refusal = checkPrimaryChange({ ...evidence, primaryPathChanges: [fileAttribution, other],
+      revertedRegionDiagnostics: diagnostics }, head);
+    assert.equal(refusal.reason, 'primary-change-reverted');
+    assert.deepEqual(refusal.missingEvidence.regionDiagnostics, [...diagnostics.filter(entry => entry.path === path), fileAttribution]);
+    assert.ok(refusal.missingEvidence.summary.includes(`${head} author=hammer-worker`));
+  }
+});
+
+test('PRIMARYRENAME-01: missing files without a rename destination bound attribution to 20 commits', async t => {
+  const fixture = primaryRenameRepository(t, { deleted: true });
+  const commit = await fixture.args.get(`repos/fixture/repo/commits/${fixture.renameSha}`);
+  const earlier = Array.from({ length: 24 }, (_, index) => ({ ...commit,
+    sha: (index + 1).toString(16).padStart(40, '0'), files: [], parents: [{ sha: fixture.builder }] }));
+  const reads = [];
+  const get = async path => {
+    if (path.includes('/commits/')) {
+      reads.push(path);
+      const candidate = earlier.find(entry => path.endsWith(`/commits/${entry.sha}`));
+      if (candidate) return candidate;
+    }
+    const data = await fixture.args.get(path);
+    if (path.endsWith(`...${fixture.args.headSha}`)) return { ...data,
+      total_commits: data.total_commits + earlier.length, commits: [...data.commits.slice(0, -1), ...earlier, data.commits.at(-1)] };
+    return data;
+  };
+  const evidence = await fetchPrimaryChange({ ...fixture.args, get });
+  assert.deepEqual(reads, earlier.slice(0, 20).map(entry => `repos/fixture/repo/commits/${entry.sha}`));
+  assert.equal(evidence.renameProofReadFailed, undefined);
+  const refusal = checkPrimaryChange(evidence, fixture.args.headSha);
+  assert.equal(refusal.reason, 'primary-change-reverted');
+  assert.match(refusal.missingEvidence.regionDiagnostics[0].error, /truncated after 20 of 25 commits/);
 });
 // This suite isolates history semantics; ci-cost.test.mjs exercises the live collector.
 const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {

@@ -17,7 +17,7 @@ import { createHistoryReader } from '../../src/ama/history-reader.mjs';
 export function primaryRenameRepository(t, { changed = false, deleted = false,
   modified = false, author = 'hammer-worker', committer = 'hammer-worker',
   verification = undefined, laterHammer = false, existingDestination = false, binary = false, restored = false,
-  baseMerge = false, destination = 'named-guide.txt' } = {}) {
+  baseMerge = false, earlierHammer = false, destination = 'named-guide.txt' } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-rename-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: rootDir, encoding: 'utf8', timeout: 5000,
@@ -37,6 +37,11 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
   git('commit', '-q', '-m', 'Add builder guide');
   const builder = git('rev-parse', 'HEAD');
   const blob = git('rev-parse', `HEAD:${source}`);
+  let earlierHammerSha;
+  if (earlierHammer) {
+    git('commit', '-q', '--allow-empty', '-m', 'Earlier repair\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)');
+    earlierHammerSha = git('rev-parse', 'HEAD');
+  }
   if (deleted) git('rm', '-q', source);
   else {
     git('mv', '-f', source, destination);
@@ -98,6 +103,6 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
     for (const entry of data.commits || []) delete entry.commit.verification;
     return { stdout: JSON.stringify(data) };
   } });
-  return { rootDir, source, destination, builder, blob, renameSha, calls,
+  return { rootDir, source, destination, builder, blob, renameSha, earlierHammerSha, calls,
     args: { repo: 'fixture/repo', prNumber: 1, headSha, rootDir, get } };
 }

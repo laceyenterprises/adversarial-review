@@ -39,3 +39,10 @@ budget reads, the throttle floor, and the `wait`, `record`, and `limited` bridge
 processes. Explicit `options.env` budget settings take precedence; missing budget
 settings inherit from `process.env`. An isolated caller's observations therefore
 stay in its selected store, including failures without rate-limit headers.
+
+The `bin/metered-gh.mjs exec` bridge preserves ordinary command exit codes.
+Signal failures use the shell status `128 + signal number`. If the bridge
+receives SIGTERM or SIGINT, it kills the active child with SIGKILL but reports
+the original interruption as 143 or 130, respectively. Child-originated
+signals retain their own status (for example, SIGALRM is 142). Errors without
+a numeric exit status or recognized signal fall back to 1.

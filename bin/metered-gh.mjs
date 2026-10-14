@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { constants } from 'node:os';
 import { meteredExecFile } from '../src/metered-gh.mjs';
 import { awaitThrottleIfNeeded, recordResponseRateLimit, recordRateLimitedCall } from '../src/rate-limit-throttle.mjs';
 
@@ -13,14 +14,19 @@ if (action === 'wait' || action === 'record' || action === 'limited') {
     else await recordResponseRateLimit(item);
   }
 } else if (action === 'exec') {
+  let terminationSignal;
   const execute = (command, argv, options) => new Promise((resolve, reject) => {
     const child = execFile(command, argv, options, (err, stdout, stderr) => {
-      for (const signal of ['SIGTERM', 'SIGINT']) process.removeListener(signal, cancel);
+      for (const [signal, cancel] of cancellations) process.removeListener(signal, cancel);
       if (err) reject(Object.assign(err, { stdout, stderr }));
       else resolve({ stdout, stderr });
     });
-    const cancel = () => child.kill('SIGKILL');
-    for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, cancel);
+    const cancellations = ['SIGTERM', 'SIGINT'].map(signal => [signal, () => {
+      // Preserve the interruption cause even though cleanup escalates to SIGKILL.
+      terminationSignal ||= signal;
+      child.kill('SIGKILL');
+    }]);
+    for (const [signal, cancel] of cancellations) process.on(signal, cancel);
   });
   try {
     const result = await meteredExecFile(execute, 'gh', args, {
@@ -31,7 +37,8 @@ if (action === 'wait' || action === 'record' || action === 'limited') {
   } catch (err) {
     process.stdout.write(err.stdout || '');
     process.stderr.write(err.stderr || err.message || '');
-    process.exitCode = Number.isInteger(err.code) ? err.code : 1;
+    const signalNumber = constants.signals[terminationSignal || err.signal];
+    process.exitCode = signalNumber ? 128 + signalNumber : Number.isInteger(err.code) ? err.code : Number.isInteger(err.status) ? err.status : 1;
   }
 } else {
   process.stderr.write('usage: metered-gh.mjs exec <gh arguments>\n');

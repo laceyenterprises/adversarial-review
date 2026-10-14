@@ -5391,3 +5391,24 @@ for (const scenario of [
     if (scenario.outcome) assert.equal(logs[0].terminalOutcome, scenario.outcome);
   });
 }
+
+test('REMLINK-01 retry retains the spawned round and its publish evidence', async (t) => {
+  const { mkdtempSync, mkdirSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { requeueInProgressFollowUpJobForRetry, writeFollowUpJob, getFollowUpJobDir } = await import('../src/follow-up-jobs.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'remlink-retry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const dir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(dir, { recursive: true });
+  const jobPath = join(dir, 'synthetic-job.json');
+  const spawnedAt = '2026-01-01T00:00:00.000Z';
+  writeFollowUpJob(jobPath, { ...buildFollowUpJob({ repo: 'fixture/repo', prNumber: 1, reviewerModel: 'codex', reviewBody: 'Synthetic finding', critical: true }), jobId: 'synthetic-job', repo: 'fixture/repo', prNumber: 1, status: 'in_progress',
+    remediationWorker: { state: 'spawned', spawnedAt },
+    remediationPlan: { currentRound: 1, maxRounds: 2, rounds: [{ round: 1, state: 'spawned', spawnedAt,
+      startHeadSha: 'a'.repeat(40), publishedHeadSha: 'b'.repeat(40) }] } });
+  const result = requeueInProgressFollowUpJobForRetry({ rootDir, jobPath, allowDirectWorkerRetry: true,
+    requeuedAt: '2026-01-01T00:24:00.000Z', retryReason: 'synthetic retry' });
+  assert.equal(result.job.remediationPlan.rounds[0].spawnedAt, spawnedAt);
+  assert.equal(result.job.remediationPlan.rounds[0].publishedHeadSha, 'b'.repeat(40));
+});

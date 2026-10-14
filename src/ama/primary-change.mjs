@@ -1,6 +1,7 @@
 import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-head-validation.mjs';
 import { createHash } from 'node:crypto';
 import { storedPrimaryChange } from './primary-change-store.mjs';
+import { createHistoryReader } from './history-reader.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
@@ -445,10 +446,13 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       throw new Error('empty primary change');
     }
     const testChanges = testRegionsChanged(primary, final);
-    const reverted = (path, missing = 'reversal-authorization') => ({ ok: false, reason: 'primary-change-reverted', path,
-      testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
-        refusedRegions(primary.get(path), final.get(path), (unit) =>
-          reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation))) });
+    const reverted = (path, missing = 'reversal-authorization') => {
+      const diagnosticCache = new Map();
+      return { ok: false, reason: 'primary-change-reverted', path,
+        testRegionsChanged: testChanges, missingEvidence: missingReversalEvidence(evidence, path, missing, authorizationCache,
+          refusedRegions(primary.get(path), final.get(path), (unit) =>
+            reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation))) };
+    };
     for (const [path, change] of primary) {
       const actual = final.get(path);
       if (isTestPath(path) && isTestPath(change.filename)
@@ -756,13 +760,29 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
 // diagnostic never becomes a new merge gate. Compare snapshots in merge-base
 // coordinates: a later commit which leaves the region alone gets no attribution.
 async function describeRevertedRegions(args, evidence, refusal) {
-  const { repo, prNumber, get } = args;
+  const { repo, prNumber, get, signal } = args;
   const regions = refusal.missingEvidence.regions || [];
   const diagnostics = regions.map(region => ({ path: refusal.path, ...region, commits: [] }));
   if (!diagnostics.length) diagnostics.push({ path: refusal.path, start: null, end: null, commits: [] });
   const cache = new Map();
+  const bounded = operation => {
+    signal.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      Promise.resolve().then(() => { signal.throwIfAborted(); return operation(); })
+        .then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
+  };
   const read = path => {
-    if (!cache.has(path)) cache.set(path, Promise.resolve().then(() => get(path)));
+    signal.throwIfAborted();
+    if (!cache.has(path)) cache.set(path, bounded(() => get(path)).then(result => {
+      signal.throwIfAborted();
+      if (Array.isArray(result?.files) && result.files.length >= 300 && result.filesComplete !== true) {
+        throw new Error('diagnostic snapshot capped');
+      }
+      return result;
+    }));
     return cache.get(path);
   };
   const signature = (files, region) => {
@@ -792,6 +812,7 @@ async function describeRevertedRegions(args, evidence, refusal) {
     // without changing the independently computed preservation verdict.
     const maxDiagnosticCommits = 20;
     for (const entry of range.slice(0, maxDiagnosticCommits)) {
+      signal.throwIfAborted();
       const snapshot = entry.sha === evidence.headSha ? { files: evidence.finalFiles, merge_base_commit: { sha: evidence.mergeBase } }
         : await read(`repos/${repo}/compare/${evidence.mergeBase}...${entry.sha}`);
       if (snapshot.merge_base_commit?.sha !== evidence.mergeBase) throw new Error('diagnostic merge base differs');
@@ -802,7 +823,7 @@ async function describeRevertedRegions(args, evidence, refusal) {
         if (commit.sha !== entry.sha) throw new Error('diagnostic commit differs');
         let pipelineRepair = null, repairKind = null;
         try {
-          rounds ??= await readCompletedRemediationRounds(primaryChangeRoot(args), repo, prNumber);
+          rounds ??= await bounded(() => readCompletedRemediationRounds(primaryChangeRoot(args), repo, prNumber));
           if (rounds.some(round => round.resultingHeadSha === entry.sha)) {
             pipelineRepair = true; repairKind = 'completed remediation round';
           } else {
@@ -811,7 +832,12 @@ async function describeRevertedRegions(args, evidence, refusal) {
             pipelineRepair = comments.some(comment => exactHammerValidation(comment, entry.sha));
             if (pipelineRepair) repairKind = 'hammer audit';
           }
-        } catch { /* Unknown classification remains diagnostic only. */ }
+        } catch (error) {
+          signal.throwIfAborted();
+          if (error?.primaryChangeReadFailed === true || error?.authOutage === true
+            || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
+          // Unknown classification remains diagnostic only.
+        }
         const attribution = { sha: entry.sha, author: commit.author?.login || commit.commit?.author?.name || null,
           pipelineRepair, repairKind };
         for (const region of touched) region.commits.push(attribution);
@@ -820,6 +846,8 @@ async function describeRevertedRegions(args, evidence, refusal) {
     }
     if (range.length > maxDiagnosticCommits) throw new Error(`diagnostic commit range truncated after ${maxDiagnosticCommits} of ${range.length} commits`);
   } catch (error) {
+    if (error?.primaryChangeReadFailed === true || error?.authOutage === true
+      || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
     for (const region of diagnostics) region.error = String(error.message || error);
   }
   return diagnostics;
@@ -855,9 +883,25 @@ export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost }
   if (![true, false].includes(history.hasHammerCommits) || history.headMismatch) return history;
   const ciCost = await fetchCiCostImpl({ ...args, get: path =>
     args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
-  const evidence = { ...history, ciCost };
-  const refusal = checkPrimaryChange(evidence, args.headSha, { strictNonBlockingRemediation: true });
-  if (refusal.reason === 'primary-change-reverted') evidence.revertedRegionDiagnostics =
-    await describeRevertedRegions(args, evidence, refusal);
-  return evidence;
+  return { ...history, ciCost };
+}
+
+// Explicit operator context only. Merge-authority callers use fetchPrimaryChange
+// and never pay for diagnostic snapshots, even when a refused head is reused.
+export async function fetchPrimaryChangeContext(args, {
+  strictNonBlockingRemediation = false, diagnosticTimeoutMs = 15000,
+  createDiagnosticReaderImpl = createHistoryReader, ...options
+} = {}) {
+  const evidence = await fetchPrimaryChange(args, options);
+  const refusal = checkPrimaryChange(evidence, args.headSha, { strictNonBlockingRemediation });
+  if (refusal.reason !== 'primary-change-reverted') return evidence;
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new DOMException('diagnostic time budget exhausted', 'TimeoutError')), diagnosticTimeoutMs);
+  const signal = args.signal ? AbortSignal.any([args.signal, deadline.signal]) : deadline.signal;
+  try {
+    evidence.revertedRegionDiagnostics = await describeRevertedRegions({ ...args, signal,
+      get: createDiagnosticReaderImpl({ signal }) }, evidence, refusal);
+    args.signal?.throwIfAborted();
+    return evidence;
+  } finally { clearTimeout(timer); }
 }

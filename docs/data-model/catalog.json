@@ -37,7 +37,8 @@
       "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
       "owner": "AMA canonical daemon data owner",
       "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations"],
-      "diagnosticCommitRangeEntryFields": ["sha"]
+      "diagnosticCommitRangeEntryFields": ["sha"],
+      "diagnosticCollection": "operator opt-in only; 20 commits and 15 seconds; never on shared merge-gate reads"
     },
     {
       "id": "gemini-quota-cooldown",

@@ -128,3 +128,16 @@ test('primary-change CLI rejects invalid arguments before any GitHub read', (t) 
   assert.equal(result.stdout, '');
   assert.deepEqual(result.calls, []);
 });
+
+
+test('primary-change CLI accepts explicit operator diagnostics without changing preserved-head evidence', t => {
+  const result = runCli(t, [
+    { path: prPath, data: pr },
+    { path: comparePath, data: history },
+    { path: primaryPath, data: compare },
+  ], ['fixture/repo', '1208', head, '--diagnostics']);
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(checkPrimaryChange(parsed, head).ok, true);
+  assert.equal(parsed.revertedRegionDiagnostics, undefined);
+});

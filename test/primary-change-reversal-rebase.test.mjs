@@ -1,7 +1,7 @@
 import { collect, review } from './helpers/hamclose-history.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPrimaryChange, fetchPrimaryChange,
+import { checkPrimaryChange, fetchPrimaryChange, fetchPrimaryChangeContext,
   primaryChangeExactReviewEvidence } from '../src/ama/primary-change.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 
@@ -274,4 +274,38 @@ test('unlinked rebased reversal requires an exact SHA in the authenticated App c
     { attestationAuthor: 'the-hammer-lacey[bot]', attestationHead: '9'.repeat(40) }]) {
     assert.equal((await collect({ nullAuthor: true, ...options })).result.ok, false);
   }
+});
+
+
+test('operator attribution uses the effective non-blocking policy', async () => {
+  const nonBlocking = review({ body: review().body.replace('## Blocking issues', '## Non-blocking issues')
+    .replace('## Non-blocking issues\n- None.\n', '') });
+  const { transport } = await collect({ reviews: [nonBlocking], cites: ['PRR_cited finding=1 kind=non-blocking'] });
+  for (const strictNonBlockingRemediation of [true, false]) {
+    let diagnosticReads = 0;
+    const evidence = await fetchPrimaryChangeContext({ repo: 'fixture/repo', prNumber: 8088, headSha: head, get: transport }, {
+      strictNonBlockingRemediation,
+      fetchCiCostImpl: async () => ({ headSha: head, ok: true }),
+      createDiagnosticReaderImpl: () => async path => { diagnosticReads++; return transport(path); },
+    });
+    const result = checkPrimaryChange(evidence, head, { strictNonBlockingRemediation });
+    assert.equal(result.ok, strictNonBlockingRemediation);
+    assert.equal(diagnosticReads > 0, !strictNonBlockingRemediation);
+    assert.equal(Boolean(evidence.revertedRegionDiagnostics), !strictNonBlockingRemediation);
+  }
+});
+
+test('refused-region sweep cannot add accepted or rejected authorization evidence', async () => {
+  const { evidence } = await collect({ duplicatePrimary: true });
+  const authorization = evidence.reversalAuthorizations[0];
+  authorization.rebased = false;
+  authorization.reviewedFiles = evidence.primaryFiles;
+  authorization.parentFiles = evidence.primaryFiles;
+  authorization.review.body = review().body.replace('`10-11`', '`45-46`');
+  authorization.commit.files[0].patch = authorization.commit.files[0].patch.replace('15,2 +15', '45,2 +45');
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.equal(result.missingEvidence.accepted, 0);
+  assert.deepEqual(result.missingEvidence.rejected.map(entry => entry.reason), ['finding-does-not-cover-region']);
+  assert.deepEqual(result.missingEvidence.regions, [{ start: 15, end: 16 }]);
 });

@@ -162,6 +162,15 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   assert.doesNotMatch(docFindingBody, /stale (bullet )?claim/);
   assertDocPredicate(docFindingBody, ['bin/gate.sh'], 'not_applicable', title);
   assertDocPredicate(docFindingBody.replace(/^Doc-currency:.*\n/m, ''), ['bin/gate.sh'], null, title);
+  for (const classification of ['blocking', 'non-blocking']) {
+    const unbolded = `- ${title} (${classification}): bin/gate.sh: updated catalog.json`;
+    writeFileSync(detailsPath, `${unbolded}\nDoc-currency: stale claim\n`);
+    const published = run('/bin/bash', ['-c', shell, '_', script], env);
+    assert.match(published.stdout, /STATUS=0 HELD=1/);
+    const publishedBody = readFileSync(bodyPath, 'utf8');
+    assert.ok(publishedBody.includes(unbolded), 'unbolded finding must survive publication verbatim');
+    assert.doesNotMatch(publishedBody, /stale claim/);
+  }
   for (const missing of [{ HAM_DOC_CURRENCY: '' }, { HAM_DOC_CURRENCY_REASON: '' }]) {
     const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...missing });
     assert.match(refused.stderr, /hammer-publish: supply/);

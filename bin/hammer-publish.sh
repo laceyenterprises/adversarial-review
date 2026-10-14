@@ -72,7 +72,7 @@ HAM_BUILT_HEAD=$(git rev-parse HEAD) || { ham_publish_abort 1; return 1; }
 if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ] ||
   ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-    > /tmp/ham-<<PR_NUMBER>>-range.json; then
+    > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json"; then
   HAM_PHASE_OUTCOME=exact-head-review-required
   ham_publish_abort 20; return 20
 fi
@@ -113,7 +113,7 @@ HAM_DOC_CURRENCY_LINE="$HAM_DOC_CURRENCY_LINE; $HAM_DOC_CURRENCY_REASON"
 # finding title against the review's standing findings to decide whether the
 # non-blocking waiver holds). Keep one bullet per finding on ONE line, and use
 # the finding's title VERBATIM from the review so the identity match lands.
-HAM_AUDIT_COMMENT_DETAILS="$(sed -E '/^[[:space:]]*(-[[:space:]]+)?[Dd][Oo][Cc]-[Cc][Uu][Rr][Rr][Ee][Nn][Cc][Yy][[:space:]]*:/d' "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
+HAM_AUDIT_COMMENT_DETAILS="$(sed -E -e '/\*\*/b' -e '/\((blocking|non-blocking)\)/b' -e '/^[[:space:]]*(-[[:space:]]+)?[Dd][Oo][Cc]-[Cc][Uu][Rr][Rr][Ee][Nn][Cc][Yy][[:space:]]*:/d' "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
 HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Base-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
   "$HAM_AUDIT_COMMENT_MARKER" \
   "$HAM_AUDIT_COMMENT_DETAILS" \

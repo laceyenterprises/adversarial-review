@@ -164,7 +164,7 @@ The primary change is the actual author head immediately before the first hammer
 remediation, against its merge base. `hammer-context`
 includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
 `statedIntent` from the PR body (including Why or Operator decision sections).
-Use `bin/primary-change-context.mjs` for full patches. Use this context to understand intent; it does not suppress real blocking findings.
+`bin/primary-change-context.mjs` supplies patches; use `--diagnostics` only outside merge execution. Context never waives blocking findings.
 If primary evidence is missing or unsupported, stop before remediation and
 print `primaryChange.reason` in the stop message. When the snapshot status is
 `history-read-failed` or the helper reports `historyReadFailed: true`, record a
@@ -729,12 +729,12 @@ SHA equals HEAD and append both exact SHAs in the hammer App comment. Preserve
 earlier attestation edges. Signatures and commit metadata confer no trust;
 an unproven base requests re-review.
 
-API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use CAS git and the same base proof; push rejection releases the lease and aborts.
+API-publish one single-parent commit above fetched remote HEAD; rebased/multi-commit history uses lease-protected git. Retry transport three times (500/1000ms; 15s each), keeping CAS/tree IDs. Errors or unsupported modes use CAS git with the same base proof; push rejection releases the lease and aborts.
 
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-  > /tmp/ham-<<PR_NUMBER>>-range.json || {
+  > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json" || {
     # Every failed provenance proof uses exact-head review.
     ham_release_merge_lease
     HAM_REVIEW_ROUTE_NOTICE=$(printf '%s' "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review." |
@@ -803,7 +803,7 @@ HAM_VERDICT_READY_FILE=""
   --risk-class <<RISK_CLASS>> \
   --ham-terminal-remediation /tmp/ham-<<PR_NUMBER>>-terminal-remediation.json \
   --ham-commit /tmp/ham-<<PR_NUMBER>>-commit.json \
-  --ham-range /tmp/ham-<<PR_NUMBER>>-range.json \
+  --ham-range "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json" \
   --primary-change "$HAM_PRIMARY_CHANGE_FILE" \
   > "$HAM_VERDICT_FILE" || exit 1
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"

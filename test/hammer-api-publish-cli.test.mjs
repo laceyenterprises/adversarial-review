@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -173,12 +173,7 @@ for (const route of ['api', 'git-explicit', 'git-tracking']) {
   test(`HAMPREDICATE-01: ${route} publication and rendered audit pass the whole CLI predicate`, async t => {
     const root = mkdtempSync(join(tmpdir(), 'hammer-predicate-e2e-'));
     const pr = String(2_000_000 + process.pid);
-    t.after(() => {
-      rmSync(root, { recursive: true, force: true });
-      for (const name of readdirSync('/tmp')) {
-        if (name.startsWith(`ham-${pr}-`)) rmSync(join('/tmp', name), { force: true });
-      }
-    });
+    t.after(() => rmSync(root, { recursive: true, force: true }));
     const work = join(root, 'work'), remote = join(root, 'remote.git'), bin = join(root, 'bin');
     mkdirSync(work); mkdirSync(bin);
     const git = async (...args) => (await exec('git', args, { cwd: work, timeout: 10000 })).stdout.trim();
@@ -321,7 +316,7 @@ source "$1"
       protection: { required_status_checks: { contexts: ['agent-os/adversarial-gate'] } },
       timeline: comments.map(comment => ({ event: 'commented', ...comment })),
       'ham-terminal-remediation': evidence, 'ham-commit': rawCommit, 'primary-change': primary,
-      'ham-range': JSON.parse(readFileSync(`/tmp/ham-${pr}-range.json`, 'utf8')) };
+      'ham-range': JSON.parse(readFileSync(join(env.TMPDIR, `ham-${pr}-range.json`), 'utf8')) };
     const args = [];
     for (const [key, value] of Object.entries(paths)) {
       const path = join(root, `${key}.json`); writeFileSync(path, JSON.stringify(value)); args.push(`--${key}`, path);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
+import { checkPrimaryChange, fetchPrimaryChangeContext as fetchContext, fetchPrimaryChange as fetchPrimaryChangeWithCost, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
 import { createHash } from 'node:crypto';
 import { storedPrimaryChange } from '../src/ama/primary-change-store.mjs';
@@ -14,6 +14,11 @@ const head = 'c'.repeat(40);
 // This suite isolates history semantics; ci-cost.test.mjs exercises the live collector.
 const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {
   fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true }),
+});
+const fetchPrimaryChangeContext = (args, options = {}) => fetchContext(args, {
+  fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true }),
+  createDiagnosticReaderImpl: () => args.get,
+  ...options,
 });
 function predicate(primaryChange) {
   return isEligibleForAmaClosure({ headSha: head, verdict: 'approved', riskClass: 'low',
@@ -634,7 +639,7 @@ test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region,
       body: `HAM-Base-Head: ${builder}\nHAM-Validated-Head: ${earlier}` }];
     throw new Error(`unexpected diagnostic read ${path}`);
   };
-  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get, rootDir: root });
+  const evidence = await fetchPrimaryChangeContext({ repo: 'fixture/repo', prNumber: 1, headSha: head, get, rootDir: root });
   const verdict = predicate(evidence);
   assert.equal(verdict.eligible, false);
   assert.equal(verdict.trace.primaryChange.reason, 'primary-change-reverted');
@@ -648,7 +653,7 @@ test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region,
   const audit = JSON.parse(readFileSync(filePath, 'utf8'));
   assert.deepEqual(audit.attempts[0].primaryChangeMissingEvidence, missing);
 
-  const unreadable = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
+  const unreadable = await fetchPrimaryChangeContext({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
     get: path => path.endsWith(`${base}...${earlier}`) ? Promise.reject(new Error('diagnostic unavailable')) : get(path) });
   assert.equal(predicate(unreadable).eligible, false);
   assert.equal(checkPrimaryChange(unreadable, head).reason, 'primary-change-reverted');
@@ -658,7 +663,7 @@ test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region,
   assert.ok(diagnosticCommitRange.length && revertedRegionDiagnostics.length);
   await storedPrimaryChange({ rootDir: root, repo: 'fixture/repo', prNumber: 1, baseSha: base, headSha: head,
     mergeBase: base, reviewKey: createHash('sha256').update('[]').digest('hex'), launchHead: null }, async () => legacy);
-  const cached = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
+  const cached = await fetchPrimaryChangeContext({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
     get: Object.assign(get, { persistPrimaryChange: true, metadata: get }) });
   assert.equal(cached.diagnosticCommitRange, undefined, 'old eligibility evidence is retained');
   assert.deepEqual(checkPrimaryChange(cached, head).missingEvidence.regionDiagnostics, missing.regionDiagnostics);
@@ -667,7 +672,7 @@ test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region,
   mkdirSync(completed, { recursive: true });
   writeFileSync(join(completed, 'fixture__repo-pr-1-repair.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
     status: 'completed', remediationPlan: { rounds: [{ state: 'completed', startHeadSha: builder, resultingHeadSha: earlier }] } }));
-  const recorded = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
+  const recorded = await fetchPrimaryChangeContext({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
     get: path => path.includes('/comments') ? Promise.reject(new Error('comments unavailable')) : get(path) });
   const attributed = checkPrimaryChange(recorded, head).missingEvidence.regionDiagnostics[0].commits[0];
   assert.equal(attributed.pipelineRepair, true);
@@ -694,7 +699,7 @@ test('refusal attribution bounds snapshot reads and preserves the refusal when a
     // incompleteness while the independently evaluated final diff still refuses.
     return { merge_base_commit: { sha: history.mergeBase }, files: history.primaryFiles };
   };
-  const evidence = await fetchPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 1,
+  const evidence = await fetchPrimaryChangeContext({ rootDir, repo: 'fixture/repo', prNumber: 1,
     headSha: head, get: Object.assign(get, { persistPrimaryChange: true, metadata: get }) });
   assert.deepEqual(snapshotReads, history.diagnosticCommitRange.slice(0, 20)
     .map(({ sha }) => `repos/fixture/repo/compare/${history.mergeBase}...${sha}`));
@@ -705,4 +710,88 @@ test('refusal attribution bounds snapshot reads and preserves the refusal when a
     assert.deepEqual(region.commits, []);
     assert.match(region.error, /truncated after 20 of 25 commits/);
   }
+});
+
+// Stored refused history isolates diagnostic reads from required live metadata.
+async function storedRefusal(t) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'primary-diagnostic-safety-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const history = { ...primaryChangeFixture(head), finalFiles: [],
+    diagnosticCommitRange: [{ sha: 'e'.repeat(40) }, { sha: head }] };
+  await storedPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 1,
+    baseSha: history.mergeBase, headSha: head, mergeBase: history.mergeBase,
+    reviewKey: createHash('sha256').update('[]').digest('hex') }, async () => history);
+  const reads = [];
+  const get = async path => {
+    reads.push(path);
+    if (path.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: history.mergeBase } };
+    if (path.includes('/reviews?')) return [];
+    if (path.endsWith(`${history.mergeBase}...${head}`)) return { merge_base_commit: { sha: history.mergeBase } };
+    throw new Error(`unexpected shared read: ${path}`);
+  };
+  return { history, reads, args: { rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head,
+    get: Object.assign(get, { persistPrimaryChange: true, metadata: get }) } };
+}
+
+test('repeated refused merge-gate evaluations perform zero diagnostic reads', async t => {
+  const { args, reads } = await storedRefusal(t);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const evidence = await fetchPrimaryChange(args);
+    assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+    assert.equal(evidence.revertedRegionDiagnostics, undefined);
+  }
+  assert.equal(reads.length, 6, 'only live PR, merge-base metadata and reviews per evaluation');
+});
+
+test('operator diagnostics reject capped snapshots instead of attributing a disappearance', async t => {
+  const { args, history } = await storedRefusal(t);
+  const evidence = await fetchPrimaryChangeContext(args, { createDiagnosticReaderImpl: () => async () => ({
+    merge_base_commit: { sha: history.mergeBase },
+    files: Array.from({ length: 300 }, (_, index) => ({ filename: `unrelated/${index}`, status: 'added',
+      additions: 1, deletions: 0, patch: '@@ -0,0 +1 @@\n+unrelated' })),
+  }) });
+  const region = evidence.revertedRegionDiagnostics[0];
+  assert.deepEqual(region.commits, []);
+  assert.match(region.error, /diagnostic snapshot capped/);
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
+test('operator diagnostics enforce a wall-clock budget and pass its signal to the reader', async t => {
+  const { args } = await storedRefusal(t);
+  let signal, reads = 0;
+  const start = Date.now();
+  const evidence = await fetchPrimaryChangeContext(args, { diagnosticTimeoutMs: 20,
+    createDiagnosticReaderImpl: options => {
+      signal = options.signal;
+      return () => { reads++; return new Promise(() => {}); };
+    } });
+  assert.equal(signal.aborted, true);
+  assert.equal(reads, 1, 'no reads after deadline');
+  assert.ok(Date.now() - start < 2000);
+  assert.match(evidence.revertedRegionDiagnostics[0].error, /time budget exhausted/);
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+});
+
+test('operator diagnostics propagate cancellation and outage errors, including comment reads', async t => {
+  const { args, history } = await storedRefusal(t);
+  for (const error of [new DOMException('cancelled', 'AbortError'),
+    Object.assign(new Error('auth unavailable'), { authOutage: true }),
+    Object.assign(new Error('read unavailable'), { primaryChangeReadFailed: true }),
+    Object.assign(new Error('cancelled'), { code: 'ABORT_ERR' })]) {
+    for (const failureAt of ['snapshot', 'comments']) {
+      await assert.rejects(fetchPrimaryChangeContext(args, { createDiagnosticReaderImpl: () => async path => {
+        if (failureAt === 'snapshot' || path.includes('/comments')) throw error;
+        if (path.includes('/commits/')) return { sha: 'e'.repeat(40), commit: {} };
+        return { files: [], merge_base_commit: { sha: history.mergeBase } };
+      } }), caught => caught === error);
+    }
+  }
+  const controller = new AbortController();
+  await assert.rejects(fetchPrimaryChangeContext({ ...args, signal: controller.signal }, {
+    createDiagnosticReaderImpl: ({ signal }) => () => {
+      assert.equal(signal.aborted, false);
+      controller.abort();
+      return new Promise(() => {});
+    },
+  }), { name: 'AbortError' });
 });

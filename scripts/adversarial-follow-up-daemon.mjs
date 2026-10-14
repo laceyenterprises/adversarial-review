@@ -702,7 +702,7 @@ async function runFollowUpDaemonIteration({
     const result = await sweepStuckInProgressClaimsImpl({ rootDir: ROOT, thresholdMs });
     logTick(
       'stale-claim-sweep',
-      `scanned=${result.scanned} reclaimed=${result.reclaimed} skipped=${result.skipped} ` +
+      `scanned=${result.scanned} reclaimed=${result.reclaimed} completed=${result.completed} skipped=${result.skipped} ` +
       `thresholdMs=${result.thresholdMs} signalled=${result.signalled} ` +
       `signalFailed=${result.signalFailed} signalSkipped=${result.signalSkipped}`
     );

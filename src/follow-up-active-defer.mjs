@@ -1,3 +1,4 @@
+import { completeWorkerPublishedHead } from './remediation-published-head.mjs';
 import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
@@ -92,6 +93,12 @@ function stopTerminalPendingFollowUpJob({
   const revisionSuperseded = Boolean(jobRevisionRef && headRevisionRef && jobRevisionRef !== headRevisionRef);
   if (!settledClean && !revisionSuperseded) {
     return null;
+  }
+
+  if (revisionSuperseded) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath: latest.jobPath,
+      headSha: headRevisionRef, completedAt: stoppedAt });
+    if (completed) return completed;
   }
 
   const releaseReason = settledClean && revisionSuperseded
@@ -243,6 +250,7 @@ function stopStaleInProgressFollowUpJob({
   latest,
   nowMs = Date.now(),
   thresholdMs = resolveFollowUpStuckThresholdMs(),
+  currentRevisionRef = null,
   markStoppedImpl = followUpJobs.markFollowUpJobStopped,
   signalWorkerImpl = signalStaleFollowUpWorker,
   log = console,
@@ -270,6 +278,11 @@ function stopStaleInProgressFollowUpJob({
   if (session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) return null;
   if (ageMs < thresholdMs * 3 && readWorkerCpuPercent(job) > 0) return null;
   const stoppedAt = new Date(nowMs).toISOString();
+  if (currentRevisionRef) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath: latest.jobPath,
+      headSha: currentRevisionRef, completedAt: stoppedAt });
+    if (completed) return completed;
+  }
   const jobId = job?.jobId || basename(latest.jobPath);
   const stopReason =
     `Reclaimed orphaned in-progress claim ${jobId}: ${source} is ` +
@@ -319,6 +332,11 @@ function shouldDeferReviewForActiveFollowUp({
   staleSignalImpl = signalStaleFollowUpWorker,
 }) {
   let latest = latestJobFinder(rootDir, { repo, prNumber });
+  if (latest?.job?.status === 'pending' && currentRevisionRef) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath: latest.jobPath,
+      headSha: currentRevisionRef, completedAt: new Date(nowMs).toISOString() });
+    if (completed) latest = { job: completed.job, jobPath: completed.jobPath };
+  }
   const budgetStopped = typeof budgetSweepImpl === 'function' ? budgetSweepImpl({
     rootDir,
     latest,
@@ -365,6 +383,7 @@ function shouldDeferReviewForActiveFollowUp({
       rootDir,
       latest,
       nowMs,
+      currentRevisionRef,
       markStoppedImpl,
       signalWorkerImpl: staleSignalImpl,
       log,

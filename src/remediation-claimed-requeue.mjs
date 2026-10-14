@@ -40,7 +40,7 @@ export function requeueClaimedFollowUpJobBeforeSpawn({
   const lastRound = rounds.at(-1);
   let nextCurrentRound = currentRound;
   if (lastRound && Number(lastRound.round) === currentRound && lastRound.state === 'claimed') {
-    rounds.pop();
+    if (!lastRound.spawnedAt && !lastRound.publishedHeadSha) rounds.pop();
     nextCurrentRound = Math.max(0, currentRound - 1);
   }
   const nextJob = {

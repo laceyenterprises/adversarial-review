@@ -2668,8 +2668,9 @@ function claimNextFollowUpJob({
           ...(job.remediationPlan?.nextAction?.operatorOverride === true ? { operatorOverride: true } : {}),
         },
         rounds: [
-          ...(job?.remediationPlan?.rounds || []),
+          ...(job?.remediationPlan?.rounds || []).filter(round => Number(round.round) !== nextRoundNumber),
           {
+            ...(job?.remediationPlan?.rounds || []).find(round => Number(round.round) === nextRoundNumber),
             round: nextRoundNumber,
             ...buildDeliveryKey({
               repo: job?.repo,
@@ -2925,7 +2926,8 @@ function requeueInProgressFollowUpJobForRetry({
   if (currentRoundNumber > 0) {
     nextJob.remediationPlan = {
       ...nextJob.remediationPlan,
-      rounds: (nextJob.remediationPlan?.rounds || []).filter((round) => round.round !== currentRoundNumber),
+      rounds: (nextJob.remediationPlan?.rounds || []).map((round) => Number(round.round) === currentRoundNumber
+        ? { ...round, worker: effectiveWorker || round.worker || null } : round),
     };
   }
 

@@ -1,3 +1,4 @@
+import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorkerPublishedHead, buildRereviewResult } from './remediation-published-head.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
@@ -1361,32 +1362,6 @@ function buildReconciliationPaths(rootDir, job) {
   };
 }
 
-function buildRereviewResult({ requested, reason, outcome = null }) {
-  return {
-    requested,
-    requestedAt: outcome?.requestedAt || null,
-    reason: reason || null,
-    triggered: Boolean(outcome?.triggered),
-    status: outcome?.status || (requested ? 'blocked' : 'not-requested'),
-    outcomeReason: outcome?.reason || null,
-    reviewRow: outcome?.reviewRow
-      ? {
-          repo: outcome.reviewRow.repo,
-          prNumber: outcome.reviewRow.pr_number,
-          reviewer: outcome.reviewRow.reviewer,
-          prState: outcome.reviewRow.pr_state,
-          reviewStatus: outcome.reviewRow.review_status,
-          reviewAttempts: outcome.reviewRow.review_attempts,
-          lastAttemptedAt: outcome.reviewRow.last_attempted_at,
-          postedAt: outcome.reviewRow.posted_at,
-          failedAt: outcome.reviewRow.failed_at,
-          revisionRef: outcome.reviewRow.revision_ref || null,
-          reviewerHeadSha: outcome.reviewRow.reviewer_head_sha || null,
-        }
-      : null,
-  };
-}
-
 // Reconcile-time GitHub operations must not return unmapped worker
 // identities such as clio-agent. A recorded spawned worker model is
 // attribution ground truth; operator pins win unless a cap fallback replaced them.
@@ -1653,6 +1628,10 @@ async function reconcileFollowUpJob({
   const worker = job?.remediationWorker;
   const isHqWorker = worker?.dispatchMode === 'hq' && typeof worker?.dispatchId === 'string' && worker.dispatchId.trim();
   if ((!isHqWorker && !worker?.processId && !recordedInfrastructureReason(worker?.recordedOutcome)) || worker?.state !== 'spawned') {
+    // Restart/reclaim can lose top-level runtime metadata while the round survives.
+    const lifecycle = await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
+    const completed = completeLiveWorkerPublishedHead({ rootDir, jobPath, lifecycle, completedAt: now(), requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+    if (completed) return { action: 'completed', ...completed };
     return {
       action: 'skipped',
       reason: 'missing-worker-metadata',
@@ -1690,6 +1669,11 @@ async function reconcileFollowUpJob({
     buildReconciliationPathsImpl: buildReconciliationPaths,
     parseHqWorkerWorkspaceFromPayloadImpl: parseHqWorkerWorkspaceFromPayload,
   });
+  if (liveness.state !== 'active' && ['stale-review-head', 'stale-drift'].includes(lifecycleStop?.stopCode)) {
+    const completed = completeLiveWorkerPublishedHead({ rootDir, jobPath, lifecycle, completedAt: now(),
+      requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+    if (completed) return { action: 'completed', ...completed };
+  }
   if (liveness.state === 'active' && !lifecycleStop) {
     return {
       action: 'active',
@@ -1738,6 +1722,10 @@ async function reconcileFollowUpJob({
         return failFollowUpJobForHqCancel({ rootDir, job, jobPath, worker, workerState, failedAt: lifecycleStoppedAt,
           cancellation, action: lifecycleStop.stopCode, postCommentImpl, now, log }); }
       workerState.cancellation = cancellation;
+    }
+    if (['stale-review-head', 'stale-drift'].includes(lifecycleStop.stopCode)) {
+      const completed = completeLiveWorkerPublishedHead({ rootDir, jobPath, lifecycle, completedAt: lifecycleStoppedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+      if (completed) return { action: 'completed', ...completed };
     }
     const stopped = markFollowUpJobStopped({
       rootDir,
@@ -1789,6 +1777,8 @@ async function reconcileFollowUpJob({
     };
   }
 
+  // Capture recovery evidence before ordinary exit accounting observes a changed head.
+  const workerPublishedHead = lifecycle?.source === 'live' && lifecycle.prState === 'open' ? findWorkerPublishedHead({ rootDir, job, headSha: lifecycle.headSha }) : null;
   const completedAt = now();
   const refund = await settleInfrastructureRemediationRound({
     rootDir, job, jobPath, worker, liveness, lifecycle, lifecycleStop, completedAt,
@@ -2380,6 +2370,8 @@ async function reconcileFollowUpJob({
           log,
         });
         if (ciGate.state === 'failed') {
+          const published = (!ciGate.headSha || ciGate.headSha === workerPublishedHead?.headSha) && completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath, completedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+          if (published) return published;
           const maxRetries = resolveMaxTransientRemediationRetries();
           const priorRetries = Number(job?.remediationPlan?.transientRetries || 0);
           if (priorRetries < maxRetries) {
@@ -2754,6 +2746,8 @@ async function reconcileFollowUpJob({
     }
 
     if (!rereview.requested && !finalRound.completed && !pendingCiCompletion) {
+      const published = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath, completedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+      if (published) return published;
       const resumed = operationalBlockerRecovery?.rescue?.preserved && worker.dispatchMode !== 'hq' && requeueForWorkspaceResume({
         rootDir, jobPath, job, requeuedAt: completedAt, retryMetadata: { rescue: operationalBlockerRecovery.rescue },
         retryReason: 'Preserved remediation commit after worker credential failure; resuming the same workspace.',
@@ -2939,6 +2933,8 @@ async function reconcileFollowUpJob({
     };
   }
 
+  const published = completeKnownWorkerPublish({ proof: workerPublishedHead, rootDir, jobPath, completedAt, requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+  if (published) return published;
   const dispatchFailureDetail = liveness?.dispatchStatus?.failureDetail || null;
   if (worker?.dispatchMode === 'hq' && classifyHqDispatchFailure(liveness?.dispatchStatus) === 'transient') {
     const nextTransientRetry = Number(job?.remediationPlan?.transientRetries || 0) + 1;
@@ -3378,6 +3374,10 @@ async function consumeNextFollowUpJob({
     site: 'consume',
     job: claimed.job,
   });
+  if (lifecycle?.source === 'live' && ['stale-review-head', 'stale-drift'].includes(lifecycleStop?.stopCode)) {
+    const completed = completeLiveWorkerPublishedHead({ rootDir, jobPath: claimed.jobPath, lifecycle, completedAt: now(), requestWatcherWakeImpl });
+    if (completed) return { consumed: false, reason: 'completed', ...completed };
+  }
   if (lifecycleStop) {
     if (lifecycleStop.logMessage) {
       log.log?.(lifecycleStop.logMessage);

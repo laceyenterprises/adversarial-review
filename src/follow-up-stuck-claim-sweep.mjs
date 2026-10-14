@@ -1,3 +1,5 @@
+import { isWorkerProcessRunning } from './remediation-worker-liveness.mjs';
+import { completeWorkerPublishedHead, hasWorkerPublishArtifacts } from './remediation-published-head.mjs';
 // Stuck-claim sweep + heartbeat emitter + pre-spawn lifecycle recheck.
 //
 // Why this exists (LAC-957, 2026-05-31):
@@ -905,10 +907,15 @@ async function sweepStuckInProgressClaims({
   postCommentImpl = postRemediationOutcomeComment,
   recordInitialCommentDeliveryImpl = recordInitialCommentDelivery,
   readWorkerCpuImpl = readWorkerCpuPercent,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  completePublishedHeadImpl = completeWorkerPublishedHead,
+  reconcileFollowUpJobImpl = null,
+  isWorkerRunning = isWorkerProcessRunning,
 } = {}) {
   let scanned = 0;
   let reclaimed = 0;
   let requeued = 0;
+  let completed = 0;
   let terminalStopped = 0;
   let skipped = 0;
   let signalled = 0;
@@ -933,20 +940,37 @@ async function sweepStuckInProgressClaims({
       continue;
     }
     const ageMs = nowMs - sourceMs;
-    if (ageMs <= thresholdMs) {
+    const exitedWithResult = hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace: false })
+      && !isWorkerRunning(job?.remediationWorker?.processId);
+    if (ageMs <= thresholdMs && !exitedWithResult) {
       skipped += 1;
       continue;
     }
     const session = resolveWorkerSessionProgressMs(rootDir, job);
-    if (session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) {
+    if (!exitedWithResult && session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) {
       skipped += 1;
       continue;
     }
     // CPU is only a short grace signal after durable progress stops. A hot
     // loop must not reserve a remediation slot indefinitely.
-    if (ageMs < thresholdMs * 3 && readWorkerCpuImpl(job) > 0) {
+    if (!exitedWithResult && ageMs < thresholdMs * 3 && readWorkerCpuImpl(job) > 0) {
       skipped += 1;
       continue;
+    }
+
+    if (hasWorkerPublishArtifacts({ rootDir, job })) {
+      const lifecycle = await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
+      if (lifecycle?.source === 'live' && lifecycle.prState === 'open') {
+        const settled = completePublishedHeadImpl({ rootDir, jobPath, headSha: lifecycle.headSha, completedAt: reclaimedAtIso });
+        if (settled) { completed += 1; continue; }
+      }
+      // A durable result is processed by ordinary reconciliation before any reclaim.
+      if (hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace: false })) {
+        const reconcile = reconcileFollowUpJobImpl || (await import('./follow-up-remediation.mjs')).reconcileFollowUpJob;
+        const result = await reconcile({ rootDir, job, jobPath, resolvePRLifecycleImpl, isWorkerRunning,
+          execFileImpl, now: () => reclaimedAtIso, postCommentImpl, log });
+        if (!['skipped', 'active'].includes(result.action)) { skipped += 1; continue; }
+      }
     }
 
     const jobId = job?.jobId || basename(jobPath);
@@ -1049,6 +1073,7 @@ async function sweepStuckInProgressClaims({
     scanned,
     reclaimed,
     requeued,
+    completed,
     terminalStopped,
     skipped,
     thresholdMs,
@@ -1143,6 +1168,7 @@ async function applyPreSpawnLifecycleGate({
   execFileImpl,
   stopConsumedJobWithCommentImpl = null,
   postCommentImpl,
+  completePublishedHeadImpl = completeWorkerPublishedHead,
   dirtyMergeImpl = attemptDirtyMerge,
   resolveDirtyConflictSpecContextImpl = resolveDirtyConflictSpecContext,
   now = () => new Date().toISOString(),
@@ -1161,6 +1187,10 @@ async function applyPreSpawnLifecycleGate({
     site: 'consume',
     job,
   });
+  if (lifecycle?.source === 'live' && ['stale-review-head', 'stale-drift'].includes(lifecycleStop?.stopCode)) {
+    const completed = completePublishedHeadImpl({ rootDir, jobPath, headSha: lifecycle.headSha, completedAt: now() });
+    if (completed) return { action: 'completed', ...completed };
+  }
   if (isDirtyMergeState(lifecycle) && !lifecycleStop) {
     const nowIso = now();
     const resolvedBaseBranch = normalizeBranchName(baseBranch || lifecycle?.baseBranch || job?.baseBranch);

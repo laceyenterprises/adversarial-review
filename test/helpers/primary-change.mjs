@@ -15,7 +15,8 @@ import { createHistoryReader } from '../../src/ama/history-reader.mjs';
 // files come from the production tree/blob reader, including its lack of rename
 // inference for files which were not present at the merge base.
 export function primaryRenameRepository(t, { changed = false, deleted = false,
-  modified = false, author = 'hammer-worker', committer = 'hammer-worker' } = {}) {
+  modified = false, author = 'hammer-worker', committer = 'hammer-worker',
+  verification = undefined, laterHammer = false, existingDestination = false, binary = false, restored = false } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-rename-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const git = (...args) => execFileSync('git', args, { cwd: rootDir, encoding: 'utf8', timeout: 5000,
@@ -26,24 +27,34 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
   git('init', '-q');
   const source = 'guide.txt', destination = 'named-guide.txt';
   if (modified) { writeFileSync(join(rootDir, source), 'Base guide\n'); git('add', source); }
+  if (existingDestination) { writeFileSync(join(rootDir, destination), 'Builder guide\n'); git('add', destination); }
   git('commit', '-q', '--allow-empty', '-m', 'Fixture base');
   const base = git('rev-parse', 'HEAD');
-  writeFileSync(join(rootDir, source), 'Builder guide\n');
+  writeFileSync(join(rootDir, source), binary ? 'Builder\0guide\n' : 'Builder guide\n');
   git('add', source);
   git('commit', '-q', '-m', 'Add builder guide');
   const builder = git('rev-parse', 'HEAD');
   const blob = git('rev-parse', `HEAD:${source}`);
   if (deleted) git('rm', '-q', source);
   else {
-    git('mv', source, destination);
+    git('mv', '-f', source, destination);
     if (changed) { writeFileSync(join(rootDir, destination), 'Builder Guide\n'); git('add', destination); }
+    if (restored) { writeFileSync(join(rootDir, source), 'Base guide\n'); git('add', source); }
   }
   git('commit', '-q', '-m', 'Repair guide name\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)');
+  const renameSha = git('rev-parse', 'HEAD');
+  if (laterHammer) {
+    writeFileSync(join(rootDir, 'other-guide.txt'), 'Unrelated repair\n');
+    git('add', 'other-guide.txt');
+    git('commit', '-q', '-m', 'Repair another guide\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)');
+  }
   const headSha = git('rev-parse', 'HEAD');
-  const commit = sha => ({ sha, author: { login: sha === headSha ? author : 'fixture-builder' },
-    committer: { login: sha === headSha ? committer : 'fixture-builder' },
+  const commit = sha => ({ sha, author: sha === renameSha ? author && { login: author }
+    : { login: sha === headSha ? 'hammer-worker' : 'fixture-builder' },
+    committer: sha === renameSha ? committer && { login: committer }
+      : { login: sha === headSha ? 'hammer-worker' : 'fixture-builder' },
     parents: git('show', '-s', '--format=%P', sha).split(' ').filter(Boolean).map(sha => ({ sha })),
-    commit: { message: git('show', '-s', '--format=%B', sha), author: { name: 'Fixture Author' } } });
+    commit: { message: git('show', '-s', '--format=%B', sha), author: { name: 'Fixture Author' }, verification } });
   const calls = [];
   const get = createHistoryReader({ execGhWithRetryImpl: async ({ args }) => {
     const path = args[1]; calls.push(path);
@@ -73,10 +84,13 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
           ...(status === 'R100' ? { additions: 0, deletions: 0 } : {}) };
       });
       data = { ...commit(sha), files };
+      if (args.at(-1) === '{sha, verification: .commit.verification}') data = { sha, verification };
+      else delete data.commit.verification;
     } else if (path.includes('/comments') || path.includes('/reviews')) data = [];
     else throw new Error(`Unexpected fixture read: ${path}`);
+    for (const entry of data.commits || []) delete entry.commit.verification;
     return { stdout: JSON.stringify(data) };
   } });
-  return { rootDir, source, destination, builder, blob, calls,
+  return { rootDir, source, destination, builder, blob, renameSha, calls,
     args: { repo: 'fixture/repo', prNumber: 1, headSha, rootDir, get } };
 }

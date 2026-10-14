@@ -22,9 +22,153 @@ test('PRIMARYRENAME-01: an added-file rename loses the builder path in the base-
   assert.equal(evidence.finalFiles[0].filename, fixture.destination);
   assert.equal(evidence.finalFiles[0].status, 'added');
   assert.equal(evidence.finalFiles[0].sha, fixture.blob);
-  assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).reason, 'primary-change-reverted');
-  assert.equal(decideClosureOwner({ primaryChange: evidence, currentHead: fixture.args.headSha }).reason,
+  // Removing just the new commit proof reproduces the old refusal exactly.
+  const { renameProofs, ...oldEvidence } = evidence;
+  assert.equal(renameProofs.length, 1);
+  assert.equal(checkPrimaryChange(oldEvidence, fixture.args.headSha).reason, 'primary-change-reverted');
+  assert.equal(decideClosureOwner({ primaryChange: oldEvidence, currentHead: fixture.args.headSha }).reason,
     'primary-change-needs-operator');
+  assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true);
+  assert.equal(isEligibleForAmaClosure({ headSha: fixture.args.headSha, verdict: 'approved', riskClass: 'low',
+    remediationPending: false, blockingFindingState: 'known', blockingFindingCount: 0,
+    nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+  { headSha: fixture.args.headSha, isOpen: true, mergeableState: 'MERGEABLE', labels: [],
+    statusCheckRollup: [{ name: 'test', conclusion: 'SUCCESS' }] },
+  { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
+  { primaryChange: evidence }).eligible, true);
+  assert.equal(decideClosureOwner({ primaryChange: evidence, currentHead: fixture.args.headSha,
+    reviewState: { verdict: 'approved', headSha: fixture.args.headSha,
+      blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } }).owner, 'daemon-merge');
+});
+
+test('PRIMARYRENAME-01: identical renames preserve modified files and survive later unrelated hammer repairs', async t => {
+  for (const options of [{ modified: true }, { laterHammer: true }, { binary: true },
+    { author: null }, { committer: 'web-flow', verification: { verified: true, reason: 'valid' } }]) {
+    const fixture = primaryRenameRepository(t, options);
+    const evidence = await fetchPrimaryChange(fixture.args);
+    assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true, JSON.stringify(options));
+    assert.equal(evidence.renameProofs[0].commit.sha, fixture.renameSha);
+  }
+});
+
+test('PRIMARYRENAME-01: web-flow verification is added only to rename proof, never legacy commit evidence', async t => {
+  const fixture = primaryRenameRepository(t, { committer: 'web-flow', verification: { verified: true, reason: 'valid' } });
+  const path = `repos/fixture/repo/commits/${fixture.renameSha}`;
+  assert.equal((await fixture.args.get(path)).commit.verification, undefined);
+  const evidence = await fetchPrimaryChange(fixture.args);
+  assert.deepEqual(evidence.renameProofs[0].commit.commit.verification, { verified: true, reason: 'valid' });
+  assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true);
+  assert.equal((await fixture.args.get(path)).commit.verification, undefined);
+});
+
+test('PRIMARYRENAME-01: restoring a modified path to base is not absence, even with its old blob at a new path', async t => {
+  const fixture = primaryRenameRepository(t, { modified: true, restored: true });
+  const evidence = await fetchPrimaryChange(fixture.args);
+  assert.equal(evidence.finalFiles.some(file => file.filename === fixture.source), false);
+  assert.equal(evidence.finalFiles[0].sha, fixture.blob);
+  assert.equal(evidence.renameProofs, undefined);
+  assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).reason, 'primary-change-reverted');
+});
+
+test('PRIMARYRENAME-01: changed bytes, deletion, foreign identity and an existing content match retain the refusal', async t => {
+  for (const options of [{ changed: true }, { deleted: true },
+    { author: 'fixture-contributor' }, { author: 'fixture-contributor', laterHammer: true },
+    { committer: 'fixture-contributor' }, { author: null, committer: null },
+    { committer: 'web-flow', verification: { verified: false, reason: 'unsigned' } },
+    { existingDestination: true }]) {
+    const fixture = primaryRenameRepository(t, options);
+    const evidence = await fetchPrimaryChange(fixture.args);
+    const refusal = checkPrimaryChange(evidence, fixture.args.headSha);
+    assert.equal(refusal.reason, 'primary-change-reverted', JSON.stringify(options));
+    assert.equal(refusal.missingEvidence.path, fixture.source);
+    assert.ok(refusal.missingEvidence.summary.includes(fixture.source));
+    assert.ok(refusal.missingEvidence.summary.includes(fixture.renameSha), JSON.stringify(options) + ': ' + refusal.missingEvidence.summary);
+    assert.ok(refusal.missingEvidence.summary.includes(options.author === null ? 'Fixture Author'
+      : options.author || 'hammer-worker'));
+    assert.equal(refusal.missingEvidence.summary.includes(`${fixture.args.headSha} author=`),
+      !options.laterHammer, 'attribute the removing commit rather than the later head');
+    assert.equal(decideClosureOwner({ primaryChange: evidence, currentHead: fixture.args.headSha }).reason,
+      'primary-change-needs-operator');
+    const detailed = await fetchPrimaryChangeContext(fixture.args);
+    assert.ok(checkPrimaryChange(detailed, fixture.args.headSha).missingEvidence.summary.includes(fixture.renameSha));
+  }
+});
+
+test('PRIMARYRENAME-01: unavailable or incomplete optional rename proof leaves the old refusal intact', async t => {
+  for (const kind of ['unavailable', 'capped', 'foreign-full-commit', 'wrong-sha', 'outside-range']) {
+    const fixture = primaryRenameRepository(t, { laterHammer: true });
+    const get = async path => {
+      if (path.endsWith(`/commits/${fixture.renameSha}`)) {
+        if (kind === 'unavailable') throw new Error('Fixture commit unavailable');
+        const commit = await fixture.args.get(path);
+        if (kind === 'capped') return { ...commit, filesComplete: false, files: Array(300).fill(commit.files[0]) };
+        if (kind === 'foreign-full-commit') return { ...commit, author: { login: 'fixture-contributor' } };
+        if (kind === 'wrong-sha') return { ...commit, sha: 'f'.repeat(40) };
+        return { ...commit, parents: [{ sha: 'f'.repeat(40) }] };
+      }
+      if (path.endsWith(`${fixture.builder}...${'f'.repeat(40)}`)) return { status: 'diverged' };
+      return fixture.args.get(path);
+    };
+    const evidence = await fetchPrimaryChange({ ...fixture.args, get });
+    assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).reason, 'primary-change-reverted', kind);
+  }
+});
+
+test('PRIMARYRENAME-01: evaluator rechecks identity, exact blob, source absence and range membership', async t => {
+  const fixture = primaryRenameRepository(t);
+  const evidence = await fetchPrimaryChange(fixture.args);
+  for (const mutate of [
+    proof => { proof.renameProofs[0].commit.author.login = 'fixture-contributor'; },
+    proof => { proof.renameProofs[0].commit.committer.login = 'fixture-contributor'; },
+    proof => { proof.renameProofs[0].commit.files[0].sha = 'f'.repeat(40); },
+    proof => { proof.diagnosticCommitRange = []; },
+    proof => { proof.renameProofs[0].commit.parents[0].sha = 'f'.repeat(40); },
+    proof => { proof.finalFiles[0].sha = 'f'.repeat(40); },
+    proof => { proof.finalFiles.push({ ...proof.primaryFiles[0], sha: 'f'.repeat(40), additions: 0, patch: '' }); },
+  ]) {
+    const invalid = structuredClone(evidence); mutate(invalid);
+    assert.equal(checkPrimaryChange(invalid, fixture.args.headSha).reason, 'primary-change-reverted');
+  }
+});
+
+test('PRIMARYRENAME-01: a cached pre-rename refusal is recomputed once and the new proof is reused', async t => {
+  const fixture = primaryRenameRepository(t);
+  const evidence = await fetchPrimaryChange({ ...fixture.args, get: path => fixture.args.get(path) });
+  const legacy = structuredClone(evidence);
+  delete legacy.renameProofs;
+  delete legacy.ciCost;
+  const directory = join(fixture.rootDir, 'data', 'primary-change-history');
+  mkdirSync(directory, { recursive: true });
+  const reviewKey = createHash('sha256').update('[]').digest('hex');
+  const key = [fixture.args.repo, 1, evidence.mergeBase, fixture.args.headSha, evidence.mergeBase, reviewKey, null];
+  writeFileSync(join(directory, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`),
+    JSON.stringify({ key, history: legacy }));
+  let commitReads = 0;
+  const get = Object.assign(path => {
+    if (path.includes('/commits/')) commitReads += 1;
+    return fixture.args.get(path);
+  }, { metadata: fixture.args.get.metadata, persistPrimaryChange: true });
+  const fresh = await fetchPrimaryChange({ ...fixture.args, get });
+  assert.equal(checkPrimaryChange(fresh, fixture.args.headSha).ok, true);
+  assert.equal(commitReads, 1, 'old disk history must not hide the missing proof');
+  const reused = await fetchPrimaryChange({ ...fixture.args, get });
+  assert.equal(checkPrimaryChange(reused, fixture.args.headSha).ok, true);
+  assert.equal(commitReads, 1, 'new disk history reuses the commit proof');
+});
+
+test('PRIMARYRENAME-01: an optional proof read outage cannot cache a permanent refusal', async t => {
+  const fixture = primaryRenameRepository(t);
+  let unavailable = true;
+  const get = Object.assign(path => {
+    if (path.includes('/commits/') && unavailable) throw new Error('Fixture proof read outage');
+    return fixture.args.get(path);
+  }, { metadata: fixture.args.get.metadata, persistPrimaryChange: true });
+  const refused = await fetchPrimaryChange({ ...fixture.args, get });
+  assert.equal(checkPrimaryChange(refused, fixture.args.headSha).reason, 'primary-change-reverted');
+  unavailable = false;
+  const recovered = await fetchPrimaryChange({ ...fixture.args, get });
+  assert.equal(checkPrimaryChange(recovered, fixture.args.headSha).ok, true);
 });
 // This suite isolates history semantics; ci-cost.test.mjs exercises the live collector.
 const fetchPrimaryChange = (args) => fetchPrimaryChangeWithCost(args, {

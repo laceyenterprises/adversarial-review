@@ -4,7 +4,9 @@ import { join } from 'node:path';
 
 const running = new Map();
 const directory = rootDir => join(rootDir, 'data', 'primary-change-history');
-const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null];
+// PRIMARYRENAME-01: old history records lack commit-level rename proof. Re-read
+// those once so a cached refusal cannot strand an otherwise preserved head.
+const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'primary-rename-v1'];
 const pathFor = args => join(directory(args.rootDir), `${createHash('sha256').update(JSON.stringify(identity(args))).digest('hex')}.json`);
 
 // Atomic replacement inherits the writer's UID. Never let a worker replace
@@ -53,7 +55,7 @@ export async function storedPrimaryChange(args, compute) {
   }
   const entry = { args, startedAt: Date.now() };
   entry.promise = Promise.resolve().then(compute).then(history => {
-    if ([true, false].includes(history.hasHammerCommits) && !history.readFailed && !history.headMismatch
+    if ([true, false].includes(history.hasHammerCommits) && !history.readFailed && !history.headMismatch && !history.renameProofReadFailed
       && (!history.hasHammerCommits || history.mergeBase === args.mergeBase)) {
       assertStoreOwner(args.rootDir, path);
       mkdirSync(directory(args.rootDir), { recursive: true });

@@ -596,6 +596,25 @@
       "path": "docs/data-model/argus-security-jobs.md",
       "store": "data/argus-security-jobs/",
       "schemaSurface": "src/argus-security-queue.mjs",
+      "recordContract": {
+        "primaryKey": "jobId",
+        "uniqueIdentity": ["repo", "prNumber", "headSha"],
+        "lastAutoadjudicationAttempt": {
+          "fields": ["schemaVersion", "decision", "reason", "inputs", "attemptedAt", "deferrals"],
+          "optionalFields": ["notBefore", "mergeDisposition", "mergeReason", "mergeReasons"],
+          "deferralBudget": 18,
+          "retryMilliseconds": 600000
+        },
+        "mergeWithheldRecovery": {
+          "fields": ["headSha", "reopenedAt", "inputs"],
+          "maximumRecoveriesPerJob": 1,
+          "headReference": "headSha"
+        },
+        "result.autoadjudication": {
+          "fields": ["schemaVersion", "decision", "reason", "inputs", "completedAt"],
+          "optionalFields": ["mergeDisposition", "mergeReasons"]
+        }
+      },
       "relatedSchemaSurfaces": [
         "src/argus-security-drain.mjs",
         "src/argus-backlog-retirement.mjs",

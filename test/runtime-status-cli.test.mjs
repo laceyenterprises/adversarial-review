@@ -108,6 +108,8 @@ test('renders the SPEC Win 1 status block from durable artifacts', async () => {
       'fallback canary: PASS 2026-07-17T06:00:12.000Z (local fixture review, verdict=comment-only, 94s)',
       'settle smoke: MISSING agent-runtime (missing)',
       'reviewer cutover: not requested',
+      'GitHub core: remaining=unknown reset=unknown rate-limited=0',
+      'GitHub graphql: remaining=unknown reset=unknown rate-limited=0',
     ].join('\n'));
 
     // JSON model carries the same facts for tooling.
@@ -620,4 +622,26 @@ test('readAuditRows bounds the newest-transition lookup once latest failover and
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('GHBUDGET-01: status includes remaining, reset and current-window rate-limited calls per resource', () => {
+  const rootDir = tmpRoot();
+  try {
+    const resetAt = '2026-01-01T01:00:00.000Z';
+    const observedAt = '2026-01-01T00:00:00.000Z';
+    mkdirSync(join(rootDir, 'data', 'api-cache'), { recursive: true });
+    writeFileSync(join(rootDir, 'data', 'api-cache', 'rate-limit-state.json'), JSON.stringify({ buckets: {
+      core: { resource: 'core', remaining: 3456, resetAt, observedAt, rateLimitedCalls: 2 },
+      graphql: { resource: 'graphql', remaining: 123, resetAt, observedAt, rateLimitedCalls: 7 },
+    } }));
+    const model = buildRuntimeStatus(rootDir, { env: {}, now: () => new Date(observedAt) });
+    assert.deepEqual(model.githubBudget.core, { remaining: 3456, resetAt, rateLimitedCalls: 2 });
+    assert.deepEqual(model.githubBudget.graphql, { remaining: 123, resetAt, rateLimitedCalls: 7 });
+    const text = renderRuntimeStatus(model);
+    assert.match(text, /GitHub core: remaining=3456 reset=2026-01-01T01:00:00.000Z rate-limited=2/);
+    assert.match(text, /GitHub graphql: remaining=123 reset=2026-01-01T01:00:00.000Z rate-limited=7/);
+    const next = buildRuntimeStatus(rootDir, { env: {}, now: () => new Date(resetAt) });
+    assert.equal(next.githubBudget.graphql.rateLimitedCalls, 0);
+    assert.equal(next.githubBudget.graphql.remaining, null);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

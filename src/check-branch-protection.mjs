@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
@@ -69,7 +70,7 @@ function assertSharedEvidenceOwner(evidenceDir, { processImpl = process } = {}) 
 async function listOrgRepos(org, { execFileImpl = execFileAsync, env = process.env } = {}) {
   const token = env.GITHUB_TOKEN || env.GH_TOKEN;
   if (!token) throw new Error('GITHUB_TOKEN is required to list org repos');
-  const { stdout } = await execFileImpl(
+  const { stdout } = await meteredExecFile(execFileImpl,
     'gh',
     ['api', `orgs/${org}/repos`, '--paginate', '--jq', '.[].full_name'],
     {

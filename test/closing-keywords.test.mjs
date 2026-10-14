@@ -60,7 +60,7 @@ test('hammer shell merge runner receives the neutralized body', (t) => {
   const stderrPath = join(dir, 'merge.stderr');
   const snippet = renderCommitMessageSnippet('  HAM_MERGE_EXIT=$?');
   const stub = `ham_read_protective_predecessor_value() { printf -v "$2" '%s' 'Fix #7732 regression'; }
-gh() { while [ "$#" -gt 0 ]; do if [ "$1" = --subject ]; then printf '%s\\n' "$2"; fi; if [ "$1" = --body ]; then printf '%s' "$2"; return; fi; shift; done; return 1; }\n`;
+ham_gh() { while [ "$#" -gt 0 ]; do if [ "$1" = --subject ]; then printf '%s\\n' "$2"; fi; if [ "$1" = --body ]; then printf '%s' "$2"; return; fi; shift; done; return 1; }\n`;
   const result = spawnSync('bash', ['-c', stub + snippet], { encoding: 'utf8', env: {
     ...process.env, HAM_NODE_BIN: process.execPath, HAM_AMA_TRAILERS: 'Closed-By: hammer', HAM_PR_TITLE: 'Preserve author title',
     HAM_PROTECTIVE_PREDECESSOR_BODY: 'Fix:\n\n#7732; closes #7',

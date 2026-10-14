@@ -1,3 +1,4 @@
+import { withGitHubBudgetScope, isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 // Poll-loop fairness — keep new-PR discovery alive when the loop is carrying a
 // backlog of PRs it cannot advance.
 //
@@ -513,7 +514,11 @@ export async function runPostedReviewHandlersFairly({
   async function executeHandler({ handler, key, positionLabel, laneAdmission = null }) {
     const handlerStartedMs = nowMs();
     const handlerDeadlineMs = parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs);
-    const outcome = await runWithDeadline(() => handler.run(), {
+    let resourceLimited = false;
+    const outcome = await runWithDeadline(() => withGitHubBudgetScope({ urgent: handler.budgetUrgent === true }, async scope => {
+      try { return await handler.run(); }
+      finally { resourceLimited = scope.rateLimited || scope.deferred; }
+    }), {
       timeoutMs: handlerDeadlineMs,
       setTimeoutFn,
       clearTimeoutFn,
@@ -557,7 +562,8 @@ export async function runPostedReviewHandlersFairly({
       }
     }
 
-    if (laneGate && typeof laneGate.record === 'function') {
+    if (!resourceLimited && !isGitHubRateLimitError(outcome.error)
+      && !handler.suppressNoProgress && laneGate && typeof laneGate.record === 'function') {
       try {
         await laneGate.record(handler, {
           timedOut: outcome.timedOut,

@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { buildMergeCommitBody } from './ama/closing-keywords.mjs';
 // Fast-merge processing / orchestration layer.
@@ -547,7 +548,7 @@ function normalizePrView(parsed = {}) {
 
 async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
   const execFileImpl = execFileFromGhClient(ghClient);
-  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+  const { stdout } = await withGhRetry(() => meteredExecFile(execFileImpl, 'gh', [
     'pr',
     'view',
     String(prNumber),
@@ -564,7 +565,7 @@ async function fetchFastMergePrView({ ghClient, repo, prNumber }) {
 
 async function fetchFastMergeMergeCommit({ ghClient, repo, prNumber }) {
   const execFileImpl = execFileFromGhClient(ghClient);
-  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+  const { stdout } = await withGhRetry(() => meteredExecFile(execFileImpl, 'gh', [
     'pr',
     'view',
     String(prNumber),
@@ -584,7 +585,7 @@ async function fetchFastMergeMergeCommit({ ghClient, repo, prNumber }) {
 async function fetchFastMergePrState({ ghClient, repo, prNumber }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   try {
-    const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    const { stdout } = await withGhRetry(() => meteredExecFile(execFileImpl, 'gh', [
       'pr',
       'view',
       String(prNumber),
@@ -656,7 +657,7 @@ async function fetchFastMergeChecks({ ghClient, repo, prNumber }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   let stdout = '';
   try {
-    ({ stdout } = await withGhRetry(() => execFileImpl('gh', [
+    ({ stdout } = await withGhRetry(() => meteredExecFile(execFileImpl, 'gh', [
       'pr',
       'checks',
       String(prNumber),
@@ -723,7 +724,7 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, bod
       // withGhRetry may re-run this callback after transient gh failure; GitHub treats an already-merged
       // PR/head as idempotently terminal, so the fallback remains retry-safe.
     }
-    return execFileImpl('gh', [
+    return meteredExecFile(execFileImpl, 'gh', [
       'pr',
       'merge',
       String(prNumber),
@@ -1392,7 +1393,7 @@ async function processFastMergePR({
   const commitBody = buildMergeCommitBody({ prTitle: preMergeView.title, prBody: preMergeView.body, trailers: 'Closed-By: fast-merge', selfPrNumber: prNumber, repo });
   let mergeActor = null;
   try {
-    const { stdout } = await execFileFromGhClient(ghClient)('gh', ['api', 'user', '--jq', '.login'], { timeout: FAST_MERGE_GH_TIMEOUT_MS });
+    const { stdout } = await meteredExecFile(execFileFromGhClient(ghClient), 'gh', ['api', 'user', '--jq', '.login'], { timeout: FAST_MERGE_GH_TIMEOUT_MS });
     const login = stdout.trim();
     if (/^[a-z0-9][a-z0-9-]*(?:\[bot\])?$/i.test(login)) mergeActor = login;
   } catch (err) {

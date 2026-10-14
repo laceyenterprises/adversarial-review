@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 // Bind a review write to the exact commit the reviewer inspected.  GitHub's
 // normal `gh pr review` command otherwise submits against the current head.
@@ -63,7 +64,7 @@ async function postExactHeadReview({
   env,
 } = {}) {
   reviewBody = filterGitHubBody(reviewBody, { repo, reviewerHeadSha });
-  const response = await execFileImpl(
+  const response = await meteredExecFile(execFileImpl,
     'gh',
     [
       'api', '--method', 'POST', `repos/${repo}/pulls/${prNumber}/reviews`,

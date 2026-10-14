@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { hammerHandoffReviewBypass } from './hammer-handoff-review-bypass.mjs';
 import { isOperatorHeld } from './operator-hold-labels.mjs';
 import { observeHoldRelease } from './operator-hold-release.mjs';
@@ -945,7 +946,7 @@ async function fetchLivePRLifecycle({
     await awaitThrottleImpl();
     // A bounded caller may abandon this lookup during shared backoff.
     if (signal?.aborted) return null;
-    const result = await execFileImpl(
+    const result = await meteredExecFile(execFileImpl,
       'gh',
       [
         'pr',

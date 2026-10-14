@@ -356,6 +356,8 @@ test('adapter gh fallback passes only an allowlisted env and worker-routed GH_TO
   assert.equal(calls.length, 1);
   assert.equal(calls[0].cmd, 'gh');
   assert.deepEqual(calls[0].options.env, {
+    GH_DEBUG: 'api',
+    ...Object.fromEntries(['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
     PATH: '/usr/local/bin:/usr/bin:/bin',
     HOME: '/Users/airlock',
     GH_TOKEN: 'codex-bot-token',
@@ -470,6 +472,8 @@ test('adapter gh fallback does not pass through GITHUB_TOKEN when an explicit to
 
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].options.env, {
+    GH_DEBUG: 'api',
+    ...Object.fromEntries(['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
     PATH: '/usr/bin:/bin',
     HOME: '/Users/airlock',
     GH_TOKEN: 'explicit-bot-token',

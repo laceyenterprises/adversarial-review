@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -106,6 +106,12 @@ try {
     const root = makeWorkerRoot(index);
     return path.join(root, path.relative(repoRoot, file));
   });
+  // Tests own their CLI fixture; an omitted stub must not use host credentials.
+  const fixtureBin = path.join(sandboxRoot, 'fixture-bin');
+  mkdirSync(fixtureBin);
+  writeFileSync(path.join(fixtureBin, 'gh'), '#!/bin/sh\necho "offline fixture: inject a GitHub executor or fake gh" >&2\nexit 78\n', { mode: 0o755 });
+  const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)$/.test(key)));
   child = spawn(process.execPath, [
     '--preserve-symlinks',
     '--preserve-symlinks-main',
@@ -121,13 +127,14 @@ try {
   ], {
     cwd: sandboxRoot,
     env: {
-      ...process.env,
+      ...testEnv,
+      GH_CONFIG_DIR: path.join(sandboxRoot, 'gh-config'),
       ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT: sandboxRoot,
       ADVERSARIAL_REVIEW_TEST_TMP_PROBE_PREFIX: fixtureProbePrefix,
       TMPDIR: sandboxTmpDir,
       TMP: sandboxTmpDir,
       TEMP: sandboxTmpDir,
-      PATH: [path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
+      PATH: [fixtureBin, path.dirname(process.execPath), process.env.PATH].filter(Boolean).join(path.delimiter),
       NODE_OPTIONS: [process.env.NODE_OPTIONS, '--preserve-symlinks', '--preserve-symlinks-main'].filter(Boolean).join(' '),
     },
     stdio: 'inherit',

@@ -2477,8 +2477,12 @@ than launching remediation again only while verdict misses are limited to pendin
 CI. Structural policy holds and operator-required refusals remain authoritative;
 red CI or conflicts route back to hammer remediation. A pending-check timeout
 is deferred only when pending CI is the sole live gate miss; conflicts, strict
-BEHIND, closed PRs and labels retain a failed-without-merge audit. Required checks,
-primary-change, exact-head,
+BEHIND, closed PRs and labels retain a failed-without-merge audit.
+During the remote-check wait, the hammer defers primary-change and CI-cost
+evaluation until checks are green, then fetches real exact-head evidence before
+allowing merge. This applies in both advisory and blocking CI-cost modes;
+pending checks never supply synthetic cost approval. The other live gates
+remain active throughout the wait. Required checks, primary-change, exact-head,
 protective predecessors, branch protection and the autonomous execution switch
 remain mandatory, including the live read inside the lease. Moving the head
 invalidates the certification and removes the old audit from the active queue.
@@ -2522,8 +2526,10 @@ later retries use fifteen-second intervals, clamped to the remaining deadline.
 Each visibility probe is bounded to 30 seconds or the remaining deadline,
 whichever is shorter. Transport
 errors and probe alarms retry within that same deadline; permanent errors and
-malformed or missing head data remain fatal. Only successful reads with a full
-head SHA replace the cached PR JSON. Exhaustion reports `published-head-timeout`
+malformed or missing head data remain fatal. Visibility probes read PR metadata
+without check runs or commit statuses; the subsequent lease check reads the full
+rollup on the visible head. Only successful reads with a full head SHA replace
+the cached PR JSON. Exhaustion reports `published-head-timeout`
 with the elapsed head/check wait times; a different live head leaves the wait
 and follows the existing race path.
 Publication and verify-head export `HAM_HEAD_WAITED_SECONDS` and

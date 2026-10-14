@@ -756,13 +756,15 @@ test('postRemediationOutcomeComment passes only an allowlisted env to gh', async
       'GH_CLAUDE_REVIEWER_TOKEN',
       'GH_CLAUDE_REVIEWER_TOKEN_SOURCE',
       'GH_TOKEN',
+      'GH_DEBUG',
+      ...['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'].filter(key => process.env[key] !== undefined),
       'HOME',
       'HTTP_PROXY',
       'LANG',
       'NODE_EXTRA_CA_CERTS',
       'PATH',
       'SSL_CERT_FILE',
-    ],
+    ].sort(),
     `child env must be exactly the allowlist; got: ${Object.keys(childEnv).join(', ')}`
   );
   assert.equal(childEnv.GH_TOKEN, 'test-pat-claude');

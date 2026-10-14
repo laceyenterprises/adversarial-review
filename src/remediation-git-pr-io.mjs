@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 // Remediation git & PR I/O helpers.
 //
 // Extracted from follow-up-remediation.mjs (ARC-19 wave3). This is a
@@ -164,7 +165,7 @@ async function runWorkspaceNetworkCommandWithTransientRetry({
       await sleep(delays[attempt]);
     }
     try {
-      return await execFileImpl(command, args, activeOptions);
+      return await meteredExecFile(execFileImpl, command, args, activeOptions);
     } catch (err) {
       lastError = err;
 

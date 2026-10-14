@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 // Fast-merge GitHub I/O layer.
 //
 // Self-contained GitHub read/transport primitives for the fast-merge gate:
@@ -148,7 +149,7 @@ function flattenGhPaginatedJson(parsed) {
 
 async function fetchFastMergeHamCommit({ ghClient, repo, headSha }) {
   const execFileImpl = execFileFromGhClient(ghClient);
-  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+  const { stdout } = await withGhRetry(() => meteredExecFile(execFileImpl, 'gh', [
     'api',
     `repos/${repo}/commits/${headSha}`,
   ], {
@@ -160,7 +161,7 @@ async function fetchFastMergeHamCommit({ ghClient, repo, headSha }) {
 
 async function fetchFastMergeTimeline({ ghClient, repo, prNumber }) {
   const execFileImpl = execFileFromGhClient(ghClient);
-  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+  const { stdout } = await withGhRetry(() => meteredExecFile(execFileImpl, 'gh', [
     'api',
     `repos/${repo}/issues/${prNumber}/timeline`,
     '--paginate',

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // One bounded GitHub snapshot; no Agent OS installation or local daemon required.
+import { meteredExecFileSync } from '../src/metered-gh.mjs';
+import { fetchHammerPr } from '../src/hammer-pr-read.mjs';
 import { fetchPrimaryChange } from '../src/ama/primary-change.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHistoryReader } from '../src/ama/history-reader.mjs';
@@ -14,7 +16,7 @@ if (!/^[^/\s]+\/[^/\s]+$/.test(repo || '') || !/^[1-9]\d*$/.test(number || '') |
   process.exit(64);
 }
 function get(args) {
-  const result = spawnSync('gh', args, { encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER });
+  const result = meteredExecFileSync(spawnSync, 'gh', args, { encoding: 'utf8', timeout: 15000, maxBuffer: GH_LOOKUP_MAX_BUFFER });
   if (result.error || result.status !== 0) throw new Error(`${args[0]} ${args[1]} failed: ${(result.stderr || result.error?.message || '').slice(-500)}`);
   return JSON.parse(result.stdout);
 }
@@ -38,7 +40,9 @@ try {
     if (batch.length < 100) break;
     if (page === 10) throw new Error('review pagination exceeded ten pages');
   }
-  const checks = get(['pr', 'view', number, '--repo', repo, '--json', 'statusCheckRollup']);
+  const checks = await fetchHammerPr(repo, number, {
+    read: path => path === `repos/${repo}/pulls/${number}` ? pr : get(['api', path]),
+  });
   let protection;
   try { protection = get(['api', `repos/${repo}/branches/${encodeURIComponent(pr.base?.ref || 'main')}/protection`]); }
   catch { protection = { required_status_checks: null, unavailable: true }; }

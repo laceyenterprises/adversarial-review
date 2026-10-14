@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
+ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec "$@"; }
+ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
+
 ham_merge_phase() {
 HAM_PHASE_OUTCOME=merge-error
 HAM_CLOSING_KEYWORD_REWRITES='[]'
@@ -11,7 +14,7 @@ if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; t
 fi
 
 HAM_REMOTE_CI_WAIT_SECONDS="${HAM_REMOTE_CI_WAIT_SECONDS:-900}"
-HAM_REMOTE_CI_POLL_SECONDS="${HAM_REMOTE_CI_POLL_SECONDS:-15}"
+HAM_REMOTE_CI_POLL_SECONDS="${HAM_REMOTE_CI_POLL_SECONDS:-30}"
 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3}"
 HAM_MERGE_RETRY_CAP="${HAM_MERGE_RETRY_CAP:-4}"
 HAM_MERGE_BACKOFF_BASE_SECONDS="${HAM_MERGE_BACKOFF_BASE_SECONDS:-2}"
@@ -266,12 +269,24 @@ ham_fire_watcher_merge_wake() {
   return 0
 }
 
+# One cadence helper owns every check snapshot, including retry attempts and
+# the final pre-merge refresh. Never add a second check-polling loop.
+ham_wait_for_check_poll() {
+  local now next wait
+  now=$(date +%s)
+  next=$(( ${HAM_LAST_CHECK_POLL_AT:-0} + HAM_REMOTE_CI_POLL_SECONDS ))
+  wait=$((next - now))
+  if [ "$wait" -gt 0 ]; then sleep "$wait"; fi
+  HAM_LAST_CHECK_POLL_AT=$(date +%s)
+}
+
 ham_refresh_github_gate_once() {
+  ham_wait_for_check_poll
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
   HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
   HAM_BRANCH_PROTECTION_REQUIRED="$HAM_BRANCH_PROTECTION_REQUIRED" \
   "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
-import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
+import { fetchHammerPr } from '<<ROOT_DIR>>/src/hammer-pr-read.mjs';
 import { createHistoryReader } from '<<ROOT_DIR>>/src/ama/history-reader.mjs';
 import { fetchPrimaryChange, checkPrimaryChange } from '<<ROOT_DIR>>/src/ama/primary-change.mjs';
 import { loadEffectiveMergeAuthorityConfig } from '<<ROOT_DIR>>/src/ama/effective-policy.mjs';
@@ -282,7 +297,7 @@ import { classifyCheckRollup, latestCheckRollupItems } from '<<ROOT_DIR>>/src/ch
 const repo = '<<REPO>>';
 const prNumber = Number('<<PR_NUMBER>>');
 const expectedHead = process.env.POST_REMEDIATION_SHA;
-const rollup = await fetchPullRequestRollup(repo, prNumber);
+const rollup = await fetchHammerPr(repo, prNumber);
 const checks = Array.isArray(rollup.checks)
   ? rollup.checks
   : Array.isArray(rollup.statusCheckRollup)
@@ -311,12 +326,14 @@ const open = state === 'OPEN';
 const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
 // Resolve the same effective policy as bin/ama-check.mjs, including its strict default.
 const cfg = loadEffectiveMergeAuthorityConfig({ rootDir: '<<ROOT_DIR>>' });
-const primaryChange = await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
+const primaryChange = checksConclusion === 'SUCCESS' ? await fetchPrimaryChange({ repo, prNumber, headSha: expectedHead, rootDir: '<<ROOT_DIR>>',
   get: createHistoryReader(),
-});
+}) : null;
+// Pending/red checks cannot merge. Defer preservation and cost evaluation until
+// green, when real exact-head evidence is fetched; never synthesize approval.
 const eligibility = evaluateMergeEligibility({
   primaryChange,
-  requirePrimaryChange: true,
+  requirePrimaryChange: checksConclusion === 'SUCCESS',
   strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
   verdict: 'settled-success',
   leaseHeld: true,
@@ -330,15 +347,15 @@ const eligibility = evaluateMergeEligibility({
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
 });
-const primaryIntent = checkPrimaryChange(primaryChange, expectedHead, {
+const primaryIntent = primaryChange ? checkPrimaryChange(primaryChange, expectedHead, {
   strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
-});
+}) : null;
 console.log(JSON.stringify({
   ok: eligibility.eligible,
   reasons: eligibility.reasons,
-  primaryChangeReason: primaryChange.reason || primaryIntent.detail || null,
+  primaryChangeReason: primaryChange?.reason || primaryIntent?.detail || null,
   // REVERSALREBASE-01: the closing status names the one missing piece.
-  primaryChangeMissingEvidence: primaryIntent.missingEvidence || null,
+  primaryChangeMissingEvidence: primaryIntent?.missingEvidence || null,
   state,
   open,
   headMatches,
@@ -704,7 +721,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
 
   HAM_PROTECTIVE_PREDECESSOR_BODY=""
   ham_read_protective_predecessor_value body HAM_PROTECTIVE_PREDECESSOR_BODY \
-    gh pr view <<PR_URL>> --json body --jq '.body // ""'
+    ham_pr --json body --jq '.body // ""'
   HAM_PROTECTIVE_PREDECESSOR_READ_STATUS=$?
   if [ "$HAM_PROTECTIVE_PREDECESSOR_READ_STATUS" -ne 0 ]; then
     echo "HAM hard-blocker: protective predecessor body read failed; refusing merge" >&2
@@ -734,7 +751,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
       fi
       HAM_PROTECTOR_STATE=""
       ham_read_protective_predecessor_value "state-${HAM_PROTECTOR_PR}" HAM_PROTECTOR_STATE \
-        gh pr view "$HAM_PROTECTOR_PR" --repo "<<REPO>>" --json state --jq '.state // ""'
+        ham_gh pr view "$HAM_PROTECTOR_PR" --repo "<<REPO>>" --json state --jq '.state // ""'
       HAM_PROTECTOR_STATE_READ_STATUS=$?
       if [ "$HAM_PROTECTOR_STATE_READ_STATUS" -ne 0 ]; then
         echo "HAM hard-blocker: protective predecessor state unreadable for PR #$HAM_PROTECTOR_PR; refusing merge" >&2
@@ -773,7 +790,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   }
   HAM_PR_TITLE=""
   ham_read_protective_predecessor_value title HAM_PR_TITLE \
-    gh pr view <<PR_URL>> --json title --jq '.title // ""'
+    ham_pr --json title --jq '.title // ""'
   HAM_TITLE_READ_STATUS=$?
   if [ "$HAM_TITLE_READ_STATUS" -ne 0 ]; then
     if [ "$HAM_TITLE_READ_STATUS" -eq 1 ]; then
@@ -823,7 +840,7 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     return 1
   fi
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  gh pr merge <<PR_URL>> \
+  ham_gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
     --subject "$HAM_COMMIT_SUBJECT" \
@@ -877,7 +894,7 @@ HAM_POST_VIEW_ATTEMPTS=0
 HAM_POST_VIEW_EXIT=1
 while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
   HAM_POST_VIEW_ATTEMPTS=$((HAM_POST_VIEW_ATTEMPTS + 1))
-  gh pr view <<PR_URL>> --json state,mergedAt,mergeCommit,headRefOid \
+  ham_pr --json state,mergedAt,mergeCommit,headRefOid \
     > "$HAM_POST_MERGE_JSON" \
     2> "$HAM_POST_MERGE_STDERR"
   HAM_POST_VIEW_EXIT=$?

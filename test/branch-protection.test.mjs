@@ -57,7 +57,7 @@ test('fetchAdversarialGateBranchProtection succeeds when required context is pre
   assert.equal(result.reason, 'required-context-present');
   assert.equal(calls[0].command, 'gh');
   assert.ok(calls[0].args.includes('repos/laceyenterprises/adversarial-review/branches/main/protection'));
-  assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH']);
+  assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH', 'GH_DEBUG', ...['GHO_RATE_LIMIT_SHARED_STATE_PATH', 'GHO_RATE_LIMIT_THROTTLE_FLOOR'].filter(key => process.env[key] !== undefined)].sort());
 });
 
 test('fetchAdversarialGateBranchProtection retries transient gh failures before succeeding', async () => {

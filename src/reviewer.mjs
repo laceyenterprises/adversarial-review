@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 /**
  * LAC-12 + LAC-13: Reviewer Agent + Linear Integration
@@ -1513,7 +1514,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             }
           }
           if (!adapterHandled) {
-            await execFileImpl(
+            await meteredExecFile(execFileImpl,
               'gh',
               ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
               {

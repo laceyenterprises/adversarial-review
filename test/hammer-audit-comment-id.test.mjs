@@ -65,7 +65,7 @@ process.stdout.write(fs.readFileSync(process.env.PAGES_PATH));
   const source = readFileSync(join(root, 'bin/hammer-publish.sh'), 'utf8');
   const lookup = source.match(/ham_existing_terminal_audit_comment_id\(\) \{[\s\S]*?\n\}/)?.[0];
   assert.ok(lookup);
-  const script = lookup.replaceAll('<<ROOT_DIR>>', root)
+  const script = (source.match(/ham_gh\(\) \{[^\n]+/)[0] + '\n' + lookup).replaceAll('<<ROOT_DIR>>', root)
     .replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_NUMBER>>', '123');
   const result = spawnSync('/bin/bash', ['-c', `${script}\nham_existing_terminal_audit_comment_id`], {
     encoding: 'utf8', timeout: 5000,

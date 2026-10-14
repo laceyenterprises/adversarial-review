@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { readFileSync } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -10,9 +12,40 @@ const MAX_THROTTLE_FLOOR = 1000;
 const LOCK_RETRY_MS = 50;
 const LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_RESOURCE = 'core';
+const UNKNOWN_RATE_LIMIT_RESET_MS = 60_000;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const TOOL_ROOT = dirname(MODULE_DIR);
 const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-limit-state.json');
+
+const budgetScopes = new AsyncLocalStorage();
+
+function withGitHubBudgetScope(options, fn) {
+  const scope = { urgent: false, rateLimited: false, deferred: false, ...options };
+  return budgetScopes.run(scope, () => fn(scope));
+}
+
+function currentGitHubBudgetScope() { return budgetScopes.getStore(); }
+
+function markGitHubRateLimited() {
+  const scope = currentGitHubBudgetScope();
+  if (scope) scope.rateLimited = true;
+}
+
+function isGitHubRateLimitError(err) {
+  return err?.rateLimited === true || err?.status === 429
+    || /rate limit|too many requests|HTTP\s+429/i.test(
+      [err?.message, err?.stderr, err?.stdout, err?.response?.data?.message].join('\n'));
+}
+
+class GitHubBudgetDeferredError extends Error {
+  constructor(observation) {
+    super(`GitHub ${observation.resource} budget deferred until ${observation.resetAt}`);
+    this.name = 'GitHubBudgetDeferredError';
+    this.rateLimited = true;
+    this.budgetDeferred = true;
+    this.observation = observation;
+  }
+}
 
 function defaultSleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -74,6 +107,8 @@ function normalizeObservation(observation = null) {
     remaining: normalizedRemaining,
     resetAt: normalizedResetAt,
     observedAt: normalizedObservedAt,
+    ...(Number.isInteger(observation.rateLimitedCalls) && observation.rateLimitedCalls > 0
+      ? { rateLimitedCalls: observation.rateLimitedCalls } : {}),
   };
 }
 
@@ -105,6 +140,8 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   if (rightResetAtMs > leftResetAtMs) return right;
   if (rightResetAtMs < leftResetAtMs) return left;
   return {
+    ...(Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) > 0
+      ? { rateLimitedCalls: Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) } : {}),
     resource: left.resource,
     remaining: Math.min(left.remaining, right.remaining),
     resetAt: left.resetAt,
@@ -311,29 +348,36 @@ function createRateLimitThrottle({
 
   async function readSharedState() {
     const resolvedSharedStatePath = resolveSharedStatePathNow();
-    const shared = await withSharedStateLock(resolvedSharedStatePath, () => readStateFile(resolvedSharedStatePath, {
+    // Writers publish complete snapshots by atomic rename. A budget read must
+    // not create state directories merely to discover that no record exists.
+    const shared = await readStateFile(resolvedSharedStatePath, {
       nowMs: nowMs(),
       readFileImpl,
-    }), {
-      mkdirImpl,
-      readFileImpl,
-      writeFileImpl,
-      rmImpl,
-      statImpl,
-      sleepImpl,
-      nowMs,
     });
     inMemoryObservations = mergeObservationMaps(inMemoryObservations, shared, nowMs());
     return inMemoryObservations;
   }
 
-  async function recordResponseRateLimit(observation) {
-    const normalized = sanitizeObservation(observation, nowMs());
-    if (!normalized) return null;
+  async function recordRateLimit(observation, rateLimitedOnly = false) {
+    let normalized = sanitizeObservation(observation, nowMs());
+    if (!rateLimitedOnly && !normalized) return null;
     const resolvedSharedStatePath = resolveSharedStatePathNow();
     return withSharedStateLock(resolvedSharedStatePath, async () => {
       const current = await readStateFile(resolvedSharedStatePath, { nowMs: nowMs(), readFileImpl });
-      const merged = mergeObservationMaps(current, { [normalized.resource]: normalized }, nowMs());
+      if (rateLimitedOnly) {
+        // Resolve missing-header failures under the lock so simultaneous first
+        // failures share one window and increment the same durable counter.
+        const resource = normalizeResource(observation.resource);
+        normalized = current[resource] || normalizeObservation({
+          resource, remaining: 0, resetAt: nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
+          observedAt: nowMs(),
+        });
+      }
+      const previous = current[normalized.resource];
+      const count = (previous?.resetAt === normalized.resetAt ? previous.rateLimitedCalls || 0 : 0)
+        + (observation.rateLimited === true ? 1 : 0);
+      const incoming = count > 0 ? { ...normalized, rateLimitedCalls: count } : normalized;
+      const merged = mergeObservationMaps(current, { [normalized.resource]: incoming }, nowMs());
       if (
         Object.keys(merged).length > 0
         && JSON.stringify(merged) !== JSON.stringify(current)
@@ -357,8 +401,34 @@ function createRateLimitThrottle({
     });
   }
 
+  async function recordResponseRateLimit(observation) {
+    return recordRateLimit(observation);
+  }
+
+  async function recordRateLimitedCall(resource) {
+    markGitHubRateLimited();
+    await recordRateLimit({ resource, rateLimited: true }, true);
+  }
+
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE) {
     const normalizedResource = normalizeResource(resource);
+    const scope = currentGitHubBudgetScope();
+    if (scope?.rateLimited) {
+      throw new GitHubBudgetDeferredError({ resource: normalizedResource, resetAt: null });
+    }
+    // Scoped callers must decide independently of another caller's sleep or
+    // deferral. Only un-scoped callers share the in-flight wait below.
+    if (scope) {
+      const floor = resolveThrottleFloor(env, logger);
+      const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
+      const current = currentObservations[normalizedResource] || null;
+      if (!current || current.remaining >= floor) return false;
+      // Reserve remaining capacity for an already-ready close; zero cannot
+      // serve any request, urgent or otherwise.
+      if (scope.urgent && current.remaining > 0) return false;
+      scope.deferred = true;
+      throw new GitHubBudgetDeferredError(current);
+    }
     if (activeThrottlePromises.has(normalizedResource)) {
       return activeThrottlePromises.get(normalizedResource);
     }
@@ -416,6 +486,7 @@ function createRateLimitThrottle({
   return {
     awaitThrottleIfNeeded,
     recordResponseRateLimit,
+    recordRateLimitedCall,
     readSharedState,
     resolveSharedStatePath: () => resolveSharedStatePathNow(),
     resolveThrottleFloor: () => resolveThrottleFloor(env, logger),
@@ -440,8 +511,32 @@ function recordResponseRateLimit(observation) {
   return defaultThrottle.recordResponseRateLimit(observation);
 }
 
+function readGitHubBudgetState() { return defaultThrottle.readSharedState(); }
+
+function recordRateLimitedCall(resource) { return defaultThrottle.recordRateLimitedCall(resource); }
+
+function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs = Date.now() } = {}) {
+  const sharedStatePath = env.GHO_RATE_LIMIT_SHARED_STATE_PATH || resolve(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
+  let buckets = {};
+  try { buckets = normalizeObservationMap(JSON.parse(readFileSync(sharedStatePath, 'utf8')), nowMs); }
+  catch { /* Status is read-only and unknown evidence is displayed as unknown. */ }
+  return Object.fromEntries([...new Set(['core', 'graphql', ...Object.keys(buckets)])].map(resource => [resource, {
+    remaining: buckets[resource]?.remaining ?? null,
+    resetAt: buckets[resource]?.resetAt ?? null,
+    rateLimitedCalls: buckets[resource]?.rateLimitedCalls || 0,
+  }]));
+}
+
 export {
   awaitThrottleIfNeeded,
+  currentGitHubBudgetScope,
+  GitHubBudgetDeferredError,
+  isGitHubRateLimitError,
+  markGitHubRateLimited,
+  withGitHubBudgetScope,
+  readGitHubBudgetState,
+  readGitHubBudgetStatus,
+  recordRateLimitedCall,
   createRateLimitThrottle,
   DEFAULT_RESOURCE,
   DEFAULT_THROTTLE_FLOOR,

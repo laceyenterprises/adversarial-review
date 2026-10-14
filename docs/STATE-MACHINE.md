@@ -658,6 +658,11 @@ remediation, conflict rebase, a bounded named wait, or page. Daemon contention
 retries twice in the same tick; persistent wait debt has a 30-minute default
 bound (`AMA_CLOSURE_WAIT_BOUND_MS`) and one reserved exhaustion page per head.
 `merge-agent-stuck` is diagnostic, while explicit operator holds still apply.
+During low-budget watcher polls, locally settled posted rows receive closing
+priority, then a REST snapshot refreshes the live PR state, head, and labels.
+The posted-row handler receives label name strings for operator controls; gate
+projection receives the label objects. Closing priority does not waive the
+normal live merge predicates or operator holds.
 A finished worker's worktree cleanup failure is nonfatal and remains available
 to the existing cleanup retry path. Terminal lease finalization is idempotent
 for the same outcome and continues refusing different terminal outcomes.

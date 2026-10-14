@@ -143,7 +143,7 @@ print('[]')
       const output = execFileSync('python3', [script, '--adapter-bin', join(root, 'adapter', 'bin', 'github-adapter'),
         '--kind', kind, '--number', '1', '--repo', 'org/repo', '--role', 'merge-agent',
         '--provider', 'github-app-merge-agent', '--app-id', '123', '--installation-id', '456'],
-      { encoding: 'utf8', timeout: 20_000, env: { PATH: `${root}:${process.env.PATH}`, GH_TOKEN: 'ambient',
+      { encoding: 'utf8', timeout: 20_000, env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json'), PATH: `${root}:${process.env.PATH}`, GH_TOKEN: 'ambient',
         GITHUB_TOKEN: 'ambient', FIXTURE_GH_TRANSIENT: '1' } });
       assert.ok(!output.includes('token'));
       assert.ok(!output.includes('secret-marker'));
@@ -156,7 +156,7 @@ print('[]')
       '--adapter-bin', join(root, 'adapter', 'bin', 'github-adapter'),
       '--kind', 'checks', '--number', '999', '--repo', 'org/repo', '--role', 'merge-agent',
       '--provider', 'github-app-merge-agent', '--app-id', '123', '--installation-id', '456'],
-    { timeout: 3000, env: { PATH: `${root}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'] }));
+    { timeout: 3000, env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json'), PATH: `${root}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'] }));
     const childPid = Number(readFileSync(join(root, 'child.pid'), 'utf8'));
     assert.throws(() => process.kill(childPid, 0), { code: 'ESRCH' });
   } finally { rmSync(root, { recursive: true, force: true }); }

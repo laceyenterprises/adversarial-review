@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -285,7 +286,7 @@ async function readRecoveryPrHead({ repo, prNumber, execFileImpl, env, retryDela
   for (let attempt = 0; attempt < attempts.length; attempt += 1) {
     if (attempts[attempt] > 0) await sleepImpl(attempts[attempt]);
     try {
-      const { stdout } = await execFileImpl('gh', ['pr', 'view', String(prNumber),
+      const { stdout } = await meteredExecFile(execFileImpl, 'gh', ['pr', 'view', String(prNumber),
         '--repo', repo, '--json', 'headRefOid', '--jq', '.headRefOid'],
       { env, timeout: 15000, maxBuffer: 1024 * 1024 });
       const head = String(stdout || '').trim();

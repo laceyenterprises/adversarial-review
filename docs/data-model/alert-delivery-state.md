@@ -63,6 +63,8 @@ Directory: `data/alert-delivery/`
   are durable, callers receive `{ status: "queued" }`. Callers intentionally
   treat that durable enqueue as terminal for their own debounce; transport
   delivery authority belongs to the sink health/receipt state.
+  GitHub rate-limit or deferred-budget scopes do not suppress enqueueing or
+  delivery: the local outbox and notification transport use no GitHub quota.
 - Orphan recovery `exhausted`, `ownership-uncertain` and `store-error` events,
   and the hammer-owner SEV1 pages — CYCLECAPHAM-01
   `ama.review_cycle_cap.hammer_final` (review-cycle-cap PR) and CIBLOCKHAM-01

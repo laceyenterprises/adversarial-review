@@ -1,3 +1,4 @@
+import { meteredExecFile } from '../../../metered-gh.mjs';
 /**
  * GitHub Pull Request implementation of the subject-channel adapter.
  *
@@ -326,7 +327,7 @@ function createGitHubPRSubjectAdapter({
   async function listOpenPullRequestsWithGh(repoPath) {
     let stdout;
     try {
-      ({ stdout } = await execFileImpl('gh', [
+      ({ stdout } = await meteredExecFile(execFileImpl, 'gh', [
         'pr',
         'list',
         '--repo',
@@ -470,7 +471,7 @@ function createGitHubPRSubjectAdapter({
         ({ stdout } = await withApiTelemetry('diff_fetch', {
           repo: snapshot.repo,
           prNumber: snapshot.prNumber,
-        }, () => execFileImpl('gh', [
+        }, () => meteredExecFile(execFileImpl, 'gh', [
           'pr',
           'diff',
           String(snapshot.prNumber),

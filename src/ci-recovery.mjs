@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 import { createHash, createPublicKey, verify, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, realpathSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -170,7 +171,7 @@ export async function recoverCancelledChecks({ rootDir, repo, prNumber, headSha,
     if (workflow.created) {
       // Do not retry this POST in-call: a lost response may hide an accepted
       // rerun. The next tick reads the workflow snapshot before retrying.
-      await postReservation(workflow, () => execFileImpl('gh', ['api', '--method', 'POST',
+      await postReservation(workflow, () => meteredExecFile(execFileImpl, 'gh', ['api', '--method', 'POST',
         `repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`], { env, signal, timeout: 30_000 }));
     }
   }

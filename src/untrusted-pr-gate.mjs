@@ -1,3 +1,4 @@
+import { meteredExecFile } from './metered-gh.mjs';
 // UNTRUSTEDPR-01 — the one intake predicate that keeps the review watcher, the
 // remediators and the hammer from ever acting on a PR from a fork or from an
 // author the fleet does not trust. adversarial-review is a public repository,
@@ -169,7 +170,7 @@ export function createRepoPermissionResolver({
   cache = sharedPermissionCache,
 } = {}) {
   const fetchPermission = fetchPermissionImpl || (async (repo, login) => {
-    const { stdout } = await execFileImpl('gh', [
+    const { stdout } = await meteredExecFile(execFileImpl, 'gh', [
       'api',
       `repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`,
       '--jq',

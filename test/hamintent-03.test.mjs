@@ -153,7 +153,9 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
     const fixture = JSON.parse(readFileSync(${JSON.stringify(fixturePath)}, 'utf8'));
     export async function load(url, context, nextLoad) {
       let source;
-      if (url.endsWith('/src/github-api.mjs')) {
+      if (url.endsWith('/src/hammer-pr-read.mjs')) {
+        source = 'export async function fetchHammerPr() { return ' + JSON.stringify(fixture.rollup) + '; }';
+      } else if (url.endsWith('/src/github-api.mjs')) {
         source = 'export async function fetchPullRequestRollup() { return ' + JSON.stringify(fixture.rollup) + '; }';
       } else if (url.endsWith('/src/ama/history-reader.mjs')) {
         source = 'const responses = ' + JSON.stringify(fixture.responses) + ';' +
@@ -168,7 +170,8 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
       return source === undefined ? nextLoad(url, context) : { format: 'module', source, shortCircuit: true };
     }
   `);
-  const env = { ...process.env, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '1',
+  writeFileSync(join(directory, 'gh'), '#!/bin/sh\necho offline-fixture-gh >&2\nexit 1\n', { mode: 0o755 });
+  const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '1',
     HAM_PR_URL: 'https://github.com/fixture/repo/pull/1',
     HAM_REVIEWED_SHA: author, HAM_TARGET_REMEDIATION_SHA: head, HAM_MERGE_METHOD: 'squash',
     HAM_HQ_ROOT: directory, HAM_REVIEWER: 'claude', HAM_RISK_CLASS: 'low',
@@ -203,6 +206,32 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
     assert.equal(merge.ok, closure.eligible, JSON.stringify(merge));
     assert.equal(closure.trace.primaryChange.ok, expected);
     assert.deepEqual(merge.reasons, expected ? [] : ['primary-change-reverted']);
+  }
+  // Blocking cost mode must defer pending CI without inventing cost evidence.
+  // Once green, the real collector must still refuse unreadable cost evidence.
+  const gateInput = gate.replaceAll(`rootDir: '${root}'`, `rootDir: '${directory}'`);
+  const costEnv = { ...env, AGENT_OS_CONFIG_PATH: join(directory, 'global.yaml'), AMA_CI_COST_MODE: 'blocking' };
+  const greenWithCost = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { env: costEnv, input: gateInput }));
+  assert.equal(greenWithCost.ok, true);
+  assert.deepEqual(greenWithCost.reasons, []);
+  const greenWithoutCost = structuredClone(responses);
+  delete greenWithoutCost[`repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`];
+  json('github', { responses: greenWithoutCost, rollup });
+  const refused = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { env: costEnv, input: gateInput }));
+  assert.equal(refused.ok, false);
+  assert.deepEqual(refused.reasons, ['ci-cost-read-failed']);
+  for (const extra of [{}, { mergeable: 'CONFLICTING' }, { headSha: author, headRefOid: author }, { labels: null }]) {
+    json('github', { responses: {}, rollup: { ...rollup, ...extra,
+      statusCheckRollup: [{ name: 'test', status: 'QUEUED', conclusion: null }] } });
+    const pending = JSON.parse(run(['--experimental-loader', loader, '--input-type=module'], { env: costEnv, input: gateInput }));
+    assert.equal(pending.ok, false);
+    assert.equal(pending.checksConclusion, 'PENDING');
+    assert.equal(pending.primaryChangeReason, null);
+    assert.equal(pending.primaryChangeMissingEvidence, null);
+    assert.deepEqual(pending.reasons, ['ci-not-green',
+      ...(extra.mergeable ? ['pr-not-mergeable'] : []),
+      ...(extra.headSha ? ['stale-head'] : []),
+      ...(extra.labels === null ? ['labels-unavailable'] : [])]);
   }
 });
 

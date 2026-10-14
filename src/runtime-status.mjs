@@ -1,3 +1,4 @@
+import { readGitHubBudgetStatus } from './rate-limit-throttle.mjs';
 // `runtime status` model + renderer (ARC-09, SPEC §1 Win 1). Builds the hybrid
 // runtime status surface from DURABLE artifacts so the CLI works as a separate
 // process from the watcher daemon that owns the live router:
@@ -206,6 +207,7 @@ function buildRuntimeStatus(rootDir, {
 
   return {
     generatedAt: now().toISOString(),
+    githubBudget: readGitHubBudgetStatus({ rootDir, env, nowMs: now().getTime() }),
     mode,
     since,
     snapshotPresent: Boolean(snapStatus),
@@ -326,6 +328,9 @@ function renderRuntimeStatus(model) {
   lines.push(renderCanaryLine(model.canary));
   lines.push(renderSettleSmokeLine(model.settleSmoke));
   lines.push(renderReviewerCutoverLine(model.reviewerCutover));
+  for (const [resource, budget] of Object.entries(model.githubBudget || {})) {
+    lines.push(`GitHub ${resource}: remaining=${budget.remaining ?? 'unknown'} reset=${budget.resetAt || 'unknown'} rate-limited=${budget.rateLimitedCalls}`);
+  }
   return lines.join('\n');
 }
 

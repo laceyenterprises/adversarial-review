@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # HAMMERTRIM-01: rendered by bin/hammer-procedure.mjs with trusted dispatch values.
+ham_gh() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/metered-gh.mjs exec "$@"; }
+ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> "$@"; }
+
 ham_publish_phase() {
 HAM_PHASE_OUTCOME=hammer-publish-error
 HAM_PUBLISHED_AUDIT_HEAD=""
@@ -44,7 +47,7 @@ HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.X
 
 POST_REMEDIATION_SHA=""
 for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
-  if POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
+  if POST_REMEDIATION_SHA=$(ham_pr --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
     ham_is_full_sha "$POST_REMEDIATION_SHA"; then
     break
   fi
@@ -119,7 +122,7 @@ HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
 ham_existing_terminal_audit_comment_id() {
   # Slurp pagination into one JSON value; gh's --slurp cannot be combined
   # with --jq. The selector reads the complete array of comment pages.
-  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" gh api \
+  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" ham_gh api \
     --paginate --slurp \
     "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
   # Preserve earlier runs' base/head edges. Repeating publication of this exact
@@ -149,7 +152,7 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
     # REFRESH it in place (new head trailer / findings) instead of skipping or
     # duplicating, so the single audit tracks the merged head and a hammer's
     # rebases never read as several hammers (agent-os#4090).
-    if GH_TOKEN="$HAM_GH_TOKEN" gh api --method PATCH \
+    if GH_TOKEN="$HAM_GH_TOKEN" ham_gh api --method PATCH \
       "repos/<<REPO>>/issues/comments/$HAM_EXISTING_AUDIT_COMMENT_ID" \
       -f body="$HAM_AUDIT_COMMENT_BODY" > /dev/null 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
       HAM_AUDIT_COMMENT_POSTED=1
@@ -167,7 +170,7 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
     sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
     continue
   fi
-  if GH_TOKEN="$HAM_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+  if GH_TOKEN="$HAM_GH_TOKEN" ham_gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
     HAM_AUDIT_COMMENT_POSTED=1
     break
   fi

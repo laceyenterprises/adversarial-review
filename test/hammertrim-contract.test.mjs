@@ -110,7 +110,7 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   const success = run('/bin/bash', ['-c', shell, '_', script], env);
   assert.equal(success.status, 0, success.stderr);
   assert.match(success.stdout, /STATUS=0 HELD=1 PUBLISHED=aaaaaaaa/);
-  function assertDocPredicate(body, changedFiles) {
+  function assertDocPredicate(body, changedFiles, expectedStatus = 'not_applicable', expectedTitle = 'Fix gate') {
     const head = 'a'.repeat(40), reviewed = 'b'.repeat(40);
     // Bind the rendered body to a synthetic reviewed parent for the predicate.
     body = body.replaceAll(`HAM-Base-Head: ${head}`, `HAM-Base-Head: ${reviewed}`);
@@ -122,6 +122,8 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
     const auditComment = { body, author: 'hammer-worker' };
     const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({ reviewedHead: reviewed,
       verifiedCommit: commit, verifiedAuditComment: auditComment });
+    assert.equal(evidence.auditComment.docCurrency?.status ?? null, expectedStatus);
+    assert.deepEqual(evidence.auditComment.findings.map(finding => finding.title), [expectedTitle]);
     const verdict = isEligibleForAmaClosure({ headSha: reviewed, verdict: 'request-changes', riskClass: 'low',
       blockingFindingState: 'known', blockingFindingCount: 1, remediationPending: false,
       nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
@@ -130,7 +132,8 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
     { enabled: true, eligibility: { riskClasses: ['low'] }, branchProtection: { required: false } },
     { hamTerminalRemediation: evidence, hamTerminalRemediationGroundTruth: { commit, auditComment,
       range: { verified: true, reviewedHead: reviewed, currentHead: head, baseSha: reviewed, commits: [head] } } });
-    assert.equal(verdict.trace.hamTerminalRemediation.checks.docCurrency, true, JSON.stringify(verdict));
+    assert.equal(verdict.trace.hamTerminalRemediation.checks.docCurrency, expectedStatus !== null, JSON.stringify(verdict));
+    // Missing doc evidence is advisory under the existing HAM contract.
     assert.equal(verdict.eligible, true, JSON.stringify(verdict));
   }
   const body = readFileSync(bodyPath, 'utf8');
@@ -143,7 +146,22 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
     HAM_DOC_CURRENCY: 'applicable', HAM_DOC_CURRENCY_REASON: 'updated README.md for changed files bin/gate.sh, README.md; data-model docs not applicable' });
   assert.match(applicable.stdout, /STATUS=0 HELD=1/);
   assert.match(readFileSync(bodyPath, 'utf8'), /^Doc-currency: updated; updated README.md/m);
-  assertDocPredicate(readFileSync(bodyPath, 'utf8'), ['bin/gate.sh', 'README.md']);
+  assertDocPredicate(readFileSync(bodyPath, 'utf8'), ['bin/gate.sh', 'README.md'], 'updated');
+  const skipped = run('/bin/bash', ['-c', shell, '_', script], { ...env,
+    HAM_DOC_CURRENCY: 'skipped superproject-doc obligation',
+    HAM_DOC_CURRENCY_REASON: 'bin/gate.sh affects superproject walkthrough; local docs not applicable' });
+  assert.match(skipped.stdout, /STATUS=0 HELD=1/);
+  assertDocPredicate(readFileSync(bodyPath, 'utf8'), ['bin/gate.sh'], 'skipped_superproject');
+  const title = 'Doc-currency: missing catalog update';
+  const finding = `- **${title}** (blocking): bin/gate.sh: updated catalog.json`;
+  writeFileSync(detailsPath, `${finding}\n  Doc-currency: stale claim\n  - dOc-CuRrEnCy: stale bullet claim\n`);
+  const docFinding = run('/bin/bash', ['-c', shell, '_', script], env);
+  assert.match(docFinding.stdout, /STATUS=0 HELD=1/);
+  const docFindingBody = readFileSync(bodyPath, 'utf8');
+  assert.ok(docFindingBody.includes(finding), 'finding title must survive publication verbatim');
+  assert.doesNotMatch(docFindingBody, /stale (bullet )?claim/);
+  assertDocPredicate(docFindingBody, ['bin/gate.sh'], 'not_applicable', title);
+  assertDocPredicate(docFindingBody.replace(/^Doc-currency:.*\n/m, ''), ['bin/gate.sh'], null, title);
   for (const missing of [{ HAM_DOC_CURRENCY: '' }, { HAM_DOC_CURRENCY_REASON: '' }]) {
     const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...missing });
     assert.match(refused.stderr, /hammer-publish: supply/);

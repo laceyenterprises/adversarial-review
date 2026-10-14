@@ -674,3 +674,35 @@ test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region,
   assert.equal(attributed.repairKind, 'completed remediation round');
   assert.equal(checkPrimaryChange(recorded, head).reason, 'primary-change-reverted');
 });
+
+test('refusal attribution bounds snapshot reads and preserves the refusal when attribution is incomplete', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'primary-diagnostic-bound-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const history = { ...primaryChangeFixture(head), finalFiles: [],
+    diagnosticCommitRange: Array.from({ length: 25 }, (_, index) => ({ sha: (index + 1).toString(16).padStart(40, '0') })) };
+  history.diagnosticCommitRange.at(-1).sha = head;
+  await storedPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 1,
+    baseSha: history.mergeBase, headSha: head, mergeBase: history.mergeBase,
+    reviewKey: createHash('sha256').update('[]').digest('hex') }, async () => history);
+  const snapshotReads = [];
+  const get = async path => {
+    if (path.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: history.mergeBase } };
+    if (path.includes('/reviews?')) return [];
+    if (path.endsWith(`${history.mergeBase}...${head}`)) return { merge_base_commit: { sha: history.mergeBase } };
+    snapshotReads.push(path);
+    // The reversal occurs outside the lookup window. Diagnostics must report
+    // incompleteness while the independently evaluated final diff still refuses.
+    return { merge_base_commit: { sha: history.mergeBase }, files: history.primaryFiles };
+  };
+  const evidence = await fetchPrimaryChange({ rootDir, repo: 'fixture/repo', prNumber: 1,
+    headSha: head, get: Object.assign(get, { persistPrimaryChange: true, metadata: get }) });
+  assert.deepEqual(snapshotReads, history.diagnosticCommitRange.slice(0, 20)
+    .map(({ sha }) => `repos/fixture/repo/compare/${history.mergeBase}...${sha}`));
+  assert.equal(predicate(evidence).eligible, false);
+  assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
+  assert.ok(evidence.revertedRegionDiagnostics.length > 0);
+  for (const region of evidence.revertedRegionDiagnostics) {
+    assert.deepEqual(region.commits, []);
+    assert.match(region.error, /truncated after 20 of 25 commits/);
+  }
+});

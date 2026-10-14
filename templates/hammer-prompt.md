@@ -91,7 +91,8 @@ bullet per finding: exact review title, blocking class, changed files and fix.
 Export decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`,
 `HAM_AUDIT_REMEDIATED_NON_BLOCKING` (the classes sum to the total), and
 `HAM_FAILING_TESTS_FIXED` (actual repairs or `suite already green`).
-Export `HAM_DOC_CURRENCY` (`applicable` or `not applicable`) and
+Export `HAM_DOC_CURRENCY` (`applicable`, `not applicable`, or
+`skipped superproject-doc obligation`) and
 `HAM_DOC_CURRENCY_REASON`: one line naming covered changed files and updated
 docs when applicable. The publication step renders Doc-currency; omit it from
 the details file. Missing or placeholder inputs release the lease. Keep these

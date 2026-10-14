@@ -692,10 +692,12 @@ function hamAuditBodyCoversFindings(body, findings) {
 }
 
 function hamDocCurrencyLine(body) {
-  return String(body || '')
+  const lines = String(body || '')
     .replace(/\r\n/g, '\n')
-    .split('\n')
-    .find((line) => /\bdoc-currency\s*:/i.test(line)) || '';
+    .split('\n');
+  return lines.find((line) => /^[ \t]*(?:-[ \t]+)?doc-currency\s*:/i.test(line))
+    // Retain legacy inline audit prose, but never consume a finding bullet.
+    || lines.find((line) => !/^[ \t]*[-*][ \t]+/.test(line) && /\bdoc-currency\s*:/i.test(line)) || '';
 }
 
 function normalizePathList(value) {

@@ -26,8 +26,17 @@ The JSON object contains `key` and `history`; there is no schema-version field.
 Without hammer commits, those two fields are sufficient. With hammer commits,
 history includes `primaryHead`, `mergeBase`, `primaryFiles`, `finalFiles`,
 `completeFileLists` and `testRegionsChanged`. It may include `builderBoundary`,
-`reversalAuthorizations` and `rejectedReversalAuthorizations`. File evidence
-and reversal citations use the collector's shapes in `src/ama/primary-change.mjs`.
+`reversalAuthorizations` and `rejectedReversalAuthorizations`. New hammer-history
+records also include optional `diagnosticCommitRange`: an ordered array of
+`{ sha: <commit SHA> }` entries from the first hammer commit through `headSha`,
+including intervening remediation commits. This range supports observational
+refusal attribution only; it never authorizes a merge. Older records without
+the field remain reusable: refusal diagnostics fetch the range on demand.
+Attribution examines at most the first 20 entries and reports truncation when
+later entries are omitted. The range is stored in full; attribution results
+(`revertedRegionDiagnostics`) are collected after reuse and are not cached here.
+File evidence and reversal citations use the collector's shapes in
+`src/ama/primary-change.mjs`.
 CI-cost evidence is collected live after history reuse and is never cached here.
 
 Reuse requires an exact key, matching head, a boolean `hasHammerCommits`, and a

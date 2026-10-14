@@ -788,7 +788,10 @@ async function describeRevertedRegions(args, evidence, refusal) {
     }
     if (!range.length) throw new Error('commit range unavailable');
     let comments, rounds;
-    for (const entry of range) {
+    // Diagnostics are best effort. Bound intermediate snapshot/commit reads
+    // without changing the independently computed preservation verdict.
+    const maxDiagnosticCommits = 20;
+    for (const entry of range.slice(0, maxDiagnosticCommits)) {
       const snapshot = entry.sha === evidence.headSha ? { files: evidence.finalFiles, merge_base_commit: { sha: evidence.mergeBase } }
         : await read(`repos/${repo}/compare/${evidence.mergeBase}...${entry.sha}`);
       if (snapshot.merge_base_commit?.sha !== evidence.mergeBase) throw new Error('diagnostic merge base differs');
@@ -815,6 +818,7 @@ async function describeRevertedRegions(args, evidence, refusal) {
       }
       previous = snapshot.files;
     }
+    if (range.length > maxDiagnosticCommits) throw new Error(`diagnostic commit range truncated after ${maxDiagnosticCommits} of ${range.length} commits`);
   } catch (error) {
     for (const region of diagnostics) region.error = String(error.message || error);
   }

@@ -1642,6 +1642,13 @@ Compare pages use four workers; blob pairs and tree pairs are fetched together.
 Metadata-only cost reads avoid reconstructing patches they do not consume;
 each page/blob/diff retains the existing output bound.
 
+After a `primary-change-reverted` verdict, refusal diagnostics compare snapshots
+for at most the first 20 commits from the first hammer through the candidate
+head and identify commits that changed the refused regions. Larger ranges
+retain partial attribution and report truncation; unreadable diagnostics report
+their error. Neither changes the preservation verdict or authorizes a merge.
+Older cache records without `diagnosticCommitRange` fetch that range on demand.
+
 The [primary-change history data model](data-model/primary-change-history.md)
 defines the record layout and retention. Cache access and sweeping require the
 canonical runtime data owner's effective UID; `data/`, the store directory and
@@ -2106,7 +2113,14 @@ HAM's versioned `hammer-publish` phase takes the audit finding bullets from
 `HAM_AUDIT_DETAILS_FILE`, decimal remediation counts from
 `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
 `HAM_AUDIT_REMEDIATED_NON_BLOCKING`, and a test summary from
-`HAM_FAILING_TESTS_FIXED`. Supply these before rendering the helper. A successful
+`HAM_FAILING_TESTS_FIXED`. Also supply `HAM_DOC_CURRENCY` (`applicable`,
+`not applicable`, or `skipped superproject-doc obligation`) and a single-line
+`HAM_DOC_CURRENCY_REASON` naming the covered changed files and any updated docs
+or skipped superproject obligations. Publication replaces standalone
+`Doc-currency:` attestations in the details file with this rendered claim;
+finding titles containing `Doc-currency:` are preserved. Supply these before
+rendering the helper. Consumers prefer the standalone claim and retain legacy
+inline audit prose as a fallback, excluding finding bullets. A successful
 post or refresh sets `HAM_PUBLISHED_AUDIT_HEAD` to the head that the audit names.
 The `hammer-merge` phase requires that marker and an owned, run-scoped `HAM_VERDICT_FILE` produced after audit publish by a successful `ama-check` call. The caller sets `HAM_VERDICT_READY_FILE` to the same path only after that call succeeds and removes the file after merge. The verdict must have
 `eligible: true` and a matching current head before reading GitHub's required

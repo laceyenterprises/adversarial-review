@@ -97,8 +97,9 @@ fi
 case "${HAM_DOC_CURRENCY:-}" in
   'not applicable') HAM_DOC_CURRENCY_LINE='Doc-currency: not applicable' ;;
   applicable) HAM_DOC_CURRENCY_LINE='Doc-currency: updated' ;;
+  'skipped superproject-doc obligation') HAM_DOC_CURRENCY_LINE='Doc-currency: skipped superproject-doc obligation' ;;
   *)
-    echo "HAM hammer-publish: supply HAM_DOC_CURRENCY (applicable or not applicable) and HAM_DOC_CURRENCY_REASON before publication" >&2
+    echo "HAM hammer-publish: supply HAM_DOC_CURRENCY (applicable, not applicable, or skipped superproject-doc obligation) and HAM_DOC_CURRENCY_REASON before publication" >&2
     ham_publish_abort 1; return 1 ;;
 esac
 HAM_DOC_CURRENCY_REASON="${HAM_DOC_CURRENCY_REASON:-}"
@@ -112,7 +113,7 @@ HAM_DOC_CURRENCY_LINE="$HAM_DOC_CURRENCY_LINE; $HAM_DOC_CURRENCY_REASON"
 # finding title against the review's standing findings to decide whether the
 # non-blocking waiver holds). Keep one bullet per finding on ONE line, and use
 # the finding's title VERBATIM from the review so the identity match lands.
-HAM_AUDIT_COMMENT_DETAILS="$(sed '/[Dd][Oo][Cc]-[Cc][Uu][Rr][Rr][Ee][Nn][Cc][Yy][[:space:]]*:/d' "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
+HAM_AUDIT_COMMENT_DETAILS="$(sed -E '/^[[:space:]]*(-[[:space:]]+)?[Dd][Oo][Cc]-[Cc][Uu][Rr][Rr][Ee][Nn][Cc][Yy][[:space:]]*:/d' "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
 HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Base-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
   "$HAM_AUDIT_COMMENT_MARKER" \
   "$HAM_AUDIT_COMMENT_DETAILS" \

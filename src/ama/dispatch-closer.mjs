@@ -4104,18 +4104,17 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
 
 function parseHamAuditDocCurrencyFromBody(body, changedFiles) {
   const text = String(body || '');
-  const docCurrencyLine = text
+  const lines = text
     .replace(/\r\n/g, '\n')
-    .split('\n')
-    .find((line) => /\bdoc-currency\s*:/i.test(line)) || '';
+    .split('\n');
+  const docCurrencyLine = lines.find((line) => /^[ \t]*(?:-[ \t]+)?doc-currency\s*:/i.test(line))
+    // Retain legacy inline audit prose, but never consume a finding bullet.
+    || lines.find((line) => !/^[ \t]*[-*][ \t]+/.test(line) && /\bdoc-currency\s*:/i.test(line)) || '';
   const lower = docCurrencyLine.toLowerCase();
   const files = Array.isArray(changedFiles) ? changedFiles.map(String).filter(Boolean) : [];
   if (!lower.includes('doc-currency')) return null;
   // A rendered updated claim may explain why another docs category is not applicable.
   const renderedUpdated = /\bdoc-currency\s*:\s*updated\b/.test(lower);
-  if (!renderedUpdated && lower.includes('not applicable')) {
-    return { status: 'not_applicable', changedFiles: files };
-  }
   if (!renderedUpdated && lower.includes('skipped superproject-doc obligation')) {
     const skippedSuperprojectDocs = files.filter((file) => lower.includes(file.toLowerCase()));
     return {
@@ -4123,6 +4122,9 @@ function parseHamAuditDocCurrencyFromBody(body, changedFiles) {
       changedFiles: files,
       skippedSuperprojectDocs,
     };
+  }
+  if (!renderedUpdated && lower.includes('not applicable')) {
+    return { status: 'not_applicable', changedFiles: files };
   }
   if (lower.includes('updated')) {
     const docsUpdated = files.filter((file) => {

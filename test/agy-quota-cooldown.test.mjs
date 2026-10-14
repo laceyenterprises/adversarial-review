@@ -132,3 +132,22 @@ test('AGYCOOLDOWN-01: a ready added cli-direct identity dispatches with zero bro
     assert.equal(summary.deferredReasons[0].reason, 'gemini-credential-concurrency-zero');
   } finally { reviewerRuntimeState.adapter = previous; f.cleanup(); }
 });
+
+test('AGYCOOLDOWN-01: a legacy global record written before the upgrade holds only the HQ owner', async () => {
+  const f = fixture();
+  try {
+    // The pre-upgrade watcher wrote one provider-wide record.
+    const { writeFileSync } = await import('node:fs');
+    const resetAt = new Date(f.options().nowMs + 50 * 3600000).toISOString();
+    writeFileSync(join(f.rootDir, 'gemini-quota-cooldown.json'), JSON.stringify({ resetAt }));
+    await f.pool.refreshReadiness();
+    // Gemini stays on: only the HQ owner is cooled.
+    assert.equal(readReviewerGeminiQuotaCooldown({ ...f.options(), pool: f.pool, adapter }), null);
+    assert.deepEqual(f.pool.readyUsers(), [added]);
+    const lease = await f.pool.acquire({ reviewId: 'after-upgrade' });
+    assert.equal(lease.user, added);
+    await f.pool.release(lease);
+    // A single-identity runtime still sees the legacy hold on the HQ owner.
+    assert.deepEqual(readReviewerGeminiQuotaCooldown({ ...f.options(), pool: f.pool, adapter: null }), { resetAt });
+  } finally { f.cleanup(); }
+});

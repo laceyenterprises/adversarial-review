@@ -514,12 +514,23 @@ function resolveReviewerOutageSignal({
 
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
-function recordGeminiQuotaCooldown({ rootDir, env, result, identityUser }) {
+function recordGeminiQuotaCooldown({ rootDir, env, result, identityUser, pool }) {
   // Typed runtime evidence owns classification; text only supplies the reset.
   const diagnostic = [result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n');
   const signal = parseReviewerQuotaExhaustion({ stderr: diagnostic });
   signal.resetAt ||= resolveQuotaResetIso(diagnostic);
-  return startGeminiQuotaCooldown({ rootDir, env, signal, identityUser });
+  // Key the record by the pool's configured HQ owner, the same name every
+  // reader uses, rather than the OS account that happens to run this process.
+  const hqOwner = configuredHqOwner(pool);
+  return startGeminiQuotaCooldown({ rootDir, env, signal, identityUser, ...(hqOwner ? { hqOwner } : {}) });
+}
+
+function configuredHqOwner(pool) {
+  try {
+    return pool?.plan?.()?.hqOwner || null;
+  } catch {
+    return null;
+  }
 }
 
 async function spawnReviewer(args) {
@@ -607,7 +618,10 @@ async function spawnReviewer(args) {
   if (!result.ok && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
     // The runtime owns classification. Text here is used only to recover a
     // reset timestamp after typed quota evidence, never to select fallback.
-    recordGeminiQuotaCooldown({ rootDir, env, result, identityUser: result.agyIdentityUser });
+    recordGeminiQuotaCooldown({
+      rootDir, env, result, identityUser: result.agyIdentityUser,
+      pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
+    });
     if (canFallback) {
       console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
       return runFallback(result);
@@ -841,7 +855,9 @@ async function spawnReviewerOnce({
         && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
         // Persist before releasing the identity or admission capacity so the
         // next queued review cannot lease the identity that just hit its quota.
-        recordGeminiQuotaCooldown({ rootDir, env: quotaCheckEnv, result: runtimeResult, identityUser: agyIdentityUser });
+        recordGeminiQuotaCooldown({
+          rootDir, env: quotaCheckEnv, result: runtimeResult, identityUser: agyIdentityUser, pool: agyReviewerIdentityPool,
+        });
       }
       return runtimeResult;
     });

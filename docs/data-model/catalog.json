@@ -36,9 +36,10 @@
       "schemaSurface": "src/ama/primary-change-store.mjs",
       "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
       "owner": "AMA canonical daemon data owner",
-      "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations"],
+      "identityVersion": "primary-rename-v2",
+      "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations", "renameProofs", "primaryPathChanges", "renameProofReadFailed"],
       "diagnosticCommitRangeEntryFields": ["sha"],
-      "diagnosticCollection": "operator opt-in only; 20 commits and 15 seconds; never on shared merge-gate reads"
+      "diagnosticCollection": "snapshot attribution is operator opt-in only, 20 commits and 15 seconds; shared reads retain commit-file attribution from rename proof reads, capped at 20 commits when no destination exists"
     },
     {
       "id": "gemini-quota-cooldown",

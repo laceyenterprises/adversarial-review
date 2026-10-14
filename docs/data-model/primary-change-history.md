@@ -20,30 +20,46 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
+| 7 | Rename-proof cache identity version: `primary-rename-v2` |
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
 Without hammer commits, those two fields are sufficient. With hammer commits,
 history includes `primaryHead`, `mergeBase`, `primaryFiles`, `finalFiles`,
 `completeFileLists` and `testRegionsChanged`. It may include `builderBoundary`,
-`reversalAuthorizations` and `rejectedReversalAuthorizations`. New hammer-history
-records also include optional `diagnosticCommitRange`: an ordered array of
+`reversalAuthorizations`, `rejectedReversalAuthorizations`, `renameProofs` and
+`primaryPathChanges`. The returned history may also carry `renameProofReadFailed`,
+which prevents disk publication as described below. The identity version forces
+one recomputation of older records that lack rename proof for builder-renamed paths;
+those older records remain disposable and expire through the ordinary sweep.
+New hammer-history records also include optional `diagnosticCommitRange`: an ordered array of
 `{ sha: <commit SHA> }` entries from the first hammer commit through `headSha`,
-including intervening remediation commits. This range supports observational
-refusal attribution only; it never authorizes a merge. Older records without
+including intervening remediation commits. This range pins rename-proof
+candidates and supports observational refusal attribution; the range alone
+never authorizes a merge. Older records without
 the field remain reusable: explicit operator diagnostics fetch the range on demand.
 Only `fetchPrimaryChangeContext` (the CLI's opt-in `--diagnostics` mode) performs
-attribution, with the caller's effective strictness policy, a 20-commit cap and a
-15-second wall-clock budget. Deadline expiry retains partial attribution with an
+snapshot attribution, with the caller's effective strictness policy, a
+20-commit cap and a 15-second wall-clock budget. Deadline expiry retains partial attribution with an
 error; cancellation and transport/auth/read failures propagate. Capped snapshots
 are errors rather than evidence of a missing region. The range is stored in full;
 attribution results (`revertedRegionDiagnostics`) are returned to the operator and
 are not cached here. Shared `fetchPrimaryChange` and default CLI reads never
-collect attribution, including on repeated refused-head cache hits. Production
-merge gates and their refusal audits therefore do not pay for these diagnostics.
+collect diagnostic snapshots, including on repeated refused-head cache hits.
+They retain commit-file attribution gathered alongside rename proof instead.
+Production merge gates and their refusal audits do not pay for operator
+snapshot diagnostics.
 File evidence and reversal citations use the collector's shapes in
 `src/ama/primary-change.mjs`.
 CI-cost evidence is collected live after history reuse and is never cached here.
+
+The rename-related optional history fields are:
+
+| Field | Shape and meaning |
+|---|---|
+| `renameProofs` | Array of `{ source, destination, commit, baseParentProof? }`. `commit` retains the complete commit identity, parents and files proving source removal, destination introduction and identical blob SHA. Sources may be added, modified or builder-renamed files; builder-renamed sources require the original merge-base name to remain removed or renamed in the final diff. Proof requires trusted hammer identity, a parent descended from `primaryHead` and a production destination for a production source. A two-parent commit additionally carries `{ parentSha, baseSha, status }` in `baseParentProof`, with `status` equal to `ahead` or `identical`, proving its second parent is in live base ancestry. The evaluator rechecks the cached proof against the final diff and `diagnosticCommitRange`. |
+| `primaryPathChanges` | Array of `{ path, start: null, end: null, commits, error? }` for missing primary paths. Each removal/rename attribution has `{ sha, author, pipelineRepair: null, repairKind: null }`. This is observational evidence and never grants preservation authority. Candidate commit metadata is reused within the evaluation. Without a candidate destination, only the first 20 commits are read; larger ranges retain a truncation `error`, including when no removal was attributed. Rename proof scans retain the full candidate range. Refusals combine these records with operator snapshot attribution by path. |
+| `renameProofReadFailed` | Optional `true` on returned history when a candidate read failed for a path with a possible destination and no later valid proof resolved that path. Earlier failures do not prevent caching a later proven rename. A successful proof for one path cannot clear an unresolved failure for another. Histories carrying this flag are not written to disk, so subsequent reads retry optional proof instead of caching a transient refusal. |
 
 Reuse requires an exact key, matching head, a boolean `hasHammerCommits`, and a
 matching merge base when hammer commits exist. A stored `builderBoundary` must
@@ -51,7 +67,7 @@ match an explicit caller `builderHead` when both are present; the boundary is
 validated separately from the filename key. Live PR head/base, merge-base
 metadata, reviews and dispatcher provenance are read before lookup. Missing,
 corrupt or mismatched records trigger recomputation. Unknown, failed or
-head-mismatched reads are never published.
+head-mismatched reads and unresolved rename-proof read failures are never published.
 
 ## Ownership and publication
 

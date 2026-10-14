@@ -1627,14 +1627,22 @@ Test paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
 evidence. CI verifies tests against the final head; test repairs mandated by
 findings are allowed. Reviewers must still flag inversions or neutralizations of
 the tested primary-change behavior. Renaming production code into a test path
-does not exempt its protected baseline.
+does not preserve its protected baseline, even with identical bytes and a
+trusted hammer rename proof. Both rename-proof destinations and the final
+diff's renamed paths enforce this production-to-test boundary. Chained renames
+from a builder-renamed path may collect the same identical-blob hammer proof
+when both the intermediate path is absent and the merge-base name remains
+removed or renamed; restoring the merge-base name does not qualify.
 
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary
-compatibility checked on reuse. Live head/base and merge-base metadata
-are checked before reuse; CI-cost evidence remains live. Only completed successful
-history reads are stored. A daemon timeout cancels merge execution while the
+compatibility checked on reuse and a `primary-rename-v2` identity version to
+invalidate older records without commit-level rename proof. Live head/base and
+merge-base metadata are checked before reuse; CI-cost evidence remains live. Only completed successful
+history reads are stored. An unresolved optional rename-proof read failure
+prevents caching; a later valid proof resolves earlier failures for that source
+path only. A daemon timeout cancels merge execution while the
 bounded history read finishes and stores evidence for the next tick; stall logs
 name the running read and elapsed seconds. The existing cache sweep removes
 records older than seven days and retains at most 512 records, without a new knob.
@@ -1643,7 +1651,10 @@ Metadata-only cost reads avoid reconstructing patches they do not consume;
 each page/blob/diff retains the existing output bound.
 
 Merge-gate `fetchPrimaryChange` reads and the default context CLI never collect
-refusal attribution. For operator investigation, run
+refusal snapshot attribution. Commit-file removal/rename attribution is retained
+alongside rename proof. When no possible destination exists, these metadata-only
+diagnostic reads stop after 20 commits and report truncation; rename proof keeps
+the full candidate range. For operator investigation, run
 `node bin/primary-change-context.mjs OWNER/REPO PR HEAD --diagnostics` outside
 merge execution. This explicitly calls `fetchPrimaryChangeContext`, evaluates
 the refusal with the effective `strictNonBlockingRemediation` policy, and compares
@@ -1655,7 +1666,7 @@ an error instead of attribution. Cancellation, auth outages, transient transport
 errors and reader failures propagate and stop collection. Other diagnostic
 errors never change the independently computed verdict or authorize a merge.
 Older cache records without `diagnosticCommitRange` fetch that range only on
-explicit diagnostic requests. Results appear in the CLI evidence, are not cached,
+explicit diagnostic requests. Snapshot results appear in the CLI evidence, are not cached,
 and do not add GitHub reads to daemon, closer or in-lease hammer gates.
 
 The [primary-change history data model](data-model/primary-change-history.md)

@@ -68,6 +68,56 @@ function evidencePaths(primary, files) {
     .filter((file) => isTestPath(file.filename)).map((file) => file.filename)]);
 }
 
+// A missing compare entry proves absence only for an added primary file. For
+// a modified or renamed file it means restoration to the base, unless a
+// removal/rename explicitly proves that the base name is gone.
+function primaryPathAbsent(file, finalFiles) {
+  if (!['added', 'modified', 'renamed'].includes(file.status)) return false;
+  const old = finalFiles.find(entry => entry.filename === file.filename);
+  if (old && old.status !== 'removed') return false;
+  if (file.status === 'renamed') return !!file.previous_filename && finalFiles.some(entry =>
+    entry.status === 'removed' && entry.filename === file.previous_filename
+    || entry.status === 'renamed' && entry.previous_filename === file.previous_filename);
+  if (!old && file.status !== 'added' && !finalFiles.some(entry =>
+    entry.status === 'renamed' && entry.previous_filename === file.filename)) return false;
+  return true;
+}
+
+function renameDestinations(file, finalFiles) {
+  if (!primaryPathAbsent(file, finalFiles) || !SHA.test(file.sha || '')) return [];
+  return finalFiles.filter(entry => entry.filename !== file.filename && entry.sha === file.sha
+    && (!isTestPath(entry.filename) || isTestPath(file.filename))
+    && ['added', 'renamed'].includes(entry.status));
+}
+
+function commitRenamesBlob(commit, source, destination, blob) {
+  if (!Array.isArray(commit.files) || (commit.files.length >= 300 && commit.filesComplete !== true)) return false;
+  const introduced = commit.files.find(file => file.filename === destination && file.sha === blob);
+  if (introduced?.status === 'renamed') {
+    return introduced.previous_filename === source && introduced.additions === 0 && introduced.deletions === 0;
+  }
+  return introduced?.status === 'added' && commit.files.some(file =>
+    file.filename === source && file.status === 'removed' && file.sha === blob);
+}
+
+function identicalHammerRename(evidence, file) {
+  if (!evidence.renameProofs?.length) return false;
+  const destinations = renameDestinations(file, evidence.finalFiles);
+  return (evidence.renameProofs || []).some(({ source, destination, commit, baseParentProof }) => {
+    const range = evidence.diagnosticCommitRange || [];
+    const index = range.findIndex(entry => entry.sha === commit?.sha);
+    const parent = commit?.parents?.[0]?.sha;
+    return source === file.filename && destinations.some(entry => entry.filename === destination)
+      && SHA.test(commit?.sha || '') && isHammerCommit(commit, true) && hamCommitIdentityMatches(commit)
+      && [1, 2].includes(commit.parents?.length) && SHA.test(parent || '') && index >= 0
+      && (parent === evidence.primaryHead || range.slice(0, index).some(entry => entry.sha === parent))
+      && (commit.parents.length === 1 || baseParentProof?.parentSha === commit.parents[1].sha
+        && SHA.test(commit.parents[1].sha || '') && SHA.test(baseParentProof.baseSha || '')
+        && ['ahead', 'identical'].includes(baseParentProof.status))
+      && commitRenamesBlob(commit, source, destination, file.sha);
+  });
+}
+
 function testRegionsChanged(primary, final) {
   return [...new Set([...primary.keys(), ...final.keys()])]
     .filter((path) => isTestPath(path)
@@ -403,7 +453,8 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
     ? `no verified Reversal-Authorized-By covers the reverted ${path} region (${accepted} verified`
       + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason})`).join(', ')}` : ''})`
     : `the reverted ${path} change cannot be authorized by a finding (${missing})`;
-  const regionDiagnostics = (evidence.revertedRegionDiagnostics || []).filter(entry => entry.path === path);
+  const regionDiagnostics = [...(evidence.revertedRegionDiagnostics || []), ...(evidence.primaryPathChanges || [])]
+    .filter(entry => entry.path === path);
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
     `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
       `${commit.sha} author=${commit.author || 'unlinked'} pipeline-repair=${commit.pipelineRepair === true ? 'yes' : commit.pipelineRepair === false ? 'no' : 'unknown'}${commit.repairKind ? ` (${commit.repairKind})` : ''}`).join(', ') || 'unavailable'}${entry.error ? ` (${entry.error})` : ''}`).join('; ');
@@ -457,6 +508,11 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
       const actual = final.get(path);
       if (isTestPath(path) && isTestPath(change.filename)
         && (!actual || isTestPath(actual.filename))) continue;
+      if (!isTestPath(change.filename) && actual && isTestPath(actual.filename)) {
+        return reverted(path, 'rename-preservation');
+      }
+      const file = evidence.primaryFiles.find(entry => (entry.previous_filename || entry.filename) === path);
+      if (identicalHammerRename(evidence, file)) continue;
       if ((change.renamed && actual?.filename === path) || (!actual
         && !(change.regions.length > 0 && !change.opaque && !change.renamed
           && change.regions.every((region) => regionUnits(region).every((unit) => reversalAuthorized(evidence, path, unit, authorizationCache, strictNonBlockingRemediation)))))) {
@@ -648,6 +704,71 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     const final = history;
     const mergeBase = primary.merge_base_commit?.sha;
     if (!SHA.test(mergeBase || '') || final.merge_base_commit?.sha !== mergeBase) return unknown('primary and final merge bases are missing or differ');
+    const renameProofs = [];
+    const primaryPathChanges = [];
+    let renameProofReadFailed = false;
+    // Missing paths need commit-level removal/rename evidence. A base-to-head
+    // content match alone cannot attribute a rename to the hammer.
+    for (const file of primary.files || []) {
+      if (isTestPath(file.filename) || !primaryPathAbsent(file, final.files || [])) continue;
+      const destinations = renameDestinations(file, final.files || []);
+      const attribution = { path: file.filename, start: null, end: null, commits: [] };
+      let candidateReadFailed = false;
+      // Refusal details reuse commit-file metadata, without snapshot or
+      // comment-history scans. Attribution never grants authority.
+      const fullRange = history.commits.slice(history.commits.indexOf(first));
+      // No destination can prove preservation: bound reads used only for
+      // removal diagnostics, while keeping the full range for rename proof.
+      const range = destinations.length ? fullRange : fullRange.slice(0, 20);
+      if (range.length < fullRange.length) attribution.error = `diagnostic commit range truncated after 20 of ${fullRange.length} commits`;
+      for (const candidate of range) {
+        try {
+          const commitPath = `repos/${repo}/commits/${candidate.sha}`;
+          let commit = await read(commitPath);
+          if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message) continue;
+          if (Array.isArray(commit.files) && (commit.files.length < 300 || commit.filesComplete === true)
+            && commit.files.some(entry => entry.filename === file.filename && entry.status === 'removed'
+              || entry.previous_filename === file.filename && entry.status === 'renamed')) {
+            attribution.commits.push({ sha: commit.sha, author: commit.author?.login || commit.commit?.author?.name || null,
+              pipelineRepair: null, repairKind: null });
+          }
+          if (!destinations.length) continue;
+          if (commit.committer?.login === 'web-flow' && get.commitVerification) {
+            const verification = await get.commitVerification(commitPath);
+            if (verification.sha !== candidate.sha) continue;
+            commit = { ...commit, commit: { ...commit.commit, verification: verification.verification } };
+          }
+          if (!isHammerCommit(commit, true) || !hamCommitIdentityMatches(commit)
+            || ![1, 2].includes(commit.parents?.length) || !SHA.test(commit.parents[0].sha || '')) continue;
+          const destination = destinations.find(entry => commitRenamesBlob(commit, file.filename, entry.filename, file.sha));
+          if (!destination) continue;
+          const ancestry = commit.parents[0].sha === primaryHead ? { status: 'identical' }
+            : await metadata(`repos/${repo}/compare/${primaryHead}...${commit.parents[0].sha}`);
+          if (!['ahead', 'identical'].includes(ancestry.status)) continue;
+          let baseParentProof;
+          if (commit.parents.length === 2) {
+            const parentSha = commit.parents[1].sha;
+            if (!SHA.test(parentSha || '')) continue;
+            const baseParent = await metadata(`repos/${repo}/compare/${parentSha}...${pr.base.sha}`);
+            if (!['ahead', 'identical'].includes(baseParent.status)) continue;
+            baseParentProof = { parentSha, baseSha: pr.base.sha, status: baseParent.status };
+          }
+          renameProofs.push({ source: file.filename, destination: destination.filename, commit,
+            ...(baseParentProof ? { baseParentProof } : {}) });
+          candidateReadFailed = false;
+          break;
+        } catch (error) {
+          // Unavailable optional proof retains today's refusal; it must not
+          // turn an existing decision into a new fail-closed condition.
+          if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
+          if (destinations.length) candidateReadFailed = true;
+        }
+      }
+      // Successful proof resolves earlier candidate failures for this path
+      // only. Another path's unresolved proof must still prevent caching.
+      renameProofReadFailed ||= candidateReadFailed;
+      if (attribution.commits.length || attribution.error) primaryPathChanges.push(attribution);
+    }
     const reversalAuthorizations = [];
     const rejectedReversalAuthorizations = [];
     const authorizedPairs = new Set();
@@ -742,9 +863,12 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
       ...(builderBoundary ? { builderBoundary } : {}),
-      // Retain the trusted range for observational refusal attribution.
+      // Retain the trusted range for rename proof and refusal attribution.
       diagnosticCommitRange: history.commits.slice(history.commits.indexOf(first)).map(commit => ({ sha: commit.sha })),
       testRegionsChanged: testChanges,
+      ...(renameProofs.length ? { renameProofs } : {}),
+      ...(primaryPathChanges.length ? { primaryPathChanges } : {}),
+      ...(renameProofReadFailed ? { renameProofReadFailed: true } : {}),
       ...(reversalAuthorizations.length ? { reversalAuthorizations } : {}),
       ...(rejectedReversalAuthorizations.length ? { rejectedReversalAuthorizations } : {}),
       completeFileLists: primary.filesComplete === true && final.filesComplete === true,
@@ -791,6 +915,9 @@ async function describeRevertedRegions(args, evidence, refusal) {
     return JSON.stringify(patchSegments(files, region.path, new Map()).segments
       .filter(segment => region.start === region.end
         ? segment.old <= region.start && segment.oldEnd >= region.start
+          // Added files use coordinate zero in changes(), while patchSegments
+          // projects their first insertion to head line one.
+          || region.start === 0 && segment.old === 1 && segment.oldEnd === 1
         : segment.old < region.end && segment.oldEnd > region.start)
       .map(segment => [segment.old, segment.oldEnd, segment.lines]));
   };
@@ -875,7 +1002,7 @@ export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost }
         baseSha: pr.base.sha, mergeBase: comparison.merge_base_commit.sha, reviewKey, launchHead },
       () => fetchPrimaryChangeHistory({ ...args, get: Object.assign(
         path => path === `repos/${args.repo}/pulls/${args.prNumber}` ? Promise.resolve(pr) : path === reviewsPath ? Promise.resolve(reviews) : args.get(path),
-        { metadata: args.get.metadata }) }));
+        { metadata: args.get.metadata, commitVerification: args.get.commitVerification }) }));
     } catch (error) {
       return { headSha: args.headSha, hasHammerCommits: null, readFailed: true, historyReadFailed: true, reason: String(error.message).startsWith('history read failed:') ? error.message : `history read failed: ${error.message}` };
     }

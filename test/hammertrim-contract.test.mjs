@@ -11,12 +11,14 @@ import { normalizeVerifiedCloserCommit } from '../src/head-closer-commit-suppres
 import { buildHamTerminalRemediationEvidenceFromGroundTruth } from '../src/ama/dispatch-closer.mjs';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
 import { composeAmaTrailers } from '../src/ama/audit.mjs';
+import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const template = readFileSync(join(root, 'templates/hammer-prompt.md'), 'utf8');
+const subprocessTimeout = loadAwareTimeoutSeconds(45) * 1000;
 function run(command, args, env = {}) {
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('HAM_')));
-  return spawnSync(command, args, { encoding: 'utf8', timeout: 15000, env: { ...cleanEnv, ...env } });
+  return spawnSync(command, args, { encoding: 'utf8', timeout: subprocessTimeout, env: { ...cleanEnv, ...env } });
 }
 test('sourced phase wrapper reports terminal outcomes and keeps its shell alive', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-phase-'));
@@ -720,6 +722,9 @@ for (const scenario of ['first retry visible', 'already visible', 'two lag polls
     t.after(() => {
       rmSync(dir, { recursive: true, force: true });
       rmSync(`/tmp/ham-${prNumber}-pr-after.json`, { force: true });
+      for (const name of readdirSync('/tmp').filter(name => name.startsWith(`ham-${prNumber}-head-probe.`))) {
+        rmSync(join('/tmp', name), { recursive: true, force: true });
+      }
     });
     const before = 'a'.repeat(40), pushed = 'b'.repeat(40), third = 'c'.repeat(40);
     writeFileSync(join(dir, 'clock'), '1700000000');
@@ -817,6 +822,7 @@ echo "OUTCOME=$HAM_PHASE_OUTCOME rc=$rc"
 /bin/bash -c 'echo "CHILD_HEAD_WAIT=$HAM_HEAD_WAITED_SECONDS CHILD_CHECK_WAIT=$HAM_REQUIRED_CHECKS_WAITED_SECONDS"'
 ${checksContinuation}
 exit "$rc"`], env);
+    assert.ifError(result.error);
     assert.deepEqual(readdirSync('/tmp').filter(name => name.startsWith(`ham-${prNumber}-head-probe.`)), [], 'probe files are cleaned up');
     const checkReads = readFileSync(join(dir, 'check-api-reads'), 'utf8').trim().split('\n');
     assert.equal(checkReads.length, 2, 'only the initial full snapshot reads checks; visibility probes read PR metadata');

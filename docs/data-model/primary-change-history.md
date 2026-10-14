@@ -20,7 +20,7 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | Rename-proof cache identity version: `primary-rename-v1` |
+| 7 | Rename-proof cache identity version: `primary-rename-v2` |
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
@@ -30,7 +30,7 @@ history includes `primaryHead`, `mergeBase`, `primaryFiles`, `finalFiles`,
 `reversalAuthorizations`, `rejectedReversalAuthorizations`, `renameProofs` and
 `primaryPathChanges`. The returned history may also carry `renameProofReadFailed`,
 which prevents disk publication as described below. The identity version forces
-one recomputation of older seven-element-key records that lack rename proof;
+one recomputation of older records that lack rename proof for builder-renamed paths;
 those older records remain disposable and expire through the ordinary sweep.
 New hammer-history records also include optional `diagnosticCommitRange`: an ordered array of
 `{ sha: <commit SHA> }` entries from the first hammer commit through `headSha`,
@@ -57,7 +57,7 @@ The rename-related optional history fields are:
 
 | Field | Shape and meaning |
 |---|---|
-| `renameProofs` | Array of `{ source, destination, commit, baseParentProof? }`. `commit` retains the complete commit identity, parents and files proving source removal, destination introduction and identical blob SHA. Proof requires trusted hammer identity, a parent descended from `primaryHead` and a production destination for a production source. A two-parent commit additionally carries `{ parentSha, baseSha, status }` in `baseParentProof`, with `status` equal to `ahead` or `identical`, proving its second parent is in live base ancestry. The evaluator rechecks the cached proof against the final diff and `diagnosticCommitRange`. |
+| `renameProofs` | Array of `{ source, destination, commit, baseParentProof? }`. `commit` retains the complete commit identity, parents and files proving source removal, destination introduction and identical blob SHA. Sources may be added, modified or builder-renamed files; builder-renamed sources require the original merge-base name to remain removed or renamed in the final diff. Proof requires trusted hammer identity, a parent descended from `primaryHead` and a production destination for a production source. A two-parent commit additionally carries `{ parentSha, baseSha, status }` in `baseParentProof`, with `status` equal to `ahead` or `identical`, proving its second parent is in live base ancestry. The evaluator rechecks the cached proof against the final diff and `diagnosticCommitRange`. |
 | `primaryPathChanges` | Array of `{ path, start: null, end: null, commits, error? }` for missing primary paths. Each removal/rename attribution has `{ sha, author, pipelineRepair: null, repairKind: null }`. This is observational evidence and never grants preservation authority. Candidate commit metadata is reused within the evaluation. Without a candidate destination, only the first 20 commits are read; larger ranges retain a truncation `error`, including when no removal was attributed. Rename proof scans retain the full candidate range. Refusals combine these records with operator snapshot attribution by path. |
 | `renameProofReadFailed` | Optional `true` on returned history when a candidate read failed for a path with a possible destination and no later valid proof resolved that path. Earlier failures do not prevent caching a later proven rename. A successful proof for one path cannot clear an unresolved failure for another. Histories carrying this flag are not written to disk, so subsequent reads retry optional proof instead of caching a transient refusal. |
 

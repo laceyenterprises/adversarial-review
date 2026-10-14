@@ -42,6 +42,33 @@ test('PRIMARYRENAME-01: an added-file rename loses the builder path in the base-
       nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 } }).owner, 'daemon-merge');
 });
 
+test('PRIMARYRENAME-01: a builder rename followed by an identical hammer rename preserves the primary change', async t => {
+  for (const options of [{}, { laterHammer: true }, { baseMerge: true }]) {
+    const fixture = primaryRenameRepository(t, { builderRenamed: true, ...options });
+    const evidence = await fetchPrimaryChange(fixture.args);
+    assert.equal(evidence.primaryFiles[0].status, 'renamed');
+    assert.equal(evidence.primaryFiles[0].previous_filename, fixture.baseSource);
+    assert.equal(evidence.primaryFiles[0].filename, fixture.source);
+    assert.equal(evidence.finalFiles[0].previous_filename, fixture.baseSource);
+    assert.equal(evidence.finalFiles[0].filename, fixture.destination);
+    assert.equal(evidence.renameProofs[0].source, fixture.source);
+    assert.equal(evidence.renameProofs[0].commit.sha, fixture.renameSha);
+    assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, true);
+  }
+});
+
+test('PRIMARYRENAME-01: chained builder rename proof retains byte, identity, destination and base-name protections', async t => {
+  for (const options of [{ restored: true }, { changed: true }, { deleted: true },
+    { author: 'fixture-contributor' }, { destination: 'test/fixtures/guide.txt' },
+    { destination: 'base-guide.txt' }]) {
+    const fixture = primaryRenameRepository(t, { builderRenamed: true, ...options });
+    const evidence = await fetchPrimaryChange(fixture.args);
+    assert.equal(evidence.renameProofs, undefined, JSON.stringify(options));
+    if (!options.author) assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).reason,
+      'primary-change-reverted', JSON.stringify(options));
+  }
+});
+
 test('PRIMARYRENAME-01: identical renames preserve modified files and survive later unrelated hammer repairs', async t => {
   for (const options of [{ modified: true }, { laterHammer: true }, { binary: true }, { baseMerge: true },
     { author: null }, { committer: 'web-flow', verification: { verified: true, reason: 'valid' } }]) {
@@ -171,28 +198,31 @@ test('PRIMARYRENAME-01: evaluator rechecks identity, exact blob, source absence 
 });
 
 test('PRIMARYRENAME-01: a cached pre-rename refusal is recomputed once and the new proof is reused', async t => {
-  const fixture = primaryRenameRepository(t);
-  const evidence = await fetchPrimaryChange({ ...fixture.args, get: path => fixture.args.get(path) });
-  const legacy = structuredClone(evidence);
-  delete legacy.renameProofs;
-  delete legacy.ciCost;
-  const directory = join(fixture.rootDir, 'data', 'primary-change-history');
-  mkdirSync(directory, { recursive: true });
-  const reviewKey = createHash('sha256').update('[]').digest('hex');
-  const key = [fixture.args.repo, 1, evidence.mergeBase, fixture.args.headSha, evidence.mergeBase, reviewKey, null];
-  writeFileSync(join(directory, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`),
-    JSON.stringify({ key, history: legacy }));
-  let commitReads = 0;
-  const get = Object.assign(path => {
-    if (path.includes('/commits/')) commitReads += 1;
-    return fixture.args.get(path);
-  }, { metadata: fixture.args.get.metadata, persistPrimaryChange: true });
-  const fresh = await fetchPrimaryChange({ ...fixture.args, get });
-  assert.equal(checkPrimaryChange(fresh, fixture.args.headSha).ok, true);
-  assert.equal(commitReads, 1, 'old disk history must not hide the missing proof');
-  const reused = await fetchPrimaryChange({ ...fixture.args, get });
-  assert.equal(checkPrimaryChange(reused, fixture.args.headSha).ok, true);
-  assert.equal(commitReads, 1, 'new disk history reuses the commit proof');
+  for (const builderRenamed of [false, true]) {
+    const fixture = primaryRenameRepository(t, { builderRenamed });
+    const evidence = await fetchPrimaryChange({ ...fixture.args, get: path => fixture.args.get(path) });
+    const legacy = structuredClone(evidence);
+    delete legacy.renameProofs;
+    delete legacy.ciCost;
+    const directory = join(fixture.rootDir, 'data', 'primary-change-history');
+    mkdirSync(directory, { recursive: true });
+    const reviewKey = createHash('sha256').update('[]').digest('hex');
+    const key = [fixture.args.repo, 1, evidence.mergeBase, fixture.args.headSha, evidence.mergeBase, reviewKey, null, ...(builderRenamed ? ['primary-rename-v1'] : [])];
+    writeFileSync(join(directory, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`),
+      JSON.stringify({ key, history: legacy }));
+    let commitReads = 0;
+    const get = Object.assign(path => {
+      if (path.includes('/commits/')) commitReads += 1;
+      return fixture.args.get(path);
+    }, { metadata: fixture.args.get.metadata, persistPrimaryChange: true });
+    const fresh = await fetchPrimaryChange({ ...fixture.args, get });
+    assert.equal(checkPrimaryChange(fresh, fixture.args.headSha).ok, true);
+    assert.equal(fresh.renameProofs.length, 1);
+    assert.equal(commitReads, 1, 'old disk history must not hide the missing proof');
+    const reused = await fetchPrimaryChange({ ...fixture.args, get });
+    assert.equal(checkPrimaryChange(reused, fixture.args.headSha).ok, true);
+    assert.equal(commitReads, 1, 'new disk history reuses the commit proof');
+  }
 });
 
 test('PRIMARYRENAME-01: an optional proof read outage cannot cache a permanent refusal', async t => {
@@ -233,7 +263,7 @@ test('PRIMARYRENAME-01: valid later rename proof resolves earlier failures and i
     assert.equal(records.length, 1);
     const record = JSON.parse(readFileSync(join(dir, records[0]), 'utf8'));
     assert.equal(record.history.renameProofReadFailed, undefined);
-    assert.equal(record.key[7], 'primary-rename-v1');
+    assert.equal(record.key[7], 'primary-rename-v2');
     assert.deepEqual(await fetchPrimaryChange(args), evidence);
     assert.equal(commitReads, 2, 'approved history must not repeat commit reads');
   }

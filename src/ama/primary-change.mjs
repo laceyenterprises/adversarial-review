@@ -69,12 +69,15 @@ function evidencePaths(primary, files) {
 }
 
 // A missing compare entry proves absence only for an added primary file. For
-// a modified file it means restoration to the base, unless a removal/rename
-// explicitly proves that the old name is gone.
+// a modified or renamed file it means restoration to the base, unless a
+// removal/rename explicitly proves that the base name is gone.
 function primaryPathAbsent(file, finalFiles) {
-  if (!['added', 'modified'].includes(file.status)) return false;
+  if (!['added', 'modified', 'renamed'].includes(file.status)) return false;
   const old = finalFiles.find(entry => entry.filename === file.filename);
   if (old && old.status !== 'removed') return false;
+  if (file.status === 'renamed') return !!file.previous_filename && finalFiles.some(entry =>
+    entry.status === 'removed' && entry.filename === file.previous_filename
+    || entry.status === 'renamed' && entry.previous_filename === file.previous_filename);
   if (!old && file.status !== 'added' && !finalFiles.some(entry =>
     entry.status === 'renamed' && entry.previous_filename === file.filename)) return false;
   return true;

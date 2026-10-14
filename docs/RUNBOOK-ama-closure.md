@@ -1629,12 +1629,15 @@ findings are allowed. Reviewers must still flag inversions or neutralizations of
 the tested primary-change behavior. Renaming production code into a test path
 does not preserve its protected baseline, even with identical bytes and a
 trusted hammer rename proof. Both rename-proof destinations and the final
-diff's renamed paths enforce this production-to-test boundary.
+diff's renamed paths enforce this production-to-test boundary. Chained renames
+from a builder-renamed path may collect the same identical-blob hammer proof
+when both the intermediate path is absent and the merge-base name remains
+removed or renamed; restoring the merge-base name does not qualify.
 
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary
-compatibility checked on reuse and a `primary-rename-v1` identity version to
+compatibility checked on reuse and a `primary-rename-v2` identity version to
 invalidate older records without commit-level rename proof. Live head/base and
 merge-base metadata are checked before reuse; CI-cost evidence remains live. Only completed successful
 history reads are stored. An unresolved optional rename-proof read failure

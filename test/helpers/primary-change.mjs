@@ -1,21 +1,21 @@
-export function primaryChangeFixture(headSha) {
-  const file = { filename: 'src/config-loader.mjs', status: 'modified', additions: 1, deletions: 1,
-    patch: '@@ -1 +1 @@\n-shadow_only: true\n+shadow_only: false' };
-  return { headSha, ciCost: { headSha, ok: true }, hasHammerCommits: true, primaryHead: 'a'.repeat(40), mergeBase: 'b'.repeat(40),
-    primaryFiles: [file], finalFiles: [file] };
-}
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHistoryReader } from '../../src/ama/history-reader.mjs';
 
+export function primaryChangeFixture(headSha) {
+  const file = { filename: 'src/config-loader.mjs', status: 'modified', additions: 1, deletions: 1,
+    patch: '@@ -1 +1 @@\n-shadow_only: true\n+shadow_only: false' };
+  return { headSha, ciCost: { headSha, ok: true }, hasHammerCommits: true, primaryHead: 'a'.repeat(40), mergeBase: 'b'.repeat(40),
+    primaryFiles: [file], finalFiles: [file] };
+}
 
 // Real Git objects back an entirely offline GitHub-shaped transport. Compare
 // files come from the production tree/blob reader, including its lack of rename
 // inference for files which were not present at the merge base.
 export function primaryRenameRepository(t, { changed = false, deleted = false,
-  modified = false, author = 'hammer-worker', committer = 'hammer-worker',
+  modified = false, builderRenamed = false, author = 'hammer-worker', committer = 'hammer-worker',
   verification = undefined, laterHammer = false, existingDestination = false, binary = false, restored = false,
   baseMerge = false, earlierHammer = false, destination = 'named-guide.txt' } = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'primary-rename-'));
@@ -27,12 +27,15 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
       GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z' } }).trimEnd();
   git('init', '-q');
   const source = 'guide.txt';
+  const baseSource = builderRenamed ? 'base-guide.txt' : source;
   mkdirSync(dirname(join(rootDir, destination)), { recursive: true });
+  if (builderRenamed) { writeFileSync(join(rootDir, baseSource), 'Builder guide\n'); git('add', baseSource); }
   if (modified) { writeFileSync(join(rootDir, source), 'Base guide\n'); git('add', source); }
   if (existingDestination) { writeFileSync(join(rootDir, destination), 'Builder guide\n'); git('add', destination); }
   git('commit', '-q', '--allow-empty', '-m', 'Fixture base');
   const base = git('rev-parse', 'HEAD');
-  writeFileSync(join(rootDir, source), binary ? 'Builder\0guide\n' : 'Builder guide\n');
+  if (builderRenamed) git('mv', baseSource, source);
+  else writeFileSync(join(rootDir, source), binary ? 'Builder\0guide\n' : 'Builder guide\n');
   git('add', source);
   git('commit', '-q', '-m', 'Add builder guide');
   const builder = git('rev-parse', 'HEAD');
@@ -46,7 +49,7 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
   else {
     git('mv', '-f', source, destination);
     if (changed) { writeFileSync(join(rootDir, destination), 'Builder Guide\n'); git('add', destination); }
-    if (restored) { writeFileSync(join(rootDir, source), 'Base guide\n'); git('add', source); }
+    if (restored) { writeFileSync(join(rootDir, baseSource), builderRenamed ? 'Builder guide\n' : 'Base guide\n'); git('add', baseSource); }
   }
   git('commit', '-q', '-m', 'Repair guide name\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)');
   if (baseMerge) {
@@ -103,6 +106,6 @@ export function primaryRenameRepository(t, { changed = false, deleted = false,
     for (const entry of data.commits || []) delete entry.commit.verification;
     return { stdout: JSON.stringify(data) };
   } });
-  return { rootDir, source, destination, builder, blob, renameSha, earlierHammerSha, calls,
+  return { rootDir, source, baseSource, destination, builder, blob, renameSha, earlierHammerSha, calls,
     args: { repo: 'fixture/repo', prNumber: 1, headSha, rootDir, get } };
 }

@@ -30,14 +30,15 @@ function workerWorkspacePath(rootDir, job, worker) {
 }
 
 export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImpl = execFileSync }) {
+  headSha = String(headSha || '').trim().toLowerCase();
   const plan = job?.remediationPlan;
   // Pending retries decrement currentRound; their retained attempt is nextRound.
   const roundNumber = job?.status === 'pending' ? Number(plan?.currentRound || 0) + 1 : plan?.currentRound;
-  const round = plan?.rounds?.find(entry => entry.round === roundNumber);
+  const round = plan?.rounds?.find(entry => Number(entry.round) === Number(roundNumber));
   const worker = job?.remediationWorker || round?.worker || {};
   const startHead = round?.startHeadSha || job?.revisionRef;
   if (!round || !/^[a-f0-9]{40}$/i.test(headSha || '') || !startHead
-    || [startHead, job?.revisionRef].includes(headSha)
+    || [startHead, job?.revisionRef].some(sha => String(sha || '').trim().toLowerCase() === headSha)
     || (!round.spawnedAt && !worker.spawnedAt)) return null;
 
   // Movement, a fetched branch tip, and model-written reply text cannot attest
@@ -80,6 +81,7 @@ export function completeWorkerPublishedHead({
       if (!['pending', 'in_progress'].includes(job.status)) return null;
       const evidence = findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImpl });
       if (!evidence) return null;
+      headSha = evidence.headSha;
       const { round, worker, reply, replyPath } = evidence;
       round.startHeadSha = evidence.startHead;
       round.publishedHeadSha = headSha;
@@ -119,7 +121,8 @@ export function completeWorkerPublishedHead({
         }
       }
       completed.job.reReview = reReview;
-      completed.job.remediationPlan.rounds.find(entry => entry.round === round.round).reReview = reReview;
+      const targetRound = completed.job.remediationPlan?.rounds?.find(entry => Number(entry.round) === Number(round.round));
+      if (targetRound) targetRound.reReview = reReview;
       writeFollowUpJob(completed.jobPath, completed.job);
       return completed;
     });
@@ -132,7 +135,7 @@ export function completeWorkerPublishedHead({
 export function hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace = true }) {
   const plan = job?.remediationPlan;
   const roundNumber = job?.status === 'pending' ? Number(plan?.currentRound || 0) + 1 : plan?.currentRound;
-  const round = plan?.rounds?.find(entry => entry.round === roundNumber);
+  const round = plan?.rounds?.find(entry => Number(entry.round) === Number(roundNumber));
   const worker = job?.remediationWorker || round?.worker || {};
   if (!round?.spawnedAt && !round?.publishedHeadSha && !worker.spawnedAt) return false;
   if (round?.publishedHeadSha) return true;

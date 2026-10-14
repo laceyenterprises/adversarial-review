@@ -2668,9 +2668,9 @@ function claimNextFollowUpJob({
           ...(job.remediationPlan?.nextAction?.operatorOverride === true ? { operatorOverride: true } : {}),
         },
         rounds: [
-          ...(job?.remediationPlan?.rounds || []).filter(round => round.round !== nextRoundNumber),
+          ...(job?.remediationPlan?.rounds || []).filter(round => Number(round.round) !== nextRoundNumber),
           {
-            ...(job?.remediationPlan?.rounds || []).find(round => round.round === nextRoundNumber),
+            ...(job?.remediationPlan?.rounds || []).find(round => Number(round.round) === nextRoundNumber),
             round: nextRoundNumber,
             ...buildDeliveryKey({
               repo: job?.repo,

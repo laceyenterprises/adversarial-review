@@ -1469,7 +1469,12 @@ async function seedRemlink(t, { published = true, startHead = 'a'.repeat(40), ro
   const completePublishedHeadImpl = args => completeWorkerPublishedHead({ ...args,
     requestReviewRereviewImpl: () => {
       const completedPath = path.join(getFollowUpJobDir(rootDir, 'completed'), path.basename(seeded.jobPath));
-      assert.equal(readJobAtPath(completedPath).status, 'completed', 'terminal write must precede follow-on');
+      const completed = readJobAtPath(completedPath);
+      assert.equal(completed.status, 'completed', 'terminal write must precede follow-on');
+      const round = completed.remediationPlan.rounds.find(entry => Number(entry.round) === Number(roundNumber));
+      assert.deepEqual(round.completion, completed.completion);
+      assert.equal(round.completion.source, 'worker-published-head-recovery');
+      assert.equal(round.completion.publishEvidence, 'workspace-worker-job-trailer');
       followOns++; return { triggered: true, status: 'pending' };
     },
     requestRereviewWakeImpl: () => ({ requested: true }),
@@ -1512,6 +1517,9 @@ test('REMLINK-01 J2 quiet output settles its published head once instead of recl
   assert.equal(completed.remediationPlan.rounds[0].startHeadSha, f.startHead);
   assert.equal(completed.remediationPlan.rounds[0].publishedHeadSha, f.head);
   assert.equal(completed.remediationPlan.rounds[0].resultingHeadSha, f.head);
+  assert.deepEqual(completed.remediationPlan.rounds[0].reReview, completed.reReview);
+  assert.equal(completed.reReview.triggered, true);
+  assert.equal(completed.reReview.wake.requested, true);
   await sweepStuckInProgressClaims(args);
   assert.equal(f.followOns(), 1);
 });
@@ -1524,8 +1532,12 @@ test('REMLINK-01 J3 second claim retains a force-publish round readable by the u
     allowDirectWorkerRetry: true, requeuedAt: '2026-01-01T00:45:00.000Z',
     retryAfterOverride: '2026-01-01T00:45:00.000Z', retryReason: 'synthetic restart' });
   assert.equal(pending.job.remediationPlan.rounds[0].spawnedAt, '2026-01-01T00:00:00.000Z');
+  pending.job.remediationPlan.rounds[0].round = '2';
+  writeFollowUpJob(pending.jobPath, pending.job);
   const claimed = claimNextFollowUpJob({ rootDir: f.rootDir, claimedAt: '2026-01-01T01:00:00.000Z' });
   assert.equal(claimed.job.remediationPlan.rounds.length, 1);
+  assert.equal(claimed.job.remediationPlan.rounds[0].round, 2);
+  assert.equal(claimed.job.remediationPlan.rounds[0].spawnedAt, '2026-01-01T00:00:00.000Z');
   const result = await applyPreSpawnLifecycleGate({ rootDir: f.rootDir, job: claimed.job, jobPath: claimed.jobPath,
     resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.head }),
     completePublishedHeadImpl: f.completePublishedHeadImpl, now: () => '2026-01-01T01:00:00.000Z' });
@@ -1622,6 +1634,48 @@ test('REMLINK-01 reply and fetched workspace tips require exact job provenance',
   assert.equal(probe(f.head, message).source, 'workspace-worker-job-trailer');
   f.job.remediationPlan.rounds[0].startHeadSha = f.head;
   assert.equal(probe(f.head, message), null, 'a previously observed head is not a worker publication');
+});
+
+test('REMLINK-01 recovery normalizes hexadecimal heads and serialized round numbers', async t => {
+  const f = await seedRemlink(t);
+  const { findWorkerPublishedHead, hasWorkerPublishArtifacts } = await import('../src/remediation-published-head.mjs');
+  for (const status of ['in_progress', 'pending']) {
+    f.job.status = status;
+    f.job.remediationPlan.currentRound = status === 'pending' ? '0' : '1';
+    f.job.remediationPlan.rounds[0].round = '1';
+    const evidence = findWorkerPublishedHead({ rootDir: f.rootDir, job: f.job, headSha: f.head.toUpperCase() });
+    assert.equal(evidence.headSha, f.head);
+    assert.equal(hasWorkerPublishArtifacts({ rootDir: f.rootDir, job: f.job, includeWorkspace: false }), true);
+  }
+  writeFollowUpJob(f.jobPath, f.job);
+  const completed = f.completePublishedHeadImpl({ rootDir: f.rootDir, jobPath: f.jobPath, headSha: f.head.toUpperCase() });
+  assert.equal(completed.job.remediationPlan.rounds[0].publishedHeadSha, f.head);
+  assert.equal(completed.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
+  assert.deepEqual(completed.job.remediationPlan.rounds[0].reReview, completed.job.reReview);
+  for (const field of ['startHeadSha', 'revisionRef']) {
+    const job = structuredClone(f.job);
+    if (field === 'startHeadSha') job.remediationPlan.rounds[0][field] = f.head.toUpperCase();
+    else job[field] = f.head.toUpperCase();
+    assert.equal(findWorkerPublishedHead({ rootDir: f.rootDir, job, headSha: f.head }), null,
+      `${field} must still exclude a previously observed head regardless of case`);
+  }
+});
+
+test('REMLINK-01 terminal re-review update tolerates an existing completed record without its round', async t => {
+  const f = await seedRemlink(t);
+  const completedPath = path.join(getFollowUpJobDir(f.rootDir, 'completed'), path.basename(f.jobPath));
+  mkdirSync(path.dirname(completedPath), { recursive: true });
+  writeFollowUpJob(completedPath, { ...f.job, status: 'completed',
+    remediationPlan: { ...f.job.remediationPlan, rounds: [] } });
+  const { completeWorkerPublishedHead } = await import('../src/remediation-published-head.mjs');
+  const completed = completeWorkerPublishedHead({ rootDir: f.rootDir, jobPath: f.jobPath, headSha: f.head,
+    requestReviewRereviewImpl: () => ({ triggered: true, status: 'pending' }),
+    requestRereviewWakeImpl: () => ({ requested: true }) });
+  assert.equal(completed.alreadyTerminal, true);
+  assert.deepEqual(completed.job.remediationPlan.rounds, []);
+  assert.equal(readJobAtPath(completedPath).reReview.triggered, true);
+  assert.equal(readJobAtPath(completedPath).reReview.wake.requested, true);
+  assert.equal(existsSync(f.jobPath), false);
 });
 
 test('REMLINK-01 pending active-defer release completes a retained publish instead of superseding it', async t => {
@@ -1793,7 +1847,11 @@ test('REMLINK-01 comment-only recovery writes terminal state before waking closu
     requestReviewRereviewImpl: () => assert.fail('final round must not request re-review'),
     requestWatcherWakeImpl: () => {
       const completedPath = path.join(getFollowUpJobDir(f.rootDir, 'completed'), path.basename(f.jobPath));
-      assert.equal(readJobAtPath(completedPath).status, 'completed');
+      const completed = readJobAtPath(completedPath);
+      assert.equal(completed.status, 'completed');
+      assert.deepEqual(completed.remediationPlan.rounds[0].completion, completed.completion);
+      assert.equal(completed.completion.source, 'worker-published-head-recovery');
+      assert.equal(completed.completion.publishEvidence, 'workspace-worker-job-trailer');
       wakes++;
     } });
   assert.equal(completed.job.reReview.suppressed, 'comment-only-final-round');

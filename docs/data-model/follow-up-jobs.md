@@ -133,7 +133,13 @@ worker authorship. Replies predating the attempt's `spawnedAt` are ignored.
 Successful recovery uses the ordinary terminal writer to complete the retained
 round and job, setting `resultingHeadSha` to the live, proven head. Job and round
 `completion` contain `source: "worker-published-head-recovery"` and
-`publishEvidence: "workspace-worker-job-trailer"`. A current valid reply, if
+`publishEvidence: "workspace-worker-job-trailer"`. The ordinary
+`markFollowUpJobCompleted` writer copies this completion object onto the current
+round during the terminal write, before any follow-on request. Recovery compares
+round identifiers numerically, normalizes proven hexadecimal heads to lowercase,
+and guards the later round-level `reReview` update if an existing terminal
+record lacks the recovered round; the job-level outcome is still persisted.
+A current valid reply, if
 present, is retained in `remediationReply`; no reply is required to establish the
 independent commit proof. The terminal record is written before follow-on
 requests; `reReview` records the request intent and then its outcome. Ordinary

@@ -471,3 +471,34 @@ test('DEPWAIT-01 retry uses latest CI runs and notices a missing required contex
   assert.equal(result.completed, null);
   assert.equal(result.pending.job.status, 'pending');
 }));
+
+test('DEPWAIT-01 sibling lockfile conflict preserves the existing withheld path; a bot repair gets a new job', async () => withRoot(async (rootDir) => {
+  const firstArgs = baseArgs(rootDir, { prNumber: 201 });
+  const siblingArgs = baseArgs(rootDir, { prNumber: 202 });
+  const merged = await maybeAutoAdjudicateDependencyBotArgusJob({
+    ...firstArgs, runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'merged', reason: 'merged' }),
+  });
+  assert.equal(merged.completed.job.result.verdict, 'approve');
+
+  // Both fixture jobs change package-lock.json. A true conflict needs a new
+  // head; this bot-only branch currently has no conflict-repair handoff.
+  const conflicted = await maybeAutoAdjudicateDependencyBotArgusJob({
+    ...siblingArgs,
+    runDaemonCleanMergeAttemptImpl: async () => ({
+      disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-not-mergeable'],
+      liveGate: { candidateHead: HEAD, prState: 'OPEN', mergeable: 'CONFLICTING',
+        mergeStateStatus: 'DIRTY', requiredChecks: GREEN_CHECKS },
+    }),
+  });
+  assert.equal(conflicted.completed.job.result.autoadjudication.reason, 'merge-withheld-not-eligible');
+  assert.equal(conflicted.pending, undefined);
+  assert.equal(conflicted.routed, undefined);
+
+  const repaired = await maybeAutoAdjudicateDependencyBotArgusJob({
+    ...baseArgs(rootDir, { prNumber: 202, headSha: NEXT_HEAD }),
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'merged', reason: 'merged' }),
+  });
+  assert.notEqual(repaired.completed.job.jobId, conflicted.completed.job.jobId);
+  assert.equal(repaired.completed.job.result.verdict, 'approve');
+  assert.equal(findArgusJob(rootDir, { repo: REPO, prNumber: 202, headSha: HEAD }).bucket, 'completed');
+}));

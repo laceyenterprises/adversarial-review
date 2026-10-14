@@ -339,6 +339,7 @@ function buildRunnerSource({
   freshHeads = {},
   prePollSetup = '',
   afterFirstPoll = '',
+  healthProbeSetup = '',
 } = {}) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
@@ -452,6 +453,7 @@ try {
         claims.push(payload);
       },
     };
+    ${healthProbeSetup}
     await pollOnce(octokit, pollOptions);
     ${afterFirstPoll}
   } catch (err) {
@@ -3150,4 +3152,98 @@ fi`));
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+
+test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers return', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'reviewdelay-start-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        globalThis.__reviewdelayReturns = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return { spawnReviewer: async (payload) => {
+            globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+            for (let update = 0; update < 3; update += 1) {
+              payload.onReviewerPgid({ pgid: 123456, spawnedAt: '2026-10-01T00:00:00.000Z' });
+            }
+            await new Promise(resolve => globalThis.__reviewdelayReturns.push(resolve));
+            return { ok: false, failureClass: 'fixture-failure', stderr: '' };
+          }, cancel: async () => {}, reattach: async () => ({}) };
+        }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    }).replace('export async function resolve', `
+      stubs.set(${JSON.stringify(fileUrl('src', 'watcher-reviewer-pool.mjs'))}, 'fixture:health-pool');
+      export async function resolve
+    `).replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === 'fixture:health-pool') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+          export * from ${JSON.stringify(fileUrl('src', 'watcher-reviewer-pool.mjs') + '?actual')};
+          import { createDetachedReviewerDispatchTracker as create } from ${JSON.stringify(fileUrl('src', 'watcher-reviewer-pool.mjs') + '?actual')};
+          export function createDetachedReviewerDispatchTracker(options) {
+            const tracker = create(options);
+            const list = tracker.liveSpawnEntries;
+            tracker.liveSpawnEntries = () => {
+              globalThis.__reviewdelayHealthScans = (globalThis.__reviewdelayHealthScans || 0) + 1;
+              return list();
+            };
+            return tracker;
+          }
+        `)} };
+    `));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      healthProbeSetup: `
+        const { createWatcherHealthProbe } = await import(${JSON.stringify(fileUrl('src', 'health-probe.mjs') + '?actual')});
+        globalThis.__reviewdelayStarts = [];
+        globalThis.__reviewdelayEvents = [];
+        globalThis.__reviewdelayTicks = [];
+        const probe = createWatcherHealthProbe({
+          env: {}, now: () => new Date('2026-10-01T00:00:00.000Z'),
+          stdout: { write: line => globalThis.__reviewdelayEvents.push(JSON.parse(line)) },
+          deliverAlertFn: async () => { throw new Error('unexpected health page'); },
+        });
+        pollOptions.healthProbe = {
+          ...probe,
+          recordSpawn(tick, payload) {
+            globalThis.__reviewdelayStarts.push(payload);
+            probe.recordSpawn(tick, payload);
+          },
+          async finishTick(tick, options) {
+            await probe.finishTick(tick, options);
+            globalThis.__reviewdelayTicks.push(tick);
+          },
+        };
+      `,
+      afterFirstPoll: `
+        assert.ok(globalThis.__reviewdelayReturns.length > 0);
+        assert.equal(globalThis.__reviewdelayStarts.length, 3 * globalThis.__reviewdelayReturns.length);
+        assert.ok(globalThis.__reviewdelayStarts.every(start => start.at === '2026-10-01T00:00:00.000Z'));
+        assert.deepEqual(globalThis.__reviewdelayEvents, []);
+        assert.equal(globalThis.__reviewdelayTicks[0].openPendingPRs, 0);
+        assert.equal(globalThis.__reviewdelayTicks[0].openPendingRereviewPRs, 0);
+        assert.deepEqual(globalThis.__reviewdelayTicks[0].samplePRs, []);
+        assert.equal(globalThis.__reviewdelayTicks[0].spawnCount, globalThis.__reviewdelayReturns.length);
+        assert.equal(globalThis.__reviewdelayHealthScans || 0, 0, 'started PRs need no extra persisted-record scan');
+        const starts = globalThis.__reviewdelayStarts.length;
+        for (const resolve of globalThis.__reviewdelayReturns) resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(globalThis.__reviewdelayStarts.length, starts, 'returning must not count another spawn');
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...installGhFixture(tmp),
+        ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS: '1' }), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

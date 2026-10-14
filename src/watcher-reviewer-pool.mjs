@@ -953,6 +953,35 @@ function createDetachedReviewerDispatchTracker({
   }
 
   return {
+    // Health accounting includes every runtime, even a non-pipeline reviewer
+    // inherited from an earlier watcher. Reuse the persisted run's liveness
+    // and timeout bounds; dispatch promises alone do not prove a process start.
+    liveSpawnEntries() {
+      let persisted = [];
+      try {
+        const loaded = loadPersistedSpawnRecords?.() || [];
+        persisted = Array.isArray(loaded) ? loaded : Object.values(loaded);
+      } catch {
+        // Capacity accounting already reports persisted-record read failures.
+        // Health can still observe this watcher's in-memory spawns.
+      }
+      const records = new Map(persisted
+        .filter((record) => record && typeof record === 'object' && !Array.isArray(record))
+        .map((record) => [record.spawnToken, record]));
+      for (const [token, record] of activeReviewerSpawns || []) records.set(token, record);
+      const nowMs = now();
+      return [...records.values()].filter((record) => {
+        if (!reviewerDispatchPrKey({ repo: record?.repo, prNumber: record?.pr })) return false;
+        const spawnedAtMs = Date.parse(record?.spawnedAt);
+        if (!Number.isFinite(spawnedAtMs) || nowMs - spawnedAtMs > expiryMs()) return false;
+        try {
+          return typeof isPersistedSpawnLive === 'function' && isPersistedSpawnLive(record) !== false;
+        } catch {
+          // Match the existing reservation treatment of unreadable run state.
+          return true;
+        }
+      });
+    },
     activeCounts() {
       const liveDetached = pruneAndList();
       const counts = countActiveReviewerSpawnsByModel(activeReviewerSpawns);

@@ -1,5 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { createDetachedReviewerDispatchTracker, persistedSpawnReservationSource } from '../src/watcher-reviewer-pool.mjs';
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { upsertSpawnRecord } from '../src/reviewer-fence.mjs';
 
 import { createWatcherHealthProbe } from '../src/health-probe.mjs';
 
@@ -31,7 +38,7 @@ function makeProbe({ env = {}, pid = 12345 } = {}) {
   return { probe, events, alerts };
 }
 
-async function silentTick(probe, prs = [['laceyenterprises/adversarial-review', 75]]) {
+async function silentTick(probe, prs = [['sample-org/review-fixture', 75]]) {
   const tick = probe.beginTick();
   for (const [repo, prNumber] of prs) {
     probe.recordOpenPending(tick, { repo, prNumber });
@@ -39,7 +46,7 @@ async function silentTick(probe, prs = [['laceyenterprises/adversarial-review', 
   await probe.finishTick(tick);
 }
 
-async function spawnedTick(probe, prs = [['laceyenterprises/adversarial-review', 75]]) {
+async function spawnedTick(probe, prs = [['sample-org/review-fixture', 75]]) {
   const tick = probe.beginTick();
   for (const [repo, prNumber] of prs) {
     probe.recordOpenPending(tick, { repo, prNumber });
@@ -54,8 +61,8 @@ test('3 consecutive empty polls with open pending PR emits no_progress and one a
   await silentTick(probe);
   await silentTick(probe);
   await silentTick(probe, [
-    ['laceyenterprises/adversarial-review', 75],
-    ['laceyenterprises/agent-os', 357],
+    ['sample-org/review-fixture', 75],
+    ['sample-org/second-fixture', 357],
   ]);
 
   assert.equal(events.length, 1);
@@ -63,9 +70,10 @@ test('3 consecutive empty polls with open pending PR emits no_progress and one a
     event: 'watcher.no_progress',
     pollsSinceLastSpawn: 3,
     openPendingPRs: 2,
+    openPendingRereviewPRs: 0,
     samplePRs: [
-      'laceyenterprises/adversarial-review#75',
-      'laceyenterprises/agent-os#357',
+      'sample-org/review-fixture#75',
+      'sample-org/second-fixture#357',
     ],
     lastSpawnAt: null,
     watcherPid: 12345,
@@ -136,7 +144,7 @@ test('0 open pending PRs never alerts during a quiet period', async () => {
 
   assert.equal(events.length, 0);
   assert.equal(alerts.length, 0);
-  assert.equal(probe.getState().pollsSinceLastSpawn, 10);
+  assert.equal(probe.getState().pollsSinceLastSpawn, 0);
 });
 
 test('threshold override waits until the configured silent poll count', async () => {
@@ -232,4 +240,244 @@ test('health alert delivery rejection is logged and does not reject finishTick',
   assert.deepEqual(errors, [
     '[watcher] health alert delivery failed: slack down',
   ]);
+});
+
+
+test('REVIEWDELAY-01: three polls with reviewer starts need no reviewer return', async () => {
+  const { probe, events, alerts } = makeProbe();
+  const returns = [];
+  const runs = [];
+  for (let prNumber = 1; prNumber <= 3; prNumber += 1) {
+    const tick = probe.beginTick();
+    probe.recordOpenPending(tick, { repo: 'sample-org/review-fixture', prNumber });
+    runs.push(new Promise(resolve => {
+      returns.push(resolve);
+      probe.recordSpawn(tick, { repo: 'sample-org/review-fixture', prNumber });
+    }));
+    await probe.finishTick(tick);
+    assert.equal(tick.openPendingPRs, 0);
+    assert.equal(probe.getState().pollsSinceLastSpawn, 0);
+    assert.ok(probe.getState().lastSpawnAt);
+  }
+  assert.deepEqual(events, []);
+  assert.deepEqual(alerts, []);
+  for (const resolve of returns) resolve();
+  await Promise.all(runs);
+});
+
+test('REVIEWDELAY-01: refused first passes page once and later rounds stay out of the sample', async () => {
+  const { probe, events, alerts } = makeProbe();
+  for (let poll = 0; poll < 3; poll += 1) {
+    const tick = probe.beginTick();
+    for (let duplicate = 0; duplicate < 2; duplicate += 1) {
+      probe.recordOpenPending(tick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+      probe.recordOpenPending(tick, {
+        repo: 'sample-org/review-fixture', prNumber: 2, hasCompletedReviewRound: true,
+      });
+    }
+    await probe.finishTick(tick);
+  }
+  assert.equal(events.length, 1);
+  assert.equal(events[0].openPendingPRs, 1);
+  assert.equal(events[0].openPendingRereviewPRs, 1);
+  assert.deepEqual(events[0].samplePRs, ['sample-org/review-fixture#1']);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].text, 'No reviewer spawn for 3 polls while 1 PR(s) await first pass.');
+});
+
+test('REVIEWDELAY-01: an in-flight third-round reviewer is neither waiting nor silent', async () => {
+  const { probe, events } = makeProbe();
+  for (let poll = 0; poll < 3; poll += 1) {
+    const tick = probe.beginTick();
+    probe.recordOpenPending(tick, {
+      repo: 'sample-org/review-fixture', prNumber: 3, hasCompletedReviewRound: true,
+    });
+    probe.recordInFlight(tick, { repo: 'sample-org/review-fixture', prNumber: 3 });
+    // Accounting is independent of observer order.
+    probe.recordOpenPending(tick, {
+      repo: 'sample-org/review-fixture', prNumber: 3, hasCompletedReviewRound: true,
+    });
+    await probe.finishTick(tick);
+    assert.equal(tick.openPendingPRs, 0);
+    assert.equal(tick.openPendingRereviewPRs, 0);
+    assert.deepEqual(tick.samplePRs, []);
+  }
+  assert.deepEqual(events, []);
+  assert.equal(probe.getState().pollsSinceLastSpawn, 0);
+});
+
+test('REVIEWDELAY-01: a quiet poll breaks the consecutive silent waiting streak', async () => {
+  const { probe, events } = makeProbe();
+  await silentTick(probe);
+  await silentTick(probe);
+  await silentTick(probe, []);
+  await silentTick(probe);
+  await silentTick(probe);
+  assert.deepEqual(events, []);
+  await silentTick(probe);
+  assert.equal(events[0].pollsSinceLastSpawn, 3);
+});
+
+
+test('REVIEWDELAY-01: inherited reviewers exclude their own PRs without hiding unrelated waits', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'reviewdelay-restart-'));
+  const nowMs = Date.parse('2026-10-01T00:00:00.000Z');
+  const stateDir = join(root, 'state');
+  const livePgids = new Set([123456, 123457]);
+  try {
+    for (let index = 0; index < 2; index += 1) {
+      const sessionUuid = `inherited-session-${index}`;
+      upsertSpawnRecord(stateDir, {
+        spawnToken: `inherited-token-${index}`,
+        repo: 'sample-org/review-fixture', pr: index + 1,
+        reviewerModel: index === 0 ? 'codex' : 'claude',
+        reviewerSessionUuid: sessionUuid,
+        spawnedAt: new Date(nowMs - 60_000).toISOString(),
+      });
+      writeReviewerRunRecord(root, {
+        sessionUuid, state: 'heartbeating', pgid: 123456 + index,
+      });
+    }
+    const tracker = createDetachedReviewerDispatchTracker({
+      activeReviewerSpawns: new Map(),
+      now: () => nowMs,
+      timeoutMs: 600_000,
+      ...persistedSpawnReservationSource({
+        stateDir, runStateRootDir: root,
+        isPgidAliveImpl: pgid => livePgids.has(pgid),
+      }),
+    });
+    const { probe, events, alerts } = makeProbe();
+    const poll = async () => {
+      const tick = probe.beginTick();
+      probe.recordOpenPending(tick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+      probe.recordOpenPending(tick, {
+        repo: 'sample-org/review-fixture', prNumber: 2, hasCompletedReviewRound: true,
+      });
+      probe.recordOpenPending(tick, { repo: 'sample-org/review-fixture', prNumber: 3 });
+      await probe.finishTick(tick, { inFlightReviewers: tracker.liveSpawnEntries() });
+      return tick;
+    };
+    assert.equal(tracker.liveSpawnEntries().length, 2);
+    for (let index = 0; index < 3; index += 1) {
+      const tick = await poll();
+      assert.equal(tick.openPendingPRs, 1);
+      assert.equal(tick.openPendingRereviewPRs, 0);
+      assert.deepEqual(tick.samplePRs, ['sample-org/review-fixture#3']);
+    }
+    assert.equal(events.length, 1);
+    assert.equal(events[0].pollsSinceLastSpawn, 3);
+    assert.deepEqual(events[0].samplePRs, ['sample-org/review-fixture#3']);
+    assert.equal(probe.getState().pollsSinceLastSpawn, 3);
+    assert.equal(probe.getState().lastSpawnAt, null, 'inherited runs are not new spawns');
+    livePgids.delete(123456);
+    await poll();
+    assert.equal(events.at(-1).pollsSinceLastSpawn, 4);
+    writeReviewerRunRecord(root, {
+      sessionUuid: 'inherited-session-1', state: 'completed', pgid: 123457,
+    });
+    assert.deepEqual(tracker.liveSpawnEntries(), []);
+    await poll();
+    assert.equal(events.length, 3);
+    assert.equal(events.at(-1).pollsSinceLastSpawn, 5);
+    assert.equal(events.at(-1).openPendingPRs, 2);
+    assert.equal(events.at(-1).openPendingRereviewPRs, 1);
+    assert.deepEqual(events.at(-1).samplePRs, [
+      'sample-org/review-fixture#1', 'sample-org/review-fixture#3',
+    ]);
+    assert.equal(alerts.length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an unrelated same-head in-flight reviewer does not mask three silent first-pass polls', async () => {
+  const { probe, events, alerts } = makeProbe();
+  for (let poll = 0; poll < 3; poll += 1) {
+    const tick = probe.beginTick();
+    probe.recordInFlight(tick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+    probe.recordOpenPending(tick, { repo: 'sample-org/review-fixture', prNumber: 2 });
+    await probe.finishTick(tick);
+  }
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0].samplePRs, ['sample-org/review-fixture#2']);
+  assert.equal(alerts.length, 1);
+});
+
+test('late process starts recover finalized ticks and re-arm the next incident alert', async () => {
+  const { probe, events, alerts } = makeProbe();
+  await silentTick(probe);
+  await silentTick(probe);
+  const detachedTick = probe.beginTick();
+  probe.recordOpenPending(detachedTick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+  await probe.finishTick(detachedTick);
+  assert.equal(probe.getState().healthState, 'no_progress');
+
+  probe.recordSpawn(detachedTick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+  assert.equal(probe.getState().healthState, 'healthy');
+  assert.deepEqual(events.at(-1), {
+    event: 'watcher.recovered', spawnsSinceRecovery: 1,
+    recoveredFromSilentPolls: 3, watcherPid: 12345,
+  });
+  assert.equal(await probe.finishTick(detachedTick), null, 'finalization is idempotent');
+  await silentTick(probe);
+  // A stage update on the old tick must not hide a later stall.
+  const lastSpawnAt = probe.getState().lastSpawnAt;
+  probe.recordSpawn(detachedTick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+  assert.equal(probe.getState().lastSpawnAt, lastSpawnAt);
+  await silentTick(probe);
+  await silentTick(probe);
+  assert.deepEqual(events.map(event => event.event), [
+    'watcher.no_progress', 'watcher.recovered', 'watcher.no_progress',
+  ]);
+  assert.equal(alerts.length, 2);
+});
+
+test('pipeline stages, fallback runs and repeated callbacks count once per PR per tick', async () => {
+  const { probe, events } = makeProbe();
+  for (let poll = 0; poll < 3; poll += 1) await silentTick(probe);
+  const tick = probe.beginTick();
+  for (const prNumber of [1, 1, 1, 2, 2]) {
+    probe.recordSpawn(tick, { repo: 'sample-org/review-fixture', prNumber });
+    probe.recordOpenPending(tick, { repo: 'sample-org/review-fixture', prNumber });
+  }
+  await probe.finishTick(tick);
+  assert.equal(tick.spawnCount, 2);
+  assert.equal(tick.openPendingPRs, 0);
+  assert.equal(events.at(-1).spawnsSinceRecovery, 2);
+  assert.equal(events.at(-1).recoveredFromSilentPolls, 3);
+});
+
+test('recovery counts silent quiet and sub-threshold waiting polls since the last spawn', async () => {
+  const { probe, events } = makeProbe();
+  for (let poll = 0; poll < 3; poll += 1) await silentTick(probe);
+  await silentTick(probe, []);
+  await silentTick(probe, []);
+  await silentTick(probe);
+  await silentTick(probe);
+  await silentTick(probe, []);
+  assert.equal(probe.getState().pollsSinceLastSpawn, 0);
+  await spawnedTick(probe);
+  assert.equal(events.at(-1).event, 'watcher.recovered');
+  assert.equal(events.at(-1).recoveredFromSilentPolls, 8);
+  assert.equal(probe.getState().silentPollsSinceLastSpawn, 0);
+});
+
+test('REVIEWDELAY-01: crashloop starts remain dispatch progress across quiet retry backoff', async () => {
+  const { probe, events, alerts } = makeProbe();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const tick = probe.beginTick();
+    const result = await (async () => {
+      probe.recordOpenPending(tick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+      probe.recordSpawn(tick, { repo: 'sample-org/review-fixture', prNumber: 1 });
+      return { ok: false, failureClass: 'auth' };
+    })();
+    assert.equal(result.ok, false);
+    await probe.finishTick(tick);
+    // Backoff produces quiet polls; success/failure belongs to freshness and
+    // credential-outage monitoring, not the process-start health signal.
+    for (let poll = 0; poll < 3; poll += 1) await silentTick(probe, []);
+  }
+  assert.deepEqual(events, []);
+  assert.deepEqual(alerts, []);
 });

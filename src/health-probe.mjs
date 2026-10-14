@@ -46,6 +46,7 @@ function createWatcherHealthProbe({
   const state = {
     healthState: 'healthy',
     pollsSinceLastSpawn: 0,
+    silentPollsSinceLastSpawn: 0,
     lastSpawnAt: null,
     noProgressSilentPolls: 0,
     spawnsSinceRecovery: 0,
@@ -55,38 +56,73 @@ function createWatcherHealthProbe({
     return {
       enabled: config.enabled,
       openPendingPRs: 0,
+      openPendingRereviewPRs: 0,
       samplePRs: [],
-      pendingSet: new Set(),
-      sampleSet: new Set(),
+      pendingSet: new Map(),
+      startedSet: new Set(),
+      inFlightSet: new Set(),
       spawnCount: 0,
       recoveredFromSilentPolls: 0,
+      finished: false,
     };
   }
 
-  function recordOpenPending(tick, { repo, prNumber } = {}) {
+  function recordOpenPending(tick, { repo, prNumber, hasCompletedReviewRound = false } = {}) {
     if (!config.enabled || !tick?.enabled || !repo || !prNumber) return;
     const sample = formatSamplePR(repo, prNumber);
-    if (tick.pendingSet.has(sample)) return;
-    tick.pendingSet.add(sample);
-    tick.openPendingPRs += 1;
-    if (tick.samplePRs.length >= sampleLimit || tick.sampleSet.has(sample)) return;
-    tick.sampleSet.add(sample);
-    tick.samplePRs.push(sample);
+    if (tick.pendingSet.has(sample) || tick.startedSet.has(sample) || tick.inFlightSet.has(sample)) return;
+    tick.pendingSet.set(sample, hasCompletedReviewRound);
   }
 
-  function recordSpawn(tick, { at = nowIso(now) } = {}) {
+  function recordInFlight(tick, { repo, prNumber } = {}) {
+    if (!config.enabled || !tick?.enabled || !repo || !prNumber) return;
+    const sample = formatSamplePR(repo, prNumber);
+    tick.inFlightSet.add(sample);
+    tick.pendingSet.delete(sample);
+  }
+
+  function recordSpawn(tick, { repo, prNumber, at = nowIso(now) } = {}) {
     if (!config.enabled || !tick?.enabled) return;
+    if (repo && prNumber) {
+      const sample = formatSamplePR(repo, prNumber);
+      // Pipeline stages, fallback runs and heartbeat updates can report the
+      // same logical attempt more than once.
+      if (tick.startedSet.has(sample)) return;
+      tick.startedSet.add(sample);
+      tick.pendingSet.delete(sample);
+    }
     tick.spawnCount += 1;
+    const silentPolls = state.silentPollsSinceLastSpawn;
     tick.recoveredFromSilentPolls = Math.max(
       tick.recoveredFromSilentPolls,
-      state.pollsSinceLastSpawn
+      silentPolls
     );
     state.pollsSinceLastSpawn = 0;
+    state.silentPollsSinceLastSpawn = 0;
     state.lastSpawnAt = at;
+    // Single-wave dispatch can return before preparation launches the process.
+    // A finalized tick will never reach finishTick again to report recovery.
+    if (tick.finished) recordRecovery(1, silentPolls);
   }
 
   function emit(payload) {
     stdout?.write?.(`${JSON.stringify(payload)}\n`);
+  }
+
+  function recordRecovery(spawnCount, silentPolls) {
+    if (state.healthState !== 'no_progress') return null;
+    const payload = {
+      event: 'watcher.recovered',
+      spawnsSinceRecovery: spawnCount,
+      recoveredFromSilentPolls: silentPolls,
+      watcherPid: pid,
+    };
+    emit(payload);
+    state.healthState = 'healthy';
+    state.noProgressSilentPolls = 0;
+    state.spawnsSinceRecovery = 0;
+    // Recovery is telemetry only, never a page or stand-alone alert.
+    return payload;
   }
 
   async function sendTransitionAlert(text, payload) {
@@ -101,32 +137,35 @@ function createWatcherHealthProbe({
     }
   }
 
-  async function finishTick(tick) {
-    if (!config.enabled || !tick?.enabled) return null;
+  async function finishTick(tick, { inFlightReviewers = [] } = {}) {
+    if (!config.enabled || !tick?.enabled || tick.finished) return null;
+    tick.finished = true;
+    for (const reviewer of inFlightReviewers) {
+      recordInFlight(tick, { repo: reviewer.repo, prNumber: reviewer.pr });
+    }
+    const firstPassPRs = [];
+    tick.openPendingRereviewPRs = 0;
+    for (const [sample, hasCompletedReviewRound] of tick.pendingSet) {
+      if (hasCompletedReviewRound) tick.openPendingRereviewPRs += 1;
+      else firstPassPRs.push(sample);
+    }
+    tick.openPendingPRs = firstPassPRs.length;
+    tick.samplePRs = firstPassPRs.slice(0, sampleLimit);
 
     if (tick.spawnCount > 0) {
-      const wasNoProgress = state.healthState === 'no_progress';
-      if (wasNoProgress) {
-        state.spawnsSinceRecovery += tick.spawnCount;
-        const payload = {
-          event: 'watcher.recovered',
-          spawnsSinceRecovery: state.spawnsSinceRecovery,
-          recoveredFromSilentPolls:
-            tick.recoveredFromSilentPolls || state.noProgressSilentPolls,
-          watcherPid: pid,
-        };
-        emit(payload);
-        state.healthState = 'healthy';
-        state.noProgressSilentPolls = 0;
-        state.spawnsSinceRecovery = 0;
-        // Recovery is recorded in the heartbeat and emitted as telemetry.  It
-        // is deliberately not delivered as a page or a stand-alone alert.
-        return payload;
-      }
+      const recovery = recordRecovery(tick.spawnCount, tick.recoveredFromSilentPolls);
       state.spawnsSinceRecovery = 0;
-      return null;
+      return recovery;
     }
 
+    state.silentPollsSinceLastSpawn += 1;
+    // In-flight reviewers exclude only their own PR from pendingSet. An
+    // unrelated reviewer must not hide waiting first passes. Quiet polls break
+    // the waiting streak, but preserve the silent-poll recovery metric.
+    if (tick.openPendingPRs === 0) {
+      state.pollsSinceLastSpawn = 0;
+      return null;
+    }
     state.pollsSinceLastSpawn += 1;
     if (
       state.pollsSinceLastSpawn >= config.threshold &&
@@ -136,6 +175,7 @@ function createWatcherHealthProbe({
         event: 'watcher.no_progress',
         pollsSinceLastSpawn: state.pollsSinceLastSpawn,
         openPendingPRs: tick.openPendingPRs,
+        openPendingRereviewPRs: tick.openPendingRereviewPRs,
         samplePRs: tick.samplePRs,
         lastSpawnAt: state.lastSpawnAt,
         watcherPid: pid,
@@ -156,9 +196,6 @@ function createWatcherHealthProbe({
       return payload;
     }
 
-    if (state.healthState === 'no_progress' && tick.openPendingPRs === 0) {
-      state.noProgressSilentPolls = state.pollsSinceLastSpawn;
-    }
     return null;
   }
 
@@ -166,6 +203,7 @@ function createWatcherHealthProbe({
     beginTick,
     finishTick,
     recordOpenPending,
+    recordInFlight,
     recordSpawn,
     getState() {
       return { ...state };

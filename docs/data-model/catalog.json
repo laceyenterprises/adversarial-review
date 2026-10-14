@@ -154,6 +154,7 @@
         "src/remediation-quota-hold.mjs",
         "src/remediation-claimed-requeue.mjs",
         "src/remediation-worker-class-fallback.mjs",
+        "src/remediation-published-head.mjs",
         "src/remediation-round-accounting.mjs",
         "src/remediation-infrastructure-refund.mjs",
         "src/remediation-quota-evidence.mjs",

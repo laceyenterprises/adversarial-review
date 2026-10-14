@@ -1,6 +1,6 @@
 // REMLINK-01: recovery requires worker/service evidence, never just a moved head.
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { markFollowUpJobCompleted, readFollowUpJob, writeFollowUpJob, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
 import { withFollowUpJobLock } from './follow-up-job-write.mjs';
@@ -8,6 +8,15 @@ import { requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { requestRereviewWake, REREVIEW_WAKE_REASONS } from './rereview-wake.mjs';
 import { resolveRemediationReplyTarget, resolveReplyStorageKey } from './remediation-reply-paths.mjs';
+import { hasWorkerJobTrailer } from './comment-only-final-round.mjs';
+
+function isCurrentAttemptReply(replyPath, round, worker) {
+  const spawnedMs = Date.parse(worker.spawnedAt || round?.spawnedAt || '');
+  try {
+    const stat = statSync(replyPath);
+    return Number.isFinite(spawnedMs) && stat.isFile() && stat.mtimeMs >= spawnedMs;
+  } catch { return false; }
+}
 
 function workerWorkspacePath(rootDir, job, worker) {
   const stored = job?.workspaceDir || worker.workspaceDir;
@@ -27,8 +36,20 @@ export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImp
   const round = plan?.rounds?.find(entry => entry.round === roundNumber);
   const worker = job?.remediationWorker || round?.worker || {};
   const startHead = round?.startHeadSha || job?.revisionRef;
-  if (!round || !headSha || !startHead || headSha === startHead
-    || (!round.spawnedAt && !worker.spawnedAt && !round.publishedHeadSha)) return null;
+  if (!round || !/^[a-f0-9]{40}$/i.test(headSha || '') || !startHead
+    || [startHead, job?.revisionRef].includes(headSha)
+    || (!round.spawnedAt && !worker.spawnedAt)) return null;
+
+  // Movement, a fetched branch tip, and model-written reply text cannot attest
+  // authorship. Read the exact tip and the hook's job trailer in one git call.
+  const workspaceDir = workerWorkspacePath(rootDir, job, worker);
+  if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) return null;
+  try {
+    const output = String(execFileSyncImpl('git', ['-C', workspaceDir, 'show', '--no-patch', '--format=%H%n%B', 'HEAD'],
+      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }));
+    const [tip, ...message] = output.split(/\r?\n/u);
+    if (tip !== headSha || !hasWorkerJobTrailer(message.join('\n'), job?.jobId)) return null;
+  } catch { return null; }
 
   let reply = null;
   let replyPath = null;
@@ -37,29 +58,11 @@ export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImp
     replyPath = worker.replyPath || job?.remediationReply?.path
       || target.resolvePath({ launchRequestId: resolveReplyStorageKey(job) }).replyPath;
     replyPath = resolve(rootDir, replyPath);
-    if (existsSync(replyPath)) reply = readRemediationReplyArtifact(replyPath, { expectedJob: job });
+    if (isCurrentAttemptReply(replyPath, round, worker)) reply = readRemediationReplyArtifact(replyPath, { expectedJob: job });
   } catch {
     // A missing/invalid reply cannot supply publish evidence.
   }
-  const result = source => ({ round, worker, headSha, startHead, source, reply, replyPath });
-  if (round.publishedHeadSha === headSha) return result('round.publishedHeadSha');
-  // The reply contract names a push in its summary/validation, not a local commit.
-  if (reply && [reply.summary, ...(reply.validation || [])].some(text =>
-    [...String(text).matchAll(/\bpushed (?:commit |PR head (?:is )?)?([a-f0-9]{7,40})\b/gi)]
-      .some(match => match[1].toLowerCase() === headSha.toLowerCase()))) return result('worker-reply');
-
-  const workspaceDir = workerWorkspacePath(rootDir, job, worker);
-  if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) return null;
-  try {
-    const branch = String(execFileSyncImpl('git', ['-C', workspaceDir, 'symbolic-ref', '--quiet', 'HEAD'],
-      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] })).trim();
-    if (!branch.startsWith('refs/heads/')) return null;
-    const tip = String(execFileSyncImpl('git', ['-C', workspaceDir, 'rev-parse', '--verify', `${branch}^{commit}`],
-      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] })).trim();
-    return tip === headSha ? result('workspace-branch-tip') : null;
-  } catch {
-    return null;
-  }
+  return { round, worker, headSha, startHead, source: 'workspace-worker-job-trailer', reply, replyPath };
 }
 
 // The same terminal writer as ordinary completion owns the round and job move.
@@ -87,7 +90,15 @@ export function completeWorkerPublishedHead({
       // Final comment-only rounds hand off to the ordinary watcher cap/closure lane.
       // Other rounds request the existing rereview transition, which retains its caps
       // and authoritative terminal-PR guards. No merge decision is made here.
-      let reReview;
+      let reReview = job.finalRound === 'comment-only'
+        ? { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' }
+        : { requested: true, status: 'pending', requestedAt: completedAt, reason: reply?.reReview?.reason || null };
+      const completed = markFollowUpJobCompleted({ rootDir, jobPath, completedAt,
+        resultingHeadSha: headSha,
+        remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
+        remediationReply, reReview,
+        completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source },
+      });
       if (job.finalRound === 'comment-only') {
         reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
         requestWatcherWakeImpl({ rootDir, reason: 'comment-only-final-round-completed',
@@ -107,12 +118,9 @@ export function completeWorkerPublishedHead({
             requestedAt: completedAt, outcome: wake?.outcome, watcherWoken: wake?.watcherWake?.requested === true };
         }
       }
-      const completed = markFollowUpJobCompleted({ rootDir, jobPath, completedAt,
-        resultingHeadSha: headSha,
-        remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
-        remediationReply, reReview,
-        completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source },
-      });
+      completed.job.reReview = reReview;
+      completed.job.remediationPlan.rounds.find(entry => entry.round === round.round).reReview = reReview;
+      writeFollowUpJob(completed.jobPath, completed.job);
       return completed;
     });
   } catch (error) {
@@ -134,7 +142,7 @@ export function hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace = tru
     const replyPath = worker.replyPath || job?.remediationReply?.path
       || resolveRemediationReplyTarget(process.env, { requireExists: false })
         .resolvePath({ launchRequestId: resolveReplyStorageKey(job) }).replyPath;
-    return existsSync(resolve(rootDir, replyPath));
+    return isCurrentAttemptReply(resolve(rootDir, replyPath), round, worker);
   } catch { return false; }
 }
 

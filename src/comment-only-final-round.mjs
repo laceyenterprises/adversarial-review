@@ -34,7 +34,7 @@ function cherryEntries(stdout) {
   });
 }
 
-function hasWorkerJobTrailer(message, jobId) {
+export function hasWorkerJobTrailer(message, jobId) {
   if (!jobId || /[\r\n]/u.test(jobId)) return false;
   const paragraph = String(message || '').trimEnd().split(/\r?\n\s*\r?\n/u).at(-1);
   const lines = paragraph.split(/\r?\n/u);

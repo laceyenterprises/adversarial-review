@@ -2,7 +2,7 @@
 
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
-**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`
+**Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
 
 ## Missing retrigger-review label-event observations
@@ -65,7 +65,9 @@ The persisted accounting fields are:
 - `remediationPlan.rounds[].resultingHeadSha`: the live PR head SHA observed by
   the daemon when a round completes successfully. It is `null` without live
   lifecycle confirmation; legacy completed rounds may lack it. Worker replies
-  cannot attest this field. Unlike `publishedHeadSha`, it may equal the start
+  cannot attest this field. Recovery additionally requires the exact workspace
+  tip to match the live head and carry this job's `Worker-Job-Id` trailer.
+  Unlike `publishedHeadSha`, it may equal the start
   head when no head movement occurred.
 - `remediationWorker.recordedOutcome`: optional `failureReason`, `exitCode` and
   `signal` captured from local child error/exit events. HQ outcomes instead come
@@ -82,9 +84,11 @@ Unreadable or malformed job files are skipped individually, preserving valid
 evidence from other completed jobs. If the directory cannot be read, no round
 evidence is available.
 
-The retry transition removes the claimed round and decrements `currentRound`;
-the next claim reuses that round number. `retryHistory[]` retains the removed
-round's worker outcome in `worker`, plus `retryMetadata` with
+The retry transition retains the round and its attempt metadata while decrementing
+`currentRound`; the next claim reuses that round number and merges the retained
+record before resetting its claim identity, delivery key, `state` and
+`startHeadSha`. `retryHistory[]` retains the attempt's worker outcome in `worker`,
+plus `retryMetadata` with
 `code: "infrastructure-refund"`, `reason`, `startHead`, `endHead`, `workerClass`
 and `harnessSpecific`. `retryReason` is `not charged: <reason>` and `retryAfter`
 is the settlement timestamp. Only one refund is allowed per charged round on
@@ -109,6 +113,39 @@ it uses the uncapped primary; an infrastructure failure alone cannot create a
 `quota-exhausted` hold. A chosen fallback records
 `fallbackResolution.reason: "infrastructure-fallback"` and its infrastructure
 reason as `capSource`; ordinary quota holds retain REMFALLBACK-01 semantics.
+
+## Published-head recovery (REMLINK-01)
+
+Pending retries retain `rounds[].spawnedAt`, `publishedHeadSha` and `worker`
+for recovery before another attempt. Claim merges that retained round into the
+new claim; this retention alone grants no authorship or merge proof. A pre-spawn
+requeue removes a purely claimed round, but preserves a round with `spawnedAt`
+or `publishedHeadSha`, and decrements `currentRound` to reuse the same number.
+
+`findWorkerPublishedHead` in `src/remediation-published-head.mjs` requires a
+spawned attempt, a changed authoritative live head (different from both
+`startHeadSha` and `revisionRef`), and a workspace tip matching that head with
+exactly one valid `Worker-Job-Id` trailer matching `jobId`. Missing or unreadable
+workspaces and mismatched trailers fail closed. `publishedHeadSha` records
+movement only; reply prose and a matching tip without provenance cannot attest
+worker authorship. Replies predating the attempt's `spawnedAt` are ignored.
+
+Successful recovery uses the ordinary terminal writer to complete the retained
+round and job, setting `resultingHeadSha` to the live, proven head. Job and round
+`completion` contain `source: "worker-published-head-recovery"` and
+`publishEvidence: "workspace-worker-job-trailer"`. A current valid reply, if
+present, is retained in `remediationReply`; no reply is required to establish the
+independent commit proof. The terminal record is written before follow-on
+requests; `reReview` records the request intent and then its outcome. Ordinary
+rounds request re-review and wake the watcher; comment-only final rounds wake
+the existing cap/closure lane with re-review suppressed. Recovery itself grants
+no CI waiver or merge decision.
+
+The stale-claim sweep probes recovery after its activity, age and CPU gates.
+An exited worker with current result artifacts can be reconciled earlier.
+If reply reconciliation still reports `active` after the stale gates pass,
+the sweep continues to the existing signal-and-requeue path. A reply file
+therefore cannot reserve a hung worker's slot indefinitely.
 
 ## Re-review accepted with CI pending at timeout (CIBLOCKHAM-01)
 
@@ -149,8 +186,8 @@ A transient `hq dispatch --help` failure before spawn reuses the existing
 `remediationPlan.transientRetries`, `retryAfter`, and `retryHistory[]` fields.
 The retry history's `retryMetadata` contains
 `{ code: "hq-conflicted-base-probe-transient", recoverable: true }`, and
-`retryReason` retains the subprocess diagnostic. The claimed round is removed
-and `currentRound` decremented so the next claim retries the same round.
+`retryReason` retains the subprocess diagnostic. Transient requeue retains the
+round and decrements `currentRound` so the next claim retries the same round.
 `nextAction.operatorOverride=true` is retained on the claim's `worker-spawn`
 action and restored on the retry's `consume-pending-round` action when the
 pending job carried it. Successful spawn replaces that action normally.

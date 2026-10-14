@@ -969,7 +969,7 @@ async function sweepStuckInProgressClaims({
         const reconcile = reconcileFollowUpJobImpl || (await import('./follow-up-remediation.mjs')).reconcileFollowUpJob;
         const result = await reconcile({ rootDir, job, jobPath, resolvePRLifecycleImpl, isWorkerRunning,
           execFileImpl, now: () => reclaimedAtIso, postCommentImpl, log });
-        if (result.action !== 'skipped') { skipped += 1; continue; }
+        if (!['skipped', 'active'].includes(result.action)) { skipped += 1; continue; }
       }
     }
 

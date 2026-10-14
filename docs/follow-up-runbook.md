@@ -68,6 +68,20 @@ producer contract must be confirmed in agent-os. In particular, a worker that
 reports a publish refusal but finishes `succeeded` stays charged; covering that
 incident needs an agent-os dispatch-status follow-up, not narrative inference.
 
+## Published-head recovery (REMLINK-01)
+
+A lost worker result can complete a round only when the live PR head matches a
+workspace tip carrying the job's exact `Worker-Job-Id` provenance trailer and
+differs from the round start and reviewed heads. Recorded head movement and
+reply prose alone never establish authorship. Pending retries retain attempt
+metadata for this check; replies older than the attempt's spawn are ignored.
+Recovery writes the completed job before requesting re-review or waking the
+comment-only final-round closure lane. The daemon logs its `completed` count.
+The stale-claim sweep still signals and requeues hung workers when reply
+reconciliation returns `active` after the stale activity gates pass. See the
+[job data model](data-model/follow-up-jobs.md#published-head-recovery-remlink-01)
+for persisted proof and completion fields.
+
 ## Operator decision notices (REVIEWNOTICE-01)
 
 When the watcher projects `operatorDecisionRequired`, it observes the PR head

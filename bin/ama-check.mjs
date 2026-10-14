@@ -450,6 +450,8 @@ function buildVerifiedHamCommit(commitJson) {
     sha,
     parentSha,
     trailers: parseCommitTrailers(message),
+    // Preserve hosting-service verification for the HAM-author/web-flow shape.
+    ...(commitJson.commit ? { commit: commitJson.commit } : {}),
     author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
     committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
     changedFiles,

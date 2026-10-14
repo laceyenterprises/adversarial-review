@@ -264,6 +264,7 @@ function runAmaCheck(tmp, {
   strictNonBlockingRemediation = true,
   timeline = null,
   hamTerminalRemediation = null,
+  publishedCommit = null,
   primaryChangeEvidence = undefined,
   rebaseAssessment = null,
   reviewCycleExhausted = null,
@@ -286,7 +287,7 @@ function runAmaCheck(tmp, {
     paths.hamTerminalRemediation = join(tmp, 'ham-terminal-remediation.json');
     paths.hamCommit = join(tmp, 'ham-commit.json');
     writeJson(paths.hamTerminalRemediation, hamTerminalRemediation);
-    writeJson(paths.hamCommit, hamCommitFixture({
+    writeJson(paths.hamCommit, publishedCommit || hamCommitFixture({
       headSha: HAM_SHA,
       parentSha: HEAD_SHA,
       workerClass: hamTerminalRemediation?.commit?.trailers?.['Worker-Class'] || 'hammer',
@@ -1799,4 +1800,37 @@ test('ama-check requires history evidence even when a caller omits the HAM claim
   // evidence is refused by the primary-change gate rather than the cost gate.
   assert.ok(verdict.reasons.includes('primary-change-unknown'), JSON.stringify(verdict.reasons));
   assert.ok(!verdict.reasons.includes('ci-cost-read-failed'), JSON.stringify(verdict.reasons));
+});
+
+
+test('HAMPREDICATE-01: whole CLI predicate retains API signature evidence and git identity', t => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ham-publication-identity-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const original = hamCommitFixture();
+  const api = { ...original, committer: { login: 'web-flow' },
+    commit: { ...original.commit, verification: { verified: true, reason: 'valid' } } };
+  for (const [commit, accepted] of [
+    [api, true], [original, true],
+    [{ ...api, commit: { ...api.commit, verification: { verified: false, reason: 'unsigned' } } }, false],
+    [{ ...api, commit: { ...api.commit, verification: { verified: true, reason: 'invalid' } } }, false],
+    [{ ...api, author: { login: 'foreign-builder' } }, false],
+    [{ ...api, committer: { login: 'foreign-committer' } }, false],
+  ]) {
+    const run = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody: '{"required_status_checks":{"contexts":["agent-os/adversarial-gate"]}}',
+      prPatch: { headRefOid: HAM_SHA, labels: [], statusCheckRollup: [
+        { name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+        { name: 'test', conclusion: 'SUCCESS' },
+      ] },
+      reviews: [{ state: 'CHANGES_REQUESTED', body: BLOCKING_COMMENT_BODY,
+        author: AUTHORITATIVE_REVIEWER, submittedAt: '2026-01-01T12:00:00Z', commit: { oid: HEAD_SHA } }],
+      hamTerminalRemediation: hamTerminalEvidence(), publishedCommit: commit, reviewCycleExhausted: true,
+    });
+    const verdict = JSON.parse(run.stdout);
+    assert.equal(verdict.trace.hamTerminalRemediation.checks.commitIdentity, accepted);
+    // Existing authenticated exact-head audit authority is unchanged; identity
+    // refusals remain visible even when that independent authority is present.
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict));
+  }
 });

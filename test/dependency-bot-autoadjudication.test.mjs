@@ -730,3 +730,53 @@ test('DEPWAIT-01 unavailable recovery evidence leaves completion and the once al
   assert.equal(result.attempted, false);
   assert.equal(readFileSync(args.jobRecord.jobPath, 'utf8'), before);
 }));
+
+for (const [name, decline, settled] of [
+  ['mergeability unknown', { disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-mergeability-unknown'] }, true],
+  ['pending CI', { disposition: 'not-taken', reason: 'not-eligible', reasons: ['ci-not-green'], liveGate: { requiredChecks: PENDING_CHECKS } }, false],
+  ['existing defer', { disposition: 'deferred', reason: 'lease-contended' }, false],
+  ['moved head', { disposition: 'deferred', reason: 'pr-head-moved' }, true],
+]) {
+  test(`DEPWAIT-01 reviewed major bump keeps its existing merge settlement for ${name}`, async () => withRoot(async (rootDir) => {
+    const args = baseArgs(rootDir, { title: 'chore(deps): bump fixture-package from 1.0.0 to 2.0.0' });
+    const completed = completeArgusJob({ rootDir, jobPath: args.jobRecord.jobPath, job: args.jobRecord.job,
+      result: { source: 'argus-security-drain', verdict: 'approve', findings: [] } });
+    const result = await maybeAutoAdjudicateDependencyBotArgusJob({
+      ...args, jobRecord: { ...completed, bucket: 'completed' },
+      fetchMergeRecoveryEvidenceImpl: async () => assert.fail('reviewed approval is not a withheld auto-adjudication'),
+      runDaemonCleanMergeAttemptImpl: async () => decline,
+    });
+    assert.equal(result.completed.job.result.verdict, 'approve');
+    assert.equal(result.completed.job.result.source, 'argus-security-drain');
+    assert.equal(result.completed.job.result.merge.settled, settled);
+    assert.equal(result.completed.job.mergeWithheldRecovery, undefined);
+  }));
+}
+
+test('DEPWAIT-01 grouped updates remain owned by the security review drain', async () => withRoot(async (rootDir) => {
+  const args = baseArgs(rootDir, { title: 'chore(deps): bump the fixture group with 2 updates' });
+  const run = () => maybeAutoAdjudicateDependencyBotArgusJob({
+    ...args,
+    jobRecord: findArgusJob(rootDir, { repo: REPO, prNumber: 966, headSha: HEAD }),
+    runDaemonCleanMergeAttemptImpl: async () => assert.fail('grouped updates require review'),
+  });
+  const routed = await run();
+  assert.equal(routed.routed.job.routedForReview.reason, 'unparsed-dependabot-title');
+  assert.equal(isArgusJobClaimable(routed.routed.job), true);
+  assert.equal((await run()).reason, 'routed-for-review');
+}));
+
+for (const [name, decline] of [
+  ['strict BEHIND', { disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-not-mergeable'],
+    liveGate: { prState: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'BEHIND', requiredChecks: GREEN_CHECKS } }],
+  ['draft merge rejection', { disposition: 'failed-closed', reason: 'permanent-merge-rejection', permanent: true }],
+  ['missing reasons', { disposition: 'not-taken', reason: 'not-eligible', reasons: [] }],
+]) {
+  test(`DEPWAIT-01 ${name} retains its existing withheld result`, async () => withRoot(async (rootDir) => {
+    const result = await maybeAutoAdjudicateDependencyBotArgusJob({
+      ...baseArgs(rootDir), runDaemonCleanMergeAttemptImpl: async () => decline,
+    });
+    assert.equal(result.completed.job.result.verdict, 'needs_verification');
+    assert.equal(result.completed.job.result.autoadjudication.reason, `merge-withheld-${decline.reason}`);
+  }));
+}

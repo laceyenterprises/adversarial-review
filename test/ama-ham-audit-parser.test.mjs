@@ -124,5 +124,19 @@ for (const findingLine of [
     assert.deepEqual(build('HAM audit: Doc-currency: updated README.md.').auditComment.docCurrency, {
       status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'],
     }, 'legacy inline attestations still work');
+    assert.deepEqual(build('- Doc-currency: updated README.md.').auditComment.docCurrency, {
+      status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'],
+    }, 'unclassified legacy validation bullets still work');
   });
 }
+
+test('HAM audit standalone doc-currency wins over an earlier legacy validation bullet', () => {
+  const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({
+    reviewedHead: 'abc123',
+    verifiedCommit: { sha: 'def456', changedFiles: ['README.md'] },
+    verifiedAuditComment: { body: '- Doc-currency: not applicable.\nDoc-currency: updated README.md.' },
+  });
+  assert.deepEqual(evidence.auditComment.docCurrency, {
+    status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'],
+  });
+});

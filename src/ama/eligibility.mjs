@@ -696,6 +696,9 @@ function hamDocCurrencyLine(body) {
     .replace(/\r\n/g, '\n')
     .split('\n');
   return lines.find((line) => /^[ \t]*doc-currency\s*:/i.test(line))
+    // Older validation lists used an unclassified Doc-currency bullet.
+    || lines.find((line) => /^[ \t]*-[ \t]+doc-currency\s*:/i.test(line)
+      && !/\((?:blocking|non-blocking)\)/i.test(line))
     // Retain legacy inline audit prose, but never consume a finding bullet.
     || lines.find((line) => !/^[ \t]*[-*][ \t]+/.test(line)
       && !/\((?:blocking|non-blocking)\)/i.test(line) && /\bdoc-currency\s*:/i.test(line)) || '';

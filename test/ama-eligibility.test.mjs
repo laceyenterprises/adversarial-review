@@ -3199,7 +3199,7 @@ for (const findingLine of [
     const { reviewState, prMetadata, cfg } = eligibleFixture({
       prMetadata: { headSha: 'def67890' },
     });
-    for (const claim of ['', '  Doc-currency: updated; README.md.', 'HAM audit: Doc-currency: updated README.md.']) {
+    for (const claim of ['', '  Doc-currency: updated; README.md.', 'HAM audit: Doc-currency: updated README.md.', '- Doc-currency: updated README.md.']) {
       const auditBody = [findingLine, claim].filter(Boolean).join('\r\n');
       const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
         env: ENV,
@@ -3213,6 +3213,19 @@ for (const findingLine of [
     }
   });
 }
+
+test('ham terminal remediation: standalone doc-currency wins over a legacy validation bullet', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({ prMetadata: { headSha: 'def67890' } });
+  const auditBody = '- Doc-currency: not applicable.\nDoc-currency: updated README.md.';
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ auditBody,
+      docCurrency: { status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'] },
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ auditBody, changedFiles: ['README.md'] }),
+  });
+  assert.equal(result.trace.hamTerminalRemediation.checks.docCurrency, true);
+});
 
 test('ham terminal remediation: App audit author is mandatory; bookkeeping and empty diff do not veto a validated head', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({

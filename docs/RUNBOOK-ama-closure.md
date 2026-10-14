@@ -2129,7 +2129,8 @@ or skipped superproject obligations. Publication replaces standalone
 `Doc-currency:` attestations in the details file with this rendered claim;
 finding titles containing `Doc-currency:` are preserved. Supply these before
 rendering the helper. Consumers prefer the standalone claim and retain legacy
-inline audit prose as a fallback, excluding finding bullets and lines with
+unclassified `- Doc-currency:` validation bullets and inline audit prose as
+fallbacks, excluding finding bullets and lines with
 `(blocking)` or `(non-blocking)` finding classification markers. A successful
 post or refresh sets `HAM_PUBLISHED_AUDIT_HEAD` to the head that the audit names.
 The `hammer-merge` phase requires that marker and an owned, run-scoped `HAM_VERDICT_FILE` produced after audit publish by a successful `ama-check` call. The caller sets `HAM_VERDICT_READY_FILE` to the same path only after that call succeeds and removes the file after merge. The verdict must have

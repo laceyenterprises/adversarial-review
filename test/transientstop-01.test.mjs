@@ -168,6 +168,61 @@ test('TRANSIENTSTOP-01: legacy last-run fallback survives repeated skipped polls
   assert.equal(gate.evaluate(handler).run, true);
 });
 
+test('TRANSIENTSTOP-01: review-row read faults retain head-based evidence cadence and ordinary backoff', t => {
+  for (const evidenceStop of [false, true]) {
+    const { args } = fixture(t);
+    if (evidenceStop) stopAudit(args.rootDir, 'history-read-failed');
+    const identity = { repo, prNumber: 1 };
+    for (let i = 0; i < 20; i++) recordNoProgressLaneRun(args.rootDir, identity, {
+      headSha: head, fingerprint: 'unchanged', now: at(0), logger,
+    });
+    const warnings = [];
+    let clock = at(60_000);
+    const gate = createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
+      readReviewRow: () => { throw new Error('SQLITE_BUSY: database is locked'); },
+      now: () => clock, logger: { ...logger, warn: message => warnings.push(message) } });
+    const handler = { repoPath: repo, prNumber: 1, headSha: head };
+    const waiting = gate.evaluate(handler);
+    assert.equal(waiting.run, false);
+    assert.equal(waiting.reason, evidenceStop ? 'hammer-evidence-wait' : 'slow-lane-backoff');
+    clock = at(300_000);
+    const due = gate.evaluate(handler);
+    assert.equal(due.run, evidenceStop);
+    assert.equal(due.reason, evidenceStop ? 'hammer-evidence-due' : 'slow-lane-backoff');
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[0], /review-row read failed for fixture\/repo#1 .*SQLITE_BUSY.*evaluating by head/);
+  }
+});
+
+test('TRANSIENTSTOP-01: skips preserve explicit null last-run timestamps', t => {
+  const { args } = fixture(t);
+  const identity = { repo, prNumber: 1 };
+  recordNoProgressLaneRun(args.rootDir, identity, { headSha: head, fingerprint: 'unchanged', now: null, logger });
+  const ledger = readNoProgressLane(args.rootDir, identity);
+  ledger.updatedAt = at(0);
+  writeFileSync(noProgressLaneFilePath(args.rootDir, identity), JSON.stringify(ledger));
+  for (const ms of [60_000, 120_000]) {
+    recordNoProgressLaneSkip(args.rootDir, identity, { headSha: head, now: at(ms), logger });
+    const skipped = readNoProgressLane(args.rootDir, identity);
+    assert.equal(skipped.lastRunAt, null);
+    assert.equal(skipped.updatedAt, at(ms));
+    assert.equal(skipped.skippedTicks, ms / 60_000);
+  }
+});
+
+test('TRANSIENTSTOP-01: explicit null run anchor admits an evidence walk despite recent skips', t => {
+  const { args } = fixture(t);
+  stopAudit(args.rootDir, 'history-read-failed');
+  const identity = { repo, prNumber: 1 };
+  recordNoProgressLaneRun(args.rootDir, identity, { headSha: head, fingerprint: 'unchanged', now: null, logger });
+  recordNoProgressLaneSkip(args.rootDir, identity, { headSha: head, now: at(60_000), logger });
+  const gate = createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
+    readReviewRow: () => ({ reviewer_head_sha: head }), now: () => at(60_001), logger });
+  const decision = gate.evaluate({ repoPath: repo, prNumber: 1, headSha: head });
+  assert.equal(decision.run, true);
+  assert.equal(decision.reason, 'hammer-evidence-due');
+});
+
 for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass releases and dispatches without a review event (omit timestamp=${omitTimestamp})`, async t => {
   const { args, pages } = fixture(t);
   stopAudit(args.rootDir, 'history-read-failed');

@@ -723,8 +723,8 @@ export function recordNoProgressLaneSkip(rootDir, identity, {
     ...existing,
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     skippedTicks,
-    // Preserve the legacy cadence anchor before updatedAt advances on a skip.
-    lastRunAt: existing.lastRunAt ?? existing.updatedAt ?? null,
+    // Preserve explicit null (no walk) and migrate only absent legacy anchors.
+    lastRunAt: existing.lastRunAt !== undefined ? existing.lastRunAt : (existing.updatedAt ?? null),
     updatedAt: now || existing.updatedAt || null,
   });
   return { skippedTicks, headSha: head };

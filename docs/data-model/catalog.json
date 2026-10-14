@@ -373,6 +373,7 @@
       ],
       "owner": "watcher posted-review dispatch fairness",
       "optionalCadenceFields": ["lastRunAt"],
+      "lastRunAtContract": "Explicit null means no recorded walk; only absent legacy fields fall back to updatedAt",
       "evidenceStopRecheckMs": 300000
     },
     {

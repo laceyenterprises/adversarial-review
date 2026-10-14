@@ -898,20 +898,30 @@ export function createNoProgressLaneGate({
       const ledger = readNoProgressLane(rootDir, identity, { logger });
       let decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
       const observedAt = now();
+      let reviewedSha = null;
+      try {
+        reviewedSha = readReviewRow(handler.repoPath, handler.prNumber)?.reviewer_head_sha ?? null;
+      } catch (err) {
+        logger?.warn?.(
+          `[watcher] no-progress lane: review-row read failed for ` +
+            `${handler.repoPath}#${handler.prNumber} (${err?.message || err}); evaluating by head`,
+        );
+      }
       // Evidence can recover without a review-row mutation or a wake event.
       // Only unresolved, unpaged stops use the shorter cadence. Historical
       // audit records must not keep released/paged stops outside normal backoff.
       const stop = readHammerStopForHead({
         hqRoot, ...identity, headSha: handler.headSha,
-        reviewedSha: readReviewRow(handler.repoPath, handler.prNumber)?.reviewer_head_sha,
+        reviewedSha,
         logger,
       });
       if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) {
         const hold = readHammerStopHoldForHead({ rootDir, ...identity,
           headSha: handler.headSha, stopKey: stop.stopKey });
         if (!hold?.releasedAt && !hold?.pagedAt) {
+          const lastRunAt = ledger?.lastRunAt !== undefined ? ledger.lastRunAt : ledger?.updatedAt;
           const lastRunMs = ledger?.headSha === handler.headSha
-            ? Date.parse(ledger.lastRunAt ?? ledger.updatedAt ?? '') : NaN;
+            ? Date.parse(lastRunAt ?? '') : NaN;
           const elapsedMs = Date.parse(observedAt) - lastRunMs;
           const due = !Number.isFinite(elapsedMs) || elapsedMs >= HAMMER_EVIDENCE_RECHECK_INTERVAL_MS;
           decision = { ...decision, due, reason: due ? 'hammer-evidence-due' : 'hammer-evidence-wait',

@@ -686,13 +686,16 @@ test('AGYCOOLDOWN-01: runtime quota evidence records the identity from its lease
       agyReviewerIdentityPool: {
         plan: () => ({ multi: true }),
         acquire: async () => ({ user: 'reviewer-b', hqOwner: false, reviewId: 'synthetic-review' }),
-        release: async () => { released = true; },
+        release: async () => {
+          assert.ok(readGeminiQuotaCooldown({ rootDir, env, identityUser: 'reviewer-b' }), 'cooldown must exist before the lease is released');
+          released = true;
+        },
       },
       reviewerRuntimeAdapterOverride: {
         describe: () => ({ capabilities: { agyReviewerIdentity: true } }),
         async spawnReviewer({ subjectContext }) {
           assert.equal(subjectContext.agyIdentity.user, 'reviewer-b');
-          return { ok: false, failureClass: 'quota-exhausted', stderr: 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 50h' };
+          return { ok: false, failureClass: 'quota-exhausted', stderrTail: 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 50h' };
         },
       },
     });

@@ -19,7 +19,7 @@
 
 import { readFile as readFileAsync } from 'node:fs/promises';
 import { adapterCarriesAgyReviewerIdentity, getAgyReviewerIdentityPool } from './agy-reviewer-identities.mjs';
-import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
+import { reviewerRuntimeState, resolveReviewerRuntimeAdapterForDomainId } from './reviewer-runtime-adapter.mjs';
 import { writeReviewerTokenUsageArtifact } from './reviewer-pass-tokens.mjs';
 import { fetchGeminiCredentialConcurrency, reviewerDispatchCandidateUsesGemini, reviewerDispatchCandidateGeminiSeats } from './watcher-reviewer-pool.mjs';
 
@@ -106,7 +106,11 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
     fetchCredentialConcurrency = fetchGeminiCredentialConcurrency,
     readSharedSecret = readReviewerBrokerSharedSecretBestEffort,
     identityPool = getAgyReviewerIdentityPool(),
-    resolveCandidateAdapter = (candidate) => candidate?.reviewerRuntimeAdapter || reviewerRuntimeState.adapter,
+    resolveDomainAdapter = resolveReviewerRuntimeAdapterForDomainId,
+    resolveCandidateAdapter = (candidate) => candidate?.reviewerRuntimeAdapter
+      || resolveDomainAdapter(candidate?.domainId || candidate?.subject?.domainId)
+      || reviewerRuntimeState.adapter,
+    logger = console,
   } = {}
 ) {
   const geminiCandidates = candidates.filter(reviewerDispatchCandidateUsesGemini);
@@ -135,17 +139,30 @@ export async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
     requiredSeats: leasingCandidates.length > 0
       ? Math.min(...leasingCandidates.map(reviewerDispatchCandidateGeminiSeats)) : 1,
   });
-  if (readyIdentities !== null && leasingCandidates.length === geminiCandidates.length) return readyIdentities;
+  const readyUsers = readyIdentities === null ? [] : identityPool.readyUsers?.() || [];
+  const report = (limit, brokerLimit = null) => {
+    logger.log?.(`[agy-identities] ready=${readyUsers.join(',') || '<none>'} limit=${limit ?? '<unknown>'} brokerLimit=${brokerLimit ?? '<unknown>'} leasingCandidates=${leasingCandidates.length}/${geminiCandidates.length}`);
+    return limit;
+  };
+  // Clear prior per-candidate evidence on each pass (config and readiness can
+  // change while a deferred candidate remains in the queue).
+  for (const candidate of geminiCandidates) delete candidate.geminiCredentialConcurrency;
+  if (readyIdentities !== null && leasingCandidates.length === geminiCandidates.length) return report(readyIdentities);
 
   const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || DEFAULT_CQP_BROKER_URL;
   const brokerCount = await fetchCredentialConcurrency({
     brokerUrl,
     secret: brokerUrl ? await readSharedSecret(env) : '',
   });
-  if (readyIdentities === null) return brokerCount;
-  // Mixed runtimes in one drain: leasing reviews must stay within the ready
-  // identities and HQ-owner reviews within the broker count, so bound the
-  // shared Gemini cap by both.
+  if (readyIdentities === null) return report(brokerCount, brokerCount);
+  // A broker-only candidate cannot bound the identity-backed candidates to
+  // zero. Keep each candidate under the capacity of the runtime it uses. The
+  // queue still subtracts all active Gemini seats from either limit, preserving
+  // conservative admission across mixed runtimes and recovered pipeline seats.
   const broker = Number.parseInt(String(brokerCount ?? ''), 10);
-  return Number.isFinite(broker) ? Math.min(readyIdentities, broker) : readyIdentities;
+  const leasingSet = new Set(leasingCandidates);
+  for (const candidate of geminiCandidates) {
+    candidate.geminiCredentialConcurrency = leasingSet.has(candidate) ? readyIdentities : brokerCount;
+  }
+  return report(Number.isFinite(broker) ? Math.max(readyIdentities, broker) : Math.max(readyIdentities, 1), brokerCount);
 }

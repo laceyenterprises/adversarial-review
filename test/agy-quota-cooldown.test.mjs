@@ -70,3 +70,65 @@ test('AGYCOOLDOWN-01: both quotas hold the mode, then the first reset restores o
     await f.pool.release(lease);
   } finally { f.cleanup(); }
 });
+
+test('AGYCOOLDOWN-01: a ready added cli-direct identity dispatches with zero broker credentials', async () => {
+  const { createCliDirectReviewerRuntimeAdapter } = await import('../src/adapters/reviewer-runtime/cli-direct/index.mjs');
+  const { resolveReviewerRuntimeAdapterForDomainId, reviewerRuntimeState } = await import('../src/reviewer-runtime-adapter.mjs');
+  const { resolveGeminiCredentialConcurrencyForDispatchCandidates } = await import('../src/reviewer-runtime-support.mjs');
+  const { fetchGeminiCredentialConcurrency, runBoundedReviewerDispatchQueue } = await import('../src/watcher-reviewer-pool.mjs');
+  const f = fixture([added]);
+  const previous = reviewerRuntimeState.adapter;
+  const lines = [];
+  const logger = { log: line => lines.push(line), warn() {}, error() {} };
+  try {
+    const brokerCount = await fetchGeminiCredentialConcurrency({
+      brokerUrl: 'http://broker.invalid', fetchImpl: async () => ({ ok: true,
+        json: async () => ({ credentials: [{ credential_id: 'synthetic-credential', is_cooled: true }] }),
+      }),
+    });
+    assert.equal(brokerCount, 0);
+    // A primary adapter cannot carry identities. A domain-specific cli-direct
+    // adapter can; capacity must resolve the adapter used by the candidate.
+    const inert = { describe: () => ({ id: 'fixture-stub', capabilities: {} }) };
+    reviewerRuntimeState.adapter = inert;
+    const domainAdapter = resolveReviewerRuntimeAdapterForDomainId('synthetic-code', {
+      rootDir: f.rootDir, domainMtimeImpl: () => 1,
+      loadDomainConfigImpl: () => ({ id: 'synthetic-code', reviewerRuntime: 'cli-direct' }),
+      createAdapterImpl: options => createCliDirectReviewerRuntimeAdapter({ ...options, logger }),
+    });
+    assert.equal(domainAdapter.describe().capabilities.agyReviewerIdentity, true);
+    const seen = [];
+    const addedCandidate = {
+      repoPath: 'example/synthetic', prNumber: 1, reviewerModel: 'gemini', subject: { domainId: 'synthetic-code' },
+      run: () => runWithAgyReviewerIdentity({ reviewerModel: 'gemini', adapter: domainAdapter, pool: f.pool }, async identity => {
+        seen.push(identity.user);
+        return { ok: true };
+      }),
+    };
+    const brokerCandidate = {
+      repoPath: 'example/synthetic', prNumber: 2, reviewerModel: 'gemini', reviewerRuntimeAdapter: inert,
+      run: async () => { throw new Error('no usable broker credential'); },
+    };
+    const resolveCap = candidates => resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates, {
+      env: {}, identityPool: f.pool, logger,
+      resolveDomainAdapter: domain => domain === 'synthetic-code' ? domainAdapter : null,
+      readSharedSecret: async () => '', fetchCredentialConcurrency: async () => brokerCount,
+    });
+    // The added identity starts draining; the actual readiness pass clears it.
+    assert.equal(f.pool.readyCount(), 0);
+    assert.equal(await resolveCap([addedCandidate]), 1);
+    assert.deepEqual(f.pool.readyUsers(), [added]);
+    assert.equal(lines.filter(line => line.startsWith('[agy-identities]')).length, 1);
+    assert.match(lines[0], /ready=reviewer-b limit=1/);
+    const limit = await resolveCap([brokerCandidate, addedCandidate]);
+    assert.equal(limit, 1, 'a mixed batch cannot reduce the ready identity limit to broker zero');
+    assert.equal(brokerCandidate.geminiCredentialConcurrency, 0);
+    const summary = await runBoundedReviewerDispatchQueue([brokerCandidate, addedCandidate], {
+      maxConcurrent: 2, geminiCredentialConcurrency: limit, logger,
+    });
+    assert.equal(summary.dispatched, 1);
+    assert.deepEqual(seen, [added]);
+    assert.equal(summary.deferred, 1);
+    assert.equal(summary.deferredReasons[0].reason, 'gemini-credential-concurrency-zero');
+  } finally { reviewerRuntimeState.adapter = previous; f.cleanup(); }
+});

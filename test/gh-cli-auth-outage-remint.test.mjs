@@ -93,17 +93,22 @@ test('a 401 forces exactly one re-mint and the retry succeeds on the fresh token
   const calls = [];
   let reminted = 0;
   const env = { GITHUB_TOKEN: 'ghs_expired', PATH: '/usr/bin', HOME: '/tmp' };
+  const logger = {
+    warnings: [],
+    warn(message) { this.warnings.push(message); },
+  };
 
   const result = await execGhWithRetry({
     args: ['pr', 'diff', '6366'],
     env,
-    log: SILENT_LOG,
+    log: logger,
     execFileImpl: async (_bin, _args, opts) => {
       calls.push(opts.env.GH_TOKEN);
       if (opts.env.GH_TOKEN === 'ghs_expired') throw ghError(BAD_CREDENTIALS);
       return { stdout: 'diff --git a/x b/x', stderr: '' };
     },
-    refreshGhAuthImpl: async ({ env: targetEnv }) => {
+    refreshGhAuthImpl: async ({ env: targetEnv, log }) => {
+      assert.equal(log, logger, 'auth refresh retains the logger object');
       reminted += 1;
       targetEnv.GITHUB_TOKEN = 'ghs_fresh';
       return { refreshed: true, role: 'merge-agent', skipped: null, failed: null };
@@ -114,6 +119,8 @@ test('a 401 forces exactly one re-mint and the retry succeeds on the fresh token
   assert.equal(reminted, 1, 're-mint must fire exactly once');
   // The retry has to actually pick up the new credential, not replay the dead one.
   assert.deepEqual(calls, ['ghs_expired', 'ghs_fresh']);
+  assert.equal(logger.warnings.length, 1);
+  assert.match(logger.warnings[0], /gh pr diff hit GitHub 401.*retrying once/);
 });
 
 test('a 401 that survives the re-mint raises an auth outage, and only re-mints once', async () => {

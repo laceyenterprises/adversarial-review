@@ -165,6 +165,23 @@ test('non-bot author is left pending for the normal Argus worker', async () => w
   assert.equal(findArgusJob(rootDir, { repo: REPO, prNumber: 966, headSha: HEAD }).bucket, 'pending');
 }));
 
+test('missing job paths cannot reach the pending attempt writer', async () => withRoot(async (rootDir) => {
+  const args = baseArgs(rootDir);
+  const before = readFileSync(args.jobRecord.jobPath, 'utf8');
+  for (const jobPath of [undefined, null, '']) {
+    const result = await maybeAutoAdjudicateDependencyBotArgusJob({
+      ...args,
+      jobRecord: { ...args.jobRecord, jobPath },
+      runDaemonCleanMergeAttemptImpl: async () => assert.fail('missing path must not reach merge'),
+      writeArgusJobImpl: () => assert.fail('missing path must not write an attempt'),
+      completeArgusJobImpl: () => assert.fail('missing path must not complete a job'),
+    });
+    assert.equal(result.attempted, false);
+    assert.equal(result.reason, 'no-pending-job');
+    assert.equal(readFileSync(args.jobRecord.jobPath, 'utf8'), before);
+  }
+}));
+
 test('safe bump with a pending required check stays queued for retry', async () => withRoot(async (rootDir) => {
   const result = await maybeAutoAdjudicateDependencyBotArgusJob({
     ...baseArgs(rootDir),

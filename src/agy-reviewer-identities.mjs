@@ -73,6 +73,11 @@ const AGY_REVIEWER_SETTINGS_KEYS = Object.freeze([
 ]);
 // Comparison filler: keep equal to the bootstrap's canonical settings filler.
 const AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH = 'Library/Keychains/agy-reviewer.keychain-db';
+// Distinct initial readiness failures one added identity logs before it is
+// first ready. A reason that carries per-pass detail (survivor pids, helper
+// stderr) is distinct on every pass and would otherwise log, and be kept,
+// on every pass.
+const AGY_INITIAL_FAILURE_LOG_LIMIT = 16;
 const DEFAULT_DISPATCH_WORKER_USER = 'agentos-worker';
 const DISPATCH_WORKER_USER_ENV = ['AGENT_OS_WORKER_RUN_AS_USER', 'HQ_WORKER_RUN_AS_USER'];
 
@@ -723,12 +728,19 @@ function createAgyReviewerIdentityPool({
       // Added identities start not ready: report each distinct initial failure
       // even without a ready -> not-ready transition, but do not repeat it.
       const reasonSet = JSON.stringify([...new Set(reasons)].sort());
-      if (!state.initialFailureReasonSets.has(reasonSet)) {
-        state.initialFailureReasonSets.add(reasonSet);
+      const seen = state.initialFailureReasonSets;
+      if (!seen.has(reasonSet) && seen.size < AGY_INITIAL_FAILURE_LOG_LIMIT) {
+        seen.add(reasonSet);
         log.warn?.(`[agy-identities] identity=${state.user} not ready: ${reasons.join('; ') || 'readiness failed'}`);
+        if (seen.size === AGY_INITIAL_FAILURE_LOG_LIMIT) {
+          log.warn?.(`[agy-identities] identity=${state.user} further distinct readiness failures are not logged until it is first ready`);
+        }
       }
     }
-    if (ready) state.everReady = true;
+    if (ready) {
+      state.everReady = true;
+      state.initialFailureReasonSets.clear();
+    }
   }
 
   function setDraining(state, draining) {
@@ -1244,6 +1256,7 @@ export {
   AGY_IDENTITY_REVIEW_ID_ENV,
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   AGY_IDENTITY_USER_ENV,
+  AGY_INITIAL_FAILURE_LOG_LIMIT,
   AGY_REVIEWER_KEYCHAIN_HELPER,
   AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH,
   AGY_REVIEWER_LIBEXEC_DIR,

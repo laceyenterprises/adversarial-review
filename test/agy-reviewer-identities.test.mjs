@@ -33,6 +33,7 @@ import {
   AGY_IDENTITY_REVIEW_ID_ENV,
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   AGY_IDENTITY_USER_ENV,
+  AGY_INITIAL_FAILURE_LOG_LIMIT,
   AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH,
   AGY_REVIEWER_LIBEXEC_DIR,
   AGY_REVIEWER_PINNED_AGY,
@@ -712,6 +713,38 @@ test('AGYDRIFT-01: first-pass proxy drift logs once per distinct reason set unti
     assert.ok(log.lines.includes(`warn [agy-identities] identity=reviewer-b isolated: ${driftReason}`));
     await pool.refreshReadiness();
     assert.equal(failures().length, 2, 'after first ready, existing transition logging takes over');
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('AGYDRIFT-01: initial failures that differ every pass stop logging at the bound', async () => {
+  const fake = makeFakeInstall({ users: ['reviewer-b'] });
+  try {
+    let pid = 40000;
+    const log = quietLog();
+    const pool = createAgyReviewerIdentityPool({
+      env: {},
+      log,
+      hqOwner: 'owner-identity',
+      loadIdentities: () => ['reviewer-b'],
+      resolveRuntime: () => 'antigravity',
+      runPinnedImpl: fake.runPinned,
+      readBootstrapRecordImpl: () => ({ ready: true }),
+      // A survivor whose pid changes every pass makes every reason distinct.
+      listUserProcessesImpl: async () => ({ ok: true, processes: [{ pid: pid += 1, pgid: 1, comm: 'synthetic-child' }] }),
+      readActiveRunRecordsImpl: () => [],
+      readQuotaCooldownImpl: () => null,
+      deliverAlertImpl: async () => ({}),
+      leaseWaitMs: 0,
+    });
+    for (let pass = 0; pass < AGY_INITIAL_FAILURE_LOG_LIMIT + 5; pass += 1) {
+      assert.equal(await pool.refreshReadiness(), 0);
+    }
+    const failures = log.lines.filter((line) => line.includes('identity=reviewer-b not ready:'));
+    assert.equal(failures.length, AGY_INITIAL_FAILURE_LOG_LIMIT);
+    assert.equal(log.lines.filter((line) => line.includes('identity=reviewer-b further distinct readiness failures')).length, 1);
+    assert.match(pool.snapshot()[0].reasons[0], new RegExp(`\\b${pid} synthetic-child\\b`), 'the snapshot still carries the latest reason');
   } finally {
     fake.cleanup();
   }

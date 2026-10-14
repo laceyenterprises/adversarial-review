@@ -12,6 +12,7 @@ import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 // is threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,12 @@ import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestrat
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
+import {
+  HAMMER_EVIDENCE_FAILURES,
+  HAMMER_EVIDENCE_RECHECK_INTERVAL_MS,
+  readHammerStopForHead,
+  readHammerStopHoldForHead,
+} from './ama/hammer-stop-hold.mjs';
 import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
 import { maybeFireFleetWideFalseDeferralAlert } from './fleet-wide-false-deferral-detector.mjs';
 import {
@@ -878,6 +885,7 @@ const postedReviewFairnessState = createPostedReviewFairnessState();
  */
 export function createNoProgressLaneGate({
   rootDir = ROOT,
+  hqRoot = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq'),
   readReviewRow = (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber),
   now = () => new Date().toISOString(),
   deliverAlertFn = defaultDeliverAlert,
@@ -888,11 +896,42 @@ export function createNoProgressLaneGate({
     evaluate(handler) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
-      const decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
+      let decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
+      const observedAt = now();
+      let reviewedSha = null;
+      try {
+        reviewedSha = readReviewRow(handler.repoPath, handler.prNumber)?.reviewer_head_sha ?? null;
+      } catch (err) {
+        logger?.warn?.(
+          `[watcher] no-progress lane: review-row read failed for ` +
+            `${handler.repoPath}#${handler.prNumber} (${err?.message || err}); evaluating by head`,
+        );
+      }
+      // Evidence can recover without a review-row mutation or a wake event.
+      // Only unresolved, unpaged stops use the shorter cadence. Historical
+      // audit records must not keep released/paged stops outside normal backoff.
+      const stop = readHammerStopForHead({
+        hqRoot, ...identity, headSha: handler.headSha,
+        reviewedSha,
+        logger,
+      });
+      if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) {
+        const hold = readHammerStopHoldForHead({ rootDir, ...identity,
+          headSha: handler.headSha, stopKey: stop.stopKey });
+        if (!hold?.releasedAt && !hold?.pagedAt) {
+          const lastRunAt = ledger?.lastRunAt !== undefined ? ledger.lastRunAt : ledger?.updatedAt;
+          const lastRunMs = ledger?.headSha === handler.headSha
+            ? Date.parse(lastRunAt ?? '') : NaN;
+          const elapsedMs = Date.parse(observedAt) - lastRunMs;
+          const due = !Number.isFinite(elapsedMs) || elapsedMs >= HAMMER_EVIDENCE_RECHECK_INTERVAL_MS;
+          decision = { ...decision, due, reason: due ? 'hammer-evidence-due' : 'hammer-evidence-wait',
+            retryAfterMs: due ? 0 : HAMMER_EVIDENCE_RECHECK_INTERVAL_MS - elapsedMs };
+        }
+      }
       if (!decision.due) {
         recordNoProgressLaneSkip(rootDir, identity, {
           headSha: handler.headSha || null,
-          now: now(),
+          now: observedAt,
           logger,
         });
       }

@@ -6044,6 +6044,15 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
+      // Keep the terminal status read from HQ for the capacity scan below.
+      // A missing lease plus an unreadable ledger otherwise resurrects the
+      // old running record and delays this already-admitted retry until age-out.
+      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
+        current?.launchRequestId === existingRecord.launchRequestId && current.state !== 'dispatching'
+          && !AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus))
+          ? { ...current, lastObservedStatus: status, lastObservedAt: dispatchContext.dispatchedAt || new Date().toISOString() }
+          : null
+      ));
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
         leaseIdentity: existingRecordLeaseIdentity,

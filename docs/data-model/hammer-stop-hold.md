@@ -3,7 +3,7 @@
 **Owner:** AMA closer retry admission
 **Store:** `data/follow-up-jobs/hammer-stop-hold/`
 **Source of truth:** `src/ama/hammer-stop-hold.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/audit.mjs`, `src/checks-summary.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/audit.mjs`, `src/checks-summary.mjs`, `src/posted-review-row.mjs`
 
 ## Purpose
 
@@ -64,6 +64,26 @@ the answer is computable, the store persists `primary-change-evidence` in
 predicate. There is one probe per pass while unreleased, no probe backoff in
 this store, and no further probe for the same released stop. Hold observation
 and release timestamps use the closer pass's `dispatchedAt` when supplied.
+
+TRANSIENTSTOP-01 also includes `history-read-failed`. The posted-review
+no-progress lane reads the latest hammer audit before applying backoff. All
+`HAMMER_EVIDENCE_FAILURES` stops that have neither paged nor released are
+eligible every five minutes, anchored to the no-progress ledger's `lastRunAt`.
+This includes the initial observation before a hold file exists. The gate reads
+the matching hold through `readHammerStopHoldForHead`; a different `stopKey`
+cannot supply release state for the current stop. Paged or released stops use
+ordinary lane backoff, including while other dispatch prerequisites remain
+pending. Review or gate events are not needed to retry the probe.
+
+Only `history-read-failed` defers its page: a failed probe must remain unresolved
+for ten minutes from `firstObservedAt`, allowing two default five-minute polling
+intervals for recovery. The probe runs before the page decision, so success at
+the deadline releases without paging. The durable timestamp preserves the
+deadline across restarts. Other predicates retain immediate paging. A terminal
+retryable HQ status is persisted before the launch-capacity scan, so an old
+running record cannot delay redispatch when its lease is gone and its ledger
+read is unavailable. Live launch, lease, eligibility and retry limits still
+apply.
 
 Release permits ordinary eligibility, lease and retry-cap checks; it does not
 authorize dispatch or merge by itself. A new head starts its own entry. A new

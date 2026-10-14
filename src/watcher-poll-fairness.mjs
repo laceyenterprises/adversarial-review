@@ -443,6 +443,8 @@ function runWithDeadline(run, {
  *
  * `laneGate` is `{ evaluate(handler) -> { run, ... }, record(handler, outcome) }`;
  * it is injected so this scheduler stays free of SQLite and the filesystem.
+ * A positive `retryAfterMs` is a cadence hold respected by priority and the
+ * idle floor; ordinary tick backoff remains eligible for those overrides.
  *
  * Never throws: a handler fault, a lane fault, or an exhausted budget all resolve
  * into the returned summary so the tick always reaches its next phase.
@@ -623,7 +625,7 @@ export async function runPostedReviewHandlersFairly({
       }
     }
     const priorityMatched = postedReviewHandlerMatchesPriority(handler, normalizedPriorityTargets);
-    if (!laneDecision.run && priorityMatched) {
+    if (!laneDecision.run && priorityMatched && !(laneDecision.retryAfterMs > 0)) {
       summary.priorityLaneBypasses += 1;
       logger?.log?.(
         `[watcher] posted-review wake priority: running ${key} despite ` +
@@ -715,7 +717,7 @@ export async function runPostedReviewHandlersFairly({
     // walk, then the one with the longest no-progress series, then queue order.
     // Ties fall back to the order the queue already chose, so the promotion set
     // and wake-priority ordering upstream still carry through.
-    const byStarvation = [...laneDeferred].sort((a, b) => (
+    const byStarvation = laneDeferred.filter(({ decision }) => !(decision.retryAfterMs > 0)).sort((a, b) => (
       (b.decision?.skippedTicks ?? 0) - (a.decision?.skippedTicks ?? 0)
       || (b.decision?.noProgressTicks ?? 0) - (a.decision?.noProgressTicks ?? 0)
       || a.index - b.index

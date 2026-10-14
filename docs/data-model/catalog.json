@@ -371,7 +371,10 @@
         "src/posted-review-row.mjs",
         "src/operator-label-wake.mjs"
       ],
-      "owner": "watcher posted-review dispatch fairness"
+      "owner": "watcher posted-review dispatch fairness",
+      "optionalCadenceFields": ["lastRunAt"],
+      "lastRunAtContract": "Explicit null means no recorded walk; only absent legacy fields fall back to updatedAt",
+      "evidenceStopRecheckMs": 300000
     },
     {
       "id": "operator-label-holds",
@@ -533,6 +536,7 @@
         "src/ama/dispatch-closer.mjs",
         "src/ama/audit.mjs",
         "src/checks-summary.mjs",
+        "src/posted-review-row.mjs",
         "src/ama/primary-change.mjs",
         "src/operator-hold-release.mjs",
         "src/ama/operator-hold-refund.mjs"

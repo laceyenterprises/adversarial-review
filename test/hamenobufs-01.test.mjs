@@ -113,7 +113,7 @@ test('two preflight failed reads refund both attempts and hold/probe/page once r
     launchRequestId: `launch-${i}`, startedAt: `2026-10-10T00:0${i}:00Z`, head, path: 'hammer' }));
   let pages = 0, probes = 0;
   const args = { rootDir: root, hqRoot: root, ...identity, headSha: head, prMetadata: { headSha: head, mergeable: 'CONFLICTING' },
-    readAuditImpl: () => ({ attempts }),
+    readAuditImpl: () => ({ attempts }), now: '2026-10-10T00:03:00Z',
     fetchPrimaryChangeImpl: async () => { probes++; return { headSha: head, hasHammerCommits: null, historyReadFailed: true, reason: 'ENOBUFS' }; },
     deliverAlertImpl: async (text, { payload }) => { pages++; assert.match(text, /ENOBUFS/); assert.equal(payload.historyReadError, 'spawnSync gh ENOBUFS'); }, logger: { warn() {}, error() {} } };
   assert.equal((await evaluateHammerStopHold(args)).action, 'hold');
@@ -124,6 +124,8 @@ test('two preflight failed reads refund both attempts and hold/probe/page once r
   assert.equal((await evaluateHammerStopHold({ ...args, prMetadata: { headSha: head, mergeable: 'CONFLICTING', baseSha: author } })).action, 'hold');
   assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
   assert.equal(probes, 2);
+  assert.equal(pages, 0);
+  await evaluateHammerStopHold({ ...args, now: '2026-10-10T00:13:00Z' });
   assert.equal(pages, 1);
   assert.equal((await evaluateHammerStopHold({ ...args, fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: false }) })).action, 'release');
 });

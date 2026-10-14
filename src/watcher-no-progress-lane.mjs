@@ -723,6 +723,8 @@ export function recordNoProgressLaneSkip(rootDir, identity, {
     ...existing,
     schemaVersion: NO_PROGRESS_LANE_SCHEMA_VERSION,
     skippedTicks,
+    // Preserve explicit null (no walk) and migrate only absent legacy anchors.
+    lastRunAt: existing.lastRunAt !== undefined ? existing.lastRunAt : (existing.updatedAt ?? null),
     updatedAt: now || existing.updatedAt || null,
   });
   return { skippedTicks, headSha: head };
@@ -873,6 +875,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     ...(priorStalledEvent ? { stalledEvent: priorStalledEvent } : {}),
     ...(priorPromotedFrom ? { promotedFrom: priorPromotedFrom } : {}),
     ...(priorPromotionHistory.length > 0 ? { promotionHistory: priorPromotionHistory } : {}),
+    lastRunAt: now || null,
     updatedAt: now || null,
   });
   return {

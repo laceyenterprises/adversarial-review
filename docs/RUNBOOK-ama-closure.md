@@ -1397,6 +1397,13 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   runs once per pass while unreleased. An unknown or unreadable answer retains
   the hold; a computable answer persists `releasedBy: ['primary-change-evidence']`
   and lets ordinary gates decide closure, even if that answer refuses merge.
+  TRANSIENTSTOP-01 includes `history-read-failed` and gives unresolved, unpaged
+  evidence stops a five-minute posted-review cadence instead of deeper lane
+  backoff. The durable lane `lastRunAt` anchors it across skips and restarts;
+  wake priority and the idle starvation floor respect the interval. Paged or
+  released stops return to ordinary backoff. Only `history-read-failed` delays
+  its page for ten minutes from the hold's `firstObservedAt`; a successful probe
+  at that deadline releases without paging. Other predicates page immediately.
   Other observed input changes and merge conflicts also release the hold.
   Hammer-owner routes retain their final no-merge decision for non-evidence
   stops on the live head; an older head's no-merge does not terminate ownership

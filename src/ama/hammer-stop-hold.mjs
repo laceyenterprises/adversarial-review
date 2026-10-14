@@ -60,6 +60,9 @@ export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
 export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
 
 export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed', 'history-read-failed']);
+// Two ordinary five-minute polling intervals let a transport fault recover
+// before paging. Start at the first failed probe, not the old hammer timestamp.
+export const HISTORY_READ_FAILURE_PAGE_GRACE_MS = 10 * 60_000;
 const execFileAsync = promisify(execFile);
 
 const STOP_OUTCOMES = new Set(['failed-without-merge', 'no-merge']);
@@ -351,7 +354,9 @@ export async function evaluateHammerStopHold({
     return { action: 'release', hammerStop, changed: entry.releasedBy || [] };
   }
   const debounceKey = `${repo}\0${prNumber}\0${headSha}`;
-  if (!entry.pagedAt && !PAGED_IN_PROCESS.has(debounceKey) && typeof deliverAlertImpl === 'function') {
+  const pageDue = stop.predicate !== 'history-read-failed'
+    || Date.parse(now) - Date.parse(entry.firstObservedAt) >= HISTORY_READ_FAILURE_PAGE_GRACE_MS;
+  if (pageDue && !entry.pagedAt && !PAGED_IN_PROCESS.has(debounceKey) && typeof deliverAlertImpl === 'function') {
     const text = `Adversarial-review hammer stopped without merging ${repo}#${prNumber} on head `
       + `${String(headSha).slice(0, 12)}: ${stop.predicate}. `
       + (stop.historyReadError ? `Read error: ${stop.historyReadError}. ` : '')

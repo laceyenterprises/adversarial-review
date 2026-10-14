@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 const head = 'c'.repeat(40);
@@ -603,4 +604,50 @@ for (const useLedger of [true, false]) test(`PRIMARYEMPTY-01: launch-proven unta
   assert.equal(evidence.primaryHead, builder);
   assert.equal(checkPrimaryChange(evidence, head).ok, true);
   assert.equal(checkPrimaryChange({ ...evidence, finalFiles: [] }, head).reason, 'primary-change-reverted');
+});
+
+
+test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region, not the later hammer', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'primary-repair-diagnostic-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const base = 'd'.repeat(40), builder = 'a'.repeat(40), earlier = 'e'.repeat(40);
+  const file = { filename: 'data/entries.txt', status: 'modified', additions: 2, deletions: 1,
+    patch: '@@ -10 +10,2 @@\n-entry marker\n+entry\n+marker' };
+  const earlierCommit = { sha: earlier, author: { login: 'hammer-worker' }, parents: [{ sha: builder }],
+    commit: { message: 'Join marker onto covered line\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)' } };
+  const laterCommit = { sha: head, author: { login: 'hammer-worker' }, parents: [{ sha: earlier }],
+    commit: { message: 'Repair another file\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nClosed-By: hammer (adversarial-pipe-mode)' } };
+  const reads = [];
+  const get = async path => {
+    reads.push(path);
+    if (path.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: base } };
+    if (path.endsWith(`${base}...${head}`)) return { total_commits: 3,
+      commits: [{ sha: builder, commit: { message: 'Builder change' } }, earlierCommit, laterCommit],
+      merge_base_commit: { sha: base }, files: [] };
+    if (path.endsWith(`${base}...${builder}`)) return { merge_base_commit: { sha: base }, files: [file] };
+    if (path.endsWith(`${base}...${earlier}`)) return { merge_base_commit: { sha: base }, files: [] };
+    if (path.endsWith(`/commits/${earlier}`)) return earlierCommit;
+    if (path.endsWith('/issues/1/comments?per_page=100')) return [{ user: { login: 'hammer-worker' },
+      body: `HAM-Base-Head: ${builder}\nHAM-Validated-Head: ${earlier}` }];
+    throw new Error(`unexpected diagnostic read ${path}`);
+  };
+  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, get, rootDir: root });
+  const verdict = predicate(evidence);
+  assert.equal(verdict.eligible, false);
+  assert.equal(verdict.trace.primaryChange.reason, 'primary-change-reverted');
+  const missing = verdict.trace.primaryChange.missingEvidence;
+  assert.match(missing.summary, new RegExp(`${earlier} author=hammer-worker pipeline-repair=yes`));
+  assert.deepEqual(missing.regionDiagnostics, [{ path: file.filename, start: 10, end: 11,
+    commits: [{ sha: earlier, author: 'hammer-worker', pipelineRepair: true, repairKind: 'hammer audit' }] }]);
+  assert.equal(reads.some(path => path.endsWith(`/commits/${head}`)), false, 'later hammer did not change the region');
+  const { filePath } = writeAmaAuditEntry({ hqRoot: root, repo: 'fixture/repo', prNumber: 1, headSha: head,
+    attempt: { outcome: 'failed-without-merge', primaryChangeMissingEvidence: missing }, now: '2026-01-01T00:00:00Z' });
+  const audit = JSON.parse(readFileSync(filePath, 'utf8'));
+  assert.deepEqual(audit.attempts[0].primaryChangeMissingEvidence, missing);
+
+  const unreadable = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
+    get: path => path.endsWith(`${base}...${earlier}`) ? Promise.reject(new Error('diagnostic unavailable')) : get(path) });
+  assert.equal(predicate(unreadable).eligible, false);
+  assert.equal(checkPrimaryChange(unreadable, head).reason, 'primary-change-reverted');
+  assert.match(checkPrimaryChange(unreadable, head).missingEvidence.summary, /diagnostic unavailable/);
 });

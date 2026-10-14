@@ -1,3 +1,4 @@
+import { completeWorkerPublishedHead } from './remediation-published-head.mjs';
 import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
@@ -92,6 +93,12 @@ function stopTerminalPendingFollowUpJob({
   const revisionSuperseded = Boolean(jobRevisionRef && headRevisionRef && jobRevisionRef !== headRevisionRef);
   if (!settledClean && !revisionSuperseded) {
     return null;
+  }
+
+  if (revisionSuperseded) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath: latest.jobPath,
+      headSha: headRevisionRef, completedAt: stoppedAt });
+    if (completed) return completed;
   }
 
   const releaseReason = settledClean && revisionSuperseded
@@ -319,6 +326,11 @@ function shouldDeferReviewForActiveFollowUp({
   staleSignalImpl = signalStaleFollowUpWorker,
 }) {
   let latest = latestJobFinder(rootDir, { repo, prNumber });
+  if (latest?.job?.status === 'pending' && currentRevisionRef) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath: latest.jobPath,
+      headSha: currentRevisionRef, completedAt: new Date(nowMs).toISOString() });
+    if (completed) latest = { job: completed.job, jobPath: completed.jobPath };
+  }
   const budgetStopped = typeof budgetSweepImpl === 'function' ? budgetSweepImpl({
     rootDir,
     latest,

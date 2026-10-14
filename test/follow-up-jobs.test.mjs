@@ -4732,7 +4732,7 @@ test('requeueFollowUpJobForNextRound rejects stopped:abandoned jobs', () => {
   );
 });
 
-test('requeueInProgressFollowUpJobForRetry drops the active round entry so re-claim reuses the round number without duplicates', () => {
+test('requeueInProgressFollowUpJobForRetry retains the active round so re-claim reuses it without duplicates', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob({
     ...makeJobInput(rootDir),
@@ -4758,7 +4758,7 @@ test('requeueInProgressFollowUpJobForRetry drops the active round entry so re-cl
 
   assert.equal(requeued.job.status, 'pending');
   assert.equal(requeued.job.remediationPlan.currentRound, 0);
-  assert.equal(requeued.job.remediationPlan.rounds.length, 0);
+  assert.equal(requeued.job.remediationPlan.rounds.length, 1);
   assert.equal(requeued.job.remediationPlan.stop, null);
   assert.equal(requeued.job.remediationPlan.stopReason, null);
   assert.equal(requeued.job.remediationPlan.transientRetries, 1);

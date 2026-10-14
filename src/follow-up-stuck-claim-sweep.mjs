@@ -1,3 +1,4 @@
+import { completeWorkerPublishedHead, hasWorkerPublishArtifacts } from './remediation-published-head.mjs';
 // Stuck-claim sweep + heartbeat emitter + pre-spawn lifecycle recheck.
 //
 // Why this exists (LAC-957, 2026-05-31):
@@ -905,10 +906,13 @@ async function sweepStuckInProgressClaims({
   postCommentImpl = postRemediationOutcomeComment,
   recordInitialCommentDeliveryImpl = recordInitialCommentDelivery,
   readWorkerCpuImpl = readWorkerCpuPercent,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  completePublishedHeadImpl = completeWorkerPublishedHead,
 } = {}) {
   let scanned = 0;
   let reclaimed = 0;
   let requeued = 0;
+  let completed = 0;
   let terminalStopped = 0;
   let skipped = 0;
   let signalled = 0;
@@ -947,6 +951,19 @@ async function sweepStuckInProgressClaims({
     if (ageMs < thresholdMs * 3 && readWorkerCpuImpl(job) > 0) {
       skipped += 1;
       continue;
+    }
+
+    if (hasWorkerPublishArtifacts({ rootDir, job })) {
+      const lifecycle = await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
+      if (lifecycle?.source === 'live' && lifecycle.prState === 'open') {
+        const settled = completePublishedHeadImpl({ rootDir, jobPath, headSha: lifecycle.headSha, completedAt: reclaimedAtIso });
+        if (settled) { completed += 1; continue; }
+      }
+      // A durable result is processed by ordinary reconciliation before any reclaim.
+      const { reconcileFollowUpJob } = await import('./follow-up-remediation.mjs');
+      const result = await reconcileFollowUpJob({ rootDir, job, jobPath, resolvePRLifecycleImpl,
+        execFileImpl, now: () => reclaimedAtIso, postCommentImpl, log });
+      if (result.action !== 'skipped') { skipped += 1; continue; }
     }
 
     const jobId = job?.jobId || basename(jobPath);
@@ -1049,6 +1066,7 @@ async function sweepStuckInProgressClaims({
     scanned,
     reclaimed,
     requeued,
+    completed,
     terminalStopped,
     skipped,
     thresholdMs,
@@ -1143,6 +1161,7 @@ async function applyPreSpawnLifecycleGate({
   execFileImpl,
   stopConsumedJobWithCommentImpl = null,
   postCommentImpl,
+  completePublishedHeadImpl = completeWorkerPublishedHead,
   dirtyMergeImpl = attemptDirtyMerge,
   resolveDirtyConflictSpecContextImpl = resolveDirtyConflictSpecContext,
   now = () => new Date().toISOString(),
@@ -1161,6 +1180,10 @@ async function applyPreSpawnLifecycleGate({
     site: 'consume',
     job,
   });
+  if (lifecycle?.source === 'live' && ['stale-review-head', 'stale-drift'].includes(lifecycleStop?.stopCode)) {
+    const completed = completePublishedHeadImpl({ rootDir, jobPath, headSha: lifecycle.headSha, completedAt: now() });
+    if (completed) return { action: 'completed', ...completed };
+  }
   if (isDirtyMergeState(lifecycle) && !lifecycleStop) {
     const nowIso = now();
     const resolvedBaseBranch = normalizeBranchName(baseBranch || lifecycle?.baseBranch || job?.baseBranch);

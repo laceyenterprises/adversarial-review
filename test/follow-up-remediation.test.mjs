@@ -9213,7 +9213,8 @@ test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch s
     assert.equal(result.job.status, 'pending');
     assert.equal(result.job.remediationWorker, null);
     assert.equal(result.job.remediationPlan.currentRound, 0);
-    assert.deepEqual(result.job.remediationPlan.rounds, []);
+    assert.equal(result.job.remediationPlan.rounds.length, 1);
+    assert.equal(result.job.remediationPlan.rounds[0].spawnedAt, spawned.job.remediationPlan.rounds[0].spawnedAt);
     assert.equal(result.job.remediationPlan.transientRetries, 1);
     assert.equal(result.job.remediationPlan.retryHistory.at(-1)?.round, 1);
     assert.match(result.job.remediationPlan.retryHistory.at(-1)?.retryReason || '', /memory pressure refused admit until the worker was reaped/i);

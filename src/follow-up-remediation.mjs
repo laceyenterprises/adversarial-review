@@ -1,3 +1,4 @@
+import { completeWorkerPublishedHead } from './remediation-published-head.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { logRoundBudgetDecision, settleInfrastructureRemediationRound, recordLocalRemediationOutcome } from './remediation-round-accounting.mjs';
 import { recordedInfrastructureReason, localWorkerErrorOutcome } from './remediation-infrastructure-refund.mjs';
@@ -1653,6 +1654,13 @@ async function reconcileFollowUpJob({
   const worker = job?.remediationWorker;
   const isHqWorker = worker?.dispatchMode === 'hq' && typeof worker?.dispatchId === 'string' && worker.dispatchId.trim();
   if ((!isHqWorker && !worker?.processId && !recordedInfrastructureReason(worker?.recordedOutcome)) || worker?.state !== 'spawned') {
+    // Restart/reclaim can lose top-level runtime metadata while the round survives.
+    const lifecycle = await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
+    if (lifecycle?.source === 'live' && lifecycle.prState === 'open') {
+      const completed = completeWorkerPublishedHead({ rootDir, jobPath, headSha: lifecycle.headSha, completedAt: now(),
+        requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+      if (completed) return { action: 'completed', ...completed };
+    }
     return {
       action: 'skipped',
       reason: 'missing-worker-metadata',
@@ -1690,6 +1698,12 @@ async function reconcileFollowUpJob({
     buildReconciliationPathsImpl: buildReconciliationPaths,
     parseHqWorkerWorkspaceFromPayloadImpl: parseHqWorkerWorkspaceFromPayload,
   });
+  if (lifecycle?.source === 'live' && lifecycle.prState === 'open'
+    && (liveness.state !== 'active' || ['stale-review-head', 'stale-drift'].includes(lifecycleStop?.stopCode))) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath, headSha: lifecycle.headSha, completedAt: now(),
+      requestReviewRereviewImpl, requestRereviewWakeImpl, requestWatcherWakeImpl });
+    if (completed) return { action: 'completed', ...completed };
+  }
   if (liveness.state === 'active' && !lifecycleStop) {
     return {
       action: 'active',
@@ -3378,6 +3392,11 @@ async function consumeNextFollowUpJob({
     site: 'consume',
     job: claimed.job,
   });
+  if (lifecycle?.source === 'live' && ['stale-review-head', 'stale-drift'].includes(lifecycleStop?.stopCode)) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath: claimed.jobPath,
+      headSha: lifecycle.headSha, completedAt: now(), requestWatcherWakeImpl });
+    if (completed) return { consumed: false, reason: 'completed', ...completed };
+  }
   if (lifecycleStop) {
     if (lifecycleStop.logMessage) {
       log.log?.(lifecycleStop.logMessage);

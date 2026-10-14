@@ -83,6 +83,7 @@ function buildLoaderSource({
     [fileUrl('src', 'duplicate-family-state.mjs')]: 'fixture:duplicate-family-state',
     ...(process.env.FIXTURE_THROW_HELDHEAD_REQUEST === '1' ? { [fileUrl('src', 'comment-only-final-round.mjs')]: 'fixture:heldhead' } : {}),
     [fileUrl('src', 'follow-up-jobs.mjs')]: 'fixture:follow-up-jobs',
+    [fileUrl('src', 'remediation-published-head.mjs')]: 'fixture:remediation-published-head',
     [fileUrl('src', 'remediation-prompt.mjs')]: 'fixture:remediation-prompt',
     [fileUrl('src', 'follow-up-merge-agent.mjs')]: 'fixture:follow-up-merge-agent',
     [fileUrl('src', 'follow-up-retrigger-label.mjs')]: 'fixture:follow-up-retrigger-label',
@@ -291,6 +292,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    'fixture:remediation-published-head': "export function completeWorkerPublishedHead() { return null; } export function completeLiveWorkerPublishedHead() { return null; } export function completeKnownWorkerPublish() { return null; } export function findWorkerPublishedHead() { return null; } export function hasWorkerPublishArtifacts() { return false; } export function buildRereviewResult() { return {}; }",
     'fixture:session-ledger-read-adapter': ${JSON.stringify(`export * from '${fileUrl('src', 'session-ledger-read-adapter.mjs')}?actual'; export function readPrBuilderProvenance({ prNumber }) { return globalThis.__watcherClaimLoopProvenance?.(prNumber) || { ok: false, reason: 'missing-builder-provenance' }; }`)},
     'fixture:branch-protection': "export function createBranchProtectionChecker() { return {}; } export async function fetchAdversarialGateBranchProtection() {} export async function warnForMissingAdversarialGateBranchProtection() {}",
     'fixture:adversarial-gate-status': "export function readGateRecord() { return globalThis.__budgetGateRecord || null; } export function resolveSettledReviewVerdict() { return globalThis.__holdReleaseSettled || { verdict: '', remediationPending: false }; } export function buildAdversarialGateSnapshot() { return { settledReview: { verdict: '', remediationPending: false }, reviewedHeadSha: null, mergeableState: '', labels: [] }; } export function deleteGateRecordsForPR() {} export function pickAdversarialGateStatus() { return { state: 'pending', reason: 'fixture', context: 'agent-os/adversarial-gate' }; } export async function projectAdversarialGateStatus() { globalThis.__holdReleaseGateProjections = (globalThis.__holdReleaseGateProjections || 0) + 1; return { decision: { state: 'pending', reason: 'fixture' } }; } export async function publishAdversarialGateStatus() { return { posted: true }; }",

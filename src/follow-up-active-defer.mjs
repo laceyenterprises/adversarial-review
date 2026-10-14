@@ -250,6 +250,7 @@ function stopStaleInProgressFollowUpJob({
   latest,
   nowMs = Date.now(),
   thresholdMs = resolveFollowUpStuckThresholdMs(),
+  currentRevisionRef = null,
   markStoppedImpl = followUpJobs.markFollowUpJobStopped,
   signalWorkerImpl = signalStaleFollowUpWorker,
   log = console,
@@ -277,6 +278,11 @@ function stopStaleInProgressFollowUpJob({
   if (session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) return null;
   if (ageMs < thresholdMs * 3 && readWorkerCpuPercent(job) > 0) return null;
   const stoppedAt = new Date(nowMs).toISOString();
+  if (currentRevisionRef) {
+    const completed = completeWorkerPublishedHead({ rootDir, jobPath: latest.jobPath,
+      headSha: currentRevisionRef, completedAt: stoppedAt });
+    if (completed) return completed;
+  }
   const jobId = job?.jobId || basename(latest.jobPath);
   const stopReason =
     `Reclaimed orphaned in-progress claim ${jobId}: ${source} is ` +
@@ -377,6 +383,7 @@ function shouldDeferReviewForActiveFollowUp({
       rootDir,
       latest,
       nowMs,
+      currentRevisionRef,
       markStoppedImpl,
       signalWorkerImpl: staleSignalImpl,
       log,

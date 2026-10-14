@@ -1446,15 +1446,14 @@ test('LABELGATE-01: final pre-spawn gate allows repair of a guarded change', asy
 });
 
 // Synthetic REMLINK-01 fixtures are deliberately independent of production identities.
-async function seedRemlink(t, { published = true, head = 'b'.repeat(40) } = {}) {
+async function seedRemlink(t, { published = true, head = 'b'.repeat(40), startHead = 'a'.repeat(40), roundNumber = 1 } = {}) {
   const rootDir = makeRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const startHead = 'a'.repeat(40);
   const spawnedAt = '2026-01-01T00:00:00.000Z';
   const seeded = seedInProgressJob(rootDir, { jobId: 'fixture__repo-pr-1-synthetic-remediation', repo: 'fixture/repo', prNumber: 1,
     claimedAt: spawnedAt, spawnedAt, lastHeartbeatAt: spawnedAt,
     jobUpdates: { revisionRef: startHead },
-    plan: { currentRound: 1, maxRounds: 2, rounds: [{ round: 1, state: 'spawned', spawnedAt,
+    plan: { currentRound: roundNumber, maxRounds: 2, rounds: [{ round: roundNumber, state: 'spawned', spawnedAt,
       startHeadSha: startHead, ...(published ? { publishedHeadSha: head } : {}) }] } });
   const { completeWorkerPublishedHead } = await import('../src/remediation-published-head.mjs');
   let followOns = 0;
@@ -1465,10 +1464,28 @@ async function seedRemlink(t, { published = true, head = 'b'.repeat(40) } = {}) 
   return { ...seeded, rootDir, startHead, head, completePublishedHeadImpl, followOns: () => followOns };
 }
 
+function writeRemlinkPublishReply(f) {
+  const replyPath = path.join(f.rootDir, 'synthetic-reply.json');
+  writeFileSync(replyPath, JSON.stringify({ kind: 'adversarial-review-remediation-reply', schemaVersion: 1,
+    jobId: f.job.jobId, repo: f.job.repo, prNumber: f.job.prNumber, outcome: 'completed',
+    summary: `Pushed commit ${f.head}`, validation: ['synthetic validation'], addressed: [], pushback: [],
+    blockers: [], reReview: { requested: true, reason: 'Synthetic remediation completed' } }));
+  f.job.remediationWorker.replyPath = replyPath;
+  writeFollowUpJob(f.jobPath, f.job);
+  return replyPath;
+}
+
 test('REMLINK-01 J2 quiet output settles its published head once instead of reclaiming', async t => {
-  const f = await seedRemlink(t);
+  const f = await seedRemlink(t, { published: false });
+  const replyPath = writeRemlinkPublishReply(f);
+  utimesSync(replyPath, new Date('2026-01-01T00:12:00.000Z'), new Date('2026-01-01T00:12:00.000Z'));
+  const outputPath = path.join(f.rootDir, 'synthetic-output.txt');
+  writeFileSync(outputPath, 'Synthetic final output');
+  utimesSync(outputPath, new Date('2026-01-01T00:13:00.000Z'), new Date('2026-01-01T00:13:00.000Z'));
+  f.job.remediationWorker.outputPath = outputPath;
+  writeFollowUpJob(f.jobPath, f.job);
   const nowMs = Date.parse('2026-01-01T00:24:00.000Z');
-  const args = { rootDir: f.rootDir, nowMs, thresholdMs: 600_000, readWorkerCpuImpl: () => 0,
+  const args = { rootDir: f.rootDir, nowMs, thresholdMs: 600_000, readWorkerCpuImpl: () => 0, isWorkerRunning: () => true,
     resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.head }),
     completePublishedHeadImpl: f.completePublishedHeadImpl,
     processKill: () => { throw new Error('published job must not be signalled'); }, log: { log() {}, warn() {} } };
@@ -1487,7 +1504,8 @@ test('REMLINK-01 J2 quiet output settles its published head once instead of recl
 });
 
 test('REMLINK-01 J3 second claim retains a force-publish round readable by the unchanged hammer proof', async t => {
-  const f = await seedRemlink(t, { head: 'c'.repeat(40) });
+  const f = await seedRemlink(t, { published: false, head: 'c'.repeat(40), startHead: 'b'.repeat(40), roundNumber: 2 });
+  writeRemlinkPublishReply(f);
   const { requeueInProgressFollowUpJobForRetry, claimNextFollowUpJob } = await import('../src/follow-up-jobs.mjs');
   const pending = requeueInProgressFollowUpJobForRetry({ rootDir: f.rootDir, jobPath: f.jobPath,
     allowDirectWorkerRetry: true, requeuedAt: '2026-01-01T00:45:00.000Z',
@@ -1517,14 +1535,169 @@ test('REMLINK-01 J3 second claim retains a force-publish round readable by the u
 
 test('REMLINK-01 an external head still gets the exact existing stale stop', async t => {
   const f = await seedRemlink(t, { published: false });
+  const workspaceDir = path.join(f.rootDir, 'synthetic-external-workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  f.job.remediationWorker.workspaceDir = workspaceDir;
+  writeFollowUpJob(f.jobPath, f.job);
   const { lifecycleStopDecision } = await import('../src/follow-up-lifecycle.mjs');
   const lifecycle = { source: 'live', prState: 'open', headSha: f.head };
   const expected = lifecycleStopDecision(lifecycle, { repo: f.job.repo, prNumber: f.job.prNumber, site: 'consume', job: f.job });
   const result = await applyPreSpawnLifecycleGate({ rootDir: f.rootDir, job: f.job, jobPath: f.jobPath,
-    resolvePRLifecycleImpl: async () => lifecycle, completePublishedHeadImpl: f.completePublishedHeadImpl,
+    resolvePRLifecycleImpl: async () => lifecycle, completePublishedHeadImpl: args => f.completePublishedHeadImpl({ ...args,
+      execFileSyncImpl: (_command, gitArgs) => gitArgs.includes('symbolic-ref') ? 'refs/heads/synthetic-repair' : 'c'.repeat(40) }),
     now: () => '2026-01-01T01:00:00.000Z', postCommentImpl: async () => ({ posted: true }), log: { log() {}, warn() {} } });
   assert.equal(result.action, 'stopped');
   assert.equal(result.job.remediationPlan.stop.code, expected.stopCode);
   assert.equal(result.job.remediationPlan.stop.reason, expected.stopReason);
   assert.equal(f.followOns(), 0);
+});
+
+test('REMLINK-01 an alive worker with fresh output stays untouched despite a recorded publish', async t => {
+  const f = await seedRemlink(t);
+  const result = await sweepStuckInProgressClaims({ rootDir: f.rootDir,
+    nowMs: Date.parse('2026-01-01T00:01:00.000Z'), isWorkerRunning: () => true,
+    resolvePRLifecycleImpl: () => { throw new Error('fresh output must not resolve lifecycle'); },
+    completePublishedHeadImpl: f.completePublishedHeadImpl });
+  assert.equal(result.completed, 0);
+  assert.equal(result.requeued, 0);
+  assert.equal(existsSync(f.jobPath), true);
+  assert.equal(f.followOns(), 0);
+});
+
+test('REMLINK-01 an exited worker with a recorded publish settles without waiting for stale output', async t => {
+  const f = await seedRemlink(t);
+  const result = await sweepStuckInProgressClaims({ rootDir: f.rootDir,
+    nowMs: Date.parse('2026-01-01T00:01:00.000Z'), isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.head }),
+    completePublishedHeadImpl: f.completePublishedHeadImpl });
+  assert.equal(result.completed, 1);
+  assert.equal(result.requeued, 0);
+  assert.equal(f.followOns(), 1);
+});
+
+test('REMLINK-01 a stale claim reads a reply before reclaiming even when it cannot prove a publish', async t => {
+  const f = await seedRemlink(t, { published: false });
+  const replyPath = path.join(f.rootDir, 'synthetic-reply.json');
+  writeFileSync(replyPath, JSON.stringify({ outcome: 'synthetic-result' }));
+  utimesSync(replyPath, new Date('2026-01-01T00:01:00.000Z'), new Date('2026-01-01T00:01:00.000Z'));
+  f.job.remediationWorker.replyPath = replyPath;
+  writeFollowUpJob(f.jobPath, f.job);
+  let reconciles = 0;
+  const result = await sweepStuckInProgressClaims({ rootDir: f.rootDir,
+    nowMs: Date.parse('2026-01-01T00:24:00.000Z'), isWorkerRunning: () => true, readWorkerCpuImpl: () => 0,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.startHead }),
+    reconcileFollowUpJobImpl: async () => { reconciles++; return { action: 'active' }; },
+    processKill: () => { throw new Error('result reconciliation must precede reclaim'); } });
+  assert.equal(reconciles, 1);
+  assert.equal(result.requeued, 0);
+});
+
+test('REMLINK-01 reply and workspace evidence must name the exact live head', async t => {
+  const f = await seedRemlink(t, { published: false });
+  const { findWorkerPublishedHead } = await import('../src/remediation-published-head.mjs');
+  const workspaceDir = path.join(f.rootDir, 'synthetic-workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  f.job.remediationWorker.workspaceDir = workspaceDir;
+  const probe = tip => findWorkerPublishedHead({ rootDir: f.rootDir, job: f.job, headSha: f.head,
+    execFileSyncImpl: (_command, args) => args.includes('symbolic-ref') ? 'refs/heads/synthetic-repair' : tip });
+  assert.equal(probe('c'.repeat(40)), null);
+  assert.equal(probe(f.head).source, 'workspace-branch-tip');
+  const replyPath = path.join(f.rootDir, 'synthetic-reply.json');
+  const reply = { kind: 'adversarial-review-remediation-reply', schemaVersion: 1,
+    jobId: f.job.jobId, repo: f.job.repo, prNumber: f.job.prNumber, outcome: 'completed',
+    summary: `Pushed commit ${f.head}`, validation: ['synthetic validation'], addressed: [], pushback: [],
+    blockers: [], reReview: { requested: true, reason: 'Synthetic remediation completed' } };
+  writeFileSync(replyPath, JSON.stringify(reply));
+  f.job.remediationWorker.replyPath = replyPath;
+  assert.equal(probe('c'.repeat(40)).source, 'worker-reply');
+  writeFileSync(replyPath, JSON.stringify({ ...reply, summary: `Pushed commit ${f.head.slice(0, 7)}` }));
+  assert.equal(probe('c'.repeat(40)), null, 'a reply abbreviation cannot attest the exact live head');
+});
+
+test('REMLINK-01 pending active-defer release completes a retained publish instead of superseding it', async t => {
+  const f = await seedRemlink(t);
+  const { requeueInProgressFollowUpJobForRetry } = await import('../src/follow-up-jobs.mjs');
+  const { stopTerminalPendingFollowUpJob } = await import('../src/follow-up-active-defer.mjs');
+  const pending = requeueInProgressFollowUpJobForRetry({ rootDir: f.rootDir, jobPath: f.jobPath,
+    allowDirectWorkerRetry: true, requeuedAt: '2026-01-01T00:24:00.000Z', retryReason: 'synthetic restart' });
+  const result = stopTerminalPendingFollowUpJob({ rootDir: f.rootDir,
+    latest: { job: pending.job, jobPath: pending.jobPath }, currentRevisionRef: f.head,
+    stoppedAt: '2026-01-01T00:25:00.000Z',
+    markStoppedImpl: () => { throw new Error('own publish must not be superseded'); } });
+  assert.equal(result.job.status, 'completed');
+  assert.equal(result.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
+  assert.equal(result.job.remediationPlan.currentRound, 1);
+});
+
+test('REMLINK-01 restart reconciliation recovers publish evidence without top-level worker metadata', async t => {
+  const f = await seedRemlink(t);
+  f.job.remediationWorker = null;
+  writeFollowUpJob(f.jobPath, f.job);
+  const { reconcileFollowUpJob } = await import('../src/follow-up-remediation.mjs');
+  let followOns = 0;
+  const result = await reconcileFollowUpJob({ rootDir: f.rootDir, job: f.job, jobPath: f.jobPath,
+    now: () => '2026-01-01T01:00:00.000Z',
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.head }),
+    requestReviewRereviewImpl: () => { followOns++; return { triggered: true, status: 'pending' }; },
+    requestRereviewWakeImpl: () => ({ requested: true }) });
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
+  assert.equal(followOns, 1);
+});
+
+test('REMLINK-01 an older published round is not a result for a fresh unspawned claim', async t => {
+  const f = await seedRemlink(t);
+  f.job.remediationWorker = null;
+  f.job.remediationPlan.currentRound = 2;
+  f.job.remediationPlan.rounds.push({ round: 2, state: 'claimed', startHeadSha: f.head,
+    claimedAt: '2026-01-01T00:00:00.000Z' });
+  writeFollowUpJob(f.jobPath, f.job);
+  const result = await sweepStuckInProgressClaims({ rootDir: f.rootDir,
+    nowMs: Date.parse('2026-01-01T00:01:00.000Z'), isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: () => { throw new Error('an older round must not make a fresh claim eligible for recovery'); } });
+  assert.equal(result.completed, 0);
+  assert.equal(result.requeued, 0);
+  assert.equal(existsSync(f.jobPath), true);
+});
+
+test('REMLINK-01 a CI retry settles an independently proven worker publish instead of requeueing', async t => {
+  const f = await seedRemlink(t, { published: false });
+  const previousRepliesRoot = process.env.ADV_REPLIES_ROOT;
+  const previousWorkspaceRoot = process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT;
+  const repliesRoot = path.join(f.rootDir, 'synthetic-replies');
+  const workspaceRoot = path.join(f.rootDir, 'synthetic-workspaces');
+  process.env.ADV_REPLIES_ROOT = repliesRoot;
+  process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT = workspaceRoot;
+  t.after(() => {
+    if (previousRepliesRoot === undefined) delete process.env.ADV_REPLIES_ROOT;
+    else process.env.ADV_REPLIES_ROOT = previousRepliesRoot;
+    if (previousWorkspaceRoot === undefined) delete process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT;
+    else process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT = previousWorkspaceRoot;
+  });
+  const originalReply = writeRemlinkPublishReply(f);
+  const replyPath = path.join(repliesRoot, f.job.jobId, 'remediation-reply.json');
+  mkdirSync(path.dirname(replyPath), { recursive: true });
+  writeFileSync(replyPath, readFileSync(originalReply));
+  f.job.baseBranch = 'main';
+  f.job.remediationWorker.replyPath = replyPath;
+  f.job.remediationWorker.workspaceDir = path.join(workspaceRoot, f.job.jobId);
+  writeFollowUpJob(f.jobPath, f.job);
+  const { reconcileFollowUpJob } = await import('../src/follow-up-remediation.mjs');
+  let followOns = 0;
+  const result = await reconcileFollowUpJob({ rootDir: f.rootDir, job: f.job, jobPath: f.jobPath,
+    now: () => '2026-01-01T00:24:00.000Z', isWorkerRunning: () => false,
+    resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.head }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+    inspectRemediationCiRegressionImpl: async () => ({ state: 'failed', headSha: f.head,
+      conclusion: 'FAILURE', failedChecks: [{ name: 'synthetic-check', conclusion: 'FAILURE' }], pendingChecks: [] }),
+    requestReviewRereviewImpl: () => { followOns++; return { triggered: true, status: 'pending' }; },
+    requestRereviewWakeImpl: () => ({ requested: true }),
+    postCommentImpl: async () => ({ posted: false, reason: 'offline-fixture' }),
+    log: { log() {}, warn() {}, error() {} } });
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.remediationPlan.rounds[0].resultingHeadSha, f.head);
+  assert.equal(result.job.remediationPlan.transientRetries, 0);
+  assert.equal(existsSync(pendingPathFor(f.rootDir, f.jobPath)), false);
+  assert.equal(followOns, 1);
 });

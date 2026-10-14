@@ -1,3 +1,4 @@
+import { isWorkerProcessRunning } from './remediation-worker-liveness.mjs';
 import { completeWorkerPublishedHead, hasWorkerPublishArtifacts } from './remediation-published-head.mjs';
 // Stuck-claim sweep + heartbeat emitter + pre-spawn lifecycle recheck.
 //
@@ -908,6 +909,8 @@ async function sweepStuckInProgressClaims({
   readWorkerCpuImpl = readWorkerCpuPercent,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   completePublishedHeadImpl = completeWorkerPublishedHead,
+  reconcileFollowUpJobImpl = null,
+  isWorkerRunning = isWorkerProcessRunning,
 } = {}) {
   let scanned = 0;
   let reclaimed = 0;
@@ -937,18 +940,20 @@ async function sweepStuckInProgressClaims({
       continue;
     }
     const ageMs = nowMs - sourceMs;
-    if (ageMs <= thresholdMs) {
+    const exitedWithResult = hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace: false })
+      && !isWorkerRunning(job?.remediationWorker?.processId);
+    if (ageMs <= thresholdMs && !exitedWithResult) {
       skipped += 1;
       continue;
     }
     const session = resolveWorkerSessionProgressMs(rootDir, job);
-    if (session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) {
+    if (!exitedWithResult && session.sourceMs !== null && nowMs - session.sourceMs <= thresholdMs) {
       skipped += 1;
       continue;
     }
     // CPU is only a short grace signal after durable progress stops. A hot
     // loop must not reserve a remediation slot indefinitely.
-    if (ageMs < thresholdMs * 3 && readWorkerCpuImpl(job) > 0) {
+    if (!exitedWithResult && ageMs < thresholdMs * 3 && readWorkerCpuImpl(job) > 0) {
       skipped += 1;
       continue;
     }
@@ -960,10 +965,12 @@ async function sweepStuckInProgressClaims({
         if (settled) { completed += 1; continue; }
       }
       // A durable result is processed by ordinary reconciliation before any reclaim.
-      const { reconcileFollowUpJob } = await import('./follow-up-remediation.mjs');
-      const result = await reconcileFollowUpJob({ rootDir, job, jobPath, resolvePRLifecycleImpl,
-        execFileImpl, now: () => reclaimedAtIso, postCommentImpl, log });
-      if (result.action !== 'skipped') { skipped += 1; continue; }
+      if (hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace: false })) {
+        const reconcile = reconcileFollowUpJobImpl || (await import('./follow-up-remediation.mjs')).reconcileFollowUpJob;
+        const result = await reconcile({ rootDir, job, jobPath, resolvePRLifecycleImpl, isWorkerRunning,
+          execFileImpl, now: () => reclaimedAtIso, postCommentImpl, log });
+        if (result.action !== 'skipped') { skipped += 1; continue; }
+      }
     }
 
     const jobId = job?.jobId || basename(jobPath);

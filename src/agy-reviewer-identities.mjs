@@ -71,7 +71,8 @@ const AGY_REVIEWER_SETTINGS_KEYS = Object.freeze([
   'http_proxy',
   'no_proxy',
 ]);
-const AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH = 'Library/Keychains/login.keychain-db';
+// Comparison filler: keep equal to the bootstrap's canonical settings filler.
+const AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH = 'Library/Keychains/agy-reviewer.keychain-db';
 const DEFAULT_DISPATCH_WORKER_USER = 'agentos-worker';
 const DISPATCH_WORKER_USER_ENV = ['AGENT_OS_WORKER_RUN_AS_USER', 'HQ_WORKER_RUN_AS_USER'];
 
@@ -1235,6 +1236,7 @@ export {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   AGY_IDENTITY_USER_ENV,
   AGY_REVIEWER_KEYCHAIN_HELPER,
+  AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH,
   AGY_REVIEWER_LIBEXEC_DIR,
   AGY_REVIEWER_PINNED_AGY,
   AGY_REVIEWER_SETTINGS_KEYS,

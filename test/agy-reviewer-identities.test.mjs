@@ -33,6 +33,7 @@ import {
   AGY_IDENTITY_REVIEW_ID_ENV,
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   AGY_IDENTITY_USER_ENV,
+  AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH,
   AGY_REVIEWER_LIBEXEC_DIR,
   AGY_REVIEWER_PINNED_AGY,
   AGY_REVIEWER_SUDO,
@@ -632,6 +633,47 @@ test('CCX-08: the dispatch-worker user is refused as an identity, fail closed', 
 });
 
 // ── Readiness: isolation, drift, re-admission ───────────────────────────────
+
+function makeSettingsReadinessPool(fake, log = quietLog()) {
+  return createAgyReviewerIdentityPool({
+    env: {},
+    log,
+    hqOwner: 'owner-identity',
+    loadIdentities: () => ['reviewer-b'],
+    resolveRuntime: () => 'antigravity',
+    runPinnedImpl: fake.runPinned,
+    readBootstrapRecordImpl: () => ({ ready: true }),
+    listUserProcessesImpl: async () => ({ ok: true, processes: [] }),
+    readActiveRunRecordsImpl: () => [],
+    readQuotaCooldownImpl: () => null,
+    deliverAlertImpl: async () => ({}),
+    leaseWaitMs: 0,
+  });
+}
+
+test('AGYDRIFT-01: the comparison filler stays equal to the bootstrap canonical filler', () => {
+  assert.equal(AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH, 'Library/Keychains/agy-reviewer.keychain-db');
+  assert.deepEqual(referenceAgySettingsFromEnv({}), [
+    'AGY_KEYCHAIN_PATH=~/Library/Keychains/agy-reviewer.keychain-db',
+  ]);
+});
+
+test('AGYDRIFT-01: an added identity is ready with the dedicated keychain and no environment override', async () => {
+  const fake = makeFakeInstall({ users: ['reviewer-b'] });
+  try {
+    writeFileSync(fake.settingsPath('reviewer-b'), 'AGY_KEYCHAIN_PATH=~/Library/Keychains/agy-reviewer.keychain-db\n');
+    const pool = makeSettingsReadinessPool(fake);
+    assert.equal(await pool.refreshReadiness(), 1);
+    const state = pool.snapshot().find((entry) => entry.user === 'reviewer-b');
+    assert.equal(state.ready, true);
+    assert.deepEqual(state.reasons, []);
+    const lease = await pool.acquire({ reviewId: 'agy-drift-ready' });
+    assert.equal(lease.user, 'reviewer-b');
+    await pool.release(lease);
+  } finally {
+    fake.cleanup();
+  }
+});
 
 test('CCX-08: a failed review isolates only its identity, and a passing readiness check re-admits it', async () => {
   const fake = makeFakeInstall();

@@ -107,3 +107,45 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
   }
   assert.equal(readdirSync(root).length, 2);
 });
+
+test('HAMTMP-01: a launch with an ambiguous response retains scratch until terminal reconciliation', async t => {
+  const root = fixture(t);
+  const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root), execFileImpl: async () => {
+    throw Object.assign(new Error('synthetic response lost after launch'), {
+      stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }),
+    });
+  } });
+  assert.equal(result.reason, 'dispatch-response-ambiguous');
+  const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
+  const record = JSON.parse(readFileSync(path));
+  assert.equal(existsSync(record.scratchDir), true);
+  await reconcileAmaCloserDispatches(root, { logger,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }) });
+  assert.equal(existsSync(record.scratchDir), true);
+  await reconcileAmaCloserDispatches(root, { logger,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' } }) });
+  assert.equal(existsSync(record.scratchDir), false);
+});
+
+test('HAMTMP-01: the next admitted run removes a dead predecessor and renders a fresh directory', async t => {
+  const root = fixture(t);
+  const promptDir = join(root, 'prompts');
+  const previous = createHammerScratchDir(promptDir);
+  const { updateAmaCloserDispatchRecord } = await import('../src/ama/dispatch-closer.mjs');
+  updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 42, headSha: head }, () => ({
+    repo: 'fixture/repo', prNumber: 42, headSha: head, reviewedSha: head,
+    workerClass: 'hammer', state: 'dispatch-failed', promptDir, scratchDir: previous,
+    retryCount: 0, lastAttemptedAt: '2026-09-01T00:00:00Z',
+  }));
+  const args = dispatchArgs(root);
+  args.dispatchContext.promptDir = promptDir;
+  const result = await maybeDispatchAmaCloser({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-new-lrq', dispatchId: 'synthetic-new-dispatch' }) }) });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
+  const record = JSON.parse(readFileSync(path));
+  assert.notEqual(record.scratchDir, previous);
+  assert.equal(existsSync(previous), false);
+  assert.equal(existsSync(record.scratchDir), true);
+  assert.equal(readFileSync(result.promptPath, 'utf8'), `PR 42 scratch=${record.scratchDir}`);
+});

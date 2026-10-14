@@ -1568,7 +1568,9 @@ async function pollOnceWithinBudget(
   });
   } finally {
     try {
-      await healthProbe?.finishTick?.(healthTick);
+      await healthProbe?.finishTick?.(healthTick, {
+        inFlightReviewers: detachedReviewerDispatchTracker.liveSpawnEntries(),
+      });
     } catch (err) {
       console.error('[watcher] health probe finalize failed:', err?.message || err);
     }

@@ -2884,6 +2884,9 @@ export async function processReviewSubject(entry, ctx) {
           logger: console,
           db,
         });
+        if (firstPassBudgetSuppression.reason === 'same-head-review-in-flight') {
+          healthProbe?.recordInFlight?.(healthTick, { repo: repoPath, prNumber });
+        }
         // The review-cycle cap is the runaway breaker and is never lifted for
         // automation; every other budget reason yields to a verified FSR-06B
         // request (an empty delta cannot spend a remediation round on anything).
@@ -3728,6 +3731,9 @@ export async function processReviewSubject(entry, ctx) {
               healthProbe?.recordOpenPending?.(healthTick, {
                 repo: repoPath,
                 prNumber,
+                hasCompletedReviewRound: Boolean(stmtHasCompletedReview.get(repoPath, prNumber))
+                  || Boolean(dispatchHasPriorPostedReview || current?.posted_at)
+                  || completedRemediationRounds > 0,
               });
               const spawnReviewerArgs = {
                 repo: repoPath,

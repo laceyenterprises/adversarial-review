@@ -3181,13 +3181,35 @@ test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers 
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({
       healthProbeSetup: `
+        const { createWatcherHealthProbe } = await import(${JSON.stringify(fileUrl('src', 'health-probe.mjs') + '?actual')});
         globalThis.__reviewdelayStarts = [];
-        pollOptions.healthProbe.recordSpawn = (_tick, payload) => globalThis.__reviewdelayStarts.push(payload);
+        globalThis.__reviewdelayEvents = [];
+        globalThis.__reviewdelayTicks = [];
+        const probe = createWatcherHealthProbe({
+          env: {}, now: () => new Date('2026-10-01T00:00:00.000Z'),
+          stdout: { write: line => globalThis.__reviewdelayEvents.push(JSON.parse(line)) },
+          deliverAlertFn: async () => { throw new Error('unexpected health page'); },
+        });
+        pollOptions.healthProbe = {
+          ...probe,
+          recordSpawn(tick, payload) {
+            globalThis.__reviewdelayStarts.push(payload);
+            probe.recordSpawn(tick, payload);
+          },
+          async finishTick(tick, options) {
+            await probe.finishTick(tick, options);
+            globalThis.__reviewdelayTicks.push(tick);
+          },
+        };
       `,
       afterFirstPoll: `
         assert.ok(globalThis.__reviewdelayReturns.length > 0);
         assert.equal(globalThis.__reviewdelayStarts.length, globalThis.__reviewdelayReturns.length);
         assert.ok(globalThis.__reviewdelayStarts.every(start => start.at === '2026-10-01T00:00:00.000Z'));
+        assert.deepEqual(globalThis.__reviewdelayEvents, []);
+        assert.equal(globalThis.__reviewdelayTicks[0].openPendingPRs, 0);
+        assert.equal(globalThis.__reviewdelayTicks[0].openPendingRereviewPRs, 0);
+        assert.deepEqual(globalThis.__reviewdelayTicks[0].samplePRs, []);
         const starts = globalThis.__reviewdelayStarts.length;
         for (const resolve of globalThis.__reviewdelayReturns) resolve();
         await new Promise(resolve => setImmediate(resolve));

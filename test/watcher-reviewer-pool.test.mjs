@@ -1997,3 +1997,30 @@ test('CCX-08: a surviving Gemini stage without an identity lease keeps its own s
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test('REVIEWDELAY-01: health lists live spawns across models without changing pool counts', () => {
+  const nowMs = Date.parse('2026-10-01T00:00:00.000Z');
+  const record = (spawnToken, pr, reviewerModel, ageMs = 60_000) => ({
+    spawnToken, repo: 'sample-org/review-fixture', pr, reviewerModel,
+    spawnedAt: new Date(nowMs - ageMs).toISOString(),
+  });
+  const persisted = [
+    record('live-codex', 1, 'codex'),
+    record('live-claude', 2, 'claude'),
+    record('ended', 3, 'gemini'),
+    record('expired', 4, 'codex', 900_000),
+    { ...record('invalid-date', 5, 'claude'), spawnedAt: 'invalid' },
+  ];
+  const active = new Map([['live-codex', persisted[0]]]);
+  const tracker = createDetachedReviewerDispatchTracker({
+    activeReviewerSpawns: active,
+    timeoutMs: 600_000, graceMs: 0, now: () => nowMs,
+    loadPersistedSpawnRecords: () => Object.fromEntries(persisted.map(item => [item.spawnToken, item])),
+    isPersistedSpawnLive: item => item.spawnToken !== 'ended',
+  });
+  const countsBefore = [...tracker.activeCounts()];
+  assert.deepEqual(tracker.liveSpawnEntries().map(item => item.pr), [1, 2]);
+  assert.deepEqual([...tracker.activeCounts()], countsBefore);
+  assert.equal(active.size, 1);
+});

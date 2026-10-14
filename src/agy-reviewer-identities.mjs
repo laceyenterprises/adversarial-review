@@ -40,6 +40,7 @@ import { fileURLToPath } from 'node:url';
 
 import { readReviewerRunRecord, scanActiveReviewerRunRecords } from './adapters/reviewer-runtime/run-state.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
+import { readGeminiQuotaCooldown, readGeminiQuotaCooldownForIdentities } from './gemini-quota-cooldown.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
 import { isPgidAlive } from './process-group-identity.mjs';
 import { resolveGeminiReviewerIdentities, resolveGeminiRuntime } from './role-config.mjs';
@@ -623,6 +624,9 @@ function createAgyReviewerIdentityPool({
   referenceSettings = () => referenceAgySettingsFromEnv(env),
   listUserProcessesImpl = listUserProcesses,
   runStateRootDir = DEFAULT_RUN_STATE_ROOT,
+  readQuotaCooldownImpl = (identityUser) => readGeminiQuotaCooldown({
+    rootDir: runStateRootDir, env, nowMs: now(), log, hqOwner, identityUser,
+  }),
   // `{ records, unreadable }`; a plain array is taken as a complete read.
   readActiveRunRecordsImpl = () => scanActiveReviewerRunRecords(runStateRootDir),
   readRunRecordImpl = (sessionUuid) => readReviewerRunRecord(runStateRootDir, sessionUuid),
@@ -956,6 +960,7 @@ function createAgyReviewerIdentityPool({
       const state = stateFor(identity);
       try {
         if (await applyAdoptedLeases(state, runningLeases === null ? null : (runningLeases.get(identity.user) || []))) return;
+        if (readQuotaCooldownImpl(identity.user)) return;
         if (!identity.hqOwner) {
           if (state.draining && !state.lease) {
             const { drained, reason } = await checkDrained(state);
@@ -1002,13 +1007,18 @@ function createAgyReviewerIdentityPool({
   // (adopted) unreadies its identity instead, since the queue cannot see it.
   function readyCount(plan = currentPlan()) {
     if (!plan.multi) return null;
-    return plan.identities.filter((identity) => states.get(identity.user)?.ready).length;
+    return readyUsers(plan).length;
+  }
+
+  function readyUsers(plan = currentPlan()) {
+    return plan.identities.filter((identity) => states.get(identity.user)?.ready && !readQuotaCooldownImpl(identity.user))
+      .map((identity) => identity.user);
   }
 
   function tryAcquire(plan, { reviewId }) {
     for (const identity of plan.identities) {
       const state = stateFor(identity);
-      if (!state.ready || state.lease || state.adopted.length) continue;
+      if (!state.ready || state.lease || state.adopted.length || readQuotaCooldownImpl(identity.user)) continue;
       const lease = { user: identity.user, hqOwner: identity.hqOwner, reviewId };
       state.lease = lease;
       return lease;
@@ -1110,6 +1120,7 @@ function createAgyReviewerIdentityPool({
     plan: currentPlan,
     refreshReadiness,
     readyCount: () => readyCount(),
+    readyUsers,
     acquire,
     release,
     sweepAll,
@@ -1129,8 +1140,8 @@ function createAgyReviewerIdentityPool({
 }
 
 // Failure classes that say nothing about the identity that ran the review.
-// Provider-wide and quota failures hit every identity at once; isolating on
-// them would empty the lane on a provider blip.
+// Provider blips do not justify an auth probe. Quota failures use their
+// identity-scoped durable cooldown instead of readiness isolation.
 const NON_ISOLATING_FAILURE_CLASSES = new Set([
   'cancelled',
   'stale-review-head',
@@ -1256,3 +1267,15 @@ export {
   setAgyReviewerIdentityPoolForTests,
   sweepAgyReviewWorkspaces,
 };
+
+// Use the same configured pool for routing and fallback as for actual leasing.
+// Runtimes that cannot carry an identity continue to use the HQ owner.
+export function readReviewerGeminiQuotaCooldown({
+  rootDir, env = process.env, nowMs = Date.now(), log = console,
+  pool = getAgyReviewerIdentityPool(), adapter = null,
+}) {
+  const plan = pool.plan();
+  const identities = plan.multi && adapterCarriesAgyReviewerIdentity(adapter)
+    ? plan.identities.map(({ user }) => user) : [plan.hqOwner];
+  return readGeminiQuotaCooldownForIdentities({ rootDir, env, nowMs, log, hqOwner: plan.hqOwner, identities });
+}

@@ -22,7 +22,7 @@ import { deliverAlert } from './alert-delivery.mjs';
 import { parseReviewerModelUnavailable } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { randomUUID } from 'node:crypto';
 import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
-import { readGeminiQuotaCooldown, startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
+import { startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -44,6 +44,7 @@ import {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   getAgyReviewerIdentityPool,
   runWithAgyReviewerIdentity,
+  readReviewerGeminiQuotaCooldown,
 } from './agy-reviewer-identities.mjs';
 import {
   isGroundedProviderState,
@@ -565,7 +566,10 @@ async function spawnReviewer(args) {
       }
     }
   };
-  if (canFallback && readGeminiQuotaCooldown({ rootDir, env })) {
+  if (canFallback && readReviewerGeminiQuotaCooldown({
+    rootDir, env, pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
+    adapter: args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter,
+  })) {
     return runFallback();
   }
   const result = await spawnReviewerOnce({

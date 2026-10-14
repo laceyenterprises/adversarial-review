@@ -65,7 +65,10 @@ process.stdout.write(entry.raw ?? JSON.stringify(data));
 `, { mode: 0o755 });
   const result = spawnSync(process.execPath, [cli, ...argv], {
     encoding: 'utf8', timeout: 15_000,
-    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root },
+    // This deliberately minimal environment does not inherit the runner's
+    // state isolation. Bind the metered CLI's shared state to this fixture too.
+    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root,
+      GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json') },
   });
   assert.ifError(result.error);
   return { ...result, calls: JSON.parse(readFileSync(callsFile, 'utf8')) };

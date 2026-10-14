@@ -549,6 +549,8 @@ test('DEPWAIT-01 completed exact-head withheld approval reopens once and merges 
   });
   assert.equal(merges, 1);
   assert.equal(result.completed.job.result.verdict, 'approve');
+  assert.equal(JSON.parse(readFileSync(result.completed.jobPath, 'utf8')).result.autoadjudication.decision,
+    'approve-auto-merge', 'recovered merge persists its approval token');
   assert.deepEqual(result.completed.job.result.autoadjudication.inputs, originalInputs);
   assert.ok(result.completed.job.mergeWithheldRecovery.reopenedAt);
   assert.equal(findArgusJob(rootDir, { repo: REPO, prNumber: 966, headSha: HEAD }).bucket, 'completed');
@@ -652,14 +654,23 @@ test('DEPWAIT-01 recovered approval can wait under a fresh bounded budget withou
     title: 'edited after approval',
     jobRecord: findArgusJob(rootDir, { repo: REPO, prNumber: 966, headSha: HEAD }),
     fetchMergeRecoveryEvidenceImpl: async () => { reads += 1; return recoveryEvidence(); },
-    runDaemonCleanMergeAttemptImpl: async () => { merges += 1; return {
-      disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-mergeability-unknown'],
-    }; },
+    runDaemonCleanMergeAttemptImpl: async () => {
+      merges += 1;
+      return merges % 2
+        ? { disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-mergeability-unknown'] }
+        : { disposition: 'deferred', reason: 'lease-contended' };
+    },
   });
   for (let i = 0; i < ARGUS_CI_WAIT_DEFERRAL_BUDGET; i += 1) {
     const pending = await retry();
     assert.equal(pending.completed, null);
     assert.ok(pending.pending.job.mergeWithheldRecovery);
+    const persisted = JSON.parse(readFileSync(pending.pending.jobPath, 'utf8'));
+    assert.equal(persisted.lastAutoadjudicationAttempt.decision, 'approve-auto-merge');
+    assert.equal(persisted.lastAutoadjudicationAttempt.deferrals, i + 1);
+    assert.deepEqual(persisted.lastAutoadjudicationAttempt.inputs, args.jobRecord.job.result.autoadjudication.inputs);
+    assert.equal(isArgusJobClaimable(persisted, { nowMs: clockMs + 24 * 60 * 60 * 1000 }),
+      false, 'watcher retains ownership across recovered retries after bot grace expires');
     clockMs += CI_WAIT_RETRY_MS;
   }
   assert.equal((await retry()).completed.job.result.verdict, 'needs_verification');

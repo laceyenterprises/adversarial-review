@@ -3,6 +3,9 @@ import { ARGUS_VERDICTS } from './argus-security-verdict.mjs';
 import { ARGUS_REVIEW_RESULT_SOURCE } from './argus-security-review.mjs';
 import { isUnroutableBotAuthor } from './bot-author.mjs';
 import { DAEMON_MERGE_DISPOSITION } from './ama/daemon-merge.mjs';
+import { ARGUS_CI_WAIT_DEFERRAL_BUDGET, CI_WAIT_RETRY_MS } from './argus-dependency-evidence.mjs';
+import { classifyCheckRollup } from './checks-summary.mjs';
+import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
 
 export const DEPENDENCY_BOT_AUTOADJUDICATION_EVENT = 'argus.dependency_bot_autoadjudication';
 
@@ -142,39 +145,49 @@ function resolveGateChecks(daemonResult) {
   return null;
 }
 
-function checkIsStillPending(check) {
-  if (!check || typeof check !== 'object') return false;
-  const status = String(check.status || check.state || '').trim().toUpperCase();
-  const conclusion = String(check.conclusion || '').trim().toUpperCase();
-  if (check.__typename === 'StatusContext') {
-    return status !== '' && !['SUCCESS', 'FAILURE', 'ERROR'].includes(status);
-  }
-  if (status) return status !== 'COMPLETED';
-  return !conclusion;
-}
+// Only incomplete reads and contention can clear without changing the approved
+// head or policy. A hard blocker beside a transient miss still withholds merge.
+const RETRYABLE_ELIGIBILITY_REASONS = new Set([
+  'pr-mergeability-unknown',
+  'labels-unavailable',
+  'primary-change-read-failed',
+  'history-read-failed',
+  'ci-cost-read-failed',
+  'lease-not-held',
+]);
+const RETRYABLE_DEFERRED_REASONS = new Set([
+  'live-head-refresh-failed',
+  'live-head-unresolved',
+  'gate-read-failed',
+  'history-read-failed',
+  'merge-title-missing',
+  'lease-acquire-error',
+  'lease-contended',
+  'audit-init-failed',
+]);
+const RETRYABLE_DECLINE_REASONS = new Set([
+  'protective-predecessor-open',
+  'protective-predecessor-state-unreadable',
+]);
 
-function hasPendingRequiredChecks(daemonResult) {
-  const checks = resolveGateChecks(daemonResult);
-  if (!Array.isArray(checks) || checks.length === 0) return true;
-  return checks.some(checkIsStillPending);
-}
-
-function shouldKeepArgusJobPendingForMergeRetry(daemonResult) {
+function shouldKeepArgusJobPendingForMergeRetry(daemonResult, cfg) {
   const disposition = String(daemonResult?.disposition || '');
   const reason = String(daemonResult?.reason || '');
   const reasons = Array.isArray(daemonResult?.reasons) ? daemonResult.reasons : [];
-
+  const gatesCanClear = reasons.every((gate) => {
+    if (gate !== 'ci-not-green') return RETRYABLE_ELIGIBILITY_REASONS.has(gate);
+    const ci = classifyCheckRollup(resolveGateChecks(daemonResult), {
+      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
+    });
+    return ci === null || ci === 'PENDING';
+  });
+  if (!gatesCanClear) return false;
   if (disposition === DAEMON_MERGE_DISPOSITION.DEFERRED) {
-    return reason !== 'pr-head-moved';
+    return RETRYABLE_DEFERRED_REASONS.has(reason);
   }
-  if (
-    disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN
-    && reason === 'not-eligible'
-    && reasons.includes('ci-not-green')
-  ) {
-    return hasPendingRequiredChecks(daemonResult);
-  }
-  return false;
+  return disposition === DAEMON_MERGE_DISPOSITION.NOT_TAKEN
+    && ((reason === 'not-eligible' && reasons.length > 0)
+      || RETRYABLE_DECLINE_REASONS.has(reason));
 }
 
 function writePendingAutoadjudicationAttempt({
@@ -195,6 +208,10 @@ function writePendingAutoadjudicationAttempt({
       reason: decision.reason,
       inputs: decision.inputs,
       attemptedAt,
+      // One budget across all curable reasons prevents alternating misses from
+      // extending the wait indefinitely. The initial decline buys one wait.
+      deferrals: (jobRecord.job.lastAutoadjudicationAttempt?.deferrals || 0) + 1,
+      notBefore: new Date(Date.parse(attemptedAt) + CI_WAIT_RETRY_MS).toISOString(),
       mergeDisposition: daemonResult?.disposition || null,
       mergeReason: daemonResult?.reason || null,
       mergeReasons: Array.isArray(daemonResult?.reasons) ? daemonResult.reasons : [],
@@ -307,7 +324,7 @@ async function mergeArgusDrainApprovedDependencyBump({
     env,
   });
   const merged = daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.MERGED;
-  const retryable = !merged && shouldKeepArgusJobPendingForMergeRetry(daemonResult);
+  const retryable = !merged && shouldKeepArgusJobPendingForMergeRetry(daemonResult, cfg);
   const updated = {
     ...job,
     result: {
@@ -383,6 +400,10 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
   }
 
   const completedAt = now();
+  const retryAt = Date.parse(jobRecord.job.lastAutoadjudicationAttempt?.notBefore || '');
+  if (retryAt > Date.parse(completedAt)) {
+    return { attempted: false, reason: 'merge-retry-wait' };
+  }
   const decision = adjudicateDependencyBotUpdate({ title, authorRef, job: jobRecord.job });
   if (decision.reason === 'not-bot-author') {
     return {
@@ -468,7 +489,8 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
   });
 
   if (daemonResult?.disposition !== DAEMON_MERGE_DISPOSITION.MERGED) {
-    if (shouldKeepArgusJobPendingForMergeRetry(daemonResult)) {
+    if (shouldKeepArgusJobPendingForMergeRetry(daemonResult, cfg)
+      && (jobRecord.job.lastAutoadjudicationAttempt?.deferrals || 0) < ARGUS_CI_WAIT_DEFERRAL_BUDGET) {
       const pending = writePendingAutoadjudicationAttempt({
         jobRecord,
         decision,
@@ -492,6 +514,8 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
       inputs: decision.inputs,
     };
     const withheldResult = buildArgusResult({ decision: withheldDecision, completedAt });
+    withheldResult.autoadjudication.mergeDisposition = daemonResult?.disposition || null;
+    withheldResult.autoadjudication.mergeReasons = Array.isArray(daemonResult?.reasons) ? daemonResult.reasons : [];
     const completed = completeArgusJobImpl({
       rootDir,
       jobPath: jobRecord.jobPath,

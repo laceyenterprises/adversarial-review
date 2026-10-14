@@ -15,10 +15,11 @@ import {
 } from '../src/argus-security-queue.mjs';
 import { runDaemonCleanMergeAttempt as runDaemonCleanMergeAttemptReal } from '../src/daemon-clean-merge.mjs';
 import { attemptDaemonCleanMerge } from '../src/ama/daemon-merge.mjs';
+import { ARGUS_CI_WAIT_DEFERRAL_BUDGET, CI_WAIT_RETRY_MS } from '../src/argus-dependency-evidence.mjs';
 
 const HEAD = 'a'.repeat(40);
 const NEXT_HEAD = 'b'.repeat(40);
-const REPO = 'laceyenterprises/adversarial-review';
+const REPO = 'example/dependency-fixture';
 
 async function withRoot(fn) {
   const rootDir = mkdtempSync(join(tmpdir(), 'depbot-autoadjudication-'));
@@ -147,7 +148,7 @@ test('non-bot author is left pending for the normal Argus worker', async () => w
   let mergeCalled = false;
   const result = await maybeAutoAdjudicateDependencyBotArgusJob({
     ...baseArgs(rootDir),
-    authorRef: 'placey',
+    authorRef: 'fixture-author',
     runDaemonCleanMergeAttemptImpl: async () => {
       mergeCalled = true;
       return { disposition: 'merged' };
@@ -355,3 +356,118 @@ function runDaemonCleanMergeAttempt(args) {
     ...args,
   });
 }
+
+const GREEN_CHECKS = [{ __typename: 'CheckRun', name: 'fixture-suite', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+const PENDING_CHECKS = [{ __typename: 'CheckRun', name: 'fixture-suite', status: 'IN_PROGRESS', conclusion: null }];
+const RED_CHECKS = [{ __typename: 'CheckRun', name: 'fixture-suite', status: 'COMPLETED', conclusion: 'FAILURE' }];
+
+const CURABLE_DECLINES = [
+  ...['pr-mergeability-unknown', 'labels-unavailable', 'primary-change-read-failed',
+    'history-read-failed', 'ci-cost-read-failed', 'lease-not-held'].map((gate) => ({
+    disposition: 'not-taken', reason: 'not-eligible', reasons: [gate],
+  })),
+  ...['live-head-refresh-failed', 'live-head-unresolved', 'gate-read-failed',
+    'history-read-failed', 'merge-title-missing', 'lease-acquire-error',
+    'lease-contended', 'audit-init-failed'].map((reason) => ({ disposition: 'deferred', reason })),
+  ...['protective-predecessor-open', 'protective-predecessor-state-unreadable']
+    .map((reason) => ({ disposition: 'not-taken', reason })),
+  ...[PENDING_CHECKS, [], null].map((requiredChecks) => ({
+    disposition: 'not-taken', reason: 'not-eligible', reasons: ['ci-not-green'], liveGate: { requiredChecks },
+  })),
+  { disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-mergeability-unknown', 'ci-not-green', 'labels-unavailable'],
+    liveGate: { requiredChecks: PENDING_CHECKS, mergeable: 'UNKNOWN', mergeStateStatus: 'BEHIND' } },
+];
+
+for (const [index, decline] of CURABLE_DECLINES.entries()) {
+  test(`DEPWAIT-01 curable decline ${index}: ${decline.reasons || decline.reason} waits then merges`, async () => withRoot(async (rootDir) => {
+    const args = baseArgs(rootDir);
+    let clockMs = Date.parse(args.now());
+    let calls = 0;
+    const attempt = () => maybeAutoAdjudicateDependencyBotArgusJob({
+      ...args,
+      now: () => new Date(clockMs).toISOString(),
+      jobRecord: findArgusJob(rootDir, { repo: REPO, prNumber: 966, headSha: HEAD }),
+      runDaemonCleanMergeAttemptImpl: async () => ++calls === 1 ? decline : { disposition: 'merged', reason: 'merged' },
+    });
+    const first = await attempt();
+    assert.equal(first.completed, null);
+    assert.equal(first.pending.job.status, 'pending');
+    assert.equal(first.pending.job.result, null);
+    clockMs += CI_WAIT_RETRY_MS - 1;
+    assert.equal((await attempt()).attempted, false);
+    assert.equal(calls, 1);
+    clockMs += 1;
+    const next = await attempt();
+    assert.equal(calls, 2);
+    assert.equal(next.completed.job.result.verdict, 'approve');
+    assert.equal(next.merge.disposition, 'merged');
+  }));
+}
+
+const HARD_DECLINES = [
+  ...['verdict-not-eligible', 'pr-not-mergeable', 'branch-protection-missing-gate',
+    'stale-head', 'duplicate-family-unresolved', 'primary-change-reverted',
+    'primary-change-unknown', 'ci-cost-check-failed', 'ci-cost-unauthorized', 'unknown-gate'].map((gate) => ({
+    disposition: 'not-taken', reason: 'not-eligible', reasons: [gate],
+  })),
+  ...['blocking-findings-present', 'non-blocking-findings-present', 'findings-unknown',
+    'prior-daemon-terminal-failure', 'daemon-inputs-missing', 'operator-approval-no-longer-current',
+    'protective-predecessor-malformed-trailer', 'protective-predecessor-not-found'].map((reason) => ({
+    disposition: 'not-taken', reason,
+  })),
+  { disposition: 'deferred', reason: 'pr-head-moved' },
+  { disposition: 'deferred', reason: 'unknown-defer' },
+  { disposition: 'deferred', reason: 'gate-read-failed', reasons: ['stale-head'] },
+  { disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-mergeability-unknown', 'duplicate-family-unresolved'] },
+  { disposition: 'not-taken', reason: 'not-eligible', reasons: ['pr-mergeability-unknown', 'ci-not-green'],
+    liveGate: { requiredChecks: [...RED_CHECKS, { ...PENDING_CHECKS[0], name: 'other-suite' }] } },
+];
+for (const [index, decline] of HARD_DECLINES.entries()) {
+  test(`DEPWAIT-01 non-curable decline ${index}: ${decline.reasons || decline.reason} completes withheld`, async () => withRoot(async (rootDir) => {
+    const result = await maybeAutoAdjudicateDependencyBotArgusJob({
+      ...baseArgs(rootDir), runDaemonCleanMergeAttemptImpl: async () => decline,
+    });
+    assert.equal(result.completed.job.result.verdict, 'needs_verification');
+    assert.equal(result.completed.job.result.autoadjudication.reason, `merge-withheld-${decline.reason}`);
+    assert.deepEqual(result.completed.job.result.autoadjudication.mergeReasons, decline.reasons || []);
+  }));
+}
+
+test('DEPWAIT-01 shared wait budget exhausts once even when curable reasons alternate', async () => withRoot(async (rootDir) => {
+  const args = baseArgs(rootDir);
+  let clockMs = Date.parse(args.now());
+  let calls = 0;
+  const attempt = () => maybeAutoAdjudicateDependencyBotArgusJob({
+    ...args,
+    now: () => new Date(clockMs).toISOString(),
+    jobRecord: findArgusJob(rootDir, { repo: REPO, prNumber: 966, headSha: HEAD }),
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible',
+      reasons: [++calls % 2 ? 'pr-mergeability-unknown' : 'labels-unavailable'] }),
+  });
+  for (let count = 0; count < ARGUS_CI_WAIT_DEFERRAL_BUDGET; count += 1) {
+    assert.equal((await attempt()).completed, null);
+    clockMs += CI_WAIT_RETRY_MS;
+  }
+  const exhausted = await attempt();
+  assert.equal(exhausted.completed.job.result.verdict, 'needs_verification');
+  assert.equal(exhausted.completed.job.result.autoadjudication.reason, 'merge-withheld-not-eligible');
+  assert.equal(exhausted.completed.job.lastAutoadjudicationAttempt.deferrals, ARGUS_CI_WAIT_DEFERRAL_BUDGET);
+  clockMs += CI_WAIT_RETRY_MS;
+  assert.equal((await attempt()).attempted, false);
+  assert.equal(calls, ARGUS_CI_WAIT_DEFERRAL_BUDGET + 1);
+}));
+
+test('DEPWAIT-01 retry uses latest CI runs and notices a missing required context', async () => withRoot(async (rootDir) => {
+  const args = baseArgs(rootDir);
+  const result = await maybeAutoAdjudicateDependencyBotArgusJob({
+    ...args,
+    cfg: { ...args.cfg, requiredCheckContexts: ['fixture-suite', 'missing-suite'] },
+    runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible', reasons: ['ci-not-green'],
+      liveGate: { requiredChecks: [
+        { ...RED_CHECKS[0], createdAt: '2026-01-01T00:00:00Z' },
+        { ...GREEN_CHECKS[0], createdAt: '2026-01-01T00:01:00Z' },
+      ] } }),
+  });
+  assert.equal(result.completed, null);
+  assert.equal(result.pending.job.status, 'pending');
+}));

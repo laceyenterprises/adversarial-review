@@ -44,7 +44,7 @@ const MAX_MANIFEST_DIRS = 4;
 const MAX_LIST_ITEMS = 40;
 const MAX_USAGE_LINES = 60;
 const MAX_RELEASE_NOTES_CHARS = 20_000;
-const CI_WAIT_RETRY_MS = 10 * 60 * 1000;
+export const CI_WAIT_RETRY_MS = 10 * 60 * 1000;
 // How many CI waits (at CI_WAIT_RETRY_MS each) before an unfinished suite
 // stops deferring and becomes `needs_verification`: three hours.
 export const ARGUS_CI_WAIT_DEFERRAL_BUDGET = 18;

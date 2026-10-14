@@ -1150,6 +1150,10 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     geminiCredentialConcurrency,
     ceiling: Math.max(concurrencyLimit, ...candidates.map(reviewerDispatchCandidateGeminiSeats)),
   });
+  const geminiLimitForCandidate = (candidate) => Object.prototype.hasOwnProperty.call(candidate, 'geminiCredentialConcurrency')
+    ? resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency: candidate.geminiCredentialConcurrency, ceiling: Math.max(concurrencyLimit, reviewerDispatchCandidateGeminiSeats(candidate)) })
+    : geminiConcurrencyLimit;
+
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
   const pending = queue.map((candidate) => ({ candidate, started: false }));
@@ -1304,7 +1308,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
         continue;
       }
-      if (isGeminiCandidate(entry.candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiConcurrencyLimit) {
+      if (isGeminiCandidate(entry.candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiLimitForCandidate(entry.candidate)) {
         // Use actual admission order and occupied seats, including pipelines.
         // Returning to the selector after the async hook preserves lane fairness
         // and rechecks capacity if another reviewer completed during the probe.
@@ -1312,7 +1316,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
           && !saturationPrepared.has(entry.candidate)) return entry;
         recordDeferredReason(
           entry,
-          geminiConcurrencyLimit < 1
+          geminiLimitForCandidate(entry.candidate) < 1
             ? 'gemini-credential-concurrency-zero'
             : 'gemini-credential-concurrency-saturated'
         );
@@ -1325,10 +1329,11 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
   const hasUnstarted = () => pending.some((entry) => !entry.started);
   const deferReasonFor = (candidate) => {
-    if (isGeminiCandidate(candidate) && geminiConcurrencyLimit < 1) {
+    const candidateGeminiLimit = geminiLimitForCandidate(candidate);
+    if (isGeminiCandidate(candidate) && candidateGeminiLimit < 1) {
       return 'gemini-credential-concurrency-zero';
     }
-    if (isGeminiCandidate(candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(candidate) > geminiConcurrencyLimit) {
+    if (isGeminiCandidate(candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(candidate) > candidateGeminiLimit) {
       return 'gemini-credential-concurrency-saturated';
     }
     if (initialWaveClosed) return 'single-wave-deferred';

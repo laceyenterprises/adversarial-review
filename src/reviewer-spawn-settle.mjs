@@ -22,7 +22,7 @@ import { deliverAlert } from './alert-delivery.mjs';
 import { parseReviewerModelUnavailable } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { randomUUID } from 'node:crypto';
 import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
-import { readGeminiQuotaCooldown, startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
+import { startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -44,6 +44,7 @@ import {
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   getAgyReviewerIdentityPool,
   runWithAgyReviewerIdentity,
+  readReviewerGeminiQuotaCooldown,
 } from './agy-reviewer-identities.mjs';
 import {
   isGroundedProviderState,
@@ -513,6 +514,25 @@ function resolveReviewerOutageSignal({
 
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
+function recordGeminiQuotaCooldown({ rootDir, env, result, identityUser, pool }) {
+  // Typed runtime evidence owns classification; text only supplies the reset.
+  const diagnostic = [result.error, result.stderr, result.stderrTail].filter(Boolean).join('\n');
+  const signal = parseReviewerQuotaExhaustion({ stderr: diagnostic });
+  signal.resetAt ||= resolveQuotaResetIso(diagnostic);
+  // Key the record by the pool's configured HQ owner, the same name every
+  // reader uses, rather than the OS account that happens to run this process.
+  const hqOwner = configuredHqOwner(pool);
+  return startGeminiQuotaCooldown({ rootDir, env, signal, identityUser, ...(hqOwner ? { hqOwner } : {}) });
+}
+
+function configuredHqOwner(pool) {
+  try {
+    return pool?.plan?.()?.hqOwner || null;
+  } catch {
+    return null;
+  }
+}
+
 async function spawnReviewer(args) {
   if (normalizeReviewerModel(args.reviewerModel) !== 'gemini') return spawnReviewerOnce(args);
   const rootDir = args.rootDir || ROOT;
@@ -565,7 +585,10 @@ async function spawnReviewer(args) {
       }
     }
   };
-  if (canFallback && readGeminiQuotaCooldown({ rootDir, env })) {
+  if (canFallback && readReviewerGeminiQuotaCooldown({
+    rootDir, env, pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
+    adapter: args.reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter,
+  })) {
     return runFallback();
   }
   const result = await spawnReviewerOnce({
@@ -595,10 +618,10 @@ async function spawnReviewer(args) {
   if (!result.ok && result.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
     // The runtime owns classification. Text here is used only to recover a
     // reset timestamp after typed quota evidence, never to select fallback.
-    const diagnostic = [result.error, result.stderr].filter(Boolean).join('\n');
-    const signal = parseReviewerQuotaExhaustion({ stderr: diagnostic });
-    signal.resetAt ||= resolveQuotaResetIso(diagnostic);
-    startGeminiQuotaCooldown({ rootDir, env, signal });
+    recordGeminiQuotaCooldown({
+      rootDir, env, result, identityUser: result.agyIdentityUser,
+      pool: args.agyReviewerIdentityPool || getAgyReviewerIdentityPool(),
+    });
     if (canFallback) {
       console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
       return runFallback(result);
@@ -785,13 +808,15 @@ async function spawnReviewerOnce({
 
     // CCX-08: a Gemini review leases one agy reviewer identity for its whole
     // run; with one identity (the HQ owner) this calls straight through.
+    let agyIdentityUser;
     let result = await runWithAgyReviewerIdentity({
       reviewerModel,
       adapter: activeReviewerRuntimeAdapter,
       pool: agyReviewerIdentityPool,
-    }, (agyIdentity, agyIdentityLease) => {
+    }, async (agyIdentity, agyIdentityLease) => {
+      agyIdentityUser = agyIdentityLease?.user;
       onReviewerRuntimeStarted();
-      return activeReviewerRuntimeAdapter.spawnReviewer({
+      const runtimeResult = await activeReviewerRuntimeAdapter.spawnReviewer({
         model: reviewerModel,
         prompt: '',
         subjectContext: {
@@ -826,8 +851,17 @@ async function spawnReviewerOnce({
         forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
         onReviewerPgid,
       });
+      if (normalizeReviewerModel(reviewerModel) === 'gemini' && !runtimeResult.ok
+        && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+        // Persist before releasing the identity or admission capacity so the
+        // next queued review cannot lease the identity that just hit its quota.
+        recordGeminiQuotaCooldown({
+          rootDir, env: quotaCheckEnv, result: runtimeResult, identityUser: agyIdentityUser, pool: agyReviewerIdentityPool,
+        });
+      }
+      return runtimeResult;
     });
-    result = { ...result, effectiveReviewerModel: reviewerModel };
+    result = { ...result, effectiveReviewerModel: reviewerModel, ...(agyIdentityUser ? { agyIdentityUser } : {}) };
     if (
       result.ok &&
       shouldPostAdapterReviewBody(result) &&

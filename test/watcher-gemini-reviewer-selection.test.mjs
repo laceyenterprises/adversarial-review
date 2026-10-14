@@ -284,6 +284,7 @@ test('CFGDRIFT-01 watcher: mode log attributes configuration and quota cooldown 
     [{ ...resolution, source: 'env' }, null, 'off', '[watcher] gemini-mode resolved=off source=env topPath=/fixture/config.yaml'],
     [{}, null, 'off', '[watcher] gemini-mode resolved=off source=unknown topPath=<unknown>'],
     [resolution, { resetAt: '2026-10-11T18:00:00.000Z' }, 'off', '[watcher] gemini-mode resolved=off source=quota-cooldown resetAt=2026-10-11T18:00:00.000Z topPath=/fixture/config.yaml'],
+    [resolution, { identities: [{ user: 'owner-identity', resetAt: '2026-10-16T02:00:00Z' }, { user: 'reviewer-b', resetAt: '2026-10-16T12:00:00Z' }] }, 'off', '[watcher] gemini-mode resolved=off source=quota-cooldown identities=owner-identity:2026-10-16T02:00:00Z,reviewer-b:2026-10-16T12:00:00Z topPath=/fixture/config.yaml'],
   ]) {
     assert.equal(runInNewContext(logExpression, {
       geminiModeResolution, geminiCooldown, geminiReviewerMode,

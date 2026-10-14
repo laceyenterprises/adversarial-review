@@ -25,7 +25,8 @@ import { summarizeChecksConclusion } from './checks-summary.mjs';
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
 import { transferGeminiFallbackSession } from './gemini-fallback-session.mjs';
-import { readGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
+import { readReviewerGeminiQuotaCooldown } from './agy-reviewer-identities.mjs';
+import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
@@ -1752,12 +1753,14 @@ export async function processReviewSubject(entry, ctx) {
       // gemini-on-gemini route that an operator `roles.reviewer=gemini` pin
       // could otherwise produce.
       const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
-      const geminiCooldown = readGeminiQuotaCooldown({ rootDir: ROOT });
+      const geminiCooldown = readReviewerGeminiQuotaCooldown({ rootDir: ROOT, adapter: domainReviewerRuntimeAdapter || reviewerRuntimeState.adapter });
       const geminiReviewerMode = geminiCooldown ? 'off' : geminiModeResolution.mode;
       console.log(
         `[watcher] gemini-mode resolved=${geminiReviewerMode} ` +
           `source=${geminiCooldown ? 'quota-cooldown' : geminiModeResolution.source || 'unknown'} ` +
-          (geminiCooldown ? `resetAt=${geminiCooldown.resetAt} ` : '') +
+          (geminiCooldown?.identities
+            ? `identities=${geminiCooldown.identities.map(({ user, resetAt }) => `${user}:${resetAt}`).join(',')} `
+            : geminiCooldown ? `resetAt=${geminiCooldown.resetAt} ` : '') +
           `topPath=${geminiModeResolution.topPath || '<unknown>'}`
       );
       if (geminiModeResolution.error) {

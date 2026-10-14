@@ -431,15 +431,15 @@ test('CCX-08: on the agent-runtime reviewer runtime the identities are inert: br
     assert.equal(pool.snapshot().some((state) => state.leased), false);
     assert.match(log.lines.join('\n'), /runtime agent-runtime cannot run a review as an added identity/);
 
-    // Mixed runtimes in one drain: the shared cap is bounded by both counts.
+    // Mixed runtimes retain separate candidate caps; neither runtime disables the other.
     assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([
       { reviewerModel: 'gemini', reviewerRuntimeAdapter: agentRuntime },
       { reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER },
-    ], { ...brokerOptions, fetchCredentialConcurrency: async () => 2 }), 2);
+    ], { ...brokerOptions, fetchCredentialConcurrency: async () => 2 }), 3);
     assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([
       { reviewerModel: 'gemini', reviewerRuntimeAdapter: agentRuntime },
       { reviewerModel: 'gemini', reviewerRuntimeAdapter: LEASING_ADAPTER },
-    ], brokerOptions), 3);
+    ], brokerOptions), 5);
   } finally {
     fake.cleanup();
   }

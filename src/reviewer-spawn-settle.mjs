@@ -598,7 +598,7 @@ async function spawnReviewer(args) {
     const diagnostic = [result.error, result.stderr].filter(Boolean).join('\n');
     const signal = parseReviewerQuotaExhaustion({ stderr: diagnostic });
     signal.resetAt ||= resolveQuotaResetIso(diagnostic);
-    startGeminiQuotaCooldown({ rootDir, env, signal });
+    startGeminiQuotaCooldown({ rootDir, env, signal, identityUser: result.agyIdentityUser });
     if (canFallback) {
       console.info(`[watcher] reviewer-selection ${args.repo}#${args.prNumber} → ${fallback.reviewerModel} (Gemini quota exhausted; immediate fallback)`);
       return runFallback(result);
@@ -785,11 +785,13 @@ async function spawnReviewerOnce({
 
     // CCX-08: a Gemini review leases one agy reviewer identity for its whole
     // run; with one identity (the HQ owner) this calls straight through.
+    let agyIdentityUser;
     let result = await runWithAgyReviewerIdentity({
       reviewerModel,
       adapter: activeReviewerRuntimeAdapter,
       pool: agyReviewerIdentityPool,
     }, (agyIdentity, agyIdentityLease) => {
+      agyIdentityUser = agyIdentityLease?.user;
       onReviewerRuntimeStarted();
       return activeReviewerRuntimeAdapter.spawnReviewer({
         model: reviewerModel,
@@ -827,7 +829,7 @@ async function spawnReviewerOnce({
         onReviewerPgid,
       });
     });
-    result = { ...result, effectiveReviewerModel: reviewerModel };
+    result = { ...result, effectiveReviewerModel: reviewerModel, ...(agyIdentityUser ? { agyIdentityUser } : {}) };
     if (
       result.ok &&
       shouldPostAdapterReviewBody(result) &&

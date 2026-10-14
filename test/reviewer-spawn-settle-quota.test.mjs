@@ -674,3 +674,32 @@ for (const [name, fallback] of [
     } finally { await rm(rootDir, { recursive: true, force: true }); }
   });
 }
+
+test('AGYCOOLDOWN-01: runtime quota evidence records the identity from its lease', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'leased-quota-'));
+  const env = { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false', ADVERSARIAL_REVIEW_STATE_DIR: rootDir };
+  let released = false;
+  try {
+    const result = await spawnReviewer({
+      ...spawnArgs({ env, capture: newCapture() }),
+      rootDir, repo: 'example/synthetic', reviewerModel: 'gemini', builderTag: 'codex',
+      agyReviewerIdentityPool: {
+        plan: () => ({ multi: true }),
+        acquire: async () => ({ user: 'reviewer-b', hqOwner: false, reviewId: 'synthetic-review' }),
+        release: async () => { released = true; },
+      },
+      reviewerRuntimeAdapterOverride: {
+        describe: () => ({ capabilities: { agyReviewerIdentity: true } }),
+        async spawnReviewer({ subjectContext }) {
+          assert.equal(subjectContext.agyIdentity.user, 'reviewer-b');
+          return { ok: false, failureClass: 'quota-exhausted', stderr: 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 50h' };
+        },
+      },
+    });
+    assert.equal(result.failureClass, 'quota-exhausted');
+    assert.equal(released, true);
+    const cooldown = readGeminiQuotaCooldown({ rootDir, env, identityUser: 'reviewer-b' });
+    assert.ok(Date.parse(cooldown.resetAt) > Date.now() + 49 * 3600000);
+    assert.equal(readGeminiQuotaCooldown({ rootDir, env, identityUser: 'owner-identity' }), null);
+  } finally { await rm(rootDir, { recursive: true, force: true }); }
+});

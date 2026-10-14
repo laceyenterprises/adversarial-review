@@ -10,7 +10,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const PR_NUMBER = '4242';
 
 export const GITHUB_PLAN_UNAVAILABLE_STDERR =
   'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)';

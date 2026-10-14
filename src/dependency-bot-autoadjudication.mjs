@@ -1,11 +1,12 @@
-import { completeArgusJob, writeArgusJob } from './argus-security-queue.mjs';
+import { completeArgusJob, returnArgusJobToPending, writeArgusJob } from './argus-security-queue.mjs';
 import { ARGUS_VERDICTS } from './argus-security-verdict.mjs';
 import { ARGUS_REVIEW_RESULT_SOURCE } from './argus-security-review.mjs';
 import { isUnroutableBotAuthor } from './bot-author.mjs';
 import { DAEMON_MERGE_DISPOSITION } from './ama/daemon-merge.mjs';
 import { ARGUS_CI_WAIT_DEFERRAL_BUDGET, CI_WAIT_RETRY_MS } from './argus-dependency-evidence.mjs';
-import { classifyCheckRollup } from './checks-summary.mjs';
+import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 
 export const DEPENDENCY_BOT_AUTOADJUDICATION_EVENT = 'argus.dependency_bot_autoadjudication';
 
@@ -190,6 +191,29 @@ function shouldKeepArgusJobPendingForMergeRetry(daemonResult, cfg) {
       || RETRYABLE_DECLINE_REASONS.has(reason));
 }
 
+// The reviewed dependency lane (including major bumps) retains its existing
+// settlement semantics. DEPWAIT-01 only changes auto-adjudicated approvals.
+function shouldKeepArgusDrainApprovalForMergeRetry(daemonResult) {
+  if (daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.DEFERRED) {
+    return daemonResult.reason !== 'pr-head-moved';
+  }
+  if (daemonResult?.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN
+    || daemonResult.reason !== 'not-eligible'
+    || !daemonResult.reasons?.includes('ci-not-green')) return false;
+  const checks = resolveGateChecks(daemonResult);
+  if (!Array.isArray(checks) || checks.length === 0) return true;
+  return checks.some((check) => {
+    if (!check || typeof check !== 'object') return false;
+    const status = String(check.status || check.state || '').trim().toUpperCase();
+    const conclusion = String(check.conclusion || '').trim().toUpperCase();
+    if (check.__typename === 'StatusContext') {
+      return status !== '' && !['SUCCESS', 'FAILURE', 'ERROR'].includes(status);
+    }
+    if (status) return status !== 'COMPLETED';
+    return !conclusion;
+  });
+}
+
 function writePendingAutoadjudicationAttempt({
   jobRecord,
   decision,
@@ -324,7 +348,7 @@ async function mergeArgusDrainApprovedDependencyBump({
     env,
   });
   const merged = daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.MERGED;
-  const retryable = !merged && shouldKeepArgusJobPendingForMergeRetry(daemonResult, cfg);
+  const retryable = !merged && shouldKeepArgusDrainApprovalForMergeRetry(daemonResult);
   const updated = {
     ...job,
     result: {
@@ -352,6 +376,32 @@ async function mergeArgusDrainApprovedDependencyBump({
   };
 }
 
+function isCompletedMergeWithheldJob(jobRecord, currentPrHeadSha) {
+  const job = jobRecord?.job;
+  return jobRecord?.bucket === 'completed'
+    && Boolean(jobRecord.jobPath)
+    && Boolean(currentPrHeadSha)
+    && job?.status === 'completed'
+    && job.headSha === currentPrHeadSha
+    && !job.mergeWithheldRecovery
+    && job.result?.verdict === ARGUS_VERDICTS.NEEDS_VERIFICATION
+    && job.result?.autoadjudication?.decision === 'route-for-review'
+    && String(job.result.autoadjudication.reason || '').startsWith('merge-withheld-');
+}
+
+// Read directly rather than using a subject snapshot or adapter cache: a
+// terminal PR, a moved head, or stale CI must never revive a completed job.
+async function fetchDependencyMergeRecoveryEvidence(repo, prNumber, { env, logger }) {
+  const { stdout } = await execGhWithRetry({
+    args: ['pr', 'view', String(prNumber), '--repo', repo, '--json',
+      'state,headRefOid,mergeable,mergeStateStatus,isDraft,statusCheckRollup'],
+    env,
+    timeoutMs: 30_000,
+    log: logger,
+  });
+  return JSON.parse(String(stdout || '{}'));
+}
+
 export async function maybeAutoAdjudicateDependencyBotArgusJob({
   rootDir,
   jobRecord,
@@ -364,6 +414,8 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
   currentPrHeadSha,
   runDaemonCleanMergeAttemptImpl,
   completeArgusJobImpl = completeArgusJob,
+  returnArgusJobToPendingImpl = returnArgusJobToPending,
+  fetchMergeRecoveryEvidenceImpl = fetchDependencyMergeRecoveryEvidence,
   writeArgusJobImpl = writeArgusJob,
   logger = console,
   env = process.env,
@@ -391,6 +443,49 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
       attemptedAt: now(),
     });
   }
+  if (isCompletedMergeWithheldJob(jobRecord, currentPrHeadSha)
+    && isUnroutableBotAuthor(authorRef)) {
+    let live;
+    try {
+      live = await fetchMergeRecoveryEvidenceImpl(jobRecord.job.repo, jobRecord.job.prNumber, { env, logger });
+    } catch {
+      return { attempted: false, reason: 'merge-recovery-evidence-unavailable' };
+    }
+    if (live?.headRefOid !== jobRecord.job.headSha
+      || String(live?.state || '').toUpperCase() !== 'OPEN'
+      || String(live?.mergeable || '').toUpperCase() !== 'MERGEABLE'
+      || String(live?.mergeStateStatus || '').toUpperCase() === 'DIRTY'
+      || live?.isDraft === true
+      || summarizeChecksConclusion(live?.statusCheckRollup, { cfg, env }) !== 'SUCCESS') {
+      return { attempted: false, reason: 'merge-recovery-not-ready' };
+    }
+    const reopenedAt = now();
+    const recovered = returnArgusJobToPendingImpl({
+      rootDir,
+      jobPath: jobRecord.jobPath,
+      job: jobRecord.job,
+      patch: {
+        // Persist before the move/merge attempt, including across restarts. A
+        // second withheld result on this job can never start another recovery.
+        mergeWithheldRecovery: {
+          headSha: jobRecord.job.headSha,
+          reopenedAt,
+          inputs: jobRecord.job.result.autoadjudication.inputs,
+        },
+        // Keep the drain from claiming an old job while the watcher awaits the
+        // daemon. Its original bot grace may have expired hours ago.
+        lastAutoadjudicationAttempt: {
+          schemaVersion: 1,
+          decision: 'approve-auto-merge',
+          reason: 'non-major-dependency-bump',
+          inputs: jobRecord.job.result.autoadjudication.inputs,
+          attemptedAt: reopenedAt,
+          deferrals: 0,
+        },
+      },
+    });
+    jobRecord = { ...recovered, bucket: 'pending' };
+  }
   if (!jobRecord?.job || !jobRecord.jobPath || jobRecord.bucket !== 'pending') {
     return { attempted: false, reason: 'no-pending-job' };
   }
@@ -404,7 +499,12 @@ export async function maybeAutoAdjudicateDependencyBotArgusJob({
   if (retryAt > Date.parse(completedAt)) {
     return { attempted: false, reason: 'merge-retry-wait' };
   }
-  const decision = adjudicateDependencyBotUpdate({ title, authorRef, job: jobRecord.job });
+  // A recovered merge retries the approval already issued for this head. A
+  // title edit after completion does not turn that approval into a new review.
+  const recovery = jobRecord.job.mergeWithheldRecovery;
+  const decision = recovery?.headSha === jobRecord.job.headSha && isUnroutableBotAuthor(authorRef)
+    ? { autoMergeEligible: true, reason: 'non-major-dependency-bump', inputs: recovery.inputs }
+    : adjudicateDependencyBotUpdate({ title, authorRef, job: jobRecord.job });
   if (decision.reason === 'not-bot-author') {
     return {
       attempted: false,

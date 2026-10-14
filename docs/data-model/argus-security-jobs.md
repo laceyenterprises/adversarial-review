@@ -2,7 +2,7 @@
 
 **Owner:** ASR-03 Argus security review queue
 **Store:** `data/argus-security-jobs/`
-**Source of truth:** `src/argus-security-queue.mjs`
+**Source of truth:** `src/argus-security-queue.mjs`, `src/dependency-bot-autoadjudication.mjs`
 **Runtime surface:** `src/argus-security-queue.mjs`
 **Producer:** `src/argus-security-route.mjs`, called from `processReviewSubject`
 (`src/pollonce-phases.mjs`) once per PR head (ASR-04). Narrow dependency-bot
@@ -52,7 +52,7 @@ Directory: `data/argus-security-jobs/`
 |---|---|---|
 | `pending/*.json` | Argus job document with `status: "pending"` | Durable work waiting to be claimed. Filenames are deterministic job IDs derived from `(repo, prNumber, headSha)`. |
 | `in-progress/*.json` | Argus job document with `status: "in_progress"` | Claimed work owned by a security reviewer worker. Claims are acquired by hard-linking the pending file into this lane, then unlinking the pending name. |
-| `completed/*.json` | Argus job document with `status: "completed"`, `completedAt`, and `result` | Archive for answered jobs: drain reviews (`approve`, `needs_verification`, `block`), dependency-bot adjudications, and retirements with a `superseded` result. Not strictly terminal: a `superseded` job whose head is live again, or a legacy `route-for-review` completion whose head is live, is moved back to `pending/`. |
+| `completed/*.json` | Argus job document with `status: "completed"`, `completedAt`, and `result` | Archive for answered jobs: drain reviews (`approve`, `needs_verification`, `block`), dependency-bot adjudications, and retirements with a `superseded` result. Not strictly terminal: superseded and legacy routed jobs can return to `pending/`; a dependency-bot `merge-withheld-*` completion can also recover once after live exact-head checks turn green. |
 | `failed/*.json` | Argus job document with `status: "failed"`, `failedAt`, and `error` | Terminal archive for failed reviews and unreadable pending records that were quarantined out of the active queue. |
 
 ## Job Document
@@ -74,11 +74,42 @@ Directory: `data/argus-security-jobs/`
 | `failedAt` | string or null | ISO-8601 failure time for failed jobs. |
 | `result` | object or null | Result payload on completed jobs; reset to `null` when a job returns to `pending/`. Drain reviews and retirements carry `source: "argus-security-drain"` (`ARGUS_REVIEW_RESULT_SOURCE`); drain reviews carry `verdict` (`approve`, `needs_verification`, `block`), `summary`, `findings`, `reviewer`, `rubric`, `dependency`, `verification`, `completedAt`, `posted`, and a `drain` block `{claimedAt, completedAt, latencyMs, attempts}` the health surface reads for claim-to-verdict latency. Retirements carry `verdict: "superseded"`, `supersededReason` (`pr-merged-or-closed` or `head-superseded`), `observedHeadSha`, and `retiredBy: "backlog-retirement"`. `superseded` is a result verdict, not a job `status`. |
 | `error` | string or null | Failure reason on failed jobs. |
-| `lastAutoadjudicationAttempt` | object or null | Optional watcher-written breadcrumb for dependency-bot auto-adjudication attempts that approved the dependency update but left the job pending because merge authority could not yet land the exact head. |
+| `lastAutoadjudicationAttempt` | object or null | Watcher-owned approval retry record: `{schemaVersion: 1, decision: "approve-auto-merge", reason, inputs, attemptedAt, deferrals, notBefore?, mergeDisposition?, mergeReason?, mergeReasons?}`. `deferrals` counts waits across all curable merge refusals; each refusal sets `notBefore` to ten minutes after `attemptedAt`. Recovery seeds an approval with `deferrals: 0` and no merge-attempt fields. |
+| `mergeWithheldRecovery` | object or absent | Once-only recovery marker `{headSha, reopenedAt, inputs}`. `headSha` references this job's exact head; `inputs` retains the original approved dependency evidence. Persisted before returning a completed merge-withheld job to pending, and retained across retries and later completion. |
+| `result.autoadjudication` | object or absent | Dependency-bot result metadata `{schemaVersion, decision, reason, inputs, completedAt, mergeDisposition?, mergeReasons?}`. A withheld merge records `decision: "route-for-review"`, a `merge-withheld-*` reason, and the daemon's disposition and reasons. |
 | `routedForReview` | object or absent | ARGUSDRAIN-01. Set when the dependency-bot auto-adjudicator declines to approve a bump on its own (for example semver-major): `{schemaVersion, source: "dependency-bot-autoadjudication", decision: "route-for-review", reason, inputs, routedAt}`. The job stays in `pending/` and the drain claims it without waiting out the bot-adjudication grace. Legacy completions reopened by backlog retirement also carry `requeuedFrom: "legacy-route-for-review-completion"` and `requeuedAt`. |
 | `drain` | object or absent | ARGUSDRAIN-01 drain bookkeeping, carried across claims: `attempts`, `lastError`, `lastAttemptAt`, `notBefore` (the drain does not claim the job before this ISO time), `deferrals`, `lastDeferReason`, `lastDeferredAt`, and `cachedReview` (a model review of this exact `headSha`, reused within its max age so a retry or deferral does not pay for a second model call; cleared on completion or failure). |
 | `priorResult` | object or absent | The `result` a job carried before it was moved back to `pending/` (a revived `superseded` retirement or a reopened legacy `route-for-review` completion), kept for the record. |
 | `revivedAt` | string or absent | ISO time the route revived a `superseded` job whose PR is open at the same head again. |
+
+The filename/job ID is the primary key; `(repo, prNumber, headSha)` is the
+logical unique identity. Retry and recovery objects are embedded in that job,
+not separate records or cross-store references.
+
+```mermaid
+erDiagram
+    ARGUS_JOB ||--o| AUTOADJUDICATION_ATTEMPT : embeds
+    ARGUS_JOB ||--o| MERGE_WITHHELD_RECOVERY : embeds
+    ARGUS_JOB {
+        string jobId PK
+        string repo
+        number prNumber
+        string headSha
+        string status
+    }
+    AUTOADJUDICATION_ATTEMPT {
+        string decision
+        object inputs
+        string attemptedAt
+        number deferrals
+        string notBefore
+    }
+    MERGE_WITHHELD_RECOVERY {
+        string headSha
+        string reopenedAt
+        object inputs
+    }
+```
 
 ## Operational Contract
 
@@ -109,9 +140,18 @@ Directory: `data/argus-security-jobs/`
   policy, `0.x` minor bumps are treated as major and require verification. A
   successful exact-head clean merge completes the job with an approving result;
   policy denials and permanent merge blockers complete it as
-  `needs_verification`. Transient merge blockers, including required checks that
-  have not reported a terminal result yet, keep the job in `pending/` and update
-  `lastAutoadjudicationAttempt` so the next watcher tick can retry.
+  `needs_verification`. Curable merge blockers keep the job in `pending/` and
+  update `lastAutoadjudicationAttempt`, with one shared budget of 18 ten-minute
+  deferrals across reasons. Ticks before `notBefore` do not attempt a merge;
+  exhausted retries complete as `needs_verification`. These pending approvals
+  remain watcher-owned rather than being claimed for another security review.
+- A completed dependency-bot `needs_verification` job with a
+  `merge-withheld-*` auto-adjudication reason may reopen once. Recovery requires
+  a fresh GitHub read proving the same head is open, non-draft, mergeable and
+  green under the shared external-check classifier. Before moving the file,
+  it persists `mergeWithheldRecovery` and seeds the pending approval from the
+  original inputs; a later title edit cannot replace that evidence. The marker
+  prevents a second recovery even after restart or another withheld completion.
 - Returning a job to `pending/` (`returnArgusJobToPending`: a drain retry or
   deferral, a revive, a reopened legacy completion, or a reclaimed stale claim)
   rewrites the record in place first and renames it into `pending/` second, then

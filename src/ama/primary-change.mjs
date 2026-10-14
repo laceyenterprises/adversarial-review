@@ -776,8 +776,17 @@ async function describeRevertedRegions(args, evidence, refusal) {
   };
   let previous = evidence.primaryFiles;
   try {
-    const range = evidence.diagnosticCommitRange;
-    if (!Array.isArray(range) || !range.length) throw new Error('commit range unavailable');
+    let range = evidence.diagnosticCommitRange;
+    if (!Array.isArray(range)) {
+      // Older stored evidence remains valid. Fill only its missing diagnostics.
+      const history = await read(`repos/${repo}/compare/${evidence.mergeBase}...${evidence.headSha}`);
+      if (!Array.isArray(history.commits) || history.commits.length !== history.total_commits
+        || history.merge_base_commit?.sha !== evidence.mergeBase) throw new Error('diagnostic commit range incomplete');
+      const first = history.commits.findIndex(commit => commit.parents?.[0]?.sha === evidence.primaryHead);
+      if (first < 0) throw new Error('diagnostic primary boundary unavailable');
+      range = history.commits.slice(first);
+    }
+    if (!range.length) throw new Error('commit range unavailable');
     let comments, rounds;
     for (const entry of range) {
       const snapshot = entry.sha === evidence.headSha ? { files: evidence.finalFiles, merge_base_commit: { sha: evidence.mergeBase } }
@@ -790,14 +799,15 @@ async function describeRevertedRegions(args, evidence, refusal) {
         if (commit.sha !== entry.sha) throw new Error('diagnostic commit differs');
         let pipelineRepair = null, repairKind = null;
         try {
-          comments ??= await read(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
           rounds ??= await readCompletedRemediationRounds(primaryChangeRoot(args), repo, prNumber);
-          if (!Array.isArray(comments) || comments.length >= 100) throw new Error('diagnostic comments incomplete');
-          if (comments.some(comment => exactHammerValidation(comment, entry.sha))) {
-            pipelineRepair = true; repairKind = 'hammer audit';
-          } else if (rounds.some(round => round.resultingHeadSha === entry.sha)) {
+          if (rounds.some(round => round.resultingHeadSha === entry.sha)) {
             pipelineRepair = true; repairKind = 'completed remediation round';
-          } else pipelineRepair = false;
+          } else {
+            comments ??= await read(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
+            if (!Array.isArray(comments) || comments.length >= 100) throw new Error('diagnostic comments incomplete');
+            pipelineRepair = comments.some(comment => exactHammerValidation(comment, entry.sha));
+            if (pipelineRepair) repairKind = 'hammer audit';
+          }
         } catch { /* Unknown classification remains diagnostic only. */ }
         const attribution = { sha: entry.sha, author: commit.author?.login || commit.commit?.author?.name || null,
           pipelineRepair, repairKind };

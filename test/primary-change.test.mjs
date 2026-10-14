@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkPrimaryChange, fetchPrimaryChange as fetchPrimaryChangeWithCost, readPrimaryChangeLaunchHead, primaryChangeRoot } from '../src/ama/primary-change.mjs';
 import { amaAllAuthoritativeReviewerLogins } from '../src/ama/reviewer-authority.mjs';
+import { createHash } from 'node:crypto';
+import { storedPrimaryChange } from '../src/ama/primary-change-store.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
@@ -621,6 +623,7 @@ test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region,
   const get = async path => {
     reads.push(path);
     if (path.endsWith('/pulls/1')) return { head: { sha: head }, base: { sha: base } };
+    if (path.endsWith('/pulls/1/reviews?per_page=100')) return [];
     if (path.endsWith(`${base}...${head}`)) return { total_commits: 3,
       commits: [{ sha: builder, commit: { message: 'Builder change' } }, earlierCommit, laterCommit],
       merge_base_commit: { sha: base }, files: [] };
@@ -650,4 +653,24 @@ test('HAMPREDICATE-01: an earlier recorded repair owns the reverted data region,
   assert.equal(predicate(unreadable).eligible, false);
   assert.equal(checkPrimaryChange(unreadable, head).reason, 'primary-change-reverted');
   assert.match(checkPrimaryChange(unreadable, head).missingEvidence.summary, /diagnostic unavailable/);
+
+  const { diagnosticCommitRange, revertedRegionDiagnostics, ...legacy } = evidence;
+  assert.ok(diagnosticCommitRange.length && revertedRegionDiagnostics.length);
+  await storedPrimaryChange({ rootDir: root, repo: 'fixture/repo', prNumber: 1, baseSha: base, headSha: head,
+    mergeBase: base, reviewKey: createHash('sha256').update('[]').digest('hex'), launchHead: null }, async () => legacy);
+  const cached = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
+    get: Object.assign(get, { persistPrimaryChange: true, metadata: get }) });
+  assert.equal(cached.diagnosticCommitRange, undefined, 'old eligibility evidence is retained');
+  assert.deepEqual(checkPrimaryChange(cached, head).missingEvidence.regionDiagnostics, missing.regionDiagnostics);
+
+  const completed = join(root, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completed, { recursive: true });
+  writeFileSync(join(completed, 'fixture__repo-pr-1-repair.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
+    status: 'completed', remediationPlan: { rounds: [{ state: 'completed', startHeadSha: builder, resultingHeadSha: earlier }] } }));
+  const recorded = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 1, headSha: head, rootDir: root,
+    get: path => path.includes('/comments') ? Promise.reject(new Error('comments unavailable')) : get(path) });
+  const attributed = checkPrimaryChange(recorded, head).missingEvidence.regionDiagnostics[0].commits[0];
+  assert.equal(attributed.pipelineRepair, true);
+  assert.equal(attributed.repairKind, 'completed remediation round');
+  assert.equal(checkPrimaryChange(recorded, head).reason, 'primary-change-reverted');
 });

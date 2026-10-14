@@ -339,6 +339,7 @@ function buildRunnerSource({
   freshHeads = {},
   prePollSetup = '',
   afterFirstPoll = '',
+  healthProbeSetup = '',
 } = {}) {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
@@ -452,6 +453,7 @@ try {
         claims.push(payload);
       },
     };
+    ${healthProbeSetup}
     await pollOnce(octokit, pollOptions);
     ${afterFirstPoll}
   } catch (err) {
@@ -3150,4 +3152,54 @@ fi`));
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv(env), timeout: 60000 });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+
+test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers return', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'reviewdelay-start-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        globalThis.__reviewdelayReturns = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return { spawnReviewer: async (payload) => {
+            globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+            payload.onReviewerPgid({ pgid: 123456, spawnedAt: '2026-10-01T00:00:00.000Z' });
+            await new Promise(resolve => globalThis.__reviewdelayReturns.push(resolve));
+            return { ok: false, failureClass: 'fixture-failure', stderr: '' };
+          }, cancel: async () => {}, reattach: async () => ({}) };
+        }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      healthProbeSetup: `
+        globalThis.__reviewdelayStarts = [];
+        pollOptions.healthProbe.recordSpawn = (_tick, payload) => globalThis.__reviewdelayStarts.push(payload);
+      `,
+      afterFirstPoll: `
+        assert.ok(globalThis.__reviewdelayReturns.length > 0);
+        assert.equal(globalThis.__reviewdelayStarts.length, globalThis.__reviewdelayReturns.length);
+        assert.ok(globalThis.__reviewdelayStarts.every(start => start.at === '2026-10-01T00:00:00.000Z'));
+        const starts = globalThis.__reviewdelayStarts.length;
+        for (const resolve of globalThis.__reviewdelayReturns) resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(globalThis.__reviewdelayStarts.length, starts, 'returning must not count another spawn');
+      `,
+    }));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...installGhFixture(tmp),
+        ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS: '1' }), timeout: 60000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

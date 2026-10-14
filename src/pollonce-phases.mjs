@@ -3787,6 +3787,11 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
                   reviewerProcessStarted = true;
+                  healthProbe?.recordSpawn?.(healthTick, {
+                    repo: repoPath,
+                    prNumber,
+                    at: spawnedAt,
+                  });
                   persistReviewerPgid({
                     pgid,
                     reviewerSessionUuid,
@@ -3856,9 +3861,6 @@ export async function processReviewSubject(entry, ctx) {
                 } catch (releaseError) {
                   console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
                 }
-              }
-              if (result.ok) {
-                healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
               }
 
               if (!reviewRowSettled) {

@@ -12,6 +12,7 @@ import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 // is threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,7 @@ import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestrat
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
+import { HAMMER_EVIDENCE_FAILURES, readHammerStopForHead } from './ama/hammer-stop-hold.mjs';
 import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
 import { maybeFireFleetWideFalseDeferralAlert } from './fleet-wide-false-deferral-detector.mjs';
 import {
@@ -878,6 +880,7 @@ const postedReviewFairnessState = createPostedReviewFairnessState();
  */
 export function createNoProgressLaneGate({
   rootDir = ROOT,
+  hqRoot = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq'),
   readReviewRow = (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber),
   now = () => new Date().toISOString(),
   deliverAlertFn = defaultDeliverAlert,
@@ -887,6 +890,15 @@ export function createNoProgressLaneGate({
   return {
     evaluate(handler) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
+      // Evidence can recover without a review-row mutation or a wake event.
+      // Read the audit even before a hold file exists, and keep released stops
+      // in the ordinary lane until dispatch reconciliation can admit the retry.
+      const stop = readHammerStopForHead({
+        hqRoot, ...identity, headSha: handler.headSha,
+        reviewedSha: readReviewRow(handler.repoPath, handler.prNumber)?.reviewer_head_sha,
+        logger,
+      });
+      if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) return { run: true };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
       const decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
       if (!decision.due) {

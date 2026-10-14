@@ -8,6 +8,9 @@ import {
   HISTORY_READ_FAILURE_PAGE_GRACE_MS,
   _resetHammerStopHoldPageDebounceForTests,
 } from '../src/ama/hammer-stop-hold.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
+import { recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
 
 const repo = 'fixture/repo';
 const head = 'a'.repeat(40);
@@ -74,3 +77,24 @@ test('TRANSIENTSTOP-01: thrown probes get the same grace; other stop predicates 
     assert.equal(other.pages.length, 1, predicate);
   }
 });
+
+function stopAudit(rootDir, predicate) {
+  writeAmaAuditEntry({ hqRoot: rootDir, repo, prNumber: 1, headSha: head, now: at(0),
+    attempt: { outcome: 'failed-without-merge', reason: predicate, head, path: 'hammer' } });
+}
+
+test('TRANSIENTSTOP-01: ordinary passes revisit every evidence stop despite a slow lane and no review event', async t => {
+  for (const predicate of ['history-read-failed', 'primary-change-unknown', 'primary-change-read-failed', 'ci-not-green']) {
+    const { args } = fixture(t, predicate);
+    stopAudit(args.rootDir, predicate);
+    const identity = { repo, prNumber: 1 };
+    for (let i = 0; i < 20; i++) recordNoProgressLaneRun(args.rootDir, identity, {
+      headSha: head, fingerprint: 'unchanged-review', now: at(0), logger,
+    });
+    const gate = createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
+      readReviewRow: () => ({ reviewer_head_sha: head }), now: () => at(5 * 60_000), logger });
+    const handler = { repoPath: repo, prNumber: 1, headSha: head };
+    assert.equal(gate.evaluate(handler).run, predicate !== 'ci-not-green', predicate);
+  }
+});
+

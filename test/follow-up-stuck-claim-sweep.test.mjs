@@ -1661,6 +1661,35 @@ test('REMLINK-01 recovery normalizes hexadecimal heads and serialized round numb
   }
 });
 
+test('REMLINK-01 retained round workspace survives partial top-level worker metadata', async t => {
+  const f = await seedRemlink(t, { published: false });
+  const { findWorkerPublishedHead, hasWorkerPublishArtifacts } = await import('../src/remediation-published-head.mjs');
+  f.job.remediationPlan.rounds[0].worker = { ...f.job.remediationWorker, workspaceDir: f.job.workspaceDir };
+  delete f.job.workspaceDir;
+  f.job.remediationWorker = { state: 'spawned' };
+  writeFollowUpJob(f.jobPath, f.job);
+  assert.equal(hasWorkerPublishArtifacts({ rootDir: f.rootDir, job: f.job }), true);
+  assert.equal(findWorkerPublishedHead({ rootDir: f.rootDir, job: f.job, headSha: f.head }).headSha, f.head);
+  const completed = f.completePublishedHeadImpl({ rootDir: f.rootDir, jobPath: f.jobPath, headSha: f.head });
+  assert.equal(completed.job.status, 'completed');
+  assert.equal(completed.job.remediationPlan.rounds[0].publishedHeadSha, f.head);
+});
+
+for (const outcome of [null, undefined]) {
+  test(`REMLINK-01 a ${outcome} re-review outcome persists blocked status without waking`, async t => {
+    const f = await seedRemlink(t);
+    const { completeWorkerPublishedHead } = await import('../src/remediation-published-head.mjs');
+    const completed = completeWorkerPublishedHead({ rootDir: f.rootDir, jobPath: f.jobPath, headSha: f.head,
+      requestReviewRereviewImpl: () => outcome,
+      requestRereviewWakeImpl: () => { assert.fail('a blocked re-review must not wake'); } });
+    const persisted = readJobAtPath(completed.jobPath);
+    assert.equal(persisted.status, 'completed');
+    assert.equal(persisted.reReview.status, 'blocked');
+    assert.equal(persisted.reReview.triggered, false);
+    assert.deepEqual(persisted.remediationPlan.rounds[0].reReview, persisted.reReview);
+  });
+}
+
 test('REMLINK-01 terminal re-review update tolerates an existing completed record without its round', async t => {
   const f = await seedRemlink(t);
   const completedPath = path.join(getFollowUpJobDir(f.rootDir, 'completed'), path.basename(f.jobPath));

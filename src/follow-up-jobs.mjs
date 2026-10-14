@@ -2926,7 +2926,7 @@ function requeueInProgressFollowUpJobForRetry({
   if (currentRoundNumber > 0) {
     nextJob.remediationPlan = {
       ...nextJob.remediationPlan,
-      rounds: (nextJob.remediationPlan?.rounds || []).map((round) => round.round === currentRoundNumber
+      rounds: (nextJob.remediationPlan?.rounds || []).map((round) => Number(round.round) === currentRoundNumber
         ? { ...round, worker: effectiveWorker || round.worker || null } : round),
     };
   }

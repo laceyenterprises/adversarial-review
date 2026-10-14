@@ -18,8 +18,8 @@ function isCurrentAttemptReply(replyPath, round, worker) {
   } catch { return false; }
 }
 
-function workerWorkspacePath(rootDir, job, worker) {
-  const stored = job?.workspaceDir || worker.workspaceDir;
+function workerWorkspacePath(rootDir, job, worker, round) {
+  const stored = job?.workspaceDir || worker.workspaceDir || round?.worker?.workspaceDir;
   if (stored) return resolve(rootDir, stored);
   if (!job?.jobId) return null;
   const workspaceRoot = job.workspaceRoot || worker.workspaceRoot
@@ -43,7 +43,7 @@ export function findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImp
 
   // Movement, a fetched branch tip, and model-written reply text cannot attest
   // authorship. Read the exact tip and the hook's job trailer in one git call.
-  const workspaceDir = workerWorkspacePath(rootDir, job, worker);
+  const workspaceDir = workerWorkspacePath(rootDir, job, worker, round);
   if (!workspaceDir || !existsSync(join(workspaceDir, '.git'))) return null;
   try {
     const output = String(execFileSyncImpl('git', ['-C', workspaceDir, 'show', '--no-patch', '--format=%H%n%B', 'HEAD'],
@@ -110,7 +110,7 @@ export function completeWorkerPublishedHead({
           requestedAt: completedAt, reason: reply?.reReview?.reason || null, targetRevisionRef: headSha });
         reReview = buildRereviewResult({ requested: true, reason: reply?.reReview?.reason || null,
           outcome: { ...outcome, requestedAt: completedAt } });
-        if (outcome.triggered || outcome.status === 'already-pending') {
+        if (outcome?.triggered || outcome?.status === 'already-pending') {
           const wake = requestRereviewWakeImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
             headSha, reason: REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
             source: 'follow-up-remediation', sourceRef: job.jobId,
@@ -139,7 +139,7 @@ export function hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace = tru
   const worker = job?.remediationWorker || round?.worker || {};
   if (!round?.spawnedAt && !round?.publishedHeadSha && !worker.spawnedAt) return false;
   if (round?.publishedHeadSha) return true;
-  const workspace = workerWorkspacePath(rootDir, job, worker);
+  const workspace = workerWorkspacePath(rootDir, job, worker, round);
   if (includeWorkspace && workspace && existsSync(join(workspace, '.git'))) return true;
   try {
     const replyPath = worker.replyPath || job?.remediationReply?.path

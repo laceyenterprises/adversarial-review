@@ -140,7 +140,7 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   assert.doesNotMatch(body, /<finding title>/);
   assert.match(body, /^Doc-currency: not applicable; changed files covered: bin\/gate.sh$/m);
   const applicable = run('/bin/bash', ['-c', shell, '_', script], { ...env,
-    HAM_DOC_CURRENCY: 'applicable', HAM_DOC_CURRENCY_REASON: 'updated README.md for changed files bin/gate.sh, README.md' });
+    HAM_DOC_CURRENCY: 'applicable', HAM_DOC_CURRENCY_REASON: 'updated README.md for changed files bin/gate.sh, README.md; data-model docs not applicable' });
   assert.match(applicable.stdout, /STATUS=0 HELD=1/);
   assert.match(readFileSync(bodyPath, 'utf8'), /^Doc-currency: updated; updated README.md/m);
   assertDocPredicate(readFileSync(bodyPath, 'utf8'), ['bin/gate.sh', 'README.md']);

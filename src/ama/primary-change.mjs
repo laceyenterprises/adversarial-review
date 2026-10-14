@@ -384,7 +384,9 @@ function refusedRegions(primary, final, authorized) {
         : other.start < unit.end && other.end > unit.start);
       const lostRemoval = region.removedLines.some(line => line.position === unit.start
         && (final?.removed.get(line.text) || 0) < primary.removed.get(line.text));
-      if ((!overlaps || lostRemoval) && !authorized(unit)) result.push(unit);
+      if (overlaps && !lostRemoval) continue;
+      try { if (!authorized(unit)) result.push(unit); }
+      catch { result.push(unit); } // Diagnostic uncertainty cannot change the verdict.
     }
   }
   return result;
@@ -840,7 +842,7 @@ export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost }
   const ciCost = await fetchCiCostImpl({ ...args, get: path =>
     args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
   const evidence = { ...history, ciCost };
-  const refusal = checkPrimaryChange(evidence, args.headSha);
+  const refusal = checkPrimaryChange(evidence, args.headSha, { strictNonBlockingRemediation: true });
   if (refusal.reason === 'primary-change-reverted') evidence.revertedRegionDiagnostics =
     await describeRevertedRegions(args, evidence, refusal);
   return evidence;

@@ -4111,10 +4111,12 @@ function parseHamAuditDocCurrencyFromBody(body, changedFiles) {
   const lower = docCurrencyLine.toLowerCase();
   const files = Array.isArray(changedFiles) ? changedFiles.map(String).filter(Boolean) : [];
   if (!lower.includes('doc-currency')) return null;
-  if (lower.includes('not applicable')) {
+  // A rendered updated claim may explain why another docs category is not applicable.
+  const renderedUpdated = /\bdoc-currency\s*:\s*updated\b/.test(lower);
+  if (!renderedUpdated && lower.includes('not applicable')) {
     return { status: 'not_applicable', changedFiles: files };
   }
-  if (lower.includes('skipped superproject-doc obligation')) {
+  if (!renderedUpdated && lower.includes('skipped superproject-doc obligation')) {
     const skippedSuperprojectDocs = files.filter((file) => lower.includes(file.toLowerCase()));
     return {
       status: 'skipped_superproject',

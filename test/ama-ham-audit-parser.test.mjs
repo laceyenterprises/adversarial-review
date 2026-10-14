@@ -94,3 +94,13 @@ test('HAM audit finding parsing prefers the most specific changed file path', ()
     },
   ]);
 });
+
+
+test('HAMPREDICATE-01: the rendered status wins over a not-applicable explanation', () => {
+  const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({ reviewedHead: 'a'.repeat(40),
+    verifiedCommit: { sha: 'b'.repeat(40), changedFiles: ['README.md'] },
+    verifiedAuditComment: { body: 'Doc-currency: updated; README.md covers changed files README.md; data-model docs not applicable.' } });
+  assert.deepEqual(evidence.auditComment.docCurrency, {
+    status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'],
+  });
+});

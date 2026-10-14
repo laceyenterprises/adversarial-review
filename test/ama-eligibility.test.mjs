@@ -3189,6 +3189,31 @@ test('ham terminal remediation: doc-currency validation ignores global status ph
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
+for (const findingLine of [
+  '- Doc-currency: missing catalog update (blocking): Fixed README.md.',
+  '  - Doc-currency: not applicable (non-blocking): Updated README.md.',
+  '- **Doc-currency: not applicable** (blocking): Updated README.md.',
+  'Finding Doc-currency: not applicable (non-blocking): Updated README.md.',
+]) {
+  test(`ham terminal remediation: doc-currency trace ignores finding prose: ${findingLine}`, () => {
+    const { reviewState, prMetadata, cfg } = eligibleFixture({
+      prMetadata: { headSha: 'def67890' },
+    });
+    for (const claim of ['', '  Doc-currency: updated; README.md.', 'HAM audit: Doc-currency: updated README.md.']) {
+      const auditBody = [findingLine, claim].filter(Boolean).join('\r\n');
+      const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+        env: ENV,
+        hamTerminalRemediation: hamEvidence({ auditBody,
+          docCurrency: { status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'] },
+        }),
+        hamTerminalRemediationGroundTruth: hamGroundTruth({ auditBody, changedFiles: ['README.md'] }),
+      });
+      assert.equal(result.trace.hamTerminalRemediation.checks.docCurrency, Boolean(claim),
+        'only the standalone or legacy inline attestation supplies doc-currency trace evidence');
+    }
+  });
+}
+
 test('ham terminal remediation: App audit author is mandatory; bookkeeping and empty diff do not veto a validated head', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {

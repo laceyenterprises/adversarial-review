@@ -711,14 +711,14 @@ while true; do
   exit 1
 done
 ham_gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR_NUMBER>>-timeline.json
-ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
+ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json"
 ```
 
 Remediate, rebase and validate; reuse an already-fixed head. Proven fleet
 ancestry merges under lease; failed proofs request one exact-head review for
 daemon closure, never operator escalation.
 
-Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
+Write `${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
 Start from the captured `HAM_BASE_HEAD`. Prove it first using the reviewed head,
 an App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain, or completed
@@ -779,7 +779,7 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
 }
 ```
 
-Run the predicate against the live post-remediation head. Create an owned, run-scoped verdict file after publishing the audit; export the path so the merge helper reads this run's result. Remove both owned files after the merge phase:
+Validate the live post-remediation head after publishing the audit. Export the owned, run-scoped verdict file for the merge helper. Remove both owned files after merge:
 
 ```bash
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-primary-change.XXXXXX") || exit 1
@@ -801,8 +801,8 @@ HAM_VERDICT_READY_FILE=""
   --reviewed-sha <<REVIEWED_SHA>> \
   --reviewer <<REVIEWER>> \
   --risk-class <<RISK_CLASS>> \
-  --ham-terminal-remediation /tmp/ham-<<PR_NUMBER>>-terminal-remediation.json \
-  --ham-commit /tmp/ham-<<PR_NUMBER>>-commit.json \
+  --ham-terminal-remediation "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json" \
+  --ham-commit "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json" \
   --ham-range "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json" \
   --primary-change "$HAM_PRIMARY_CHANGE_FILE" \
   > "$HAM_VERDICT_FILE" || exit 1

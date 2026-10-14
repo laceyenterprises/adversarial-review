@@ -104,3 +104,25 @@ test('HAMPREDICATE-01: the rendered status wins over a not-applicable explanatio
     status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'],
   });
 });
+
+for (const findingLine of [
+  '- Doc-currency: missing catalog update (blocking): Fixed README.md.',
+  '  - Doc-currency: not applicable (non-blocking): Updated README.md.',
+  '- **Doc-currency: not applicable** (blocking): Updated README.md.',
+  'Finding Doc-currency: not applicable (non-blocking): Updated README.md.',
+]) {
+  test(`HAM audit ignores finding prose as doc-currency evidence: ${findingLine}`, () => {
+    const build = claim => buildHamTerminalRemediationEvidenceFromGroundTruth({
+      reviewedHead: 'abc123',
+      verifiedCommit: { sha: 'def456', changedFiles: ['README.md'] },
+      verifiedAuditComment: { body: [findingLine, claim].filter(Boolean).join('\r\n') },
+    });
+    assert.deepEqual(build('  Doc-currency: updated; README.md.').auditComment.docCurrency, {
+      status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'],
+    });
+    assert.equal(build('').auditComment.docCurrency, null, 'finding alone cannot attest currency');
+    assert.deepEqual(build('HAM audit: Doc-currency: updated README.md.').auditComment.docCurrency, {
+      status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'],
+    }, 'legacy inline attestations still work');
+  });
+}

@@ -172,6 +172,8 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
     const publishedBody = readFileSync(bodyPath, 'utf8');
     assert.ok(publishedBody.includes(unbolded), 'unbolded finding must survive publication verbatim');
     assert.doesNotMatch(publishedBody, /stale claim/);
+    assertDocPredicate(publishedBody, ['bin/gate.sh'], 'not_applicable', title);
+    assertDocPredicate(publishedBody.replace(/^Doc-currency:.*\n/m, ''), ['bin/gate.sh'], null, title);
   }
   for (const missing of [{ HAM_DOC_CURRENCY: '' }, { HAM_DOC_CURRENCY_REASON: '' }]) {
     const refused = run('/bin/bash', ['-c', shell, '_', script], { ...env, ...missing });

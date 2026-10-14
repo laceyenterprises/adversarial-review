@@ -4107,9 +4107,10 @@ function parseHamAuditDocCurrencyFromBody(body, changedFiles) {
   const lines = text
     .replace(/\r\n/g, '\n')
     .split('\n');
-  const docCurrencyLine = lines.find((line) => /^[ \t]*(?:-[ \t]+)?doc-currency\s*:/i.test(line))
+  const docCurrencyLine = lines.find((line) => /^[ \t]*doc-currency\s*:/i.test(line))
     // Retain legacy inline audit prose, but never consume a finding bullet.
-    || lines.find((line) => !/^[ \t]*[-*][ \t]+/.test(line) && /\bdoc-currency\s*:/i.test(line)) || '';
+    || lines.find((line) => !/^[ \t]*[-*][ \t]+/.test(line)
+      && !/\((?:blocking|non-blocking)\)/i.test(line) && /\bdoc-currency\s*:/i.test(line)) || '';
   const lower = docCurrencyLine.toLowerCase();
   const files = Array.isArray(changedFiles) ? changedFiles.map(String).filter(Boolean) : [];
   if (!lower.includes('doc-currency')) return null;

@@ -49,6 +49,15 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   }
 });
 
+test('hammer terminal evidence producers and predicate inputs honor TMPDIR', () => {
+  for (const suffix of ['terminal-remediation', 'commit', 'range']) {
+    assert.ok(HAMMER_TEMPLATE.includes(`--ham-${suffix} "\${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${suffix}.json"`));
+    assert.ok(!HAMMER_TEMPLATE.includes(`/tmp/ham-<<PR_NUMBER>>-${suffix}.json`));
+  }
+  assert.ok(HAMMER_TEMPLATE.includes('> "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json"'));
+  assert.ok(HAMMER_TEMPLATE.includes('Write `${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json`'));
+});
+
 test('ordinary remediation publishes before validating the live head', () => {
   const ordinary = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('Commit the remediation:'),
     HAMMER_TEMPLATE.indexOf('## Resolving merge conflicts'));

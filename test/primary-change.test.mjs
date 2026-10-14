@@ -772,6 +772,18 @@ test('operator diagnostics enforce a wall-clock budget and pass its signal to th
   assert.equal(checkPrimaryChange(evidence, head).reason, 'primary-change-reverted');
 });
 
+test('whole-file reversal diagnostics use a file-level label without changing the refusal', () => {
+  const evidence = { ...primaryChangeFixture(head), finalFiles: [],
+    primaryFiles: [{ filename: 'src/obsolete.mjs', status: 'removed', additions: 0, deletions: 1,
+      patch: '@@ -1 +0,0 @@\n-obsolete' }],
+    revertedRegionDiagnostics: [{ path: 'src/obsolete.mjs', start: null, end: null, commits: [] }],
+  };
+  const result = checkPrimaryChange(evidence, head);
+  assert.equal(result.reason, 'primary-change-reverted');
+  assert.match(result.missingEvidence.summary, /region history: file-level: unavailable/);
+  assert.doesNotMatch(result.missingEvidence.summary, /null-null/);
+});
+
 test('operator diagnostics propagate cancellation and outage errors, including comment reads', async t => {
   const { args, history } = await storedRefusal(t);
   for (const error of [new DOMException('cancelled', 'AbortError'),

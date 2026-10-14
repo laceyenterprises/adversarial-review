@@ -405,7 +405,7 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
     : `the reverted ${path} change cannot be authorized by a finding (${missing})`;
   const regionDiagnostics = (evidence.revertedRegionDiagnostics || []).filter(entry => entry.path === path);
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
-    `${entry.start}-${entry.end}: ${entry.commits.map(commit =>
+    `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
       `${commit.sha} author=${commit.author || 'unlinked'} pipeline-repair=${commit.pipelineRepair === true ? 'yes' : commit.pipelineRepair === false ? 'no' : 'unknown'}${commit.repairKind ? ` (${commit.repairKind})` : ''}`).join(', ') || 'unavailable'}${entry.error ? ` (${entry.error})` : ''}`).join('; ');
   return { evidence: missing, path, accepted, rejected, summary, regions, regionDiagnostics };
 }

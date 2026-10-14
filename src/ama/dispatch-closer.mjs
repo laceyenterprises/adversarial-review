@@ -2457,6 +2457,15 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
   const next = mutate(existing ? { ...existing } : null);
   if (!next) return existing;
   writeAmaCloserDispatchRecord(rootDir, identity, next);
+  // HQ cancellation also settles runs through this writer, without teardown.
+  // Only a fresh terminal observation owns cleanup; launch intents can carry
+  // a predecessor's status until dispatch returns and must retain new scratch.
+  const status = normalizeWorkerRunStatus(next.lastObservedStatus);
+  if (existing?.state !== 'dispatching' && next.state !== 'dispatching'
+    && status !== normalizeWorkerRunStatus(existing?.lastObservedStatus)
+    && AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(status)) {
+    cleanupHammerScratchDir(next);
+  }
   return next;
 }
 

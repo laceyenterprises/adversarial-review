@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   amaCloserDispatchFilePath, composeCloserPrompt, createHammerScratchDir,
-  maybeDispatchAmaCloser, reconcileAmaCloserDispatches,
+  maybeDispatchAmaCloser, reconcileAmaCloserDispatches, updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 
 const repoRoot = resolve(new URL('..', import.meta.url).pathname);
@@ -131,7 +131,6 @@ test('HAMTMP-01: the next admitted run removes a dead predecessor and renders a 
   const root = fixture(t);
   const promptDir = join(root, 'prompts');
   const previous = createHammerScratchDir(promptDir);
-  const { updateAmaCloserDispatchRecord } = await import('../src/ama/dispatch-closer.mjs');
   updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 42, headSha: head }, () => ({
     repo: 'fixture/repo', prNumber: 42, headSha: head, reviewedSha: head,
     workerClass: 'hammer', state: 'dispatch-failed', promptDir, scratchDir: previous,
@@ -148,4 +147,32 @@ test('HAMTMP-01: the next admitted run removes a dead predecessor and renders a 
   assert.equal(existsSync(previous), false);
   assert.equal(existsSync(record.scratchDir), true);
   assert.equal(readFileSync(result.promptPath, 'utf8'), `PR 42 scratch=${record.scratchDir}`);
+});
+
+for (const status of ['succeeded', 'failed', 'cancelled']) {
+  test(`HAMTMP-01: recording a fresh ${status} run observation removes scratch without teardown`, t => {
+    const root = fixture(t);
+    const scratchDir = createHammerScratchDir(root);
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+    updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatched',
+      lastObservedStatus: 'running', scratchDir, promptDir: root }));
+    assert.equal(existsSync(scratchDir), true);
+    updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, lastObservedStatus: status }));
+    assert.equal(existsSync(scratchDir), false);
+  });
+}
+
+test('HAMTMP-01: dispatching and inherited predecessor statuses cannot remove a new run directory', t => {
+  const root = fixture(t);
+  const scratchDir = createHammerScratchDir(root);
+  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+  updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatching',
+    lastObservedStatus: 'failed', scratchDir, promptDir: root }));
+  assert.equal(existsSync(scratchDir), true);
+  updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, state: 'dispatched' }));
+  assert.equal(existsSync(scratchDir), true);
+  updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, lastObservedStatus: 'running' }));
+  assert.equal(existsSync(scratchDir), true);
+  updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, lastObservedStatus: 'succeeded' }));
+  assert.equal(existsSync(scratchDir), false);
 });

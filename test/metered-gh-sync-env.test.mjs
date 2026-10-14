@@ -76,7 +76,7 @@ test('synchronous admission uses the caller budget path and throttle floor', asy
 
 test('synchronous wait bridge waits for the caller budget reset', t => {
   const { ambient, explicit, env } = fixture(t);
-  const resetAt = Date.now() + 400;
+  const resetAt = Date.now() + 50;
   writeBudget(ambient, 4900);
   writeBudget(explicit, 0, resetAt);
   assert.equal(meteredExecFileSync(() => {

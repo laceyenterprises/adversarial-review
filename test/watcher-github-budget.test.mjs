@@ -30,7 +30,7 @@ for (const names of [['hold', 'do-not-merge', 'operator-approved', 'retrigger-re
     const gateDir = join(rootDir, 'data', 'adversarial-gate-status');
     mkdirSync(gateDir, { recursive: true });
     writeFileSync(join(gateDir, `fixture__repo-pr-42-${head}.json`), JSON.stringify({ state: 'success' }));
-    const labels = names.length ? names.map(name => ({ node_id: `LA_${name}`, name, color: 'ff0000' })) : null;
+    const labels = names.map(name => ({ node_id: `LA_${name}`, name, color: 'ff0000' }));
     writeFileSync(join(rootDir, 'gh'), `#!${process.execPath}
 import assert from 'node:assert/strict';
 assert.deepEqual(process.argv.slice(2), ['api', 'repos/fixture/repo/pulls/42']);
@@ -51,7 +51,7 @@ console.log(${JSON.stringify(JSON.stringify({ state: 'open', head: { sha: head }
         createWatcherOperatorSurface: () => ({}),
         projectAdversarialGateStatus: async (_root, options) => {
           projected++;
-          assert.deepEqual(options.labels, labels?.map(label => ({ id: label.node_id, name: label.name, color: label.color })) || null);
+          assert.deepEqual(options.labels, labels.map(label => ({ id: label.node_id, name: label.name, color: label.color })));
         },
         markMerged: () => assert.fail('open PR must not be marked merged'),
         markClosed: () => assert.fail('open PR must not be marked closed'),

@@ -85,7 +85,7 @@ dispatch, containing `data/follow-up-jobs/completed`. Keep it exported for
 `hammer-head-context.mjs`; `HAM_HQ_ROOT` is a separate HQ root. Manual callers
 must supply `HAM_ROOT_DIR` when relying on completed-round proof.
 
-Before the merge lease, write audit markdown to an absolute-path file and export
+Before the merge lease, write the complete audit markdown to an absolute-path file and export
 `HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
 bullet per finding: exact review title, blocking class, changed files and fix.
 Export decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`,

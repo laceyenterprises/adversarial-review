@@ -457,12 +457,12 @@ test('hammer merge capability shell fallback mirrors JS token-class discovery', 
 
 test('hammer audit comment payload reads caller-supplied findings without prompt instructions', () => {
   assert.match(HAMMER_TEMPLATE, /write the complete audit markdown to/);
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat "\$HAM_AUDIT_DETAILS_FILE"\)"/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(sed [^\n]* "\$HAM_AUDIT_DETAILS_FILE"\)"/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'/);
 });
 
 test('hammer audit comment keeps model-authored markdown out of shell expansion', () => {
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat "\$HAM_AUDIT_DETAILS_FILE"\)"/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(sed [^\n]* "\$HAM_AUDIT_DETAILS_FILE"\)"/);
   assert.match(
     HAMMER_PROMPT,
     /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*"\$HAM_AUDIT_COMMENT_DETAILS"[\s\S]*"\$POST_REMEDIATION_SHA"[\s\S]*"\$HAM_AUDIT_REMEDIATED_TOTAL"[\s\S]*"\$HAM_AUDIT_REMEDIATED_BLOCKING"[\s\S]*"\$HAM_AUDIT_REMEDIATED_NON_BLOCKING"\)/,

@@ -69,11 +69,10 @@ function acquisitionFixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'lease-defer-admission-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const source = readFileSync(join(root, 'bin/hammer-verify-head.sh'), 'utf8');
-  const values = { ROOT_DIR: root, HQ_ROOT: dir, PR_NUMBER: '42', REPO: 'fixture/repo',
+  const values = { RUN_DIR: dir, ROOT_DIR: root, HQ_ROOT: dir, PR_NUMBER: '42', REPO: 'fixture/repo',
     REVIEWED_SHA: 'b'.repeat(40), REVIEWER: 'claude', RISK_CLASS: 'critical' };
   const helper = source.slice(source.indexOf('ham_acquire_merge_lease()'), source.indexOf('ham_update_branch_conflict()'))
     .replace(/<<([A-Z_]+)>>/g, (_, key) => values[key] || 'unused')
-    .replaceAll('/tmp/ham-42-', `${dir}/ham-42-`)
     .replace(' acquire \\', ` acquire --root-dir '${dir}' \\`);
   return { dir, run(pr, probeState = pr.state) {
     return spawnSync('/bin/bash', ['-c', `

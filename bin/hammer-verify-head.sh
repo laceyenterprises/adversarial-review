@@ -5,8 +5,8 @@ ham_pr() { "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> 
 
 ham_verify_head_phase() {
 HAM_PHASE_OUTCOME=verify-head-error
-ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
-POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
+ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"
+POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")
 # Wait only for read-after-push lag. A third head retains the ordinary race path.
 HAM_HEAD_WAITED_SECONDS="${HAM_HEAD_WAITED_SECONDS:-0}"
 HAM_REQUIRED_CHECKS_WAITED_SECONDS="${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}"
@@ -34,7 +34,7 @@ ham_wait_for_published_head() {
     if [ "$remaining" -le 0 ]; then continue; fi
     probe_timeout="$remaining"
     if [ "$probe_timeout" -gt 30 ]; then probe_timeout=30; fi
-    probe_dir=$(mktemp -d /tmp/ham-<<PR_NUMBER>>-head-probe.XXXXXX) || return 1
+    probe_dir=$(mktemp -d "<<RUN_DIR>>/head-probe.XXXXXX") || return 1
     if /usr/bin/perl -e 'alarm shift; exec @ARGV' "$probe_timeout" "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-pr-read.mjs <<REPO>> <<PR_NUMBER>> \
       --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,author,baseRefName \
       > "$probe_dir/pr.json" 2> "$probe_dir/stderr"; then
@@ -42,7 +42,7 @@ ham_wait_for_published_head() {
         rm -rf "$probe_dir"
         return 1
       fi
-      mv "$probe_dir/pr.json" /tmp/ham-<<PR_NUMBER>>-pr-after.json || { rm -rf "$probe_dir"; return 1; }
+      mv "$probe_dir/pr.json" "<<RUN_DIR>>/pr-after.json" || { rm -rf "$probe_dir"; return 1; }
       POST_REMEDIATION_SHA="$probe_head"
       rm -rf "$probe_dir"
     else
@@ -60,7 +60,7 @@ ham_wait_for_published_head() {
   done
 }
 ham_wait_for_published_head || return $?
-BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
+BASE_BRANCH=$(jq -r '.baseRefName' "<<RUN_DIR>>/pr-after.json")
 HAM_VALIDATION_BASE_SHA="${HAM_VALIDATION_BASE_SHA:-}"
 HAM_FORCE_REVALIDATION=0
 HAM_REBASE_ATTEMPTS="${HAM_REBASE_ATTEMPTS:-0}"
@@ -107,7 +107,7 @@ ham_release_merge_lease() {
         --pr <<PR_NUMBER>> \
         --lease-id "$HAM_MERGE_LEASE_ID" \
         "${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}" \
-        > /tmp/ham-<<PR_NUMBER>>-merge-lease-release.json; then
+        > "<<RUN_DIR>>/merge-lease-release.json"; then
         HAM_MERGE_LEASE_HELD=0
         HAM_MERGE_LEASE_ID=""
         HAM_MERGE_LEASE_RETRYABLE_ABORT=0
@@ -118,7 +118,7 @@ ham_release_merge_lease() {
         HAM_MERGE_LEASE_RELEASE_EXIT=$?
       fi
       echo "AMG-04 warning: merge lease release attempt ${ham_release_attempt}/${HAM_MERGE_LEASE_RELEASE_RETRY_CAP} failed for lease ${HAM_MERGE_LEASE_ID} (exit ${HAM_MERGE_LEASE_RELEASE_EXIT}); keeping EXIT trap armed" >&2
-      cat /tmp/ham-<<PR_NUMBER>>-merge-lease-release.json >&2 || true
+      cat "<<RUN_DIR>>/merge-lease-release.json" >&2 || true
       if [ "$ham_release_attempt" -ge "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; then
         echo "AMG-04 hard-blocker: merge lease release failed after ${HAM_MERGE_LEASE_RELEASE_RETRY_CAP} attempts; do not continue while the lease is unconfirmed" >&2
         return "$HAM_MERGE_LEASE_RELEASE_EXIT"
@@ -167,11 +167,11 @@ ham_acquire_merge_lease() {
   fi
   local ham_required_checks_green_args=()
   ham_lease_pr_view --json headRefOid,state,isDraft,labels,statusCheckRollup \
-    > /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json || return 1
+    > "<<RUN_DIR>>/pre-acquire-checks.json" || return 1
   # Live holds/terminal state fence the lane. Historical stops were already
   # evaluated (and, on changed inputs, released) by the closer before dispatch.
   local ham_admission_reason ham_admission_outcome ham_admission_audit ham_admission_audit_exit
-  ham_admission_reason=$(HAM_ADMISSION_ROOT=<<ROOT_DIR>> "$HAM_NODE_BIN" --input-type=module - "$POST_REMEDIATION_SHA" /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json <<'NODE'
+  ham_admission_reason=$(HAM_ADMISSION_ROOT=<<ROOT_DIR>> "$HAM_NODE_BIN" --input-type=module - "$POST_REMEDIATION_SHA" "<<RUN_DIR>>/pre-acquire-checks.json" <<'NODE'
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const { mergeLeaseAdmissionReason } = await import(pathToFileURL(`${process.env.HAM_ADMISSION_ROOT}/src/ama/merge-lease-admission.mjs`));
@@ -225,7 +225,7 @@ NODE
       else .conclusion as $conclusion |
         (.status == "COMPLETED" and (["SUCCESS", "NEUTRAL", "SKIPPED"] | index($conclusion)) != null) end
     ))
-  ' /tmp/ham-<<PR_NUMBER>>-pre-acquire-checks.json >/dev/null; then
+  ' "<<RUN_DIR>>/pre-acquire-checks.json" >/dev/null; then
     ham_required_checks_green_args=(--required-checks-green)
   fi
   # The procedure wrapper preserves live stderr on descriptor 3. Direct
@@ -240,20 +240,20 @@ NODE
     --owner-pid "$$" \
     --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" --wait-for-holder-deadline \
     "${ham_required_checks_green_args[@]+"${ham_required_checks_green_args[@]}"}" \
-    > /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json 2>&"$ham_lease_progress_fd"; then
+    > "<<RUN_DIR>>/merge-lease-acquire.json" 2>&"$ham_lease_progress_fd"; then
     HAM_MERGE_LEASE_ACQUIRE_EXIT=0
   else
     HAM_MERGE_LEASE_ACQUIRE_EXIT=$?
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70 ] \
-    && [ "$(jq -r '.parked // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
-    HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
+    && [ "$(jq -r '.parked // false' "<<RUN_DIR>>/merge-lease-acquire.json")" = "true" ]; then
+    HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' "<<RUN_DIR>>/merge-lease-acquire.json")
     if [ "$HAM_PARK_REASON" != "max-gate-attempts" ]; then
       echo "AMG-04 parked: merge lease acquisition parked PR <<PR_NUMBER>> ($HAM_PARK_REASON)" >&2
       HAM_PHASE_OUTCOME="parked:${HAM_PARK_REASON}"
       return 20
     fi
-    HAM_GATE_CAP_CLOSING_STATUS=$(jq -r '.closingStatus // empty' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
+    HAM_GATE_CAP_CLOSING_STATUS=$(jq -r '.closingStatus // empty' "<<RUN_DIR>>/merge-lease-acquire.json")
     if [ -z "$HAM_GATE_CAP_CLOSING_STATUS" ]; then
       echo "AMG-04 hard-blocker: parked lease response omitted closingStatus" >&2
       return 1
@@ -348,8 +348,8 @@ $HAM_GATE_CAP_COMMENT"
     return 20
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75 ] \
-    && [ "$(jq -r '.timedOut // false' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)" = "true" ]; then
-    HAM_PARK_WAITED=$(jq -c '.waited_s // null' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
+    && [ "$(jq -r '.timedOut // false' "<<RUN_DIR>>/merge-lease-acquire.json")" = "true" ]; then
+    HAM_PARK_WAITED=$(jq -c '.waited_s // null' "<<RUN_DIR>>/merge-lease-acquire.json")
     echo "AMG-04 parked: merge lease acquisition timed out for PR <<PR_NUMBER>> after ${HAM_PARK_WAITED}s (configured ${HAM_MERGE_LEASE_WAIT_SECONDS}s); no merge" >&2
     ham_park_json=$(mktemp "${TMPDIR:-/tmp}/ham-lease-park.XXXXXX") || return 1
     jq -n --argjson waited_s "$HAM_PARK_WAITED" --argjson configured_s "$HAM_MERGE_LEASE_WAIT_SECONDS" \
@@ -375,11 +375,11 @@ $HAM_GATE_CAP_COMMENT"
     return 20
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -ne 0 ]; then
-    cat /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json >&2
+    cat "<<RUN_DIR>>/merge-lease-acquire.json" >&2
     HAM_PHASE_OUTCOME=merge-lease-acquire-failed
     return "$HAM_MERGE_LEASE_ACQUIRE_EXIT"
   fi
-  HAM_MERGE_LEASE_ID=$(jq -r '.leaseId // empty' /tmp/ham-<<PR_NUMBER>>-merge-lease-acquire.json)
+  HAM_MERGE_LEASE_ID=$(jq -r '.leaseId // empty' "<<RUN_DIR>>/merge-lease-acquire.json")
   if [ -z "$HAM_MERGE_LEASE_ID" ]; then
     echo "AMG-04 hard-blocker: merge lease acquired without leaseId" >&2
     HAM_PHASE_OUTCOME=merge-lease-id-missing
@@ -457,28 +457,28 @@ ham_bounded_git_sync() {
 
 ham_fetch_base_with_retries() {
   ham_bounded_git_sync "$BASE_BRANCH" \
-    > /tmp/ham-<<PR_NUMBER>>-fetch-base.stdout \
-    2> /tmp/ham-<<PR_NUMBER>>-fetch-base.stderr
+    > "<<RUN_DIR>>/fetch-base.stdout" \
+    2> "<<RUN_DIR>>/fetch-base.stderr"
 }
 
 ham_capture_current_base_sha() {
   if ! ham_fetch_base_with_retries; then
     return 1
   fi
-  HAM_CAPTURED_BASE_SHA=$(git rev-parse FETCH_HEAD 2>/tmp/ham-<<PR_NUMBER>>-rev-parse-base.stderr || true)
+  HAM_CAPTURED_BASE_SHA=$(git rev-parse FETCH_HEAD 2>"<<RUN_DIR>>/rev-parse-base.stderr" || true)
   ham_is_full_sha "$HAM_CAPTURED_BASE_SHA"
 }
 
 ham_update_branch_with_retries() {
   ham_update_attempt=1
   while [ "$ham_update_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
-    if ham_gh pr update-branch <<PR_URL>> --rebase > /tmp/ham-<<PR_NUMBER>>-update-branch.stdout 2> /tmp/ham-<<PR_NUMBER>>-update-branch.stderr; then
+    if ham_gh pr update-branch <<PR_URL>> --rebase > "<<RUN_DIR>>/update-branch.stdout" 2> "<<RUN_DIR>>/update-branch.stderr"; then
       return 0
     fi
-    if ham_update_branch_conflict /tmp/ham-<<PR_NUMBER>>-update-branch.stderr; then
+    if ham_update_branch_conflict "<<RUN_DIR>>/update-branch.stderr"; then
       return 2
     fi
-    if ! ham_update_branch_transient /tmp/ham-<<PR_NUMBER>>-update-branch.stderr; then
+    if ! ham_update_branch_transient "<<RUN_DIR>>/update-branch.stderr"; then
       return 1
     fi
     if [ "$ham_update_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
@@ -526,8 +526,8 @@ ham_base_touches_pr_files() {
 # MERGEABLE PR), so chasing it with a rebase would only re-run the full required
 # check suite on identical code (agent-os#5464).
 HAM_REQUIRES_UP_TO_DATE=1
-ham_rsc_json=/tmp/ham-<<PR_NUMBER>>-required-status-checks.json
-ham_rsc_err=/tmp/ham-<<PR_NUMBER>>-required-status-checks.stderr
+ham_rsc_json="<<RUN_DIR>>/required-status-checks.json"
+ham_rsc_err="<<RUN_DIR>>/required-status-checks.stderr"
 ham_base_enc_early=$(printf '%s' "$BASE_BRANCH" | jq -sRr @uri)
 if ham_gh api \
     "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
@@ -541,7 +541,7 @@ elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required s
 fi
 echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
 
-while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" = "BEHIND" ]; do
+while [ "$(jq -r '.mergeStateStatus // ""' "<<RUN_DIR>>/pr-after.json")" = "BEHIND" ]; do
   # STOP CHASING A MOVING BASE (agent-os#5464). Once we have rebased onto a recent
   # base at least once (HAM_REBASE_ATTEMPTS>=1) and (a) the base has no strict
   # up-to-date rule, (b) the PR is MERGEABLE, and (c) the newer base does not touch
@@ -551,7 +551,7 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
   # suite on identical code. Keep chasing when the base REQUIRES up-to-date, on a
   # genuine conflict, or on changed-file overlap (all fall through to the rebase).
   if [ "$HAM_REQUIRES_UP_TO_DATE" -ne 1 ] \
-     && [ "$(jq -r '.mergeable // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" = "MERGEABLE" ] \
+     && [ "$(jq -r '.mergeable // ""' "<<RUN_DIR>>/pr-after.json")" = "MERGEABLE" ] \
      && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
      && ! ham_base_touches_pr_files; then
     echo "HAM: base BEHIND only because other PRs merged (no strict up-to-date rule, PR MERGEABLE, no changed-file overlap) — merging the validated head without a re-rebase to avoid CI churn on identical code." >&2
@@ -586,13 +586,13 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
     return 21
   fi
   if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
-    cat /tmp/ham-<<PR_NUMBER>>-update-branch.stderr >&2
+    cat "<<RUN_DIR>>/update-branch.stderr" >&2
     ham_release_merge_lease
     HAM_PHASE_OUTCOME=update-branch-failed
     return 1
   fi
-  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-<<PR_NUMBER>>-pr-after.json
-  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
+  ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "<<RUN_DIR>>/pr-after.json"
+  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "<<RUN_DIR>>/pr-after.json")
 done
 
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
@@ -611,7 +611,7 @@ else
   HAM_FORCE_REVALIDATION=1
 fi
 if [ "$HAM_FORCE_REVALIDATION" -eq 1 ]; then
-  printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json
+  printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > "<<RUN_DIR>>/merge-lease-revalidation.json"
   HAM_NEEDS_REVALIDATION=true
 else
   if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation \
@@ -620,18 +620,18 @@ else
     --validation-base "$HAM_VALIDATION_BASE_SHA" \
     --current-base "$HAM_CURRENT_BASE_SHA" \
     --changed-files-from "$POST_REMEDIATION_SHA" \
-    > /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json; then
+    > "<<RUN_DIR>>/merge-lease-revalidation.json"; then
     # Preserve JSON false exactly. Never use `.needsRevalidation // true` here:
     # jq's alternative operator treats false like null and would force a spurious
     # revalidation blocker on a clean `needsRevalidation:false` decision.
-    HAM_NEEDS_REVALIDATION=$(jq -er 'if (.needsRevalidation | type) == "boolean" then .needsRevalidation else true end' /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json 2> /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation-jq.stderr || true)
+    HAM_NEEDS_REVALIDATION=$(jq -er 'if (.needsRevalidation | type) == "boolean" then .needsRevalidation else true end' "<<RUN_DIR>>/merge-lease-revalidation.json" 2> "<<RUN_DIR>>/merge-lease-revalidation-jq.stderr" || true)
     if [ "$HAM_NEEDS_REVALIDATION" != "true" ] && [ "$HAM_NEEDS_REVALIDATION" != "false" ]; then
-      printf '{"needsRevalidation":true,"reason":"needs-revalidation-output-invalid"}\n' > /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json
+      printf '{"needsRevalidation":true,"reason":"needs-revalidation-output-invalid"}\n' > "<<RUN_DIR>>/merge-lease-revalidation.json"
       HAM_NEEDS_REVALIDATION=true
     fi
   else
     HAM_NEEDS_REVALIDATION_EXIT=$?
-    printf '{"needsRevalidation":true,"reason":"needs-revalidation-tool-failed","exitCode":%s}\n' "$HAM_NEEDS_REVALIDATION_EXIT" > /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json
+    printf '{"needsRevalidation":true,"reason":"needs-revalidation-tool-failed","exitCode":%s}\n' "$HAM_NEEDS_REVALIDATION_EXIT" > "<<RUN_DIR>>/merge-lease-revalidation.json"
     HAM_NEEDS_REVALIDATION=true
   fi
 fi

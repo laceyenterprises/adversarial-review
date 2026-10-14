@@ -14,7 +14,7 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 const render = source => source.replaceAll('<<ROOT_DIR>>', quote(rootDir))
   .replaceAll('<<PR_URL>>', 'fixture-url').replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_NUMBER>>', '7702')
   .replaceAll('<<HQ_ROOT>>', quote(rootDir)).replaceAll('<<REVIEWER>>', 'claude').replaceAll('<<RISK_CLASS>>', 'critical')
-  .replaceAll('/tmp/ham-', '"$TEST_ROOT"/ham-');
+  .replaceAll('<<RUN_DIR>>', '$TEST_ROOT');
 
 function runWait(t, { gate, greenAfterSleep = false, greenAfterPolls = 1, launches = 1, overlap = false, failAfterGreen = false, fixture = null, staleAbortBeforeAcquire = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'ci-wait-refund-'));

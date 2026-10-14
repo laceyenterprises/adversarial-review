@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import {
   evaluateHammerStopHold,
   HISTORY_READ_FAILURE_PAGE_GRACE_MS,
   _resetHammerStopHoldPageDebounceForTests,
 } from '../src/ama/hammer-stop-hold.mjs';
+import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
+import { runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
@@ -98,3 +101,61 @@ test('TRANSIENTSTOP-01: ordinary passes revisit every evidence stop despite a sl
   }
 });
 
+test('TRANSIENTSTOP-01: next ordinary pass releases and dispatches on the settled head without a review event', async t => {
+  const { args, pages } = fixture(t);
+  stopAudit(args.rootDir, 'history-read-failed');
+  const identity = { repo, prNumber: 1, headSha: head };
+  const user = userInfo().username;
+  let now = at(0), failing = true, launches = 0, probes = 0;
+  const closer = () => maybeDispatchAmaCloser({
+    reviewState: { verdict: 'approved', headSha: head, riskClass: 'low', remediationPending: false,
+      blockingFindingState: 'known', blockingFindingCount: 0,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0 },
+    prMetadata: { prNumber: 1, headSha: head, isOpen: true, isDraft: false, labels: [],
+      mergeableState: 'MERGEABLE', branchProtection: { requiredContexts: [] },
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+    cfg: { enabled: true, workerClass: 'hammer', mergeMethod: 'squash',
+      eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: false } },
+    dispatchContext: { rootDir: args.rootDir, hqRoot: args.rootDir, repo, reviewedSha: head,
+      targetRemediationSha: head, dispatchRecordHeadSha: head, dispatchedAt: now, forceHammerAfterDaemonFailure: true,
+      hqOwnerUser: user, currentUser: user, hqPath: 'fixture-hq',
+      closerTokenRollupPollDelaysMs: [], livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: head, headBranchExists: true }) },
+    fetchPrimaryChangeImpl: async () => { probes++; return failing
+      ? { headSha: head, historyReadFailed: true } : primaryChangeFixture(head); },
+    execFileImpl: async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }) };
+      if (argv[0] === 'dispatch') { launches++; return { stdout: JSON.stringify({ dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-next' }) }; }
+      return { stdout: '{}' };
+    },
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }),
+    readPullRequestStateImpl: () => null,
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
+    resolveCloserDispatchHarnessImpl: async () => ({ workerClass: 'hammer', fellBack: false }),
+    observeCloserBacklogImpl: async () => 0,
+    readTemplateImpl: () => 'synthetic hammer prompt', writeFileImpl: () => {},
+    deliverAlertImpl: args.deliverAlertImpl, logger,
+  });
+  // A prior failed launch has a fresh record; its lease is already gone and the ledger read fails.
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => ({ ...identity,
+    workerClass: 'hammer', state: 'dispatched', launchRequestId: 'fixture-prior',
+    reviewedSha: head, lastObservedStatus: 'running', dispatchedAt: at(0), lastAttemptedAt: at(0) }));
+  assert.equal((await closer()).reason, 'hammer-stop-awaiting-input-change');
+  assert.equal(pages.length, 0);
+  for (let i = 0; i < 20; i++) recordNoProgressLaneRun(args.rootDir, identity, {
+    headSha: head, fingerprint: 'unchanged-review', now: at(0), logger,
+  });
+  const gate = createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
+    readReviewRow: () => ({ reviewer_head_sha: head }), now: () => now, logger });
+  now = at(5 * 60_000);
+  failing = false;
+  let result;
+  await runPostedReviewHandlersFairly({ handlers: [{ repoPath: repo, prNumber: 1, headSha: head,
+    run: async () => { result = await closer(); return result; } }], laneGate: gate,
+    budgetMs: 30_000, handlerTimeoutMs: 20_000, logger });
+  assert.equal(result?.dispatched, true, JSON.stringify(result));
+  assert.equal(launches, 1);
+  assert.ok(probes >= 2);
+  assert.equal(pages.length, 0);
+});

@@ -16,6 +16,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
+const RANGE_PROBE = /\/usr\/bin\/perl[^]*?> "\$\{TMPDIR:-\/tmp\}\/ham-<<PR_NUMBER>>-range\.json"/;
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
 const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
@@ -31,8 +32,9 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   const block = HAMMER_TEMPLATE.slice(start, end);
   assert.match(block, /hammer-head-context\.mjs/);
   assert.match(block, /--pr <<PR_URL>>/);
+  assert.match(block, RANGE_PROBE);
   for (const exitCode of [1, 65, 124]) {
-    const script = block.replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, `(exit ${exitCode})`)
+    const script = block.replace(RANGE_PROBE, `(exit ${exitCode})`)
       .replace(/[^\n]*ham_gh pr comment[^\n]+/g, 'echo re-review')
       .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review')
       .replaceAll('<<ROOT_DIR>>', '"$HAM_TEST_ROOT"')
@@ -47,13 +49,22 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   }
 });
 
+test('hammer terminal evidence producers and predicate inputs honor TMPDIR', () => {
+  for (const suffix of ['terminal-remediation', 'commit', 'range']) {
+    assert.ok(HAMMER_TEMPLATE.includes(`--ham-${suffix} "\${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${suffix}.json"`));
+    assert.ok(!HAMMER_TEMPLATE.includes(`/tmp/ham-<<PR_NUMBER>>-${suffix}.json`));
+  }
+  assert.ok(HAMMER_TEMPLATE.includes('> "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json"'));
+  assert.ok(HAMMER_TEMPLATE.includes('Write `${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json`'));
+});
+
 test('ordinary remediation publishes before validating the live head', () => {
   const ordinary = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('Commit the remediation:'),
     HAMMER_TEMPLATE.indexOf('## Resolving merge conflicts'));
   assert.match(ordinary, /HAM_COMMIT_PUBLICATION_ONLY=1/);
   assert.match(ordinary, /hammer-procedure\.mjs hammer-publish --render/);
   assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
-  assert.match(HAMMER_TEMPLATE, /Preserve rebased and multi-commit history/);
+  assert.match(HAMMER_TEMPLATE, /rebased\/multi-commit history uses lease-protected git/);
 });
 
 for (const [worker, handoffStatus] of [['worker', 0], ['canonical', 0], ['worker', 1]]) {
@@ -73,8 +84,10 @@ process.stdout.write(JSON.stringify({ owner: process.env.HANDOFF_EFFECTIVE_OWNER
 process.exit(${handoffStatus});
 `, { mode: 0o755 });
     const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
-    const block = HAMMER_TEMPLATE.slice(start, HAMMER_TEMPLATE.indexOf('\n```', start))
-      .replace(/\/usr\/bin\/perl[^]*?> \/tmp\/ham-<<PR_NUMBER>>-range\.json/, '(exit 65)')
+    const originalBlock = HAMMER_TEMPLATE.slice(start, HAMMER_TEMPLATE.indexOf('\n```', start));
+    assert.match(originalBlock, RANGE_PROBE);
+    const block = originalBlock
+      .replace(RANGE_PROBE, '(exit 65)')
       .replace(/[^\n]*ham_gh pr comment[^\n]*/, ':')
       .replace(/<<ROOT_DIR>>/g, '/fixture').replace(/<<REPO>>/g, 'fixture/repo').replace(/<<PR_NUMBER>>/g, '42');
     const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${block}`], {
@@ -457,12 +470,12 @@ test('hammer merge capability shell fallback mirrors JS token-class discovery', 
 
 test('hammer audit comment payload reads caller-supplied findings without prompt instructions', () => {
   assert.match(HAMMER_TEMPLATE, /write the complete audit markdown to/);
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat "\$HAM_AUDIT_DETAILS_FILE"\)"/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(sed [^\n]* "\$HAM_AUDIT_DETAILS_FILE"\)"/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'/);
 });
 
 test('hammer audit comment keeps model-authored markdown out of shell expansion', () => {
-  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat "\$HAM_AUDIT_DETAILS_FILE"\)"/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(sed [^\n]* "\$HAM_AUDIT_DETAILS_FILE"\)"/);
   assert.match(
     HAMMER_PROMPT,
     /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*"\$HAM_AUDIT_COMMENT_DETAILS"[\s\S]*"\$POST_REMEDIATION_SHA"[\s\S]*"\$HAM_AUDIT_REMEDIATED_TOTAL"[\s\S]*"\$HAM_AUDIT_REMEDIATED_BLOCKING"[\s\S]*"\$HAM_AUDIT_REMEDIATED_NON_BLOCKING"\)/,

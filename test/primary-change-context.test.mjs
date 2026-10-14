@@ -65,7 +65,10 @@ process.stdout.write(entry.raw ?? JSON.stringify(data));
 `, { mode: 0o755 });
   const result = spawnSync(process.execPath, [cli, ...argv], {
     encoding: 'utf8', timeout: 15_000,
-    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root },
+    // This deliberately minimal environment does not inherit the runner's
+    // state isolation. Bind the metered CLI's shared state to this fixture too.
+    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root,
+      GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json') },
   });
   assert.ifError(result.error);
   return { ...result, calls: JSON.parse(readFileSync(callsFile, 'utf8')) };
@@ -87,7 +90,8 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
   delete parsed.ciCost;
   const { ciCost: _cost, ...historyEvidence } = evidence;
   for (const key of ['primaryFiles', 'finalFiles']) for (const file of parsed[key]) { delete file.sha; file.patch = file.patch.trimEnd(); }
-  assert.deepEqual(parsed, { ...historyEvidence, completeFileLists: true, testRegionsChanged: [] });
+  assert.deepEqual(parsed, { ...historyEvidence, completeFileLists: true, testRegionsChanged: [],
+    diagnosticCommitRange: [{ sha: head }] });
   assert.deepEqual(result.calls, [prPath, prPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/reviews?per_page=100', comparePath,
     primaryPath, primaryPath, prPath, comparePath, 'repos/fixture/repo/pulls/1208/files?per_page=100&page=1', `repos/fixture/repo/commits/${head}/check-runs?per_page=100&page=1`, `repos/fixture/repo/commits/${head}/statuses?per_page=100&page=1`, prPath].map(path => ['api', path]));
 });
@@ -126,4 +130,17 @@ test('primary-change CLI rejects invalid arguments before any GitHub read', (t) 
   assert.match(result.stderr, /usage:/);
   assert.equal(result.stdout, '');
   assert.deepEqual(result.calls, []);
+});
+
+
+test('primary-change CLI accepts explicit operator diagnostics without changing preserved-head evidence', t => {
+  const result = runCli(t, [
+    { path: prPath, data: pr },
+    { path: comparePath, data: history },
+    { path: primaryPath, data: compare },
+  ], ['fixture/repo', '1208', head, '--diagnostics']);
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(checkPrimaryChange(parsed, head).ok, true);
+  assert.equal(parsed.revertedRegionDiagnostics, undefined);
 });

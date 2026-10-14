@@ -72,7 +72,7 @@ HAM_BUILT_HEAD=$(git rev-parse HEAD) || { ham_publish_abort 1; return 1; }
 if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ] ||
   ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-    > /tmp/ham-<<PR_NUMBER>>-range.json; then
+    > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json"; then
   HAM_PHASE_OUTCOME=exact-head-review-required
   ham_publish_abort 20; return 20
 fi
@@ -92,16 +92,32 @@ if ! ham_audit_is_nonnegative_int "${HAM_AUDIT_REMEDIATED_TOTAL:-}" ||
   echo "HAM hard-blocker: provide valid audit counts, findings file and failing-tests summary" >&2
   ham_publish_abort 1; return 1
 fi
-# When filling in the comment body below, optionally add one bullet each for
-# applicable test evidence and doc currency, using the same bulleted style.
+# Render the parser's vocabulary here rather than asking the agent to type it.
+# The reason names the covered files and, when applicable, the updated docs.
+case "${HAM_DOC_CURRENCY:-}" in
+  'not applicable') HAM_DOC_CURRENCY_LINE='Doc-currency: not applicable' ;;
+  applicable) HAM_DOC_CURRENCY_LINE='Doc-currency: updated' ;;
+  'skipped superproject-doc obligation') HAM_DOC_CURRENCY_LINE='Doc-currency: skipped superproject-doc obligation' ;;
+  *)
+    echo "HAM hammer-publish: supply HAM_DOC_CURRENCY (applicable, not applicable, or skipped superproject-doc obligation) and HAM_DOC_CURRENCY_REASON before publication" >&2
+    ham_publish_abort 1; return 1 ;;
+esac
+HAM_DOC_CURRENCY_REASON="${HAM_DOC_CURRENCY_REASON:-}"
+if [ -z "${HAM_DOC_CURRENCY_REASON//[[:space:]]/}" ] ||
+  [[ "$HAM_DOC_CURRENCY_REASON" == *$'\n'* || "$HAM_DOC_CURRENCY_REASON" == *$'\r'* ]]; then
+  echo "HAM hammer-publish: supply a single-line HAM_DOC_CURRENCY_REASON naming the covered files before publication" >&2
+  ham_publish_abort 1; return 1
+fi
+HAM_DOC_CURRENCY_LINE="$HAM_DOC_CURRENCY_LINE; $HAM_DOC_CURRENCY_REASON"
 # HSC-01: the findings bullets are MACHINE-PARSED (the closer matches each
 # finding title against the review's standing findings to decide whether the
 # non-blocking waiver holds). Keep one bullet per finding on ONE line, and use
 # the finding's title VERBATIM from the review so the identity match lands.
-HAM_AUDIT_COMMENT_DETAILS="$(cat "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Base-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
+HAM_AUDIT_COMMENT_DETAILS="$(sed -E -e '/\*\*/b' -e '/\((blocking|non-blocking)\)/b' -e '/^[[:space:]]*(-[[:space:]]+)?[Dd][Oo][Cc]-[Cc][Uu][Rr][Rr][Ee][Nn][Cc][Yy][[:space:]]*:/d' "$HAM_AUDIT_DETAILS_FILE")" || { ham_publish_abort 1; return 1; }
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nHAM-Base-Head: %s\nHAM-Validated-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
   "$HAM_AUDIT_COMMENT_MARKER" \
   "$HAM_AUDIT_COMMENT_DETAILS" \
+  "$HAM_DOC_CURRENCY_LINE" \
   "$POST_REMEDIATION_SHA" \
   "$HAM_BASE_HEAD" \
   "$POST_REMEDIATION_SHA" \

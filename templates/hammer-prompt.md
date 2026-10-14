@@ -85,15 +85,18 @@ dispatch, containing `data/follow-up-jobs/completed`. Keep it exported for
 `hammer-head-context.mjs`; `HAM_HQ_ROOT` is a separate HQ root. Manual callers
 must supply `HAM_ROOT_DIR` when relying on completed-round proof.
 
-Before entering the merge-lease window, write the complete audit markdown to
-an absolute-path file. It must contain the `**Findings addressed**` heading and
-one single-line bullet per finding with the exact review title, blocking class,
-changed files and fix. Export its path as `HAM_AUDIT_DETAILS_FILE`. Also export
-decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
-`HAM_AUDIT_REMEDIATED_NON_BLOCKING` (the latter two must sum to the total), plus
-`HAM_FAILING_TESTS_FIXED` with the actual test repairs or `suite already green`.
-The publish helper rejects missing or placeholder inputs and releases the lease
-on failure. Keep these values in the same shell for the merge audit.
+Before the merge lease, write the complete audit markdown to an absolute-path file and export
+`HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
+bullet per finding: exact review title, blocking class, changed files and fix.
+Export decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`,
+`HAM_AUDIT_REMEDIATED_NON_BLOCKING` (the classes sum to the total), and
+`HAM_FAILING_TESTS_FIXED` (actual repairs or `suite already green`).
+Export `HAM_DOC_CURRENCY` (`applicable`, `not applicable`, or
+`skipped superproject-doc obligation`) and
+`HAM_DOC_CURRENCY_REASON`: one line naming covered changed files and updated
+docs when applicable. The publication step renders Doc-currency; omit it from
+the details file. Missing or placeholder inputs release the lease. Keep these
+values in the same shell for the merge audit.
 
 Use the shared-budget check-wait helper (minimum 30 seconds). Never use
 `--watch` or add polling loops. All GitHub calls use these metered helpers.
@@ -161,7 +164,7 @@ The primary change is the actual author head immediately before the first hammer
 remediation, against its merge base. `hammer-context`
 includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
 `statedIntent` from the PR body (including Why or Operator decision sections).
-Use `bin/primary-change-context.mjs` for full patches. Use this context to understand intent; it does not suppress real blocking findings.
+`bin/primary-change-context.mjs` supplies patches; use `--diagnostics` only outside merge execution. Context never waives blocking findings.
 If primary evidence is missing or unsupported, stop before remediation and
 print `primaryChange.reason` in the stop message. When the snapshot status is
 `history-read-failed` or the helper reports `historyReadFailed: true`, record a
@@ -708,14 +711,14 @@ while true; do
   exit 1
 done
 ham_gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR_NUMBER>>-timeline.json
-ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
+ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json"
 ```
 
 Remediate, rebase and validate; reuse an already-fixed head. Proven fleet
 ancestry merges under lease; failed proofs request one exact-head review for
 daemon closure, never operator escalation.
 
-Write `/tmp/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
+Write `${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
 Start from the captured `HAM_BASE_HEAD`. Prove it first using the reviewed head,
 an App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain, or completed
@@ -726,12 +729,12 @@ SHA equals HEAD and append both exact SHAs in the hammer App comment. Preserve
 earlier attestation edges. Signatures and commit metadata confer no trust;
 an unproven base requests re-review.
 
-API-publish only one single-parent commit above the fetched remote head. Preserve rebased and multi-commit history with the lease-protected git fallback. Retry transport failures three times (500/1000ms, 15s each); preserve CAS and tree IDs. Errors or unsupported modes use CAS git and the same base proof; push rejection releases the lease and aborts.
+API-publish one single-parent commit above fetched remote HEAD; rebased/multi-commit history uses lease-protected git. Retry transport three times (500/1000ms; 15s each), keeping CAS/tree IDs. Errors or unsupported modes use CAS git with the same base proof; push rejection releases the lease and aborts.
 
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-  > /tmp/ham-<<PR_NUMBER>>-range.json || {
+  > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json" || {
     # Every failed provenance proof uses exact-head review.
     ham_release_merge_lease
     HAM_REVIEW_ROUTE_NOTICE=$(printf '%s' "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review." |
@@ -776,7 +779,7 @@ API-publish only one single-parent commit above the fetched remote head. Preserv
 }
 ```
 
-Run the predicate against the live post-remediation head. Create an owned, run-scoped verdict file after publishing the audit; export the path so the merge helper reads this run's result. Remove both owned files after the merge phase:
+Validate the live post-remediation head after publishing the audit. Export the owned, run-scoped verdict file for the merge helper. Remove both owned files after merge:
 
 ```bash
 HAM_PRIMARY_CHANGE_FILE=$(mktemp "${TMPDIR:-/tmp}/ham-primary-change.XXXXXX") || exit 1
@@ -798,9 +801,9 @@ HAM_VERDICT_READY_FILE=""
   --reviewed-sha <<REVIEWED_SHA>> \
   --reviewer <<REVIEWER>> \
   --risk-class <<RISK_CLASS>> \
-  --ham-terminal-remediation /tmp/ham-<<PR_NUMBER>>-terminal-remediation.json \
-  --ham-commit /tmp/ham-<<PR_NUMBER>>-commit.json \
-  --ham-range /tmp/ham-<<PR_NUMBER>>-range.json \
+  --ham-terminal-remediation "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json" \
+  --ham-commit "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json" \
+  --ham-range "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json" \
   --primary-change "$HAM_PRIMARY_CHANGE_FILE" \
   > "$HAM_VERDICT_FILE" || exit 1
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"

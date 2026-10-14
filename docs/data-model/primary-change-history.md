@@ -26,8 +26,23 @@ The JSON object contains `key` and `history`; there is no schema-version field.
 Without hammer commits, those two fields are sufficient. With hammer commits,
 history includes `primaryHead`, `mergeBase`, `primaryFiles`, `finalFiles`,
 `completeFileLists` and `testRegionsChanged`. It may include `builderBoundary`,
-`reversalAuthorizations` and `rejectedReversalAuthorizations`. File evidence
-and reversal citations use the collector's shapes in `src/ama/primary-change.mjs`.
+`reversalAuthorizations` and `rejectedReversalAuthorizations`. New hammer-history
+records also include optional `diagnosticCommitRange`: an ordered array of
+`{ sha: <commit SHA> }` entries from the first hammer commit through `headSha`,
+including intervening remediation commits. This range supports observational
+refusal attribution only; it never authorizes a merge. Older records without
+the field remain reusable: explicit operator diagnostics fetch the range on demand.
+Only `fetchPrimaryChangeContext` (the CLI's opt-in `--diagnostics` mode) performs
+attribution, with the caller's effective strictness policy, a 20-commit cap and a
+15-second wall-clock budget. Deadline expiry retains partial attribution with an
+error; cancellation and transport/auth/read failures propagate. Capped snapshots
+are errors rather than evidence of a missing region. The range is stored in full;
+attribution results (`revertedRegionDiagnostics`) are returned to the operator and
+are not cached here. Shared `fetchPrimaryChange` and default CLI reads never
+collect attribution, including on repeated refused-head cache hits. Production
+merge gates and their refusal audits therefore do not pay for these diagnostics.
+File evidence and reversal citations use the collector's shapes in
+`src/ama/primary-change.mjs`.
 CI-cost evidence is collected live after history reuse and is never cached here.
 
 Reuse requires an exact key, matching head, a boolean `hasHammerCommits`, and a

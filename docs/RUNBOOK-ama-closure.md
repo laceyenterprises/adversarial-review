@@ -1642,6 +1642,22 @@ Compare pages use four workers; blob pairs and tree pairs are fetched together.
 Metadata-only cost reads avoid reconstructing patches they do not consume;
 each page/blob/diff retains the existing output bound.
 
+Merge-gate `fetchPrimaryChange` reads and the default context CLI never collect
+refusal attribution. For operator investigation, run
+`node bin/primary-change-context.mjs OWNER/REPO PR HEAD --diagnostics` outside
+merge execution. This explicitly calls `fetchPrimaryChangeContext`, evaluates
+the refusal with the effective `strictNonBlockingRemediation` policy, and compares
+snapshots for at most the first 20 commits from the first hammer through the
+candidate head. Attribution has a separate 15-second wall-clock budget; expiry
+aborts its reader and returns partial attribution with a budget error. Larger
+ranges report truncation, and capped or otherwise incomplete snapshots report
+an error instead of attribution. Cancellation, auth outages, transient transport
+errors and reader failures propagate and stop collection. Other diagnostic
+errors never change the independently computed verdict or authorize a merge.
+Older cache records without `diagnosticCommitRange` fetch that range only on
+explicit diagnostic requests. Results appear in the CLI evidence, are not cached,
+and do not add GitHub reads to daemon, closer or in-lease hammer gates.
+
 The [primary-change history data model](data-model/primary-change-history.md)
 defines the record layout and retention. Cache access and sweeping require the
 canonical runtime data owner's effective UID; `data/`, the store directory and
@@ -1820,8 +1836,8 @@ The dispute page guard persists across restarts. Read outages remain `gate-read-
 and retry normal ticks after transport/auth recovery. Recovery-store or pager
 failures are logged and always retain `skipMergeAgent: true`.
 
-For a refused head, inspect `bin/primary-change-context.mjs` evidence and repair
-the PR branch or restore missing history/patch access. A new head re-evaluates
+For a refused head, inspect the explicit diagnostic CLI evidence described above
+and repair the PR branch or restore missing history/patch access. A new head re-evaluates
 the predicate. If evidence recovery needs another worker, an attributable operator
 can apply `merge-agent-requested` scoped to the current head and latest PR update.
 The existing operator-fallback lane accepts both the closer's
@@ -2106,7 +2122,16 @@ HAM's versioned `hammer-publish` phase takes the audit finding bullets from
 `HAM_AUDIT_DETAILS_FILE`, decimal remediation counts from
 `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`, and
 `HAM_AUDIT_REMEDIATED_NON_BLOCKING`, and a test summary from
-`HAM_FAILING_TESTS_FIXED`. Supply these before rendering the helper. A successful
+`HAM_FAILING_TESTS_FIXED`. Also supply `HAM_DOC_CURRENCY` (`applicable`,
+`not applicable`, or `skipped superproject-doc obligation`) and a single-line
+`HAM_DOC_CURRENCY_REASON` naming the covered changed files and any updated docs
+or skipped superproject obligations. Publication replaces standalone
+`Doc-currency:` attestations in the details file with this rendered claim;
+finding titles containing `Doc-currency:` are preserved. Supply these before
+rendering the helper. Consumers prefer the standalone claim and retain legacy
+unclassified `- Doc-currency:` validation bullets and inline audit prose as
+fallbacks, excluding finding bullets and lines with
+`(blocking)` or `(non-blocking)` finding classification markers. A successful
 post or refresh sets `HAM_PUBLISHED_AUDIT_HEAD` to the head that the audit names.
 The `hammer-merge` phase requires that marker and an owned, run-scoped `HAM_VERDICT_FILE` produced after audit publish by a successful `ama-check` call. The caller sets `HAM_VERDICT_READY_FILE` to the same path only after that call succeeds and removes the file after merge. The verdict must have
 `eligible: true` and a matching current head before reading GitHub's required

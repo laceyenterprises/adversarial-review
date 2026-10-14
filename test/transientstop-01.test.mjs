@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -8,12 +8,12 @@ import {
   HISTORY_READ_FAILURE_PAGE_GRACE_MS,
   _resetHammerStopHoldPageDebounceForTests,
 } from '../src/ama/hammer-stop-hold.mjs';
-import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
-import { recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
+import { noProgressLaneFilePath, readNoProgressLane, recordNoProgressLaneRun, recordNoProgressLaneSkip } from '../src/watcher-no-progress-lane.mjs';
 
 const repo = 'fixture/repo';
 const head = 'a'.repeat(40);
@@ -86,7 +86,7 @@ function stopAudit(rootDir, predicate) {
     attempt: { outcome: 'failed-without-merge', reason: predicate, head, path: 'hammer' } });
 }
 
-test('TRANSIENTSTOP-01: ordinary passes revisit every evidence stop despite a slow lane and no review event', async t => {
+test('TRANSIENTSTOP-01: evidence stops become due at five minutes despite a slow lane and no review event', async t => {
   for (const predicate of ['history-read-failed', 'primary-change-unknown', 'primary-change-read-failed', 'ci-not-green']) {
     const { args } = fixture(t, predicate);
     stopAudit(args.rootDir, predicate);
@@ -101,12 +101,80 @@ test('TRANSIENTSTOP-01: ordinary passes revisit every evidence stop despite a sl
   }
 });
 
-test('TRANSIENTSTOP-01: next ordinary pass releases and dispatches on the settled head without a review event', async t => {
+test('TRANSIENTSTOP-01: rapid ticks, wake priority and the idle floor respect evidence cadence across restart', async t => {
+  const { args } = fixture(t);
+  stopAudit(args.rootDir, 'history-read-failed');
+  let clock = at(0), runs = 0;
+  const makeGate = () => createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
+    readReviewRow: () => ({ reviewer_head_sha: head }), now: () => clock, logger });
+  let gate = makeGate();
+  const handler = { repoPath: repo, prNumber: 1, headSha: head, run: async () => { runs++; } };
+  const poll = () => runPostedReviewHandlersFairly({ handlers: [handler], laneGate: gate,
+    priorityTargets: [{ repo, prNumber: 1 }], budgetMs: 30_000, handlerTimeoutMs: 20_000, logger });
+  await poll();
+  assert.equal(runs, 1, 'missing ledger gets one initial walk');
+  for (const ms of [1, 60_000, 240_000, 299_999]) {
+    clock = at(ms);
+    gate = makeGate();
+    await poll();
+    assert.equal(runs, 1, 'neither scheduler override can bypass the interval');
+    assert.equal(readNoProgressLane(args.rootDir, { repo, prNumber: 1 }).lastRunAt, at(0));
+  }
+  clock = at(300_000);
+  await poll();
+  assert.equal(runs, 2);
+  clock = at(300_001);
+  await poll();
+  assert.equal(runs, 2, 'the second walk starts a new interval');
+  assert.equal(gate.evaluate({ ...handler, headSha: 'b'.repeat(40) }).run, true);
+});
+
+test('TRANSIENTSTOP-01: paged and released historical stops use ordinary backoff', async t => {
+  for (const release of [false, true]) {
+    const { args, pages } = fixture(t);
+    stopAudit(args.rootDir, 'history-read-failed');
+    await evaluateHammerStopHold({ ...args, readAuditImpl: undefined, now: at(0) });
+    await evaluateHammerStopHold({ ...args, readAuditImpl: undefined, now: at(600_000),
+      ...(release ? { fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: false }) } : {}) });
+    assert.equal(pages.length, release ? 0 : 1);
+    const identity = { repo, prNumber: 1 };
+    for (let i = 0; i < 20; i++) recordNoProgressLaneRun(args.rootDir, identity, {
+      headSha: head, fingerprint: 'unchanged-review', now: at(600_000), logger });
+    const gate = createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
+      readReviewRow: () => ({ reviewer_head_sha: head }), now: () => at(900_000), logger });
+    const handler = { repoPath: repo, prNumber: 1, headSha: head };
+    assert.equal(gate.evaluate(handler).run, false, release ? 'released but waiting for checks/capacity' : 'paged');
+    for (let i = 0; i < 12; i++) recordNoProgressLaneSkip(args.rootDir, identity, { headSha: head, now: at(900_000) });
+    assert.equal(gate.evaluate(handler).run, true, 'normal backoff still eventually admits');
+  }
+});
+
+test('TRANSIENTSTOP-01: legacy last-run fallback survives repeated skipped polls', t => {
+  const { args } = fixture(t);
+  stopAudit(args.rootDir, 'history-read-failed');
+  const identity = { repo, prNumber: 1 };
+  recordNoProgressLaneRun(args.rootDir, identity, { headSha: head, fingerprint: 'unchanged', now: at(0) });
+  const legacy = readNoProgressLane(args.rootDir, identity);
+  delete legacy.lastRunAt;
+  writeFileSync(noProgressLaneFilePath(args.rootDir, identity), JSON.stringify(legacy));
+  let clock = at(60_000);
+  const gate = createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
+    readReviewRow: () => ({ reviewer_head_sha: head }), now: () => clock, logger });
+  const handler = { repoPath: repo, prNumber: 1, headSha: head };
+  assert.equal(gate.evaluate(handler).run, false);
+  clock = at(299_999);
+  assert.equal(gate.evaluate(handler).run, false);
+  clock = at(300_000);
+  assert.equal(gate.evaluate(handler).run, true);
+});
+
+for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass releases and dispatches without a review event (omit timestamp=${omitTimestamp})`, async t => {
   const { args, pages } = fixture(t);
   stopAudit(args.rootDir, 'history-read-failed');
   const identity = { repo, prNumber: 1, headSha: head };
   const user = userInfo().username;
   let now = at(0), failing = true, launches = 0, probes = 0;
+  let observedRecord;
   const closer = () => maybeDispatchAmaCloser({
     reviewState: { verdict: 'approved', headSha: head, riskClass: 'low', remediationPending: false,
       blockingFindingState: 'known', blockingFindingCount: 0,
@@ -117,14 +185,18 @@ test('TRANSIENTSTOP-01: next ordinary pass releases and dispatches on the settle
     cfg: { enabled: true, workerClass: 'hammer', mergeMethod: 'squash',
       eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: false } },
     dispatchContext: { rootDir: args.rootDir, hqRoot: args.rootDir, repo, reviewedSha: head,
-      targetRemediationSha: head, dispatchRecordHeadSha: head, dispatchedAt: now, forceHammerAfterDaemonFailure: true,
+      targetRemediationSha: head, dispatchRecordHeadSha: head,
+      dispatchedAt: omitTimestamp && !failing ? undefined : now, forceHammerAfterDaemonFailure: true,
       hqOwnerUser: user, currentUser: user, hqPath: 'fixture-hq',
       closerTokenRollupPollDelaysMs: [], livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: head, headBranchExists: true }) },
     fetchPrimaryChangeImpl: async () => { probes++; return failing
       ? { headSha: head, historyReadFailed: true } : primaryChangeFixture(head); },
     execFileImpl: async (_cmd, argv) => {
       if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }) };
-      if (argv[0] === 'dispatch') { launches++; return { stdout: JSON.stringify({ dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-next' }) }; }
+      if (argv[0] === 'dispatch') {
+        launches++;
+        return { stdout: JSON.stringify({ dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-next' }) };
+      }
       return { stdout: '{}' };
     },
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }),
@@ -133,7 +205,10 @@ test('TRANSIENTSTOP-01: next ordinary pass releases and dispatches on the settle
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', comments: [] }),
     resolveCloserDispatchHarnessImpl: async () => ({ workerClass: 'hammer', fellBack: false }),
-    observeCloserBacklogImpl: async () => 0,
+    observeCloserBacklogImpl: async () => {
+      observedRecord = readAmaCloserDispatchRecord(args.rootDir, identity);
+      return 0;
+    },
     readTemplateImpl: () => 'synthetic hammer prompt', writeFileImpl: () => {},
     deliverAlertImpl: args.deliverAlertImpl, logger,
   });
@@ -156,6 +231,9 @@ test('TRANSIENTSTOP-01: next ordinary pass releases and dispatches on the settle
     budgetMs: 30_000, handlerTimeoutMs: 20_000, logger });
   assert.equal(result?.dispatched, true, JSON.stringify(result));
   assert.equal(launches, 1);
+  assert.equal(observedRecord.lastObservedStatus, 'failed');
+  assert.ok(Number.isFinite(Date.parse(observedRecord.lastObservedAt)), 'terminal observation has a usable timestamp');
+  if (!omitTimestamp) assert.equal(observedRecord.lastObservedAt, now);
   assert.ok(probes >= 2);
   assert.equal(pages.length, 0);
 });

@@ -52,6 +52,7 @@ Required fields:
 | `operatorReason` | string, optional | Present only in the `operator-blocked` lane when the handler named why an operator is needed, for example `pr-is-draft` (COMMENTCLOSE-01). A named reason also selects that reason's operator-decision alert text. |
 | `firstNoProgressAt` | string or null | First observed timestamp for the unchanged series. |
 | `updatedAt` | string or null | Last ledger update timestamp. |
+| `lastRunAt` | optional string or null | Last completed or timed-out handler walk. Skips and alert/event updates preserve it. Legacy ledgers use `updatedAt` until their first skip or walk records this field. |
 
 Optional `stalledEvent` field:
 
@@ -68,6 +69,11 @@ Optional `stalledEvent` field:
 
 - The lane only changes how often a PR is re-walked; it never changes review,
   remediation, or merge eligibility decisions.
+- An unresolved, unpaged hammer evidence stop uses a five-minute interval
+  anchored to `lastRunAt`, even in the active lane. Skipped polls cannot move
+  that deadline. The scheduler's wake priority and idle starvation floor
+  respect its positive `retryAfterMs`. Paged or released stops resume ordinary
+  tick backoff; a missing or different-head ledger admits an initial walk.
 - Missing, unreadable, malformed, legacy, or head-mismatched ledgers fail open
   toward walking the PR.
 - Review-state progress is keyed by `fingerprint`. A change in

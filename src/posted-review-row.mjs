@@ -27,7 +27,12 @@ import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestrat
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
-import { HAMMER_EVIDENCE_FAILURES, readHammerStopForHead } from './ama/hammer-stop-hold.mjs';
+import {
+  HAMMER_EVIDENCE_FAILURES,
+  HAMMER_EVIDENCE_RECHECK_INTERVAL_MS,
+  readHammerStopForHead,
+  readHammerStopHoldForHead,
+} from './ama/hammer-stop-hold.mjs';
 import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
 import { maybeFireFleetWideFalseDeferralAlert } from './fleet-wide-false-deferral-detector.mjs';
 import {
@@ -890,21 +895,33 @@ export function createNoProgressLaneGate({
   return {
     evaluate(handler) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
+      const ledger = readNoProgressLane(rootDir, identity, { logger });
+      let decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
+      const observedAt = now();
       // Evidence can recover without a review-row mutation or a wake event.
-      // Read the audit even before a hold file exists, and keep released stops
-      // in the ordinary lane until dispatch reconciliation can admit the retry.
+      // Only unresolved, unpaged stops use the shorter cadence. Historical
+      // audit records must not keep released/paged stops outside normal backoff.
       const stop = readHammerStopForHead({
         hqRoot, ...identity, headSha: handler.headSha,
         reviewedSha: readReviewRow(handler.repoPath, handler.prNumber)?.reviewer_head_sha,
         logger,
       });
-      if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) return { run: true };
-      const ledger = readNoProgressLane(rootDir, identity, { logger });
-      const decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
+      if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) {
+        const hold = readHammerStopHoldForHead({ rootDir, ...identity,
+          headSha: handler.headSha, stopKey: stop.stopKey });
+        if (!hold?.releasedAt && !hold?.pagedAt) {
+          const lastRunMs = ledger?.headSha === handler.headSha
+            ? Date.parse(ledger.lastRunAt ?? ledger.updatedAt ?? '') : NaN;
+          const elapsedMs = Date.parse(observedAt) - lastRunMs;
+          const due = !Number.isFinite(elapsedMs) || elapsedMs >= HAMMER_EVIDENCE_RECHECK_INTERVAL_MS;
+          decision = { ...decision, due, reason: due ? 'hammer-evidence-due' : 'hammer-evidence-wait',
+            retryAfterMs: due ? 0 : HAMMER_EVIDENCE_RECHECK_INTERVAL_MS - elapsedMs };
+        }
+      }
       if (!decision.due) {
         recordNoProgressLaneSkip(rootDir, identity, {
           headSha: handler.headSha || null,
-          now: now(),
+          now: observedAt,
           logger,
         });
       }

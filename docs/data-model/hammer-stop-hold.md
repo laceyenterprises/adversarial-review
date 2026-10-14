@@ -3,7 +3,7 @@
 **Owner:** AMA closer retry admission
 **Store:** `data/follow-up-jobs/hammer-stop-hold/`
 **Source of truth:** `src/ama/hammer-stop-hold.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/audit.mjs`, `src/checks-summary.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/ama/audit.mjs`, `src/checks-summary.mjs`, `src/posted-review-row.mjs`
 
 ## Purpose
 
@@ -67,9 +67,13 @@ and release timestamps use the closer pass's `dispatchedAt` when supplied.
 
 TRANSIENTSTOP-01 also includes `history-read-failed`. The posted-review
 no-progress lane reads the latest hammer audit before applying backoff. All
-`HAMMER_EVIDENCE_FAILURES` stops are evaluated on every ordinary polling pass,
-even before a hold file exists and after release while dispatch reconciliation
-is pending. Review or gate events are not needed to retry the probe.
+`HAMMER_EVIDENCE_FAILURES` stops that have neither paged nor released are
+eligible every five minutes, anchored to the no-progress ledger's `lastRunAt`.
+This includes the initial observation before a hold file exists. The gate reads
+the matching hold through `readHammerStopHoldForHead`; a different `stopKey`
+cannot supply release state for the current stop. Paged or released stops use
+ordinary lane backoff, including while other dispatch prerequisites remain
+pending. Review or gate events are not needed to retry the probe.
 
 Only `history-read-failed` defers its page: a failed probe must remain unresolved
 for ten minutes from `firstObservedAt`, allowing two default five-minute polling

@@ -60,6 +60,7 @@ export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
 export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
 
 export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed', 'history-read-failed']);
+export const HAMMER_EVIDENCE_RECHECK_INTERVAL_MS = 5 * 60_000;
 // Two ordinary five-minute polling intervals let a transport fault recover
 // before paging. Start at the first failed probe, not the old hammer timestamp.
 export const HISTORY_READ_FAILURE_PAGE_GRACE_MS = 10 * 60_000;
@@ -94,6 +95,11 @@ function readHoldState(rootDir, repo, prNumber) {
   } catch {
     return { heads: {} };
   }
+}
+
+export function readHammerStopHoldForHead({ rootDir, repo, prNumber, headSha, stopKey } = {}) {
+  const entry = readHoldState(rootDir, repo, prNumber).heads[headSha];
+  return entry?.stopKey === stopKey ? entry : null;
 }
 
 function writeHoldState(rootDir, repo, prNumber, state) {
@@ -363,7 +369,7 @@ export async function evaluateHammerStopHold({
       + (stop.closingStatus ? `Hammer said: ${stop.closingStatus} ` : '')
       + 'The PR has neither a reviewer nor a hammer. Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. '
       + 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; '
-      + 'the watcher re-checks every tick and re-dispatches once when one does.';
+      + 'the watcher re-checks on its scheduled cadence and re-dispatches once when one does.';
     try {
       await deliverAlertImpl(text, {
         event: HAMMER_STOP_HOLD_PAGE_EVENT,

@@ -6050,7 +6050,7 @@ export async function maybeDispatchAmaCloser({
       updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
         current?.launchRequestId === existingRecord.launchRequestId && current.state !== 'dispatching'
           && !AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus))
-          ? { ...current, lastObservedStatus: status, lastObservedAt: dispatchContext.dispatchedAt }
+          ? { ...current, lastObservedStatus: status, lastObservedAt: dispatchContext.dispatchedAt || new Date().toISOString() }
           : null
       ));
       finalizeAmaCloserLeaseBestEffort({

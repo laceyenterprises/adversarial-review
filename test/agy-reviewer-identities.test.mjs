@@ -33,6 +33,8 @@ import {
   AGY_IDENTITY_REVIEW_ID_ENV,
   AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS,
   AGY_IDENTITY_USER_ENV,
+  AGY_INITIAL_FAILURE_LOG_LIMIT,
+  AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH,
   AGY_REVIEWER_LIBEXEC_DIR,
   AGY_REVIEWER_PINNED_AGY,
   AGY_REVIEWER_SUDO,
@@ -632,6 +634,121 @@ test('CCX-08: the dispatch-worker user is refused as an identity, fail closed', 
 });
 
 // ── Readiness: isolation, drift, re-admission ───────────────────────────────
+
+function makeSettingsReadinessPool(fake, log = quietLog()) {
+  return createAgyReviewerIdentityPool({
+    env: {},
+    log,
+    hqOwner: 'owner-identity',
+    loadIdentities: () => ['reviewer-b'],
+    resolveRuntime: () => 'antigravity',
+    runPinnedImpl: fake.runPinned,
+    readBootstrapRecordImpl: () => ({ ready: true }),
+    listUserProcessesImpl: async () => ({ ok: true, processes: [] }),
+    readActiveRunRecordsImpl: () => [],
+    readQuotaCooldownImpl: () => null,
+    deliverAlertImpl: async () => ({}),
+    leaseWaitMs: 0,
+  });
+}
+
+test('AGYDRIFT-01: the comparison filler stays equal to the bootstrap canonical filler', () => {
+  assert.equal(AGY_REVIEWER_KEYCHAIN_RELATIVE_PATH, 'Library/Keychains/agy-reviewer.keychain-db');
+  assert.deepEqual(referenceAgySettingsFromEnv({}), [
+    'AGY_KEYCHAIN_PATH=~/Library/Keychains/agy-reviewer.keychain-db',
+  ]);
+});
+
+test('AGYDRIFT-01: an added identity is ready with the dedicated keychain and no environment override', async () => {
+  const fake = makeFakeInstall({ users: ['reviewer-b'] });
+  try {
+    writeFileSync(fake.settingsPath('reviewer-b'), 'AGY_KEYCHAIN_PATH=~/Library/Keychains/agy-reviewer.keychain-db\n');
+    const pool = makeSettingsReadinessPool(fake);
+    assert.equal(await pool.refreshReadiness(), 1);
+    const state = pool.snapshot().find((entry) => entry.user === 'reviewer-b');
+    assert.equal(state.ready, true);
+    assert.deepEqual(state.reasons, []);
+    const lease = await pool.acquire({ reviewId: 'agy-drift-ready' });
+    assert.equal(lease.user, 'reviewer-b');
+    await pool.release(lease);
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('AGYDRIFT-01: first-pass proxy drift logs once per distinct reason set until first ready', async () => {
+  const fake = makeFakeInstall({ users: ['reviewer-b'] });
+  try {
+    const settings = 'AGY_KEYCHAIN_PATH=~/Library/Keychains/agy-reviewer.keychain-db\nHTTPS_PROXY=synthetic-proxy\n';
+    writeFileSync(fake.settingsPath('reviewer-b'), settings);
+    const log = quietLog();
+    const pool = makeSettingsReadinessPool(fake, log);
+    const failures = () => log.lines.filter((line) => line.includes('identity=reviewer-b not ready:'));
+    const driftReason = 'settings drift: HTTPS_PROXY is set for the identity but not on the HQ-owner path';
+    assert.equal(await pool.refreshReadiness(), 0);
+    assert.equal(pool.snapshot()[0].ready, false);
+    assert.deepEqual(pool.snapshot()[0].reasons, [driftReason]);
+    assert.deepEqual(failures(), [`warn [agy-identities] identity=reviewer-b not ready: ${driftReason}`]);
+    assert.equal(await pool.acquire({ reviewId: 'agy-drift-held' }), null);
+    await pool.refreshReadiness();
+    assert.equal(failures().length, 1, 'repeated failures do not repeat the log');
+
+    // A second reason set is reported once, including when the first recurs.
+    writeFileSync(join(fake.home('reviewer-b'), '.item-missing'), '');
+    await pool.refreshReadiness();
+    await pool.refreshReadiness();
+    assert.deepEqual(failures(), [
+      `warn [agy-identities] identity=reviewer-b not ready: ${driftReason}`,
+      `warn [agy-identities] identity=reviewer-b not ready: agy keychain item missing; ${driftReason}`,
+    ]);
+    rmSync(join(fake.home('reviewer-b'), '.item-missing'));
+    await pool.refreshReadiness();
+    assert.equal(failures().length, 2);
+
+    writeFileSync(fake.settingsPath('reviewer-b'), settings.split('\n')[0] + '\n');
+    assert.equal(await pool.refreshReadiness(), 1);
+    assert.ok(log.lines.includes('log [agy-identities] identity=reviewer-b ready'));
+    writeFileSync(fake.settingsPath('reviewer-b'), settings);
+    assert.equal(await pool.refreshReadiness(), 0);
+    assert.ok(log.lines.includes(`warn [agy-identities] identity=reviewer-b isolated: ${driftReason}`));
+    await pool.refreshReadiness();
+    assert.equal(failures().length, 2, 'after first ready, existing transition logging takes over');
+  } finally {
+    fake.cleanup();
+  }
+});
+
+test('AGYDRIFT-01: initial failures that differ every pass stop logging at the bound', async () => {
+  const fake = makeFakeInstall({ users: ['reviewer-b'] });
+  try {
+    let pid = 40000;
+    const log = quietLog();
+    const pool = createAgyReviewerIdentityPool({
+      env: {},
+      log,
+      hqOwner: 'owner-identity',
+      loadIdentities: () => ['reviewer-b'],
+      resolveRuntime: () => 'antigravity',
+      runPinnedImpl: fake.runPinned,
+      readBootstrapRecordImpl: () => ({ ready: true }),
+      // A survivor whose pid changes every pass makes every reason distinct.
+      listUserProcessesImpl: async () => ({ ok: true, processes: [{ pid: pid += 1, pgid: 1, comm: 'synthetic-child' }] }),
+      readActiveRunRecordsImpl: () => [],
+      readQuotaCooldownImpl: () => null,
+      deliverAlertImpl: async () => ({}),
+      leaseWaitMs: 0,
+    });
+    for (let pass = 0; pass < AGY_INITIAL_FAILURE_LOG_LIMIT + 5; pass += 1) {
+      assert.equal(await pool.refreshReadiness(), 0);
+    }
+    const failures = log.lines.filter((line) => line.includes('identity=reviewer-b not ready:'));
+    assert.equal(failures.length, AGY_INITIAL_FAILURE_LOG_LIMIT);
+    assert.equal(log.lines.filter((line) => line.includes('identity=reviewer-b further distinct readiness failures')).length, 1);
+    assert.match(pool.snapshot()[0].reasons[0], new RegExp(`\\b${pid} synthetic-child\\b`), 'the snapshot still carries the latest reason');
+  } finally {
+    fake.cleanup();
+  }
+});
 
 test('CCX-08: a failed review isolates only its identity, and a passing readiness check re-admits it', async () => {
   const fake = makeFakeInstall();

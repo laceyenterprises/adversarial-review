@@ -18,6 +18,23 @@ import {
 // for an item that existed and was readable from a login shell. The reader must name
 // the same keychain the bootstrap writer uses.
 
+test('AGYDRIFT-01: HQ-owner auth still probes the real login keychain by default', async () => {
+  assert.equal(DEFAULT_AGY_KEYCHAIN_RELATIVE_PATH, 'Library/Keychains/login.keychain-db');
+  const calls = [];
+  const result = await checkAgyReviewerAuth({
+    env: { HOME: 'owner-home' },
+    cacheSuccess: false,
+    execFileImpl: async (file, args) => {
+      calls.push({ file, args });
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+  assert.equal(result.ok, true);
+  const probe = calls.find((call) => call.args?.[0] === 'find-generic-password');
+  assert.ok(probe);
+  assert.equal(probe.args.at(-1), 'owner-home/Library/Keychains/login.keychain-db');
+});
+
 test('keychain probe names the per-user login keychain derived from HOME', () => {
   const args = agyKeychainProbeArgs({ HOME: '/Users/airlock' });
   assert.deepEqual(args, [

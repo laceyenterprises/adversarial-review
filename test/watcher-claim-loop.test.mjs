@@ -3168,7 +3168,9 @@ test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers 
         export function createReviewerRuntimeAdapterForDomain() {
           return { spawnReviewer: async (payload) => {
             globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
-            payload.onReviewerPgid({ pgid: 123456, spawnedAt: '2026-10-01T00:00:00.000Z' });
+            for (let update = 0; update < 3; update += 1) {
+              payload.onReviewerPgid({ pgid: 123456, spawnedAt: '2026-10-01T00:00:00.000Z' });
+            }
             await new Promise(resolve => globalThis.__reviewdelayReturns.push(resolve));
             return { ok: false, failureClass: 'fixture-failure', stderr: '' };
           }, cancel: async () => {}, reattach: async () => ({}) };
@@ -3177,7 +3179,25 @@ test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers 
         export function loadDomainConfig() { return {}; }
         export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
       `,
-    }));
+    }).replace('export async function resolve', `
+      stubs.set(${JSON.stringify(fileUrl('src', 'watcher-reviewer-pool.mjs'))}, 'fixture:health-pool');
+      export async function resolve
+    `).replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === 'fixture:health-pool') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+          export * from ${JSON.stringify(fileUrl('src', 'watcher-reviewer-pool.mjs') + '?actual')};
+          import { createDetachedReviewerDispatchTracker as create } from ${JSON.stringify(fileUrl('src', 'watcher-reviewer-pool.mjs') + '?actual')};
+          export function createDetachedReviewerDispatchTracker(options) {
+            const tracker = create(options);
+            const list = tracker.liveSpawnEntries;
+            tracker.liveSpawnEntries = () => {
+              globalThis.__reviewdelayHealthScans = (globalThis.__reviewdelayHealthScans || 0) + 1;
+              return list();
+            };
+            return tracker;
+          }
+        `)} };
+    `));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({
       healthProbeSetup: `
@@ -3204,12 +3224,14 @@ test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers 
       `,
       afterFirstPoll: `
         assert.ok(globalThis.__reviewdelayReturns.length > 0);
-        assert.equal(globalThis.__reviewdelayStarts.length, globalThis.__reviewdelayReturns.length);
+        assert.equal(globalThis.__reviewdelayStarts.length, 3 * globalThis.__reviewdelayReturns.length);
         assert.ok(globalThis.__reviewdelayStarts.every(start => start.at === '2026-10-01T00:00:00.000Z'));
         assert.deepEqual(globalThis.__reviewdelayEvents, []);
         assert.equal(globalThis.__reviewdelayTicks[0].openPendingPRs, 0);
         assert.equal(globalThis.__reviewdelayTicks[0].openPendingRereviewPRs, 0);
         assert.deepEqual(globalThis.__reviewdelayTicks[0].samplePRs, []);
+        assert.equal(globalThis.__reviewdelayTicks[0].spawnCount, globalThis.__reviewdelayReturns.length);
+        assert.equal(globalThis.__reviewdelayHealthScans || 0, 0, 'started PRs need no extra persisted-record scan');
         const starts = globalThis.__reviewdelayStarts.length;
         for (const resolve of globalThis.__reviewdelayReturns) resolve();
         await new Promise(resolve => setImmediate(resolve));

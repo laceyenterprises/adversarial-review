@@ -965,7 +965,9 @@ function createDetachedReviewerDispatchTracker({
         // Capacity accounting already reports persisted-record read failures.
         // Health can still observe this watcher's in-memory spawns.
       }
-      const records = new Map(persisted.map((record) => [record.spawnToken, record]));
+      const records = new Map(persisted
+        .filter((record) => record && typeof record === 'object' && !Array.isArray(record))
+        .map((record) => [record.spawnToken, record]));
       for (const [token, record] of activeReviewerSpawns || []) records.set(token, record);
       const nowMs = now();
       return [...records.values()].filter((record) => {

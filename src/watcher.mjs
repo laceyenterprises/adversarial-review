@@ -1569,7 +1569,10 @@ async function pollOnceWithinBudget(
   } finally {
     try {
       await healthProbe?.finishTick?.(healthTick, {
-        inFlightReviewers: detachedReviewerDispatchTracker.liveSpawnEntries(),
+        // Only waiting PRs need inherited-spawn reconciliation. In particular,
+        // disabled/quiet/early-return ticks need no extra synchronous scan.
+        inFlightReviewers: healthTick?.pendingSet?.size > 0
+          ? detachedReviewerDispatchTracker.liveSpawnEntries() : [],
       });
     } catch (err) {
       console.error('[watcher] health probe finalize failed:', err?.message || err);

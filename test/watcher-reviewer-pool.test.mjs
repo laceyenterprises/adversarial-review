@@ -2024,3 +2024,19 @@ test('REVIEWDELAY-01: health lists live spawns across models without changing po
   assert.deepEqual([...tracker.activeCounts()], countsBefore);
   assert.equal(active.size, 1);
 });
+
+test('health spawn listing ignores malformed array and object entries', () => {
+  const nowMs = Date.parse('2026-10-01T00:00:00.000Z');
+  const live = {
+    spawnToken: 'live', repo: 'sample-org/review-fixture', pr: 1,
+    spawnedAt: new Date(nowMs).toISOString(),
+  };
+  const malformed = [null, undefined, false, 42, 'invalid', [], {}];
+  for (const loaded of [[...malformed, live], { ...malformed, live }]) {
+    const tracker = createDetachedReviewerDispatchTracker({
+      activeReviewerSpawns: new Map(), timeoutMs: 600_000, now: () => nowMs,
+      loadPersistedSpawnRecords: () => loaded, isPersistedSpawnLive: () => true,
+    });
+    assert.deepEqual(tracker.liveSpawnEntries(), [live]);
+  }
+});

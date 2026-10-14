@@ -46,6 +46,7 @@ function createWatcherHealthProbe({
   const state = {
     healthState: 'healthy',
     pollsSinceLastSpawn: 0,
+    silentPollsSinceLastSpawn: 0,
     lastSpawnAt: null,
     noProgressSilentPolls: 0,
     spawnsSinceRecovery: 0,
@@ -62,6 +63,7 @@ function createWatcherHealthProbe({
       inFlightSet: new Set(),
       spawnCount: 0,
       recoveredFromSilentPolls: 0,
+      finished: false,
     };
   }
 
@@ -83,20 +85,44 @@ function createWatcherHealthProbe({
     if (!config.enabled || !tick?.enabled) return;
     if (repo && prNumber) {
       const sample = formatSamplePR(repo, prNumber);
+      // Pipeline stages, fallback runs and heartbeat updates can report the
+      // same logical attempt more than once.
+      if (tick.startedSet.has(sample)) return;
       tick.startedSet.add(sample);
       tick.pendingSet.delete(sample);
     }
     tick.spawnCount += 1;
+    const silentPolls = state.silentPollsSinceLastSpawn;
     tick.recoveredFromSilentPolls = Math.max(
       tick.recoveredFromSilentPolls,
-      state.pollsSinceLastSpawn
+      silentPolls
     );
     state.pollsSinceLastSpawn = 0;
+    state.silentPollsSinceLastSpawn = 0;
     state.lastSpawnAt = at;
+    // Single-wave dispatch can return before preparation launches the process.
+    // A finalized tick will never reach finishTick again to report recovery.
+    if (tick.finished) recordRecovery(1, silentPolls);
   }
 
   function emit(payload) {
     stdout?.write?.(`${JSON.stringify(payload)}\n`);
+  }
+
+  function recordRecovery(spawnCount, silentPolls) {
+    if (state.healthState !== 'no_progress') return null;
+    const payload = {
+      event: 'watcher.recovered',
+      spawnsSinceRecovery: spawnCount,
+      recoveredFromSilentPolls: silentPolls,
+      watcherPid: pid,
+    };
+    emit(payload);
+    state.healthState = 'healthy';
+    state.noProgressSilentPolls = 0;
+    state.spawnsSinceRecovery = 0;
+    // Recovery is telemetry only, never a page or stand-alone alert.
+    return payload;
   }
 
   async function sendTransitionAlert(text, payload) {
@@ -112,7 +138,8 @@ function createWatcherHealthProbe({
   }
 
   async function finishTick(tick, { inFlightReviewers = [] } = {}) {
-    if (!config.enabled || !tick?.enabled) return null;
+    if (!config.enabled || !tick?.enabled || tick.finished) return null;
+    tick.finished = true;
     for (const reviewer of inFlightReviewers) {
       recordInFlight(tick, { repo: reviewer.repo, prNumber: reviewer.pr });
     }
@@ -126,31 +153,16 @@ function createWatcherHealthProbe({
     tick.samplePRs = firstPassPRs.slice(0, sampleLimit);
 
     if (tick.spawnCount > 0) {
-      const wasNoProgress = state.healthState === 'no_progress';
-      if (wasNoProgress) {
-        state.spawnsSinceRecovery += tick.spawnCount;
-        const payload = {
-          event: 'watcher.recovered',
-          spawnsSinceRecovery: state.spawnsSinceRecovery,
-          recoveredFromSilentPolls:
-            tick.recoveredFromSilentPolls || state.noProgressSilentPolls,
-          watcherPid: pid,
-        };
-        emit(payload);
-        state.healthState = 'healthy';
-        state.noProgressSilentPolls = 0;
-        state.spawnsSinceRecovery = 0;
-        // Recovery is recorded in the heartbeat and emitted as telemetry.  It
-        // is deliberately not delivered as a page or a stand-alone alert.
-        return payload;
-      }
+      const recovery = recordRecovery(tick.spawnCount, tick.recoveredFromSilentPolls);
       state.spawnsSinceRecovery = 0;
-      return null;
+      return recovery;
     }
 
-    // A surviving reviewer is progress even when this watcher did not launch
-    // it. Quiet polls also break the consecutive waiting-work streak.
-    if (tick.inFlightSet.size > 0 || tick.openPendingPRs === 0) {
+    state.silentPollsSinceLastSpawn += 1;
+    // In-flight reviewers exclude only their own PR from pendingSet. An
+    // unrelated reviewer must not hide waiting first passes. Quiet polls break
+    // the waiting streak, but preserve the silent-poll recovery metric.
+    if (tick.openPendingPRs === 0) {
       state.pollsSinceLastSpawn = 0;
       return null;
     }

@@ -607,6 +607,39 @@ reproducing it), the operator docs are:
 - [`DEPLOYMENT.md`](DEPLOYMENT.md) — audit of maintainer-local paths still in source
 - [`tools/adversarial-review/DEPS.md`](tools/adversarial-review/DEPS.md) — full dependency contract
 
+### Watcher dispatch health
+
+`src/health-probe.mjs` emits `watcher.no_progress` after three consecutive
+polls with waiting first-pass PRs and no reviewer process start. Set
+`ADVERSARIAL_WATCHER_SILENT_POLL_THRESHOLD` to a positive integer to change
+the threshold, or `ADVERSARIAL_WATCHER_HEALTH_PROBE=0` to disable the probe.
+Re-reviews are excluded from the waiting sample. A live reviewer removes only
+its own PR from that sample, including processes inherited after a watcher
+restart; other waiting PRs still accumulate the no-progress streak. Quiet
+polls break the waiting streak.
+
+The first transition into no progress queues a digest notice through the
+durable alert sink; subsequent stalled polls emit telemetry without another
+notice. A new process start resets the streak and emits `watcher.recovered`
+if an incident was active, even when single-wave dispatch already finalized
+that poll. Recovery is telemetry only. Stage, fallback and repeated PGID
+callbacks count once per PR in a poll. `recoveredFromSilentPolls` counts all
+polls without a new start since the last start, including quiet polls; it is
+separate from the consecutive waiting streak.
+
+This probe measures dispatch liveness. A process that starts and then fails
+still counts as progress, and quiet retry-backoff polls do not trigger it.
+Crashloops and processes that never post a review remain covered by the
+review-freshness pager, with credential-outage gating for classified auth
+failures. Inspect reviewer failure evidence when dispatch health is healthy
+but freshness is stalled.
+
+Inherited-process reconciliation reads persisted spawn records synchronously
+only when the poll observed waiting PRs. Invalid record entries are ignored.
+The scan remains proportional to the number of records; capacity admission
+keeps its own fresh reads rather than sharing a potentially stale health
+snapshot across starts and settlements within a poll.
+
 ### Secret-source contract
 
 If your wrapper exits at startup with

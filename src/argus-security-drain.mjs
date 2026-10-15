@@ -45,7 +45,6 @@ import { getAgyReviewerIdentityPool } from './agy-reviewer-identities.mjs';
 import { acquireArgusGeminiLease } from './argus-reviewer-identity.mjs';
 import { resolveGeminiReviewerModeWithSource } from './role-config.mjs';
 import { resolveConfiguredArgusReviewerModels } from './argus-reviewer-routing.mjs';
-import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { writeArgusDrainStatus } from './argus-security-health.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -192,7 +191,9 @@ export async function runArgusReviewChild({
     });
     const geminiFailure = (outcome.modelAttempts || outcome.result?.reviewer?.attempts || [])
       .find((attempt) => attempt.model === 'gemini');
-    reason = geminiFailure?.failureClass || (outcome.error ? classifyReviewerFailure(outcome.error, null) : '');
+    // A job-level error can belong to another model or precede all model calls.
+    // Only a recorded Gemini failure can penalize the held Gemini identity.
+    reason = geminiFailure?.failureClass || '';
     failed = Boolean(reason && !['quota-exhausted', 'agy-identity-unavailable'].includes(reason));
     return outcome;
   } finally {

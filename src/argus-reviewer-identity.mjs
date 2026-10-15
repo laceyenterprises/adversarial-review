@@ -19,8 +19,8 @@ export async function argusGeminiAvailability({
   return { available, resetAt: available ? null : resets[0] || null };
 }
 
-export async function acquireArgusGeminiLease(options) {
-  const availability = await argusGeminiAvailability(options);
-  const lease = availability.available ? await options.pool.acquire() : null;
+export async function acquireArgusGeminiLease({ pool = getAgyReviewerIdentityPool(), ...options } = {}) {
+  const availability = await argusGeminiAvailability({ pool, ...options });
+  const lease = availability.available ? await pool.acquire() : null;
   return { lease, resetAt: availability.resetAt };
 }

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAgyReviewerIdentityPool } from '../src/agy-reviewer-identities.mjs';
+import { createAgyReviewerIdentityPool, setAgyReviewerIdentityPoolForTests } from '../src/agy-reviewer-identities.mjs';
+import { acquireArgusGeminiLease } from '../src/argus-reviewer-identity.mjs';
 import { startGeminiQuotaCooldown, readGeminiQuotaCooldown } from '../src/gemini-quota-cooldown.mjs';
 import { createDefaultArgusReviewDeps } from '../src/argus-security-review-deps.mjs';
 import { createArgusSecurityDrain, runArgusReviewChild, ARGUS_REVIEW_OUTCOME_PREFIX } from '../src/argus-security-drain.mjs';
@@ -107,6 +108,75 @@ for (const failure of [false, true]) {
     assert.equal(pool.snapshot().some((state) => state.leased), false);
     assert.equal(cleanups.length, 1);
     assert.equal(readReviewerRunRecord(rootDir, held.reviewId).state, failure ? 'failed' : 'completed');
+  }));
+}
+
+for (const { name, outcome, reason = '', failed = false } of [
+  ...['claude', 'codex'].map((model) => ({
+    name: `${model} failure without a Gemini attempt`,
+    outcome: { kind: 'retry', error: `${model}: reviewer execution failed`, modelAttempts: [
+      { model, failureClass: 'reviewer-execution-failed' },
+    ] },
+  })),
+  { name: 'pre-review error', outcome: { kind: 'retry', error: 'live PR read failed' } },
+  { name: 'empty attempts', outcome: { kind: 'retry', error: 'reviewer execution failed', modelAttempts: [] } },
+  ...['quota-exhausted', 'agy-identity-unavailable', 'reviewer-execution-failed'].map((failureClass) => ({
+    name: `Gemini ${failureClass} before a Codex failure`,
+    outcome: { kind: 'retry', error: 'codex: reviewer execution failed', modelAttempts: [
+      { model: 'gemini', failureClass }, { model: 'codex', failureClass: 'reviewer-execution-failed' },
+    ] },
+    reason: failureClass,
+    failed: failureClass === 'reviewer-execution-failed',
+  })),
+  {
+    name: 'Gemini failure before successful fallback',
+    outcome: { kind: 'complete', result: { verdict: 'approve', reviewer: {
+      model: 'codex', attempts: [{ model: 'gemini', failureClass: 'reviewer-execution-failed' }],
+    } } },
+    reason: 'reviewer-execution-failed', failed: true,
+  },
+]) {
+  test(`shared Gemini lease settlement: ${name}`, () => withPool(async ({ rootDir, pool, cleanups }) => {
+    let held;
+    let released;
+    const identityPool = {
+      refreshReadiness: () => pool.refreshReadiness(), plan: () => pool.plan(), readyUsers: () => pool.readyUsers(),
+      acquire: () => pool.acquire(),
+      release: (lease, options) => { released = options; return pool.release(lease, options); },
+    };
+    const result = await runArgusReviewChild({
+      rootDir, jobPath: join(rootDir, 'job.json'), identityPool, env: {}, logger: quiet,
+      geminiEnabled: () => true, nowMs: () => NOW,
+      execFileImpl: (_cmd, args, _options, callback) => {
+        held = JSON.parse(args[args.indexOf('--agy-lease') + 1]);
+        queueMicrotask(() => callback(null, `${ARGUS_REVIEW_OUTCOME_PREFIX}${JSON.stringify(outcome)}\n`, ''));
+        return { pid: 123 };
+      },
+    });
+    assert.deepEqual(result, outcome);
+    assert.deepEqual(released, { failed, reason });
+    const state = pool.snapshot().find((entry) => entry.user === held.user);
+    assert.equal(state.leased, false);
+    assert.equal(state.needsProbe, failed);
+    assert.equal(state.ready, !failed);
+    assert.equal(cleanups.length, 1);
+    assert.equal(readReviewerRunRecord(rootDir, held.reviewId).state, failed ? 'failed' : 'completed');
+  }));
+}
+
+for (const withOptions of [false, true]) {
+  test(`Argus lease acquisition defaults the shared pool ${withOptions ? 'with options' : 'without arguments'}`, () => withPool(async ({ rootDir, pool }) => {
+    setAgyReviewerIdentityPoolForTests(pool);
+    let lease;
+    try {
+      ({ lease } = await (withOptions ? acquireArgusGeminiLease({ rootDir, env: {}, logger: quiet, nowMs: NOW })
+        : acquireArgusGeminiLease()));
+      assert.ok(lease);
+      assert.equal(pool.snapshot().find((state) => state.user === lease.user).leased, true);
+    } finally {
+      if (lease) await pool.release(lease);
+      setAgyReviewerIdentityPoolForTests(null);
+    }
   }));
 }
 

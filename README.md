@@ -270,6 +270,13 @@ pre-ASR-04 terminal behaviour (loudly — every such write logs
 `ARGUS_ROUTE_DISABLED`). `npm run argus:backfill` recovers rows already stranded
 in the old status; open rows also self-heal on the next watcher tick.
 
+The Argus drain reserves a shared Gemini identity before spawning its review
+child when Gemini is enabled. A structured child outcome penalizes that identity
+only for a recorded Gemini failure other than quota exhaustion or identity
+unavailability. Claude/Codex failures and errors before model execution release
+the reservation cleanly; a child that exits without a usable outcome retains
+the conservative failed-lease handling.
+
 A narrow dependency-bot auto-adjudication path handles simple non-major,
 non-native manifest bumps without waiting for a separate Argus worker; `0.x`
 minor bumps are treated as major for this policy and route to verification. It

@@ -40,6 +40,11 @@ import {
   failArgusJob,
   returnArgusJobToPending,
 } from './argus-security-queue.mjs';
+import { writeReviewerRunRecord, settleReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
+import { getAgyReviewerIdentityPool } from './agy-reviewer-identities.mjs';
+import { acquireArgusGeminiLease } from './argus-reviewer-identity.mjs';
+import { resolveGeminiReviewerModeWithSource } from './role-config.mjs';
+import { resolveConfiguredArgusReviewerModels } from './argus-reviewer-routing.mjs';
 import { writeArgusDrainStatus } from './argus-security-health.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -114,34 +119,90 @@ function parseChildOutcome(stdout) {
   throw new Error('argus review child printed no outcome line');
 }
 
+function argusGeminiEnabled(env) {
+  if (!resolveConfiguredArgusReviewerModels(env).includes('gemini')) return false;
+  try {
+    return resolveGeminiReviewerModeWithSource({ env }).mode !== 'off';
+  } catch {
+    // The child resolver already reports this and treats Gemini as off.
+    return false;
+  }
+}
+
 /**
  * Production `runJob`: review the job in a child process. The child reads the
  * claimed record, never writes the queue, and prints one outcome line.
  */
-export function runArgusReviewChild({
+export async function runArgusReviewChild({
   rootDir,
   jobPath,
   execFileImpl = execFile,
   env = process.env,
   timeoutMs = ARGUS_REVIEW_CHILD_TIMEOUT_MS,
+  identityPool = getAgyReviewerIdentityPool(),
+  nowMs = () => Date.now(),
+  geminiEnabled = () => argusGeminiEnabled(env),
+  logger = console,
 } = {}) {
-  return new Promise((resolve, reject) => {
-    execFileImpl(
-      process.execPath,
-      [join(ROOT, 'src', 'argus-security-review-child.mjs'), '--root', rootDir, '--job', jobPath],
-      { env, cwd: ROOT, timeout: timeoutMs, killSignal: 'SIGTERM', maxBuffer: 20 * 1024 * 1024 },
-      (err, stdout, stderr) => {
+  const { lease, resetAt } = geminiEnabled()
+    ? await acquireArgusGeminiLease({ rootDir, env, pool: identityPool, logger, nowMs: nowMs() })
+    : { lease: null, resetAt: null };
+  let failed = true;
+  let reason = 'reviewer threw';
+  try {
+    if (lease && !lease.legacy) writeReviewerRunRecord(rootDir, {
+      sessionUuid: lease.reviewId, state: 'launching', runtime: 'argus-security',
+      subjectContext: { agyIdentityLease: lease },
+    });
+    const outcome = await new Promise((resolve, reject) => {
+      let spawnRecordError = null;
+      const child = execFileImpl(
+        process.execPath,
+        [join(ROOT, 'src', 'argus-security-review-child.mjs'), '--root', rootDir, '--job', jobPath,
+          '--agy-lease', JSON.stringify(lease), '--gemini-reset-at', resetAt || ''],
+        { env, cwd: ROOT, detached: true, timeout: timeoutMs, killSignal: 'SIGTERM', maxBuffer: 20 * 1024 * 1024 },
+        (err, stdout, stderr) => {
+          if (spawnRecordError) { reject(spawnRecordError); return; }
+          try {
+            resolve(parseChildOutcome(stdout));
+          } catch (parseErr) {
+            const detail = String(stderr || '').trim().split('\n').slice(-3).join(' | ');
+            reject(err
+              ? new Error(`argus review child failed: ${err.message}${detail ? ` (${detail})` : ''}`)
+              : new Error(`${parseErr.message}${detail ? ` (${detail})` : ''}`));
+          }
+        },
+      );
+      if (lease && !lease.legacy && Number.isInteger(child?.pid)) {
         try {
-          resolve(parseChildOutcome(stdout));
-        } catch (parseErr) {
-          const detail = String(stderr || '').trim().split('\n').slice(-3).join(' | ');
-          reject(err
-            ? new Error(`argus review child failed: ${err.message}${detail ? ` (${detail})` : ''}`)
-            : new Error(`${parseErr.message}${detail ? ` (${detail})` : ''}`));
+          writeReviewerRunRecord(rootDir, {
+            // Only the identity pool adopts this record after a watcher restart.
+            // Argus children have no normal reviewer-runtime reattach contract.
+            sessionUuid: lease.reviewId, state: 'launching', runtime: 'argus-security', pgid: child.pid,
+            subjectContext: { agyIdentityLease: lease },
+          });
+        } catch (err) {
+          // Keep the lease until the spawned child exits, even when its PID
+          // could not be persisted. execFile's existing timeout still bounds it.
+          spawnRecordError = err;
+          try { child.kill('SIGTERM'); } catch { /* callback/timeout owns settlement */ }
         }
-      },
-    );
-  });
+      }
+    });
+    const geminiFailure = (outcome.modelAttempts || outcome.result?.reviewer?.attempts || [])
+      .find((attempt) => attempt.model === 'gemini');
+    // A job-level error can belong to another model or precede all model calls.
+    // Only a recorded Gemini failure can penalize the held Gemini identity.
+    reason = geminiFailure?.failureClass || '';
+    failed = Boolean(reason && !['quota-exhausted', 'agy-identity-unavailable'].includes(reason));
+    return outcome;
+  } finally {
+    try {
+      if (lease && !lease.legacy) settleReviewerRunRecord(rootDir, lease.reviewId, { state: failed ? 'failed' : 'completed' });
+    } finally {
+      if (lease) await identityPool.release(lease, { failed, reason });
+    }
+  }
 }
 
 function retryBackoffMs(attempt) {
@@ -189,7 +250,9 @@ export function applyArgusReviewOutcome({
   }
 
   if (outcome?.kind === 'defer') {
-    const retryAfterMs = Math.max(60_000, Number(outcome.retryAfterMs) || 10 * 60 * 1000);
+    const resetMs = Date.parse(outcome.resetAt);
+    const retryAfterMs = Number.isFinite(resetMs) && resetMs > nowMs
+      ? resetMs - nowMs : Math.max(60_000, Number(outcome.retryAfterMs) || 10 * 60 * 1000);
     const released = returnArgusJobToPending({
       rootDir,
       jobPath,
@@ -211,13 +274,16 @@ export function applyArgusReviewOutcome({
 
   const error = String(outcome?.error || 'argus review returned no outcome');
   const attempts = (drain.attempts || 0) + 1;
+  const attemptHistory = [...(drain.attemptHistory || []), {
+    attempt: attempts, error, modelAttempts: outcome?.modelAttempts || null,
+  }];
   if (attempts >= maxAttempts) {
     const failed = failArgusJob({
       rootDir,
       jobPath,
       failedAt: nowIso,
       error: `argus review failed after ${attempts} attempt(s): ${error}`,
-      job: { ...job, drain: { ...drain, attempts, lastError: error, cachedReview: null } },
+      job: { ...job, drain: { ...drain, attempts, attemptHistory, lastError: error, cachedReview: null } },
     });
     logger?.error?.(`[argus-drain] ${label} failed after ${attempts} attempt(s): ${error}`);
     return { applied: 'failed', ...failed };
@@ -231,6 +297,7 @@ export function applyArgusReviewOutcome({
       drain: {
         ...drain,
         attempts,
+        attemptHistory,
         lastError: error,
         lastAttemptAt: nowIso,
         notBefore: new Date(nowMs + backoffMs).toISOString(),

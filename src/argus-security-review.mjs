@@ -25,6 +25,7 @@
 // It never touches the queue. It returns an outcome and the drain applies it,
 // which keeps every bucket transition in one place.
 
+import { argusReviewerFailure, argusFailureDefers, argusReviewerDeferral } from './argus-reviewer-failures.mjs';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -377,7 +378,7 @@ function cachedReviewFor(job, nowMs) {
   return cached;
 }
 
-async function runModels({ models, prompt, cwd, diff, runReviewerModel, logger }) {
+async function runModels({ models, prompt, cwd, diff, runReviewerModel, logger, nowMs }) {
   const attempts = [];
   for (const model of models) {
     try {
@@ -386,8 +387,9 @@ async function runModels({ models, prompt, cwd, diff, runReviewerModel, logger }
       const review = parseArgusReviewOutput(output?.text);
       return { review, model, execution: output?.execution || null, attempts };
     } catch (err) {
-      const message = String(err?.message || err).slice(0, 500);
-      attempts.push({ model, error: message });
+      const failure = argusReviewerFailure(err, { nowMs });
+      const message = failure.error;
+      attempts.push({ model, ...failure });
       logger?.warn?.(`[argus-review] ${model} did not produce a review: ${message}`);
     }
   }
@@ -442,11 +444,7 @@ export async function reviewArgusJob({
     }
     const models = await deps.resolveReviewerModels({ job, pr });
     if (!Array.isArray(models) || models.length === 0) {
-      return {
-        kind: ARGUS_REVIEW_OUTCOME.DEFER,
-        reason: 'no-reviewer-model-available',
-        retryAfterMs: 15 * 60 * 1000,
-      };
+      return argusReviewerDeferral({ ...deps.reviewerDeferral?.(), nowMs });
     }
     const prompt = buildArgusReviewPrompt({
       promptTemplate: promptTemplate || loadArgusReviewPromptTemplate(),
@@ -455,11 +453,15 @@ export async function reviewArgusJob({
       diff,
       evidence: evidence.sections,
     });
-    const ran = await runModels({ models, prompt, cwd: workDir, diff, runReviewerModel: deps.runReviewerModel, logger });
+    const ran = await runModels({ models, prompt, cwd: workDir, diff, runReviewerModel: deps.runReviewerModel, logger, nowMs });
     if (!ran.review) {
+      if (ran.attempts.every(argusFailureDefers)) {
+        return argusReviewerDeferral({ failures: ran.attempts, ...deps.reviewerDeferral?.(), nowMs });
+      }
       return {
         kind: ARGUS_REVIEW_OUTCOME.RETRY,
         error: `no reviewer model produced a review: ${ran.attempts.map((a) => `${a.model}: ${a.error}`).join(' | ')}`,
+        modelAttempts: ran.attempts,
       };
     }
     cached = {

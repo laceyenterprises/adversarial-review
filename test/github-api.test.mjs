@@ -1,3 +1,5 @@
+// Must stay the first import: it isolates this file's state before any production module loads.
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -6,7 +8,6 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-import './helpers/rate-limit-state-isolation.mjs';
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const FIXTURE_REPO = 'laceyenterprises/adversarial-review';

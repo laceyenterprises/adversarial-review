@@ -1,3 +1,5 @@
+// Must stay the first import: it isolates this file's state before any production module loads.
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -15,7 +17,6 @@ import {
   postRemediationOutcomeComment,
   resolveCommentBotTokenEnv,
 } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
-import './helpers/rate-limit-state-isolation.mjs';
 
 process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = '0';
 

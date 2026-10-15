@@ -37,7 +37,6 @@ import { resolveHqRoot } from './hq-root.mjs';
 // verdict with no resolvable `commit_id` is retained too (fail closed).
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join } from 'node:path';
 
 import { readAmaAuditEntry } from './ama/audit.mjs';
 import { headHasValidatedHamTerminalRemediation } from './daemon-clean-merge.mjs';

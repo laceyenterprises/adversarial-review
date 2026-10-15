@@ -100,6 +100,10 @@ try {
   sandboxRoot = realpathSync(mkdtempSync(path.join(tempBase, 'art-')));
   const sandboxTmpDir = path.join(sandboxRoot, 'tmp');
   mkdirSync(sandboxTmpDir);
+  const coordinatorHqRoot = path.join(sandboxTmpDir, 'coordinator-hq');
+  const coordinatorHome = path.join(sandboxTmpDir, 'coordinator-home');
+  mkdirSync(coordinatorHqRoot);
+  mkdirSync(coordinatorHome);
   // Include this run's random sandbox name so concurrent suites cannot trip the guard.
   const fixtureProbePrefix = `adversarial-review-tmp-probe-${path.basename(sandboxRoot)}-`;
   const testPaths = testFiles().map((file, index) => {
@@ -110,8 +114,18 @@ try {
   const fixtureBin = path.join(sandboxRoot, 'fixture-bin');
   mkdirSync(fixtureBin);
   writeFileSync(path.join(fixtureBin, 'gh'), '#!/bin/sh\necho "offline fixture: inject a GitHub executor or fake gh" >&2\nexit 78\n', { mode: 0o755 });
+  // Home-derived defaults must not be bypassed by inherited auth/session or
+  // config paths. A test that needs one sets its own synthetic override.
+  const inheritedStatePaths = new Set([
+    'CODEX_HOME', 'CODEX_SOURCE_HOME', 'CODEX_AUTH_PATH', 'GEMINI_HOME',
+    'GEMINI_OAUTH_CREDS_PATH', 'CLAUDE_CONFIG_DIR',
+    'CODEX_SESSION_ROOTS', 'CODEX_SESSION_ROOT',
+    'CLAUDE_SESSION_ROOTS', 'CLAUDE_SESSION_ROOT', 'CLAUDE_PROJECTS_ROOT',
+    'AGENT_OS_CONFIG_PATH', 'ADVERSARIAL_REVIEW_WORKSPACE_STATE_DIR',
+    'AGENT_OS_REVIEWER_QUOTA_STATUS_DIR', 'ADVERSARIAL_REVIEW_QUOTA_STATUS_DIR',
+  ]);
   const testEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)$/.test(key)));
+    !inheritedStatePaths.has(key) && !/^(?:GH_.*TOKEN|GITHUB_.*TOKEN|.*_GH_TOKEN)$/.test(key)));
   child = spawn(process.execPath, [
     '--preserve-symlinks',
     '--preserve-symlinks-main',
@@ -128,6 +142,12 @@ try {
     cwd: sandboxRoot,
     env: {
       ...testEnv,
+      // The preload replaces these again in each test-file process. Even the
+      // node:test coordinator must never inherit the caller's live roots.
+      HQ_ROOT: coordinatorHqRoot,
+      AGENT_OS_HQ_ROOT: coordinatorHqRoot,
+      HOME: coordinatorHome,
+      USERPROFILE: coordinatorHome,
       GH_CONFIG_DIR: path.join(sandboxRoot, 'gh-config'),
       ADVERSARIAL_REVIEW_TEST_SANDBOX_ROOT: sandboxRoot,
       ADVERSARIAL_REVIEW_TEST_TMP_PROBE_PREFIX: fixtureProbePrefix,

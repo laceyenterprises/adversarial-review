@@ -19,13 +19,17 @@ export function createIdentityBaselineFixture(t) {
     'identity fixture wrote outside its temporary root into fake live workspaces',
   );
   const env = {
-    HQ_ROOT: join(rootDir, 'hq'),
+    HQ_ROOT: fakeLiveRoot,
     ADVERSARIAL_REVIEW_STATE_DIR: join(rootDir, 'data'),
-    ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT: workspaceRootDir,
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(rootDir, 'data', 'rate-limit-state.json'),
   };
-  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  const previous = Object.fromEntries([
+    ...Object.keys(env), 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT',
+  ].map(key => [key, process.env[key]]));
   Object.assign(process.env, env);
+  // Workspace tests pass an explicit caller root. An unintended fallback must
+  // reach the monitored HQ root, even when the host exports a workspace override.
+  delete process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT;
   t.after(() => {
     try {
       assertNoLiveWrites();

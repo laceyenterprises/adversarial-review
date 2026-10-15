@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, symlinkSync, readdirSync, lstatSync, readFileSync } from 'node:fs';
@@ -8,9 +8,6 @@ import { preserveUnsafeWorkspaceMetadata } from '../src/workspace-identity.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket } from '../src/ama/ham-provenance.mjs';
 import { prepareWorkspaceForJob } from '../src/follow-up-remediation.mjs';
 import { isTerminalCloserCommitIdentity, getHeadCloserCommitSuppression, normalizeVerifiedCloserCommit } from '../src/head-closer-commit-suppression.mjs';
-
-const fixtures = new WeakMap();
-beforeEach(t => fixtures.set(t, createIdentityBaselineFixture(t)));
 
 test('IDENTBASE-01: foreign closer committer never suppresses a worker author', () => {
   for (const message of ['worker fix', 'worker fix\n\nWorker-Ticket: HAM-123']) {
@@ -172,7 +169,7 @@ test('merge-agent finalize commits with production PR tickets remain reviewable'
 // This deliberately injects unsupported metadata to exercise the defensive guard;
 // production cloneRemediationWorkspace always creates a standalone clone.
 test('IDENTBASE-01: linked worktree is refused before shared config or hooks are written', async (t) => {
-  const { rootDir: root, workspaceRootDir, env } = fixtures.get(t);
+  const { rootDir: root, workspaceRootDir, env } = createIdentityBaselineFixture(t);
   const base = join(root, 'base');
   const sibling = join(root, 'sibling');
   const git = (...args) => execFileSync('git', args, {
@@ -226,7 +223,7 @@ test('HAM worker tickets use the documented exact forms', () => {
 });
 
 test('IDENTBASE-01: production standalone clone receives worktree-scoped remediation identity', async (t) => {
-  const { rootDir: root, workspaceRootDir, env } = fixtures.get(t);
+  const { rootDir: root, workspaceRootDir, env } = createIdentityBaselineFixture(t);
   const base = join(root, 'base');
   const git = (...args) => execFileSync('git', args, {
     encoding: 'utf8', env: { ...process.env,
@@ -277,7 +274,7 @@ test('every reversal-authorizing split commit is instructed to carry verifier pr
 });
 
 test('workspace symlink is preserved without Git touching its target, even when broken', async (t) => {
-  const { rootDir: root } = fixtures.get(t);
+  const { rootDir: root } = createIdentityBaselineFixture(t);
   for (const broken of [false, true]) {
     const target = join(root, broken ? 'absent' : 'target');
     if (!broken) mkdirSync(target);
@@ -294,7 +291,7 @@ test('workspace symlink is preserved without Git touching its target, even when 
 });
 
 test('unknown remote with leftover registrations is preserved for daemon recovery', async (t) => {
-  const { rootDir: root } = fixtures.get(t);
+  const { rootDir: root } = createIdentityBaselineFixture(t);
   const workspaceDir = join(root, 'job');
   mkdirSync(join(workspaceDir, '.git', 'worktrees'), { recursive: true });
   assert.equal(await preserveUnsafeWorkspaceMetadata({ workspaceDir, workspaceRootDir: root,

@@ -583,7 +583,7 @@ test('spawnReviewer leaves repairable attribution after bounded transient ledger
   console.warn = (message) => warnings.push(String(message));
   try {
     await spawnReviewer({
-    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 26,
@@ -682,7 +682,7 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
     });
 
     await spawnReviewer({
-    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir,
       repo: 'laceyenterprises/demo',
       prNumber: 121,
@@ -803,6 +803,7 @@ test('spawnReviewer preserves worker run_id when the adapter throws (error-path 
   // surfaced on err.tokenUsage must survive onto the settled pass.
   await assert.rejects(
     spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 23,

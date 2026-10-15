@@ -15,7 +15,7 @@ function watcherSource() {
 
 // ARC-18: runQueuedReviewAdoptionPhase and its internal drain/maintenance
 // ordering moved to src/posted-review-row.mjs. The reviewer/posted-review queue
-// initialization still lives in pollOnce (watcher.mjs), so the two halves of
+// initialization lives in watcher.mjs, so the two halves of
 // this structural check now read from two different source files.
 function postedReviewRowSource() {
   return readFileSync(path.join(ROOT, 'src', 'posted-review-row.mjs'), 'utf8');
@@ -23,7 +23,7 @@ function postedReviewRowSource() {
 
 // ARC-18: the per-PR loop body — which enqueues posted-review handoffs — moved
 // out of pollOnce into processReviewSubject (src/pollonce-phases.mjs). The queue
-// is still initialized in pollOnce (watcher.mjs) and threaded into that phase.
+// now survives polls (watcher.mjs) and is threaded into that phase.
 function pollOncePhasesSource() {
   return readFileSync(path.join(ROOT, 'src', 'pollonce-phases.mjs'), 'utf8');
 }
@@ -33,7 +33,7 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   const phase = postedReviewRowSource();
   const pollPhases = pollOncePhasesSource();
 
-  // Queue initialization is part of pollOnce and stays in watcher.mjs.
+  // Candidate ownership survives polls; posted handlers are still per poll.
   const candidateQueue = watcher.indexOf('const reviewerDispatchCandidates = [];');
   const detachedTrackerImport = watcher.indexOf('createDetachedReviewerDispatchTracker,');
   const detachedTracker = watcher.indexOf('const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker');
@@ -91,8 +91,10 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.notEqual(maintenanceLoop, -1, 'post-review maintenance handlers still run');
 
   assert.ok(candidateQueue < postedQueue, 'queues are initialized near the reviewer scheduler');
-  assert.ok(detachedTracker < candidateQueue, 'detached launch tracker is initialized before queue drains');
-  assert.ok(candidateQueue < discoveryDrainHelper, 'bounded drain helper is scoped to the tick candidate queue');
+  assert.ok(candidateQueue < detachedTracker, 'process-wide queue exists before tracker settlement can request admission');
+  const earlyDrain = watcher.indexOf("await drainReviewerDispatchCandidates('poll-start retained candidates');");
+  assert.ok(earlyDrain > candidateQueue && earlyDrain < orgRefresh, 'retained work drains before the slow poll phases');
+  assert.ok(candidateQueue < discoveryDrainHelper, 'bounded drain helper sees the shared candidate queue');
   assert.ok(subjectFifoSort < perPrPhaseCall, 'subjects are wake-aware FIFO sorted before processReviewSubject can enqueue candidates');
   assert.ok(postedQueue < perPrPhaseCall, 'posted handler queue is initialized before the per-PR phase that enqueues into it');
   assert.ok(orgRefresh < frontLifecycleCleanup, 'lifecycle cleanup runs after repo refresh gives the tick its operator surface');

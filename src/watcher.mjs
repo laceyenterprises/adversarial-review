@@ -107,6 +107,7 @@ import {
   createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
 } from './watcher-wake.mjs';
+import { createReviewerAdmissionQueue } from './watcher-reviewer-admission.mjs';
 import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
@@ -1036,7 +1037,21 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 // pool race that the CAS alone cannot (both workers read `pending`, both fetch,
 // both claim in sequence).
 const reviewerHeadDispatchLease = createHeadDispatchLease();
-const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: () => Math.max(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000, resolveGeminiReviewerProcessTimeoutMs()), isProcessAlive, ...persistedSpawnReservationSource({ stateDir: ADVERSARIAL_REVIEW_STATE_DIR, runStateRootDir: ROOT }), logger: console });
+// Discovery and settlement share candidates and memory reservations across polls.
+const reviewerDispatchCandidates = [];
+const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates });
+const reviewerMemoryReservationState = { reservedMb: 0 };
+const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
+  onCapacityFreed: reviewerAdmission.capacityFreed,
+  activeReviewerSpawns,
+  timeoutMs: () => Math.max(
+    resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000,
+    resolveGeminiReviewerProcessTimeoutMs(),
+  ),
+  isProcessAlive,
+  ...persistedSpawnReservationSource({ stateDir: ADVERSARIAL_REVIEW_STATE_DIR, runStateRootDir: ROOT }),
+  logger: console,
+});
 // ── Operator surface ─────────────────────────────────────────────────────────
 function createWatcherOperatorSurface() {
   return createCompositeOperatorSurface({
@@ -1166,7 +1181,99 @@ async function pollOnceWithinBudget(
   await refreshWatcherAuthenticationForTick({ log: console });
   const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
+  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
+  const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
+    0,
+    Number.parseInt(
+      String(process.env.ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS || ''),
+      10,
+    ) || 0,
+  ) || undefined;
+  const admissionSettlementSplitEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
+  console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
+  const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
+  const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });
+  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
+  const postedReviewHandlers = [];
+  const mergeAgentCandidateBranchProtectionCache = new Map();
+  const postReviewMaintenanceHandlers = [], reviewerTickCaches = { fleetQuotaStatus: new Map() };
+  const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
+    logger: console,
+    memoryPressureConfig: reviewerMemoryPressureConfig,
+  });
+  const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
+  const getHcpHealthzForTick = createTickHcpHealthzProbe();
+  const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
+  const drainReviewerDispatchCandidates = reviewerAdmission.drain;
+  reviewerAdmission.setDrain(async (reason) => {
+    if (readWatcherDrainState().active || !reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
+      return { dispatched: 0, maxObservedConcurrency: 0 };
+    }
+    const candidates = reviewerDispatchCandidates.splice(0, reviewerDispatchCandidates.length);
+    const startedCandidates = new Set();
+    const startedAt = process.hrtime.bigint();
+    console.log(
+      `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
+    );
+    try {
+      // Unknown broker capacity uses the pool's conservative single-Gemini cap.
+      const geminiCredentialConcurrency =
+        await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
+      const orderedCandidates = await prepareQueueDepthSpillover(candidates, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
+      const drainResult = await runBoundedReviewerDispatchQueue(orderedCandidates, {
+        maxConcurrent: reviewerPoolConfig.maxConcurrent,
+        geminiCredentialConcurrency,
+        activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
+        usePersistentReviewerLaneState: true,
+        singleWave: true,
+        singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
+        splitPostReviewSettlement: admissionSettlementSplitEnabled,
+        onCandidateStarted: (started) => {
+          startedCandidates.add(started.candidate);
+          detachedReviewerDispatchTracker.track(started);
+        },
+        logger: console,
+      });
+      if (drainResult.deferred > 0) {
+        const deferredCandidates = Array.isArray(drainResult.deferredCandidates)
+          ? drainResult.deferredCandidates
+          : [];
+        reviewerDispatchCandidates.unshift(...deferredCandidates);
+        console.log(
+          `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
+          `dispatched=${drainResult.dispatched} deferred=${drainResult.deferred} ` +
+          `max_observed_concurrency=${drainResult.maxObservedConcurrency}` +
+          (drainResult.deferredReasonSummary ? ` deferred_reasons=${drainResult.deferredReasonSummary}` : '')
+        );
+      }
+      return { ...drainResult, admissions: [...startedCandidates].map(candidate => candidate.admissionOutcome) };
+    } catch (error) {
+      reviewerDispatchCandidates.unshift(...candidates.filter(candidate => !startedCandidates.has(candidate)));
+      throw error;
+    } finally {
+      // Also settle reservations when the drain throws before returning its
+      // deferred list. Started candidates own their spawn/refusal settlement.
+      for (const candidate of candidates) {
+        if (!startedCandidates.has(candidate)) {
+          candidate.retainWakeForCapacity?.();
+          candidate.refundDepthSpill?.();
+        }
+      }
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
+        console.warn(
+          `[watcher] reviewer dispatch drain exceeded SLA: ` +
+          `elapsed_ms=${Math.round(elapsedMs)} candidates=${candidates.length} reason="${reason}"`
+        );
+      }
+    }
+  });
+  const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({
+    priorityDiscoveryPending, reviewerDispatchCandidates, batchSize: Math.max(1, reviewerPoolConfig.maxConcurrent || 1),
+    countOpenPrsAwaitingFirstPassReview, drain: drainReviewerDispatchCandidates,
+  });
   try {
+    await drainReviewerDispatchCandidates('poll-start retained candidates');
     if (await runLowBudgetWatcherPoll({ db, activeRepos, rootDir: ROOT,
       domainId: WATCHER_PRIMARY_DOMAIN_ID, execFileImpl: execFileAsync,
       handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus,
@@ -1248,94 +1355,6 @@ async function pollOnceWithinBudget(
   // ARGUSDRAIN-01: start Argus security reviews in the background (never awaited).
   startArgusSecurityDrainForWatcherTick({ rootDir: ROOT, watcherDrainActive: watcherDrain.active, logger: console });
 
-  const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
-  const reviewerDispatchSingleWaveSettleGraceMs = Math.max(
-    0,
-    Number.parseInt(
-      String(process.env.ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS || ''),
-      10,
-    ) || 0,
-  ) || undefined;
-  const admissionSettlementSplitEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
-  console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
-  const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
-  const reviewerDispatchCandidates = [];
-  const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });
-  const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
-  const postedReviewHandlers = [];
-  const mergeAgentCandidateBranchProtectionCache = new Map();
-  const postReviewMaintenanceHandlers = [], reviewerMemoryReservationState = { reservedMb: 0 }, reviewerTickCaches = { fleetQuotaStatus: new Map() };
-  const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
-    logger: console,
-    memoryPressureConfig: reviewerMemoryPressureConfig,
-  });
-  const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
-  const getHcpHealthzForTick = createTickHcpHealthzProbe();
-  const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
-  async function drainReviewerDispatchCandidates(reason) {
-    if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
-      return { dispatched: 0, maxObservedConcurrency: 0 };
-    }
-    const candidates = reviewerDispatchCandidates.splice(0, reviewerDispatchCandidates.length);
-    const startedCandidates = new Set();
-    const startedAt = process.hrtime.bigint();
-    console.log(
-      `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
-    );
-    try {
-      // Unknown broker capacity uses the pool's conservative single-Gemini cap.
-      const geminiCredentialConcurrency =
-        await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
-      const orderedCandidates = await prepareQueueDepthSpillover(candidates, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
-      const drainResult = await runBoundedReviewerDispatchQueue(orderedCandidates, {
-        maxConcurrent: reviewerPoolConfig.maxConcurrent,
-        geminiCredentialConcurrency,
-        activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
-        usePersistentReviewerLaneState: true,
-        singleWave: true,
-        singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
-        splitPostReviewSettlement: admissionSettlementSplitEnabled,
-        onCandidateStarted: (started) => {
-          startedCandidates.add(started.candidate);
-          detachedReviewerDispatchTracker.track(started);
-        },
-        logger: console,
-      });
-      if (drainResult.deferred > 0) {
-        const deferredCandidates = Array.isArray(drainResult.deferredCandidates)
-          ? drainResult.deferredCandidates
-          : [];
-        reviewerDispatchCandidates.unshift(...deferredCandidates);
-        console.log(
-          `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
-          `dispatched=${drainResult.dispatched} deferred=${drainResult.deferred} ` +
-          `max_observed_concurrency=${drainResult.maxObservedConcurrency}` +
-          (drainResult.deferredReasonSummary ? ` deferred_reasons=${drainResult.deferredReasonSummary}` : '')
-        );
-      }
-      return drainResult;
-    } finally {
-      // Also settle reservations when the drain throws before returning its
-      // deferred list. Started candidates own their spawn/refusal settlement.
-      for (const candidate of candidates) {
-        if (!startedCandidates.has(candidate)) {
-          candidate.retainWakeForCapacity?.();
-          candidate.refundDepthSpill?.();
-        }
-      }
-      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
-      if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
-        console.warn(
-          `[watcher] reviewer dispatch drain exceeded SLA: ` +
-          `elapsed_ms=${Math.round(elapsedMs)} candidates=${candidates.length} reason="${reason}"`
-        );
-      }
-    }
-  }
-  const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({
-    priorityDiscoveryPending, reviewerDispatchCandidates, batchSize: Math.max(1, reviewerPoolConfig.maxConcurrent || 1),
-    countOpenPrsAwaitingFirstPassReview, drain: drainReviewerDispatchCandidates,
-  });
   // ARC-03: pump every enabled domain through its own adapter set instead of
   // assuming a single hardcoded `code-pr` domain. Each enabled domain resolves
   // its own reviewer-runtime adapter (isolated from other domains); the primary
@@ -1449,6 +1468,9 @@ async function pollOnceWithinBudget(
         reviewerPoolConfig,
         reviewerMemoryPressureConfig,
         reviewerDispatchCandidates,
+        enqueueReviewerDispatchCandidate: reviewerAdmission.enqueue,
+        onReviewerCapacityFreed: reviewerAdmission.capacityFreed,
+        readWatcherDrainState,
         firstPassSpilloverController,
         reviewerBurstController, postedReviewHandlers,
         mergeAgentCandidateBranchProtectionCache,

@@ -736,6 +736,9 @@ export async function processReviewSubject(entry, ctx) {
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
     requestWatcherWakeImpl = requestWatcherWake,
+    enqueueReviewerDispatchCandidate = candidate => reviewerDispatchCandidates.push(candidate),
+    onReviewerCapacityFreed = null,
+    readWatcherDrainState = () => watcherDrain,
     wakePayload = null,
     retainedWatcherWakes = null,
     admissionSettlementSplitEnabled = false,
@@ -3124,6 +3127,11 @@ export async function processReviewSubject(entry, ctx) {
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         async run() {
+          if (readWatcherDrainState().active) {
+            this.retainWakeForCapacity();
+            this.refundDepthSpill();
+            return { dispatched: false, reason: 'watcher-drain-active' };
+          }
           if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
             this.retainWakeForCapacity();
             return { dispatched: false, reason: 'quota-blocked' };
@@ -3488,6 +3496,12 @@ export async function processReviewSubject(entry, ctx) {
                 releaseUnexecutedHoldReviewClaim();
                 reviewerHeadDispatchLease.release(dispatchLeaseKey);
                 return { dispatched: false, reason: 'hold-release-read-deferred' };
+              }
+              if (reviewerPoolConfig.enabled) {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                this.retainWakeForCapacity();
+                console.warn(`[watcher] queued reviewer freshness read deferred for ${repoPath}#${prNumber}: ${err?.message || err}`);
+                return { dispatched: false, reason: 'freshness-read-deferred' };
               }
               // Non-fatal — proceed with spawn rather than block. A failed
               // freshness check is no worse than not having one at all.
@@ -3927,6 +3941,7 @@ export async function processReviewSubject(entry, ctx) {
                   + `wait_threshold_exceeded=${waitThresholdExceeded}`);
               }
               reviewerSpawned = true;
+              dispatchCandidate.markAdmissionStarted?.();
               if (depthSpillReserved) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
                 depthSpillReserved = false;
@@ -4026,8 +4041,9 @@ export async function processReviewSubject(entry, ctx) {
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
             if (reviewerPoolConfig.enabled && reviewerSpawned) {
-              // The slot is free after settlement or a failed spawn. Fill it
-              // without waiting for the next five-minute scheduled poll.
+              onReviewerCapacityFreed?.();
+              // Direct admission handles queued work. Keep the durable poll
+              // wake as discovery backstop for an empty or invalidated queue.
               try {
                 requestWatcherWakeImpl({ rootDir: ROOT, reason: 'reviewer-capacity-freed' });
               } catch (wakeError) {
@@ -4042,7 +4058,7 @@ export async function processReviewSubject(entry, ctx) {
         firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
       }
       if (reviewerPoolConfig.enabled) {
-        reviewerDispatchCandidates.push(dispatchCandidate);
+        enqueueReviewerDispatchCandidate(dispatchCandidate);
       } else {
         await dispatchCandidate.run();
       }

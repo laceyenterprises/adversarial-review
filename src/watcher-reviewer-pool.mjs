@@ -892,6 +892,7 @@ function summarizeDeferredReviewerReasons(deferredReasons = []) {
 
 function createDetachedReviewerDispatchTracker({
   activeReviewerSpawns,
+  onCapacityFreed = null,
   timeoutMs = resolveReviewerTimeoutMs(),
   graceMs = DEFAULT_DETACHED_REVIEWER_DISPATCH_GRACE_MS,
   now = () => Date.now(),
@@ -1085,6 +1086,7 @@ function createDetachedReviewerDispatchTracker({
       Promise.resolve(promise)
         .finally(() => {
           detachedReviewerDispatches.delete(token);
+          onCapacityFreed?.();
         })
         .catch(() => {});
     },

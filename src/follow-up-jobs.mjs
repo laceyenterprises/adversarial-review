@@ -2572,6 +2572,7 @@ function claimNextFollowUpJob({
       let stopped = null;
       try {
         stopped = markStoppedImpl({
+          commentDeliveryExemption: 'no-remediation-started',
           rootDir,
           jobPath: inProgressPath,
           stoppedAt: claimedAt,
@@ -2614,6 +2615,7 @@ function claimNextFollowUpJob({
       let stopped = null;
       try {
         stopped = markStoppedImpl({
+          commentDeliveryExemption: 'no-remediation-started',
           rootDir,
           jobPath: inProgressPath,
           stoppedAt: claimedAt,
@@ -2733,6 +2735,7 @@ function stopPendingNoRemediationJobs({
 
     try {
       const stopped = markStoppedImpl({
+        commentDeliveryExemption: 'no-remediation-started',
         rootDir,
         jobPath: inProgressPath,
         stoppedAt,
@@ -3059,6 +3062,7 @@ function markFollowUpJobFailed({
   // terminal move and the post-move pre-stamp in
   // `recordInitialCommentDelivery`. Reviewer R5 blocking #1 fix.
   commentDelivery = null,
+  commentDeliveryExemption = null,
   jobUpdates = null,
 }) {
   return moveTerminalJobRecord({
@@ -3102,6 +3106,10 @@ function markFollowUpJobFailed({
 
       if (commentDelivery) {
         nextJob.commentDelivery = commentDelivery;
+        delete nextJob.commentDeliveryExemption;
+      }
+      if (!nextJob.commentDelivery && commentDeliveryExemption) {
+        nextJob.commentDeliveryExemption = commentDeliveryExemption;
       }
 
       if (jobUpdates && typeof jobUpdates === 'object') {
@@ -3176,6 +3184,7 @@ function markFollowUpJobCompleted({
 
       if (commentDelivery) {
         nextJob.commentDelivery = commentDelivery;
+        delete nextJob.commentDeliveryExemption;
       }
       if (jobUpdates && typeof jobUpdates === 'object') {
         nextJob = {
@@ -3209,6 +3218,7 @@ function computeFollowUpJobStoppedState({
   completion,
   failure,
   commentDelivery = null,
+  commentDeliveryExemption = null,
   passFailureClass = null,
   stopMetadata = null,
   jobUpdates = null,
@@ -3259,6 +3269,10 @@ function computeFollowUpJobStoppedState({
 
   if (commentDelivery) {
     nextJob.commentDelivery = commentDelivery;
+    delete nextJob.commentDeliveryExemption;
+  }
+  if (!nextJob.commentDelivery && commentDeliveryExemption) {
+    nextJob.commentDeliveryExemption = commentDeliveryExemption;
   }
   if (jobUpdates && typeof jobUpdates === 'object') {
     nextJob = {
@@ -3287,6 +3301,7 @@ function markFollowUpJobStopped({
   completion,
   failure,
   commentDelivery = null,
+  commentDeliveryExemption = null,
   passFailureClass = null,
   stopMetadata = null,
   jobUpdates = null,
@@ -3310,6 +3325,7 @@ function markFollowUpJobStopped({
         completion,
         failure,
         commentDelivery,
+        commentDeliveryExemption,
         passFailureClass,
         stopMetadata,
         jobUpdates,
@@ -3373,6 +3389,7 @@ function requeueFollowUpJobForNextRound({
 
   if (currentRound >= maxRounds) {
     return markFollowUpJobStopped({
+      commentDeliveryExemption: 'round-requeue-refused',
       rootDir,
       jobPath,
       stoppedAt: requestedAt,
@@ -3389,6 +3406,7 @@ function requeueFollowUpJobForNextRound({
 
   if (completedWithoutProgress) {
     return markFollowUpJobStopped({
+      commentDeliveryExemption: 'round-requeue-refused',
       rootDir,
       jobPath,
       stoppedAt: requestedAt,
@@ -3474,6 +3492,7 @@ function stopFollowUpJob({
   }
 
   return markFollowUpJobStopped({
+    commentDeliveryExemption: 'operator-stop',
     rootDir,
     jobPath,
     stoppedAt: requestedAt,

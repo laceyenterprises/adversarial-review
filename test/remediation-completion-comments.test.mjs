@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'acorn';
+import { markFollowUpJobCompleted, markFollowUpJobFailed, markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
 import { completeWorkerPublishedHead } from '../src/remediation-published-head.mjs';
 import {
   buildReconcileCommentDelivery,
@@ -50,6 +53,65 @@ function fixture(t, { reply = true } = {}) {
     requestWatcherWakeImpl: () => ({ requested: true }),
   };
 }
+
+// These are administrative transitions, rather than reconciled worker replies.
+// Keep the exemption names and reasons in the PR's completion-path audit too.
+const exemptions = {
+  'no-remediation-started': 'Settled review or exhausted budget; no worker started for this job.',
+  'interrupted-without-reconciled-reply': 'Lifecycle, stale claim, or pre-spawn stop interrupted reply reconciliation.',
+  'worker-start-failed': 'Worker preparation or startup failed before reply reconciliation.',
+  'round-requeue-refused': 'An additional round was refused; an existing delivery is retained.',
+  'operator-stop': 'An explicit operator stop does not reconcile a worker reply; an existing delivery is retained.',
+};
+
+function terminalCallSites() {
+  const sourceRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+  const calls = [];
+  const writers = new Set(['markFollowUpJobCompleted', 'markFollowUpJobFailed', 'markFollowUpJobStopped', 'markStoppedImpl']);
+  function visit(node, file) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'CallExpression' && writers.has(node.callee.name)) {
+      calls.push({ file: relative(sourceRoot, file), line: node.loc.start.line,
+        writer: node.callee.name, properties: node.arguments[0]?.properties || [] });
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(child => visit(child, file));
+      else if (value && typeof value === 'object') visit(value, file);
+    }
+  }
+  for (const name of readdirSync(sourceRoot, { recursive: true })) {
+    if (!name.endsWith('.mjs')) continue;
+    const file = join(sourceRoot, name);
+    const source = readFileSync(file, 'utf8');
+    if (!/markFollowUpJob(?:Completed|Failed|Stopped)|markStoppedImpl/u.test(source)) continue;
+    visit(parse(source, { ecmaVersion: 'latest', sourceType: 'module', locations: true }), file);
+  }
+  return calls;
+}
+
+test('REMCOMMENT-01: every terminal writer call records delivery or a documented exemption', async t => {
+  const paths = terminalCallSites();
+  assert.ok(paths.length > 30, 'inventory must include ordinary, recovery, admission, and stop paths');
+  for (const row of paths) {
+    await t.test(`${row.file}:${row.line} ${row.writer}`, child => {
+      const deliveryProperty = row.properties.find(p => p.key?.name === 'commentDelivery');
+      const exemption = row.properties.find(p => p.key?.name === 'commentDeliveryExemption')?.value?.value;
+      assert.ok(deliveryProperty || exemptions[exemption], 'terminal call must supply delivery or name its exemption');
+      const f = fixture(child);
+      const commentDelivery = deliveryProperty ? buildReconcileCommentDelivery({
+        job: f.job, worker: f.job.remediationWorker, action: 'completed', reply: f.payload,
+      }).commentDelivery : null;
+      const writer = row.writer === 'markFollowUpJobCompleted' ? markFollowUpJobCompleted
+        : row.writer === 'markFollowUpJobFailed' ? markFollowUpJobFailed : markFollowUpJobStopped;
+      const result = writer({ rootDir: f.rootDir, jobPath: f.jobPath, commentDelivery,
+        commentDeliveryExemption: exemption, error: new Error('Synthetic worker failure.'),
+        stopCode: 'synthetic-stop', stopReason: 'Synthetic administrative stop.' });
+      const record = JSON.parse(readFileSync(result.jobPath, 'utf8'));
+      if (deliveryProperty) assert.deepEqual(record.commentDelivery, commentDelivery);
+      else assert.equal(record.commentDeliveryExemption, exemption);
+    });
+  }
+});
 
 for (const reply of [true, false]) {
   test(`REMCOMMENT-01: published-head completion owes the ordinary body (reply=${reply})`, async t => {

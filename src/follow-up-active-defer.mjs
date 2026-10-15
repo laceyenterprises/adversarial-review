@@ -43,6 +43,7 @@ function stopBudgetExhaustedPendingFollowUpJob({
   }
 
   return markStoppedImpl({
+    commentDeliveryExemption: 'interrupted-without-reconciled-reply',
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,
@@ -111,6 +112,7 @@ function stopTerminalPendingFollowUpJob({
     : '';
 
   return markStoppedImpl({
+    commentDeliveryExemption: 'interrupted-without-reconciled-reply',
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,
@@ -299,6 +301,7 @@ function stopStaleInProgressFollowUpJob({
   }
 
   return markStoppedImpl({
+    commentDeliveryExemption: 'interrupted-without-reconciled-reply',
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,

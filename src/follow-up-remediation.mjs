@@ -1554,6 +1554,7 @@ async function reconcileFollowUpJob({
       if (completed) return { action: 'completed', ...completed };
     }
     const stopped = markFollowUpJobStopped({
+      commentDeliveryExemption: 'interrupted-without-reconciled-reply',
       rootDir,
       jobPath,
       stoppedAt: lifecycleStoppedAt,
@@ -1583,6 +1584,7 @@ async function reconcileFollowUpJob({
   if (lifecycleStop) {
     const lifecycleStoppedAt = now();
     const stopped = markFollowUpJobStopped({
+      commentDeliveryExemption: 'interrupted-without-reconciled-reply',
       rootDir,
       jobPath,
       stoppedAt: lifecycleStoppedAt,
@@ -3212,6 +3214,7 @@ async function consumeNextFollowUpJob({
     let stopped;
     if (lifecycleStop.stopCode === 'stale-drift' || lifecycleStop.stopCode === 'stale-review-head') {
       stopped = await markFollowUpJobStopped({
+        commentDeliveryExemption: 'interrupted-without-reconciled-reply',
         rootDir,
         jobPath: claimed.jobPath,
         stoppedAt,
@@ -3791,6 +3794,7 @@ async function consumeNextFollowUpJob({
     }
 
     const failed = markFollowUpJobFailed({
+      commentDeliveryExemption: 'worker-start-failed',
       rootDir,
       jobPath: claimed.jobPath,
       error: err,

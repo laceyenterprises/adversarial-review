@@ -1243,6 +1243,7 @@ async function applyPreSpawnLifecycleGate({
         return { action: 'requeued', job: requeued.job, jobPath: requeued.jobPath, reason: 'dirty-merge-transient-failed' };
       }
       const stopped = markFollowUpJobStopped({
+        commentDeliveryExemption: 'interrupted-without-reconciled-reply',
         rootDir,
         jobPath,
         stoppedAt: nowIso,
@@ -1304,6 +1305,7 @@ async function applyPreSpawnLifecycleGate({
       });
       if (!specContext.ok || specContext.entries.length === 0) {
         const stopped = markFollowUpJobStopped({
+          commentDeliveryExemption: 'interrupted-without-reconciled-reply',
           rootDir,
           jobPath,
           stoppedAt: nowIso,
@@ -1384,6 +1386,7 @@ async function applyPreSpawnLifecycleGate({
   }
   const stopped = (lifecycleStop.stopCode === 'stale-drift' || lifecycleStop.stopCode === 'stale-review-head')
     ? markFollowUpJobStopped({
+        commentDeliveryExemption: 'interrupted-without-reconciled-reply',
         rootDir,
         jobPath,
         stoppedAt: nowIso,
@@ -1412,6 +1415,7 @@ async function applyPreSpawnLifecycleGate({
           log,
         })
       : markFollowUpJobStopped({
+          commentDeliveryExemption: 'interrupted-without-reconciled-reply',
           rootDir,
           jobPath,
           stoppedAt: nowIso,
@@ -1718,6 +1722,7 @@ async function reapFinishedPrFollowUpJobs({
     }
 
     markFollowUpJobStopped({
+      commentDeliveryExemption: 'interrupted-without-reconciled-reply',
       rootDir,
       jobPath,
       stoppedAt: nowIso,

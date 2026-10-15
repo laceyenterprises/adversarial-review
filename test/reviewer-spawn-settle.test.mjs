@@ -19,14 +19,15 @@ function currentHead(headRefOid) {
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];
   const spawnRequests = [];
+  const passes = [];
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 14,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'abc123',
@@ -48,6 +49,7 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
         };
       },
     },
+    beginReviewerPassImpl: (_root, payload) => passes.push(payload),
     postGitHubReviewWithCaptureImpl: async (payload) => {
       posted.push(payload);
     },
@@ -56,14 +58,14 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
 
   assert.equal(result.ok, true);
   assert.equal(posted.length, 1);
-  assert.equal(posted[0].repo, 'laceyenterprises/demo');
+  assert.equal(posted[0].repo, 'fixture-owner/demo');
   assert.equal(posted[0].prNumber, 14);
   assert.equal(posted[0].attemptNumber, 3);
   assert.equal(posted[0].reviewerModel, 'gemini');
   assert.equal(posted[0].reviewerHeadSha, 'abc123');
   assert.equal(posted[0].botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
   assert.equal(posted[0].passKind, 'first-pass');
-  assert.equal(posted[0].reviewerIdentity, 'gemini-reviewer-lacey');
+  assert.equal(posted[0].reviewerIdentity, passes[0].identity);
   assert.match(posted[0].reviewBody, /^## Verdict\nComment only/m);
   assert.equal(spawnRequests[0]?.subjectContext?.reviewDbAttemptNumber, 3);
   assert.equal(spawnRequests[0]?.subjectContext?.passKind, 'first-pass');
@@ -78,11 +80,11 @@ test('spawnReviewer does not fail a posted pass when post-operation callback thr
     const result = await spawnReviewer({
       readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 15,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'abc123',
@@ -134,11 +136,11 @@ test('spawnReviewer discards adapter review body when current PR head moved befo
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 140,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'old-head',
@@ -177,11 +179,11 @@ test('spawnReviewer retries transient freshness probes before discarding stale a
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 141,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'old-head',
@@ -232,7 +234,7 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
   const { settleReviewerAttempt } = await import('../src/reviewer-spawn-settle.mjs');
 
   settleReviewerAttempt({
-    repoPath: 'laceyenterprises/demo',
+    repoPath: 'fixture-owner/demo',
     prNumber: 140,
     result: {
       ok: false,
@@ -249,7 +251,7 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
   });
 
   assert.deepEqual(markedPosted, []);
-  assert.deepEqual(released, [['stale-session', 'laceyenterprises/demo', 140]]);
+  assert.deepEqual(released, [['stale-session', 'fixture-owner/demo', 140]]);
   assert.equal(leaseReleased.length, 0);
 });
 
@@ -258,11 +260,11 @@ test('spawnReviewer does not post unmarked adapter review bodies', async () => {
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 15,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'def456',
@@ -297,11 +299,11 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 21,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha21',
@@ -359,11 +361,11 @@ test('spawnReviewer enriches adapter usage with worker_run_id and preserves repo
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 24,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha24',
@@ -439,11 +441,11 @@ test('spawnReviewer retries transient ledger contention and preserves adapter co
     const result = await spawnReviewer({
       readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 25,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha25',
@@ -518,11 +520,11 @@ test('spawnReviewer keeps retrying token-only evidence until worker attribution 
   await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 251,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha251',
@@ -585,11 +587,11 @@ test('spawnReviewer leaves repairable attribution after bounded transient ledger
     await spawnReviewer({
       readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 26,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha26',
@@ -672,7 +674,7 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
       ],
     });
     beginReviewerPass(rootDir, {
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 121,
       attemptNumber: 2,
       reviewerClass: 'gemini',
@@ -684,11 +686,11 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
     await spawnReviewer({
       readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir,
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 121,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha121',
@@ -739,11 +741,11 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 22,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha22',
@@ -805,11 +807,11 @@ test('spawnReviewer preserves worker run_id when the adapter throws (error-path 
     spawnReviewer({
       readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 23,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha23',

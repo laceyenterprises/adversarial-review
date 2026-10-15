@@ -59,7 +59,8 @@ test('FIXTURELEAK-01: explicit workspace root wins over inherited environment du
   mkdirSync(workspaceDir, { recursive: true });
   writeFileSync(join(workspaceDir, '.git'), 'gitdir: synthetic-metadata\n');
   await assert.rejects(prepareWorkspaceForJob({
-    rootDir: root, workspaceRootDir, env: { HQ_ROOT: fakeHqRoot },
+    rootDir: root, workspaceRootDir,
+    env: { HQ_ROOT: fakeHqRoot, AGENT_OS_DEPLOY_CHECKOUT: join(root, 'fake-deploy') },
     job: { jobId: 'fixture', repo: 'fixture/repo', prNumber: 1 },
     execFileImpl: async (command, args) => {
       if (command === 'gh') return { stdout: JSON.stringify({ base: { ref: 'main' }, head: { ref: 'feature' } }) };

@@ -20,6 +20,7 @@ export function createIdentityBaselineFixture(t) {
   );
   const env = {
     HQ_ROOT: fakeLiveRoot,
+    AGENT_OS_DEPLOY_CHECKOUT: join(container, 'fake-deploy'),
     ADVERSARIAL_REVIEW_STATE_DIR: join(rootDir, 'data'),
     GHO_RATE_LIMIT_SHARED_STATE_PATH: join(rootDir, 'data', 'rate-limit-state.json'),
   };

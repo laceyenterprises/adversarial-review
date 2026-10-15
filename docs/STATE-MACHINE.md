@@ -84,6 +84,22 @@ data/reviews.db
 | `argus-security-queued` | bot-authored PR routed to the Argus security queue (ASR-04). **Not terminal** — the dispatch loop keeps visiting the row so a new head re-enqueues, and the adversarial gate reports `pending` (never `success`) until Argus answers or the narrow dependency-bot auto-adjudicator lands/completes the exact head. Excluded from malformed-title ticketing and from the adversarial stall count; a stuck security review surfaces on the Argus queue depth instead |
 | `unroutable-bot-author` | **Legacy (pre-ASR-04).** Bot-authored PR recorded terminal because nothing could route it — that terminal write is what stranded `#909`/`#910` for 14 hours. No longer written unless `ADVERSARIAL_ARGUS_SECURITY_ROUTE` is off; open rows still carrying it self-heal to `argus-security-queued` on the next watcher tick, and `npm run argus:backfill` recovers them immediately |
 
+### Reviewer admission
+
+The watcher keeps a process-lifetime reviewer admission queue shared by poll
+discovery and capacity-freed drains. Waiting candidates remain visible to
+discovery throughout asynchronous capacity probes and launch waves, so a
+rediscovered PR replaces its queued snapshot in FIFO position. Starting a
+candidate removes only that exact snapshot; a newer queued snapshot remains
+eligible. Deferred candidates stay queued even if the drain throws.
+
+The per-head dispatch lease is released by the candidate's unconditional
+`finally`, including after a queued freshness-read failure refunds its SQLite
+claim. The detached dispatch tracker also signals freed capacity when a
+candidate returns before spawning, allowing the next waiting candidate to
+proceed without another discovery poll. Capacity and live spawn guards still
+apply to every admission wave.
+
 ### Reviewer run-state ledger
 
 The delivery row also retains `codex_broker_provider` (`codex`, `codex-corp`,

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createReviewerDispatchDrain } from '../src/watcher-reviewer-dispatch.mjs';
+import { createReviewerAdmissionQueue } from '../src/watcher-reviewer-admission.mjs';
 import { createDetachedReviewerDispatchTracker } from '../src/watcher-reviewer-pool.mjs';
 
 const quiet = { log() {}, warn() {}, error() {} };
@@ -65,4 +66,57 @@ test('SEATIDLE-01: a failed drain restores only unstarted candidates and refunds
   assert.deepEqual(tracked, [201]);
   assert.deepEqual(refunded, [202]);
   assert.deepEqual(retained, [202]);
+});
+
+for (const fails of [false, true]) {
+  test(`SEATIDLE-01: discovery refresh during an active drain preserves unique FIFO candidates (${fails ? 'failure' : 'deferral'})`, async () => {
+    const admission = createReviewerAdmissionQueue();
+    const started = candidate(201), waiting = candidate(202), last = candidate(203);
+    for (const c of [started, waiting, last]) admission.enqueue(c);
+    let enterDrain, releaseDrain;
+    const entered = new Promise(resolve => { enterDrain = resolve; });
+    const gate = new Promise(resolve => { releaseDrain = resolve; });
+    admission.setDrain(createReviewerDispatchDrain(options(admission.candidates, {
+      runQueue: async (candidates, { onCandidateStarted }) => {
+        onCandidateStarted({ candidate: candidates[0], promise: Promise.resolve() });
+        enterDrain();
+        await gate;
+        if (fails) throw new Error('synthetic admission failure');
+        return { dispatched: 1, deferred: 2, deferredCandidates: candidates.slice(1) };
+      },
+    })));
+    const draining = admission.drain('poll');
+    await entered;
+    const refreshed = { ...candidate(202), subject: { headSha: 'newer-head' } };
+    const discovered = candidate(204);
+    admission.enqueue(refreshed);
+    admission.enqueue(discovered);
+    releaseDrain();
+    if (fails) await assert.rejects(draining, /synthetic admission failure/);
+    else await draining;
+    assert.deepEqual(admission.candidates, [refreshed, last, discovered]);
+    assert.equal(new Set(admission.candidates.map(c => `${c.repoPath}#${c.prNumber}`)).size, 3);
+  });
+}
+
+test('SEATIDLE-01: the real launch wave retains a refreshed waiting head exactly once', async () => {
+  const admission = createReviewerAdmissionQueue();
+  const starts = [];
+  let enterFirst, releaseFirst;
+  const entered = new Promise(resolve => { enterFirst = resolve; });
+  const completion = new Promise(resolve => { releaseFirst = resolve; });
+  admission.enqueue(candidate(201, async () => { enterFirst(); await completion; }));
+  admission.enqueue(candidate(202, async () => { starts.push('old-head'); }));
+  admission.setDrain(createReviewerDispatchDrain(options(admission.candidates)));
+  const draining = admission.drain('poll');
+  await entered;
+  const refreshed = candidate(202, async () => { starts.push('new-head'); });
+  admission.enqueue(refreshed);
+  await draining;
+  assert.deepEqual(admission.candidates, [refreshed]);
+  releaseFirst();
+  await new Promise(resolve => setImmediate(resolve));
+  await admission.drain('capacity-freed');
+  assert.deepEqual(starts, ['new-head']);
+  assert.deepEqual(admission.candidates, []);
 });

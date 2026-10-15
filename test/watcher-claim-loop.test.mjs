@@ -3760,8 +3760,19 @@ for (const priorStatus of ['pending', 'failed']) test(`SEATIDLE-01: unreadable q
   try {
     let loader = buildLoaderSource().replace('const overrides = globalThis.__watcherClaimLoopFreshHeads || {};',
       "if (prNumber === 101 && globalThis.__seatIdleReadError) throw new Error('synthetic unavailable state'); const overrides = globalThis.__watcherClaimLoopFreshHeads || {};");
+    const gateUrl = fileUrl('src', 'reviewed-head-dispatch-gate.mjs');
+    loader = loader.replace('export async function resolve', `
+      stubs.set(${JSON.stringify(gateUrl)}, 'fixture:seatidle-real-lease');
+      export async function resolve`);
     loader = loader.replace('export async function load(url, context, nextLoad) {', `
       export async function load(url, context, nextLoad) {
+        if (url === 'fixture:seatidle-real-lease') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+          export * from ${JSON.stringify(gateUrl + '?actual')};
+          import { createHeadDispatchLease as create } from ${JSON.stringify(gateUrl + '?actual')};
+          export function createHeadDispatchLease() {
+            return globalThis.__seatIdleRealLease = create();
+          }
+        `)} };
         if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
           const result = await nextLoad(url, context);
           result.source = String(result.source).replace(
@@ -3790,16 +3801,23 @@ for (const priorStatus of ['pending', 'failed']) test(`SEATIDLE-01: unreadable q
           assert.equal(refunded[key], before[key], 'refunded ' + key);
         }
         assert.ok(!globalThis.__watcherClaimLoopReviewerSpawns.some(s => s.subjectContext.prNumber === 101));
+        assert.equal(globalThis.__seatIdleRealLease.has('example/review-fixture#101@sha-happy-101'), false,
+          'the unconditional finally releases the real process-lifetime lease after freshness deferral');
+        assert.deepEqual(globalThis.__seatIdleClaimLeaseStates, [true]);
         globalThis.__seatIdleReadError = false;
         await pollOnce(octokit, pollOptions);
         assert.equal(claims.filter(c => c.prNumber === 101).length, 2);
         assert.equal(claims.filter(c => c.prNumber === 101)[0].reviewerHeadSha,
           claims.filter(c => c.prNumber === 101)[1].reviewerHeadSha, 'retry reacquires the same head');
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
+        assert.deepEqual(globalThis.__seatIdleClaimLeaseStates, [true, true],
+          'the real lease is held at each claim, including the same-head retry');
       `,
     });
     runner = runner.replace('claims.push(payload);', `
       claims.push(payload);
+      if (payload.prNumber === 101) (globalThis.__seatIdleClaimLeaseStates ||= []).push(
+        globalThis.__seatIdleRealLease.has('example/review-fixture#101@sha-happy-101'));
       if (payload.prNumber === 101 && claims.filter(c => c.prNumber === 101).length === 1) globalThis.__seatIdleReadError = true;
     `);
     writeFileSync(runnerPath, seatIdleSynthetic(runner));

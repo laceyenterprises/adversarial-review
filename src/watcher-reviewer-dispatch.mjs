@@ -16,7 +16,10 @@ export function createReviewerDispatchDrain({
     if (readWatcherDrainState().active || !reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
       return { dispatched: 0, maxObservedConcurrency: 0 };
     }
-    const candidates = reviewerDispatchCandidates.splice(0, reviewerDispatchCandidates.length);
+    // Keep waiting candidates visible to discovery's in-place FIFO refresh
+    // while capacity probes, spillover and the launch wave await. Only a
+    // started snapshot leaves the queue; a refreshed snapshot stays eligible.
+    const candidates = [...reviewerDispatchCandidates];
     const startedCandidates = new Set();
     const startedAt = process.hrtime.bigint();
     logger.log(
@@ -37,15 +40,13 @@ export function createReviewerDispatchDrain({
         splitPostReviewSettlement,
         onCandidateStarted: (started) => {
           startedCandidates.add(started.candidate);
+          const index = reviewerDispatchCandidates.indexOf(started.candidate);
+          if (index >= 0) reviewerDispatchCandidates.splice(index, 1);
           detachedReviewerDispatchTracker.track(started);
         },
         logger,
       });
       if (drainResult.deferred > 0) {
-        const deferredCandidates = Array.isArray(drainResult.deferredCandidates)
-          ? drainResult.deferredCandidates
-          : [];
-        reviewerDispatchCandidates.unshift(...deferredCandidates);
         logger.log(
           `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
           `dispatched=${drainResult.dispatched} deferred=${drainResult.deferred} ` +
@@ -54,9 +55,6 @@ export function createReviewerDispatchDrain({
         );
       }
       return { ...drainResult, admissions: [...startedCandidates].map(candidate => candidate.admissionOutcome) };
-    } catch (error) {
-      reviewerDispatchCandidates.unshift(...candidates.filter(candidate => !startedCandidates.has(candidate)));
-      throw error;
     } finally {
       // Also settle reservations when the drain throws before returning its
       // deferred list. Started candidates own their spawn/refusal settlement.

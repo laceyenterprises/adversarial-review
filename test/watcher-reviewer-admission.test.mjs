@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createReviewerAdmissionQueue } from '../src/watcher-reviewer-admission.mjs';
-import { createDetachedReviewerDispatchTracker, runBoundedReviewerDispatchQueue } from '../src/watcher-reviewer-pool.mjs';
+import { createDetachedReviewerDispatchTracker } from '../src/watcher-reviewer-pool.mjs';
+import { createReviewerDispatchDrain } from '../src/watcher-reviewer-dispatch.mjs';
 
 const quiet = { log() {}, warn() {}, error() {} };
 const flush = async () => { for (let turn = 0; turn < 40; turn++) await Promise.resolve(); };
@@ -22,21 +23,21 @@ function fixture(t) {
   const tracker = createDetachedReviewerDispatchTracker({ onCapacityFreed: admission.capacityFreed, logger: quiet });
   let concurrentDrains = 0, maxDrains = 0, active = 0, maxActive = 0;
   let beforeDrain = async () => {};
+  const drain = createReviewerDispatchDrain({
+    reviewerPoolConfig: { enabled: true, maxConcurrent: 3 },
+    reviewerDispatchCandidates: admission.candidates,
+    detachedReviewerDispatchTracker: tracker,
+    readWatcherDrainState: () => ({ active: false }),
+    resolveGeminiCredentialConcurrencyForDispatchCandidates: async () => 1,
+    prepareSpillover: async candidates => candidates,
+    singleWaveSettleGraceMs: 0, logger: quiet,
+  });
   admission.setDrain(async () => {
     concurrentDrains++;
     maxDrains = Math.max(maxDrains, concurrentDrains);
     try {
       await beforeDrain();
-      const candidates = admission.candidates.splice(0);
-      const startedAdmissions = [];
-      const result = await runBoundedReviewerDispatchQueue(candidates, {
-        maxConcurrent: 3, geminiCredentialConcurrency: 1,
-        activeReviewerCounts: tracker.activeCounts(), singleWave: true,
-        singleWaveSettleGraceMs: 0, logger: quiet,
-        onCandidateStarted(started) { startedAdmissions.push(started.candidate.admissionOutcome); tracker.track(started); },
-      });
-      admission.candidates.unshift(...result.deferredCandidates);
-      return { ...result, admissions: startedAdmissions };
+      return await drain('test');
     } finally { concurrentDrains--; }
   });
   function enqueue(prNumber, hasPriorPostedReview = false, headSha = `head-${prNumber}`) {
@@ -134,6 +135,26 @@ test('SEATIDLE-01: a refused candidate does not log a successful capacity handof
   f.admission.capacityFreed(); await f.schedulerTick();
   assert.deepEqual(f.starts, []);
   assert.deepEqual(f.logs, [], 'queue attempts that never spawn do not log admissions');
+});
+
+test('SEATIDLE-01: a slow pre-spawn refusal hands capacity to the next candidate without a poll', async t => {
+  const f = fixture(t);
+  const refusal = deferred();
+  f.admission.enqueue({
+    repoPath: 'example/review-fixture', prNumber: 200, reviewerModel: 'gemini',
+    async run() {
+      await refusal.promise;
+      return { dispatched: false, reason: 'head-moved-before-spawn' };
+    },
+  });
+  f.enqueue(201);
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.admission.candidates.map(c => c.prNumber), [201]);
+  refusal.resolve(); await flush(); await f.schedulerTick();
+  assert.deepEqual(f.starts, [201]);
+  assert.equal(f.counts().maxActive, 1);
+  f.completions[0].resolve(); await flush();
 });
 
 

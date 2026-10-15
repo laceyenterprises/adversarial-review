@@ -2382,7 +2382,7 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 }
 
-for (const capacity of ['pool', 'memory', 'credential', 'overdue']) test(capacity === 'overdue'
+for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota', 'overdue']) test(capacity === 'overdue'
   ? 'WAKESTARVE-01: production discovery admits overdue work before newer wakes'
   : `WAKESTARVE-01: production ${capacity} deferral retains a wake across polls`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-retained-wake-'));
@@ -2407,7 +2407,8 @@ for (const capacity of ['pool', 'memory', 'credential', 'overdue']) test(capacit
         import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
         export * from '${routeUrl}?actual';
         export function selectReviewerRouteForAttempt(args) {
-          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini };
+          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini,
+            quotaBlocked: ${capacity === 'quota'} && !globalThis.__wakeTestSeats };
         }
       `,
       [poolUrl]: `
@@ -2419,6 +2420,15 @@ for (const capacity of ['pool', 'memory', 'credential', 'overdue']) test(capacit
         }
       `,
     };
+    if (capacity === 'fallback-quota') {
+      const fallbackUrl = fileUrl('src', 'review-worker-class-fallback.mjs');
+      sources[fallbackUrl] = `
+        export * from '${fallbackUrl}?actual';
+        export async function resolveReviewerWorkerClassWithFallback() {
+          return { fellBack: false, quotaBlocked: !globalThis.__wakeTestSeats };
+        }
+      `;
+    }
     let loader = buildLoaderSource();
     if (capacity === 'credential') loader = loader.replace(
       'export function shouldPauseReviewerModel() { return { paused: false }; }',
@@ -2468,6 +2478,9 @@ for (const capacity of ['pool', 'memory', 'credential', 'overdue']) test(capacit
     assert.match(output, capacity === 'overdue'
       ? /reviewer priority dispatch .*retained_wake=false wait_threshold_exceeded=true/
       : /reviewer priority dispatch .*retained_wake=true/);
+    if (capacity === 'quota' || capacity === 'fallback-quota') {
+      assert.match(output, /reviewer-route DEFERRED .*pr=101/);
+    }
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 

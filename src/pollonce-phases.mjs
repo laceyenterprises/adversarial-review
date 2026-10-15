@@ -2034,7 +2034,10 @@ export async function processReviewSubject(entry, ctx) {
 
       }
       await applyWorkerFallback();
-      if (logReviewerQuotaBlock({ repoPath, prNumber, route })) return;
+      if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+        retainWakeForCapacity();
+        return;
+      }
 
       if (route.reviewerModelFallback) {
         console.warn(
@@ -3083,6 +3086,7 @@ export async function processReviewSubject(entry, ctx) {
         },
         async run() {
           if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+            this.retainWakeForCapacity();
             return { dispatched: false, reason: 'quota-blocked' };
           }
           // Pool admission can defer a release for several ticks. Fence the

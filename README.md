@@ -793,3 +793,289 @@ refreshed in the record. The green fail-open gate displays the record ID;
 this record does not authorize automatic merge. Record and elision-evidence
 writes are best-effort and cannot suppress a page or fail a completed review.
 A new head still re-arms review through the existing REVIEWSTALL-01 policy.
+
+
+## State machines and smoke verification (SMV v1)
+
+[state-machines.json](state-machines.json) maps the six owned lifecycle objects.
+A terminal flag means this attempt or decision is quiescent; explicit recovery
+may start another attempt. Closure owner is a computed decision, not a stored PR
+status. Its initial/final node is an evaluation boundary. Lease removal is not
+permission to merge. Semantic source fingerprints track state writers, guards and terminal sets:
+review the state/edge inventory, update the map and independent graph snapshot,
+then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
+Each object's `codeSources` includes every transition's source file.
+Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
+README equivalence; mutation tests alter both a state and a CAS edge in source.
+
+Run `node bin/smv-smoke.mjs` from this checkout. It emits one JSON verdict per
+step followed by the aggregate report. `SMV_COMMIT` overrides Git metadata lookup;
+lookup failures emit failed step rows and an aggregate failure with commit `unknown`.
+The isolated child PATH includes `/usr/local/bin` and `/opt/homebrew/bin` for
+package-managed Git, after the fake external commands and system directories.
+Setup, closed stdin, process group kill,
+child wait and disposable-store cleanup fit within the 180-second total budget.
+Each child has isolated state, a credential-free environment, network refusal,
+fake external commands and a file-only Git remote. The watcher entry is the
+production posted-review phase (`handlePostedReviewRow`) used by `pollOnce`;
+the consumer, closer dispatcher, handoff and daemon merge functions are real.
+The existing claim-loop suite continues to verify `pollOnce` admission itself.
+
+<a id="smv-clean"></a>**smv-clean:** an approved exact-head, zero-finding review
+merges autonomously and the bare remote records that SHA. The synthetic commit
+is unsigned: an ordinary reviewed head does not require fleet identity proof.
+
+<a id="smv-handoff"></a>**smv-handoff:** findings dispatch one hammer through the
+real closer, with a durable dispatch record and lease. The fake worker repairs
+local Git, hands off to exact-head review, and an approved review drains through
+the real follow-up consumer and merges through the watcher closure phase.
+
+<a id="smv-ci-blocked"></a>**smv-ci-blocked:** same-head failed CI parks the real
+review claim; no follow-up job and exhausted/no-progress remediation both assign
+the hammer, while the shared merge predicate refuses a merge over red CI.
+
+<a id="smv-refusals"></a>**smv-refusals:** lease expiry alone cannot steal a
+claim; exhaustion selects operator paging. Fleet identity proof requires a valid
+GitHub signature (the signature metadata is faked, not cryptographically tested).
+A fake GitHub signed-commit policy refuses the unsigned head through the real
+daemon merge attempt. The real consumer stops exhausted rounds and the closure
+phase refuses a stale head. These checks do not waive any exact-head or primary-change predicate.
+
+[post-merge-verify.json](post-merge-verify.json) is the SMV-01 declaration for the
+registered `tools/adversarial-review` repository integration. Parent discovery
+reads it beside this README and invokes this same command from the deploy root;
+there is no parent policy import or second runner here. After deployment, SRE
+runs `SMV_HOST_CANARY_APPROVED=1 hq smoke adversarial-review --mode host --json`
+from the deployed parent checkout, outside a worker. Host mode is an explicitly
+approved disposable offline safe canary of deployed code; it does not inspect
+live queues, credentials or running daemon freshness. This worker does not run
+host mode. Node dependencies and local Git must already be installed.
+
+The shared consumer records every step, pages once with module/step/commit on
+failure, opens no revert PR and does not hold later deploys. This repository
+only declares `onFailure=page`; notification delivery belongs to that consumer.
+No workflow, CI cadence, runner or merge-locking behavior changes here.
+
+Known dead ends below are proposals, all **enforcement=missing**. Existing retry,
+heartbeat, stall-page and attempt caps are conditional recovery, not universal
+elapsed-time exits. Repair is outside SMV-03. Terminal malformed/failed/orphan
+attempts retain their documented operator recovery; “terminal” promises no
+automatic landing. Every missing nonterminal state is listed in the table.
+
+| Object / states | Proposed exit owner / bound / overdue recipient | Missing enforcement |
+|---|---|---|
+| review-row: pending, pending-upstream, reviewing, ci-blocked, argus-security-queued, fast_merge_skipped | watcher / 1800 s / adversarial-review operator | No unconditional elapsed-time exit across holds, unavailable providers, Argus and bypass dependencies. |
+| follow-up-job: pending, in_progress | follow-up daemon / 1800 s / adversarial-review operator | Retry/queue pressure or repeated quota holds can prevent an elapsed-time exit. |
+| reviewer-run: launching, spawned, heartbeating | reviewer runtime / 1800 s / adversarial-review operator | Ledger alone has no mandatory expiry; runtime recovery and timeout configuration are external dependencies. |
+| closer-lease: handed-to-review | watcher / closer / 1800 s / adversarial-review operator | Completed review is required for reclaim; record has no independent handoff deadline. |
+| hammer-dispatch: dispatch-deferred-transient, dispatch-blocked-branch-holder | closer dispatcher / 1800 s / adversarial-review operator | Budget-neutral transport retries and holder retries lack a universal time exit. |
+
+The lease and launch bounds in the map are default recovery thresholds, not a
+promise to reclaim uncertain ownership. Corrupt timestamps or unavailable
+liveness evidence can still prevent reclamation; proposed operator bound is
+1800 seconds with enforcement missing for those invalid-record cases.
+
+<!-- smv:diagrams:start -->
+
+### review-row
+
+```mermaid
+stateDiagram-v2
+    state "pending" as s0
+    state "pending-upstream" as s1
+    state "reviewing" as s2
+    state "ci-blocked" as s3
+    state "posted" as s4
+    state "failed" as s5
+    state "failed-orphan" as s6
+    state "malformed" as s7
+    state "unroutable-bot-author" as s8
+    state "argus-security-queued" as s9
+    state "skipped" as s10
+    state "fast_merge_skipped" as s11
+    [*] --> s0: review-row.01 discover tagged subject
+    [*] --> s7: review-row.02 title rejected
+    [*] --> s9: review-row.03 route bot
+    [*] --> s8: review-row.04 bot route disabled
+    s8 --> s9: review-row.05 legacy bot recovery
+    s9 --> s9: review-row.06 enqueue new head
+    s0 --> s2: review-row.07 claim CAS
+    s1 --> s2: review-row.08 claim after hold
+    s5 --> s2: review-row.09 eligible retry CAS
+    s2 --> s4: review-row.10 deliver review
+    s2 --> s5: review-row.11 dispatch or reviewer failure
+    s2 --> s6: review-row.12 startup cannot prove recovery
+    s2 --> s0: review-row.13 stale head release or accepted rereview
+    s2 --> s1: review-row.14 provider hold
+    s0 --> s1: review-row.15 upstream outage
+    s1 --> s0: review-row.16 provider recovery
+    s2 --> s3: review-row.17 red CI without remediation
+    s3 --> s0: review-row.18 CI green or changed head
+    s4 --> s0: review-row.19 accepted rereview
+    s5 --> s0: review-row.20 new head archives failure
+    s6 --> s4: review-row.21 posted review reconciliation
+    s6 --> s0: review-row.22 operator verified reset
+    s4 --> s4: review-row.23 closure maintenance
+    s0 --> s10: review-row.24 PR already merged
+    s1 --> s10: review-row.25 PR already merged
+    s2 --> s10: review-row.26 PR already merged
+    [*] --> s11: review-row.27 authorized bypass
+    s11 --> s0: review-row.28 authorization withdrawn or head moved
+    s4 --> [*]
+    s5 --> [*]
+    s6 --> [*]
+    s7 --> [*]
+    s8 --> [*]
+    s10 --> [*]
+```
+
+### follow-up-job
+
+```mermaid
+stateDiagram-v2
+    state "pending" as s0
+    state "in_progress" as s1
+    state "completed" as s2
+    state "failed" as s3
+    state "stopped" as s4
+    state "cancelled" as s5
+    [*] --> s0: follow-up-job.01 create from delivered review
+    s0 --> s1: follow-up-job.02 claim and start round
+    s0 --> s4: follow-up-job.03 clean or exhausted rounds
+    s0 --> s3: follow-up-job.04 claim failure
+    s0 --> s5: follow-up-job.05 operator cancellation
+    s1 --> s2: follow-up-job.06 validated worker reply
+    s1 --> s3: follow-up-job.07 worker failure
+    s1 --> s4: follow-up-job.08 lifecycle or budget stop
+    s1 --> s5: follow-up-job.09 operator cancellation
+    s1 --> s0: follow-up-job.10 transient retry
+    s2 --> s0: follow-up-job.11 next round
+    s3 --> s0: follow-up-job.12 explicit retrigger
+    s4 --> s0: follow-up-job.13 allowlisted explicit retrigger
+    s2 --> [*]
+    s3 --> [*]
+    s4 --> [*]
+    s5 --> [*]
+```
+
+### reviewer-run
+
+```mermaid
+stateDiagram-v2
+    state "launching" as s0
+    state "spawned" as s1
+    state "heartbeating" as s2
+    state "completed" as s3
+    state "failed" as s4
+    state "cancelled" as s5
+    [*] --> s0: reviewer-run.01 claim launch intent
+    [*] --> s1: reviewer-run.02 legacy record default
+    [*] --> s2: reviewer-run.03 adopt existing runtime
+    s0 --> s2: reviewer-run.04 PGID captured
+    s1 --> s2: reviewer-run.05 heartbeat
+    s2 --> s2: reviewer-run.06 heartbeat
+    s0 --> s3: reviewer-run.07 settle subprocess
+    s0 --> s4: reviewer-run.08 settle subprocess
+    s0 --> s5: reviewer-run.09 settle subprocess
+    s1 --> s3: reviewer-run.10 settle subprocess
+    s1 --> s4: reviewer-run.11 settle subprocess
+    s1 --> s5: reviewer-run.12 settle subprocess
+    s2 --> s3: reviewer-run.13 settle subprocess
+    s2 --> s4: reviewer-run.14 settle subprocess
+    s2 --> s5: reviewer-run.15 settle subprocess
+    s5 --> s2: reviewer-run.16 recover adopted PGID
+    s3 --> [*]
+    s4 --> [*]
+    s5 --> [*]
+```
+
+### closer-lease
+
+```mermaid
+stateDiagram-v2
+    state "pending" as s0
+    state "dispatched" as s1
+    state "handed-to-review" as s2
+    state "terminal" as s3
+    [*] --> s0: closer-lease.01 exclusive acquisition
+    s0 --> s1: closer-lease.02 launch receipt
+    s0 --> s3: closer-lease.03 terminal observed before launch
+    s1 --> s3: closer-lease.04 terminal settlement
+    s0 --> s2: closer-lease.05 bounded review request accepted
+    s1 --> s2: closer-lease.06 bounded review request accepted
+    s2 --> s0: closer-lease.07 review completed; locked reclaim
+    s2 --> s3: closer-lease.08 external terminal outcome
+    s0 --> [*]: closer-lease.09 expired pending lease reclaimed
+    s1 --> [*]: closer-lease.10 expired dispatched lease reconciled
+    s3 --> [*]
+```
+
+### closure-owner
+
+```mermaid
+stateDiagram-v2
+    state "close" as s0
+    state "page" as s1
+    state "wait" as s2
+    state "hammer" as s3
+    state "review" as s4
+    state "remediation" as s5
+    state "follow-up-drain" as s6
+    state "conflict-rebase" as s7
+    state "daemon-merge" as s8
+    [*] --> s0: closure-owner.01 recompute ownership: close
+    [*] --> s1: closure-owner.02 recompute ownership: page
+    [*] --> s2: closure-owner.03 recompute ownership: wait
+    [*] --> s3: closure-owner.04 recompute ownership: hammer
+    [*] --> s4: closure-owner.05 recompute ownership: review
+    [*] --> s5: closure-owner.06 recompute ownership: remediation
+    [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain
+    [*] --> s7: closure-owner.08 recompute ownership: conflict-rebase
+    [*] --> s8: closure-owner.09 recompute ownership: daemon-merge
+    s2 --> [*]: closure-owner.10 next bounded observation
+    s0 --> [*]
+    s1 --> [*]
+    s3 --> [*]
+    s4 --> [*]
+    s5 --> [*]
+    s6 --> [*]
+    s7 --> [*]
+    s8 --> [*]
+```
+
+### hammer-dispatch
+
+```mermaid
+stateDiagram-v2
+    state "dispatching" as s0
+    state "dispatched" as s1
+    state "launch-terminal" as s2
+    state "dispatch-deferred-transient" as s3
+    state "dispatch-blocked-branch-holder" as s4
+    state "dispatch-branch-holder-block-exhausted" as s5
+    state "dispatch-failed" as s6
+    state "no-dispatch" as s7
+    state "completed" as s8
+    [*] --> s0: hammer-dispatch.01 persist launch intent
+    s0 --> s1: hammer-dispatch.02 launch result: dispatched
+    s0 --> s3: hammer-dispatch.03 launch result: dispatch-deferred-transient
+    s0 --> s4: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
+    s0 --> s5: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
+    s0 --> s6: hammer-dispatch.06 launch result: dispatch-failed
+    s0 --> s7: hammer-dispatch.07 launch result: no-dispatch
+    s0 --> s8: hammer-dispatch.08 launch result: completed
+    s1 --> s2: hammer-dispatch.09 terminal launch evidence
+    s1 --> s6: hammer-dispatch.10 failed outcome reconciled
+    s2 --> s0: hammer-dispatch.11 bounded retry or changed context
+    s3 --> s0: hammer-dispatch.12 bounded retry or changed context
+    s4 --> s0: hammer-dispatch.13 bounded retry or changed context
+    s6 --> s0: hammer-dispatch.14 bounded retry or changed context
+    s7 --> s0: hammer-dispatch.15 bounded retry or changed context
+    s2 --> [*]
+    s5 --> [*]
+    s6 --> [*]
+    s7 --> [*]
+    s8 --> [*]
+```
+
+<!-- smv:diagrams:end -->

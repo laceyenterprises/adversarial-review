@@ -1,14 +1,11 @@
+import { watcherTick } from './helpers/smv-watcher.mjs';
 import { collect } from './helpers/hamclose-history.mjs';
-import { mapDaemonPrimaryChangeResult } from '../src/daemon-clean-merge.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { checkPrimaryChange } from '../src/ama/primary-change.mjs';
-import { handlePostedReviewRow } from '../src/posted-review-row.mjs';
-import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
-import { attemptDaemonCleanMerge } from '../src/ama/daemon-merge.mjs';
 import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { consumeFollowUpJobsUntilCapacity } from '../src/follow-up-remediation.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease, rekeyAmaCloserLease } from '../src/ama/closer-lease.mjs';
@@ -18,7 +15,6 @@ import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } fro
 import { routeCappedReviewToClosure, hammerHandoffReviewBypass, postedReviewCeilingReached } from '../src/hamclose-review-admission.mjs';
 import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
 import { classifyClosureOwnership } from '../src/merge-agent-rescue-classifier.mjs';
-import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 
 const repo = 'fixture/repo';
 const cleanBody = '## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved';
@@ -35,55 +31,6 @@ async function history(options = {}) {
     originalParent: '2'.repeat(40), originalLine: 15, snapshotStatus: 'diverged', ...options })).evidence;
 }
 
-// Both production watcher phases run. Only external GitHub/dispatch/merge
-// boundaries are injected; the actual primary-change and merge predicates run.
-async function watcherTick({ rootDir, prNumber, headSha, evidence, store, row, closerImpl, closureOnly = false, pageImpl = async () => {}, findings = false }) {
-  const candidate = { repo, prNumber, headSha, prState: store.merged ? 'merged' : 'open',
-    title: '[codex] HAMCLOSE replay', body: '', baseBranch: 'main', isDraft: false, riskClass: 'low',
-    mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', statusCheckRollup: [{ name: 'ci', conclusion: 'SUCCESS' }],
-    labels: [], branchProtection: { requiredContexts: [] } };
-  const reviewState = { blockingFindingCount: 0, blockingFindingState: 'known', nonBlockingFindingCount: 0,
-    nonBlockingFindingState: 'known', headSha, verdict: 'approved' };
-  if (findings) reviewState.nonBlockingFindingCount = 1;
-  const body = findings ? findingsBody : cleanBody;
-  return handlePostedReviewRow({ rootDir, repoPath: repo, prNumber, existing: row,
-    currentRevisionRef: headSha, logger: quiet,
-    currentReviewRowReader: () => row, latestFollowUpJobFinder: () => null,
-    latestPostedReviewBodyFinder: () => body,
-    projectGateStatusSafe: async () => ({ decision: { state: 'success', reason: 'review-settled' } }),
-    fetchMergeAgentCandidateImpl: async () => candidate,
-    buildMergeAgentDispatchJobImpl: () => ({ ...reviewState }),
-    resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome: 'ama-pending',
-      amaClosureResult: store.lastClosure = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
-        candidate, reviewStateRow: row, currentRevisionRef: headSha, dispatchJob: reviewState, labelNames: [], logger: { ...quiet, warn: message => { (store.warnings ||= []).push(message); } },
-        loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true, strictMode: true,
-          autonomousMergeExecutionEnabled: true, branchProtection: { required: false }, lha: { consumeAttestations: false } }) }),
-        observeClosureWaitImpl: args => observeClosureWait({ ...args, pageImpl }),
-        resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
-        fetchHeadCloserVerifiedCommitImpl: async () => null,
-        fetchPullRequestMergeabilityImpl: async () => ({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
-        fetchMergedProtectiveDependentsImpl: async () => [],
-        fetchProtectivePredecessorStateImpl: async () => null,
-        fetchLatestHeadReviewBodiesImpl: async () => closureOnly ? [] : [body], liveReviewRetryDelaysMs: [0],
-        maybeDispatchAmaCloserImpl: closerImpl || (async () => { throw new Error('clean review must not launch a hammer'); }),
-        runDaemonCleanMergeAttemptImpl: async () => {
-          if (closureOnly) return { disposition: 'not-taken', reason: 'stale-head' };
-          const gate = { candidateHead: headSha, validatedHead: headSha, requiredChecks: candidate.statusCheckRollup,
-            mergeable: 'MERGEABLE', prState: 'OPEN', labels: [], primaryChange: evidence,
-            requirePrimaryChange: true, strictNonBlockingRemediation: true };
-          const result = await attemptDaemonCleanMerge({ repo, prNumber, base: 'main', validatedHead: headSha,
-            verdict: 'settled-success', reviewState, liveGate: gate, branchProtectionRequired: false,
-            prTitle: candidate.title, hqRoot: rootDir, logger: quiet,
-            fetchLiveGateImpl: async () => store.merged ? { ...gate, prState: 'MERGED' } : gate,
-            acquireLeaseImpl: () => ({ acquired: true, lease: { leaseId: 'fixture' } }), releaseLeaseImpl() {},
-            runMergeImpl: async () => { store.merged = true; return { code: 0, stdout: '', stderr: '' }; },
-            writeAuditImpl: () => ({ written: true }), appendAuditImpl: () => ({ written: true }), readAuditImpl: () => null });
-          return mapDaemonPrimaryChangeResult(result);
-        },
-      }) }),
-    dispatchMergeAgentForPRImpl: async () => { throw new Error('merge-agent fallback must not run'); },
-  });
-}
 
 test('HAMCLOSE-03 replay A: synthetic reversal merges in one posted-review/closure tick', async t => {
   const rootDir = root(t), evidence = await history(), store = { merged: false };

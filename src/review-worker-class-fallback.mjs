@@ -568,7 +568,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   }
 
   return {
-    ...base, reason: 'no-allowed-reviewer-available', primaryState: primaryAvail.state,
+    ...base, reason: 'no-available-fallback', primaryState: primaryAvail.state,
     quotaBlocked: true,
     quotaGrounding: {
       reviewer: reviewerModelForWorkerClass(primaryClass), state: primaryAvail.state,

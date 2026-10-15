@@ -142,7 +142,7 @@ test('defers rather than selecting a Codex-family reviewer the child refuses', a
   });
   assert.equal(result.workerClass, 'gemini');
   assert.equal(result.fellBack, false);
-  assert.equal(result.reason, 'no-allowed-reviewer-available');
+  assert.equal(result.reason, 'no-available-fallback');
   assert.equal(result.quotaBlocked, true);
   assert.equal(result.primaryState, 'exhausted');
 });

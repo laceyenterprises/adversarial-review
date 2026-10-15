@@ -3,7 +3,7 @@
 **Owner:** reviewer transient-failure backoff and route selection
 **Store:** `data/cascade-state/`
 **Source of truth:** `src/reviewer-cascade.mjs`
-**Runtime surface:** `src/reviewer-cascade.mjs`, `src/watcher.mjs`, `src/reviewer-route-selection.mjs`, `src/review-pipeline-health.mjs`, `src/token-refresh-hold.mjs`
+**Runtime surface:** `src/reviewer-cascade.mjs`, `src/watcher.mjs`, `src/reviewer-route-selection.mjs`, `src/review-pipeline-health.mjs`, `src/token-refresh-hold.mjs`, `src/reviewer-timeout-budget.mjs`, `src/pollonce-phases.mjs`, `src/reviewer-spawn-settle.mjs`, `src/reviewer-pass-reaper.mjs`
 
 ## Purpose
 
@@ -41,6 +41,7 @@ Directory: `data/cascade-state/`
 | `nextRetryAfter` | string | ISO-8601 PR-level backoff expiry. This is computed from the cascade backoff schedule, never from a provider-supplied reset hint. The one exception is a token-refresh hold (below), which sets it to `tokenRefreshHold.holdUntil`: never earlier than the backoff floor and never later than `tokenRefreshHold.maxHoldUntil`. |
 | `providerRetryAfter` | string | Optional diagnostic provider reset hint. It is recorded only when supplied, is replaced on each write, and never gates reviewer dispatch. |
 | `backoffMinutes` | number | Backoff duration used to compute `nextRetryAfter`. |
+| `reviewerTimeout` | object | Optional head/build timeout budget with `count`, `total`, `limit`, `rearmAt`, and `lastTimeoutAt`; see CASCADECAP-01 below. |
 | `tokenRefreshHold` | object | Optional TOKDZ-01 hold written by `recordTokenRefreshHold` when the Claude reviewer refused a broker token that was waiting on a rotation (`token-refresh-pending`). Fields: `reviewerModel`, `startedAt` (first refusal of this hold), `lastRefusalAt`, `refusals`, `expectedRotationAt` (token expiry minus the bridge refresh window, or null when the refusal carried no lifetime), `holdUntil`, `maxHoldUntil` (`startedAt` plus `ADVERSARIAL_REVIEW_TOKEN_REFRESH_HOLD_MAX_MINUTES`, default 30), `maxHoldMs`. Carried forward across later transient-failure writes; dropped by `clearCascadeState`. |
 | `capExhaustedAlertedAt` | string | Optional debounce marker for a cascade-cap-exhausted alert. |
 | `capExhaustedAlert` | object | Optional diagnostic payload containing failure class, attempts, cap, and reason for the cap-exhausted alert. |
@@ -102,3 +103,89 @@ the bound.
   the same durable owner and atomic-write behavior as the backoff state.
 - The files contain transient failure diagnostics and no secrets or review
   bodies.
+
+## Repeated same-head timeouts (CASCADECAP-01)
+
+`reviewerTimeout` records `{ headSha, reviewerBuildId, count, total, limit,
+rearmAt, lastTimeoutAt }`. Normal settlement and the running-pass reaper both write it,
+including terminal failures at the infrastructure cap. `count` measures timeouts
+in the current head/build/re-arm series; `total` retains timeout evidence on the
+head for dispatch fairness. `lastTimeoutAt` records the latest timeout on that
+head, independently of the PR-wide `lastFailureAt`. Scoped non-timeout failures
+persist the current build and consumed operator re-arm without charging a
+timeout; failures without head evidence preserve the object. Both retain the
+ordinary cascade backoff.
+
+The default limit is two timeouts. A positive integer
+`ADVERSARIAL_REVIEWER_TIMEOUT_SAME_HEAD_LIMIT` overrides it without a config
+schema change. At the limit, the watcher parks the row before another claim,
+persists `reviewer-timeout-repeated-same-head` in `failure_message` and the
+existing review-failure decision record, and uses the existing operator-decision
+alert path once per series. Later polls of the same failed row and park marker
+leave the row and failure decision untouched, after checking the existing
+timeout-exhaustion handoff. Parking fills a missing `reviewed_prs.failed_at`
+with the current ISO timestamp while preserving an existing failure timestamp.
+An expired cascade backoff cannot bypass this park.
+The underlying `[reviewer-timeout]` classifier remains available to the existing
+operator-label-gated timeout-exhaustion handoff; that gate is unchanged.
+
+A new head starts a fresh budget. An explicit `retrigger-review:` operator
+request newer than the last timeout, or a different reviewer build, permits
+one timeout on the same head; a timeout from that probe parks again. Non-timeout
+transients retain that allowance across cascade retries without renewing the
+build/re-arm reset. An already consumed operator request cannot reset it again.
+Builds default to a process-start content digest of reviewer sources, runtime adapters and
+reviewer prompts. Files removed between directory enumeration and reading
+contribute a deterministic missing-file marker instead of failing startup.
+A missing source directory also contributes an absence marker; only regular
+top-level source files are hashed, so directories named like modules are ignored;
+other read errors still fail. A deployment can supply `ADVERSARIAL_REVIEWER_BUILD_ID` instead. The
+build is captured in pass metadata so reaping an old pass attributes its failure
+to the build that actually ran. Legacy files use the failed row's head and flat
+timeout count until a scoped failure is recorded. Files lacking `lastTimeoutAt`
+use `lastFailureAt` only when `lastFailureClass` is `reviewer-timeout`; otherwise
+an unseen, valid operator request is accepted without a timestamp comparison.
+
+Timeout retries yield to waiting first-pass and re-review candidates in the
+shared WAKESTARVE-01 wake/wait ordering, including retries with retained wakes
+or long waits. Timeout retries do not reserve first-pass lane capacity ahead
+of waiting re-reviews. A partial discovery wave containing such a retry waits for full
+discovery, so later subjects can enter that same ordering. Successful reviews
+clear cascade state as before. Real upstream failures retain the existing
+backoff and cap-override behavior.
+
+Sibling audit:
+
+- `pollonce-phases.mjs` and `review-state-statements.mjs`: the cascade override
+  was the unbounded path for both first-pass and re-review timeouts. Both now
+  consult the shared timeout budget, including a recheck before the claim CAS.
+  Changed-build probes use that budget; their infra counter stays at its cap.
+- `reviewer-spawn-settle.mjs` and `reviewer-pass-reaper.mjs`: both persist head
+  and build evidence. The reaper now records terminal-at-cap timeouts too.
+- `argus-security-drain.mjs` / `argus-reviewer-failures.mjs`: actual review and
+  child timeouts are charged against `maxAttempts`. Only quota and unavailable
+  identity deferrals avoid that counter, before model execution. Quota-only
+  failed-job recovery requires quota-only history, so a timeout cannot use it.
+  No behavior change needed.
+- `follow-up-remediation.mjs` / `follow-up-jobs.mjs`: transient HQ dispatch
+  failures and CI repair reuse a round but charge the job-scoped transient
+  retry budget, which is checked before requeueing. Provider/identity holds
+  before execution intentionally avoid charging it. No cascade override of
+  that budget exists; no behavior change needed.
+- Token-refresh and model-scoped credential-outage holds deliberately preserve
+  their existing bounded probe/hold rules. Neither classification converts a
+  recorded reviewer timeout into an unlimited retry.
+- Additional remediation recoveries (`remediation-missing-artifact.mjs`,
+  `remediation-claimed-requeue.mjs`, `remediation-worker-resume.mjs`, and the
+  stale-claim sweep) check the same transient budget before requeueing.
+  `remediation-round-accounting.mjs` can refund an infrastructure failure
+  without charging that budget, but only once per round and within the existing
+  PR-wide infrastructure-refund limit. These remain unchanged.
+- `reviewer-harness.mjs` has an internal transient Gemini subprocess ladder.
+  Its fixed retry-delay array bounds retries inside one reviewer attempt;
+  it cannot override the watcher's head/build park. It remains unchanged.
+- `ama/dispatch-closer.mjs` / `ama/hammer-retry-cap.mjs` grant one transient
+  stale-head retry per head after fresh eligibility checks; they retain the
+  lifetime dispatch ceiling. Deferral and unexecuted-launch refunds also have
+  independent durable limits. These bounded merge/remediation exceptions remain
+  unchanged; they do not reclaim a reviewer seat or bypass the timeout budget.

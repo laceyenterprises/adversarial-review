@@ -60,6 +60,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
 function buildLoaderSource({
   capRouteSource = null,
   discoveryHookSource = '',
+  cascadeRootDir = null,
   subjectHeads = {},
   subject101Overrides = {},
   subjectRevisionRefs = {},
@@ -67,6 +68,14 @@ function buildLoaderSource({
   reviewerRuntimeSource = "globalThis.__watcherClaimLoopReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__watcherClaimLoopReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
   followUpMergeAgentSource = "export const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add'; export function classifyBlockingFindings() { return { count: 0, state: 'known' }; } export async function applyMergeAgentStuckLabel() { return false; } export async function addMergeAgentDispatchedLabel() { return { added: true }; } export function buildMergeAgentDispatchJob() { return null; } export async function dispatchMergeAgentForPR() { return { dispatched: false }; } export function fetchMergeAgentCandidate() { return null; } export async function cancelMergeAgentDispatchOnMerge() { return { attempted: false, cancelled: false, labelRemoved: false }; } export function clearMergeAgentLifecycleCleanup() { return true; } export function listMergeAgentDispatches() { return []; } export function listMergeAgentLifecycleCleanups() { return []; } export async function isMergeAgentDispatchActiveForHead() { return { active: false, reason: 'fixture' }; } export async function pollFastMergeQueue() { return { processed: 0, merged: 0, blocked: 0, requeued_head_change: 0, requeued_veto: 0, skipped_still_pending: 0 }; } export function resolveFastMergePerPollCap() { return 5; } export function shouldUseReviewerTimeoutExhaustedMergeGate() { return false; } export function summarizeChecksConclusion() { return 'SUCCESS'; } export function updateMergeAgentLifecycleCleanup() { return {}; } export function upsertMergeAgentLifecycleCleanup() { return {}; } export function scanStuckMergeAgentDispatches() { return []; } export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; } export function validateStartupMergeAgentConfig() {} export function isScopedMergeAgentRequest() { return false; }",
 } = {}) {
+  const cascadeUrl = fileUrl('src', 'reviewer-cascade.mjs');
+  const cascadeSource = cascadeRootDir ? `
+    import * as actual from ${JSON.stringify(`${cascadeUrl}?actual`)};
+    export * from ${JSON.stringify(`${cascadeUrl}?actual`)};
+    ${['readCascadeState', 'recordCascadeFailure', 'clearCascadeState', 'shouldBackoffReviewerSpawn',
+      'markCascadeCapExhaustedAlerted', 'markOperatorDecisionRequiredAlerted'].map(name =>
+      `export function ${name}(_root, args) { return actual.${name}(${JSON.stringify(cascadeRootDir)}, args); }`).join('\n')}
+  ` : null;
   const reviewStateUrl = fileUrl('src', 'review-state.mjs');
   const reviewStateActualUrl = `${reviewStateUrl}?actual`;
   const subjectAdapterUrl = fileUrl('src', 'adapters', 'subject', 'github-pr', 'index.mjs');
@@ -107,6 +116,7 @@ function buildLoaderSource({
 
   return `
 const capRouteSource = ${JSON.stringify(capRouteSource)};
+const cascadeSource = ${JSON.stringify(cascadeSource)};
 const stubs = new Map(${JSON.stringify(Object.entries(stubs))});
 
 export async function resolve(specifier, context, nextResolve) {
@@ -120,6 +130,7 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url === 'fixture:reviewer-cascade' && cascadeSource) return { format: 'module', shortCircuit: true, source: cascadeSource };
   if (url === 'fixture:cap-route') return { format: 'module', shortCircuit: true, source: capRouteSource };
   if (url === 'fixture:heldhead') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
@@ -3471,3 +3482,130 @@ test('GHSCOPE-01: a rate-limited first discovery still fetches other repository 
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+for (const scenario of ['unchanged', 'pending-missing-failed-at', 'pending-upstream-missing-failed-at', 'new-head', 'new-build', 'operator-rearm', 'upstream-503']) {
+  test(`CASCADECAP-01 pollOnce: ${scenario}`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-timeout-bound-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      const fixtureRepo = JSON.parse(readFileSync(path.join(REPO_ROOT, 'config.json'), 'utf8')).org + '/adversarial-review';
+      const synthetic = source => source.replaceAll(fixtureRepo, 'example/adversarial-review');
+      let loader = buildLoaderSource({ cascadeRootDir: tmp,
+        ...(['new-build', 'operator-rearm'].includes(scenario) ? { reviewerRuntimeSource: `
+          globalThis.__watcherClaimLoopReviewerSpawns = [];
+          export function createReviewerRuntimeAdapterForDomain() { return {
+            spawnReviewer: async payload => {
+              globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+              return payload.subjectContext?.prNumber === 101
+                ? { ok: false, failureClass: 'reviewer-timeout', error: 'synthetic reviewer timeout' }
+                : { ok: true, stdout: '', stderr: '' };
+            }, cancel: async () => {}, reattach: async () => ({}) };
+          }
+          export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+          export function loadDomainConfig() { return {}; }
+          export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+        ` } : {}),
+      });
+      // Run the real durable park/alert path against fixture storage and transport.
+      const parkUrl = fileUrl('src', 'review-retry-exhaustion.mjs');
+      loader = loader.replace('  return nextLoad(url, context);', `
+        if (url === ${JSON.stringify(parkUrl)}) return { format: 'module', shortCircuit: true,
+          source: ${JSON.stringify(`
+            import { parkExhaustedReview as actual } from ${JSON.stringify(`${parkUrl}?actual`)};
+            export * from ${JSON.stringify(`${parkUrl}?actual`)};
+            export function parkExhaustedReview(args) {
+              globalThis.__timeoutParkCalls = (globalThis.__timeoutParkCalls || 0) + 1;
+              return actual({ ...args, rootDir: ${JSON.stringify(tmp)}, deliverAlertFn: async () => {
+                globalThis.__timeoutAlerts = (globalThis.__timeoutAlerts || 0) + 1;
+                return { delivered: true };
+              } });
+            }
+          `)} };
+        if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+          const loaded = await nextLoad(url, context);
+          return { ...loaded, source: loaded.source.toString().replace(
+            "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));",
+            "const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')); config.org = 'example';"
+          ) };
+        }
+        return nextLoad(url, context);
+      `);
+      writeFileSync(loaderPath, synthetic(loader));
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      const failureClass = scenario === 'upstream-503' ? 'cascade' : 'reviewer-timeout';
+      const missingFailedAt = scenario.endsWith('-missing-failed-at');
+      const parksWithoutRetry = scenario === 'unchanged' || missingFailedAt;
+      writeFileSync(runnerPath, synthetic(buildRunnerSource({
+        prePollSetup: `
+          db.exec(\`
+            CREATE TABLE timeout_park_writes (pr_number INTEGER);
+            CREATE TRIGGER track_timeout_park AFTER UPDATE OF failure_message ON reviewed_prs
+            WHEN NEW.pr_number = 101 AND NEW.failure_message LIKE '%[reviewer-timeout-repeated-same-head]%'
+            BEGIN INSERT INTO timeout_park_writes VALUES (NEW.pr_number); END;
+          \`);
+          const { recordCascadeFailure } = await import(${JSON.stringify(fileUrl('src', 'reviewer-cascade.mjs'))});
+          for (let index = 0; index < 2; index++) recordCascadeFailure('unused', {
+            repo: 'example/adversarial-review', prNumber: 101,
+            headSha: ${JSON.stringify(scenario === 'new-head' ? 'old-head' : 'sha-happy-101')},
+            reviewerBuildId: ${JSON.stringify(scenario === 'new-build' ? 'build-old' : 'build-current')},
+            failureClass: ${JSON.stringify(failureClass)}, failureReason: 'synthetic failure',
+            failedAt: '2026-01-01T00:00:00Z', reviewerModel: 'claude',
+          });
+          db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+            review_status, review_attempts, infra_auto_recover_attempts, reviewer_head_sha,
+            revision_ref, failed_at, failure_message, rereview_requested_at, rereview_reason)
+            VALUES ('example/adversarial-review',101,'2026-01-01','claude','open',?,0,3,?,?,
+              ?,?,?,?)\`).run(
+              ${JSON.stringify(scenario === 'pending-upstream-missing-failed-at' ? 'pending-upstream'
+                : missingFailedAt || scenario === 'operator-rearm' ? 'pending' : 'failed')},
+              ${JSON.stringify(scenario === 'new-head' ? 'old-head' : 'sha-happy-101')},
+              ${JSON.stringify(scenario === 'new-head' ? 'old-head' : 'sha-happy-101')},
+              ${JSON.stringify(missingFailedAt ? null : '2026-01-01T00:00:00Z')},
+              ${JSON.stringify(`[${failureClass}] synthetic failure`)},
+              ${JSON.stringify(scenario === 'operator-rearm' ? '2026-01-02T00:00:00Z' : null)},
+              ${JSON.stringify(scenario === 'operator-rearm' ? 'retrigger-review: synthetic re-arm' : null)});
+        `,
+        afterFirstPoll: parksWithoutRetry ? `
+          await pollOnce(octokit, pollOptions);
+          assert.equal(claims.filter(claim => claim.prNumber === 101).length, 0, 'no third claim');
+          const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+          assert.equal(row.review_status, 'failed');
+          ${missingFailedAt ? `assert.ok(Date.parse(row.failed_at) >= Date.now() - 60000,
+            'newly parked row receives the current failure timestamp');` : `assert.equal(row.failed_at, '2026-01-01T00:00:00Z',
+            'existing failure timestamp is preserved');`}
+          assert.match(row.failure_message, /^\\[reviewer-timeout\\] \\[reviewer-timeout-repeated-same-head\\]/);
+          assert.equal(globalThis.__timeoutAlerts, 1, 'operator alert fires once');
+          assert.equal(globalThis.__timeoutParkCalls, 1, 'later polls do not rewrite the failure decision');
+          assert.equal(db.prepare('SELECT COUNT(*) AS count FROM timeout_park_writes').get().count, 1,
+            'later polls do not rewrite the parked row');
+          assert.equal(claims[0].prNumber, 102, 'waiting first pass proceeds while timeout row is parked');
+        ` : `
+          assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1, 'changed input or upstream outage allows retry');
+          ${['new-build', 'operator-rearm'].includes(scenario) ? `
+            await pollOnce(octokit, pollOptions);
+            assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1, 'failed probe parks again');
+            const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+            assert.equal(row.review_status, 'failed');
+            assert.match(row.failure_message, /^\\[reviewer-timeout\\] \\[reviewer-timeout-repeated-same-head\\]/);
+            assert.ok(row.infra_auto_recover_attempts <= 3);
+          ` : ''}
+
+        `,
+      })));
+      const fixture = installGhFixture(tmp);
+      const ghPath = path.join(tmp, 'gh');
+      writeFileSync(ghPath, synthetic(readFileSync(ghPath, 'utf8')));
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+        { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...fixture,
+          ADVERSARIAL_REVIEWER_BUILD_ID: 'build-current',
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: parksWithoutRetry ? '1' : '6' }), timeout: 60000 });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      if (scenario !== 'upstream-503') assert.doesNotMatch(output,
+        /class=reviewer-timeout, infra attempt (?:[4-9]|\d{2,})\/3/,
+        'same-head timeout recovery never logs an infra attempt beyond the cap');
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}

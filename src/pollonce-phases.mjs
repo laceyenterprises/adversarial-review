@@ -1,3 +1,4 @@
+import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './reviewer-timeout-budget.mjs';
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
@@ -203,6 +204,7 @@ import {
 } from './reviewed-head-dispatch-gate.mjs';
 import {
   markCascadeCapExhaustedAlerted,
+  readCascadeState,
   recordCascadeFailure,
   releaseReviewerCredentialProbe,
   shouldBackoffReviewerSpawn,
@@ -2530,6 +2532,42 @@ export async function processReviewSubject(entry, ctx) {
         );
         return;
       }
+      const timeoutBudget = reviewerTimeoutBudget(readCascadeState(ROOT, { repo: repoPath, prNumber }), {
+        headSha: subject.headSha, row: current,
+      });
+      if (timeoutBudget.parked) {
+        // The existing label-gated exhaustion handoff remains available even
+        // for a parked head; parking never grants merge authority itself.
+        const handoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
+          rootDir: ROOT, repoPath, prNumber, existing: current,
+          subjectRef: subject.ref, currentRevisionRef: subject.ref.revisionRef,
+          labelNames: prLabelNames, execFileImpl: execFileAsync, operatorSurface, domainId,
+        });
+        if (handoff.handled) return;
+        // Preserve the timeout classifier and claim identity; only settle the
+        // failed row observed by discovery, never overwrite a racing live claim.
+        const reason = REVIEWER_TIMEOUT_REPEATED_REASON;
+        if (current?.review_status === 'failed' && current?.failure_message?.includes(`[${reason}]`)) return;
+        const message = String(current?.failure_message || '[reviewer-timeout] Reviewer timed out');
+        const parkedMessage = message.includes(`[${reason}]`) ? message
+          : `[reviewer-timeout] [${reason}] timeouts=${timeoutBudget.count}/${timeoutBudget.limit}; reviewer build=${timeoutBudget.reviewerBuildId}\n${message}`;
+        const parked = db.prepare(`UPDATE reviewed_prs SET review_status = 'failed', failure_message = ?,
+            reviewer_lease_expires_at = NULL, failed_at = COALESCE(failed_at, ?)
+          WHERE repo = ? AND pr_number = ? AND review_status IN ('failed', 'pending', 'pending-upstream')
+            AND reviewer_head_sha IS ? AND reviewer_session_uuid IS ? AND failure_message IS ?`).run(
+          parkedMessage, new Date().toISOString(), repoPath, prNumber, current?.reviewer_head_sha || null,
+          current?.reviewer_session_uuid || null, current?.failure_message || null,
+        );
+        if (parked.changes === 1) {
+          markWatcherSpawnDecision({ repo: repoPath, pr_number: prNumber, decision: reason,
+            failure_class: reason, reviewer_head_sha: subject.headSha });
+          await parkExhaustedReview({ rootDir: ROOT, repo: repoPath, prNumber, headSha: subject.headSha,
+            reason, operatorReason: reason,
+            fingerprint: `${reason}:${timeoutBudget.reviewerBuildId}:${timeoutBudget.rearmAt || ''}`,
+            deliverAlertFn });
+        }
+        return;
+      }
       const cascadeGate = shouldBackoffReviewerSpawn(ROOT, {
         repo: repoPath,
         prNumber,
@@ -2560,7 +2598,7 @@ export async function processReviewSubject(entry, ctx) {
         });
         return;
       }
-      const cascadeRetryDue = Boolean(cascadeGate.state?.nextRetryAfter);
+      const cascadeRetryDue = Boolean(cascadeGate.state?.nextRetryAfter) || timeoutBudget.changed;
       const timeoutExhaustionHandoff = await maybeDispatchReviewerTimeoutExhaustedMergeAgent({
         rootDir: ROOT,
         repoPath,
@@ -3050,6 +3088,7 @@ export async function processReviewSubject(entry, ctx) {
         current,
         hasPriorPostedReview: getDispatchHasPriorPostedReview(),
         depthPassKind: getDepthPassKind(),
+        sameHeadTimeoutRetry: timeoutBudget.total > 0,
         retainedWakePriority: retainedWatcherWakes?.matches(wakeIdentity) === true,
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
@@ -3233,6 +3272,11 @@ export async function processReviewSubject(entry, ctx) {
             };
             // TOKDZ-01: a token-refresh row is reclaimed by its own CAS, which
             // never checks or charges infra_auto_recover_attempts.
+            // Queue admission can outlive another watcher's timeout settlement.
+            // Recheck the shared budget immediately before the single-claim CAS.
+            if (reviewerTimeoutBudget(readCascadeState(ROOT, { repo: repoPath, prNumber }), {
+              headSha: reviewerHeadSha, row: stmtGetReviewRow.get(repoPath, prNumber),
+            }).parked) return { dispatched: false, reason: REVIEWER_TIMEOUT_REPEATED_REASON };
             const claimReviewer = () => tokenRefreshRecovery
               ? stmtMarkTokenRefreshRecoveryAttemptStarted.run(
                 attemptAt,
@@ -3353,9 +3397,10 @@ export async function processReviewSubject(entry, ctx) {
                   `(class=${infraRecoveryClass}, uncharged; infra attempts stay ${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP})`
               );
             } else if (infraRecoveryClass) {
+              const claimedInfraAttempts = Number(stmtGetReviewRow.get(repoPath, prNumber)?.infra_auto_recover_attempts || 0);
               console.log(
                 `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +
-                  `(class=${infraRecoveryClass}, infra attempt ${infraRecoveryAttempts + 1}/${INFRA_AUTO_RECOVER_CAP})`
+                  `(class=${infraRecoveryClass}, infra attempt ${claimedInfraAttempts}/${INFRA_AUTO_RECOVER_CAP})`
               );
             }
             if (unknownFailureRetryable) {

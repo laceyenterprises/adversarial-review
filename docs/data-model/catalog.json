@@ -335,7 +335,11 @@
         "src/watcher.mjs",
         "src/reviewer-route-selection.mjs",
         "src/review-pipeline-health.mjs",
-        "src/token-refresh-hold.mjs"
+        "src/token-refresh-hold.mjs",
+        "src/reviewer-timeout-budget.mjs",
+        "src/pollonce-phases.mjs",
+        "src/reviewer-spawn-settle.mjs",
+        "src/reviewer-pass-reaper.mjs"
       ],
       "owner": "reviewer transient-failure backoff and route selection"
     },

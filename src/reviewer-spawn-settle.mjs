@@ -1,4 +1,5 @@
 import { resolveHqRoot } from './hq-root.mjs';
+import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
 // spawnReviewer + the gated pipeline entry point + settleReviewerAttempt +
@@ -797,6 +798,7 @@ async function spawnReviewerOnce({
       // budget counter keys per (repo, pr, head) — a head move re-arms review.
       headSha: reviewerHeadSha || null,
       metadata: {
+        reviewerBuildId: REVIEWER_BUILD_ID,
         reviewerSessionUuid,
         reviewerModel,
         reviewAttemptNumber,
@@ -1535,6 +1537,9 @@ function settleReviewerAttempt({
       failureClass,
       failureReason: failureMessage,
       reviewerModel,
+      headSha: reviewerHeadSha || currentRow?.reviewer_head_sha,
+      reviewerBuildId: REVIEWER_BUILD_ID,
+      row: currentRow,
     });
     if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
       const repeatExhaustion = infraRecoverAttempts > INFRA_AUTO_RECOVER_CAP;

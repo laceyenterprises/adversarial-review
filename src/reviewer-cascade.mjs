@@ -18,6 +18,7 @@
  * tmp+fsync+rename write below keeps a crashed writer from ever leaving a
  * torn JSON that would (fail-closed) park the PR.
  */
+import { reviewerTimeoutBudget, REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -42,7 +43,8 @@ import {
 // unbounded: upstream provider outages resolve on the minutes-to-an-hour
 // scale, and an unbounded exponent would leave PRs parked for hours after
 // the provider recovered. The counter is clamped to CASCADE_FAILURE_CAP, so
-// the last entry is the permanent steady-state retry cadence.
+// the last entry is the steady-state retry cadence for real upstream outages.
+// Same-head timeouts have a separate bounded budget (CASCADECAP-01).
 const CASCADE_BACKOFF_MINUTES = [1, 2, 4, 8, 15];
 // Clamp for consecutiveTransientFailures (keeps the counter from growing
 // unbounded across a long outage). Doubles as a threshold elsewhere: the
@@ -323,6 +325,9 @@ function recordCascadeFailure(rootDir, {
   failureReason = null,
   nextRetryAfter = null,
   reviewerModel = null,
+  headSha = null,
+  reviewerBuildId = REVIEWER_BUILD_ID,
+  row = null,
 } = {}) {
   const previous = readCascadeState(rootDir, { repo, prNumber });
   // SCHEMA SHIM — do not remove while any data/cascade-state/*.json written
@@ -421,7 +426,18 @@ function recordCascadeFailure(rootDir, {
     modelCounts[normalizedFailureClass] = Number(modelCounts[normalizedFailureClass] || 0) + 1;
     transientFailureBreakdownByModel[normalizedModel] = modelCounts;
   }
+  // Settle a scoped build/re-arm reset even when the attempt did not time out.
+  // Otherwise later retries either lose the re-arm or keep rediscovering the
+  // same build change. Only actual timeouts spend the timeout allowance.
+  const timeout = headSha
+    ? reviewerTimeoutBudget(previous, { headSha, reviewerBuildId, row }) : null;
+  const timeoutIncrement = normalizedFailureClass === 'reviewer-timeout' ? 1 : 0;
   return writeCascadeState(rootDir, { repo, prNumber }, {
+    ...(timeout ? { reviewerTimeout: {
+      headSha, reviewerBuildId, count: timeout.count + timeoutIncrement, total: timeout.total + timeoutIncrement,
+      limit: timeout.limit, rearmAt: timeout.rearmAt,
+      lastTimeoutAt: timeoutIncrement ? new Date(failedAtMs).toISOString() : timeout.lastTimeoutAt,
+    } } : previous?.reviewerTimeout ? { reviewerTimeout: previous.reviewerTimeout } : {}),
     consecutiveTransientFailures,
     transientFailureBreakdown,
     transientFailureBreakdownByModel,

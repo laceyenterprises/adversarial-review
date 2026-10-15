@@ -617,17 +617,19 @@ function reapRunningPassTimeouts({
       }
       if (result.reviewChanged) {
         const reviewRow = getReviewRow.get(row.repo, row.pr_number);
-        if (reviewRow?.review_status === 'pending-upstream') {
+        if (['pending-upstream', 'failed'].includes(reviewRow?.review_status)) {
           recordCascadeFailure(rootDir, {
             repo: row.repo,
             prNumber: row.pr_number,
             failedAt: endedAt,
             failureClass: RUNNING_PASS_TIMEOUT_FAILURE_CLASS,
+            headSha: row.head_sha || null,
+            reviewerBuildId: passMetadata.reviewerBuildId,
+            row: reviewRow,
             reviewerModel: row.reviewer_model || row.reviewer_class || null,
           });
-          reviewClaimsReleased++;
-        } else if (reviewRow?.review_status === 'failed') {
-          reviewClaimsFailed++;
+          if (reviewRow.review_status === 'pending-upstream') reviewClaimsReleased++;
+          else reviewClaimsFailed++;
         }
       }
       log.log(

@@ -322,8 +322,6 @@ function reviewerDispatchIsFirstPass(candidate) {
 }
 
 function reviewerDispatchTierRank(candidate) {
-  if (candidate?.retainedWakePriority === true) return 0;
-  if (candidate?.wakePriority === true) return 1;
   return reviewerDispatchIsFirstPass(candidate) ? 2 : 3;
 }
 
@@ -343,6 +341,20 @@ function compareReviewerDispatchWait(a, b, options) {
   return bWait - aWait;
 }
 
+// WAKESTARVE-01 has one admission ordering shared by sorting and lane
+// selection. A timed-out head yields even when its old wait or retained wake
+// would otherwise promote it. First-pass and re-review lane fairness then runs
+// unchanged within each priority group.
+function compareReviewerDispatchPriority(a, b, options) {
+  const timeoutDelta = Number(a?.sameHeadTimeoutRetry === true) - Number(b?.sameHeadTimeoutRetry === true);
+  if (timeoutDelta !== 0) return timeoutDelta;
+  const waitDelta = compareReviewerDispatchWait(a, b, options);
+  if (waitDelta !== 0) return waitDelta;
+  const retainedDelta = Number(b?.retainedWakePriority === true) - Number(a?.retainedWakePriority === true);
+  if (retainedDelta !== 0) return retainedDelta;
+  return Number(b?.wakePriority === true) - Number(a?.wakePriority === true);
+}
+
 function reviewerDispatchEnqueuedAt(current) {
   return current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || null;
 }
@@ -350,8 +362,8 @@ function reviewerDispatchEnqueuedAt(current) {
 function compareReviewerDispatchCandidates(a, b, {
   nowMs = Date.now(), waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
 } = {}) {
-  const waitDelta = compareReviewerDispatchWait(a, b, { nowMs, waitWarnMs });
-  if (waitDelta !== 0) return waitDelta;
+  const priorityDelta = compareReviewerDispatchPriority(a, b, { nowMs, waitWarnMs });
+  if (priorityDelta !== 0) return priorityDelta;
   const tierDelta = reviewerDispatchTierRank(a) - reviewerDispatchTierRank(b);
   if (tierDelta !== 0) return tierDelta;
   const timeDelta = reviewerDispatchSortTimeMs(a) - reviewerDispatchSortTimeMs(b);
@@ -416,7 +428,9 @@ function pendingLaneCounts(entries) {
   let firstPass = 0;
   let rereview = 0;
   for (const entry of entries) {
-    if (entry.started) continue;
+    // A timeout retry cannot reserve lane capacity ahead of fresh work.
+    // Its eventual admission still uses the shared priority comparator.
+    if (entry.started || entry.candidate?.sameHeadTimeoutRetry === true) continue;
     if (reviewerDispatchIsFirstPass(entry.candidate)) firstPass += 1;
     else rereview += 1;
   }
@@ -511,14 +525,8 @@ function compareReviewerDispatchEntries(
     waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   } = {},
 ) {
-  const waitDelta = compareReviewerDispatchWait(a.candidate, b.candidate, { nowMs, waitWarnMs });
-  if (waitDelta !== 0) return waitDelta;
-  const aRetained = a?.candidate?.retainedWakePriority === true;
-  const bRetained = b?.candidate?.retainedWakePriority === true;
-  if (aRetained !== bRetained) return aRetained ? -1 : 1;
-  const aWake = a?.candidate?.wakePriority === true;
-  const bWake = b?.candidate?.wakePriority === true;
-  if (aWake !== bWake) return aWake ? -1 : 1;
+  const priorityDelta = compareReviewerDispatchPriority(a.candidate, b.candidate, { nowMs, waitWarnMs });
+  if (priorityDelta !== 0) return priorityDelta;
 
   const counts = laneCounts || { firstPass: 0, rereview: 0 };
   const bothLanesPending = counts.firstPass > 0 && counts.rereview > 0;

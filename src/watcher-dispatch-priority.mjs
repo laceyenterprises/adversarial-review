@@ -9,7 +9,10 @@ export function createWatcherDiscoveryBatchDrain({
 }) {
   let used = false;
   return async (reason) => {
-    if (used || priorityDiscoveryPending.size > 0 || reviewerDispatchCandidates.length < batchSize) {
+    if (used || priorityDiscoveryPending.size > 0 || reviewerDispatchCandidates.length < batchSize
+        // A timeout retry cannot consume a partial discovery wave before later
+        // first-pass/re-review subjects enter the existing priority ordering.
+        || reviewerDispatchCandidates.some(candidate => candidate.sameHeadTimeoutRetry === true)) {
       return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     }
     if (reviewerDispatchCandidates.every((candidate) => !reviewerDispatchIsFirstPass(candidate))

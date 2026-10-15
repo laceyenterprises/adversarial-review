@@ -133,17 +133,17 @@ test('fail-open: malformed fleet-quota status stdout keeps the primary', async (
   assert.match(errors[0], /failing open/);
 });
 
-test('uses a same-writer reviewer only as an explicit quota-grounded last resort', async () => {
+test('defers rather than selecting a Codex-family reviewer the child refuses', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'codex',
     primary: 'gemini',
     fallbackWorkerClasses: ['codex'],
     execFileImpl: fleetStatusStub(GEMINI_EXHAUSTED_CODEX_OK),
   });
-  assert.equal(result.workerClass, 'codex');
-  assert.equal(result.fellBack, true);
-  assert.equal(result.reason, 'primary-grounded-last-resort');
-  assert.equal(result.lastResort, true);
+  assert.equal(result.workerClass, 'gemini');
+  assert.equal(result.fellBack, false);
+  assert.equal(result.reason, 'no-available-fallback');
+  assert.equal(result.quotaBlocked, true);
   assert.equal(result.primaryState, 'exhausted');
 });
 
@@ -529,7 +529,7 @@ test('applies fallback route with explicit worker-class precedence and model-key
   });
 });
 
-test('route application preserves the diversity guard unless the decision is stamped last-resort', () => {
+test('route application refuses codex-on-codex even when stamped last-resort', () => {
   const route = {
     builderClass: 'codex',
     reviewerModel: 'gemini',
@@ -567,9 +567,8 @@ test('route application preserves the diversity guard unless the decision is sta
     },
     authorClass: 'codex',
   });
-  assert.equal(applied.applied, true);
-  assert.equal(applied.route.reviewerModel, 'codex');
-  assert.equal(applied.route.reviewWorkerClassFallback.lastResort, true);
+  assert.equal(applied.applied, false);
+  assert.equal(applied.reason, 'writer-diversity-violation');
 });
 
 test('does not apply or claim fallback success when the worker class has no model route', () => {

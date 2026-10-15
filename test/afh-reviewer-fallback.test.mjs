@@ -330,7 +330,8 @@ test('AFH-04: every candidate grounded holds the primary without spawning', () =
       google: { state: 'exhausted', grounded: true },
     }),
     geminiReviewerMode: 'always-on',
-  }), { ...baseRoute, quotaBlocked: true });
+  }), { ...baseRoute, quotaBlocked: true, quotaGrounding: { reviewer: 'gemini',
+    state: 'exhausted', source: 'fleet-quota-status', reason: 'all-candidates-grounded' } });
 });
 
 test('AFH-04: an explicit operator reviewer pin outranks the AFH fallback', () => {

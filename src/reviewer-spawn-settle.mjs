@@ -37,7 +37,9 @@ import {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
-import { isCrossModelReviewWaived, normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
+import {
+  CODEX_BUILDER_REVIEW_REFUSAL, reviewerRefusesBuilder, isCrossModelReviewWaived, normalizeReviewerModel,
+} from './adapters/subject/github-pr/routing.mjs';
 import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
 import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
 import {
@@ -45,6 +47,7 @@ import {
   getAgyReviewerIdentityPool,
   runWithAgyReviewerIdentity,
   readReviewerGeminiQuotaCooldown,
+  readReviewerGeminiPoolAvailability,
 } from './agy-reviewer-identities.mjs';
 import {
   isGroundedProviderState,
@@ -672,8 +675,11 @@ async function spawnReviewerOnce({
   onPostOperationSettled = null,
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
-  if (normalizeReviewerModel(reviewerModel) === 'codex' && isCrossModelReviewWaived(builderTag, reviewerModel)) {
-    return { ok: false, effectiveReviewerModel: reviewerModel, failureClass: 'bug', error: 'Codex-family reviewer cannot review a Codex-family builder' };
+  if (reviewerRefusesBuilder(builderTag, reviewerModel)) {
+    return {
+      ok: false, effectiveReviewerModel: reviewerModel, failureClass: 'bug',
+      routingRefusal: true, error: CODEX_BUILDER_REVIEW_REFUSAL,
+    };
   }
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
@@ -694,6 +700,12 @@ async function spawnReviewerOnce({
       codexBrokerProvider,
       env: quotaCheckEnv,
     });
+    if (normalizeReviewerModel(reviewerModel) === 'gemini' && quotaDecision.state !== 'disabled') {
+      const poolAvailability = await readReviewerGeminiPoolAvailability({
+        pool: agyReviewerIdentityPool, adapter: activeReviewerRuntimeAdapter,
+      });
+      if (poolAvailability) quotaDecision = { ...poolAvailability, provider: 'google' };
+    }
   } catch {
     quotaDecision = {
       available: true,
@@ -1340,7 +1352,8 @@ function settleReviewerAttempt({
   const reviewCreateFailure = classifyGitHubReviewCreateFailure(fullFailureOutput);
   const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
-  if (failureClass === 'stale-review-head') {
+  const routingRefusal = failureClass === 'bug' && result.error === CODEX_BUILDER_REVIEW_REFUSAL;
+  if (routingRefusal || failureClass === 'stale-review-head') {
     // Claim identity comes from dispatch, not the runtime adapter's result.
     // Failure/lease statements charge attempts and cannot handle head churn.
     let releaseResult = typeof statements.releaseReviewerClaim?.run === 'function'
@@ -1349,7 +1362,7 @@ function settleReviewerAttempt({
         { label: `reviewer-settle-release-claim:${repoPath}#${prNumber}`, log }
       )
       : { changes: 0 };
-    if (releaseResult.changes === 0 && reviewerHeadSha &&
+    if (!routingRefusal && releaseResult.changes === 0 && reviewerHeadSha &&
         typeof statements.releaseLegacyStaleReviewerClaim?.run === 'function') {
       releaseResult = withSqliteBusyRetrySync(
         () => statements.releaseLegacyStaleReviewerClaim.run(repoPath, prNumber, reviewerHeadSha),
@@ -1357,9 +1370,9 @@ function settleReviewerAttempt({
       );
     }
     log.warn(
-      `[watcher] Reviewer output for ${repoPath}#${prNumber} was stale; ` +
+      `[watcher] Reviewer ${routingRefusal ? 'routing refusal' : 'stale output'} for ${repoPath}#${prNumber}; ` +
       `released claim=${releaseResult.changes === 1 ? 'yes' : 'no'} ` +
-      'for current-head re-review'
+      (routingRefusal ? 'deferred without charging review attempts' : 'for current-head re-review')
     );
     return;
   }

@@ -70,6 +70,7 @@ import {
   ROUTE_BY_BUILDER_CLASS,
   geminiMayReviewBuilder,
   isCrossModelReviewWaived,
+  reviewerRefusesBuilder,
   normalizeBuilderClass,
   normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
@@ -639,6 +640,13 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     softVerdict: null,
     known: false,
   };
+  if (model === 'gemini' && grounding?.geminiPoolAvailability) {
+    const status = grounding.geminiPoolAvailability;
+    return {
+      ...base, state: status.state, source: status.source, known: true,
+      hardGrounded: !status.available, grounded: !status.available, poolGrounded: !status.available,
+    };
+  }
   if (model === 'claude' && grounding?.localRuntimeGrounding?.claude?.available === false) {
     const runtimeStatus = grounding.localRuntimeGrounding.claude;
     const entry = grounding?.providers?.[provider] || base;
@@ -661,6 +669,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
       softVerdict,
       known: true,
       localRuntimeGrounded: true,
+      source: 'local-claude-runtime-probe',
     };
   }
   if (!grounding?.available || !provider) return base;
@@ -676,6 +685,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
   return {
     ...base,
     state: entry.state,
+    source: 'fleet-quota-status',
     brokerProvider,
     hardGrounded: entry.hardGrounded,
     softGrounded: entry.softGrounded,
@@ -773,6 +783,9 @@ export function afhReviewerFallbackDecision({
   });
 
   if (!baseRoute || baseRoute.configBroken) return notApplied('no-route');
+  if (grounding?.reason === 'afh-reviewer-fallback-disabled') {
+    return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled');
+  }
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
   // An explicit operator reviewer pin outranks the AFH degradation path, exactly
@@ -784,7 +797,7 @@ export function afhReviewerFallbackDecision({
   // Fail open: an unreadable/absent/disabled AFH signal keeps the configured
   // primary + gemini behavior exactly as it is today unless a local runtime
   // probe conclusively grounded the current reviewer itself.
-  if (!grounding?.available && !primary.localRuntimeGrounded) {
+  if (!grounding?.available && !primary.localRuntimeGrounded && !primary.poolGrounded) {
     return notApplied(`afh-grounding-unavailable:${grounding?.reason || 'absent'}`);
   }
   if (!primary.grounded) {
@@ -818,7 +831,7 @@ export function afhReviewerFallbackDecision({
         continue;
       }
     }
-    if (candidate === 'codex' && isCrossModelReviewWaived(normalizedBuilder, candidate)) {
+    if (reviewerRefusesBuilder(normalizedBuilder, candidate)) {
       considered.push({ reviewerModel: candidate, selected: false, reason: 'codex-builder-integrity-guard' });
       continue;
     }
@@ -860,7 +873,16 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
   if (!baseRoute) return baseRoute;
   if (!decision?.applied) {
     if (decision?.primary?.brokerProvider === 'codex-corp') return { ...baseRoute, codexBrokerProvider: 'codex-corp' };
-    if (decision?.primary?.grounded) return { ...baseRoute, quotaBlocked: true };
+    if (decision?.primary?.grounded) {
+      return {
+        ...baseRoute, quotaBlocked: true,
+        quotaGrounding: {
+          reviewer: decision.primary.model, state: decision.primary.state,
+          source: decision.primary.source || decision.primary.softVerdict?.source || 'fleet-quota-status',
+          reason: decision.reason,
+        },
+      };
+    }
     return baseRoute;
   }
   const target = REVIEWER_ROUTE_BY_MODEL[decision.to];
@@ -870,6 +892,7 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
     reviewerModel: target.reviewerModel,
     codexBrokerProvider: decision.brokerProvider || 'codex',
     quotaBlocked: false,
+    quotaGrounding: null,
     botTokenEnv: target.botTokenEnv,
     afhReviewerFallback: {
       fromReviewerModel: decision.from,

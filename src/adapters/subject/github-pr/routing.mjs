@@ -193,6 +193,13 @@ function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
   return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] === reviewerModel;
 }
 
+// The child refuses this family pairing even for an explicit last resort.
+export const CODEX_BUILDER_REVIEW_REFUSAL = 'Codex-family reviewer cannot review a Codex-family builder';
+export function reviewerRefusesBuilder(builderClass, reviewerModel) {
+  return normalizeReviewerModel(reviewerModel) === 'codex'
+    && isCrossModelReviewWaived(builderClass, reviewerModel);
+}
+
 function describeCrossModelReviewWaiver(builderClassInput, reviewerInput, env = process.env) {
   if (!isCrossModelReviewWaived(builderClassInput, reviewerInput)) {
     return null;
@@ -280,8 +287,7 @@ function applyGeminiReviewerRoute({
   const normalizedBuilder =
     normalizeBuilderClass(builderClass, routeTable) || normalizeBuilderClass(baseRoute.builderClass, routeTable);
   const baseIsGemini = normalizeReviewerModel(baseRoute.reviewerModel) === 'gemini';
-  if (normalizeReviewerModel(baseRoute.reviewerModel) === 'codex'
-    && isCrossModelReviewWaived(normalizedBuilder, 'codex')) {
+  if (reviewerRefusesBuilder(normalizedBuilder, baseRoute.reviewerModel)) {
     const crossModel = routeTable[normalizedBuilder];
     return { ...baseRoute, reviewerModel: crossModel.reviewerModel, botTokenEnv: crossModel.botTokenEnv };
   }

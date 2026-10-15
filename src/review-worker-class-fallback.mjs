@@ -1,3 +1,4 @@
+import { readReviewerGeminiPoolAvailability } from './agy-reviewer-identities.mjs';
 import { promisify } from 'node:util';
 import { execFile as execFileCb } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
@@ -11,6 +12,7 @@ import {
 import {
   REVIEWER_ROUTE_BY_MODEL as REVIEWER_ROUTE_TABLE_BY_MODEL,
   isCrossModelReviewWaived,
+  reviewerRefusesBuilder,
 } from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFileCb);
@@ -321,7 +323,8 @@ export function applyReviewerWorkerClassFallbackToRoute({
   // the author the CALLER believes in, so no future trigger can reach the route
   // swap with a class-X reviewer for a class-X PR.
   const author = authorClass ?? route?.builderClass ?? null;
-  if (author && violatesWriterDiversity(author, workerClass) && decision.lastResort !== true) {
+  if (reviewerRefusesBuilder(author, reviewerModel)
+    || (author && violatesWriterDiversity(author, workerClass) && decision.lastResort !== true)) {
     return { applied: false, route, reason: 'writer-diversity-violation' };
   }
 
@@ -397,6 +400,8 @@ export async function resolveReviewerWorkerClassWithFallback({
   retryDelaysMs = FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
   fleetQuotaStatusCache = fleetQuotaStatusCacheFor(execFileImpl),
   fleetQuotaStatusCacheTtlMs = FLEET_QUOTA_STATUS_CACHE_TTL_MS,
+  agyReviewerIdentityPool = undefined,
+  reviewerRuntimeAdapter = null,
   nowMs = () => Date.now(),
 } = {}) {
   const author = String(authorClass || '').trim().toLowerCase();
@@ -452,6 +457,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   );
   const sameWriterLastResorts = quotaTrackedFallbacks.filter(
     (candidate) => violatesWriterDiversity(author, candidate)
+      && !reviewerRefusesBuilder(author, reviewerModelForWorkerClass(candidate))
   );
   if (quotaTrackedFallbacks.length === 0) {
     return { ...base, ...depthFields, reason: 'no-available-fallback' };
@@ -473,13 +479,18 @@ export async function resolveReviewerWorkerClassWithFallback({
   }
 
   const stdout = quotaStatus.stdout;
+  const geminiAvailability = await readReviewerGeminiPoolAvailability({
+    pool: agyReviewerIdentityPool, adapter: reviewerRuntimeAdapter,
+  });
+  const availability = (harness) => reviewerModelForWorkerClass(harness) === 'gemini' && geminiAvailability
+    ? geminiAvailability : quotaAvailableFromFleetStatus(stdout, { harness });
   let primaryAvail;
   try {
     // A primary with no tracked provider can only be here under depth pressure
     // (the gate above). It has no quota verdict, so it is treated as ungrounded
     // and the quota trigger simply does not fire for it — depth does.
     primaryAvail = providerForQuotaHarness(primaryClass)
-      ? quotaAvailableFromFleetStatus(stdout, { harness: primaryClass })
+      ? availability(primaryClass)
       : { available: true, state: 'untracked-quota-harness' };
     if (!isGroundedProviderState(primaryAvail.state)) {
       // ── Elevated-spend trigger (RSP-01 depth / RPL-07 burst lease) ────────
@@ -494,7 +505,7 @@ export async function resolveReviewerWorkerClassWithFallback({
           // class actually boot and post", and failing either makes the spill a
           // stall rather than a drain.
           if (!reviewerWorkerClassEntitled(candidate, env)) continue;
-          if (!quotaAvailableFromFleetStatus(stdout, { harness: candidate }).available) continue;
+          if (!availability(candidate).available) continue;
           return {
             workerClass: candidate,
             fellBack: true,
@@ -522,7 +533,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     // Quota trigger, unchanged: a grounded primary falls over regardless of
     // depth, and does NOT consume the depth budget — the two triggers compose.
     for (const candidate of viableFallbacks) {
-      const candidateAvail = quotaAvailableFromFleetStatus(stdout, { harness: candidate });
+      const candidateAvail = availability(candidate);
       if (candidateAvail.available) {
         return {
           workerClass: candidate,
@@ -535,7 +546,7 @@ export async function resolveReviewerWorkerClassWithFallback({
       }
     }
     for (const candidate of sameWriterLastResorts) {
-      const candidateAvail = quotaAvailableFromFleetStatus(stdout, { harness: candidate });
+      const candidateAvail = availability(candidate);
       if (candidateAvail.available) {
         return {
           workerClass: candidate,
@@ -556,5 +567,12 @@ export async function resolveReviewerWorkerClassWithFallback({
     return { ...base, reason: 'fleet-quota-status-parse-error', error: message };
   }
 
-  return { ...base, reason: 'no-available-fallback', primaryState: primaryAvail.state };
+  return {
+    ...base, reason: 'no-available-fallback', primaryState: primaryAvail.state,
+    quotaBlocked: true,
+    quotaGrounding: {
+      reviewer: reviewerModelForWorkerClass(primaryClass), state: primaryAvail.state,
+      source: primaryAvail.source || 'fleet-quota-status', reason: 'no-allowed-reviewer-available',
+    },
+  };
 }

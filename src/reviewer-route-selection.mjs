@@ -5,6 +5,7 @@ import { readCascadeState } from './reviewer-cascade.mjs';
 import { tokenRefreshHoldExhausted } from './token-refresh-hold.mjs';
 import {
   isCrossModelReviewWaived,
+  reviewerRefusesBuilder,
   normalizeBuilderClass,
 } from './adapters/subject/github-pr/routing.mjs';
 import {
@@ -256,7 +257,7 @@ function candidateReviewerModelsForExecFallback({ baseRoute, builderClass }) {
   const push = (model, { sameModelLastResort = false } = {}) => {
     const normalized = normalizeReviewerAttribution(model);
     if (!normalized || seen.has(normalized)) return;
-    if (normalized === 'codex' && !modelMayReviewBuilder(normalized, builderClass)) return;
+    if (reviewerRefusesBuilder(builderClass, normalized)) return;
     if (!sameModelLastResort && !modelMayReviewBuilder(normalized, builderClass)) return;
     seen.add(normalized);
     candidates.push({ reviewerModel: normalized, sameModelLastResort });
@@ -526,7 +527,7 @@ export function selectReviewerRouteForAttempt({
   }
   const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
   if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return { ...baseRoute };
-  if (fallbackModel === 'codex' && !modelMayReviewBuilder(fallbackModel, builderClass)) return { ...baseRoute };
+  if (reviewerRefusesBuilder(builderClass, fallbackModel)) return { ...baseRoute };
   const fallbackRoute = reviewerRouteForModel(fallbackModel);
   if (!fallbackRoute) return { ...baseRoute };
   // AFH-04: never switch the timeout fallback onto a reviewer whose provider is

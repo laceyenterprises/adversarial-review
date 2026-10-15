@@ -1141,6 +1141,7 @@ function createAgyReviewerIdentityPool({
   return {
     plan: currentPlan,
     refreshReadiness,
+    refreshReadinessIfStale: () => readinessStale(currentPlan()) ? refreshReadiness() : Promise.resolve(readyCount()),
     readyCount: () => readyCount(),
     readyUsers,
     acquire,
@@ -1302,4 +1303,15 @@ export function readReviewerGeminiQuotaCooldown({
   const identities = plan.multi && adapterCarriesAgyReviewerIdentity(adapter)
     ? plan.identities.map(({ user }) => user) : [plan.hqOwner];
   return readGeminiQuotaCooldownForIdentities({ rootDir, env, nowMs, log, hqOwner: plan.hqOwner, identities });
+}
+
+// Routing and leasing must use the same capacity, including identity cooldowns.
+// Busy seats still count as available: the dispatch queue owns concurrency.
+export async function readReviewerGeminiPoolAvailability({
+  pool = getAgyReviewerIdentityPool(), adapter = null,
+} = {}) {
+  if (!pool.plan().multi || (adapter && !adapterCarriesAgyReviewerIdentity(adapter))) return null;
+  await (pool.refreshReadinessIfStale?.() ?? pool.refreshReadiness());
+  const ready = pool.readyCount();
+  return { available: ready > 0, state: ready > 0 ? 'ok' : 'exhausted', source: 'agy-reviewer-identity-pool' };
 }

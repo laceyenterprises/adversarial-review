@@ -6921,6 +6921,18 @@ test('killDetachedWorkerProcessGroup terminates detached remediation workers by 
     const closed = new Promise((resolve) => child.once('close', resolve));
     assert.equal(killDetachedWorkerProcessGroup(child.pid), true);
     await closed;
+    // A killed grandchild can remain in the group until its new parent reaps it.
+    const deadline = performance.now() + 5_000;
+    while (true) {
+      try {
+        process.kill(-child.pid, 0);
+      } catch (error) {
+        if (error.code === 'ESRCH') break;
+        throw error;
+      }
+      assert.ok(performance.now() < deadline, `Process group ${child.pid} still has members 5 seconds after the worker closed`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     assert.equal(killDetachedWorkerProcessGroup(child.pid), false);
   } finally {
     await killFixtureChild(child);

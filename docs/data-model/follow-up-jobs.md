@@ -3,7 +3,7 @@
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
 **Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
-**Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
+**Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`
 
 ## Missing retrigger-review label-event observations
 
@@ -146,6 +146,13 @@ requests; `reReview` records the request intent and then its outcome. Ordinary
 rounds request re-review and wake the watcher; comment-only final rounds wake
 the existing cap/closure lane with re-review suppressed. Recovery itself grants
 no CI waiver or merge decision.
+
+Recovery holds a delivery claim across completion and follow-on dispatch. It
+registers the delivery retry index pointer only after persisting the final
+`reReview` outcome and rendered `commentDelivery.body`. The one-time completed
+worker backfill can use `remediationReply.payload` when the reply artifact read
+fails with `ENOENT`; it revalidates that payload against the job identity and
+reply contract. Other artifact read or validation errors do not use the fallback.
 
 The stale-claim sweep probes recovery after its activity, age and CPU gates.
 An exited worker with current result artifacts can be reconciled earlier.

@@ -114,8 +114,6 @@ export function completeWorkerPublishedHead({
           remediationReply, reReview, commentDelivery,
           completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source },
         });
-        // The sweep owns posting, including after the history index was seeded.
-        addToDeliveryRetryIndex(rootDir, completed.jobPath);
         if (job.finalRound === 'comment-only') {
           reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
           requestWatcherWakeImpl({ rootDir, reason: 'comment-only-final-round-completed',
@@ -142,6 +140,8 @@ export function completeWorkerPublishedHead({
         const targetRound = completed.job.remediationPlan?.rounds?.find(entry => Number(entry.round) === Number(round.round));
         if (targetRound) targetRound.reReview = reReview;
         writeFollowUpJob(completed.jobPath, completed.job);
+        // Expose retry debt only after the final re-review body is durable.
+        addToDeliveryRetryIndex(rootDir, completed.jobPath);
         return completed;
       } finally {
         if (deliveryClaim.acquired) releaseDeliveryClaim(terminalPath);

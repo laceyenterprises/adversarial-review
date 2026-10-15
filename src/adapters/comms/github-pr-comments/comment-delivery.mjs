@@ -31,7 +31,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
-import { getFollowUpJobDir, readRemediationReplyArtifact } from '../../../follow-up-jobs.mjs';
+import { getFollowUpJobDir, readRemediationReplyArtifact, validateRemediationReply } from '../../../follow-up-jobs.mjs';
 import { withFollowUpJobLock } from '../../../follow-up-job-write.mjs';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
 import { buildDeliveryKey } from '../../../identity-shapes.mjs';
@@ -869,7 +869,15 @@ function readCompletedWorkerReply(rootDir, record) {
   try {
     const reply = readRemediationReplyArtifact(resolve(rootDir, replyPath), { expectedJob: record });
     return { reply, worker };
-  } catch { return null; }
+  } catch (error) {
+    // Pruned artifacts may still have a durable reply on the job. Do not
+    // conceal malformed files or other read failures with an older payload.
+    if (error.cause?.code !== 'ENOENT') return null;
+    try {
+      const reply = validateRemediationReply(record.remediationReply?.payload, { expectedJob: record });
+      return { reply, worker };
+    } catch { return null; }
+  }
 }
 
 // REMCOMMENT-01: owe old completed-worker replies once, even on an installation

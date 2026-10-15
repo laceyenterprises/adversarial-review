@@ -244,13 +244,46 @@ for (const status of ['completed', 'stopped', 'failed']) {
   }
 }
 
-for (const invalid of ['missing', 'malformed', 'wrong-job', 'not-completed', 'exempt']) {
+test('REMCOMMENT-01: backfill validates the stored reply when its artifact was pruned', async t => {
+  const f = fixture(t, { reply: false });
+  const old = legacyTerminal(f);
+  const ordinary = buildReconcileCommentDelivery({ job: old.job, worker: old.job.remediationWorker,
+    action: 'completed', reply: f.payload, reReview: old.job.reReview });
+  let posts = 0;
+  const sweep = () => retryFailedCommentDeliveries({ rootDir: f.rootDir, log,
+    postCommentImpl: async ({ body }) => {
+      assert.equal(body, ordinary.body);
+      posts++;
+      return { posted: true };
+    },
+  });
+  assert.equal((await sweep()).posted, 1);
+  assert.equal((await sweep()).retried, 0);
+  assert.equal(posts, 1);
+  assert.equal(JSON.parse(readFileSync(old.jobPath, 'utf8')).commentDelivery.posted, true);
+});
+
+for (const invalid of ['missing', 'malformed', 'wrong-job', 'not-completed', 'exempt',
+  'stored-wrong-job', 'stored-wrong-repo', 'stored-wrong-pr', 'stored-malformed', 'unreadable']) {
   test(`REMCOMMENT-01: backfill skips ineligible reply (${invalid})`, async t => {
     const f = fixture(t, { reply: invalid !== 'missing' });
     const old = legacyTerminal(f, { workerState: invalid === 'not-completed' ? 'spawned' : 'completed' });
+    if (invalid === 'missing') delete old.job.remediationReply.payload;
+    if (invalid.startsWith('stored-')) {
+      rmSync(f.job.remediationWorker.replyPath);
+      if (invalid === 'stored-wrong-job') old.job.remediationReply.payload.jobId = 'another-synthetic-job';
+      if (invalid === 'stored-wrong-repo') old.job.remediationReply.payload.repo = 'fixture/other';
+      if (invalid === 'stored-wrong-pr') old.job.remediationReply.payload.prNumber = 2;
+      if (invalid === 'stored-malformed') old.job.remediationReply.payload = { summary: 'Incomplete reply.' };
+    }
     if (invalid === 'malformed') writeFileSync(f.job.remediationWorker.replyPath, '{invalid');
     if (invalid === 'wrong-job') writeFileSync(f.job.remediationWorker.replyPath, JSON.stringify({ ...f.payload, jobId: 'another-synthetic-job' }));
-    if (invalid === 'exempt') writeFileSync(old.jobPath, JSON.stringify({ ...old.job, commentDeliveryExemption: 'operator-stop' }));
+    if (invalid === 'unreadable') {
+      rmSync(f.job.remediationWorker.replyPath);
+      mkdirSync(f.job.remediationWorker.replyPath);
+    }
+    if (invalid === 'exempt') old.job.commentDeliveryExemption = 'operator-stop';
+    writeFileSync(old.jobPath, JSON.stringify(old.job));
     let posts = 0;
     const result = await retryFailedCommentDeliveries({ rootDir: f.rootDir, log,
       postCommentImpl: async () => { posts++; return { posted: true }; },
@@ -277,6 +310,19 @@ test('REMCOMMENT-01: a held delivery claim defers backfill without losing the mi
   assert.equal(posts, 1);
 });
 
+test('REMCOMMENT-01: first retry initializes backfill on an empty follow-up queue', async t => {
+  const f = fixture(t);
+  rmSync(join(f.rootDir, 'data'), { recursive: true });
+  const errors = [];
+  const result = await retryFailedCommentDeliveries({ rootDir: f.rootDir,
+    log: { error: message => errors.push(message) },
+    postCommentImpl: async () => assert.fail('an empty queue has no comment to post'),
+  });
+  assert.deepEqual(errors, []);
+  assert.equal(result.retried, 0);
+  assert.ok(existsSync(join(deliveryRetryIndexDir(f.rootDir), REMEDIATION_REPLY_BACKFILL_SENTINEL)));
+});
+
 test('REMCOMMENT-01: recovery holds delivery ownership until the final re-review body is durable', async t => {
   const f = fixture(t);
   seedDeliveryRetryIndexFromHistory(f.rootDir, { maxAttempts: 5, log });
@@ -293,12 +339,16 @@ test('REMCOMMENT-01: recovery holds delivery ownership until the final re-review
     requestReviewRereviewImpl: () => {
       const terminalPath = join(f.rootDir, 'data', 'follow-up-jobs', 'completed', `${f.job.jobId}.json`);
       assert.equal(JSON.parse(readFileSync(terminalPath, 'utf8')).commentDelivery.posted, false);
+      assert.ok(existsSync(deliveryLockPath(terminalPath)));
+      assert.ok(!existsSync(deliveryRetryIndexPointerPath(f.rootDir, terminalPath)),
+        'a provisional re-review body must not be registered for retry');
       racingSweep = sweep();
       return { triggered: true, status: 'pending' };
     },
   });
-  assert.equal((await racingSweep).skipped, 1);
+  assert.equal((await racingSweep).scanned, 0);
   assert.equal(posts, 0);
+  assert.ok(existsSync(deliveryRetryIndexPointerPath(f.rootDir, result.jobPath)));
   assert.ok(!existsSync(deliveryLockPath(result.jobPath)));
   assert.equal((await sweep()).posted, 1);
   assert.equal((await sweep()).retried, 0);

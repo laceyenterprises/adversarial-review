@@ -736,6 +736,9 @@ export async function processReviewSubject(entry, ctx) {
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
     requestWatcherWakeImpl = requestWatcherWake,
+    enqueueReviewerDispatchCandidate = candidate => reviewerDispatchCandidates.push(candidate),
+    onReviewerCapacityFreed = null,
+    readWatcherDrainState = () => watcherDrain,
     wakePayload = null,
     retainedWatcherWakes = null,
     admissionSettlementSplitEnabled = false,
@@ -3124,6 +3127,11 @@ export async function processReviewSubject(entry, ctx) {
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         async run() {
+          if (readWatcherDrainState().active) {
+            this.retainWakeForCapacity();
+            this.refundDepthSpill();
+            return { dispatched: false, reason: 'watcher-drain-active' };
+          }
           if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
             this.retainWakeForCapacity();
             return { dispatched: false, reason: 'quota-blocked' };
@@ -3249,10 +3257,10 @@ export async function processReviewSubject(entry, ctx) {
               ? resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000
               : route.reviewerModel === 'gemini' ? resolveGeminiReviewerProcessTimeoutMs() : resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
-            // Release-driven claims snapshot under the same write lock as
-            // their CAS, rather than using the older dispatch admission row.
+            // Queued and release-driven claims snapshot under the same write lock
+            // as their CAS so a freshness refusal can refund the exact claim.
             let preClaimRow = null;
-            const releaseUnexecutedHoldReviewClaim = () => {
+            const releaseUnexecutedReviewClaim = () => {
               // Undo all claim and routing mutations in one session-guarded
               // UPDATE. Releasing to plain pending would erase failure evidence
               // and let the next tick bypass the bounded retry CAS.
@@ -3361,7 +3369,7 @@ export async function processReviewSubject(entry, ctx) {
                 repoPath,
                 prNumber
               );
-            const claim = holdReleaseId ? db.transaction(() => {
+            const claim = (holdReleaseId || reviewerPoolConfig.enabled) ? db.transaction(() => {
               preClaimRow = stmtGetReviewRow.get(repoPath, prNumber);
               return claimReviewer();
             }).immediate() : claimReviewer();
@@ -3464,7 +3472,7 @@ export async function processReviewSubject(entry, ctx) {
                 // state for this exact session, without granting a retry.
                 if (isOperatorHeld(freshPR.labels)) observeHoldRelease({ db, repo: repoPath, prNumber,
                   headSha: freshPR.headRefOid || subject.headSha, liveLabels: freshPR.labels });
-                releaseUnexecutedHoldReviewClaim();
+                releaseUnexecutedReviewClaim();
                 reviewerHeadDispatchLease.release(dispatchLeaseKey);
                 return { dispatched: false, reason: 'hold-reapplied-before-spawn' };
               }
@@ -3485,9 +3493,15 @@ export async function processReviewSubject(entry, ctx) {
               }
             } catch (err) {
               if (holdReleaseId) {
-                releaseUnexecutedHoldReviewClaim();
+                releaseUnexecutedReviewClaim();
                 reviewerHeadDispatchLease.release(dispatchLeaseKey);
                 return { dispatched: false, reason: 'hold-release-read-deferred' };
+              }
+              if (reviewerPoolConfig.enabled) {
+                releaseUnexecutedReviewClaim();
+                this.retainWakeForCapacity();
+                console.warn(`[watcher] queued reviewer freshness read deferred for ${repoPath}#${prNumber}: ${err?.message || err}`);
+                return { dispatched: false, reason: 'freshness-read-deferred' };
               }
               // Non-fatal — proceed with spawn rather than block. A failed
               // freshness check is no worse than not having one at all.
@@ -3927,6 +3941,7 @@ export async function processReviewSubject(entry, ctx) {
                   + `wait_threshold_exceeded=${waitThresholdExceeded}`);
               }
               reviewerSpawned = true;
+              dispatchCandidate.markAdmissionStarted?.();
               if (depthSpillReserved) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
                 depthSpillReserved = false;
@@ -4026,8 +4041,9 @@ export async function processReviewSubject(entry, ctx) {
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
             if (reviewerPoolConfig.enabled && reviewerSpawned) {
-              // The slot is free after settlement or a failed spawn. Fill it
-              // without waiting for the next five-minute scheduled poll.
+              onReviewerCapacityFreed?.();
+              // Direct admission handles queued work. Keep the durable poll
+              // wake as discovery backstop for an empty or invalidated queue.
               try {
                 requestWatcherWakeImpl({ rootDir: ROOT, reason: 'reviewer-capacity-freed' });
               } catch (wakeError) {
@@ -4042,7 +4058,7 @@ export async function processReviewSubject(entry, ctx) {
         firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
       }
       if (reviewerPoolConfig.enabled) {
-        reviewerDispatchCandidates.push(dispatchCandidate);
+        enqueueReviewerDispatchCandidate(dispatchCandidate);
       } else {
         await dispatchCandidate.run();
       }

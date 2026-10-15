@@ -3475,7 +3475,9 @@ test('GHSCOPE-01: a rate-limited first discovery still fetches other repository 
     });
     runner = runner.replace("return [{ name: 'adversarial-review', archived: false }];",
       "return ['alpha', 'beta', 'gamma'].map(name => ({ name, archived: false }));");
-    writeFileSync(runnerPath, runner.replaceAll('laceyenterprises', 'example'));
+    // Only rewrite fixture identities: the checkout path in import URLs may
+    // itself contain the owner name (for example a remediation workspace).
+    writeFileSync(runnerPath, runner.replaceAll("'laceyenterprises/adversarial-review'", "'example/adversarial-review'"));
     const result = spawnSync(process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ AGENT_OS_CONFIG_PATH: path.join(tmp, 'config.yaml') }), timeout: 20_000 });
@@ -3609,3 +3611,223 @@ for (const scenario of ['unchanged', 'pending-missing-failed-at', 'pending-upstr
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }
+
+// Keep these fixtures synthetic even though the older shared harness uses
+// the production repository as its default subject identity.
+function seatIdleSynthetic(source) {
+  const defaultOrg = JSON.parse(readFileSync(path.join(REPO_ROOT, 'config.json'), 'utf8')).org;
+  return source.replaceAll(`${defaultOrg}/adversarial-review`, 'example/review-fixture')
+    .replaceAll("name: 'adversarial-review'", "name: 'review-fixture'");
+}
+
+for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
+  test(`SEATIDLE-01: real poll hands off retained candidates while posted work blocks (${stale})`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'seatidle-handoff-'));
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    try {
+      let loader = buildLoaderSource({
+        discoveryHookSource: `
+          if (!globalThis.__seatIdleDiscovered) {
+            globalThis.__seatIdleDiscovered = true;
+            const template = subjects[0];
+            subjects.splice(0, subjects.length, ...[201, 202, 203, 204].map(prNumber => ({
+              ...template, headSha: 'sha-happy-' + prNumber,
+              ref: { ...template.ref, subjectExternalId: REPO + '#' + prNumber, revisionRef: 'sha-happy-' + prNumber },
+            })));
+          }
+        `,
+        reviewerRuntimeSource: `
+          globalThis.__watcherClaimLoopReviewerSpawns = [];
+          globalThis.__seatIdleReturns = new Map();
+          globalThis.__seatIdleWaiters = new Map();
+          export function createReviewerRuntimeAdapterForDomain() {
+            return { spawnReviewer: async payload => {
+              const pr = payload.subjectContext.prNumber;
+              globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+              payload.onReviewerPgid?.({ pgid: 123456, spawnedAt: new Date().toISOString() });
+              globalThis.__seatIdleWaiters.get(pr)?.();
+              await new Promise(resolve => globalThis.__seatIdleReturns.set(pr, resolve));
+              return { ok: true, stdout: '', stderr: '' };
+            }, cancel: async () => {}, reattach: async () => ({}) };
+          }
+          export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+          export function loadDomainConfig() { return {}; }
+          export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+        `,
+      });
+      const postedUrl = fileUrl('src', 'posted-review-row.mjs');
+      loader = loader.replace('export async function resolve', `
+        stubs.set(${JSON.stringify(postedUrl)}, 'fixture:seatidle-posted');
+        export async function resolve`);
+      loader = loader.replace('export async function load(url, context, nextLoad) {', `
+        export async function load(url, context, nextLoad) {
+          if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+            const result = await nextLoad(url, context);
+            result.source = String(result.source).replace(
+              "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+              '({ org: "example", repos: ["example/review-fixture"] })');
+            return result;
+          }
+          if (url === 'fixture:seatidle-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            export * from ${JSON.stringify(postedUrl + '?actual')};
+            export async function runQueuedReviewAdoptionPhase(args) {
+              await args.drainReviewerDispatchCandidates('posted-review handlers');
+              globalThis.__seatIdlePollEntered();
+              await globalThis.__seatIdlePollGate;
+            }
+          `)} };
+      `);
+      // Hook the existing live-state port, rather than implementing a second
+      // freshness rule in the admission controller.
+      loader = loader.replace("return { state: 'open', mergedAt: null, closedAt: null, headRefOid, labels: [] };",
+        "if (globalThis.__seatIdleLiveState) { const live = globalThis.__seatIdleLiveState(prNumber); if (live) return live; } return { state: 'open', mergedAt: null, closedAt: null, headRefOid, labels: [] };");
+      // Replace only fixture literals; module URLs must keep their real names.
+      loader = seatIdleSynthetic(loader);
+      writeFileSync(loaderPath, loader);
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      let runner = buildRunnerSource({
+        prePollSetup: `
+          globalThis.__seatIdleLiveState = pr => {
+            if (!globalThis.__seatIdleStale || pr !== 202) return null;
+            if (globalThis.__seatIdleStale === 'unreadable') throw new Error('synthetic unavailable state');
+            return { state: globalThis.__seatIdleStale === 'head-moved' ? 'open' : 'closed',
+              mergedAt: globalThis.__seatIdleStale === 'merged' ? '2026-10-15T01:00:00Z' : null,
+              headRefOid: 'moved-head', labels: [] };
+          };
+          let enterPoll, releasePoll;
+          const pollEntered = new Promise(resolve => { enterPoll = resolve; });
+          globalThis.__seatIdlePollEntered = enterPoll;
+          globalThis.__seatIdlePollGate = new Promise(resolve => { releasePoll = resolve; });
+          let pollFinished = false;
+          const starts = () => globalThis.__watcherClaimLoopReviewerSpawns.map(spawn => spawn.subjectContext.prNumber);
+          async function waitForStart(pr) {
+            if (starts().includes(pr)) return;
+            let timer;
+            try {
+              await Promise.race([
+                new Promise(resolve => globalThis.__seatIdleWaiters.set(pr, resolve)),
+                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('handoff waited for blocked poll: ' + pr)), 2000); }),
+              ]);
+            } finally { clearTimeout(timer); }
+          }
+        `,
+        afterFirstPoll: `
+          assert.equal(pollFinished, false);
+          assert.deepEqual(starts(), [201]);
+          globalThis.__seatIdleStale = ${JSON.stringify(stale === 'none' ? null : stale)};
+          globalThis.__seatIdleReturns.get(201)();
+          await waitForStart(${stale === 'none' ? 202 : 203});
+          assert.equal(pollFinished, false, 'next spawn precedes the end of posted-review work');
+          assert.deepEqual(starts(), ${JSON.stringify(stale === 'none' ? [201, 202] : [201, 203])});
+          releasePoll(); await runningPoll;
+          for (let turn = 0; turn < 5; turn++) {
+            for (const resolve of globalThis.__seatIdleReturns.values()) resolve();
+            await new Promise(resolve => setTimeout(resolve, 5));
+          }
+        `,
+      });
+      runner = runner.replace('await pollOnce(octokit, pollOptions);', `
+        const runningPoll = pollOnce(octokit, pollOptions).then(() => { pollFinished = true; });
+        await pollEntered;`);
+      runner = seatIdleSynthetic(runner);
+      writeFileSync(runnerPath, runner);
+      const result = spawnSync(process.execPath,
+        ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+          cwd: REPO_ROOT, encoding: 'utf8', timeout: 15000,
+          env: fixtureEnv({ ...installGhFixture(tmp),
+            AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '1',
+            ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS: '1',
+          }),
+        });
+      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+      assert.match(result.stdout, /reviewer admission on capacity-freed: dispatched=1 idle_ms=\d+/);
+      const freshnessEvidence = {
+        'head-moved': /head moved since reviewer claim/,
+        closed: /was closed since tick-start snapshot/,
+        merged: /was merged since tick-start snapshot/,
+        unreadable: /queued reviewer freshness read deferred/,
+      };
+      if (freshnessEvidence[stale]) assert.match(`${result.stdout}${result.stderr}`, freshnessEvidence[stale]);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+}
+
+for (const priorStatus of ['pending', 'failed']) test(`SEATIDLE-01: unreadable queued freshness refunds a ${priorStatus} claim and releases its same-head lease`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'seatidle-freshness-refund-'));
+  const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+  try {
+    let loader = buildLoaderSource().replace('const overrides = globalThis.__watcherClaimLoopFreshHeads || {};',
+      "if (prNumber === 101 && globalThis.__seatIdleReadError) throw new Error('synthetic unavailable state'); const overrides = globalThis.__watcherClaimLoopFreshHeads || {};");
+    const gateUrl = fileUrl('src', 'reviewed-head-dispatch-gate.mjs');
+    loader = loader.replace('export async function resolve', `
+      stubs.set(${JSON.stringify(gateUrl)}, 'fixture:seatidle-real-lease');
+      export async function resolve`);
+    loader = loader.replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === 'fixture:seatidle-real-lease') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+          export * from ${JSON.stringify(gateUrl + '?actual')};
+          import { createHeadDispatchLease as create } from ${JSON.stringify(gateUrl + '?actual')};
+          export function createHeadDispatchLease() {
+            return globalThis.__seatIdleRealLease = create();
+          }
+        `)} };
+        if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace(
+            "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+            '({ org: "example", repos: ["example/review-fixture"] })');
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, seatIdleSynthetic(loader));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    let runner = buildRunnerSource({
+      prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+          review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref, failed_at,
+          failure_message, reviewer_session_uuid, reviewer_timeout_ms)
+          VALUES ('example/review-fixture', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
+            '${priorStatus}', 1, '[]', 'sha-happy-101', 'prior-revision',
+            ${priorStatus === 'failed' ? "'2026-05-15T12:01:00Z'" : 'NULL'},
+            ${priorStatus === 'failed' ? "'Command failed with code 1'" : 'NULL'}, 'prior-session', 1234)\`).run();
+        const before = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+      `,
+      afterFirstPoll: `
+        const refunded = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+        for (const key of ['review_status', 'review_attempts', 'reviewer_head_sha', 'failed_at',
+          'failure_message', 'reviewer_session_uuid', 'reviewer_timeout_ms']) {
+          assert.equal(refunded[key], before[key], 'refunded ' + key);
+        }
+        assert.ok(!globalThis.__watcherClaimLoopReviewerSpawns.some(s => s.subjectContext.prNumber === 101));
+        assert.equal(globalThis.__seatIdleRealLease.has('example/review-fixture#101@sha-happy-101'), false,
+          'the unconditional finally releases the real process-lifetime lease after freshness deferral');
+        assert.deepEqual(globalThis.__seatIdleClaimLeaseStates, [true]);
+        globalThis.__seatIdleReadError = false;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(claims.filter(c => c.prNumber === 101).length, 2);
+        assert.equal(claims.filter(c => c.prNumber === 101)[0].reviewerHeadSha,
+          claims.filter(c => c.prNumber === 101)[1].reviewerHeadSha, 'retry reacquires the same head');
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
+        assert.deepEqual(globalThis.__seatIdleClaimLeaseStates, [true, true],
+          'the real lease is held at each claim, including the same-head retry');
+      `,
+    });
+    runner = runner.replace('claims.push(payload);', `
+      claims.push(payload);
+      if (payload.prNumber === 101) (globalThis.__seatIdleClaimLeaseStates ||= []).push(
+        globalThis.__seatIdleRealLease.has('example/review-fixture#101@sha-happy-101'));
+      if (payload.prNumber === 101 && claims.filter(c => c.prNumber === 101).length === 1) globalThis.__seatIdleReadError = true;
+    `);
+    writeFileSync(runnerPath, seatIdleSynthetic(runner));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 15000,
+        env: fixtureEnv(installGhFixture(tmp)),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.match(result.stderr, /queued reviewer freshness read deferred/);
+    assert.doesNotMatch(result.stdout, /dispatch lease already held/);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

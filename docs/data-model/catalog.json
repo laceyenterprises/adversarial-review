@@ -122,6 +122,8 @@
         "src/ama/hammer-stop-hold.mjs"
       ],
       "owner": "AMA merge authority",
+      "guardReversalEvidenceFields": ["attempts[].guardReversals"],
+      "guardReversalEntryFields": ["authorization", "paths", "failedCheckRun", "passingCheckRun", "failedHead", "passingHead"],
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
       "waitEvidenceFields": { "attempts[].waitNote": "string", "attempts[].headWaitedSeconds": "non-negative integer seconds; 0 means not started", "attempts[].requiredChecksWaitedSeconds": "non-negative integer seconds; 0 means not started" },
       "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],

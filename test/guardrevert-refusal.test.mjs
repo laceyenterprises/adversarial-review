@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
@@ -47,17 +47,66 @@ test('GUARDREVERT-01: second unchanged wake never dispatches and pages once acro
       deliverAlertImpl: f.args.deliverAlertImpl, fetchPrimaryChangeImpl: f.args.fetchPrimaryChangeImpl, logger });
     const first = await invoke();
     assert.equal(first.reason, 'hammer-stop-awaiting-input-change');
+    assert.equal(first.skipMergeAgent, true, 'the refusal fence must prevent legacy fallback');
+    assert.equal(first.recoveryWait, true);
+    assert.deepEqual(first.hammerStop.refusal.missingEvidence, missingEvidence);
     _resetHammerStopHoldPageDebounceForTests(); // Simulate a watcher restart.
     const second = await invoke();
     assert.equal(second.dispatched, false);
     assert.equal(second.reason, first.reason);
+    assert.equal(second.skipMergeAgent, true);
+    assert.equal(second.recoveryWait, true);
     assert.equal(launches, 0);
     assert.equal(f.pages.length, 1);
+    assert.equal(f.pages[0].options.event, 'ama_closer.hammer_stop_hold');
     assert.deepEqual(f.pages[0].options.payload.refusal.reasons, [...reasons].sort());
     assert.deepEqual(f.pages[0].options.payload.refusal.missingEvidence, missingEvidence);
     assert.match(f.pages[0].text, /Action: Restore the uncited reverted regions, then push the repaired head/);
     assert.ok(f.pages[0].text.includes(missingEvidence.summary));
   }
+});
+
+test('GUARDREVERT-01: failed refusal pages retry on the next tick before debouncing success', async t => {
+  const f = setup(t);
+  const errors = [];
+  let deliveries = 0;
+  const args = { ...f.args, logger: { ...logger, error: message => errors.push(JSON.parse(message)) },
+    deliverAlertImpl: async (text, options) => {
+      deliveries++;
+      if (deliveries === 1) throw new Error('Alert transport timeout');
+      await f.args.deliverAlertImpl(text, options);
+    } };
+  const failed = await evaluateHammerStopHold(args);
+  assert.equal(failed.action, 'hold');
+  assert.equal(failed.hammerStop.paged, false);
+  const statePath = join(f.rootDir, 'data/follow-up-jobs/hammer-stop-hold/fixture-repository-pr-1.json');
+  assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).heads[head].pagedAt, null);
+  assert.equal(errors[0].event, 'ama_closer.hammer_stop_hold_page_failed');
+
+  const now = '2026-01-01T00:02:00Z';
+  const retried = await evaluateHammerStopHold({ ...args, now });
+  assert.equal(retried.hammerStop.paged, true);
+  assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).heads[head].pagedAt, now);
+  await evaluateHammerStopHold(args);
+  assert.equal(deliveries, 2, 'only the failed delivery is retried');
+  assert.equal(f.pages.length, 1);
+  assert.equal(f.pages[0].options.event, 'ama_closer.hammer_stop_hold');
+});
+
+test('GUARDREVERT-01: successful refusal page debounces when hold persistence fails', async t => {
+  const f = setup(t);
+  // A file in place of the store directory fails writes even under a privileged user.
+  mkdirSync(join(f.rootDir, 'data/follow-up-jobs'), { recursive: true });
+  writeFileSync(join(f.rootDir, 'data/follow-up-jobs/hammer-stop-hold'), 'blocked store');
+  const errors = [];
+  const args = { ...f.args, logger: { ...logger, error: message => errors.push(JSON.parse(message)) } };
+  for (let tick = 0; tick < 3; tick++) {
+    const held = await evaluateHammerStopHold(args);
+    assert.equal(held.action, 'hold');
+    assert.equal(held.hammerStop.paged, true);
+  }
+  assert.equal(errors.filter(error => error.event === 'ama_closer.hammer_stop_hold_persist_failed').length, 3);
+  assert.equal(f.pages.length, 1, 'a delivered page must survive failed receipt writes in memory');
 });
 
 test('GUARDREVERT-01: refusal identity ignores attempt IDs and reason/object order, and includes exact missing evidence', async t => {

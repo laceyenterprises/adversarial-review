@@ -817,6 +817,7 @@ async function attemptDaemonCleanMergeInner({
       }
       elig = evaluateGate(live, noCiEvidence);
     }
+    guardReversals = elig.guardReversals || [];
     // A revoked proof or newly appearing CI is a changing gate, not a permanent
     // rejection of this head. The next tick must evaluate the real rollup.
     const noCiRevoked = admittedWithNoCi && !noCiEvidence && !elig.eligible &&
@@ -851,7 +852,6 @@ async function attemptDaemonCleanMergeInner({
       break;
     }
 
-    guardReversals = elig.guardReversals || [];
     const mergeCapability = evaluateMergeCapabilityEnforcement({
       enforcement: mergeCapabilityEnforcement,
       credentialClass: mergeCredentialClass,

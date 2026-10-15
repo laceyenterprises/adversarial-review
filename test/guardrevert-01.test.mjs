@@ -105,6 +105,39 @@ test('GUARDREVERT-01: approved generated-file edit, guard repair and green CI pa
     terminal.trace.primaryChange.guardReversals);
 });
 
+for (const check of [
+  { name: 'unit', status: 'COMPLETED', conclusion: 'FAILURE' },
+  { name: 'unit', status: 'IN_PROGRESS', conclusion: null },
+]) {
+  test(`GUARDREVERT-01: daemon failure retains verified guard authority when CI is ${check.status}/${check.conclusion}`, async () => {
+    const primaryChange = await evidenceFor(fixture());
+    const guardReversals = checkPrimaryChange(primaryChange, head).guardReversals;
+    assert.equal(guardReversals.length, 1, 'the offline guard proof must be verified');
+    const live = { candidateHead: head, primaryChange, requirePrimaryChange: true,
+      requiredChecks: greenPr.statusCheckRollup, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', prState: 'OPEN', labels: [] };
+    const audits = [];
+    let released = 0;
+    const result = await attemptDaemonCleanMerge({ repo: 'fixture/repository', prNumber: 1, base: 'main', prTitle: 'Synthetic report repair',
+      validatedHead: head, verdict: 'ham_terminal_remediation_validated', allowHamTerminalRemediation: true,
+      reviewState: cleanReview, liveGate: live, branchProtectionRequired: false,
+      fetchLiveGateImpl: async () => ({ ...live, requiredChecks: [...live.requiredChecks, check] }),
+      acquireLeaseImpl: async () => ({ acquired: true, lease: { leaseId: 'fixture-lease' } }),
+      releaseLeaseImpl: () => { released++; },
+      runMergeImpl: async () => assert.fail('red or pending CI must prevent merge'),
+      writeAuditImpl: value => { audits.push(value); return { doc: { attempts: [] } }; },
+      appendAuditImpl: value => { audits.push(value); return { doc: { attempts: [] } }; },
+      readAuditImpl: () => null, writeMergeActionImpl: () => {}, logger: { log() {}, warn() {} },
+    });
+    assert.equal(result.merged, false);
+    assert.equal(result.reason, 'gate-not-eligible');
+    assert.deepEqual(result.reasons, ['ci-not-green']);
+    assert.equal(released, 1);
+    const terminal = audits.find(record => record.attempt.attemptPhase === 'daemon-failed');
+    assert.equal(terminal.attempt.outcome, 'failed-without-merge');
+    assert.deepEqual(terminal.attempt.guardReversals, guardReversals);
+  });
+}
+
 test('GUARDREVERT-01: guard-only approval coverage survives a rebase; other edits require exact-head review', async () => {
   const original = 'd'.repeat(40);
   const f = fixture();

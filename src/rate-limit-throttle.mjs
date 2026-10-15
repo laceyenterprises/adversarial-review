@@ -441,10 +441,12 @@ function createRateLimitThrottle({
   }
 
   async function recordRateLimitedCall(resource, credential = 'default', observation = null) {
-    const marked = markGitHubRateLimited(resource, credential, observation || {});
-    const recorded = await recordRateLimit({ ...observation, resource, credential, rateLimited: true }, true);
-    markGitHubRateLimited(resource, credential, recorded || marked);
-    return recorded;
+    const marked = markGitHubRateLimited(resource, credential, {
+      ...observation,
+      resetAt: observation?.resetAt || new Date(nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS).toISOString(),
+    });
+    await recordRateLimit({ ...observation, resource, credential, rateLimited: true }, true);
+    return marked;
   }
 
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE, credential = 'default') {

@@ -92,6 +92,16 @@ process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = '0';
 const AGENT_OS_PRESENT_STUB = () => ({ present: true, source: 'test' });
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
+// These cases test label-error handling, rather than a primary quota wait.
+// A secondary limit may leave the measured primary budget healthy; include
+// those synthetic response headers so unrelated cases never sleep for a reset.
+function syntheticLabelRateLimitError(message = 'rate limited') {
+  const reset = Math.ceil(Date.now() / 1000) + 60;
+  return Object.assign(new Error(message), {
+    stderr: `* Request at fixture\n< HTTP/2.0 403 Forbidden\n< X-Ratelimit-Resource: graphql\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: ${reset}\n* Request took 1ms\n`,
+  });
+}
+
 async function defaultGhExecFileImpl() {
   return { stdout: '', stderr: '' };
 }
@@ -5588,7 +5598,7 @@ test('dispatchMergeAgentForPR logs consumed-label removal failures', async () =>
         stdout: '{"dispatchId":"disp_requested","lrq":"lrq_requested"}\n',
       }),
       ghExecFileImpl: async () => {
-        throw new Error('rate limited');
+        throw syntheticLabelRateLimitError();
       },
       now: '2026-05-07T12:00:00.000Z',
     });
@@ -5632,7 +5642,7 @@ test('dispatchMergeAgentForPR retries consumed-label removal for an already-disp
       stdout: '{"dispatchId":"disp_requested","lrq":"lrq_requested"}\n',
     }),
     ghExecFileImpl: async () => {
-      throw new Error('rate limited');
+      throw syntheticLabelRateLimitError();
     },
     now: '2026-05-07T12:00:00.000Z',
   });
@@ -5810,7 +5820,7 @@ test('dispatchMergeAgentForPR reconciles externally removed consumed labels on i
       stdout: '{"dispatchId":"disp_requested","lrq":"lrq_requested"}\n',
     }),
     ghExecFileImpl: async () => {
-      throw new Error('rate limited');
+      throw syntheticLabelRateLimitError();
     },
     now: '2026-05-07T12:00:00.000Z',
   });
@@ -5977,7 +5987,7 @@ test('dispatchMergeAgentForPR retries consumed-label cleanup even when agent-os 
       stdout: '{"dispatchId":"disp_requested","lrq":"lrq_requested"}\n',
     }),
     ghExecFileImpl: async () => {
-      throw new Error('rate limited');
+      throw syntheticLabelRateLimitError();
     },
     now: '2026-05-07T12:00:00.000Z',
   });
@@ -7656,7 +7666,7 @@ test('cancelMergeAgentDispatchOnMerge normalizes dynamic label-removal request i
 
   const makeGh = (requestId) => async (_cmd, args) => {
     if (Array.isArray(args) && args.includes('--remove-label')) {
-      throw new Error(`gh api failed: HTTP 403 secondary rate limit x-github-request-id=${requestId}`);
+      throw syntheticLabelRateLimitError(`gh api failed: HTTP 403 secondary rate limit x-github-request-id=${requestId}`);
     }
     return { stdout: '', stderr: '' };
   };

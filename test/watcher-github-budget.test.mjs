@@ -62,3 +62,26 @@ console.log(${JSON.stringify(JSON.stringify({ state: 'open', head: { sha: head }
     assert.equal(projected, 1);
   });
 }
+
+for (const scenario of ['foreign credential', 'one resource']) {
+  test(`GHSCOPE-01: ${scenario} exhaustion does not skip the whole next poll`, async t => {
+    const { recordResponseRateLimit, githubCredential } = await import('../src/rate-limit-throttle.mjs');
+    const rootDir = mkdtempSync(join(tmpdir(), 'credential-poll-'));
+    const keys = ['GITHUB_TOKEN', 'GHO_RATE_LIMIT_SHARED_STATE_PATH'];
+    const old = keys.map(key => process.env[key]);
+    process.env.GITHUB_TOKEN = 'synthetic-watcher-token';
+    process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(rootDir, 'budget.json');
+    t.after(() => {
+      keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; });
+      rmSync(rootDir, { recursive: true, force: true });
+    });
+    const credential = scenario === 'foreign credential' ? 'synthetic-other-credential' : githubCredential({ token: process.env.GITHUB_TOKEN });
+    for (const resource of scenario === 'foreign credential' ? ['core', 'graphql'] : ['graphql']) {
+      await recordResponseRateLimit({ credential, resource, remaining: 0, resetAt: new Date(Date.now() + 60_000).toISOString() });
+    }
+    const skipped = await runLowBudgetWatcherPoll({
+      db: { prepare: () => assert.fail('healthy discovery must not be replaced by a global low-budget shortcut') },
+    });
+    assert.equal(skipped, false);
+  });
+}

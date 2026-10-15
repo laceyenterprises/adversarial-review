@@ -1,4 +1,4 @@
-import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation, currentGitHubBudgetScope, markGitHubRateLimited } from './rate-limit-throttle.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
@@ -464,7 +464,10 @@ async function executeLabelAdapter(execFileImpl, adapterBin, args, options) {
   const tokenNames = args.flatMap((arg, i) => arg === '--pat-env' ? [args[i + 1]] : []);
   const token = tokenNames.map(name => options.env[name]).find(Boolean);
   const credential = token ? githubCredential({ token }) : `adapter:${selector}`;
-  await awaitThrottleIfNeeded('graphql', credential);
+  // Outside a watcher scope the adapter owns its own transport admission.
+  // Parent accounting is needed to carry its failure into the enclosing poll.
+  const scope = currentGitHubBudgetScope();
+  if (scope) await awaitThrottleIfNeeded('graphql', credential);
   try {
     const result = await execFileImpl(adapterBin, args, options);
     const payload = parseAdapterJson(result.stdout, 'pull-request-label');
@@ -474,7 +477,9 @@ async function executeLabelAdapter(execFileImpl, adapterBin, args, options) {
     if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
       const observation = extractRateLimitObservation(err.response?.headers, { resource: 'graphql', rateLimited: true });
       err.rateLimited = true;
-      err.observation = await recordRateLimitedCall('graphql', credential, { ...observation, credentialSelector: selector });
+      err.observation = scope
+        ? await recordRateLimitedCall('graphql', credential, { ...observation, credentialSelector: selector })
+        : markGitHubRateLimited('graphql', credential, observation || {});
     }
     throw err;
   }

@@ -41,7 +41,7 @@ for (const sync of [false, true]) test(`GHSCOPE-01: ${sync ? 'sync' : 'async'} g
   const envB = { ...envA, GH_TOKEN: 'synthetic-token-b' };
   const reset = Math.ceil(Date.now() / 1000) + 120;
   let calls = 0;
-  function execute(_command, args) {
+  function execute(_command, _args) {
     calls++;
     if (calls === 1) throw Object.assign(new Error('GraphQL: API rate limit exceeded'), {
       stderr: `* Request at fixture\n< HTTP/2.0 429\n< X-Ratelimit-Resource: graphql\n< X-Ratelimit-Remaining: 0\n< X-Ratelimit-Reset: ${reset}\n* Request took 1ms\n`,
@@ -70,4 +70,53 @@ test('GHSCOPE-01: retry-after supplies a reset even without primary-budget heade
   });
   assert.equal(observation.resetAt, '2026-01-01T00:01:30.000Z');
   assert.equal(observation.resource, 'graphql');
+});
+
+test('GHSCOPE-01: unknown reset uses the bounded default even after a healthy observation', async t => {
+  const root = fixture(t);
+  const now = Date.now();
+  const throttle = createRateLimitThrottle({ sharedStatePath: join(root, 'budget.json'), nowMs: () => now });
+  await throttle.recordResponseRateLimit({ resource: 'graphql', credential: 'credential-a', remaining: 4900, resetAt: now + 3600_000 });
+  await withGitHubBudgetScope({}, async () => {
+    const failure = await throttle.recordRateLimitedCall('graphql', 'credential-a');
+    assert.equal(Date.parse(failure.resetAt), now + 60_000);
+    await assert.rejects(throttle.awaitThrottleIfNeeded('graphql', 'credential-a'), error => Date.parse(error.observation.resetAt) === now + 60_000);
+  });
+});
+
+test('GHSCOPE-01: measured budgets remain separate across new scopes and persisted readers', async t => {
+  const root = fixture(t);
+  const sharedStatePath = join(root, 'budget.json');
+  const now = Date.now();
+  const throttle = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
+  await throttle.recordResponseRateLimit({ resource: 'graphql', credential: 'credential-a', remaining: 0, resetAt: now + 60_000 });
+  await throttle.recordResponseRateLimit({ resource: 'graphql', credential: 'credential-b', remaining: 4900, resetAt: now + 60_000 });
+  const reader = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
+  await withGitHubBudgetScope({}, async () => {
+    await assert.rejects(reader.awaitThrottleIfNeeded('graphql', 'credential-a'), { budgetDeferred: true });
+    assert.equal(await reader.awaitThrottleIfNeeded('graphql', 'credential-b'), false);
+    assert.equal(await reader.awaitThrottleIfNeeded('core', 'credential-a'), false);
+  });
+});
+
+test('GHSCOPE-01: adapter subprocess failures carry their selector into the enclosing scope', async () => {
+  const { writeAdapterPullRequestLabel } = await import('../src/github-adapter-client.mjs');
+  const env = { GHA_ADAPTER_BIN: '/synthetic/github-adapter', WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_BROKER_ROLE: 'merge-agent', GITHUB_TOKEN: 'synthetic-adapter-token' };
+  await withGitHubBudgetScope({}, async () => {
+    await assert.rejects(writeAdapterPullRequestLabel('example/alpha', 7, { action: 'remove', labelName: 'fixture-marker' }, {
+      env, execFileImpl: async () => { throw Object.assign(new Error('adapter rejected request'), {
+        code: 1, stdout: JSON.stringify({ ok: false, failureClass: 'rate_limit', message: 'API rate limit exceeded' }),
+      }); },
+    }), error => error.rateLimited && Date.parse(error.observation.resetAt) > Date.now());
+    let calls = 0;
+    const execute = async () => { calls++; return { stdout: '{}', stderr: '' }; };
+    await meteredExecFile(execute, 'gh', ['api', 'repos/example/alpha'], { env });
+    await meteredExecFile(execute, 'gh', ['api', 'graphql'], { env: { GITHUB_TOKEN: 'synthetic-other-token' } });
+    await assert.rejects(meteredExecFile(execute, 'gh', ['api', 'graphql'], { env }), { budgetDeferred: true });
+    assert.equal(calls, 2);
+    const state = await budgetApi.readGitHubBudgetState();
+    const credential = budgetApi.githubCredential({ env });
+    assert.equal(state[budgetApi.githubBudgetKey('graphql', credential)].credentialSelector, 'merge-agent');
+  });
 });

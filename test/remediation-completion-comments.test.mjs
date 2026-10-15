@@ -269,6 +269,19 @@ test('REMCOMMENT-01: recovery holds delivery ownership until the final re-review
   assert.equal(posts, 1);
 });
 
+test('REMCOMMENT-01: an existing delivery claim never changes published-head completion', async t => {
+  const f = fixture(t);
+  const terminalDir = join(f.rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(terminalDir, { recursive: true });
+  const terminalPath = join(terminalDir, `${f.job.jobId}.json`);
+  writeFileSync(deliveryLockPath(terminalPath), JSON.stringify({ claimer: 'synthetic-retained-claim', claimedAt: new Date().toISOString() }));
+  const result = completeWorkerPublishedHead({ ...f, headSha, completedAt });
+  assert.equal(result.job.status, 'completed');
+  assert.equal(result.job.reReview.triggered, true);
+  assert.equal(result.job.commentDelivery.posted, false);
+  assert.ok(existsSync(deliveryLockPath(terminalPath)), 'recovery must retain another claimant\'s lock');
+});
+
 for (const status of ['stopped', 'failed']) {
   test(`REMCOMMENT-01: backfill includes terminal ${status} records with completed workers`, async t => {
     const f = fixture(t);

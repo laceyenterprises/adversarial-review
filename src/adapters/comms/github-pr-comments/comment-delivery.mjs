@@ -27,7 +27,7 @@ import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // human inspection; the daemon does not silently keep hammering.
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync, renameSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
@@ -54,6 +54,9 @@ const ROOT = join(__dirname, '../../../..');
 // that pre-date the index.
 const DELIVERY_RETRY_INDEX_DIR_NAME = 'delivery-retry-index';
 const DELIVERY_RETRY_INDEX_INIT_SENTINEL = '.initialized';
+// Independent of the original index seed: recovery jobs could lose their
+// delivery after that migration had already run.
+const REMEDIATION_REPLY_BACKFILL_SENTINEL = '.remediation-reply-backfilled-remcomment-01';
 
 // Maximum number of times the retry pass will re-attempt a failed
 // comment. After this, the record sits in terminal/ with posted=false
@@ -797,11 +800,67 @@ function recordOwesRetry(record, maxAttempts) {
   if (status !== 'completed' && status !== 'stopped' && status !== 'failed') return false;
   if (!record.repo || !record.prNumber) return false;
   const delivery = record.commentDelivery;
-  if (!delivery) return true; // missing — reconstructable debt
+  if (!delivery) return !record.commentDeliveryExemption; // missing — reconstructable debt
   if (delivery.posted) return false;
   if ((delivery.attempts || 0) >= maxAttempts) return false;
   if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) return false;
   return true; // delivery without body is still owed and reconstructable
+}
+
+function readCompletedWorkerReply(rootDir, record) {
+  if (!['completed', 'stopped', 'failed'].includes(record?.status)
+    || record.commentDelivery || record.commentDeliveryExemption || !record.repo || !record.prNumber) return null;
+  const round = record.remediationPlan?.rounds?.find(entry =>
+    Number(entry.round) === Number(record.remediationPlan?.currentRound));
+  const worker = record.remediationWorker || round?.worker;
+  if (worker?.state !== 'completed') return null;
+  const replyPath = record.remediationReply?.path || worker.replyPath;
+  if (!replyPath) return null;
+  try {
+    return readRemediationReplyArtifact(resolve(rootDir, replyPath), { expectedJob: record });
+  } catch { return null; }
+}
+
+// REMCOMMENT-01: owe old completed-worker replies once, even on an installation
+// whose retry index was already initialized. Posting remains in the ordinary
+// sweep, with its existing budget, claim, marker dedupe and attempt cap.
+function backfillCompletedWorkerReplyDeliveries(rootDir, { now, log }) {
+  const sentinelPath = join(ensureDeliveryRetryIndexDir(rootDir), REMEDIATION_REPLY_BACKFILL_SENTINEL);
+  if (existsSync(sentinelPath)) return;
+  let complete = true;
+  for (const jobPath of listTerminalJobPaths(rootDir)) {
+    let claimed = false;
+    try {
+      let record = readTerminalRecord(jobPath);
+      if (!readCompletedWorkerReply(rootDir, record)) continue;
+      const claim = tryAcquireDeliveryClaim(jobPath, buildClaimerId(), { now });
+      if (!claim.acquired) { complete = false; continue; }
+      claimed = true;
+      // A concurrent ordinary post may have stamped delivery since our scan.
+      record = readTerminalRecord(jobPath);
+      const reply = readCompletedWorkerReply(rootDir, record);
+      if (!reply) continue;
+      record.commentDelivery = buildReconcileCommentDelivery({
+        job: record, worker: record.remediationWorker, action: record.status,
+        reply, reReview: record.reReview, failure: record.failure, now,
+      }).commentDelivery;
+      // Write the pointer first. If persistence fails, the indexed legacy
+      // reconstruction still has the reply and another migration pass retries.
+      addToDeliveryRetryIndex(rootDir, jobPath);
+      writeTerminalRecord(jobPath, record);
+    } catch (err) {
+      complete = false;
+      log?.error?.(`[comment-delivery] failed to backfill ${jobPath}: ${err.message}`);
+    } finally {
+      if (claimed) releaseDeliveryClaim(jobPath);
+    }
+  }
+  // Held claims and failed writes defer completion of the migration, so a
+  // transient failure cannot silently discard the remainder of the backfill.
+  if (complete) {
+    try { writeFileSync(sentinelPath, `${now()}\n`, 'utf8'); }
+    catch (err) { log?.error?.(`[comment-delivery] failed to finish reply backfill: ${err.message}`); }
+  }
 }
 
 // One-time migration: the first time the retry tick runs after this
@@ -956,6 +1015,7 @@ async function retryFailedCommentDeliveries({
   maxAttempts = MAX_COMMENT_DELIVERY_ATTEMPTS,
   budget = RETRY_BUDGET_PER_TICK,
 } = {}) {
+  backfillCompletedWorkerReplyDeliveries(rootDir, { now, log });
   // One-time backfill: if the retry index hasn't been seeded yet,
   // walk the existing terminal history once so any pre-index
   // posted=false records get picked up. Subsequent ticks read only
@@ -1044,7 +1104,7 @@ async function retryFailedCommentDeliveries({
 
     delivery.body = filterGitHubBody(delivery.body, { repo: delivery.repo, rootDir, reviewerHeadSha: delivery.revisionRef });
     retried += 1;
-    /* eslint-disable no-await-in-loop */
+
     let result;
     try {
       result = await postCommentImpl({
@@ -1061,7 +1121,7 @@ async function retryFailedCommentDeliveries({
       // in `attempting=true` until the lock goes stale.
       result = { posted: false, reason: 'gh-cli-failure', error: err.message };
     }
-    /* eslint-enable no-await-in-loop */
+
 
     const attemptedAt = now();
 
@@ -1154,6 +1214,7 @@ export {
   DELIVERY_CLAIM_STALE_MS,
   DELIVERY_RETRY_INDEX_DIR_NAME,
   DELIVERY_RETRY_INDEX_INIT_SENTINEL,
+  REMEDIATION_REPLY_BACKFILL_SENTINEL,
   NON_RETRYABLE_DELIVERY_REASONS,
   addToDeliveryRetryIndex,
   buildAttemptingDelivery,

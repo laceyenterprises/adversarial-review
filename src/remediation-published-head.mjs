@@ -1,15 +1,15 @@
 // REMLINK-01: recovery requires worker/service evidence, never just a moved head.
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { resolve, join } from 'node:path';
-import { markFollowUpJobCompleted, readFollowUpJob, writeFollowUpJob, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
+import { basename, resolve, join } from 'node:path';
+import { ensureFollowUpJobDirs, getFollowUpJobDir, markFollowUpJobCompleted, readFollowUpJob, writeFollowUpJob, readRemediationReplyArtifact } from './follow-up-jobs.mjs';
 import { withFollowUpJobLock } from './follow-up-job-write.mjs';
 import { requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { requestRereviewWake, REREVIEW_WAKE_REASONS } from './rereview-wake.mjs';
 import { resolveRemediationReplyTarget, resolveReplyStorageKey } from './remediation-reply-paths.mjs';
 import { hasWorkerJobTrailer } from './comment-only-final-round.mjs';
-import { addToDeliveryRetryIndex, buildReconcileCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
+import { addToDeliveryRetryIndex, buildReconcileCommentDelivery, releaseDeliveryClaim, tryAcquireDeliveryClaim } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 function isCurrentAttemptReply(replyPath, round, worker) {
   const spawnedMs = Date.parse(worker.spawnedAt || round?.spawnedAt || '');
@@ -82,58 +82,68 @@ export function completeWorkerPublishedHead({
       if (!['pending', 'in_progress'].includes(job.status)) return null;
       const evidence = findWorkerPublishedHead({ rootDir, job, headSha, execFileSyncImpl });
       if (!evidence) return null;
-      headSha = evidence.headSha;
-      const { round, worker, reply, replyPath } = evidence;
-      round.startHeadSha = evidence.startHead;
-      round.publishedHeadSha = headSha;
-      job.remediationPlan.currentRound = round.round;
-      // Reconcile the durable reply when it exists; absence never erases a proven publish.
-      const remediationReply = reply ? { path: replyPath, state: 'worker-wrote-reply', payload: reply, reconciledAt: completedAt } : job.remediationReply;
-      writeFollowUpJob(jobPath, job);
-      // Final comment-only rounds hand off to the ordinary watcher cap/closure lane.
-      // Other rounds request the existing rereview transition, which retains its caps
-      // and authoritative terminal-PR guards. No merge decision is made here.
-      let reReview = job.finalRound === 'comment-only'
-        ? { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' }
-        : { requested: true, status: 'pending', requestedAt: completedAt, reason: reply?.reReview?.reason || null };
-      const { commentDelivery } = buildReconcileCommentDelivery({
-        job, worker, action: 'completed', reply, reReview, now: () => completedAt,
-      });
-      const completed = markFollowUpJobCompleted({ rootDir, jobPath, completedAt,
-        resultingHeadSha: headSha,
-        remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
-        remediationReply, reReview, commentDelivery,
-        completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source },
-      });
-      // The sweep owns posting, including after the history index was seeded.
-      addToDeliveryRetryIndex(rootDir, completed.jobPath);
-      if (job.finalRound === 'comment-only') {
-        reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
-        requestWatcherWakeImpl({ rootDir, reason: 'comment-only-final-round-completed',
-          repo: job.repo, prNumber: job.prNumber, requestedAt: completedAt });
-      } else {
-        const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
-          requestedAt: completedAt, reason: reply?.reReview?.reason || null, targetRevisionRef: headSha });
-        reReview = buildRereviewResult({ requested: true, reason: reply?.reReview?.reason || null,
-          outcome: { ...outcome, requestedAt: completedAt } });
-        if (outcome?.triggered || outcome?.status === 'already-pending') {
-          const wake = requestRereviewWakeImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
-            headSha, reason: REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
-            source: 'follow-up-remediation', sourceRef: job.jobId,
-            domainId: job.domainId || null, subjectExternalId: job.subjectExternalId || null,
-            requestedAt: completedAt, requestWatcherWakeImpl });
-          reReview.wake = { requested: wake?.requested === true, reason: wake?.wakeReason,
-            requestedAt: completedAt, outcome: wake?.outcome, watcherWoken: wake?.watcherWake?.requested === true };
+      ensureFollowUpJobDirs(rootDir);
+      const terminalPath = join(getFollowUpJobDir(rootDir, 'completed'), basename(jobPath));
+      // Hold the sweep's existing delivery claim until the re-review result is
+      // written into the body. Otherwise a sweep could post the provisional
+      // body and have its posted stamp overwritten by our final job write.
+      if (!tryAcquireDeliveryClaim(terminalPath, `published-head-recovery:${process.pid}`).acquired) return null;
+      try {
+        headSha = evidence.headSha;
+        const { round, worker, reply, replyPath } = evidence;
+        round.startHeadSha = evidence.startHead;
+        round.publishedHeadSha = headSha;
+        job.remediationPlan.currentRound = round.round;
+        // Reconcile the durable reply when it exists; absence never erases a proven publish.
+        const remediationReply = reply ? { path: replyPath, state: 'worker-wrote-reply', payload: reply, reconciledAt: completedAt } : job.remediationReply;
+        writeFollowUpJob(jobPath, job);
+        // Final comment-only rounds hand off to the ordinary watcher cap/closure lane.
+        // Other rounds request the existing rereview transition, which retains its caps
+        // and authoritative terminal-PR guards. No merge decision is made here.
+        let reReview = job.finalRound === 'comment-only'
+          ? { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' }
+          : { requested: true, status: 'pending', requestedAt: completedAt, reason: reply?.reReview?.reason || null };
+        const { commentDelivery } = buildReconcileCommentDelivery({
+          job, worker, action: 'completed', reply, reReview, now: () => completedAt,
+        });
+        const completed = markFollowUpJobCompleted({ rootDir, jobPath, completedAt,
+          resultingHeadSha: headSha,
+          remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
+          remediationReply, reReview, commentDelivery,
+          completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source },
+        });
+        // The sweep owns posting, including after the history index was seeded.
+        addToDeliveryRetryIndex(rootDir, completed.jobPath);
+        if (job.finalRound === 'comment-only') {
+          reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
+          requestWatcherWakeImpl({ rootDir, reason: 'comment-only-final-round-completed',
+            repo: job.repo, prNumber: job.prNumber, requestedAt: completedAt });
+        } else {
+          const outcome = requestReviewRereviewImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
+            requestedAt: completedAt, reason: reply?.reReview?.reason || null, targetRevisionRef: headSha });
+          reReview = buildRereviewResult({ requested: true, reason: reply?.reReview?.reason || null,
+            outcome: { ...outcome, requestedAt: completedAt } });
+          if (outcome?.triggered || outcome?.status === 'already-pending') {
+            const wake = requestRereviewWakeImpl({ rootDir, repo: job.repo, prNumber: job.prNumber,
+              headSha, reason: REREVIEW_WAKE_REASONS.REMEDIATION_CLOSEOUT,
+              source: 'follow-up-remediation', sourceRef: job.jobId,
+              domainId: job.domainId || null, subjectExternalId: job.subjectExternalId || null,
+              requestedAt: completedAt, requestWatcherWakeImpl });
+            reReview.wake = { requested: wake?.requested === true, reason: wake?.wakeReason,
+              requestedAt: completedAt, outcome: wake?.outcome, watcherWoken: wake?.watcherWake?.requested === true };
+          }
         }
+        completed.job.reReview = reReview;
+        completed.job.commentDelivery = buildReconcileCommentDelivery({
+          job: completed.job, worker, action: 'completed', reply, reReview, now: () => completedAt,
+        }).commentDelivery;
+        const targetRound = completed.job.remediationPlan?.rounds?.find(entry => Number(entry.round) === Number(round.round));
+        if (targetRound) targetRound.reReview = reReview;
+        writeFollowUpJob(completed.jobPath, completed.job);
+        return completed;
+      } finally {
+        releaseDeliveryClaim(terminalPath);
       }
-      completed.job.reReview = reReview;
-      completed.job.commentDelivery = buildReconcileCommentDelivery({
-        job: completed.job, worker, action: 'completed', reply, reReview, now: () => completedAt,
-      }).commentDelivery;
-      const targetRound = completed.job.remediationPlan?.rounds?.find(entry => Number(entry.round) === Number(round.round));
-      if (targetRound) targetRound.reReview = reReview;
-      writeFollowUpJob(completed.jobPath, completed.job);
-      return completed;
     });
   } catch (error) {
     if (['ENOENT', 'EWOULDBLOCK', 'EAGAIN'].includes(error.code)) return null;

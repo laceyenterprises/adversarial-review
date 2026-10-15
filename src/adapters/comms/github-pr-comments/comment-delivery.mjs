@@ -867,7 +867,8 @@ function readCompletedWorkerReply(rootDir, record) {
   const replyPath = record.remediationReply?.path || worker.replyPath;
   if (!replyPath) return null;
   try {
-    return readRemediationReplyArtifact(resolve(rootDir, replyPath), { expectedJob: record });
+    const reply = readRemediationReplyArtifact(resolve(rootDir, replyPath), { expectedJob: record });
+    return { reply, worker };
   } catch { return null; }
 }
 
@@ -888,10 +889,11 @@ function backfillCompletedWorkerReplyDeliveries(rootDir, { now, log }) {
       claimed = true;
       // A concurrent ordinary post may have stamped delivery since our scan.
       record = readTerminalRecord(jobPath);
-      const reply = readCompletedWorkerReply(rootDir, record);
-      if (!reply) continue;
+      const completed = readCompletedWorkerReply(rootDir, record);
+      if (!completed) continue;
+      const { reply, worker } = completed;
       record.commentDelivery = buildReconcileCommentDelivery({
-        job: record, worker: record.remediationWorker, action: record.status,
+        job: record, worker, action: record.status,
         reply, reReview: record.reReview, failure: record.failure, now,
       }).commentDelivery;
       // Write the pointer first. If persistence fails, the indexed legacy
@@ -996,6 +998,8 @@ function listRetryCandidates(rootDir, { maxAttempts, log }) {
     try {
       const resolvedPath = resolveIndexedJobPath(rootDir, jobPath);
       if (resolvedPath !== jobPath) {
+        // Archiving preserves the basename, so this atomically rewrites the
+        // same pointer file. Unlinking pointerPath would delete the new debt.
         addToDeliveryRetryIndex(rootDir, resolvedPath);
         jobPath = resolvedPath;
       }

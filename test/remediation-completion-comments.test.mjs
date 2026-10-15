@@ -13,6 +13,7 @@ import {
   buildReconcileCommentDelivery,
   deliveryLockPath,
   deliveryRetryIndexDir,
+  deliveryRetryIndexPointerPath,
   historicalDeliverySidecarPath,
   REMEDIATION_REPLY_BACKFILL_SENTINEL,
   retryFailedCommentDeliveries,
@@ -210,6 +211,39 @@ for (const prState of ['open', 'closed', 'merged']) {
   }
 }
 
+for (const status of ['completed', 'stopped', 'failed']) {
+  for (const topLevelWorker of [null, undefined]) {
+    test(`REMCOMMENT-01: backfill preserves current-round worker attribution (${status}, top-level=${topLevelWorker})`, async t => {
+      const f = fixture(t);
+      const old = legacyTerminal(f, { status });
+      const worker = { ...old.job.remediationWorker, model: 'claude-code',
+        resolvedModel: 'synthetic-claude-model', resolvedReasoningLevel: 'high' };
+      old.job.remediationWorker = topLevelWorker;
+      old.job.builderTag = 'claude-code';
+      old.job.remediationPlan = { ...old.job.remediationPlan, currentRound: 2,
+        rounds: [{ round: 1, worker: f.job.remediationWorker }, { round: 2, worker }] };
+      // Exercise the round worker's reply path as well as its execution fields.
+      delete old.job.remediationReply;
+      writeFileSync(old.jobPath, JSON.stringify(old.job));
+      const ordinary = buildReconcileCommentDelivery({ job: old.job, worker,
+        action: status, reply: f.payload, reReview: old.job.reReview });
+      assert.equal(ordinary.workerClass, 'claude-code');
+      assert.ok(ordinary.body.includes('synthetic-claude-model · high'));
+      const result = await retryFailedCommentDeliveries({ rootDir: f.rootDir, log,
+        postCommentImpl: async ({ body, workerClass }) => {
+          assert.equal(workerClass, ordinary.workerClass);
+          assert.equal(body, ordinary.body);
+          return { posted: true };
+        },
+      });
+      assert.equal(result.posted, 1);
+      const record = JSON.parse(readFileSync(old.jobPath, 'utf8'));
+      assert.equal(record.commentDelivery.workerClass, ordinary.workerClass);
+      assert.equal(record.commentDelivery.body, ordinary.body);
+    });
+  }
+}
+
 for (const invalid of ['missing', 'malformed', 'wrong-job', 'not-completed', 'exempt']) {
   test(`REMCOMMENT-01: backfill skips ineligible reply (${invalid})`, async t => {
     const f = fixture(t, { reply: invalid !== 'missing' });
@@ -357,6 +391,37 @@ for (const archivedBeforeBackfill of [true, false]) {
     assert.equal(attempts, archivedBeforeBackfill ? 1 : 2);
   });
 }
+
+test('REMCOMMENT-01: archive resolution rewrites one pointer and retries once per tick after failures', async t => {
+  const f = fixture(t);
+  const old = legacyTerminal(f, { status: 'stopped' });
+  writeFileSync(old.jobPath, JSON.stringify({ ...old.job, stoppedAt: completedAt }));
+  let attempts = 0;
+  const sweep = budget => retryFailedCommentDeliveries({ rootDir: f.rootDir, log, budget,
+    postCommentImpl: async () => {
+      attempts++;
+      return { posted: false, reason: 'gh-cli-failure' };
+    },
+  });
+  assert.equal((await sweep(5)).failed, 1);
+  const archived = archiveStoppedFollowUpJobs({ rootDir: f.rootDir,
+    nowMs: Date.parse('2026-01-04T00:00:00.000Z') });
+  assert.equal(archived.archived, 1);
+  const archivedPath = archived.archivedPaths[0];
+  const pointerPath = deliveryRetryIndexPointerPath(f.rootDir, old.jobPath);
+  assert.equal(pointerPath, deliveryRetryIndexPointerPath(f.rootDir, archivedPath));
+  assert.equal((await sweep(0)).scanned, 1, 'resolution must survive a deferred retry');
+  assert.deepEqual(JSON.parse(readFileSync(pointerPath, 'utf8')), { jobPath: archivedPath });
+  for (const expectedAttempts of [2, 3]) {
+    const result = await sweep(5);
+    assert.equal(result.scanned, 1);
+    assert.equal(result.failed, 1);
+    assert.equal(attempts, expectedAttempts);
+    assert.equal(JSON.parse(readFileSync(archivedPath, 'utf8')).commentDelivery.attempts, expectedAttempts);
+    assert.deepEqual(readdirSync(deliveryRetryIndexDir(f.rootDir)).filter(name => name.endsWith('.json')),
+      [`${f.job.jobId}.json`]);
+  }
+});
 
 test('REMCOMMENT-01: comment backfill and archival preserve digest-pinned final-round recovery authority', async t => {
   const f = fixture(t);

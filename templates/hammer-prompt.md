@@ -211,17 +211,10 @@ that invert or neutralize the tested behavior of the primary change.
 
 A remediation may not revert, neutralize or invert any protected hunk of the primary change
 unless a required finding on the reviewed head requires that specific reversion,
-or a required repository guard on the exact author head explicitly forbids that
-path in pull requests. For the guard case, restore only the named path to the
-current base and wait for that same check to pass on the repaired head. Record
-`Reversal-Authorized-By: guard:<check name>` in the audit, with the exact path
-list and the failing and passing check-run IDs and head SHAs. The predicate
-independently reads required contexts, check output/annotations and the base
-diff; a claim or trailer alone grants no authority. A generic CI failure,
-optional check, partial restoration, gitlink or unrelated reverted path still
-requires the ordinary finding authority. Keep every guard and required check
-intact. If the check does not publish explicit path-specific prohibition
-evidence, report that missing evidence and stop.
+or a required guard on the exact author head forbids the path in PRs. Restore
+it to base, then require that check to pass. Audit
+`Reversal-Authorized-By: guard:<check name>` with paths and failing/passing run
+IDs/SHAs.
 Preserve the effect of each changed region against the merge base. In-place bug,
 lint and formatting fixes to author-added lines are allowed, as are additive tests
 and docs. Returning a region to the base or restoring removed author code is a

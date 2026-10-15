@@ -4381,6 +4381,7 @@ export async function maybeDispatchAmaCloser({
         hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
         repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha,
         reviewedSha: dispatchContext?.reviewedSha, prMetadata, reviewState,
+        strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
         fetchPrimaryChangeImpl, execFileImpl, deliverAlertImpl, logger,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
@@ -4607,6 +4608,7 @@ export async function maybeDispatchAmaCloser({
         reviewedSha: dispatchContext?.reviewedSha || null,
         prMetadata,
         reviewState,
+        strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
         fetchPrimaryChangeImpl,
         execFileImpl,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
@@ -4845,7 +4847,7 @@ export async function maybeDispatchAmaCloser({
     prompt += composeCiBlockedHammerPrompt({ reviewedSha, targetRemediationSha,
       failedChecks: dispatchContext.ciFailedChecks });
   }
-  if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
+  if (orphanAdmit && useHammerTerminalRemediationPrompt) prompt += '\nREMORPHAN-01 owner-of-last-resort pass: rebase, remediate all current findings, validate CI, and merge only under your own lease with every ordinary merge predicate satisfied. Primary-line edits require per-finding Reversal-Authorized-By trailers in the HAMINTENT-03 format described above, verified required-guard reversal authority as described above, or restoration of the reverted lines. If the closer-authored head cannot be re-certified, use the exact-head re-review path; never waive primary-change or CI gates.\n';
 
   const reviewedHeadDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
   const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };

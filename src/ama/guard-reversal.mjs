@@ -27,9 +27,17 @@ function latest(runs, head) {
 }
 
 function namesPath(text, path) {
-  // Require a complete literal path token on the same line as the prohibition.
-  return String(text || '').split('\n').some(line => forbidden.test(line)
-    && line.split(/[\s`"'<>()[\]{},;:]+/).includes(path));
+  // Bind the prohibition to this literal path's statement. Merely mentioning
+  // an allowed file beside a different forbidden file grants no authority.
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const token = '[`"\']?' + escaped + '[`"\']?';
+  const subject = new RegExp('^(?:[-*]\\s+)?(?:the\\s+(?:file|path)\\s+)?' + token
+    + '(?:\\s*:\\s*|\\s+(?:is\\s+)?(?:generated\\s+and\\s+)?(?=forbidden|not allowed|must not|cannot|do not|rejected))', 'i');
+  const command = new RegExp('^(?:do not|must not|cannot)\\s+(?:edit|modify|change|include|regenerate)\\s+' + token + '(?:\\s|$)', 'i');
+  const label = new RegExp('^forbidden in (?:pull requests?|PRs?)\\s*:\\s*' + token + '[.!]?$', 'i');
+  return String(text || '').split(/\n|;|\.\s+|\s+(?:but|whereas|while|except)\s+/i)
+    .map(line => line.trim()).some(line => forbidden.test(line)
+      && (subject.test(line) || command.test(line) || label.test(line)));
 }
 
 export function verifiedGuardReversals(evidence, headSha) {
@@ -86,8 +94,8 @@ export async function fetchGuardReversals({ repo, prNumber, headSha, get }, evid
       const annotations = await pages(get, `repos/${repo}/check-runs/${failedRun.id}/annotations`);
       for (const path of paths) {
         if (baseDelta.some(file => file.filename === path || file.previous_filename === path)) continue;
-        const annotation = annotations.find(item => item.path === path
-          && forbidden.test(`${item.title || ''} ${item.message || ''}`));
+        const annotation = annotations.find(item => forbidden.test(`${item.title || ''} ${item.message || ''}`)
+          && (item.path === path || namesPath(`${item.title || ''} ${item.message || ''}`, path)));
         const prohibition = annotation ? `${path}: ${annotation.title || ''} ${annotation.message || ''}`
           : [failedRun.output?.summary, failedRun.output?.text].filter(Boolean).join('\n');
         if (!namesPath(prohibition, path)) continue;

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { evaluateHammerStopHold, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
+import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
 
 const head = 'a'.repeat(40), reviewed = 'b'.repeat(40);
 const repo = 'fixture/repository';
@@ -98,4 +99,27 @@ test('GUARDREVERT-01: a new head clears refusal memory, including a force-push a
   assert.equal(restored.action, 'hold');
   assert.equal(f.pages.length, 2, 'a changed head clears the old page receipt');
   _resetHammerStopHoldPageDebounceForTests();
+});
+
+test('GUARDREVERT-01: newly verifiable authority releases a historical refusal without another hammer', async t => {
+  const f = setup(t);
+  await evaluateHammerStopHold(f.args);
+  const released = await evaluateHammerStopHold({ ...f.args, fetchPrimaryChangeImpl: async () => ({
+    headSha: head, hasHammerCommits: false,
+  }) });
+  assert.equal(released.action, 'release');
+  assert.ok(released.changed.includes('primary-change-evidence'));
+  assert.equal(f.pages.length, 1);
+});
+
+test('GUARDREVERT-01: canonical evidence version changes for same-head review edits with unchanged verdict/counts', () => {
+  const read = body => resolveSettledReviewVerdict('/fixture', { repo, prNumber: 1, currentHeadSha: head,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: head, review_body: body },
+    latestJobFinder: () => null, capturedReviewerPassFinder: () => null });
+  const body = '## Summary\nSynthetic documentation review.\n## Blocking issues\n- None.\n## Non-blocking issues\n- None.\n## Verdict\nApproved';
+  const first = read(body), edited = read(body.replace('documentation', 'updated documentation'));
+  assert.equal(first.verdict, edited.verdict);
+  assert.equal(first.blockingFindingCount, edited.blockingFindingCount);
+  assert.notEqual(first.evidenceVersion, edited.evidenceVersion);
+  assert.match(first.evidenceVersion, /^[a-f0-9]{64}$/);
 });

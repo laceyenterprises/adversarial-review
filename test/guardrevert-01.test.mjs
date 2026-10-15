@@ -131,8 +131,13 @@ test('GUARDREVERT-01: failed, optional, stale, unnamed and partial restorations 
     f => { f.responses[`commits/${head}/check-runs?per_page=100&page=1`].check_runs[0].conclusion = 'failure'; },
     f => { f.responses[`commits/${head}/check-runs?per_page=100&page=1`].check_runs[0].head_sha = approved; },
     f => { f.responses[`commits/${head}/check-runs?per_page=100&page=1`].check_runs[0].app.id = 8; },
+    f => { f.responses['branches/main/protection/required_status_checks'].checks[0].app_id = 8; },
+    f => { f.responses[`commits/${approved}/check-runs?per_page=100&page=1`].check_runs[0].head_sha = head; },
+    f => { f.responses[`commits/${head}/check-runs?per_page=100&page=1`].check_runs.push({ ...f.passing, id: 13, status: 'in_progress', conclusion: null }); },
     f => { f.responses['check-runs/11/annotations?per_page=100&page=1'][0].path = 'docs/unrelated.md'; },
     f => { f.responses['check-runs/11/annotations?per_page=100&page=1'][0].message = 'Lint error.'; },
+    f => { f.responses['check-runs/11/annotations?per_page=100&page=1'] = [{ path: '.github/workflows/guard.yml',
+      message: `${path} is allowed in PRs, but docs/unrelated.md is forbidden in PRs.` }]; },
     f => { f.responses[`compare/${base}...${head}`].files.push({ ...index,
       patch: '@@ -1 +1 @@\n-Base catalog\n+Partially reverted catalog' }); },
   ]) {
@@ -141,5 +146,20 @@ test('GUARDREVERT-01: failed, optional, stale, unnamed and partial restorations 
     const f = fixture(); mutate(f);
     const result = checkPrimaryChange(await evidenceFor(f), head);
     assert.equal(result.ok && result.guardReversals?.length > 0, false);
+  }
+});
+
+test('GUARDREVERT-01: explicit path prohibitions in summaries and generic error annotations qualify', async () => {
+  for (const source of ['summary', 'annotation']) {
+    const f = fixture();
+    if (source === 'summary') {
+      f.responses['check-runs/11/annotations?per_page=100&page=1'] = [];
+      f.responses[`commits/${approved}/check-runs?per_page=100&page=1`].check_runs[0].output = {
+        summary: `The file \`${path}\` is forbidden in pull requests.` };
+    } else {
+      f.responses['check-runs/11/annotations?per_page=100&page=1'] = [{ path: '.github/workflows/guard.yml',
+        message: `The file \`${path}\` is forbidden in pull requests.` }];
+    }
+    assert.equal(checkPrimaryChange(await evidenceFor(f), head).ok, true, source);
   }
 });

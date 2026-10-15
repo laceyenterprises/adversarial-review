@@ -1,6 +1,7 @@
 import { meteredExecFile } from './metered-gh.mjs';
 import { readReviewFailureDecision } from './review-retry-exhaustion.mjs';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -488,6 +489,7 @@ function resolveCommentOnlyFinalRoundVerdict(rootDir, {
     remediationPending: false,
     reviewedHeadSha,
     commentOnlyFinalRoundPush: true,
+    evidenceVersion: createHash('sha256').update(String(body || '')).digest('hex'),
     ...classifyBlockersFromBody(body, verdict),
   };
 }
@@ -606,6 +608,7 @@ function resolveSettledReviewVerdict(
     }
     return {
       verdict: live.verdict,
+      evidenceVersion: createHash('sha256').update(String(live.body || '')).digest('hex'),
       remediationPending: false,
       reviewedHeadSha,
       ...classifyBlockersFromBody(live.body, live.verdict),
@@ -622,6 +625,7 @@ function resolveSettledReviewVerdict(
     : reviewedHeadSha);
   return {
     verdict,
+    evidenceVersion: createHash('sha256').update(String(body || '')).digest('hex'),
     remediationPending: false,
     reviewedHeadSha: settledReviewedHeadSha,
     ...classifyBlockersFromBody(body, verdict),

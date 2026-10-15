@@ -1225,7 +1225,6 @@ async function dispatchAmaClosureFor({
   let liveReviewHeadSha = closerOnlyHeadDelta || gateSnapshot.settledReview?.commentOnlyFinalRoundPush === true
     ? gateSnapshot.reviewedHeadSha
     : settledReviewHeadSha;
-  let refusalLiveReviewVersion = null;
   if (
     settledReviewHeadSha &&
     gateSnapshot.settledReview?.remediationPending === false &&
@@ -1304,7 +1303,6 @@ async function dispatchAmaClosureFor({
       );
       liveHeadReview = { resolved: false };
     }
-    refusalLiveReviewVersion = JSON.stringify(liveHeadReview);
     gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
       repo: repoPath,
       prNumber,
@@ -1397,7 +1395,7 @@ async function dispatchAmaClosureFor({
   throwIfAborted(signal);
   const reviewState = {
     // A same-head review edit is new evidence even when verdict/counts agree.
-    refusalReviewVersion: JSON.stringify([reviewStateRow?.review_body || null, gateSnapshot.settledReview, refusalLiveReviewVersion]),
+    refusalReviewVersion: gateSnapshot.settledReview?.evidenceVersion || null,
     verdict: gateSnapshot.settledReview?.verdict || '',
     // `headSha` remains the reviewed evidence identity. Ordinary MSM-04 dispatch
     // uses it as the stable budget key; proven closer-only continuations use the

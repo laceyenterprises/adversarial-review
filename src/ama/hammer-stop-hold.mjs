@@ -68,6 +68,12 @@ export const HISTORY_READ_FAILURE_PAGE_GRACE_MS = 10 * 60_000;
 const execFileAsync = promisify(execFile);
 
 const STOP_OUTCOMES = new Set(['failed-without-merge', 'no-merge']);
+const DETERMINISTIC_STOP_REASONS = new Set([
+  'primary-change-reverted', 'primary-change-unknown', 'stale-review-head',
+  'verdict-not-eligible', 'verdict-not-settled-success', 'permanent-merge-rejection',
+  'protective-predecessor-open', 'protective-predecessor-malformed-trailer',
+  'builder-token-merge-refused', 'base-changed-file-overlap',
+]);
 // Process-local page debounce for a state file that cannot be written.
 const PAGED_IN_PROCESS = new Set();
 
@@ -88,17 +94,16 @@ function stable(value) {
   return value;
 }
 
-function deterministicRefusal(attempt) {
+function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
   const reasons = [...new Set([
     ...(attempt.eligibilityTrace?.reasons || []), ...(attempt.githubGate?.reasons || []),
     ...(attempt.reasons || []),
   ])].sort();
-  if (!reasons.length && ['primary-change-reverted', 'primary-change-unknown', 'stale-review-head',
-    'verdict-not-eligible', 'verdict-not-settled-success', 'permanent-merge-rejection'].includes(attempt.reason)) reasons.push(attempt.reason);
+  if (!reasons.length && DETERMINISTIC_STOP_REASONS.has(attempt.reason)) reasons.push(attempt.reason);
   if (!reasons.length || reasons.some(reason => /read-failed|unavailable|timeout|pending|mergeability-unknown/.test(reason))) return null;
   const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
     || attempt.githubGate?.primaryChangeMissingEvidence || null);
-  const key = createHash('sha256').update(JSON.stringify({ reasons, missingEvidence })).digest('hex');
+  const key = createHash('sha256').update(JSON.stringify({ repo, prNumber: Number(prNumber), headSha, reasons, missingEvidence })).digest('hex');
   const next = attempt.next || (reasons.includes('primary-change-reverted')
     ? 'Restore the uncited reverted regions, then push the repaired head.'
     : reasons.includes('stale-review-head') ? 'Obtain an approving review on the current head.'
@@ -235,7 +240,7 @@ export function readHammerStopForHead({
       stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || ''}`,
     })),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
-    refusal: deterministicRefusal(attempt),
+    refusal: deterministicRefusal(attempt, { repo, prNumber, headSha }),
     closingStatus: oneLine(attempt?.closingStatus),
     ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
       ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason) } : {}),
@@ -318,6 +323,7 @@ export async function evaluateHammerStopHold({
   reviewedSha,
   prMetadata,
   reviewState = null,
+  strictNonBlockingRemediation = true,
   excludeContexts = [],
   deliverAlertImpl = null,
   logger = console,
@@ -339,7 +345,7 @@ export async function evaluateHammerStopHold({
   const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
   const prior = state.heads[headSha];
   const sameRefusal = stop.refusal && prior?.refusal?.key === stop.refusal.key;
-  const reuseEntry = prior && (sameRefusal || prior.stopKey === stop.stopKey)
+  const reuseEntry = prior && (stop.refusal ? sameRefusal : prior.stopKey === stop.stopKey)
     && !(prior.releasedAt && prior.stopKey !== stop.stopKey);
   if (!reuseEntry) state.refusalGeneration = (Number(state.refusalGeneration) || 0) + 1;
   let entry = reuseEntry
@@ -356,7 +362,7 @@ export async function evaluateHammerStopHold({
       inputs: prior?.releasedInputs || inputs,
       pagedAt: stop.refusal ? null : prior?.pagedAt || null,
     };
-  let dirty = !prior || prior.stopKey !== stop.stopKey;
+  let dirty = !reuseEntry || prior.stopKey !== stop.stopKey;
   if (!entry.releasedAt) {
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
@@ -377,7 +383,7 @@ export async function evaluateHammerStopHold({
           repo, prNumber, headSha, rootDir,
           get: createHistoryReader({ execFileImpl }),
         });
-        const answer = checkPrimaryChange(evidence, headSha);
+        const answer = checkPrimaryChange(evidence, headSha, { strictNonBlockingRemediation });
         if (stop.refusal?.reasons.includes('primary-change-reverted')) {
           // Deploying a new verifier or publishing guard evidence can resolve
           // the missing authority without a new SHA or verdict. Read it, but

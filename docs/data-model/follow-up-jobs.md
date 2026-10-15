@@ -3,7 +3,7 @@
 **Owner:** follow-up remediation queue
 **Store:** `data/follow-up-jobs/{pending,in-progress,completed,failed,stopped}/*.json`, `data/follow-up-jobs/single-review-voids/*.json`, `data/follow-up-jobs/missing-label-events/*.json`
 **Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
-**Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`
+**Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`
 
 ## Missing retrigger-review label-event observations
 
@@ -146,6 +146,33 @@ requests; `reReview` records the request intent and then its outcome. Ordinary
 rounds request re-review and wake the watcher; comment-only final rounds wake
 the existing cap/closure lane with re-review suppressed. Recovery itself grants
 no CI waiver or merge decision.
+
+Recovery holds a delivery claim across completion and follow-on dispatch. It
+defers without changing the job or dispatching follow-on work if another
+unexpired claim owns the terminal path; retained publish evidence is retried. It
+registers the delivery retry index pointer only after persisting the final
+`reReview` outcome and rendered `commentDelivery.body`. The one-time completed
+worker backfill can use `remediationReply.payload` when the reply artifact read
+fails with `ENOENT`; it revalidates that payload against the job identity and
+reply contract. Multi-round jobs require the payload stored on the current
+round's `remediationReply`; the top-level payload is accepted only for an
+unambiguous single first round. An explicit payload round must match.
+Other artifact read or validation errors do not use the fallback.
+
+The backfill examines at most 100 records and directory transitions per tick,
+including all historical archive months, before releasing the queue lock.
+`data/follow-up-jobs/delivery-retry-index/.remediation-reply-backfill-cursor`
+atomically stores resumable progress until the completion sentinel is written:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `directory` | absolute path string | Last terminal directory visited, in sorted path order. |
+| `after` | string | Last processed filename in that directory; `\uffff` marks a finished directory. |
+
+The cursor has no foreign keys. Failed writes and held claims retain the cursor
+before that record for the next tick. Completion removes the cursor; deleting it
+early safely restarts the idempotent scan. The sentinel is never written for a
+partial or failed scan.
 
 The stale-claim sweep probes recovery after its activity, age and CPU gates.
 An exited worker with current result artifacts can be reconciled earlier.

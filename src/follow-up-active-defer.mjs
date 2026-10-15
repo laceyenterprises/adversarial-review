@@ -43,6 +43,7 @@ function stopBudgetExhaustedPendingFollowUpJob({
   }
 
   return markStoppedImpl({
+    commentDeliveryExemption: 'interrupted-without-reconciled-reply',
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,
@@ -111,6 +112,7 @@ function stopTerminalPendingFollowUpJob({
     : '';
 
   return markStoppedImpl({
+    commentDeliveryExemption: 'interrupted-without-reconciled-reply',
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,
@@ -299,6 +301,7 @@ function stopStaleInProgressFollowUpJob({
   }
 
   return markStoppedImpl({
+    commentDeliveryExemption: 'interrupted-without-reconciled-reply',
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,
@@ -335,6 +338,8 @@ function shouldDeferReviewForActiveFollowUp({
   if (latest?.job?.status === 'pending' && currentRevisionRef) {
     const completed = completeWorkerPublishedHead({ rootDir, jobPath: latest.jobPath,
       headSha: currentRevisionRef, completedAt: new Date(nowMs).toISOString() });
+    if (completed?.deferred) return { defer: true, latestJobStatus: completed.job.status,
+      jobPath: completed.jobPath, jobId: completed.job.jobId, reason: completed.reason };
     if (completed) latest = { job: completed.job, jobPath: completed.jobPath };
   }
   const budgetStopped = typeof budgetSweepImpl === 'function' ? budgetSweepImpl({
@@ -361,6 +366,8 @@ function shouldDeferReviewForActiveFollowUp({
     stoppedAt: new Date(nowMs).toISOString(),
     markStoppedImpl,
   }) : null;
+  if (terminalStopped?.deferred) return { defer: true, latestJobStatus: terminalStopped.job.status,
+    jobPath: terminalStopped.jobPath, jobId: terminalStopped.job.jobId, reason: terminalStopped.reason };
   if (terminalStopped) {
     const releaseReason = terminalStopped.job?.remediationPlan?.stop?.code || 'pending-terminal';
     log?.info?.(

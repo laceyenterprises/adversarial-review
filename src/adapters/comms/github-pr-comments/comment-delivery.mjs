@@ -1,3 +1,4 @@
+import { resolveReconcileWorkerClass } from '../../../remediation-worker-routing.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // Durable PR-comment delivery state for terminal follow-up jobs.
 //
@@ -26,11 +27,13 @@ import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // human inspection; the daemon does not silently keep hammering.
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync, renameSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
-import { getFollowUpJobDir, readRemediationReplyArtifact } from '../../../follow-up-jobs.mjs';
+import { getFollowUpJobDir, readRemediationReplyArtifact, validateRemediationReply } from '../../../follow-up-jobs.mjs';
+import { withFollowUpJobLock } from '../../../follow-up-job-write.mjs';
+import { writeFileAtomic } from '../../../atomic-write.mjs';
 import { buildDeliveryKey } from '../../../identity-shapes.mjs';
 import { buildRemediationOutcomeCommentBody, postRemediationOutcomeComment } from './pr-comments.mjs';
 
@@ -53,6 +56,12 @@ const ROOT = join(__dirname, '../../../..');
 // that pre-date the index.
 const DELIVERY_RETRY_INDEX_DIR_NAME = 'delivery-retry-index';
 const DELIVERY_RETRY_INDEX_INIT_SENTINEL = '.initialized';
+// Independent of the original index seed: recovery jobs could lose their
+// delivery after that migration had already run.
+const REMEDIATION_REPLY_BACKFILL_SENTINEL = '.remediation-reply-backfilled-remcomment-01';
+const REMEDIATION_REPLY_BACKFILL_CURSOR = '.remediation-reply-backfill-cursor';
+const REMEDIATION_REPLY_BACKFILL_BUDGET = 100;
+const HISTORICAL_DELIVERY_ONLY = Symbol('historical-delivery-only');
 
 // Maximum number of times the retry pass will re-attempt a failed
 // comment. After this, the record sits in terminal/ with posted=false
@@ -91,6 +100,38 @@ const NON_RETRYABLE_DELIVERY_REASONS = new Set([
 // records) would skip it forever. With this shape on the record, the
 // retry walker has every field it needs (body, repo, prNumber,
 // workerClass) to deliver without touching any other artifact.
+function buildReconcileCommentDelivery({
+  job,
+  worker,
+  action,
+  reply = null,
+  reReview = null,
+  failure = null,
+  now = () => new Date().toISOString(),
+}) {
+  const workerClass = resolveReconcileWorkerClass(job, worker);
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass,
+    worker,
+    action,
+    job,
+    reply,
+    reReview,
+    failure,
+  });
+  const commentDelivery = buildOwedDelivery({
+    body,
+    repo: job?.repo,
+    prNumber: job?.prNumber,
+    workerClass,
+    owedAt: now(),
+    revisionRef: job?.revisionRef || null,
+    round: job?.remediationPlan?.currentRound || null,
+    kind: 'remediation-reply',
+  });
+  return { body, workerClass, commentDelivery };
+}
+
 function buildOwedDelivery({
   body,
   repo,
@@ -213,10 +254,31 @@ function buildAttemptingDelivery({
 
 function readTerminalRecord(jobPath) {
   const raw = readFileSync(jobPath, 'utf8');
-  return JSON.parse(raw);
+  const record = JSON.parse(raw);
+  const sidecarPath = historicalDeliverySidecarPath(jobPath);
+  if (existsSync(sidecarPath)) {
+    record.commentDelivery = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+    record[HISTORICAL_DELIVERY_ONLY] = true;
+  } else if (!record.commentDelivery && record.status === 'stopped' && record.finalRound === 'comment-only') {
+    // These historical bytes may already be pinned, or become the input to a
+    // native recovery later. JSON ignores the private routing symbol.
+    record[HISTORICAL_DELIVERY_ONLY] = true;
+  }
+  return record;
+}
+
+// A native final-round recovery pins the original terminal JSON by digest.
+// Delivery accounting for that history must not invalidate merge authority.
+function historicalDeliverySidecarPath(jobPath) {
+  return `${jobPath}.delivery.state`;
 }
 
 function writeTerminalRecord(jobPath, record) {
+  const sidecarPath = historicalDeliverySidecarPath(jobPath);
+  if (record[HISTORICAL_DELIVERY_ONLY] || existsSync(sidecarPath)) {
+    writeFileAtomic(sidecarPath, `${JSON.stringify(record.commentDelivery, null, 2)}\n`);
+    return;
+  }
   // Atomic update: write to a sibling .tmp file then rename.
   // Truncating the original in-place would leave a half-written file
   // visible to a concurrent reader on a crash mid-write.
@@ -647,7 +709,7 @@ function deliveryWarrantsRetry(delivery, maxAttempts) {
   return true;
 }
 
-function listTerminalJobPaths(rootDir) {
+function listTerminalJobPaths(rootDir, { includeArchivedStopped = false } = {}) {
   const dirs = ['completed', 'stopped', 'failed'];
   const out = [];
   for (const key of dirs) {
@@ -664,7 +726,33 @@ function listTerminalJobPaths(rootDir) {
       }
     }
   }
+  if (includeArchivedStopped) {
+    const archiveRoot = getFollowUpJobDir(rootDir, 'stoppedArchived');
+    if (existsSync(archiveRoot)) {
+      for (const month of readdirSync(archiveRoot, { withFileTypes: true })) {
+        if (!month.isDirectory()) continue;
+        const dir = join(archiveRoot, month.name);
+        for (const name of readdirSync(dir)) {
+          if (name.endsWith('.json')) out.push(join(dir, name));
+        }
+      }
+    }
+  }
   return out;
+}
+
+// Archiving preserves a stopped record's bytes but moves its filename. Follow
+// that move for indexed debt rather than treating it as a deleted job. A
+// collision remains ambiguous and is left to the existing archive diagnostics.
+function resolveIndexedJobPath(rootDir, jobPath) {
+  if (existsSync(jobPath) || dirname(jobPath) !== getFollowUpJobDir(rootDir, 'stopped')) return jobPath;
+  const archiveRoot = getFollowUpJobDir(rootDir, 'stoppedArchived');
+  if (!existsSync(archiveRoot)) return jobPath;
+  const matches = readdirSync(archiveRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => join(archiveRoot, entry.name, basename(jobPath)))
+    .filter(candidate => existsSync(candidate));
+  return matches.length === 1 ? matches[0] : jobPath;
 }
 
 // Reconstruct a delivery shape (body + addressing) from a terminal
@@ -680,7 +768,7 @@ function listTerminalJobPaths(rootDir) {
 // Upstream R5 blocking #1 fix preserved through the retry-index
 // rewrite: even when reading from the index, a pointer can lead to a
 // record whose pre-stamp never landed.
-function reconstructDeliveryFromRecord(record) {
+function reconstructDeliveryFromRecord(record, { rootDir = ROOT } = {}) {
   const action = record?.status === 'completed' ? 'completed'
     : record?.status === 'stopped' ? 'stopped'
     : record?.status === 'failed' ? 'failed'
@@ -702,7 +790,7 @@ function reconstructDeliveryFromRecord(record) {
   const replyPath = record?.remediationReply?.path || record?.remediationWorker?.replyPath || null;
   if (replyPath) {
     try {
-      parsedReply = readRemediationReplyArtifact(replyPath, { expectedJob: record });
+      parsedReply = readRemediationReplyArtifact(resolve(rootDir, replyPath), { expectedJob: record });
     } catch {
       parsedReply = null;
     }
@@ -764,11 +852,118 @@ function recordOwesRetry(record, maxAttempts) {
   if (status !== 'completed' && status !== 'stopped' && status !== 'failed') return false;
   if (!record.repo || !record.prNumber) return false;
   const delivery = record.commentDelivery;
-  if (!delivery) return true; // missing — reconstructable debt
+  if (!delivery) return !record.commentDeliveryExemption; // missing — reconstructable debt
   if (delivery.posted) return false;
   if ((delivery.attempts || 0) >= maxAttempts) return false;
   if (NON_RETRYABLE_DELIVERY_REASONS.has(delivery.reason)) return false;
   return true; // delivery without body is still owed and reconstructable
+}
+
+function readCompletedWorkerReply(rootDir, record) {
+  if (!['completed', 'stopped', 'failed'].includes(record?.status)
+    || record.commentDelivery || record.commentDeliveryExemption || !record.repo || !record.prNumber) return null;
+  const round = record.remediationPlan?.rounds?.find(entry =>
+    Number(entry.round) === Number(record.remediationPlan?.currentRound));
+  const worker = record.remediationWorker || round?.worker;
+  if (worker?.state !== 'completed') return null;
+  const replyPath = record.remediationReply?.path || worker.replyPath;
+  if (!replyPath) return null;
+  try {
+    const reply = readRemediationReplyArtifact(resolve(rootDir, replyPath), { expectedJob: record });
+    return { reply, worker };
+  } catch (error) {
+    // Pruned artifacts may still have a durable reply on the job. Do not
+    // conceal malformed files or other read failures with an older payload.
+    if (error.cause?.code !== 'ENOENT') return null;
+    try {
+      // Replies have a job identity, but legacy payloads have no round field.
+      // Prefer the reply stored on this exact round; a job-level payload alone
+      // is unambiguous only on a single first-round job.
+      const singleRound = Number(round?.round) === 1 && record.remediationPlan.rounds.length === 1;
+      const payload = round?.remediationReply?.payload
+        || (singleRound ? record.remediationReply?.payload : null);
+      if (payload?.round != null && Number(payload.round) !== Number(round?.round)) return null;
+      const reply = validateRemediationReply(payload, { expectedJob: record });
+      return { reply, worker };
+    } catch { return null; }
+  }
+}
+
+// REMCOMMENT-01: owe old completed-worker replies once, even on an installation
+// whose retry index was already initialized. Posting remains in the ordinary
+// sweep, with its existing budget, claim, marker dedupe and attempt cap.
+function backfillCompletedWorkerReplyDeliveries(rootDir, { now, log }) {
+  const sentinelPath = join(ensureDeliveryRetryIndexDir(rootDir), REMEDIATION_REPLY_BACKFILL_SENTINEL);
+  if (existsSync(sentinelPath)) return;
+  const cursorPath = join(deliveryRetryIndexDir(rootDir), REMEDIATION_REPLY_BACKFILL_CURSOR);
+  let cursor = { directory: '', after: '' };
+  if (existsSync(cursorPath)) cursor = JSON.parse(readFileSync(cursorPath, 'utf8'));
+  const archiveRoot = getFollowUpJobDir(rootDir, 'stoppedArchived');
+  const directories = ['completed', 'stopped', 'failed'].map(key => getFollowUpJobDir(rootDir, key));
+  if (existsSync(archiveRoot)) {
+    directories.push(...readdirSync(archiveRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory()).map(entry => join(archiveRoot, entry.name)));
+  }
+  directories.sort();
+  let remaining = REMEDIATION_REPLY_BACKFILL_BUDGET;
+  let complete = true;
+  // Persist progress across ticks/restarts. Enumerate only the current partition
+  // and parse at most 100 records under the queue lock, without dropping old debt.
+  scan: for (const directory of directories) {
+    if (directory < cursor.directory) continue;
+    if (remaining-- <= 0) { complete = false; break; }
+    let names;
+    try { names = readdirSync(directory).sort(); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    for (const name of names) {
+      if (!name.endsWith('.json') || (directory === cursor.directory && name <= cursor.after)) continue;
+      if (remaining-- <= 0) { complete = false; break scan; }
+      const jobPath = join(directory, name);
+      let processed = false;
+      let claimed = false;
+      try {
+        let record = readTerminalRecord(jobPath);
+        processed = true;
+        if (!readCompletedWorkerReply(rootDir, record)) continue;
+        const claim = tryAcquireDeliveryClaim(jobPath, buildClaimerId(), { now });
+        if (!claim.acquired) { processed = false; complete = false; break scan; }
+        claimed = true;
+        // A concurrent ordinary post may have stamped delivery since our scan.
+        record = readTerminalRecord(jobPath);
+        const completed = readCompletedWorkerReply(rootDir, record);
+        if (!completed) continue;
+        const { reply, worker } = completed;
+        record.commentDelivery = buildReconcileCommentDelivery({
+          job: record, worker, action: record.status,
+          reply, reReview: record.reReview, failure: record.failure, now,
+        }).commentDelivery;
+        // Write the pointer first. If persistence fails, the indexed legacy
+        // reconstruction still has the reply and another migration pass retries.
+        addToDeliveryRetryIndex(rootDir, jobPath);
+        writeTerminalRecord(jobPath, record);
+      } catch (err) {
+        processed = false;
+        complete = false;
+        log?.error?.(`[comment-delivery] failed to backfill ${jobPath}: ${err.message}`);
+        break scan;
+      } finally {
+        if (claimed) releaseDeliveryClaim(jobPath);
+        if (processed) cursor = { directory, after: name };
+      }
+    }
+    cursor = { directory, after: '\uffff' };
+  }
+  // Held claims and failed writes defer completion of the migration, so a
+  // transient failure cannot silently discard the remainder of the backfill.
+  if (complete) {
+    try {
+      writeFileSync(sentinelPath, `${now()}\n`, 'utf8');
+      rmSync(cursorPath, { force: true });
+    }
+    catch (err) { log?.error?.(`[comment-delivery] failed to finish reply backfill: ${err.message}`); }
+  } else {
+    writeFileAtomic(cursorPath, `${JSON.stringify(cursor)}\n`);
+  }
 }
 
 // One-time migration: the first time the retry tick runs after this
@@ -846,9 +1041,23 @@ function listRetryCandidates(rootDir, { maxAttempts, log }) {
       try { rmSync(pointerPath, { force: true }); } catch {}
       continue;
     }
-    const jobPath = pointer?.jobPath;
+    let jobPath = pointer?.jobPath;
     if (!jobPath) {
       try { rmSync(pointerPath, { force: true }); } catch {}
+      continue;
+    }
+    try {
+      const resolvedPath = resolveIndexedJobPath(rootDir, jobPath);
+      if (resolvedPath !== jobPath) {
+        // Archiving preserves the basename, so this atomically rewrites the
+        // same pointer file. Unlinking pointerPath would delete the new debt.
+        addToDeliveryRetryIndex(rootDir, resolvedPath);
+        jobPath = resolvedPath;
+      }
+    } catch (err) {
+      // A failed archive lookup or pointer rewrite is transient evidence;
+      // retain the original pointer so a later tick can follow the move.
+      log?.error?.(`[comment-delivery] cannot resolve retry pointer ${pointerPath}: ${err.message}`);
       continue;
     }
     let record;
@@ -873,7 +1082,7 @@ function listRetryCandidates(rootDir, { maxAttempts, log }) {
     if (!delivery) {
       // Missing — reconstruct so the retry walker can post (R5 #1
       // crash-window recovery).
-      const reconstructed = reconstructDeliveryFromRecord(record);
+      const reconstructed = reconstructDeliveryFromRecord(record, { rootDir });
       if (!reconstructed) {
         try { rmSync(pointerPath, { force: true }); } catch {}
         continue;
@@ -884,7 +1093,7 @@ function listRetryCandidates(rootDir, { maxAttempts, log }) {
     if (!delivery.body) {
       // Partial owed shape — reconstruct the body, keep the
       // attempts/firstAttemptAt accounting from the existing record.
-      const reconstructed = reconstructDeliveryFromRecord(record);
+      const reconstructed = reconstructDeliveryFromRecord(record, { rootDir });
       if (!reconstructed) {
         try { rmSync(pointerPath, { force: true }); } catch {}
         continue;
@@ -923,6 +1132,14 @@ async function retryFailedCommentDeliveries({
   maxAttempts = MAX_COMMENT_DELIVERY_ATTEMPTS,
   budget = RETRY_BUDGET_PER_TICK,
 } = {}) {
+  if (!existsSync(join(deliveryRetryIndexDir(rootDir), REMEDIATION_REPLY_BACKFILL_SENTINEL))) {
+    try {
+      // The archive sweep uses this same lock. Its move cannot split our
+      // history scan, record write and pointer creation across directories.
+      withFollowUpJobLock(join(rootDir, 'data', 'follow-up-jobs'), () =>
+        backfillCompletedWorkerReplyDeliveries(rootDir, { now, log }));
+    } catch (err) { log?.error?.(`[comment-delivery] reply backfill deferred: ${err.message}`); }
+  }
   // One-time backfill: if the retry index hasn't been seeded yet,
   // walk the existing terminal history once so any pre-index
   // posted=false records get picked up. Subsequent ticks read only
@@ -1011,7 +1228,7 @@ async function retryFailedCommentDeliveries({
 
     delivery.body = filterGitHubBody(delivery.body, { repo: delivery.repo, rootDir, reviewerHeadSha: delivery.revisionRef });
     retried += 1;
-    /* eslint-disable no-await-in-loop */
+
     let result;
     try {
       result = await postCommentImpl({
@@ -1028,7 +1245,7 @@ async function retryFailedCommentDeliveries({
       // in `attempting=true` until the lock goes stale.
       result = { posted: false, reason: 'gh-cli-failure', error: err.message };
     }
-    /* eslint-enable no-await-in-loop */
+
 
     const attemptedAt = now();
 
@@ -1121,15 +1338,18 @@ export {
   DELIVERY_CLAIM_STALE_MS,
   DELIVERY_RETRY_INDEX_DIR_NAME,
   DELIVERY_RETRY_INDEX_INIT_SENTINEL,
+  REMEDIATION_REPLY_BACKFILL_SENTINEL,
   NON_RETRYABLE_DELIVERY_REASONS,
   addToDeliveryRetryIndex,
   buildAttemptingDelivery,
   buildOwedDelivery,
+  buildReconcileCommentDelivery,
   buildPendingDelivery,
   clearPostedSidecar,
   deliveryLockPath,
   deliveryRetryIndexDir,
   deliveryRetryIndexPointerPath,
+  historicalDeliverySidecarPath,
   listRetryCandidates,
   postedSidecarPath,
   reconstructDeliveryFromRecord,

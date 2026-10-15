@@ -1,6 +1,7 @@
 // CLI entry point for the daemon tick's "retry pending PR comments"
 // step. Walks data/follow-up-jobs/{completed,stopped,failed}, finds
-// terminal records whose commentDelivery.posted is false, and re-posts
+// once backfills completed-worker records with valid replies but no delivery,
+// then finds records whose commentDelivery.posted is false, and re-posts
 // each (bounded by MAX_COMMENT_DELIVERY_ATTEMPTS).
 //
 // See src/adapters/comms/github-pr-comments/comment-delivery.mjs for the design rationale and the

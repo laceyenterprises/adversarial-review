@@ -2552,10 +2552,10 @@ export async function processReviewSubject(entry, ctx) {
         const parkedMessage = message.includes(`[${reason}]`) ? message
           : `[reviewer-timeout] [${reason}] timeouts=${timeoutBudget.count}/${timeoutBudget.limit}; reviewer build=${timeoutBudget.reviewerBuildId}\n${message}`;
         const parked = db.prepare(`UPDATE reviewed_prs SET review_status = 'failed', failure_message = ?,
-            reviewer_lease_expires_at = NULL
+            reviewer_lease_expires_at = NULL, failed_at = COALESCE(failed_at, ?)
           WHERE repo = ? AND pr_number = ? AND review_status IN ('failed', 'pending', 'pending-upstream')
             AND reviewer_head_sha IS ? AND reviewer_session_uuid IS ? AND failure_message IS ?`).run(
-          parkedMessage, repoPath, prNumber, current?.reviewer_head_sha || null,
+          parkedMessage, new Date().toISOString(), repoPath, prNumber, current?.reviewer_head_sha || null,
           current?.reviewer_session_uuid || null, current?.failure_message || null,
         );
         if (parked.changes === 1) {

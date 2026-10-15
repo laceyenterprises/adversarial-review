@@ -362,8 +362,8 @@ function reviewerDispatchEnqueuedAt(current) {
 function compareReviewerDispatchCandidates(a, b, {
   nowMs = Date.now(), waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
 } = {}) {
-  const waitDelta = compareReviewerDispatchPriority(a, b, { nowMs, waitWarnMs });
-  if (waitDelta !== 0) return waitDelta;
+  const priorityDelta = compareReviewerDispatchPriority(a, b, { nowMs, waitWarnMs });
+  if (priorityDelta !== 0) return priorityDelta;
   const tierDelta = reviewerDispatchTierRank(a) - reviewerDispatchTierRank(b);
   if (tierDelta !== 0) return tierDelta;
   const timeDelta = reviewerDispatchSortTimeMs(a) - reviewerDispatchSortTimeMs(b);

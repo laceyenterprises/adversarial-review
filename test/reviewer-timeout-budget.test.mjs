@@ -174,6 +174,20 @@ test('CASCADECAP-01 reviewer build identity supports partial installations and c
   assert.notEqual(reviewerBuildDigest(moduleUrl), complete);
 }));
 
+test('CASCADECAP-01 build digest tolerates a missing source directory and ignores source directories named like modules', () => fixture(root => {
+  const moduleUrl = pathToFileURL(join(root, 'src', 'reviewer-timeout-budget.mjs'));
+  const missing = reviewerBuildDigest(moduleUrl);
+  assert.equal(reviewerBuildDigest(moduleUrl), missing, 'missing layout has a stable identity');
+  mkdirSync(join(root, 'src'));
+  const empty = reviewerBuildDigest(moduleUrl);
+  assert.notEqual(empty, missing, 'missing source directory contributes absence evidence');
+  for (const name of ['reviewer-fixture.mjs', 'domain-pipeline.mjs']) {
+    mkdirSync(join(root, 'src', name));
+    writeFileSync(join(root, 'src', name, 'nested.mjs'), 'synthetic unrelated input');
+  }
+  assert.equal(reviewerBuildDigest(moduleUrl), empty, 'only regular top-level source files are hashed');
+}));
+
 for (const relative of ['src/reviewer-fixture.mjs', 'src/adapters/reviewer-runtime/fixture.mjs', 'prompts/code-pr/reviewer.first.md']) {
   test(`CASCADECAP-01 build digest tolerates a file disappearing after enumeration: ${relative}`, t => fixture(root => {
     mkdirSync(join(root, 'src', 'adapters', 'reviewer-runtime'), { recursive: true });

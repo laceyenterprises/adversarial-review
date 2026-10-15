@@ -3482,7 +3482,7 @@ test('GHSCOPE-01: a rate-limited first discovery still fetches other repository 
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
-for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 'upstream-503']) {
+for (const scenario of ['unchanged', 'pending-missing-failed-at', 'pending-upstream-missing-failed-at', 'new-head', 'new-build', 'operator-rearm', 'upstream-503']) {
   test(`CASCADECAP-01 pollOnce: ${scenario}`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-timeout-bound-'));
     try {
@@ -3534,6 +3534,8 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
       writeFileSync(loaderPath, synthetic(loader));
       writeFileSync(registerPath, buildRegisterSource(loaderPath));
       const failureClass = scenario === 'upstream-503' ? 'cascade' : 'reviewer-timeout';
+      const missingFailedAt = scenario.endsWith('-missing-failed-at');
+      const parksWithoutRetry = scenario === 'unchanged' || missingFailedAt;
       writeFileSync(runnerPath, synthetic(buildRunnerSource({
         prePollSetup: `
           db.exec(\`
@@ -3554,19 +3556,24 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
             review_status, review_attempts, infra_auto_recover_attempts, reviewer_head_sha,
             revision_ref, failed_at, failure_message, rereview_requested_at, rereview_reason)
             VALUES ('example/adversarial-review',101,'2026-01-01','claude','open',?,0,3,?,?,
-              '2026-01-01T00:00:00Z',?,?,?)\`).run(
-              ${JSON.stringify(scenario === 'operator-rearm' ? 'pending' : 'failed')},
+              ?,?,?,?)\`).run(
+              ${JSON.stringify(scenario === 'pending-upstream-missing-failed-at' ? 'pending-upstream'
+                : missingFailedAt || scenario === 'operator-rearm' ? 'pending' : 'failed')},
               ${JSON.stringify(scenario === 'new-head' ? 'old-head' : 'sha-happy-101')},
               ${JSON.stringify(scenario === 'new-head' ? 'old-head' : 'sha-happy-101')},
+              ${JSON.stringify(missingFailedAt ? null : '2026-01-01T00:00:00Z')},
               ${JSON.stringify(`[${failureClass}] synthetic failure`)},
               ${JSON.stringify(scenario === 'operator-rearm' ? '2026-01-02T00:00:00Z' : null)},
               ${JSON.stringify(scenario === 'operator-rearm' ? 'retrigger-review: synthetic re-arm' : null)});
         `,
-        afterFirstPoll: scenario === 'unchanged' ? `
+        afterFirstPoll: parksWithoutRetry ? `
           await pollOnce(octokit, pollOptions);
           assert.equal(claims.filter(claim => claim.prNumber === 101).length, 0, 'no third claim');
           const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
           assert.equal(row.review_status, 'failed');
+          ${missingFailedAt ? `assert.ok(Date.parse(row.failed_at) >= Date.now() - 60000,
+            'newly parked row receives the current failure timestamp');` : `assert.equal(row.failed_at, '2026-01-01T00:00:00Z',
+            'existing failure timestamp is preserved');`}
           assert.match(row.failure_message, /^\\[reviewer-timeout\\] \\[reviewer-timeout-repeated-same-head\\]/);
           assert.equal(globalThis.__timeoutAlerts, 1, 'operator alert fires once');
           assert.equal(globalThis.__timeoutParkCalls, 1, 'later polls do not rewrite the failure decision');
@@ -3593,7 +3600,7 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
         ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
         { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...fixture,
           ADVERSARIAL_REVIEWER_BUILD_ID: 'build-current',
-          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: scenario === 'unchanged' ? '1' : '6' }), timeout: 60000 });
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: parksWithoutRetry ? '1' : '6' }), timeout: 60000 });
       const output = `${result.stdout || ''}${result.stderr || ''}`;
       assert.equal(result.status, 0, output);
       if (scenario !== 'upstream-503') assert.doesNotMatch(output,

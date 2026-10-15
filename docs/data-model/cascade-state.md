@@ -123,7 +123,9 @@ persists `reviewer-timeout-repeated-same-head` in `failure_message` and the
 existing review-failure decision record, and uses the existing operator-decision
 alert path once per series. Later polls of the same failed row and park marker
 leave the row and failure decision untouched, after checking the existing
-timeout-exhaustion handoff. An expired cascade backoff cannot bypass this park.
+timeout-exhaustion handoff. Parking fills a missing `reviewed_prs.failed_at`
+with the current ISO timestamp while preserving an existing failure timestamp.
+An expired cascade backoff cannot bypass this park.
 The underlying `[reviewer-timeout]` classifier remains available to the existing
 operator-label-gated timeout-exhaustion handoff; that gate is unchanged.
 
@@ -134,7 +136,9 @@ transients retain that allowance across cascade retries without renewing the
 build/re-arm reset. An already consumed operator request cannot reset it again.
 Builds default to a process-start content digest of reviewer sources, runtime adapters and
 reviewer prompts. Files removed between directory enumeration and reading
-contribute a deterministic missing-file marker instead of failing startup;
+contribute a deterministic missing-file marker instead of failing startup.
+A missing source directory also contributes an absence marker; only regular
+top-level source files are hashed, so directories named like modules are ignored;
 other read errors still fail. A deployment can supply `ADVERSARIAL_REVIEWER_BUILD_ID` instead. The
 build is captured in pass metadata so reaping an old pass attributes its failure
 to the build that actually ran. Legacy files use the failed row's head and flat

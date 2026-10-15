@@ -41,9 +41,17 @@ export function reviewerBuildDigest(moduleUrl = REVIEWER_SOURCE_URL) {
       else if (entry.isFile() && include(entry.name)) addFile(path);
     }
   };
-  for (const name of readdirSync(new URL('.', moduleUrl)).sort()) {
-    if (/^reviewer.*\.mjs$/.test(name) || name === 'domain-pipeline.mjs') {
-      addFile(name);
+  let sourceEntries;
+  try { sourceEntries = readdirSync(new URL('.', moduleUrl), { withFileTypes: true }); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    hash.update('.').update(':missing');
+    sourceEntries = [];
+  }
+  sourceEntries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  for (const entry of sourceEntries) {
+    if (entry.isFile() && (/^reviewer.*\.mjs$/.test(entry.name) || entry.name === 'domain-pipeline.mjs')) {
+      addFile(entry.name);
     }
   }
   add('adapters/reviewer-runtime/');

@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "module": "adversarial-review",
+  "implementationOwner": "tools/adversarial-review",
+  "changedPaths": [
+    "tools/adversarial-review"
+  ],
+  "sharedPaths": [],
+  "command": [
+    "node",
+    "tools/adversarial-review/bin/smv-smoke.mjs"
+  ],
+  "totalBudgetSeconds": 180,
+  "deployMode": "host",
+  "onFailure": "page",
+  "modes": {
+    "sandbox": {
+      "prerequisites": [
+        "Node 22..26, npm dependencies installed, local git, POSIX process groups"
+      ],
+      "exclusions": [
+        "Live GitHub, paid models, deployed daemon health"
+      ]
+    },
+    "host": {
+      "prerequisites": [
+        "SRE approval: SMV_HOST_CANARY_APPROVED=1; no worker identity",
+        "Run from deployed registered checkout; disposable offline safe canary only"
+      ],
+      "exclusions": [
+        "Live PR mutation, service restart, live pager delivery, deployed queue and credential health"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "id": "clean",
+      "promise": "smv-clean",
+      "edges": [
+        "review-row.23",
+        "closure-owner.09",
+        "reviewer-run.02",
+        "reviewer-run.05",
+        "reviewer-run.13"
+      ],
+      "budgetSeconds": 35,
+      "acceptance": {
+        "verdict": "pass",
+        "evidenceRequired": true
+      }
+    },
+    {
+      "id": "handoff",
+      "promise": "smv-handoff",
+      "edges": [
+        "closer-lease.02",
+        "closer-lease.06",
+        "follow-up-job.03",
+        "closure-owner.05",
+        "hammer-dispatch.01",
+        "hammer-dispatch.02"
+      ],
+      "budgetSeconds": 35,
+      "acceptance": {
+        "verdict": "pass",
+        "evidenceRequired": true
+      }
+    },
+    {
+      "id": "ci-blocked",
+      "promise": "smv-ci-blocked",
+      "edges": [
+        "review-row.17",
+        "closure-owner.04"
+      ],
+      "budgetSeconds": 35,
+      "acceptance": {
+        "verdict": "pass",
+        "evidenceRequired": true
+      }
+    },
+    {
+      "id": "refusals",
+      "promise": "smv-refusals",
+      "edges": [
+        "closure-owner.02",
+        "follow-up-job.03"
+      ],
+      "budgetSeconds": 35,
+      "acceptance": {
+        "verdict": "pass",
+        "evidenceRequired": true
+      }
+    }
+  ]
+}

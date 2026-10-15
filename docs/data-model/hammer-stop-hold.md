@@ -21,13 +21,17 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | Field | Shape | Contract |
 |---|---|---|
 | `heads` | object keyed by head SHA | At most eight entries retained, newest `firstObservedAt` first. |
-| `heads[sha].stopKey` | string | Audit file head, attempt number (or array index), and attempt start/timestamp identify one stop. A different stop creates a new hold entry. |
+| `currentHead` | head SHA | GUARDREVERT-01 clears old refusal entries on an observed head change, including a force-push away and back. |
+| `refusalGeneration` | integer | Monotonic generation for new holds; keeps process-local page debounce scoped to the current refusal. |
+| `heads[sha].refusal` | optional object | `{ key, reasons, missingEvidence, next }`; SHA-256 identity over repository, PR, head, sorted unique reasons and recursively key-sorted full missing evidence. Repeated audit attempts with this same identity reuse the hold. |
+| `heads[sha].refusalGeneration` | integer | Page generation for this hold. Persisted page receipts survive restart. A different refusal or a new stop after input release receives a new generation. |
+| `heads[sha].stopKey` | string | Audit file head, attempt number (or array index), and attempt start/timestamp identify the latest observed stop. Legacy stops use this identity; structured deterministic refusals use `refusal.key` across attempts. |
 | `heads[sha].predicate` | string | Recorded stop reason, normalized to one line and capped at 120 characters, or `reason-not-recorded`. |
 | `heads[sha].firstObservedAt` | ISO timestamp | First closer observation of this stop. |
-| `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks }`. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. |
-| `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for subsequent stops on the same head. |
+| `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks, review }`. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. `review` is the canonical review evidence fingerprint described below. |
+| `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for the same deterministic refusal, or subsequent legacy stops on the same head. |
 | `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
-| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01). |
+| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01). |
 | `heads[sha].releasedInputs` | optional inputs object | Inputs at release; used as the next stop's baseline if another hammer stops on this head. |
 
 ## Recovery and retention
@@ -94,3 +98,15 @@ state writes cannot page every tick; that fallback resets on process restart.
 Unreadable/malformed hold files are treated as empty state and rebuilt from
 audit evidence. Write failures are logged and the in-memory decision still
 applies for that tick. Retention is capped at eight heads per PR, with no TTL.
+
+GUARDREVERT-01 adds a stable `review` fingerprint to `inputs`: reviewed head,
+verdict, remediation state, finding classifications/identities and the resolved
+review-body version. Changed review evidence releases with `review`, including
+a same-head review edit whose verdict/counts did not change. Structured
+deterministic refusals run before every closer route; unlike legacy opaque
+stops, a new audit attempt alone does not release or re-page them. A new refusal
+or a new terminal stop following changed inputs starts a fresh page generation.
+The page includes full missing evidence and a single `next` action. A read-only
+probe can release a primary-reversal refusal through `primary-change-evidence`
+when its authority becomes verifiable or its missing-evidence tuple changes.
+Unchanged or unreadable authority retains the hold.

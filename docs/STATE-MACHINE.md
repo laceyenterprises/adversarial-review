@@ -618,6 +618,16 @@ local-first path. Downstream closure authority remains independently verified.
 Once a review settles on the current head, each watcher tick routes closure
 down exactly one of two paths:
 
+GUARDREVERT-01 permits a required check's independently verified, path-specific
+prohibition to authorize restoring that path to the live base once the same
+check passes on the repaired head. Approval covers that repair (and a proven
+rebase) only when all remaining reviewed content is identical. Every execution
+path still applies the shared primary-change and exact-current-head merge gates.
+Before routing another hammer, the closer holds an unchanged deterministic
+refusal keyed by head, sorted reasons and full missing evidence, and pages once
+with the unblock action. A changed head, review, check status or verified missing
+authority releases the hold through the existing stop-store path.
+
 | Path | When | What happens |
 |---|---|---|
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head, returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |

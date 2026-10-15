@@ -440,6 +440,8 @@ test('rotation is isolated by workspace root and advances capped passes', async 
 test('bounded lookup aborts a subprocess still running when its deadline expires', async (t) => {
   const { options, workspace } = fixture(t);
   workspace(1);
+  // Filesystem scanning must not exhaust the budget before the real lookup timer starts.
+  options.clockImpl = () => options.nowMs;
   options.budgetMs = 10;
   let aborted = false;
   options.lookupPRImpl = ({ signal }) => new Promise((resolve) => {

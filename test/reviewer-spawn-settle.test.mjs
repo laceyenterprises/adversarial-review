@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { spawnReviewer, truncateCodePoints } from '../src/reviewer-spawn-settle.mjs';
+import { activeReviewerSpawns } from '../src/reviewer-session-registry.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -16,16 +17,60 @@ function currentHead(headRefOid) {
   return async () => ({ state: 'open', mergedAt: null, closedAt: null, headRefOid });
 }
 
+test('spawnReviewer reads default quota status files through either HQ root alias', async (t) => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'spawn-settle-quota-'));
+  t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+  mkdirSync(path.join(hqRoot, 'quota'));
+  for (const alias of ['HQ_ROOT', 'AGENT_OS_HQ_ROOT']) {
+    for (const state of ['exhausted', 'ok']) {
+      writeFileSync(path.join(hqRoot, 'quota', 'anthropic-oauth.status.json'), JSON.stringify({ state }));
+      let spawned = false;
+      const settled = [];
+      const result = await spawnReviewer({
+        rootDir: hqRoot,
+        repo: 'fixture-owner/demo',
+        prNumber: 1,
+        reviewerModel: 'claude-code',
+        quotaCheckEnv: { [alias]: hqRoot, AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true' },
+        reviewerHeadSha: 'fixture-head',
+        reviewerSessionUuid: `quota-${alias}-${state}`,
+        reviewAttemptNumber: 1,
+        maxRemediationRounds: 2,
+        reviewerRuntimeAdapterOverride: {
+          async spawnReviewer() {
+            spawned = true;
+            return { ok: true, reviewBody: 'fixture review', reviewBodyDelivery: 'adapter' };
+          },
+        },
+        beginReviewerPassImpl() {},
+        completeReviewerPassImpl: (_root, payload) => settled.push(payload),
+        readBestReviewerEvidenceTokenUsageImpl: async () => null,
+        ledgerLookupSleepImpl: async () => {},
+      });
+      assert.equal(spawned, state === 'ok', `${alias}: ${state}`);
+      assert.equal(result.ok, state === 'ok');
+      assert.equal(settled[0].status, state === 'ok' ? 'completed' : 'skipped');
+      if (state === 'exhausted') {
+        assert.equal(result.reason, 'primary-reviewer-quota-capped');
+        assert.equal(result.quotaState, 'exhausted');
+        assert.equal(result.quotaProvider, 'anthropic');
+      }
+    }
+  }
+});
+
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];
   const spawnRequests = [];
+  let spawnedIdentity;
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 14,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'abc123',
@@ -38,6 +83,7 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
     reviewerRuntimeAdapterOverride: {
       async spawnReviewer(request) {
         spawnRequests.push(request);
+        spawnedIdentity = activeReviewerSpawns.get(request.subjectContext.reviewerSpawnToken).identity;
         return {
           ok: true,
           reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
@@ -55,14 +101,15 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
 
   assert.equal(result.ok, true);
   assert.equal(posted.length, 1);
-  assert.equal(posted[0].repo, 'laceyenterprises/demo');
+  assert.equal(posted[0].repo, 'fixture-owner/demo');
   assert.equal(posted[0].prNumber, 14);
   assert.equal(posted[0].attemptNumber, 3);
   assert.equal(posted[0].reviewerModel, 'gemini');
   assert.equal(posted[0].reviewerHeadSha, 'abc123');
   assert.equal(posted[0].botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
   assert.equal(posted[0].passKind, 'first-pass');
-  assert.equal(posted[0].reviewerIdentity, 'gemini-reviewer-lacey');
+  assert.equal(typeof spawnedIdentity, 'string');
+  assert.equal(posted[0].reviewerIdentity, spawnedIdentity);
   assert.match(posted[0].reviewBody, /^## Verdict\nComment only/m);
   assert.equal(spawnRequests[0]?.subjectContext?.reviewDbAttemptNumber, 3);
   assert.equal(spawnRequests[0]?.subjectContext?.passKind, 'first-pass');
@@ -75,12 +122,13 @@ test('spawnReviewer does not fail a posted pass when post-operation callback thr
   console.warn = (message) => warnings.push(String(message));
   try {
     const result = await spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 15,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'abc123',
@@ -130,12 +178,13 @@ test('failure diagnostics truncation does not leave a dangling surrogate', () =>
 test('spawnReviewer discards adapter review body when current PR head moved before post', async () => {
   const posted = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 140,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'old-head',
@@ -172,12 +221,13 @@ test('spawnReviewer retries transient freshness probes before discarding stale a
   const sleeps = [];
   let fetchAttempts = 0;
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 141,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'old-head',
@@ -228,7 +278,7 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
   const { settleReviewerAttempt } = await import('../src/reviewer-spawn-settle.mjs');
 
   settleReviewerAttempt({
-    repoPath: 'laceyenterprises/demo',
+    repoPath: 'fixture-owner/demo',
     prNumber: 140,
     result: {
       ok: false,
@@ -245,19 +295,20 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
   });
 
   assert.deepEqual(markedPosted, []);
-  assert.deepEqual(released, [['stale-session', 'laceyenterprises/demo', 140]]);
+  assert.deepEqual(released, [['stale-session', 'fixture-owner/demo', 140]]);
   assert.equal(leaseReleased.length, 0);
 });
 
 test('spawnReviewer does not post unmarked adapter review bodies', async () => {
   const posted = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 15,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'def456',
@@ -290,12 +341,13 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
   let readBestArgs = null;
   const settled = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 21,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha21',
@@ -351,12 +403,13 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
 test('spawnReviewer enriches adapter usage with worker_run_id and preserves reported total', async () => {
   const settled = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 24,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha24',
@@ -430,12 +483,13 @@ test('spawnReviewer retries transient ledger contention and preserves adapter co
   console.warn = (message) => warnings.push(String(message));
   try {
     const result = await spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 25,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha25',
@@ -508,12 +562,13 @@ test('spawnReviewer keeps retrying token-only evidence until worker attribution 
   const settled = [];
   let lookupCalls = 0;
   await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 251,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha251',
@@ -574,12 +629,13 @@ test('spawnReviewer leaves repairable attribution after bounded transient ledger
   console.warn = (message) => warnings.push(String(message));
   try {
     await spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 26,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha26',
@@ -662,7 +718,7 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
       ],
     });
     beginReviewerPass(rootDir, {
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 121,
       attemptNumber: 2,
       reviewerClass: 'gemini',
@@ -672,12 +728,13 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
     });
 
     await spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir,
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 121,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha121',
@@ -726,12 +783,13 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
   const settled = [];
   let lookupLaunchRequestId = null;
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-    repo: 'laceyenterprises/demo',
+    repo: 'fixture-owner/demo',
     prNumber: 22,
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
+    linearTicketId: 'FIX-1',
     labels: [],
     builderTag: 'codex',
     reviewerHeadSha: 'sha22',
@@ -791,12 +849,13 @@ test('spawnReviewer preserves worker run_id when the adapter throws (error-path 
   // surfaced on err.tokenUsage must survive onto the settled pass.
   await assert.rejects(
     spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
-      repo: 'laceyenterprises/demo',
+      repo: 'fixture-owner/demo',
       prNumber: 23,
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      linearTicketId: 'LAC-566',
+      linearTicketId: 'FIX-1',
       labels: [],
       builderTag: 'codex',
       reviewerHeadSha: 'sha23',

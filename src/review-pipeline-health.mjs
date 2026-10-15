@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 import { meteredExecFileSync } from './metered-gh.mjs';
 import { excludingHeldOpenRows, isOperatorHeld, readHeldOpenPrCount } from './operator-hold-labels.mjs';
 import Database from 'better-sqlite3';
@@ -5,7 +6,7 @@ import { listPipelineOpenPrs, readPipelineGithub } from './pipeline-health-githu
 import { collectDagAutowalkHealth } from './dag-autowalk-health.mjs';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { homedir, tmpdir, userInfo } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -6048,9 +6049,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
 function collectReviewPipelineHealth({
   rootDir = process.cwd(),
-  hqRoot = process.env.HQ_ROOT || join(homedir(), 'agent-os-hq'),
-  now = () => new Date(),
   env = process.env,
+  hqRoot = resolveHqRoot(env),
+  now = () => new Date(),
   config: configOverrides = {},
   reconcileTerminalState = false,
   fetchPRTerminalStateSyncImpl = fetchPRTerminalStateSync,

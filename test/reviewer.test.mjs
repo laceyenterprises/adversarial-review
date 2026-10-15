@@ -2836,6 +2836,13 @@ test('Codex reviewer auth path honors explicit env overrides before service fall
 test('Codex reviewer auth path ignores CODEX_HOME without usable OAuth credentials', () => {
   const root = mkdtempSync(join(tmpdir(), 'adversarial-review-codex-home-bad-'));
   try {
+    const home = join(root, 'home');
+    const homeAuth = join(home, '.codex', 'auth.json');
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    writeFileSync(homeAuth, JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: { access_token: 'fixture-access', refresh_token: 'fixture-refresh' },
+    }));
     const missingHome = join(root, 'missing');
     const apiKeyHome = join(root, 'apikey');
     mkdirSync(apiKeyHome, { recursive: true });
@@ -2848,11 +2855,11 @@ test('Codex reviewer auth path ignores CODEX_HOME without usable OAuth credentia
       { encoding: 'utf8', flag: 'w' }
     );
 
-    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: missingHome }, () => {
-      assert.equal(resolveCodexAuthPath(), join(process.env.HOME, '.codex', 'auth.json'));
+    withEnv({ HOME: home, CODEX_AUTH_PATH: undefined, CODEX_HOME: missingHome }, () => {
+      assert.equal(resolveCodexAuthPath(), homeAuth);
     });
-    withEnv({ CODEX_AUTH_PATH: undefined, CODEX_HOME: apiKeyHome }, () => {
-      assert.equal(resolveCodexAuthPath(), join(process.env.HOME, '.codex', 'auth.json'));
+    withEnv({ HOME: home, CODEX_AUTH_PATH: undefined, CODEX_HOME: apiKeyHome }, () => {
+      assert.equal(resolveCodexAuthPath(), homeAuth);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

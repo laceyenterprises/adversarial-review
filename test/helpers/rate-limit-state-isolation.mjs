@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -34,6 +35,20 @@ if (isTestWorker) {
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error(`test file escaped the test sandbox: ${testFile}`);
   }
+  // Set roots before any production modules are evaluated, overriding worker
+  // environment inherited from the host. Each file and its children own these
+  // directories; tests may still explicitly override them after this preload.
+  const hqRoot = realpathSync(mkdtempSync(path.join(workerRoot, 'hq-')));
+  const homeRoot = realpathSync(mkdtempSync(path.join(workerRoot, 'home-')));
+  process.env.HQ_ROOT = hqRoot;
+  process.env.AGENT_OS_HQ_ROOT = hqRoot;
+  process.env.HOME = homeRoot;
+  process.env.USERPROFILE = homeRoot;
+  process.once('exit', () => {
+    rmSync(hqRoot, { recursive: true, force: true });
+    rmSync(homeRoot, { recursive: true, force: true });
+  });
+  // The runner also removes its whole sandbox on failure or termination.
   process.env.ADVERSARIAL_REVIEW_TEST_CWD = workerRoot;
   process.env.ADVERSARIAL_REVIEW_STATE_DIR = path.join(workerRoot, 'data');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = path.join(workerRoot, 'data', 'api-cache', 'rate-limit-state.json');

@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 // ── Posted-review row: per-row post-review dispatch hub ───────────────────────
@@ -12,7 +13,6 @@ import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
 // is threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
-import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -885,7 +885,7 @@ const postedReviewFairnessState = createPostedReviewFairnessState();
  */
 export function createNoProgressLaneGate({
   rootDir = ROOT,
-  hqRoot = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq'),
+  hqRoot = resolveHqRoot(),
   readReviewRow = (repo, prNumber) => stmtGetReviewRow.get(repo, prNumber),
   now = () => new Date().toISOString(),
   deliverAlertFn = defaultDeliverAlert,

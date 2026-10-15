@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
 import { createHistoryReader } from './ama/history-reader.mjs';
@@ -8,7 +9,7 @@ import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import { fetchPrimaryChange } from './ama/primary-change.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { homedir, hostname } from 'node:os';
+import { hostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -413,7 +414,7 @@ export async function runDaemonCleanMergeAttempt({
   const branchProtectionRequiredContexts = Array.isArray(candidate?.branchProtection?.requiredContexts)
     ? candidate.branchProtection.requiredContexts
     : [];
-  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  const hqRoot = resolveHqRoot(env);
   // The daemon path is a strict clean-merge shortcut. If the current review is
   // not daemon-clean, it must decline before spending any worker-identity reads:
   // the caller will fall through to the capped hammer, which owns final

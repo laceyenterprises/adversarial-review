@@ -7,24 +7,50 @@
 **Runtime surfaces:** `src/metered-gh.mjs`, `bin/metered-gh.mjs`,
 `src/runtime-status.mjs`
 
-The shared JSON document has `version: 1` and a `buckets` object keyed by
-normalized GitHub resource names (normally `core` and `graphql`). Each bucket
-contains `resource`, non-negative `remaining`, ISO `resetAt` and `observedAt`,
-and optional positive `rateLimitedCalls`. The counter belongs to that resource's
-reset window; a new window starts a new counter. Expired observations are
-discarded on reads. Legacy single-observation documents remain readable.
+The shared JSON document has `version: 2` and a `buckets` object keyed by
+`githubBudgetKey(resource, credential)`. Authenticated keys are
+`token-<digest>/<resource>` (normally `core` and `graphql`); the digest is the
+first 24 hex characters of SHA-256 of the effective token. Raw tokens are never
+stored. The `default` anonymous credential keeps bare resource keys. CLI token
+selection prefers `GH_TOKEN` over `GITHUB_TOKEN`; Octokit uses the token actually
+selected for its request, including dynamic provider tokens.
+
+Each bucket contains normalized `resource`, non-negative `remaining`, ISO
+`resetAt` and `observedAt`, optional positive `rateLimitedCalls`, optional
+`credential` (omitted for `default`) and optional `credentialSelector` (the
+adapter's broker role). The counter belongs to that credential/resource reset
+window; a new window starts a new counter. Expired observations are discarded on
+reads. Version 1 resource-keyed and legacy single-observation documents remain
+readable as anonymous observations; they do not throttle authenticated budgets.
 
 Writes hold the adjacent `.lock` directory, sync a temporary file and rename it
 over the store. Concurrent responses for the same window retain the lowest
 remaining count and increment rate-limited counters under the lock.
+An active zero-balance limit whose reset GitHub reported (a `Retry-After` or a
+reset header) takes precedence over positive primary-quota observations
+regardless of their reset ordering; healthy responses cannot clear that hold
+before expiry. A zero-balance window created without any reset evidence carries
+`resetUnknown: true` (the conservative default below); its reset is a guess, so
+a newer healthy observation for the same credential and resource replaces it.
+When both observations have zero balance, the later
+reset wins. Rate-limited responses force `remaining: 0` even if GitHub reports
+positive primary capacity, and a usable `Retry-After` selects the secondary-limit
+reset ahead of the primary reset header.
 
 When a rate-limited call provides no usable response headers,
-`recordRateLimitedCall` retains the active resource window and increments its
-counter. If that window is absent or expired, it creates an observation with
+`recordRateLimitedCall` reuses the active window only when its balance is already
+zero, and increments its counter. If that window is healthy, absent or expired,
+it creates an observation with
 `remaining: 0`, `observedAt` equal to the local clock and a conservative reset
 60 seconds later. This fallback is local backpressure evidence, not a measured
 GitHub reset. Concurrent first failures reuse the window under the same lock.
-Other resource buckets remain independent.
+Other credential/resource buckets remain independent. The recorded reset is also
+returned to the caller's scope so local admission and persisted readers agree.
+
+`readGitHubBudgetStatus` reports all observed compound keys. Its conventional
+`core` and `graphql` fields select the active credential from the supplied runtime
+environment; missing or expired evidence is displayed as unknown rather than
+falling back to another credential's budget.
 
 GitHub budget deferral applies to GitHub I/O. Local operator-alert enqueueing
 and non-GitHub alert delivery continue during deferred or rate-limited ticks.

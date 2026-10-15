@@ -1,3 +1,4 @@
+import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
 import { applyMergeAgentStuckLabel as applyStuckLabel } from './merge-agent-stuck-label.mjs';
@@ -538,7 +539,7 @@ function listMergeAgentSkippedDispatches(rootDir) {
   }
 }
 
-function listMergeAgentLifecycleCleanups(rootDir) {
+function listMergeAgentLifecycleCleanups(rootDir, { includeCompleted = false } = {}) {
   const dir = mergeAgentLifecycleCleanupDir(rootDir);
   try {
     return readdirSync(dir)
@@ -553,7 +554,7 @@ function listMergeAgentLifecycleCleanups(rootDir) {
           return null;
         }
       })
-      .filter(Boolean);
+      .filter(cleanup => cleanup && (includeCompleted || isUnresolvedMergeAgentLifecycleCleanup(cleanup)));
   } catch {
     return [];
   }
@@ -1602,18 +1603,31 @@ function upsertMergeAgentLifecycleCleanup(rootDir, {
   transition,
   headSha = null,
   queuedAt = isoNow(),
+  labelAbsent = null,
+  dispatchLaunchRequestId = null,
 } = {}) {
   const dir = mergeAgentLifecycleCleanupDir(rootDir);
   mkdirSync(dir, { recursive: true });
   const filePath = mergeAgentLifecycleCleanupFilePath(rootDir, { repo, prNumber });
   const existing = readJsonFileDetailed(filePath);
-  const previous = existing.ok ? existing.value : null;
+  let previous = existing.ok ? existing.value : null;
+  const newDispatch = dispatchLaunchRequestId && previous?.dispatchLaunchRequestId !== dispatchLaunchRequestId;
+  const newHead = headSha && previous?.headSha && previous.headSha !== headSha;
+  if (newDispatch || newHead || (transition === MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION
+      && previous?.transition !== transition)) previous = null;
+  // Keep terminal evidence: historical dispatch records can otherwise requeue
+  // the same best-effort cleanup after the label has already disappeared.
+  if (previous?.completedAt) return previous;
   const doc = {
+    ...previous,
     schemaVersion: MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION,
     repo,
     prNumber: Number(prNumber),
     transition,
-    headSha,
+    headSha: headSha || previous?.headSha || null,
+    labelAbsent: labelAbsent ?? previous?.labelAbsent ?? null,
+    dispatchLaunchRequestId: dispatchLaunchRequestId || previous?.dispatchLaunchRequestId || null,
+    labelRemovalFailures: previous?.labelRemovalFailures || 0,
     queuedAt: previous?.queuedAt || queuedAt,
     lastAttemptAt: previous?.lastAttemptAt || null,
     completedAt: previous?.completedAt || null,
@@ -1642,7 +1656,9 @@ function updateMergeAgentLifecycleCleanup(rootDir, {
   const next = {
     ...previous,
     lastAttemptAt: attemptedAt,
-    completedAt: result?.cleanupComplete ? attemptedAt : null,
+    completedAt: result?.cleanupComplete || result?.labelRemovalAbandoned ? attemptedAt : null,
+    labelRemovalFailures: result?.labelRemovalFailures ?? previous.labelRemovalFailures ?? 0,
+    nextAttemptAt: result?.nextAttemptAt || null,
     lastResult: result || null,
   };
   writeFileAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`);
@@ -1851,6 +1867,7 @@ async function cancelMergeAgentDispatchOnMerge({
   listImpl = listMergeAgentDispatches,
   logGate = followUpMergeAgentLogGate,
   env = process.env, cancelRetryDelaysMs,
+  labelAbsent = false,
 } = {}) {
   const result = {
     attempted: true,
@@ -1862,6 +1879,7 @@ async function cancelMergeAgentDispatchOnMerge({
     cancelError: null,
     labelRemoved: false,
     labelRemovalError: null,
+    labelRemovalAttempted: false,
     cleanupComplete: false,
     retryable: false,
     probeConfirmedTerminal: false,
@@ -1968,7 +1986,9 @@ async function cancelMergeAgentDispatchOnMerge({
     })
   );
 
-  if (cancelReachedTerminalOutcome) {
+  if (cancelReachedTerminalOutcome && labelAbsent) result.labelRemoved = true;
+  if (cancelReachedTerminalOutcome && !result.labelRemoved) {
+    result.labelRemovalAttempted = true;
     try {
       const adapterHandled = await tryAdapterPullRequestLabel({
         repo,
@@ -1986,11 +2006,15 @@ async function cancelMergeAgentDispatchOnMerge({
           repo,
           '--remove-label',
           MERGE_AGENT_DISPATCHED_LABEL,
-        ], { maxBuffer: 5 * 1024 * 1024 });
+        ], { env, maxBuffer: 5 * 1024 * 1024 });
       }
       result.labelRemoved = true;
     } catch (err) {
       result.labelRemovalError = labelMutationErrorDetail(err);
+      if (isGitHubRateLimitError(err)) {
+        result.rateLimited = true;
+        result.retryAfter = err.observation?.resetAt || new Date(Date.parse(now) + 60_000).toISOString();
+      }
       // Already-absent label → cleanup done, not retryable (see classifier docs).
       if (isLabelAlreadyAbsentError(err)) {
         result.labelRemoved = true;

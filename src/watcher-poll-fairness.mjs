@@ -519,6 +519,8 @@ export async function runPostedReviewHandlersFairly({
     let resourceLimited = false;
     const outcome = await runWithDeadline(() => withGitHubBudgetScope({ urgent: handler.budgetUrgent === true }, async scope => {
       try { return await handler.run(); }
+      // These aggregate flags describe this handler's accounting outcome;
+      // admission itself uses resource/credential keys inside the scope.
       finally { resourceLimited = scope.rateLimited || scope.deferred; }
     }), {
       timeoutMs: handlerDeadlineMs,

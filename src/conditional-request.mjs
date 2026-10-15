@@ -6,7 +6,7 @@ import {
   getCachedEtag,
   putCachedEtag,
 } from './etag-cache.mjs';
-import { awaitThrottleIfNeeded, recordResponseRateLimit, extractRateLimitObservation, isGitHubRateLimitError, markGitHubRateLimited, recordRateLimitedCall } from './rate-limit-throttle.mjs';
+import { awaitThrottleIfNeeded, recordResponseRateLimit, extractRateLimitObservation, isGitHubRateLimitError, githubCredential, recordRateLimitedCall } from './rate-limit-throttle.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -67,6 +67,7 @@ async function fetchConditionalRestPage({
   allowConditionalRequest = true,
   recordApiCallImpl = recordApiCall,
   putCachedEtagImpl = putCachedEtag,
+  credential = githubCredential({ token: process.env.GITHUB_TOKEN || null }),
 } = {}) {
   if (!rootDir) throw new TypeError('rootDir is required for conditional REST cache');
   if (typeof request !== 'function') {
@@ -90,13 +91,14 @@ async function fetchConditionalRestPage({
     : { ...params };
 
   async function runRequest(activeParams) {
-    await awaitThrottleIfNeeded('core');
+    await awaitThrottleIfNeeded('core', credential);
     return request(activeParams);
   }
 
   try {
     let response = await runRequest(requestParams);
     await recordResponseRateLimit({
+      credential,
       remaining: getResponseHeader(response?.headers, 'x-ratelimit-remaining'),
       resetAt: getResponseHeader(response?.headers, 'x-ratelimit-reset'),
       observedAt: new Date().toISOString(),
@@ -130,8 +132,11 @@ async function fetchConditionalRestPage({
     }
     return response;
   } catch (err) {
-    if (isGitHubRateLimitError(err)) markGitHubRateLimited();
+    if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
+      err.observation = await recordRateLimitedCall('core', credential, extractRateLimitObservation(err?.response?.headers, { rateLimited: true }));
+    }
     await recordResponseRateLimit({
+      credential,
       remaining: getResponseHeader(err?.response?.headers, 'x-ratelimit-remaining'),
       resetAt: getResponseHeader(err?.response?.headers, 'x-ratelimit-reset'),
       observedAt: new Date().toISOString(),
@@ -165,6 +170,7 @@ async function fetchConditionalRestPage({
         allowConditionalRequest: false,
         recordApiCallImpl,
         putCachedEtagImpl,
+        credential,
       });
     }
     recordApiCallImpl({
@@ -184,6 +190,7 @@ function createWatcherOctokit({
   authProvider = null,
 } = {}) {
   const hasDynamicAuth = typeof authProvider === 'function';
+  const requestTokens = new WeakMap();
   const octokit = octokitFactory(hasDynamicAuth ? {} : { auth });
   // When an authProvider is supplied, refresh the Authorization header on EVERY
   // request from the live token. The watcher is a long-lived process and its
@@ -196,7 +203,7 @@ function createWatcherOctokit({
     octokit.hook.before('request', (options) => {
       let token;
       try {
-        token = authProvider();
+        token = requestTokens.has(options) ? requestTokens.get(options) : authProvider();
       } catch {
         token = null;
       }
@@ -208,17 +215,26 @@ function createWatcherOctokit({
   }
   octokit?.hook?.wrap?.('request', async (request, options) => {
     const resource = String(options.url || '').includes('/graphql') ? 'graphql' : 'core';
-    await awaitThrottleIfNeeded(resource);
+    let token = auth;
+    if (hasDynamicAuth) {
+      try { token = authProvider(); } catch { token = null; }
+      // Pin the token for both admission and the before hook. A refresh during
+      // the asynchronous budget read must not charge one credential for another.
+      requestTokens.set(options, token);
+      token ||= String(options.headers?.authorization || '').replace(/^(?:token|bearer)\s+/i, '') || null;
+    }
+    const credential = githubCredential({ token: token || null });
+    await awaitThrottleIfNeeded(resource, credential);
     try {
       const response = await request(options);
-      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+      const observation = extractRateLimitObservation(response.headers, { resource });
+      if (observation) await recordResponseRateLimit({ ...observation, credential });
       return response;
     } catch (err) {
-      if (isGitHubRateLimitError(err)) markGitHubRateLimited();
-      const observation = extractRateLimitObservation(err?.response?.headers);
       const limited = isGitHubRateLimitError(err);
-      if (observation) await recordResponseRateLimit({ ...observation, rateLimited: limited });
-      else if (limited) await recordRateLimitedCall(resource);
+      const observation = extractRateLimitObservation(err?.response?.headers, { resource, rateLimited: limited });
+      if (limited && !err.budgetDeferred) err.observation = await recordRateLimitedCall(resource, credential, observation);
+      else if (observation) await recordResponseRateLimit({ ...observation, credential });
       throw err;
     }
   });

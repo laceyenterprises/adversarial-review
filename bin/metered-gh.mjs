@@ -9,8 +9,8 @@ const [action, ...args] = process.argv.slice(2);
 if (action === 'wait' || action === 'record' || action === 'limited') {
   const payload = JSON.parse(readFileSync(0, 'utf8'));
   for (const item of payload) {
-    if (action === 'wait') await awaitThrottleIfNeeded(item);
-    else if (action === 'limited') await recordRateLimitedCall(item);
+    if (action === 'wait') await awaitThrottleIfNeeded(item.resource || item, item.credential);
+    else if (action === 'limited') await recordRateLimitedCall(item.resource || item, item.credential);
     else await recordResponseRateLimit(item);
   }
 } else if (action === 'exec') {

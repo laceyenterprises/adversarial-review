@@ -1271,3 +1271,20 @@ test('GHBUDGET-01: caught rate-limited reads never count as no progress or emit 
   assert.deepEqual(events, []);
   assert.deepEqual(notices, []);
 });
+
+test('GHSCOPE-01: an unrelated parent-poll rate limit does not suppress healthy handler accounting', async () => {
+  const { createNoProgressLaneGate } = await import('../src/posted-review-row.mjs');
+  const { readNoProgressLane } = await import('../src/watcher-no-progress-lane.mjs');
+  const { withGitHubBudgetScope, markGitHubRateLimited } = await import('../src/rate-limit-throttle.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'credential-progress-'));
+  tempRoots.add(rootDir);
+  const identity = { repo: 'example/alpha', prNumber: 7 };
+  const logger = { log() {}, warn() {}, error() {} };
+  const laneGate = createNoProgressLaneGate({ rootDir, readReviewRow: () => ({ review_status: 'posted' }), logger });
+  await withGitHubBudgetScope({}, async () => {
+    markGitHubRateLimited('graphql', 'synthetic-credential-a');
+    await runPostedReviewHandlersFairly({ handlers: [{ repoPath: identity.repo, prNumber: identity.prNumber,
+      headSha: 'fixture-head', run: async () => ({ handled: true }) }], laneGate, logger });
+  });
+  assert.ok(readNoProgressLane(rootDir, identity));
+});

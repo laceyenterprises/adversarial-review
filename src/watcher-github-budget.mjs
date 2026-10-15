@@ -1,13 +1,13 @@
 import * as adversarialGateRecords from './adversarial-gate-status.mjs';
 import { fetchHammerPr } from './hammer-pr-read.mjs';
-import { resolveThrottleFloor, withGitHubBudgetScope, isGitHubRateLimitError, readGitHubBudgetState, currentGitHubBudgetScope } from './rate-limit-throttle.mjs';
+import { resolveThrottleFloor, withGitHubBudgetScope, isGitHubRateLimitError, readGitHubBudgetState, currentGitHubBudgetScope, githubCredential, githubBudgetKey } from './rate-limit-throttle.mjs';
 
 // Scheduling only. A durable success is a priority hint; serve must refresh the
 // live head, state and all existing merge predicates before taking action.
 async function runLowBudgetClosingTick({ budgets, rows, isReady, serve, logger = console, floor = resolveThrottleFloor() }) {
   const low = Object.values(budgets).filter(bucket => bucket.remaining < floor);
   if (!low.length) return false;
-  logger.log(`[watcher] GitHub budget: ${low.map(bucket => `${bucket.resource} remaining=${bucket.remaining} reset=${bucket.resetAt}`).join('; ')}; deferring non-urgent reads`);
+  logger.log(`[watcher] GitHub budget: ${low.map(bucket => `${bucket.credential || 'default'}/${bucket.resource} remaining=${bucket.remaining} reset=${bucket.resetAt}`).join('; ')}; deferring non-urgent reads`);
   for (const row of rows.filter(isReady)) {
     await withGitHubBudgetScope({ urgent: true }, async () => {
       try { await serve(row); }
@@ -34,8 +34,13 @@ function isClosingRowReady(rootDir, row, {
 async function runLowBudgetWatcherPoll({ db, activeRepos, rootDir, domainId, execFileImpl,
   handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus, markMerged, markClosed,
 }) {
-  const budgets = await readGitHubBudgetState();
-  if (Object.values(budgets).every(bucket => bucket.remaining >= resolveThrottleFloor())) return false;
+  const allBudgets = await readGitHubBudgetState();
+  const credential = githubCredential({ token: process.env.GITHUB_TOKEN || null });
+  const budgets = Object.fromEntries(['core', 'graphql'].map(resource => [resource,
+    allBudgets[githubBudgetKey(resource, credential)]]));
+  // This shortcut skips the entire discovery phase. A single depleted pool (or
+  // another credential) cannot justify skipping reads that still have capacity.
+  if (Object.values(budgets).some(bucket => !bucket || bucket.remaining >= resolveThrottleFloor())) return false;
   const rows = db.prepare("SELECT * FROM reviewed_prs WHERE pr_state = 'open' AND review_status = 'posted'").all()
     .filter(row => activeRepos.includes(row.repo));
   const handled = await runLowBudgetClosingTick({

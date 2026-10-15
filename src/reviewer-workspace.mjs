@@ -575,19 +575,21 @@ function changedCheckoutPaths(before, after) {
 }
 
 async function explainedCheckoutPaths(checkoutDir, beforeHead, afterHead, afterState) {
-  const diffPaths = async (revisions) => {
-    const { stdout } = await execFileAsync('git', [
-      '--no-optional-locks', 'diff', '--no-ext-diff', '--no-renames', '--ignore-submodules=none', '--name-only', '-z', ...revisions, '--',
+  const diffPaths = async (revisions, ignoreSubmodules) => {
+    const { stdout } = await withTransientGitRetries(() => execFileAsync('git', [
+      '--no-optional-locks', 'diff', '--no-ext-diff', '--no-renames', `--ignore-submodules=${ignoreSubmodules}`, '--name-only', '-z', ...revisions, '--',
     ], {
       cwd: checkoutDir, encoding: 'utf8', maxBuffer: GIT_AUDIT_MAX_BUFFER, timeout: GIT_AUDIT_TIMEOUT_MS,
-    });
+    }), 'git diff');
     return new Set(String(stdout || '').split('\0').filter(Boolean));
   };
   const [commitPaths, dirtyPaths] = await Promise.all([
-    diffPaths([beforeHead, afterHead]),
+    // Keep committed gitlink changes visible so checkout advances explain them.
+    diffPaths([beforeHead, afterHead], 'none'),
     // Compare against the captured new HEAD, including staged changes. A clean
     // index alone cannot establish that the working tree matches the deploy.
-    diffPaths([afterHead]),
+    // Match checkoutStatusZ: submodule worktrees are outside the dirt probe.
+    diffPaths([afterHead], 'all'),
   ]);
   return new Set([...commitPaths].filter((path) => !dirtyPaths.has(path)
     // Includes untracked recreations of paths deleted by the deploy, which git

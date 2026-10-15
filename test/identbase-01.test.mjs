@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, readdirSync, lstatSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, symlinkSync, readdirSync, lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createIdentityBaselineFixture } from './helpers/identity-baseline-fixture.mjs';
 import { preserveUnsafeWorkspaceMetadata } from '../src/workspace-identity.mjs';
 import { hamCommitIdentityMatches, isHamWorkerTicket } from '../src/ama/ham-provenance.mjs';
 import { prepareWorkspaceForJob } from '../src/follow-up-remediation.mjs';
@@ -168,8 +168,8 @@ test('merge-agent finalize commits with production PR tickets remain reviewable'
 
 // This deliberately injects unsupported metadata to exercise the defensive guard;
 // production cloneRemediationWorkspace always creates a standalone clone.
-test('IDENTBASE-01: linked worktree is refused before shared config or hooks are written', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'identbase-writer-'));
+test('IDENTBASE-01: linked worktree is refused before shared config or hooks are written', async (t) => {
+  const { rootDir: root, workspaceRootDir, env } = createIdentityBaselineFixture(t);
   const base = join(root, 'base');
   const sibling = join(root, 'sibling');
   const git = (...args) => execFileSync('git', args, {
@@ -180,38 +180,34 @@ test('IDENTBASE-01: linked worktree is refused before shared config or hooks are
       GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
     },
   });
-  try {
-    git('init', '--quiet', '-b', 'main', base);
-    git('-C', base, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture');
-    git('-C', base, 'config', '--local', 'user.name', 'Foreign Closer');
-    git('-C', base, 'config', '--local', 'user.email', 'closer@example.invalid');
-    git('-C', base, 'worktree', 'add', '--detach', sibling);
-    const commonConfig = git('-C', base, 'config', '--local', '--list');
-    await assert.rejects(prepareWorkspaceForJob({
-      rootDir: root,
-      workerClass: 'codex',
-      job: { jobId: 'identbase-fixture', repo: 'fixture/repo', prNumber: 1 },
-      execFileImpl: async (command, args) => {
-        if (command === 'gh') return { stdout: JSON.stringify({
-          base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'fixture/repo' } },
-        }) };
-        if (command === 'git' && args[0] === 'clone') {
-          git('-C', base, 'worktree', 'add', '-b', 'feature', args.at(-1));
-        } else if (command === 'git' && args[2] === 'config') {
-          return { stdout: git(...args) };
-        }
-        return { stdout: '', stderr: '' };
-      },
-      log() {},
-    }), /requires standalone Git metadata/);
-    assert.equal(git('-C', base, 'config', '--local', '--list'), commonConfig);
-    assert.equal(existsSync(join(base, '.git', 'hooks', 'commit-msg')), false);
-    assert.equal(git('-C', base, 'config', '--local', 'user.name').trim(), 'Foreign Closer');
-    assert.equal(git('-C', base, 'config', '--local', 'user.email').trim(), 'closer@example.invalid');
-    assert.equal(git('-C', sibling, 'config', 'user.name').trim(), 'Foreign Closer');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+  git('init', '--quiet', '-b', 'main', base);
+  git('-C', base, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture');
+  git('-C', base, 'config', '--local', 'user.name', 'Foreign Closer');
+  git('-C', base, 'config', '--local', 'user.email', 'closer@example.invalid');
+  git('-C', base, 'worktree', 'add', '--detach', sibling);
+  const commonConfig = git('-C', base, 'config', '--local', '--list');
+  await assert.rejects(prepareWorkspaceForJob({
+    rootDir: root, workspaceRootDir, env,
+    workerClass: 'codex',
+    job: { jobId: 'identbase-fixture', repo: 'fixture/repo', prNumber: 1 },
+    execFileImpl: async (command, args) => {
+      if (command === 'gh') return { stdout: JSON.stringify({
+        base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'fixture/repo' } },
+      }) };
+      if (command === 'git' && args[0] === 'clone') {
+        git('-C', base, 'worktree', 'add', '-b', 'feature', args.at(-1));
+      } else if (command === 'git' && args[2] === 'config') {
+        return { stdout: git(...args) };
+      }
+      return { stdout: '', stderr: '' };
+    },
+    log() {},
+  }), /requires standalone Git metadata/);
+  assert.equal(git('-C', base, 'config', '--local', '--list'), commonConfig);
+  assert.equal(existsSync(join(base, '.git', 'hooks', 'commit-msg')), false);
+  assert.equal(git('-C', base, 'config', '--local', 'user.name').trim(), 'Foreign Closer');
+  assert.equal(git('-C', base, 'config', '--local', 'user.email').trim(), 'closer@example.invalid');
+  assert.equal(git('-C', sibling, 'config', 'user.name').trim(), 'Foreign Closer');
 });
 
 test('HAM worker tickets use the documented exact forms', () => {
@@ -226,41 +222,37 @@ test('HAM worker tickets use the documented exact forms', () => {
   }
 });
 
-test('IDENTBASE-01: production standalone clone receives worktree-scoped remediation identity', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'identbase-clone-'));
+test('IDENTBASE-01: production standalone clone receives worktree-scoped remediation identity', async (t) => {
+  const { rootDir: root, workspaceRootDir, env } = createIdentityBaselineFixture(t);
   const base = join(root, 'base');
   const git = (...args) => execFileSync('git', args, {
     encoding: 'utf8', env: { ...process.env,
       GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
       GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' },
   });
-  try {
-    git('init', '--quiet', '-b', 'main', base);
-    git('-C', base, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture');
-    git('-C', base, 'config', '--local', 'user.name', 'Foreign Closer');
-    const result = await prepareWorkspaceForJob({
-      rootDir: root, env: {}, workerClass: 'codex',
-      job: { jobId: 'identbase-clone', repo: 'fixture/repo', prNumber: 1 },
-      execFileImpl: async (command, args) => {
-        if (command === 'gh') return { stdout: JSON.stringify({
-          base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'fixture/repo' } },
-        }) };
-        if (args[0] === 'clone') {
-          assert.ok(args.includes('--no-checkout'));
-          return { stdout: git('clone', '--no-checkout', '--single-branch', '--branch', 'main', base, args.at(-1)) };
-        }
-        if (args[2] === 'config') return { stdout: git(...args) };
-        return { stdout: '', stderr: '' };
-      }, log() {},
-    });
-    assert.equal(git('-C', result.workspaceDir, 'rev-parse', '--git-dir').trim(), '.git');
-    assert.equal(git('-C', result.workspaceDir, 'rev-parse', '--git-common-dir').trim(), '.git');
-    assert.equal(git('-C', result.workspaceDir, 'config', '--worktree', 'user.name').trim(), 'Codex Remediation Worker');
-    assert.equal(git('-C', result.workspaceDir, 'config', '--worktree', 'user.email').trim(), 'codex-remediation-worker@laceyenterprises.com');
-    assert.equal(git('-C', base, 'config', '--local', 'user.name').trim(), 'Foreign Closer');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+  git('init', '--quiet', '-b', 'main', base);
+  git('-C', base, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture');
+  git('-C', base, 'config', '--local', 'user.name', 'Foreign Closer');
+  const result = await prepareWorkspaceForJob({
+    rootDir: root, workspaceRootDir, env, workerClass: 'codex',
+    job: { jobId: 'identbase-clone', repo: 'fixture/repo', prNumber: 1 },
+    execFileImpl: async (command, args) => {
+      if (command === 'gh') return { stdout: JSON.stringify({
+        base: { ref: 'main' }, head: { ref: 'feature', repo: { full_name: 'fixture/repo' } },
+      }) };
+      if (args[0] === 'clone') {
+        assert.ok(args.includes('--no-checkout'));
+        return { stdout: git('clone', '--no-checkout', '--single-branch', '--branch', 'main', base, args.at(-1)) };
+      }
+      if (args[2] === 'config') return { stdout: git(...args) };
+      return { stdout: '', stderr: '' };
+    }, log() {},
+  });
+  assert.equal(git('-C', result.workspaceDir, 'rev-parse', '--git-dir').trim(), '.git');
+  assert.equal(git('-C', result.workspaceDir, 'rev-parse', '--git-common-dir').trim(), '.git');
+  assert.equal(git('-C', result.workspaceDir, 'config', '--worktree', 'user.name').trim(), 'Codex Remediation Worker');
+  assert.equal(git('-C', result.workspaceDir, 'config', '--worktree', 'user.email').trim(), 'codex-remediation-worker@laceyenterprises.com');
+  assert.equal(git('-C', base, 'config', '--local', 'user.name').trim(), 'Foreign Closer');
 });
 
 
@@ -282,8 +274,7 @@ test('every reversal-authorizing split commit is instructed to carry verifier pr
 });
 
 test('workspace symlink is preserved without Git touching its target, even when broken', async (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'identbase-symlink-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { rootDir: root } = createIdentityBaselineFixture(t);
   for (const broken of [false, true]) {
     const target = join(root, broken ? 'absent' : 'target');
     if (!broken) mkdirSync(target);
@@ -300,8 +291,7 @@ test('workspace symlink is preserved without Git touching its target, even when 
 });
 
 test('unknown remote with leftover registrations is preserved for daemon recovery', async (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'identbase-unknown-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { rootDir: root } = createIdentityBaselineFixture(t);
   const workspaceDir = join(root, 'job');
   mkdirSync(join(workspaceDir, '.git', 'worktrees'), { recursive: true });
   assert.equal(await preserveUnsafeWorkspaceMetadata({ workspaceDir, workspaceRootDir: root,

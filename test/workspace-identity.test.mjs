@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { preserveUnsafeWorkspaceMetadata } from '../src/workspace-identity.mjs';
-import { preserveInvalidResumeWorkspace } from '../src/remediation-git-pr-io.mjs';
+import { checkoutWorkspaceForRemediation, preserveInvalidResumeWorkspace } from '../src/remediation-git-pr-io.mjs';
 import { prepareWorkspaceForJob } from '../src/follow-up-remediation.mjs';
 
 test('FIXTURELEAK-01: resume backups default to the workspace parent', async (t) => {
@@ -30,6 +30,22 @@ test('FIXTURELEAK-01: resume backups default to the workspace parent', async (t)
       else assert.equal(readFileSync(join(backup, '.git'), 'utf8'), 'gitdir: synthetic-metadata\n');
     });
   }
+});
+
+test('FIXTURELEAK-01: resumed diff backup defaults to the workspace parent', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'identity-resume-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const workspaceDir = join(root, 'fixture');
+  mkdirSync(workspaceDir);
+  const result = await checkoutWorkspaceForRemediation({
+    workspaceDir, job: { jobId: 'fixture' }, repo: 'fixture/repo',
+    headRepo: 'fixture/repo', baseBranch: 'main', headRef: 'feature', resumeRequested: true,
+    execFileImpl: async (_command, args) => ({ stdout: args[2] === 'symbolic-ref'
+      ? 'feature\n' : args[2] === 'diff' ? 'synthetic patch\n' : '' }),
+  });
+  assert.equal(result.resumed, true);
+  assert.equal(result.resumePatchPath, join(root, 'fixture.resume.patch'));
+  assert.equal(readFileSync(result.resumePatchPath, 'utf8'), 'synthetic patch\n');
 });
 
 test('FIXTURELEAK-01: explicit workspace root wins over inherited environment during recovery', async (t) => {

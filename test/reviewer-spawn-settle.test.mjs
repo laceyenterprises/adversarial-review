@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { spawnReviewer, truncateCodePoints } from '../src/reviewer-spawn-settle.mjs';
+import { activeReviewerSpawns } from '../src/reviewer-session-registry.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -19,7 +20,7 @@ function currentHead(headRefOid) {
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];
   const spawnRequests = [];
-  const passes = [];
+  let spawnedIdentity;
   const result = await spawnReviewer({
     readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
@@ -40,6 +41,7 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
     reviewerRuntimeAdapterOverride: {
       async spawnReviewer(request) {
         spawnRequests.push(request);
+        spawnedIdentity = activeReviewerSpawns.get(request.subjectContext.reviewerSpawnToken).identity;
         return {
           ok: true,
           reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
@@ -49,7 +51,6 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
         };
       },
     },
-    beginReviewerPassImpl: (_root, payload) => passes.push(payload),
     postGitHubReviewWithCaptureImpl: async (payload) => {
       posted.push(payload);
     },
@@ -65,7 +66,8 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
   assert.equal(posted[0].reviewerHeadSha, 'abc123');
   assert.equal(posted[0].botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
   assert.equal(posted[0].passKind, 'first-pass');
-  assert.equal(posted[0].reviewerIdentity, passes[0].identity);
+  assert.equal(typeof spawnedIdentity, 'string');
+  assert.equal(posted[0].reviewerIdentity, spawnedIdentity);
   assert.match(posted[0].reviewBody, /^## Verdict\nComment only/m);
   assert.equal(spawnRequests[0]?.subjectContext?.reviewDbAttemptNumber, 3);
   assert.equal(spawnRequests[0]?.subjectContext?.passKind, 'first-pass');

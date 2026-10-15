@@ -161,6 +161,10 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   const right = sanitizeObservation(incoming, nowMs);
   if (!left) return right;
   if (!right) return left;
+  // An active exhaustion/secondary-limit window must survive healthy primary
+  // quota observations, even when the primary quota resets later.
+  if (left.remaining === 0 && right.remaining > 0) return left;
+  if (right.remaining === 0 && left.remaining > 0) return right;
   const leftResetAtMs = observationResetAtMs(left);
   const rightResetAtMs = observationResetAtMs(right);
   if (rightResetAtMs > leftResetAtMs) return right;
@@ -349,8 +353,8 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
     ? Date.parse(observedAt) + Number(retryAfter) * 1000 : normalizeTimestamp(retryAfter);
   return normalizeObservation({
     resource: lookup('x-ratelimit-resource') || resource,
-    remaining: lookup('x-ratelimit-remaining') ?? (rateLimited ? 0 : null),
-    resetAt: lookup('x-ratelimit-reset') || retryReset,
+    remaining: rateLimited ? 0 : lookup('x-ratelimit-remaining'),
+    resetAt: (rateLimited && retryReset) || lookup('x-ratelimit-reset') || retryReset,
     observedAt,
   });
 }
@@ -390,6 +394,8 @@ function createRateLimitThrottle({
   }
 
   async function recordRateLimit(observation, rateLimitedOnly = false) {
+    rateLimitedOnly ||= observation?.rateLimited === true;
+    if (rateLimitedOnly) observation = { ...observation, remaining: 0 };
     let normalized = sanitizeObservation(observation, nowMs());
     if (!rateLimitedOnly && !normalized) return null;
     const resolvedSharedStatePath = resolveSharedStatePathNow();
@@ -400,9 +406,9 @@ function createRateLimitThrottle({
         // failures share one window and increment the same durable counter.
         const resource = normalizeResource(observation.resource);
         const previous = current[githubBudgetKey(resource, observation.credential)];
-        normalized = normalized || previous || normalizeObservation({
+        normalized = normalized || normalizeObservation({
           ...observation, resource, credential: observation.credential, remaining: 0,
-          resetAt: previous?.resetAt || nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
+          resetAt: (previous?.remaining === 0 ? previous.resetAt : null) || nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
           observedAt: nowMs(),
         });
       }
@@ -441,12 +447,8 @@ function createRateLimitThrottle({
   }
 
   async function recordRateLimitedCall(resource, credential = 'default', observation = null) {
-    const marked = markGitHubRateLimited(resource, credential, {
-      ...observation,
-      resetAt: observation?.resetAt || new Date(nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS).toISOString(),
-    });
-    await recordRateLimit({ ...observation, resource, credential, rateLimited: true }, true);
-    return marked;
+    const recorded = await recordRateLimit({ ...observation, resource, credential, rateLimited: true }, true);
+    return markGitHubRateLimited(resource, credential, recorded);
   }
 
   async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE, credential = 'default') {
@@ -560,6 +562,11 @@ function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs 
   let buckets = {};
   try { buckets = normalizeObservationMap(JSON.parse(readFileSync(sharedStatePath, 'utf8')), nowMs); }
   catch { /* Status is read-only and unknown evidence is displayed as unknown. */ }
+  const credential = githubCredential({ env });
+  // Keep every observed credential visible, and resolve the conventional
+  // resource fields against the credential used by this runtime.
+  buckets = { ...buckets, ...Object.fromEntries(['core', 'graphql'].map(resource =>
+    [resource, buckets[githubBudgetKey(resource, credential)]])) };
   return Object.fromEntries([...new Set(['core', 'graphql', ...Object.keys(buckets)])].map(resource => [resource, {
     remaining: buckets[resource]?.remaining ?? null,
     resetAt: buckets[resource]?.resetAt ?? null,

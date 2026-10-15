@@ -7,6 +7,9 @@
       "path": "docs/data-model/github-rate-limit-state.md",
       "store": "data/api-cache/rate-limit-state.json",
       "schemaSurface": "src/rate-limit-throttle.mjs",
+      "storeVersion": 2,
+      "bucketKey": "githubBudgetKey(resource, credential): token-<sha256-prefix-24>/<resource>, or bare resource for default",
+      "optionalBucketFields": ["credential", "credentialSelector", "rateLimitedCalls"],
       "relatedSchemaSurfaces": ["src/metered-gh.mjs", "bin/metered-gh.mjs", "src/runtime-status.mjs"],
       "owner": "shared GitHub request throttle"
     },

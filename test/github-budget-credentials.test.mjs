@@ -74,7 +74,7 @@ test('GHSCOPE-01: retry-after supplies a reset even without primary-budget heade
 
 test('GHSCOPE-01: unknown reset uses the bounded default even after a healthy observation', async t => {
   const root = fixture(t);
-  const now = Date.now();
+  let now = Date.now();
   const throttle = createRateLimitThrottle({ sharedStatePath: join(root, 'budget.json'), nowMs: () => now });
   await throttle.recordResponseRateLimit({ resource: 'graphql', credential: 'credential-a', remaining: 4900, resetAt: now + 3600_000 });
   await withGitHubBudgetScope({}, async () => {
@@ -82,6 +82,88 @@ test('GHSCOPE-01: unknown reset uses the bounded default even after a healthy ob
     assert.equal(Date.parse(failure.resetAt), now + 60_000);
     await assert.rejects(throttle.awaitThrottleIfNeeded('graphql', 'credential-a'), error => Date.parse(error.observation.resetAt) === now + 60_000);
   });
+  const reader = createRateLimitThrottle({ sharedStatePath: join(root, 'budget.json'), nowMs: () => now });
+  await withGitHubBudgetScope({ urgent: true }, async () => {
+    await assert.rejects(reader.awaitThrottleIfNeeded('graphql', 'credential-a'), error =>
+      error.observation.remaining === 0 && Date.parse(error.observation.resetAt) === now + 60_000);
+  });
+  const resetAt = now + 60_000;
+  now += 10_000;
+  const repeated = await throttle.recordRateLimitedCall('graphql', 'credential-a');
+  assert.equal(Date.parse(repeated.resetAt), resetAt, 'an already exhausted window is reused by the scope');
+  const state = await reader.readSharedState();
+  assert.equal(Date.parse(state['credential-a/graphql'].resetAt), resetAt);
+  assert.equal(state['credential-a/graphql'].rateLimitedCalls, 2);
+});
+
+for (const viaResponse of [false, true]) test(`secondary limits override healthy quota across readers, response=${viaResponse}`, async t => {
+  const root = fixture(t);
+  const sharedStatePath = join(root, 'budget.json');
+  let now = Date.parse('2026-10-15T10:00:00Z');
+  const sleeps = [];
+  const writer = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
+  const reader = createRateLimitThrottle({ sharedStatePath, nowMs: () => now, sleepImpl: async ms => { sleeps.push(ms); } });
+  const healthy = { resource: 'graphql', credential: 'credential-a', remaining: 4900, resetAt: now + 3600_000 };
+  await writer.recordResponseRateLimit(healthy);
+  await reader.readSharedState(); // A long-lived reader has cached the healthy quota.
+  const observation = { ...healthy, resetAt: now + 120_000 };
+  if (viaResponse) await writer.recordResponseRateLimit({ ...observation, rateLimited: true });
+  else await writer.recordRateLimitedCall('graphql', 'credential-a', observation);
+  await writer.recordResponseRateLimit(healthy); // A late healthy response cannot clear the hold.
+  const state = JSON.parse(readFileSync(sharedStatePath, 'utf8'));
+  const bucket = state.buckets['credential-a/graphql'];
+  assert.equal(bucket.remaining, 0);
+  assert.equal(Date.parse(bucket.resetAt), now + 120_000);
+  assert.equal(bucket.rateLimitedCalls, 1);
+  await withGitHubBudgetScope({ urgent: true }, async () => {
+    await assert.rejects(reader.awaitThrottleIfNeeded('graphql', 'credential-a'), { budgetDeferred: true });
+    assert.equal(await reader.awaitThrottleIfNeeded('core', 'credential-a'), false);
+    assert.equal(await reader.awaitThrottleIfNeeded('graphql', 'credential-b'), false);
+  });
+  const fresh = createRateLimitThrottle({ sharedStatePath, nowMs: () => now, sleepImpl: async ms => { sleeps.push(ms); }, recordApiCallImpl: () => {} });
+  assert.equal(await fresh.awaitThrottleIfNeeded('graphql', 'credential-a'), true);
+  assert.deepEqual(sleeps, [120_000]);
+  now += 120_000;
+  await withGitHubBudgetScope({}, async () => {
+    assert.equal(await reader.awaitThrottleIfNeeded('graphql', 'credential-a'), false);
+  });
+});
+
+test('secondary-limit extraction overrides positive primary headers and uses Retry-After', () => {
+  const observation = extractRateLimitObservation({
+    'x-ratelimit-remaining': '4900', 'x-ratelimit-reset': '1792062000', 'retry-after': '120',
+  }, { observedAt: '2026-10-15T10:00:00Z', rateLimited: true });
+  assert.equal(observation.remaining, 0);
+  assert.equal(observation.resetAt, '2026-10-15T10:02:00.000Z');
+});
+
+test('runtime status resolves active credential aliases and retains other observed budgets', async t => {
+  const root = fixture(t);
+  const sharedStatePath = join(root, 'budget.json');
+  const now = Date.now();
+  const env = { GH_TOKEN: 'synthetic-active-token', GITHUB_TOKEN: 'synthetic-other-token', GHO_RATE_LIMIT_SHARED_STATE_PATH: sharedStatePath };
+  const credential = budgetApi.githubCredential({ env });
+  const throttle = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
+  await throttle.recordResponseRateLimit({ resource: 'core', remaining: 123, resetAt: now + 60_000 });
+  await throttle.recordResponseRateLimit({ resource: 'core', credential, credentialSelector: 'watcher', remaining: 4900, resetAt: now + 60_000 });
+  await throttle.recordRateLimitedCall('graphql', credential);
+  await throttle.recordResponseRateLimit({ resource: 'graphql', credential: 'credential-b', remaining: 4000, resetAt: now + 60_000 });
+  const status = budgetApi.readGitHubBudgetStatus({ env, nowMs: now });
+  assert.equal(status.core.remaining, 4900);
+  assert.equal(status.core.credential, credential);
+  assert.equal(status.core.credentialSelector, 'watcher');
+  assert.deepEqual(status.core, status[`${credential}/core`]);
+  assert.equal(status.graphql.remaining, 0);
+  assert.equal(status.graphql.rateLimitedCalls, 1);
+  assert.equal(Date.parse(status.graphql.resetAt), now + 60_000);
+  assert.equal(status['credential-b/graphql'].remaining, 4000);
+  const anonymous = budgetApi.readGitHubBudgetStatus({ env: { GHO_RATE_LIMIT_SHARED_STATE_PATH: sharedStatePath }, nowMs: now });
+  assert.equal(anonymous.core.remaining, 123);
+  assert.equal(anonymous.graphql.remaining, null);
+  const expired = budgetApi.readGitHubBudgetStatus({ env, nowMs: now + 60_000 });
+  assert.equal(expired.core.remaining, null);
+  assert.equal(expired.graphql.remaining, null);
+  assert.doesNotMatch(JSON.stringify(status), /synthetic-/);
 });
 
 test('GHSCOPE-01: measured budgets remain separate across new scopes and persisted readers', async t => {

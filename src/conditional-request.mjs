@@ -218,16 +218,17 @@ function createWatcherOctokit({
     let token = auth;
     if (hasDynamicAuth) {
       try { token = authProvider(); } catch { token = null; }
-      token ||= String(options.headers?.authorization || '').replace(/^(?:token|bearer)\s+/i, '') || null;
       // Pin the token for both admission and the before hook. A refresh during
       // the asynchronous budget read must not charge one credential for another.
       requestTokens.set(options, token);
+      token ||= String(options.headers?.authorization || '').replace(/^(?:token|bearer)\s+/i, '') || null;
     }
     const credential = githubCredential({ token: token || null });
     await awaitThrottleIfNeeded(resource, credential);
     try {
       const response = await request(options);
-      await recordResponseRateLimit({ ...extractRateLimitObservation(response.headers, { resource }), credential });
+      const observation = extractRateLimitObservation(response.headers, { resource });
+      if (observation) await recordResponseRateLimit({ ...observation, credential });
       return response;
     } catch (err) {
       const limited = isGitHubRateLimitError(err);

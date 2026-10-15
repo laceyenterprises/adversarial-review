@@ -143,7 +143,7 @@ function meteredExecFile(execFileImpl = execFileAsync, command, args, options = 
   async function executeGh() {
     const credential = githubCredential({ env: options.env || process.env });
     const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';
-    for (const resource of ghResources(args)) await awaitThrottleIfNeeded(resource, credential);
+    for (const res of ghResources(args)) await awaitThrottleIfNeeded(res, credential);
     try {
       return await finish(await execFileImpl(command, args, debugOptions(options)), { credential, resource });
     } catch (err) {
@@ -181,14 +181,14 @@ function meteredExecFileSync(execFileImpl, command, args, options = {}) {
   try { buckets = JSON.parse(readFileSync(resolveRateLimitSharedStatePath(env), 'utf8')).buckets || {}; } catch { /* No observation yet. */ }
   const scope = currentGitHubBudgetScope();
   const credential = githubCredential({ env });
-  for (const resource of ghResources(args)) {
-    const bucket = buckets[githubBudgetKey(resource, credential)];
-    const limited = scopedGitHubRateLimit(resource, credential);
+  for (const res of ghResources(args)) {
+    const bucket = buckets[githubBudgetKey(res, credential)];
+    const limited = scopedGitHubRateLimit(res, credential);
     if (limited) throw new GitHubBudgetDeferredError(limited);
     if (bucket?.remaining < resolveThrottleFloor(env) && Date.parse(bucket.resetAt) > Date.now()) {
       if (scope?.urgent && bucket.remaining > 0) continue;
       if (scope) { scope.deferred = true; throw new GitHubBudgetDeferredError(bucket); }
-      bridgeCall('wait', [{ resource, credential }], env);
+      bridgeCall('wait', [{ resource: res, credential }], env);
     }
   }
   try {

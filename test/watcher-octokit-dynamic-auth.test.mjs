@@ -93,10 +93,10 @@ test('GHSCOPE-01: budget admission pins the same dynamic token that the request 
   assert.equal(observedAuthorization, 'token synthetic-token-a');
 });
 
-test('GHSCOPE-01: a failed auth provider preserves existing request authentication', async () => {
+for (const unavailable of ['empty', 'throws']) test(`GHSCOPE-01: ${unavailable} auth provider preserves Bearer authentication`, async () => {
   let observedAuthorization;
   const octokit = createWatcherOctokit({
-    authProvider: () => { throw new Error('synthetic provider unavailable'); },
+    authProvider: () => { if (unavailable === 'throws') throw new Error('synthetic provider unavailable'); return ''; },
     octokitFactory: options => new Octokit({ ...options, request: {
       fetch: async (_url, request) => {
         observedAuthorization = request.headers.authorization;
@@ -104,8 +104,8 @@ test('GHSCOPE-01: a failed auth provider preserves existing request authenticati
       },
     } }),
   });
-  await octokit.request('GET /user', { headers: { authorization: 'token synthetic-existing-token' } });
-  assert.equal(observedAuthorization, 'token synthetic-existing-token');
+  await octokit.request('GET /user', { headers: { authorization: 'Bearer synthetic-existing-token' } });
+  assert.equal(observedAuthorization, 'Bearer synthetic-existing-token');
 });
 
 test('GHSCOPE-01: an unauthenticated Octokit request does not inherit the CLI token budget', async t => {

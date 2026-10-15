@@ -49,7 +49,7 @@ process.exit(${limited ? 1 : 0});
     if (limited) assert.throws(run, error => error.rateLimited === true);
     else assert.equal(scenario === 'injected-result' ? run().stdout : run(), '{}');
     const bucket = JSON.parse(readFileSync(explicit, 'utf8')).buckets.core;
-    assert.equal(bucket.remaining, scenario === 'headerless-error' ? 0 : 4900);
+    assert.equal(bucket.remaining, limited ? 0 : 4900);
     assert.equal(bucket.rateLimitedCalls || 0, limited ? 1 : 0);
     assert.equal(existsSync(ambient), false, 'record and limited bridges must not write ambient state');
   });

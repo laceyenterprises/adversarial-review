@@ -2253,7 +2253,7 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2322,6 +2322,18 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         }
       `,
     };
+    if (stalePriority) {
+      const storeUrl = fileUrl('src', 'watcher-retained-wakes.mjs');
+      sources[storeUrl] = `
+        import { createRetainedWatcherWakes as create } from '${storeUrl}?actual';
+        export function createRetainedWatcherWakes() {
+          const store = create({ rootDir: ${JSON.stringify(tmp)} });
+          store.retain({ repoPath: 'laceyenterprises/adversarial-review', prNumber: 998, headSha: 'old-head' });
+          globalThis.__retainedWakeStore = store;
+          return store;
+        }
+      `;
+    }
     if (drainOutcome) sources[poolUrl] = `
       import * as actual from '${poolUrl}?actual';
       export * from '${poolUrl}?actual';
@@ -2362,8 +2374,21 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource({
       expectPollError: drainOutcome === 'throw',
+      freshHeads: stalePriority ? { 998: 'old-head' } : {},
       // Depth is memoized at discovery; model the already-queued production backlog.
-      prePollSetup: `db.prepare("INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, 101, ?, 'gemini', 'open', 'pending', 0)").run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00.000Z');`,
+      prePollSetup: `
+        db.prepare("INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, 101, ?, 'gemini', 'open', 'pending', 0)").run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00.000Z');
+        if (${stalePriority}) {
+          const insert = db.prepare("INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, 999, ?, 'gemini', 'open', 'failed', 1)");
+          for (const repo of ['laceyenterprises/adversarial-review', 'example/not-polled']) {
+            insert.run(repo, '2026-05-15T12:00:00.000Z');
+          }
+        }
+      `,
+      afterFirstPoll: stalePriority ? `
+        assert.equal(globalThis.__retainedWakeStore.matches({ repoPath: 'laceyenterprises/adversarial-review',
+          prNumber: 998, headSha: 'old-head' }), true, 'unconfirmed absence must not delete durable priority');
+      ` : '',
     }));
     const result = spawnSync(process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
@@ -2498,6 +2523,12 @@ for (const burst of [false, true]) test(`engaged discovery depth keeps priority 
   assert.equal(summary.depthDiagnostics.burstAdmissions || 0, 0);
   assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 1);
   assert.equal(summary.depthDiagnostics.report.cost.byWorkerClass['claude-code'], 1);
+});
+
+test('stale retained wakes and failed rows cannot strand the intermediate discovery drain', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ stalePriority: true });
+  assert.match(output, /Draining 2 reviewer dispatch candidate\(s\) before continuing reviewer discovery/);
+  assert.equal(summary.reviewerSpawns.length, 2);
 });
 
 test('disengaged depth still permits burst admission at discovery', () => {

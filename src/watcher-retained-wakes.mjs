@@ -57,7 +57,7 @@ export function createRetainedWatcherWakes({ rootDir } = {}) {
         if (entry.repoPath !== repoPath || discoveredPrNumbers.has(entry.prNumber)) continue;
         try {
           const live = await readLive(entry.prNumber);
-          this.observe({ ...entry, headSha: live.headRefOid,
+          this.observe({ ...entry, headSha: live.headRefOid || live.headSha,
             terminal: Boolean(live.mergedAt) || live.state === 'closed' });
         } catch {
           // Absence from discovery or a failed read is not proof of closure.

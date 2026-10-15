@@ -69,6 +69,26 @@ test('the existing wait warning threshold also controls dispatch ordering', asyn
   assert.equal(reviewerDispatchWaitPriority(tasks[1], { nowMs: 99, waitWarnMs: 100 }), null);
 });
 
+for (const timestamp of ['enqueuedAtMs', 'enqueuedAt']) {
+  test(`single-lane modern ${timestamp} candidates use the injected clock`, async () => {
+    const nowMs = Date.parse('2026-01-01T00:00:00Z');
+    const starts = [];
+    const old = candidate(1, { run: async () => starts.push(1) });
+    const fresh = candidate(2, { wakePriority: true, run: async () => starts.push(2) });
+    const encode = (value) => timestamp === 'enqueuedAtMs' ? value : new Date(value).toISOString();
+    old[timestamp] = encode(nowMs - thresholdMs);
+    fresh[timestamp] = encode(nowMs);
+    // Wall time puts neither (or both) over the threshold. Only the injected
+    // clock moves the old candidate across the boundary between these drains.
+    for (const time of [nowMs - 1, nowMs]) {
+      await runBoundedReviewerDispatchQueue([fresh, old], {
+        maxConcurrent: 1, singleWave: true, now: () => time, logger,
+      });
+    }
+    assert.deepEqual(starts, [2, 1]);
+  });
+}
+
 test('wait priority is enqueue-relative and never inferred from PR creation or pending age', () => {
   const old = candidate(1);
   old.pendingSinceMs = 0;

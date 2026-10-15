@@ -451,10 +451,12 @@
       "id": "watcher-wake",
       "title": "Watcher Wake",
       "path": "docs/data-model/watcher-wake.md",
-      "store": "data/watcher-wake.json, data/watcher-wake-consumed.json",
+      "store": "data/watcher-wake.json, data/watcher-wake-consumed.json, data/watcher-wake-retained.json",
       "schemaSurface": "src/watcher-wake.mjs",
       "relatedSchemaSurfaces": [
         "src/watcher.mjs",
+        "src/watcher-retained-wakes.mjs",
+        "src/watcher-dispatch-priority.mjs",
         "bin/watcher-wake.mjs"
       ],
       "owner": "watcher wake transport and subject priority"

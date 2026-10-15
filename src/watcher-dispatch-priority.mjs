@@ -16,6 +16,17 @@ export function createWatcherPriorityDiscoveryPending({ db, retainedSubjects, no
   return pending;
 }
 
+// This barrier protects only work that can still enter this tick's queue.
+// Missing discovery is not evidence for deleting a durable retained wake.
+export function reconcileWatcherPriorityDiscoveryPending(pending, { repoPath, discoveredPrNumbers }) {
+  const prefix = `${repoPath}#`;
+  for (const identity of pending) {
+    if (identity.startsWith(prefix) && !discoveredPrNumbers.has(Number(identity.slice(prefix.length)))) {
+      pending.delete(identity);
+    }
+  }
+}
+
 export function createWatcherDispatchPriority({ rootDir, db, nowMs = Date.now() }) {
   const retainedWatcherWakes = createRetainedWatcherWakes({ rootDir });
   const priorityDiscoveryPending = createWatcherPriorityDiscoveryPending({

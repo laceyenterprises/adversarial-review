@@ -76,7 +76,8 @@ test('missing discovery and failed live reads preserve priority, and reconciliat
   const { store } = fixture(t);
   store.retain(identity);
   for (const readLive of [async () => { throw new Error('synthetic unavailable'); },
-    async () => ({ state: 'open', headRefOid: identity.headSha })]) {
+    async () => ({ state: 'open', headRefOid: identity.headSha }),
+    async () => ({ state: 'open', headSha: identity.headSha })]) {
     await store.reconcileMissing({ repoPath: identity.repoPath, discoveredPrNumbers: new Set(), readLive });
     assert.equal(store.matches(identity), true);
   }
@@ -85,6 +86,20 @@ test('missing discovery and failed live reads preserve priority, and reconciliat
   await store.reconcileMissing({ repoPath: identity.repoPath, discoveredPrNumbers: new Set([1]),
     readLive: async () => assert.fail('discovered subjects are observed separately') });
   assert.equal(store.matches(identity), true);
+});
+
+test('missing reconciliation detects head changes in raw and normalized live states', async (t) => {
+  const { store } = fixture(t);
+  for (const live of [
+    { state: 'open', headRefOid: 'head-b' },
+    { state: 'open', headSha: 'head-b' },
+    { state: 'open', headRefOid: null, headSha: 'head-b' },
+  ]) {
+    store.retain(identity);
+    await store.reconcileMissing({ repoPath: identity.repoPath, discoveredPrNumbers: new Set(),
+      readLive: async () => live });
+    assert.deepEqual(store.subjects(), []);
+  }
 });
 
 test('a stale dispatch cannot clear priority for a newer retained head', (t) => {

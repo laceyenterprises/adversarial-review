@@ -107,7 +107,7 @@ import {
   createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
 } from './watcher-wake.mjs';
-import { createWatcherDispatchPriority } from './watcher-dispatch-priority.mjs';
+import { createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
   ensureReviewStateSchema,
@@ -1374,6 +1374,11 @@ async function pollOnceWithinBudget(
     }
   }
 
+  const discoveryRepos = new Set(domainRepoWork.map(({ repoPath }) => repoPath));
+  for (const identity of priorityDiscoveryPending) {
+    if (!discoveryRepos.has(identity.slice(0, identity.lastIndexOf('#')))) priorityDiscoveryPending.delete(identity);
+  }
+
   for (const { domainAdapterSet, repoPath } of domainRepoWork) {
     const domainId = domainAdapterSet.domainId;
     const domainReviewerRuntimeAdapter = domainAdapterSet.reviewerRuntimeAdapter;
@@ -1402,6 +1407,7 @@ async function pollOnceWithinBudget(
       subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
+      reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
       continue;
     }
 
@@ -1420,6 +1426,9 @@ async function pollOnceWithinBudget(
         return null;
       }
     }))).filter(Boolean);
+    reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, {
+      repoPath, discoveredPrNumbers: new Set(subjectEntries.map(({ prNumber }) => prNumber)),
+    });
     subjectEntries = subjectEntries
       .map((entry) => ({
         ...entry,

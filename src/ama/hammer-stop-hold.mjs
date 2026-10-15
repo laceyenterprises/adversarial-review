@@ -47,6 +47,7 @@ import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 // State: data/follow-up-jobs/hammer-stop-hold/<repo>-pr-<n>.json, per head.
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { checkPrimaryChange, fetchPrimaryChange } from './primary-change.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -79,6 +80,31 @@ const HEADS_KEPT = 8;
 function oneLine(value, limit = TEXT_LIMIT) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
   return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
+}
+
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+  return value;
+}
+
+function deterministicRefusal(attempt) {
+  const reasons = [...new Set([
+    ...(attempt.eligibilityTrace?.reasons || []), ...(attempt.githubGate?.reasons || []),
+    ...(attempt.reasons || []),
+  ])].sort();
+  if (!reasons.length && ['primary-change-reverted', 'primary-change-unknown', 'stale-review-head',
+    'verdict-not-eligible', 'verdict-not-settled-success', 'permanent-merge-rejection'].includes(attempt.reason)) reasons.push(attempt.reason);
+  if (!reasons.length || reasons.some(reason => /read-failed|unavailable|timeout|pending|mergeability-unknown/.test(reason))) return null;
+  const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
+    || attempt.githubGate?.primaryChangeMissingEvidence || null);
+  const key = createHash('sha256').update(JSON.stringify({ reasons, missingEvidence })).digest('hex');
+  const next = attempt.next || (reasons.includes('primary-change-reverted')
+    ? 'Restore the uncited reverted regions, then push the repaired head.'
+    : reasons.includes('stale-review-head') ? 'Obtain an approving review on the current head.'
+      : reasons.includes('ci-not-green') ? 'Repair the named required check and rerun it on the current head.'
+        : `Supply the missing evidence for ${reasons[0]}.`);
+  return { key, reasons, missingEvidence, next };
 }
 
 function holdStatePath(rootDir, repo, prNumber) {
@@ -209,6 +235,7 @@ export function readHammerStopForHead({
       stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || ''}`,
     })),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
+    refusal: deterministicRefusal(attempt),
     closingStatus: oneLine(attempt?.closingStatus),
     ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
       ? { historyReadError: oneLine(attempt.historyReadError || attempt.githubGate.primaryChangeReason) } : {}),
@@ -226,7 +253,7 @@ function checkName(item) {
  * The inputs a repeated hammer run would read. `excludeContexts` names the
  * pipeline's own status contexts, which the watcher itself writes.
  */
-export function hammerStopInputs(prMetadata, { excludeContexts = [] } = {}) {
+export function hammerStopInputs(prMetadata, { excludeContexts = [], reviewState = null } = {}) {
   const excluded = new Set((excludeContexts || []).map((ctx) => String(ctx || '').trim().toLowerCase()).filter(Boolean));
   const rollup = Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [];
   const checks = latestCheckRollupItems(rollup.filter((item) => !isAdversarialOwnStatusContext(item, excluded)))
@@ -238,6 +265,11 @@ export function hammerStopInputs(prMetadata, { excludeContexts = [] } = {}) {
     baseSha: prMetadata?.baseSha || null,
     mergeability: ['MERGEABLE', 'CONFLICTING'].includes(mergeability) ? mergeability : null,
     checks: checks.join('|'),
+    review: JSON.stringify(stable(reviewState && Object.fromEntries([
+      'headSha', 'verdict', 'remediationPending', 'blockingFindingState', 'blockingFindingCount',
+      'nonBlockingFindingState', 'nonBlockingFindingCount', 'blockingFindingIdentities',
+      'nonBlockingFindingIdentities', 'refusalReviewVersion',
+    ].map(key => [key, reviewState[key]])))),
   };
 }
 
@@ -267,6 +299,7 @@ export function changedHammerStopInputs(previous, current) {
   if (typeof previous.checks === 'string' && typeof current.checks === 'string' && previous.checks !== current.checks) {
     changed.push('checks');
   }
+  if (typeof previous.review === 'string' && typeof current.review === 'string' && previous.review !== current.review) changed.push('review');
   return changed;
 }
 
@@ -284,6 +317,7 @@ export async function evaluateHammerStopHold({
   headSha,
   reviewedSha,
   prMetadata,
+  reviewState = null,
   excludeContexts = [],
   deliverAlertImpl = null,
   logger = console,
@@ -293,22 +327,34 @@ export async function evaluateHammerStopHold({
   execFileImpl = execFileAsync,
 } = {}) {
   if (!rootDir || !headSha) return { action: 'none' };
+  const state = readHoldState(rootDir, repo, prNumber);
+  if (state.currentHead && state.currentHead !== headSha) {
+    // A force-push away and back is still a changed head, not the old refusal.
+    state.heads = {};
+    state.currentHead = headSha;
+    writeHoldState(rootDir, repo, prNumber, state);
+  }
   const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, readAuditImpl, logger });
   if (!stop) return { action: 'none' };
-  const inputs = hammerStopInputs(prMetadata, { excludeContexts });
-  const state = readHoldState(rootDir, repo, prNumber);
+  const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
   const prior = state.heads[headSha];
-  let entry = prior && prior.stopKey === stop.stopKey
-    ? { ...prior }
+  const sameRefusal = stop.refusal && prior?.refusal?.key === stop.refusal.key;
+  const reuseEntry = prior && (sameRefusal || prior.stopKey === stop.stopKey)
+    && !(prior.releasedAt && prior.stopKey !== stop.stopKey);
+  if (!reuseEntry) state.refusalGeneration = (Number(state.refusalGeneration) || 0) + 1;
+  let entry = reuseEntry
+    ? { ...prior, stopKey: stop.stopKey, ...(stop.refusal ? { refusal: stop.refusal } : {}) }
     : {
       stopKey: stop.stopKey,
+      refusalGeneration: state.refusalGeneration,
       predicate: stop.predicate,
+      ...(stop.refusal ? { refusal: stop.refusal } : {}),
       ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
       firstObservedAt: now,
       // A stop that follows a released hold read the inputs seen at release;
       // compare against those, not against this first observation.
       inputs: prior?.releasedInputs || inputs,
-      pagedAt: prior?.pagedAt || null,
+      pagedAt: stop.refusal ? null : prior?.pagedAt || null,
     };
   let dirty = !prior || prior.stopKey !== stop.stopKey;
   if (!entry.releasedAt) {
@@ -324,21 +370,28 @@ export async function evaluateHammerStopHold({
     }
     // Probe only evidence failures, once per evaluation/pass. A computable
     // refusal (e.g. reverted primary change) releases ownership, not merge gates.
-    if (HAMMER_EVIDENCE_FAILURES.has(stop.predicate)) {
+    if (HAMMER_EVIDENCE_FAILURES.has(stop.predicate)
+      || stop.refusal?.reasons.includes('primary-change-reverted')) {
       try {
         const evidence = await fetchPrimaryChangeImpl({
           repo, prNumber, headSha, rootDir,
           get: createHistoryReader({ execFileImpl }),
         });
         const answer = checkPrimaryChange(evidence, headSha);
-        if (!HAMMER_EVIDENCE_FAILURES.has(answer.reason)) changed.push('primary-change-evidence');
+        if (stop.refusal?.reasons.includes('primary-change-reverted')) {
+          // Deploying a new verifier or publishing guard evidence can resolve
+          // the missing authority without a new SHA or verdict. Read it, but
+          // retain the hold when the same deterministic refusal remains.
+          if (answer.ok || (answer.reason === 'primary-change-reverted' && answer.missingEvidence
+            && JSON.stringify(stable(answer.missingEvidence)) !== JSON.stringify(stop.refusal.missingEvidence))) changed.push('primary-change-evidence');
+        } else if (!HAMMER_EVIDENCE_FAILURES.has(answer.reason)) changed.push('primary-change-evidence');
         else if (stop.predicate === 'history-read-failed' && !holdReleased) changed.splice(0);
       } catch (err) {
         if (stop.predicate === 'history-read-failed' && !holdReleased) changed.splice(0);
         logger?.warn?.(`[ama-closer] hammer evidence probe failed for ${repo}#${prNumber}: ${err?.message || err}`);
       }
     }
-    if (changed.length === 0 && stop.predicate !== 'history-read-failed' && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
+    if (changed.length === 0 && !stop.refusal && stop.predicate !== 'history-read-failed' && hammerStopPrIsConflicting(prMetadata)) changed.push('conflicting');
     if (changed.length > 0) {
       entry = { ...entry, releasedAt: now, releasedBy: changed, releasedInputs: inputs };
       dirty = true;
@@ -351,6 +404,7 @@ export async function evaluateHammerStopHold({
   const hammerStop = {
     headSha,
     predicate: stop.predicate,
+    ...(stop.refusal ? { refusal: stop.refusal } : {}),
     closingStatus: stop.closingStatus || null,
     ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
     since: entry.firstObservedAt,
@@ -359,7 +413,7 @@ export async function evaluateHammerStopHold({
     if (dirty) persist();
     return { action: 'release', hammerStop, changed: entry.releasedBy || [] };
   }
-  const debounceKey = `${repo}\0${prNumber}\0${headSha}`;
+  const debounceKey = `${rootDir}\0${repo}\0${prNumber}\0${headSha}${stop.refusal ? `\0${stop.refusal.key}\0${entry.refusalGeneration}` : ''}`;
   const pageDue = stop.predicate !== 'history-read-failed'
     || Date.parse(now) - Date.parse(entry.firstObservedAt) >= HISTORY_READ_FAILURE_PAGE_GRACE_MS;
   if (pageDue && !entry.pagedAt && !PAGED_IN_PROCESS.has(debounceKey) && typeof deliverAlertImpl === 'function') {
@@ -367,7 +421,8 @@ export async function evaluateHammerStopHold({
       + `${String(headSha).slice(0, 12)}: ${stop.predicate}. `
       + (stop.historyReadError ? `Read error: ${stop.historyReadError}. ` : '')
       + (stop.closingStatus ? `Hammer said: ${stop.closingStatus} ` : '')
-      + 'The PR has neither a reviewer nor a hammer. Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. '
+      + (stop.refusal ? `Reasons: ${stop.refusal.reasons.join(', ')}. Missing evidence: ${JSON.stringify(stop.refusal.missingEvidence)}. Action: ${stop.refusal.next} `
+        : 'The PR has neither a reviewer nor a hammer. Operator overrides: operator-approved, merge-agent-requested, paused-for-redesign. ')
       + 'No further hammer run on this head until its head, base, mergeability or checks change, or missing evidence becomes computable; '
       + 'the watcher re-checks on its scheduled cadence and re-dispatches once when one does.';
     try {
@@ -376,6 +431,7 @@ export async function evaluateHammerStopHold({
         payload: {
           repo, prNumber, headSha, predicate: stop.predicate, closingStatus: stop.closingStatus || null,
           next: stop.next || null, inputs,
+          ...(stop.refusal ? { refusal: stop.refusal, next: stop.refusal.next } : {}),
           ...(stop.historyReadError ? { historyReadError: stop.historyReadError } : {}),
         },
       });
@@ -394,7 +450,7 @@ export async function evaluateHammerStopHold({
 
   function persist() {
     try {
-      writeHoldState(rootDir, repo, prNumber, { ...state, heads: { ...state.heads, [headSha]: entry } });
+      writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha, heads: { ...state.heads, [headSha]: entry } });
     } catch (err) {
       logger?.error?.(JSON.stringify({
         event: 'ama_closer.hammer_stop_hold_persist_failed',

@@ -4361,32 +4361,26 @@ export async function maybeDispatchAmaCloser({
 
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
     && dispatchContext.orphanRecovery.headSha === prMetadata?.headSha;
-  if (ownerProofRecovery) {
-    if (!prMetadata.isOpen || prMetadata.isDraft || isOperatorHeld(prMetadata.labels)) {
-      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'ownerless-live-pr-held-or-terminal' });
-    }
-    const owner = await probeOrphanOwnership({ rootDir: dispatchContext.rootDir,
-      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha, signal, logger,
-      readStatusImpl: readLaunchRequestStatusImpl });
-    if (owner.owned) return noAmaDispatch({ dispatched: false, reason: 'live-run-in-flight' });
-  }
 
   // CAPROUTE-01: evidence holds must be probed even when ordinary eligibility
   // would return early. Keep this result for later reconciliation in this pass.
   let evidenceStopHold = null;
   let hammerStopRelease = null;
-  if (!ownerProofRecovery && prMetadata?.isOpen === true) {
+  if (prMetadata?.isOpen === true) {
     const stop = readHammerStopForHead({
       hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
       repo: dispatchContext?.repo, prNumber, headSha: prMetadata?.headSha,
       reviewedSha: dispatchContext?.reviewedSha, logger,
     });
-    if (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)) {
+    // GUARDREVERT-01: an unchanged deterministic terminal decision fences
+    // every hammer route, including ownerless recovery and clean eligible
+    // closures. Legacy transient evidence stops keep their recovery probes.
+    if (stop?.refusal || (!ownerProofRecovery && HAMMER_EVIDENCE_FAILURES.has(stop?.predicate))) {
       evidenceStopHold = await evaluateHammerStopHoldImpl({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
         hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
         repo: dispatchContext?.repo, prNumber, headSha: prMetadata.headSha,
-        reviewedSha: dispatchContext?.reviewedSha, prMetadata,
+        reviewedSha: dispatchContext?.reviewedSha, prMetadata, reviewState,
         fetchPrimaryChangeImpl, execFileImpl, deliverAlertImpl, logger,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
@@ -4396,6 +4390,16 @@ export async function maybeDispatchAmaCloser({
         hammerStop: evidenceStopHold.hammerStop });
       if (evidenceStopHold.action === 'release') hammerStopRelease = evidenceStopHold;
     }
+  }
+
+  if (ownerProofRecovery) {
+    if (!prMetadata.isOpen || prMetadata.isDraft || isOperatorHeld(prMetadata.labels)) {
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'ownerless-live-pr-held-or-terminal' });
+    }
+    const owner = await probeOrphanOwnership({ rootDir: dispatchContext.rootDir,
+      repo: dispatchContext.repo, prNumber, headSha: prMetadata.headSha, signal, logger,
+      readStatusImpl: readLaunchRequestStatusImpl });
+    if (owner.owned) return noAmaDispatch({ dispatched: false, reason: 'live-run-in-flight' });
   }
 
   // HAMCLOSE-07: historical launch records cannot pin a new hammer to an old
@@ -4602,6 +4606,7 @@ export async function maybeDispatchAmaCloser({
         headSha: prMetadata?.headSha || dispatchContext?.targetRemediationSha || null,
         reviewedSha: dispatchContext?.reviewedSha || null,
         prMetadata,
+        reviewState,
         fetchPrimaryChangeImpl,
         execFileImpl,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),

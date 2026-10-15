@@ -38,6 +38,7 @@ import {
   resumeInterruptedArgusRequeues,
   returnArgusJobToPending,
 } from './argus-security-queue.mjs';
+import { isQuotaOnlyArgusFailure } from './argus-reviewer-failures.mjs';
 import { ARGUS_SUPERSEDED_VERDICT } from './argus-security-verdict.mjs';
 import { ARGUS_REVIEW_RESULT_SOURCE } from './argus-security-review.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
@@ -150,6 +151,8 @@ export async function retireArgusBacklog({
   const pending = listArgusJobs(rootDir, { bucket: 'pending', limit: Number.POSITIVE_INFINITY });
   const completed = listArgusJobs(rootDir, { bucket: 'completed', limit: COMPLETED_SCAN_LIMIT })
     .filter(({ job }) => isLegacyRouteForReviewCompletion(job));
+  const quotaFailed = listArgusJobs(rootDir, { bucket: 'failed', limit: Number.POSITIVE_INFINITY })
+    .filter(({ job }) => isQuotaOnlyArgusFailure(job));
   const summary = {
     observedAt: retiredAt,
     pendingBefore: pending.length,
@@ -158,13 +161,14 @@ export async function retireArgusBacklog({
     liveHeads: 0,
     oldestLiveHead: null,
     requeued: 0,
+    requeuedQuotaFailures: 0,
     reclaimed: 0,
     resumedRequeues,
     skippedRepos: [],
   };
 
   const repos = new Map();
-  for (const { job } of [...pending, ...completed]) {
+  for (const { job } of [...pending, ...completed, ...quotaFailed]) {
     if (job?.repo) repos.set(normalizeRepoKey(job.repo), job.repo);
   }
   const openHeadsByRepo = new Map();
@@ -232,6 +236,26 @@ export async function retireArgusBacklog({
     if (reopened) {
       summary.requeued += 1;
       summary.liveHeads += 1;
+    }
+  }
+
+  for (const { job, jobPath } of quotaFailed) {
+    const heads = openHeadsByRepo.get(normalizeRepoKey(job?.repo));
+    if (!heads || heads.get(Number(job.prNumber)) !== String(job.headSha).toLowerCase()) continue;
+    const reopened = tolerateVanished(() => returnArgusJobToPending({
+      rootDir, jobPath, job,
+      patch: {
+        error: null,
+        priorQuotaFailure: { error: job.error, failedAt: job.failedAt, drain: job.drain || null },
+        drain: {
+          ...job.drain, attempts: 0, attemptHistory: [], lastError: null,
+          lastAttemptAt: null, notBefore: null, cachedReview: null, quotaFailureRequeuedAt: retiredAt,
+        },
+      },
+    }));
+    if (reopened) {
+      summary.requeuedQuotaFailures += 1;
+      logger?.log?.(`[argus-drain] requeued quota-only failure ${job.jobId}`);
     }
   }
 

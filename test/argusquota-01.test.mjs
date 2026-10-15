@@ -7,10 +7,11 @@ import { createAgyReviewerIdentityPool } from '../src/agy-reviewer-identities.mj
 import { startGeminiQuotaCooldown, readGeminiQuotaCooldown } from '../src/gemini-quota-cooldown.mjs';
 import { createDefaultArgusReviewDeps } from '../src/argus-security-review-deps.mjs';
 import { createArgusSecurityDrain, runArgusReviewChild, ARGUS_REVIEW_OUTCOME_PREFIX } from '../src/argus-security-drain.mjs';
-import { readReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { readReviewerRunRecord, readRecoverableReviewerRunRecords } from '../src/adapters/reviewer-runtime/run-state.mjs';
 
+import { retireArgusBacklog } from '../src/argus-backlog-retirement.mjs';
 import { reviewArgusJob } from '../src/argus-security-review.mjs';
-import { enqueueArgusSecurityReview, findArgusJob } from '../src/argus-security-queue.mjs';
+import { enqueueArgusSecurityReview, findArgusJob, claimNextArgusJob, failArgusJob } from '../src/argus-security-queue.mjs';
 import { resolveArgusSecurityVerdict } from '../src/argus-security-verdict.mjs';
 
 const quiet = { log() {}, info() {}, warn() {}, error() {} };
@@ -23,7 +24,7 @@ const TEXT = '<argus-review-json>{"verdict":"approve","summary":"fine","findings
 async function withPool(fn) {
   const rootDir = mkdtempSync(join(tmpdir(), 'argusquota-'));
   const cleanups = [];
-  const pool = createAgyReviewerIdentityPool({
+  const poolOptions = {
     env: {}, log: quiet, now: () => NOW, hqOwner: 'owner-identity',
     loadIdentities: () => ['owner-identity', 'reviewer-b'], resolveRuntime: () => 'antigravity',
     runStateRootDir: rootDir, readBootstrapRecordImpl: () => null,
@@ -35,12 +36,14 @@ async function withPool(fn) {
         ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '', stderr: '' };
     },
     deliverAlertImpl: async () => { throw new Error('unexpected alert'); },
-  });
+    isPgidAliveImpl: () => true,
+  };
+  const pool = createAgyReviewerIdentityPool(poolOptions);
   const cooldown = (identityUser) => startGeminiQuotaCooldown({
     rootDir, env: {}, nowMs: NOW, log: quiet, hqOwner: 'owner-identity', identityUser, signal: { resetAt: RESET },
   });
   cooldown('owner-identity');
-  try { await fn({ rootDir, pool, cleanups, cooldown }); }
+  try { await fn({ rootDir, pool, cleanups, cooldown, createPool: () => createAgyReviewerIdentityPool(poolOptions) }); }
   finally { rmSync(rootDir, { recursive: true, force: true }); }
 }
 
@@ -216,4 +219,122 @@ test('a real model failure alongside quota exhaustion still spends attempts and 
     if (pass < 3) now = Date.parse(found.job.drain.notBefore);
     else assert.equal(found.bucket, 'failed');
   }
+}));
+
+function quotaError(models = ['gemini']) {
+  return `no reviewer model produced a review: ${models.map((model) => `${model}: Gemini exec failed: Individual quota reached`).join(' | ')}`;
+}
+
+function failedJob(rootDir, prNumber, lastError, history = undefined) {
+  enqueueArgusSecurityReview({ rootDir, ...JOB, prNumber, reasons: [{ trigger: 'sensitive-path' }], enqueuedAt: new Date(NOW).toISOString() });
+  const claim = claimNextArgusJob({ rootDir, claimedAt: new Date(NOW).toISOString() });
+  return failArgusJob({
+    rootDir, ...claim, failedAt: new Date(NOW).toISOString(),
+    job: { ...claim.job, drain: { attempts: 3, lastError, ...(history ? { attemptHistory: history } : {}) } },
+    error: `argus review failed after 3 attempt(s): ${lastError}`,
+  });
+}
+
+test('backlog requeues quota-only failures once at the authoritative open head, resetting attempts', () => withPool(async ({ rootDir }) => {
+  failedJob(rootDir, 1, quotaError()); // Legacy: only the final diagnostic was recorded.
+  const mixed = `${quotaError()} | codex: reviewer execution failed`;
+  failedJob(rootDir, 2, mixed);
+  failedJob(rootDir, 3, quotaError()); // Head moved.
+  failedJob(rootDir, 4, quotaError()); // Closed or merged.
+  const history = Array.from({ length: 3 }, (_, i) => ({ attempt: i + 1, error: quotaError() }));
+  history[0].error = 'reviewer execution failed';
+  failedJob(rootDir, 5, quotaError(), history); // Last attempt was quota, first was real.
+  failedJob(rootDir, 6, quotaError(), Array.from({ length: 3 }, (_, i) => ({
+    attempt: i + 1, error: quotaError(), modelAttempts: [{ model: 'gemini', error: 'Individual quota reached', failureClass: 'quota-exhausted' }],
+  })));
+  failedJob(rootDir, 7, quotaError(), [{ attempt: 3, error: quotaError() }]); // Incomplete new history.
+  const lines = [];
+  const options = {
+    rootDir, nowMs: NOW, logger: { log: (line) => lines.push(line) },
+    listOpenPullHeads: async (repo) => {
+      assert.equal(repo, JOB.repo);
+      return { complete: true, heads: new Map([[1, HEAD], [2, HEAD], [3, 'b'.repeat(40)], [5, HEAD], [6, HEAD], [7, HEAD]]) };
+    },
+  };
+  const summary = await retireArgusBacklog(options);
+  assert.equal(summary.requeuedQuotaFailures, 2);
+  for (const prNumber of [1, 6]) {
+    const found = findArgusJob(rootDir, { ...JOB, prNumber });
+    assert.equal(found.bucket, 'pending');
+    assert.equal(found.job.drain.attempts, 0);
+    assert.deepEqual(found.job.drain.attemptHistory, []);
+    assert.equal(found.job.error, null);
+    assert.equal(found.job.failedAt, null);
+    assert.equal(found.job.drain.notBefore, null);
+    assert.equal(found.job.priorQuotaFailure.drain.attempts, 3);
+    assert.equal(resolveArgusSecurityVerdict({ rootDir, ...JOB, prNumber, nowMs: NOW }).satisfiesGate, false);
+  }
+  for (const prNumber of [2, 3, 4, 5, 7]) {
+    assert.equal(findArgusJob(rootDir, { ...JOB, prNumber }).bucket, 'failed');
+  }
+  const again = await retireArgusBacklog(options);
+  assert.equal(again.requeuedQuotaFailures, 0);
+  assert.equal(lines.filter((line) => line.startsWith('[argus-drain] requeued quota-only failure ')).length, 2);
+}));
+
+for (const listing of ['unreadable', 'truncated']) {
+  test(`quota-failure recovery respects an ${listing} live listing`, () => withPool(async ({ rootDir }) => {
+    failedJob(rootDir, 1, quotaError());
+    await retireArgusBacklog({
+      rootDir, nowMs: NOW, logger: quiet,
+      listOpenPullHeads: async () => {
+        if (listing === 'unreadable') throw new Error('listing unavailable');
+        return { complete: false, heads: new Map([[1, HEAD]]) };
+      },
+    });
+    assert.equal(findArgusJob(rootDir, JOB).bucket, 'failed');
+  }));
+}
+
+
+test('a restarted watcher pool adopts the Argus child lease while ordinary runtime recovery ignores it', () => withPool(async ({ rootDir, pool, createPool }) => {
+  let settle;
+  let held;
+  const child = runArgusReviewChild({
+    rootDir, jobPath: join(rootDir, 'job.json'), identityPool: pool, env: {}, logger: quiet,
+    geminiEnabled: () => true, nowMs: () => NOW,
+    execFileImpl: (_cmd, args, _options, callback) => {
+      held = JSON.parse(args[args.indexOf('--agy-lease') + 1]);
+      settle = callback;
+      return { pid: 123 };
+    },
+  });
+  while (!settle) await new Promise((resolve) => setImmediate(resolve));
+  try {
+    assert.deepEqual(readRecoverableReviewerRunRecords(rootDir), []);
+    const restarted = createPool();
+    assert.equal(await restarted.refreshReadiness(), 0);
+    assert.equal(await restarted.acquire(), null);
+    assert.deepEqual(restarted.snapshot().find((state) => state.user === 'reviewer-b').adoptedReviews, [held.reviewId]);
+  } finally {
+    settle(null, `${ARGUS_REVIEW_OUTCOME_PREFIX}{"kind":"complete","result":{"verdict":"approve"}}\n`, '');
+    await child;
+  }
+}));
+
+test('a lease cooled after routing is never used for a model call', () => withPool(async ({ rootDir, pool, cooldown }) => {
+  await pool.refreshReadiness();
+  const lease = await pool.acquire();
+  const deps = productionDeps({ rootDir, pool, agyLease: lease, runner: async () => { assert.fail('cooled identity must not run'); } });
+  cooldown('reviewer-b');
+  try {
+    await assert.rejects(deps.runReviewerModel({ model: 'gemini', prompt: 'T', cwd: rootDir }), (error) => error.resetAt === RESET);
+  } finally { await pool.release(lease); }
+}));
+
+test('the drain uses an absolute known reset even when it is under a minute away', () => withPool(async ({ rootDir }) => {
+  enqueueArgusSecurityReview({ rootDir, ...JOB, enqueuedAt: new Date(NOW).toISOString(), reasons: [{ trigger: 'sensitive-path' }] });
+  const resetAt = new Date(NOW + 30_000).toISOString();
+  const drain = createArgusSecurityDrain({
+    rootDir, nowMs: () => NOW + 1000, logger: quiet,
+    runJob: ({ job }) => review(reviewDeps(['gemini'], async () => { throw new Error(`Individual quota reached; resets at ${resetAt}`); }), job),
+  });
+  drain.tick();
+  await drain.drain();
+  assert.equal(findArgusJob(rootDir, JOB).job.drain.notBefore, resetAt);
 }));

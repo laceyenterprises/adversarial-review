@@ -19,7 +19,7 @@ import { acquireArgusGeminiLease, argusGeminiAvailability } from './argus-review
 import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
 import { resolveQuotaResetIso } from './quota-exhaustion.mjs';
-import { startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
+import { startGeminiQuotaCooldown, readGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 
 export {
   ARGUS_REVIEWER_MODELS_ENV,
@@ -122,14 +122,22 @@ export function createDefaultArgusReviewDeps({
         let failed = false;
         let reason = '';
         try {
+          const cooldown = readGeminiQuotaCooldown({
+            ...identityOptions(), log: logger, hqOwner: identityPool.plan().hqOwner, identityUser: lease.user,
+          });
+          if (cooldown) {
+            const error = new Error(`[${AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS}] no ready agy reviewer identity`);
+            error.resetAt = cooldown.resetAt;
+            throw error;
+          }
           output = await reviewWithGeminiImpl(diff || '', '', {
             ...options, agyIdentity: lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId },
           });
         } catch (err) {
           const diagnostic = [err?.message, err?.stderr].filter(Boolean).join('\n');
           reason = classifyReviewerFailure(diagnostic, null, err?.code, err);
-          failed = reason !== 'quota-exhausted';
-          if (!failed) {
+          failed = !['quota-exhausted', AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS].includes(reason);
+          if (reason === 'quota-exhausted') {
             const signal = parseReviewerQuotaExhaustion({ error: err, nowMs: nowMs() });
             signal.resetAt ||= resolveQuotaResetIso(diagnostic, { nowMs: nowMs() });
             startGeminiQuotaCooldown({

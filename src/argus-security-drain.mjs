@@ -120,6 +120,16 @@ function parseChildOutcome(stdout) {
   throw new Error('argus review child printed no outcome line');
 }
 
+function argusGeminiEnabled(env) {
+  if (!resolveConfiguredArgusReviewerModels(env).includes('gemini')) return false;
+  try {
+    return resolveGeminiReviewerModeWithSource({ env }).mode !== 'off';
+  } catch {
+    // The child resolver already reports this and treats Gemini as off.
+    return false;
+  }
+}
+
 /**
  * Production `runJob`: review the job in a child process. The child reads the
  * claimed record, never writes the queue, and prints one outcome line.
@@ -132,8 +142,7 @@ export async function runArgusReviewChild({
   timeoutMs = ARGUS_REVIEW_CHILD_TIMEOUT_MS,
   identityPool = getAgyReviewerIdentityPool(),
   nowMs = () => Date.now(),
-  geminiEnabled = () => resolveConfiguredArgusReviewerModels(env).includes('gemini')
-    && resolveGeminiReviewerModeWithSource({ env }).mode !== 'off',
+  geminiEnabled = () => argusGeminiEnabled(env),
   logger = console,
 } = {}) {
   const { lease, resetAt } = geminiEnabled()
@@ -147,12 +156,14 @@ export async function runArgusReviewChild({
       subjectContext: { agyIdentityLease: lease },
     });
     const outcome = await new Promise((resolve, reject) => {
+      let spawnRecordError = null;
       const child = execFileImpl(
         process.execPath,
         [join(ROOT, 'src', 'argus-security-review-child.mjs'), '--root', rootDir, '--job', jobPath,
           '--agy-lease', JSON.stringify(lease), '--gemini-reset-at', resetAt || ''],
         { env, cwd: ROOT, detached: true, timeout: timeoutMs, killSignal: 'SIGTERM', maxBuffer: 20 * 1024 * 1024 },
         (err, stdout, stderr) => {
+          if (spawnRecordError) { reject(spawnRecordError); return; }
           try {
             resolve(parseChildOutcome(stdout));
           } catch (parseErr) {
@@ -163,10 +174,21 @@ export async function runArgusReviewChild({
           }
         },
       );
-      if (lease && !lease.legacy && Number.isInteger(child?.pid)) writeReviewerRunRecord(rootDir, {
-        sessionUuid: lease.reviewId, state: 'spawned', runtime: 'argus-security', pgid: child.pid,
-        subjectContext: { agyIdentityLease: lease },
-      });
+      if (lease && !lease.legacy && Number.isInteger(child?.pid)) {
+        try {
+          writeReviewerRunRecord(rootDir, {
+            // Only the identity pool adopts this record after a watcher restart.
+            // Argus children have no normal reviewer-runtime reattach contract.
+            sessionUuid: lease.reviewId, state: 'launching', runtime: 'argus-security', pgid: child.pid,
+            subjectContext: { agyIdentityLease: lease },
+          });
+        } catch (err) {
+          // Keep the lease until the spawned child exits, even when its PID
+          // could not be persisted. execFile's existing timeout still bounds it.
+          spawnRecordError = err;
+          try { child.kill('SIGTERM'); } catch { /* callback/timeout owns settlement */ }
+        }
+      }
     });
     const geminiFailure = (outcome.modelAttempts || outcome.result?.reviewer?.attempts || [])
       .find((attempt) => attempt.model === 'gemini');
@@ -227,7 +249,9 @@ export function applyArgusReviewOutcome({
   }
 
   if (outcome?.kind === 'defer') {
-    const retryAfterMs = Math.max(60_000, Number(outcome.retryAfterMs) || 10 * 60 * 1000);
+    const resetMs = Date.parse(outcome.resetAt);
+    const retryAfterMs = Number.isFinite(resetMs) && resetMs > nowMs
+      ? resetMs - nowMs : Math.max(60_000, Number(outcome.retryAfterMs) || 10 * 60 * 1000);
     const released = returnArgusJobToPending({
       rootDir,
       jobPath,

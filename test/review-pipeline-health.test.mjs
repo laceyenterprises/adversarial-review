@@ -134,6 +134,25 @@ function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-pipeline-health-'));
 }
 
+test('collector resolves HQ aliases from its supplied environment and preserves explicit roots', (t) => {
+  const rootDir = tempRoot();
+  const primary = tempRoot();
+  const secondary = tempRoot();
+  t.after(() => {
+    for (const root of [rootDir, primary, secondary]) rmSync(root, { recursive: true, force: true });
+  });
+  for (const [env, hqRoot, expected] of [
+    [{ HQ_ROOT: primary, AGENT_OS_HQ_ROOT: secondary }, undefined, primary],
+    [{ HQ_ROOT: '', AGENT_OS_HQ_ROOT: secondary }, undefined, secondary],
+    [{ HQ_ROOT: primary, AGENT_OS_HQ_ROOT: secondary }, secondary, secondary],
+  ]) {
+    const snapshot = collectReviewPipelineHealth({
+      rootDir, hqRoot, env, now: () => new Date(NOW), config: { hostChecksEnabled: false },
+    });
+    assert.equal(snapshot.hqRoot, expected);
+  }
+});
+
 test('CFGSTALE-01 config drift alarms only after ten minutes', () => {
   const hqRoot = tempRoot();
   try {

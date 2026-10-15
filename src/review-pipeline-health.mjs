@@ -6049,10 +6049,9 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
 
 function collectReviewPipelineHealth({
   rootDir = process.cwd(),
-  // Preserve this collector's historical HQ_ROOT-only override.
-  hqRoot = resolveHqRoot({ HQ_ROOT: process.env.HQ_ROOT }),
-  now = () => new Date(),
   env = process.env,
+  hqRoot = resolveHqRoot(env),
+  now = () => new Date(),
   config: configOverrides = {},
   reconcileTerminalState = false,
   fetchPRTerminalStateSyncImpl = fetchPRTerminalStateSync,

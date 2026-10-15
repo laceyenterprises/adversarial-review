@@ -7,6 +7,11 @@ read-only, never runs schema convergence from the metrics path, and treats
 missing review-state tables or columns as an empty snapshot instead of mutating
 the watcher-owned database.
 
+HQ-host state uses the shared `src/hq-root.mjs` resolver: `HQ_ROOT`, then
+`AGENT_OS_HQ_ROOT`, then `~/agent-os-hq`. Programmatic callers can supply
+`env` for this lookup or override `hqRoot` explicitly, so the collector and
+the pipeline daemons observe the same state directory.
+
 When terminal reconciliation is enabled, the collector may open `reviews.db`
 writable only after verifying that the current process UID matches the database
 file owner, so an operator shell cannot create wrong-owned SQLite WAL sidecars.

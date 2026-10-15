@@ -1,6 +1,5 @@
 import path from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -39,8 +38,8 @@ if (isTestWorker) {
   // Set roots before any production modules are evaluated, overriding worker
   // environment inherited from the host. Each file and its children own these
   // directories; tests may still explicitly override them after this preload.
-  const hqRoot = mkdtempSync(path.join(tmpdir(), 'hq-'));
-  const homeRoot = mkdtempSync(path.join(tmpdir(), 'home-'));
+  const hqRoot = realpathSync(mkdtempSync(path.join(workerRoot, 'hq-')));
+  const homeRoot = realpathSync(mkdtempSync(path.join(workerRoot, 'home-')));
   process.env.HQ_ROOT = hqRoot;
   process.env.AGENT_OS_HQ_ROOT = hqRoot;
   process.env.HOME = homeRoot;

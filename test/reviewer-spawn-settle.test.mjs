@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -16,6 +16,48 @@ import { createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 function currentHead(headRefOid) {
   return async () => ({ state: 'open', mergedAt: null, closedAt: null, headRefOid });
 }
+
+test('spawnReviewer reads default quota status files through either HQ root alias', async (t) => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'spawn-settle-quota-'));
+  t.after(() => rmSync(hqRoot, { recursive: true, force: true }));
+  mkdirSync(path.join(hqRoot, 'quota'));
+  for (const alias of ['HQ_ROOT', 'AGENT_OS_HQ_ROOT']) {
+    for (const state of ['exhausted', 'ok']) {
+      writeFileSync(path.join(hqRoot, 'quota', 'anthropic-oauth.status.json'), JSON.stringify({ state }));
+      let spawned = false;
+      const settled = [];
+      const result = await spawnReviewer({
+        rootDir: hqRoot,
+        repo: 'fixture-owner/demo',
+        prNumber: 1,
+        reviewerModel: 'claude-code',
+        quotaCheckEnv: { [alias]: hqRoot, AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true' },
+        reviewerHeadSha: 'fixture-head',
+        reviewerSessionUuid: `quota-${alias}-${state}`,
+        reviewAttemptNumber: 1,
+        maxRemediationRounds: 2,
+        reviewerRuntimeAdapterOverride: {
+          async spawnReviewer() {
+            spawned = true;
+            return { ok: true, reviewBody: 'fixture review', reviewBodyDelivery: 'adapter' };
+          },
+        },
+        beginReviewerPassImpl() {},
+        completeReviewerPassImpl: (_root, payload) => settled.push(payload),
+        readBestReviewerEvidenceTokenUsageImpl: async () => null,
+        ledgerLookupSleepImpl: async () => {},
+      });
+      assert.equal(spawned, state === 'ok', `${alias}: ${state}`);
+      assert.equal(result.ok, state === 'ok');
+      assert.equal(settled[0].status, state === 'ok' ? 'completed' : 'skipped');
+      if (state === 'exhausted') {
+        assert.equal(result.reason, 'primary-reviewer-quota-capped');
+        assert.equal(result.quotaState, 'exhausted');
+        assert.equal(result.quotaProvider, 'anthropic');
+      }
+    }
+  }
+});
 
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];

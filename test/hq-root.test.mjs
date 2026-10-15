@@ -19,6 +19,7 @@ test('HQ root observes the environment at call time', (t) => {
   });
   process.env.HQ_ROOT = '/fixture/first';
   assert.equal(resolveHqRoot(), '/fixture/first');
+  assert.equal(resolveHqRoot(null), '/fixture/first');
   process.env.HQ_ROOT = '/fixture/second';
   assert.equal(resolveHqRoot(), '/fixture/second');
 });

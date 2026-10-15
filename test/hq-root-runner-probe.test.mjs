@@ -1,19 +1,22 @@
 // A real test-file process, also selected by the runner integration test.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { realpathSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import test from 'node:test';
 import { resolveHqRoot } from '../src/hq-root.mjs';
 import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
 
-test('runner gives the shared HQ resolver a root inside the temporary directory', () => {
+test('runner gives the shared HQ resolver canonical roots inside its sandbox', () => {
   const root = resolveHqRoot();
-  const beneathTemp = relative(tmpdir(), root);
-  assert.ok(beneathTemp && beneathTemp !== '..' && !beneathTemp.startsWith(`..${sep}`) && !isAbsolute(beneathTemp),
-    'the default HQ root must be inside the runner temporary directory');
   assert.equal(process.env.HQ_ROOT, process.env.AGENT_OS_HQ_ROOT);
+  for (const directory of [root, homedir()]) {
+    assert.equal(directory, realpathSync(directory), 'worker roots must be canonical');
+    const beneathWorker = relative(process.env.ADVERSARIAL_REVIEW_TEST_CWD, directory);
+    assert.ok(beneathWorker && beneathWorker !== '..' && !beneathWorker.startsWith(`..${sep}`) && !isAbsolute(beneathWorker),
+      'worker roots must be inside their worker sandbox for coordinator cleanup');
+  }
   const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(process.env.HQ_ROOT)'], {
     encoding: 'utf8', timeout: 5_000,
   });
@@ -59,4 +62,5 @@ test('runner quota probe cannot see an inherited exhausted Gemini status', async
   // Exercise a write through the shared root as well as a quota read.
   writeFileSync(join(resolveHqRoot(), 'fixture-state.json'), '{}');
   if (process.env.HQ_ROOT_FIXTURE_FAIL === '1') assert.fail('synthetic fixture failure');
+  if (process.env.HQ_ROOT_FIXTURE_FAIL === 'kill') process.kill(process.pid, 'SIGKILL');
 });

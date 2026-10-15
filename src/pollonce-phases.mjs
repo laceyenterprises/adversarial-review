@@ -2571,7 +2571,7 @@ export async function processReviewSubject(entry, ctx) {
         repo: repoPath,
         prNumber,
       });
-      if (cascadeGate.shouldBackoff && !timeoutBudget.changed) {
+      if (cascadeGate.shouldBackoff) {
         markWatcherSpawnDecision({
           repo: repoPath,
           pr_number: prNumber,
@@ -3396,9 +3396,10 @@ export async function processReviewSubject(entry, ctx) {
                   `(class=${infraRecoveryClass}, uncharged; infra attempts stay ${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP})`
               );
             } else if (infraRecoveryClass) {
+              const claimedInfraAttempts = Number(stmtGetReviewRow.get(repoPath, prNumber)?.infra_auto_recover_attempts || 0);
               console.log(
                 `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +
-                  `(class=${infraRecoveryClass}, infra attempt ${infraRecoveryAttempts + 1}/${INFRA_AUTO_RECOVER_CAP})`
+                  `(class=${infraRecoveryClass}, infra attempt ${claimedInfraAttempts}/${INFRA_AUTO_RECOVER_CAP})`
               );
             }
             if (unknownFailureRetryable) {

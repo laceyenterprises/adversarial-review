@@ -3583,7 +3583,11 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
         ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
         { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...fixture,
           ADVERSARIAL_REVIEWER_BUILD_ID: 'build-current' }), timeout: 60000 });
-      assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      if (scenario !== 'upstream-503') assert.doesNotMatch(output,
+        /class=reviewer-timeout, infra attempt (?:[4-9]|\d{2,})\/3/,
+        'same-head timeout recovery never logs an infra attempt beyond the cap');
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }

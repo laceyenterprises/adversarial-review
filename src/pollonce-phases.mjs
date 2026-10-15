@@ -25,7 +25,7 @@ import { summarizeChecksConclusion } from './checks-summary.mjs';
 // from their owning modules — this module never imports watcher.mjs (no cycle).
 
 import { transferGeminiFallbackSession } from './gemini-fallback-session.mjs';
-import { readReviewerGeminiQuotaCooldown } from './agy-reviewer-identities.mjs';
+import { readReviewerGeminiPoolAvailability, readReviewerGeminiQuotaCooldown } from './agy-reviewer-identities.mjs';
 import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
 import { recordNoProgressLaneRun, maybeFireOperatorDecisionRequiredAlert } from './watcher-no-progress-lane.mjs';
 import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from './comment-only-final-round.mjs';
@@ -1835,6 +1835,10 @@ export async function processReviewSubject(entry, ctx) {
           );
         }
       }
+      const geminiPoolAvailability = await readReviewerGeminiPoolAvailability({
+        adapter: domainReviewerRuntimeAdapter || reviewerRuntimeState.adapter,
+      });
+      if (geminiPoolAvailability) afhGrounding = { ...afhGrounding, geminiPoolAvailability };
       const afhSelection = applyAfhReviewerRouteForAttempt({
         subject,
         baseRoute: geminiBaseRoute,
@@ -1910,6 +1914,7 @@ export async function processReviewSubject(entry, ctx) {
           (kind) => firstPassSpilloverController?.depthPressure?.(kind)?.engaged,
         );
         const rwfDecision = await resolveReviewerWorkerClassWithFallback({
+          reviewerRuntimeAdapter: domainReviewerRuntimeAdapter || reviewerRuntimeState.adapter,
           authorClass: reviewerAuthorClass,
           primary: primaryReviewerWorkerClass,
           fallbackWorkerClasses: depthPressure?.reason === 'review-max-wait'

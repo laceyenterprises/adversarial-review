@@ -639,6 +639,11 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     softVerdict: null,
     known: false,
   };
+  if (model === 'gemini' && grounding?.geminiPoolAvailability) {
+    const status = grounding.geminiPoolAvailability;
+    return { ...base, state: status.state, source: status.source, known: true,
+      hardGrounded: !status.available, grounded: !status.available, poolGrounded: !status.available };
+  }
   if (model === 'claude' && grounding?.localRuntimeGrounding?.claude?.available === false) {
     const runtimeStatus = grounding.localRuntimeGrounding.claude;
     const entry = grounding?.providers?.[provider] || base;
@@ -676,6 +681,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
   return {
     ...base,
     state: entry.state,
+    source: 'fleet-quota-status',
     brokerProvider,
     hardGrounded: entry.hardGrounded,
     softGrounded: entry.softGrounded,
@@ -784,7 +790,7 @@ export function afhReviewerFallbackDecision({
   // Fail open: an unreadable/absent/disabled AFH signal keeps the configured
   // primary + gemini behavior exactly as it is today unless a local runtime
   // probe conclusively grounded the current reviewer itself.
-  if (!grounding?.available && !primary.localRuntimeGrounded) {
+  if (!grounding?.available && !primary.localRuntimeGrounded && !primary.poolGrounded) {
     return notApplied(`afh-grounding-unavailable:${grounding?.reason || 'absent'}`);
   }
   if (!primary.grounded) {

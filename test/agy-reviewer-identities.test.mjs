@@ -1876,3 +1876,40 @@ test('CCX-08: helper failure retains the bounded preceding diagnostic lines', as
     runPinnedImpl: async () => ({ code: 1, stdout: '', stderr: 'sudo: permission denied\n\nhelper failed' }),
   }), (err) => /permission denied.*helper failed/.test(err.message));
 });
+
+test('CHUNKTIME-01: timeout releases its lease before cleanup and drains until child exit', async () => {
+  const fake = makeFakeInstall({ users: ['reviewer-sample'] });
+  const cleanup = Promise.withResolvers();
+  let holdCleanup = false;
+  let childRunning = false;
+  const pool = makePool(fake, {
+    identities: ['reviewer-sample'],
+    runPinnedImpl: async (options) => {
+      if (holdCleanup && options.args[0] === 'cleanup') await cleanup.promise;
+      return fake.runPinned(options);
+    },
+    listUserProcessesImpl: async () => ({ ok: true, processes: childRunning
+      ? [{ pid: 700, pgid: 700, comm: 'agy' }] : [] }),
+  });
+  let released;
+  try {
+    await pool.refreshReadiness();
+    const lease = await pool.acquire({ reviewId: 'synthetic-timeout' });
+    assert.ok(lease);
+    holdCleanup = true;
+    childRunning = true;
+    released = pool.release(lease, { reason: 'reviewer-timeout' });
+    assert.equal(pool.snapshot()[0].leased, false, 'release happens in the timeout tick');
+    assert.equal(pool.snapshot()[0].draining, true, 'cleanup cannot race another lease');
+    cleanup.resolve();
+    await released;
+    assert.equal(await pool.refreshReadiness(), 0);
+    assert.equal(await pool.acquire({ reviewId: 'synthetic-waiter' }), null);
+    childRunning = false;
+    assert.equal(await pool.refreshReadiness(), 1, 'actual child exit permits re-admission');
+  } finally {
+    cleanup.resolve();
+    await released;
+    fake.cleanup();
+  }
+});

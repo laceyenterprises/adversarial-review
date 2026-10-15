@@ -4,7 +4,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
+import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from '../../../reviewer-timeout-model.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { resolveNodeBin } from '../../../node-interpreter.mjs';
@@ -519,7 +519,9 @@ function createCliDirectReviewerRuntimeAdapter({
             ? Math.max(req.timeoutMs || 0, resolveReviewerCeilingSeconds({
               changedLines: Number.MAX_SAFE_INTEGER, env: reviewerEnv,
             }) * 1000)
-            : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
+            : isGeminiModel(req.model)
+              ? req.timeoutMs || resolveGeminiReviewerProcessTimeoutMs(reviewerEnv)
+              : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
           progressTimeout: resolveProgressTimeoutForModel(req.model, reviewerEnv),
           signal: controller.signal,
           stdoutPath: sideChannels.stdoutPath,

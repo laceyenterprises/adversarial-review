@@ -26,6 +26,8 @@
 //              red. Silence past the stall deadline still goes red on its own.
 
 import { execFile } from 'node:child_process';
+import { resolveAgyReviewerSubprocessTimeoutMs, REVIEWER_PROCESS_SLACK_MS } from './reviewer-timeout.mjs';
+import { resolveReviewerCeilingConfig } from './reviewer-timeout-model.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -60,6 +62,14 @@ export const ARGUS_DRAIN_RETRY_BACKOFF_MS = Object.freeze([5 * 60 * 1000, 20 * 6
 // The child review is bounded by the harness's own reviewer timeouts; this is
 // the outer backstop so a wedged child cannot hold a slot forever.
 export const ARGUS_REVIEW_CHILD_TIMEOUT_MS = 45 * 60 * 1000;
+// Argus tries its configured models sequentially. One flat outer timeout
+// must not cut off a fallback that still has its own valid call budget.
+export function resolveArgusReviewChildTimeoutMs(env = process.env) {
+  const budgets = resolveConfiguredArgusReviewerModels(env).map((model) => model === 'gemini'
+    ? resolveAgyReviewerSubprocessTimeoutMs(env)
+    : resolveReviewerCeilingConfig(env).max * 1000);
+  return Math.max(ARGUS_REVIEW_CHILD_TIMEOUT_MS, budgets.reduce((sum, budget) => sum + budget, 0) + REVIEWER_PROCESS_SLACK_MS);
+}
 export const ARGUS_REVIEW_OUTCOME_PREFIX = 'ARGUS_REVIEW_OUTCOME ';
 
 /** Default ON; `ADVERSARIAL_ARGUS_DRAIN=off` is the kill switch. */
@@ -138,7 +148,7 @@ export async function runArgusReviewChild({
   jobPath,
   execFileImpl = execFile,
   env = process.env,
-  timeoutMs = ARGUS_REVIEW_CHILD_TIMEOUT_MS,
+  timeoutMs = resolveArgusReviewChildTimeoutMs(env),
   identityPool = getAgyReviewerIdentityPool(),
   nowMs = () => Date.now(),
   geminiEnabled = () => argusGeminiEnabled(env),

@@ -335,7 +335,7 @@ import {
   resolveOperatorMergeAccountability,
   AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
 } from './daemon-clean-merge.mjs';
-import { resolveAgyReviewerSubprocessTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveGeminiReviewerProcessTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds } from './reviewer-timeout-model.mjs';
 import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
@@ -1036,7 +1036,7 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 // pool race that the CAS alone cannot (both workers read `pending`, both fetch,
 // both claim in sequence).
 const reviewerHeadDispatchLease = createHeadDispatchLease();
-const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: () => Math.max(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000, resolveAgyReviewerSubprocessTimeoutMs()), isProcessAlive, ...persistedSpawnReservationSource({ stateDir: ADVERSARIAL_REVIEW_STATE_DIR, runStateRootDir: ROOT }), logger: console });
+const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({ activeReviewerSpawns, timeoutMs: () => Math.max(resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000, resolveGeminiReviewerProcessTimeoutMs()), isProcessAlive, ...persistedSpawnReservationSource({ stateDir: ADVERSARIAL_REVIEW_STATE_DIR, runStateRootDir: ROOT }), logger: console });
 // ── Operator surface ─────────────────────────────────────────────────────────
 function createWatcherOperatorSurface() {
   return createCompositeOperatorSurface({

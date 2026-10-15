@@ -34,7 +34,7 @@ import {
   activeReviewerSpawns,
 } from './reviewer-session-registry.mjs';
 import {
-  resolveAgyReviewerSubprocessTimeoutMs,
+  resolveGeminiReviewerProcessTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import {
@@ -815,7 +815,7 @@ async function spawnReviewerOnce({
       String(reviewerModel || '').toLowerCase() === 'gemini' &&
       resolveGeminiRuntime({ env: process.env }) === 'antigravity'
     )
-      ? resolveAgyReviewerSubprocessTimeoutMs(process.env, { reviewerTimeoutMs })
+      ? Math.max(reviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs())
       : reviewerTimeoutMs;
 
     // CCX-08: a Gemini review leases one agy reviewer identity for its whole
@@ -1451,7 +1451,7 @@ function settleReviewerAttempt({
 
   // A size ceiling is deterministic for this head; never release it to pending,
   // even during a coincident provider outage or with lease recovery enabled.
-  if (failureClass === 'reviewer-prompt-too-large') {
+  if (failureClass === 'reviewer-prompt-too-large' || failureClass === 'reviewer-chunk-budget-exceeded') {
     withSqliteBusyRetrySync(
       () => statements.markFailed.run(failureAt, classifiedMessage, repoPath, prNumber),
       { label: `reviewer-size-terminal:${repoPath}#${prNumber}`, log },

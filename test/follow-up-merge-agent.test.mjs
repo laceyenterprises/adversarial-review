@@ -1,3 +1,5 @@
+// Must stay the first import: it isolates this file's state before any production module loads.
+import './helpers/rate-limit-state-isolation.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -73,7 +75,6 @@ import {
 } from '../src/follow-up-merge-agent.mjs';
 import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
 import { execHqDispatchCancel, isLabelAlreadyAbsentError } from '../src/merge-agent-hq-exec.mjs';
-import './helpers/rate-limit-state-isolation.mjs';
 // CFG-09 (2026-05-30, round-2): role-config cascade caches by
 // (topPath, modulePaths) — not env. Tests in this file rotate env
 // between cases (codex vs claude-code vs merge-agent vs invalid)

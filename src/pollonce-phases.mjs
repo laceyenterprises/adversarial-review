@@ -253,7 +253,7 @@ import { maybeRouteReviewCycleCapToHammer } from './review-cycle-cap-hammer.mjs'
 import { latestReviewedHeadSha, maybeRouteCiBlockedToHammer } from './ci-blocked-hammer.mjs';
 import { declineSuppressedAmaRecoveryRereview } from './closer-head-rereview-decline.mjs';
 import { handOffRetriggerWithoutJob } from './retrigger-no-job-handoff.mjs';
-import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveReviewerTimeoutMs, resolveGeminiReviewerProcessTimeoutMs } from './reviewer-timeout.mjs';
 import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './reviewer-timeout-model.mjs';
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
@@ -3208,7 +3208,7 @@ export async function processReviewSubject(entry, ctx) {
             const reviewerHeadSha = subject?.headSha || null;
             const reviewerTimeoutMs = usesStreamedReviewerCeiling(route.reviewerModel)
               ? resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000
-              : resolveReviewerTimeoutMs();
+              : route.reviewerModel === 'gemini' ? resolveGeminiReviewerProcessTimeoutMs() : resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
             // Release-driven claims snapshot under the same write lock as
             // their CAS, rather than using the older dispatch admission row.

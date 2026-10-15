@@ -3515,6 +3515,7 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
             import { parkExhaustedReview as actual } from ${JSON.stringify(`${parkUrl}?actual`)};
             export * from ${JSON.stringify(`${parkUrl}?actual`)};
             export function parkExhaustedReview(args) {
+              globalThis.__timeoutParkCalls = (globalThis.__timeoutParkCalls || 0) + 1;
               return actual({ ...args, rootDir: ${JSON.stringify(tmp)}, deliverAlertFn: async () => {
                 globalThis.__timeoutAlerts = (globalThis.__timeoutAlerts || 0) + 1;
                 return { delivered: true };
@@ -3535,6 +3536,12 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
       const failureClass = scenario === 'upstream-503' ? 'cascade' : 'reviewer-timeout';
       writeFileSync(runnerPath, synthetic(buildRunnerSource({
         prePollSetup: `
+          db.exec(\`
+            CREATE TABLE timeout_park_writes (pr_number INTEGER);
+            CREATE TRIGGER track_timeout_park AFTER UPDATE OF failure_message ON reviewed_prs
+            WHEN NEW.pr_number = 101 AND NEW.failure_message LIKE '%[reviewer-timeout-repeated-same-head]%'
+            BEGIN INSERT INTO timeout_park_writes VALUES (NEW.pr_number); END;
+          \`);
           const { recordCascadeFailure } = await import(${JSON.stringify(fileUrl('src', 'reviewer-cascade.mjs'))});
           for (let index = 0; index < 2; index++) recordCascadeFailure('unused', {
             repo: 'example/adversarial-review', prNumber: 101,
@@ -3562,6 +3569,9 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
           assert.equal(row.review_status, 'failed');
           assert.match(row.failure_message, /^\\[reviewer-timeout\\] \\[reviewer-timeout-repeated-same-head\\]/);
           assert.equal(globalThis.__timeoutAlerts, 1, 'operator alert fires once');
+          assert.equal(globalThis.__timeoutParkCalls, 1, 'later polls do not rewrite the failure decision');
+          assert.equal(db.prepare('SELECT COUNT(*) AS count FROM timeout_park_writes').get().count, 1,
+            'later polls do not rewrite the parked row');
           assert.equal(claims[0].prNumber, 102, 'waiting first pass proceeds while timeout row is parked');
         ` : `
           assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1, 'changed input or upstream outage allows retry');

@@ -13,6 +13,16 @@ const REVIEWER_SOURCE_URL = pathToFileURL(realpathSync(fileURLToPath(import.meta
 
 export function reviewerBuildDigest(moduleUrl = REVIEWER_SOURCE_URL) {
   const hash = createHash('sha256');
+  const addFile = path => {
+    hash.update(path).update('\0');
+    try { hash.update(readFileSync(new URL(path, moduleUrl))); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      // A checkout can remove a file after enumeration. Include its absence
+      // in this process's build identity instead of failing watcher startup.
+      hash.update(':missing');
+    }
+  };
   const add = (relative, include = () => true) => {
     const url = new URL(relative, moduleUrl);
     let entries;
@@ -28,12 +38,12 @@ export function reviewerBuildDigest(moduleUrl = REVIEWER_SOURCE_URL) {
     for (const entry of entries) {
       const path = `${relative}${entry.name}`;
       if (entry.isDirectory()) add(`${path}/`, include);
-      else if (entry.isFile() && include(entry.name)) hash.update(path).update('\0').update(readFileSync(new URL(path, moduleUrl)));
+      else if (entry.isFile() && include(entry.name)) addFile(path);
     }
   };
   for (const name of readdirSync(new URL('.', moduleUrl)).sort()) {
     if (/^reviewer.*\.mjs$/.test(name) || name === 'domain-pipeline.mjs') {
-      hash.update(name).update('\0').update(readFileSync(new URL(name, moduleUrl)));
+      addFile(name);
     }
   }
   add('adapters/reviewer-runtime/');

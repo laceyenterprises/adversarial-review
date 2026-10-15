@@ -2547,6 +2547,7 @@ export async function processReviewSubject(entry, ctx) {
         // Preserve the timeout classifier and claim identity; only settle the
         // failed row observed by discovery, never overwrite a racing live claim.
         const reason = REVIEWER_TIMEOUT_REPEATED_REASON;
+        if (current?.review_status === 'failed' && current?.failure_message?.includes(`[${reason}]`)) return;
         const message = String(current?.failure_message || '[reviewer-timeout] Reviewer timed out');
         const parkedMessage = message.includes(`[${reason}]`) ? message
           : `[reviewer-timeout] [${reason}] timeouts=${timeoutBudget.count}/${timeoutBudget.limit}; reviewer build=${timeoutBudget.reviewerBuildId}\n${message}`;

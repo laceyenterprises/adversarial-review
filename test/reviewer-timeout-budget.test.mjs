@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -171,3 +173,36 @@ test('CASCADECAP-01 reviewer build identity supports partial installations and c
   writeFileSync(join(root, 'prompts', 'reviewer.first.md'), 'synthetic prompt v2');
   assert.notEqual(reviewerBuildDigest(moduleUrl), complete);
 }));
+
+for (const relative of ['src/reviewer-fixture.mjs', 'src/adapters/reviewer-runtime/fixture.mjs', 'prompts/code-pr/reviewer.first.md']) {
+  test(`CASCADECAP-01 build digest tolerates a file disappearing after enumeration: ${relative}`, t => fixture(root => {
+    mkdirSync(join(root, 'src', 'adapters', 'reviewer-runtime'), { recursive: true });
+    mkdirSync(join(root, 'prompts', 'code-pr'), { recursive: true });
+    const file = join(root, relative);
+    writeFileSync(file, 'synthetic reviewer input');
+    const moduleUrl = pathToFileURL(join(root, 'src', 'reviewer-timeout-budget.mjs'));
+    const present = reviewerBuildDigest(moduleUrl);
+    const actualRead = fs.readFileSync;
+    let errorCode = 'ENOENT';
+    let vanishedReads = 0;
+    t.mock.method(fs, 'readFileSync', (url, ...args) => {
+      if (url instanceof URL && url.href === pathToFileURL(file).href) {
+        vanishedReads++;
+        throw Object.assign(new Error('synthetic file read failure'), { code: errorCode });
+      }
+      return actualRead(url, ...args);
+    });
+    syncBuiltinESMExports();
+    try {
+      const vanished = reviewerBuildDigest(moduleUrl);
+      assert.notEqual(vanished, present, 'missing content changes the build identity');
+      assert.equal(reviewerBuildDigest(moduleUrl), vanished, 'the missing-file marker is deterministic');
+      assert.equal(vanishedReads, 2, 'the enumerated file was read on each traversal');
+      errorCode = 'EACCES';
+      assert.throws(() => reviewerBuildDigest(moduleUrl), { code: 'EACCES' }, 'other read failures remain visible');
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  }));
+}

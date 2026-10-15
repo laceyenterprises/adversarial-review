@@ -3048,11 +3048,11 @@ export async function processReviewSubject(entry, ctx) {
         hasPriorPostedReview: getDispatchHasPriorPostedReview(),
         depthPassKind: getDepthPassKind(),
         retainedWakePriority: retainedWatcherWakes?.matches(wakeIdentity) === true,
-        wakePriority: retainedWatcherWakes?.matches(wakeIdentity) === true || watcherWakeMatchesSubject(wakePayload, {
+        wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
           headSha: subject?.headSha,
-        }),
+        }) || retainedWatcherWakes?.matches(wakeIdentity) === true,
         pendingSince: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
         enqueuedAt: reviewerDispatchEnqueuedAt(current),
         preferredRoute: route,

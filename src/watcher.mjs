@@ -107,7 +107,7 @@ import {
   createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
 } from './watcher-wake.mjs';
-import { createRetainedWatcherWakes } from './watcher-retained-wakes.mjs';
+import { createWatcherDispatchPriority } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
   ensureReviewStateSchema,
@@ -411,8 +411,6 @@ import {
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
-  reviewerDispatchEnqueuedAt,
-  reviewerDispatchWaitPriority,
   sortReviewerDispatchCandidates,
 } from './watcher-reviewer-pool.mjs';
 import {
@@ -1262,7 +1260,7 @@ async function pollOnceWithinBudget(
   console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
-  const retainedWatcherWakes = createRetainedWatcherWakes({ rootDir: ROOT });
+  const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
@@ -1275,19 +1273,6 @@ async function pollOnceWithinBudget(
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   const reviewerDiscoveryDrainBatchSize = Math.max(1, reviewerPoolConfig.maxConcurrent || 1);
-  // A partial batch must not spend the only seat before priority work from
-  // a later subject or repository has had a chance to enter the queue.
-  const priorityDiscoveryPending = new Set(retainedWatcherWakes.subjects()
-    .map(({ repoPath, prNumber }) => `${repoPath}#${prNumber}`));
-  const discoveryNowMs = Date.now();
-  for (const row of db.prepare(`SELECT repo, pr_number, head_wait_started_at,
-    rereview_requested_at, reviewed_at FROM reviewed_prs
-    WHERE review_status IN ('pending', 'pending-upstream', 'failed')
-      AND COALESCE(pr_state, 'open') NOT IN ('merged', 'closed')`).all()) {
-    if (reviewerDispatchWaitPriority({ enqueuedAt: reviewerDispatchEnqueuedAt(row) }, { nowMs: discoveryNowMs }) !== null) {
-      priorityDiscoveryPending.add(`${row.repo}#${row.pr_number}`);
-    }
-  }
   let reviewerDiscoveryDrainUsed = false;
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {

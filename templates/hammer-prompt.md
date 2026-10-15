@@ -82,7 +82,7 @@ head after edits or a push. Keep one Bash shell for verify/publish/merge.
 
 ```bash
 umask 077
-/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-base-head.mjs '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-base-head.mjs" '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
 cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
 export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
 export TMPDIR='<<RUN_DIR>>'

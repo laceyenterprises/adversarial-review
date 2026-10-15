@@ -1,5 +1,6 @@
 import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
+import { HAMMER_PHASES } from '../src/hammer-procedure.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -144,7 +145,7 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
     assert.doesNotMatch(prompt, /\/tmp\/ham-/);
     assert.ok(prompt.includes(`export HAM_RUN_DIR='${scratchDir}'`));
     assert.ok(prompt.includes(`source "${scratchDir}/hammer-publish.sh"`));
-    for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
+    for (const phase of HAMMER_PHASES) {
       const rendered = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-procedure.mjs'), phase, '--render'], {
         env: { ...process.env, ...values }, encoding: 'utf8', timeout: 10000,
       });
@@ -154,6 +155,30 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
     }
   }
   assert.equal(readdirSync(root).length, 2);
+});
+
+test('HAMTMP-02: base-head capture runs from a deployed root containing spaces', t => {
+  const root = join(fixture(t), 'deployed root');
+  const scratchDir = join(root, 'private run');
+  mkdirSync(join(root, 'bin'), { recursive: true });
+  mkdirSync(scratchDir);
+  const prUrl = 'https://github.com/fixture/repo/pull/42';
+  writeFileSync(join(root, 'bin/hammer-base-head.mjs'), `
+    import assert from 'node:assert/strict';
+    assert.deepEqual(process.argv.slice(2), [${JSON.stringify(prUrl)}]);
+    process.stdout.write('${head}');
+  `);
+  const prompt = composeCloserPrompt({
+    templateBody: readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8'),
+    rootDir: root, scratchDir, prUrl, prNumber: 42,
+  });
+  const capture = prompt.split('\n').find(line => line.startsWith('/usr/bin/perl') && line.includes('/bin/hammer-base-head.mjs'));
+  assert.ok(capture, 'prompt contains the initial base-head capture command');
+  const result = spawnSync('/bin/bash', ['-c', capture], {
+    env: { ...process.env, HAM_NODE_BIN: process.execPath }, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(scratchDir, 'base-head'), 'utf8'), head);
 });
 
 test('HAMTMP-01: a launch with an ambiguous response retains scratch until terminal reconciliation', async t => {

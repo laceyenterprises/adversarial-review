@@ -322,8 +322,9 @@ function reviewerDispatchIsFirstPass(candidate) {
 }
 
 function reviewerDispatchTierRank(candidate) {
-  if (candidate?.wakePriority === true) return 0;
-  return reviewerDispatchIsFirstPass(candidate) ? 1 : 2;
+  if (candidate?.retainedWakePriority === true) return 0;
+  if (candidate?.wakePriority === true) return 1;
+  return reviewerDispatchIsFirstPass(candidate) ? 2 : 3;
 }
 
 function compareReviewerDispatchCandidates(a, b) {
@@ -484,6 +485,9 @@ function compareReviewerDispatchEntries(
     pendingFirstPassAgeMs = null,
   } = {},
 ) {
+  const aRetained = a?.candidate?.retainedWakePriority === true;
+  const bRetained = b?.candidate?.retainedWakePriority === true;
+  if (aRetained !== bRetained) return aRetained ? -1 : 1;
   const aWake = a?.candidate?.wakePriority === true;
   const bWake = b?.candidate?.wakePriority === true;
   if (aWake !== bWake) return aWake ? -1 : 1;

@@ -733,6 +733,7 @@ export async function processReviewSubject(entry, ctx) {
     shouldDeferReviewForActiveFollowUp,
     requestWatcherWakeImpl = requestWatcherWake,
     wakePayload = null,
+    retainedWatcherWakes = null,
     admissionSettlementSplitEnabled = false,
     consumeRereviewWakesImpl = consumeRereviewWakes,
     requestRereviewWakeImpl = requestRereviewWake,
@@ -741,6 +742,8 @@ export async function processReviewSubject(entry, ctx) {
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
   } = ctx;
 
+      const wakeIdentity = { repoPath, prNumber, headSha: subject.headSha };
+      retainedWatcherWakes?.observe({ ...wakeIdentity, terminal: subject.terminal });
       const prTitle = subject.title || '';
       const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
       // RPL-04: a CI state transition that releases a parked re-review is an
@@ -3032,7 +3035,8 @@ export async function processReviewSubject(entry, ctx) {
         current,
         hasPriorPostedReview: getDispatchHasPriorPostedReview(),
         depthPassKind: getDepthPassKind(),
-        wakePriority: watcherWakeMatchesSubject(wakePayload, {
+        retainedWakePriority: retainedWatcherWakes?.matches(wakeIdentity) === true,
+        wakePriority: retainedWatcherWakes?.matches(wakeIdentity) === true || watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
           headSha: subject?.headSha,
@@ -3040,6 +3044,9 @@ export async function processReviewSubject(entry, ctx) {
         pendingSince: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
         enqueuedAt: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || null,
         preferredRoute: route,
+        retainWakeForCapacity() {
+          if (this.wakePriority && retainedWatcherWakes?.retain(wakeIdentity)) this.retainedWakePriority = true;
+        },
         refundDepthSpill() {
           if (!depthSpillReserved) return;
           firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason: 'pool-admission-deferred' });
@@ -3168,6 +3175,7 @@ export async function processReviewSubject(entry, ctx) {
                   `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
                   `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
               );
+              this.retainWakeForCapacity();
               return { dispatched: false, reason: 'memory-admission-deferred' };
             }
 
@@ -3378,6 +3386,7 @@ export async function processReviewSubject(entry, ctx) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
                 );
+                retainedWatcherWakes?.drop(wakeIdentity);
                 stmtMarkMerged.run(freshPR.mergedAt, repoPath, prNumber);
                 return { dispatched: false, reason: 'pr-merged-before-spawn' };
               }
@@ -3385,6 +3394,7 @@ export async function processReviewSubject(entry, ctx) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was closed since tick-start snapshot (state=${freshPR.state}) — marking row + skipping reviewer spawn`
                 );
+                retainedWatcherWakes?.drop(wakeIdentity);
                 stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
                 return { dispatched: false, reason: 'pr-closed-before-spawn' };
               }
@@ -3408,6 +3418,7 @@ export async function processReviewSubject(entry, ctx) {
                   `${String(reviewerHeadSha).slice(0, 12)} → ${String(freshHeadSha).slice(0, 12)} — ` +
                   'releasing claim and skipping stale reviewer spawn'
                 );
+                retainedWatcherWakes?.drop(wakeIdentity);
                 stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
                 return { dispatched: false, reason: 'head-moved-before-spawn' };
               }
@@ -3845,6 +3856,7 @@ export async function processReviewSubject(entry, ctx) {
               // (default OFF), drive the two-stage pipeline instead of a single
               // review and post the Win 2 rollup. Gate-off is byte-identical:
               // the else-branch is the unchanged v1 single `spawnReviewer` call.
+              retainedWatcherWakes?.drop(wakeIdentity);
               reviewerSpawned = true;
               if (depthSpillReserved) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });

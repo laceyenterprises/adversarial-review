@@ -107,6 +107,7 @@ import {
   createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
 } from './watcher-wake.mjs';
+import { createRetainedWatcherWakes } from './watcher-retained-wakes.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
   ensureReviewStateSchema,
@@ -1259,6 +1260,7 @@ async function pollOnceWithinBudget(
   console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
+  const retainedWatcherWakes = createRetainedWatcherWakes({ rootDir: ROOT });
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
@@ -1271,6 +1273,9 @@ async function pollOnceWithinBudget(
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   const reviewerDiscoveryDrainBatchSize = Math.max(1, reviewerPoolConfig.maxConcurrent || 1);
+  // A partial discovery batch must not spend the only seat before a
+  // capacity-deferred wake from a later subject or repository is discovered.
+  const deferReviewerDiscoveryDrain = retainedWatcherWakes.subjects().length > 0;
   let reviewerDiscoveryDrainUsed = false;
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
@@ -1318,7 +1323,10 @@ async function pollOnceWithinBudget(
       // Also settle reservations when the drain throws before returning its
       // deferred list. Started candidates own their spawn/refusal settlement.
       for (const candidate of candidates) {
-        if (!startedCandidates.has(candidate)) candidate.refundDepthSpill?.();
+        if (!startedCandidates.has(candidate)) {
+          candidate.retainWakeForCapacity?.();
+          candidate.refundDepthSpill?.();
+        }
       }
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
@@ -1330,7 +1338,7 @@ async function pollOnceWithinBudget(
     }
   }
   async function drainReviewerDispatchCandidatesIfBatchReady(reason) {
-    if (reviewerDiscoveryDrainUsed) {
+    if (reviewerDiscoveryDrainUsed || deferReviewerDiscoveryDrain) {
       return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     }
     if (reviewerDispatchCandidates.length < reviewerDiscoveryDrainBatchSize) {
@@ -1400,6 +1408,11 @@ async function pollOnceWithinBudget(
       continue;
     }
 
+    await retainedWatcherWakes.reconcileMissing({
+      repoPath,
+      discoveredPrNumbers: new Set(subjectRefs.map((ref) => parseSubjectExternalId(ref.subjectExternalId).prNumber)),
+      readLive: (prNumber) => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),
+    });
     let subjectEntries = (await Promise.all(subjectRefs.map(async (subjectRef) => {
       try {
         const subject = await subjectAdapter.fetchState(subjectRef);
@@ -1474,7 +1487,7 @@ async function pollOnceWithinBudget(
         isFastMergeSkipEnabled,
         normalizeReviewPopulationRetryConfig,
         shouldDeferReviewForActiveFollowUp,
-        wakePayload: wakePayloadForPoll(), admissionSettlementSplitEnabled,
+        wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
       });
       firstPassSpilloverController.refundPendingSpill({ repo: repoPath, prNumber: subjectEntry.prNumber });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');

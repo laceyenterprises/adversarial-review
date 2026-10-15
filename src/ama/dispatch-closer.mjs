@@ -992,7 +992,12 @@ function cleanupHammerScratchDir(record, logger = console) {
     || dirname(resolve(scratchDir)) !== resolve(record.promptDir)
     || !basename(scratchDir).startsWith('hammer-scratch-')) return;
   try { rmSync(scratchDir, { recursive: true, force: true }); }
-  catch (err) { logger.warn?.(`hammer scratch cleanup failed: ${err.message}`); }
+  catch (err) {
+    const message = `hammer scratch cleanup failed: ${err.message}`;
+    if (typeof logger?.warn === 'function') logger.warn(message);
+    else if (typeof logger?.error === 'function') logger.error(message);
+    else if (typeof logger === 'function') logger(message);
+  }
 }
 
 async function cleanupHammerCloserWorker({
@@ -3975,7 +3980,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.auditPath       — absolute path inside HQ_ROOT, used only inside the closer
  * @param {string} args.hqRoot          — HQ root path (closer passes to `ama-audit append --hq-root`)
  * @param {string} args.rootDir         — adversarial-review checkout root for ama-check ledger probes
- * @param {string} args.scratchDir     — private per-run scratch directory
+ * @param {string=} args.scratchDir     — private per-run scratch directory; omitted preserves <<RUN_DIR>> for dispatch-time substitution
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
  * @param {string} args.reviewer
@@ -3996,7 +4001,7 @@ export function composeCloserPrompt({
   auditPath,
   hqRoot,
   rootDir = SUBMODULE_ROOT,
-  scratchDir,
+  scratchDir = '<<RUN_DIR>>',
   hqOwnerUser,
   reviewedBy,
   reviewer,

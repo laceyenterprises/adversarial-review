@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   amaCloserDispatchFilePath, composeCloserPrompt, createHammerScratchDir,
-  maybeDispatchAmaCloser, reconcileAmaCloserDispatches, updateAmaCloserDispatchRecord,
+  maybeDispatchAmaCloser, reconcileAmaCloserDispatches, substituteTemplate, updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 
 const repoRoot = resolve(new URL('..', import.meta.url).pathname);
@@ -44,6 +46,50 @@ function dispatchArgs(root) {
     logger,
   };
 }
+
+for (const sink of ['warn', 'error', 'function']) {
+  test(`HAMTMP-01: scratch cleanup failures reach the ${sink} logger`, async t => {
+    const root = fixture(t);
+    const scratchDir = createHammerScratchDir(root);
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+    updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatched',
+      launchRequestId: 'synthetic-lrq', lastObservedStatus: 'running', scratchDir, promptDir: root }));
+    const messages = [];
+    const log = sink === 'function' ? message => messages.push(message) : {
+      warn: 'not callable',
+      [sink](message) {
+        assert.equal(this, log, 'logger methods retain their receiver');
+        messages.push(message);
+      },
+    };
+    const originalRm = fs.rmSync;
+    try {
+      t.mock.method(fs, 'rmSync', (path, options) => {
+        if (path === scratchDir) throw Object.assign(new Error('synthetic cleanup refusal'), { code: 'EPERM' });
+        return originalRm(path, options);
+      });
+      syncBuiltinESMExports();
+      const result = await reconcileAmaCloserDispatches(root, {
+        ...(sink === 'function' ? { log } : { logger: log }),
+        readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      });
+      assert.equal(result.changed, 1, 'cleanup failure does not prevent terminal reconciliation');
+      assert.ok(messages.includes('hammer scratch cleanup failed: synthetic cleanup refusal'));
+      assert.equal(existsSync(scratchDir), true);
+      assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(root, identity))).state, 'launch-terminal');
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  });
+}
+
+test('HAMTMP-01: prompt composition preserves an omitted scratch directory for deferred substitution', () => {
+  const prompt = composeCloserPrompt({ prNumber: 42, templateBody: 'PR <<PR_NUMBER>> scratch=<<RUN_DIR>>' });
+  assert.equal(prompt, 'PR 42 scratch=<<RUN_DIR>>');
+  assert.equal(substituteTemplate(prompt, { RUN_DIR: '/fixture/private-scratch' }),
+    'PR 42 scratch=/fixture/private-scratch');
+});
 
 for (const status of ['succeeded', 'failed', 'canceled', 'reaped']) {
   test(`HAMTMP-01: dispatch renders one private directory and ${status} run cleanup removes it`, async t => {

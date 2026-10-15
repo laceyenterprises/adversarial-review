@@ -130,6 +130,14 @@ test('GUARDREVERT-01: guard-only approval coverage survives a rebase; other edit
 test('GUARDREVERT-01: failed, optional, stale, unnamed and partial restorations never gain guard authority', async () => {
   for (const mutate of [
     f => { f.responses['branches/main/protection/required_status_checks'] = { contexts: [] }; },
+    f => {
+      const get = f.args.get; let reads = 0;
+      f.args.get = async endpoint => {
+        const response = await get(endpoint);
+        if (endpoint.endsWith('/pulls/1') && ++reads > 1) response.base.sha = 'e'.repeat(40);
+        return response;
+      };
+    },
     f => { f.responses[`commits/${head}/check-runs?per_page=100&page=1`].check_runs[0].conclusion = 'failure'; },
     f => { f.responses[`commits/${head}/check-runs?per_page=100&page=1`].check_runs[0].head_sha = approved; },
     f => { f.responses[`commits/${head}/check-runs?per_page=100&page=1`].check_runs[0].app.id = 8; },

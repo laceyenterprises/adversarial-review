@@ -72,7 +72,8 @@ export async function fetchGuardReversals({ repo, prNumber, headSha, get }, evid
   if (!paths.length) return {};
   try {
     const pr = await get(`repos/${repo}/pulls/${prNumber}`);
-    if (pr.head?.sha !== headSha || !SHA.test(pr.base?.sha || '') || !pr.base.ref) return {};
+    if (pr.head?.sha !== headSha || pr.base?.sha !== evidence.baseSha
+      || !SHA.test(pr.base?.sha || '') || !pr.base.ref) return {};
     const protection = await get(`repos/${repo}/branches/${encodeURIComponent(pr.base.ref)}/protection/required_status_checks`);
     const required = [...(protection.checks || []), ...(protection.contexts || [])
       .filter(context => !(protection.checks || []).some(check => check.context === context)).map(context => ({ context }))];

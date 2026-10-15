@@ -709,6 +709,7 @@ function createAgyReviewerIdentityPool({
         adopted: [],
         pendingCleanup: new Set(),
         lease: null,
+        releasing: false,
         bootstrapCheckedAt: null,
       };
       states.set(identity.user, state);
@@ -998,6 +999,7 @@ function createAgyReviewerIdentityPool({
     const runningLeases = leasesFromRunRecords();
     await Promise.all(plan.identities.map(async (identity) => {
       const state = stateFor(identity);
+      if (state.releasing) return;
       try {
         if (await applyAdoptedLeases(state, runningLeases === null ? null : (runningLeases.get(identity.user) || []))) return;
         if (readQuotaCooldownImpl(identity.user)) return;
@@ -1058,7 +1060,7 @@ function createAgyReviewerIdentityPool({
   function tryAcquire(plan, { reviewId }) {
     for (const identity of plan.identities) {
       const state = stateFor(identity);
-      if (!state.ready || state.lease || state.adopted.length || readQuotaCooldownImpl(identity.user)) continue;
+      if (!state.ready || state.lease || state.releasing || state.draining || state.adopted.length || readQuotaCooldownImpl(identity.user)) continue;
       const lease = { user: identity.user, hqOwner: identity.hqOwner, reviewId };
       state.lease = lease;
       return lease;
@@ -1099,6 +1101,14 @@ function createAgyReviewerIdentityPool({
   async function release(lease, { failed = false, reason = '' } = {}) {
     if (!lease || lease.legacy) return;
     const state = states.get(lease.user);
+    if (state && state.lease !== lease) return;
+    // Free bookkeeping in the timeout tick, before any helper I/O. Keep
+    // admission closed until cleanup and an actual process-exit observation.
+    if (state) {
+      state.lease = null;
+      state.releasing = true;
+      if (!lease.hqOwner) setDraining(state, true);
+    }
     let survivors = null;
     try {
       if (!lease.hqOwner) {
@@ -1110,7 +1120,7 @@ function createAgyReviewerIdentityPool({
         } else if (state) survivors = (await checkDrained(state)).reason;
       }
     } finally {
-      if (state && state.lease === lease) state.lease = null;
+      if (state) state.releasing = false;
       if (state) {
         const reasons = [];
         if (failed) reasons.push(`review ${lease.reviewId} failed${reason ? ` (${reason})` : ''}`);
@@ -1185,6 +1195,8 @@ function createAgyReviewerIdentityPool({
 // identity-scoped durable cooldown instead of readiness isolation.
 const NON_ISOLATING_FAILURE_CLASSES = new Set([
   'cancelled',
+  'reviewer-timeout',
+  'reviewer-chunk-budget-exceeded',
   'stale-review-head',
   'daemon-bounce',
   'cascade',

@@ -2093,6 +2093,8 @@ function materializeGeminiCheckoutSession({
 const GEMINI_SIGNAL_RELEASE_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP'];
 const GEMINI_SIGNAL_RELEASE_GRACE_MS = 1000;
 const activeGeminiSignalCheckouts = new Map();
+const activeAgyControllers = new Set();
+let geminiTerminationPending = false;
 const geminiSignalReleaseHandlers = new Map();
 let geminiSignalReleaseReleaseImpl = releaseGeminiCredentialCheckout;
 let geminiSignalReleaseSleepImpl = sleep;
@@ -2114,7 +2116,7 @@ function armGeminiCheckoutSignalRelease() {
 }
 
 function disarmGeminiCheckoutSignalRelease() {
-  if (activeGeminiSignalCheckouts.size > 0) return;
+  if (activeGeminiSignalCheckouts.size > 0 || activeAgyControllers.size > 0) return;
   for (const [signal, handler] of geminiSignalReleaseHandlers.entries()) {
     process.removeListener(signal, handler);
     geminiSignalReleaseHandlers.delete(signal);
@@ -2151,6 +2153,11 @@ function trackGeminiFallbackLockForSignalRelease(fallbackLock, { log = console }
 }
 
 async function releaseActiveGeminiCheckoutsForSignal(signal, { log = console } = {}) {
+  geminiTerminationPending = true;
+  // agy is detached from reviewer.mjs. Forward termination before releasing
+  // any credential. Added-user children still require the survivor drain:
+  // none of the sanctioned pinned helpers exposes a stop operation.
+  for (const controller of activeAgyControllers) controller.abort(new Error(`review aborted by ${signal}`));
   const entries = [...activeGeminiSignalCheckouts.entries()];
   const releases = entries.map(async ([key, state]) => {
     const stateLog = state.log || log;
@@ -2197,6 +2204,8 @@ function resetGeminiSignalReleaseForTest() {
   }
   geminiSignalReleaseHandlers.clear();
   activeGeminiSignalCheckouts.clear();
+  activeAgyControllers.clear();
+  geminiTerminationPending = false;
   geminiSignalReleaseReleaseImpl = releaseGeminiCredentialCheckout;
   geminiSignalReleaseSleepImpl = sleep;
   geminiSignalReleaseKillImpl = (pid, signal) => process.kill(pid, signal);
@@ -2529,7 +2538,7 @@ async function withGeminiSubprocessRetry(operation, {
     } catch (err) {
       lastErr = err;
       signal?.throwIfAborted();
-      if (!isRetryableError(err) || attempt >= retryDelaysMs.length) {
+      if (err?.aborted || !isRetryableError(err) || attempt >= retryDelaysMs.length) {
         throw err;
       }
       log.warn?.(
@@ -2605,27 +2614,40 @@ async function spawnAgyReview({
   // reverting to stdin (which unbinds the model — the bug this fixes).
   assertAgyPromptFitsArgv(prompt, { maxBytes: resolveAgyArgvMaxBytes(env) });
   const agyArgs = buildAgyReviewArgs({ model, prompt, printTimeoutMs, workspaceDir: identity ? identity.workspaceDir : cwd });
-  if (identity) {
-    return spawnAgyIdentityReview({ identity, agyArgs, timeout: effectiveTimeout, signal, maxBuffer, spawnWithInputImpl });
+  if (geminiTerminationPending) throw new Error('review termination in progress');
+  const controller = new AbortController();
+  const childSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  childSignal.throwIfAborted();
+  activeAgyControllers.add(controller);
+  armGeminiCheckoutSignalRelease();
+  try {
+    if (identity) {
+      return await spawnAgyIdentityReview({ identity, agyArgs, timeout: effectiveTimeout, signal: childSignal, maxBuffer, spawnWithInputImpl });
+    }
+    return await spawnWithInputImpl(
+      agyCli,
+      agyArgs,
+      {
+        env,
+        cwd,
+        // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
+        input: '',
+        timeout: effectiveTimeout,
+        progressTimeout: effectiveTimeout,
+        signal: childSignal,
+        killGraceMs: 0,
+        maxBuffer,
+        // agy leaves a long-lived language-server child holding our stdout/stderr
+        // pipes; without this the capture never sees EOF and every review stalls
+        // until the progress/wall timeout SIGKILLs it. `reapGroupOnExit`
+        // treats main-process exit as authoritative and reaps descendants.
+        reapGroupOnExit: true,
+      },
+    );
+  } finally {
+    activeAgyControllers.delete(controller);
+    disarmGeminiCheckoutSignalRelease();
   }
-  return spawnWithInputImpl(
-    agyCli,
-    agyArgs,
-    {
-      env,
-      cwd,
-      // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
-      input: '',
-      timeout: effectiveTimeout,
-      signal,
-      maxBuffer,
-      // agy leaves a long-lived language-server child holding our stdout/stderr
-      // pipes; without this the capture never sees EOF and every review stalls
-      // until the progress/wall timeout SIGKILLs it. `reapGroupOnExit`
-      // treats main-process exit as authoritative and reaps descendants.
-      reapGroupOnExit: true,
-    },
-  );
 }
 
 // How long an added identity's review may outlive its SIGKILL (or its own
@@ -2687,6 +2709,8 @@ async function spawnAgyIdentityReview({ identity, agyArgs, timeout, signal, maxB
       stdoutPath,
       stderrPath,
       settleAfterKillMs: AGY_IDENTITY_SETTLE_AFTER_KILL_MS,
+      progressTimeout: timeout,
+      killGraceMs: 0,
     });
     return { ...result, ...captured() };
   } catch (err) {

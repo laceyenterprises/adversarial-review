@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as timeouts from '../src/reviewer-timeout.mjs';
-import { reviewAgyOversizedInChunks, reviewWithGemini } from '../src/reviewer-harness.mjs';
+import { reviewAgyOversizedInChunks, reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
 import { reviewerExecutionFailureExitCode } from '../src/reviewer-outcomes.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
@@ -84,4 +84,42 @@ test('CHUNKTIME-01: abort reaches the fake agy child before credential release',
     },
   }));
   assert.deepEqual(events, ['stopped', 'released']);
+});
+
+
+test('CHUNKTIME-01: termination forwards an abort to detached agy before self termination', async () => {
+  const events = [];
+  harness.configureGeminiSignalReleaseForTest({
+    killImpl: () => events.push('self-signal'),
+  });
+  try {
+    await assert.rejects(harness.spawnAgyReview({
+      prompt: 'synthetic review', env: {},
+      spawnWithInputImpl: async (_command, _args, options) => {
+        assert.equal(options.killGraceMs, 0);
+        options.signal.addEventListener('abort', () => events.push('stopped'), { once: true });
+        await harness.releaseActiveGeminiCheckoutsForSignal('SIGTERM');
+        options.signal.throwIfAborted();
+      },
+    }));
+    assert.deepEqual(events, ['stopped', 'self-signal']);
+  } finally { harness.resetGeminiSignalReleaseForTest(); }
+});
+
+test('CHUNKTIME-01: the plan timer aborts a late chunk without rerunning earlier chunks', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let plan;
+  let calls = 0;
+  await assert.rejects(reviewAgyOversizedInChunks(diff, '', {
+    env: {}, maxBytes: 60000,
+    onChunkPlan: (value) => { plan = value; },
+    reviewWithGeminiImpl: async (_diff, _context, { signal }) => {
+      calls += 1;
+      if (calls === 1) return { reviewText: '## Verdict\nComment only' };
+      t.mock.timers.tick(plan.timeoutMs);
+      assert.equal(signal.aborted, true);
+      signal.throwIfAborted();
+    },
+  }), /Command timed out after .*chunks=/);
+  assert.equal(calls, 2);
 });

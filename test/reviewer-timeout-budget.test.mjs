@@ -58,6 +58,71 @@ test('CASCADECAP-01 timeout history survives other transients and legacy files f
   assert.equal(reviewerTimeoutBudget(legacy, { ...scope, row: { reviewer_head_sha: 'older-head' } }).parked, false);
 }));
 
+for (const failureClass of ['cascade', 'provider-overloaded']) {
+  test(`CASCADECAP-01 operator re-arm survives ${failureClass} and still permits only one timeout`, () => fixture(root => {
+    timeout(root);
+    const exhausted = timeout(root);
+    const row = { rereview_reason: 'retrigger-review: operator probe', rereview_requested_at: '2026-01-02T00:00:00Z' };
+    // A headless infrastructure write can occur before the scoped settlement.
+    const unrelated = recordCascadeFailure(root, { ...identity, failureClass, failedAt: '2026-01-02T00:01:00Z' });
+    assert.equal(reviewerTimeoutBudget(unrelated, { ...scope, row }).parked, false);
+    const transient = recordCascadeFailure(root, { ...identity, ...scope, row, failureClass,
+      failedAt: '2026-01-02T00:02:00Z' });
+    assert.equal(transient.reviewerTimeout.rearmAt, row.rereview_requested_at);
+    assert.equal(transient.reviewerTimeout.lastTimeoutAt, exhausted.reviewerTimeout.lastTimeoutAt);
+    assert.equal(transient.reviewerTimeout.total, 2);
+    assert.equal(transient.reviewerTimeout.count, 0);
+    assert.equal(transient.reviewerTimeout.limit, 1);
+    assert.equal(transient.nextRetryAfter, '2026-01-02T00:10:00.000Z', 'ordinary cascade backoff remains intact');
+    const retry = reviewerTimeoutBudget(readCascadeState(root, identity), { ...scope, row });
+    assert.equal(retry.parked, false);
+    assert.equal(retry.changed, false, 're-arm is durably consumed once');
+    const parked = timeout(root, { row, failedAt: '2026-01-02T00:11:00Z' });
+    assert.equal(parked.reviewerTimeout.lastTimeoutAt, '2026-01-02T00:11:00.000Z');
+    assert.equal(reviewerTimeoutBudget(parked, { ...scope, row }).parked, true);
+    const laterTransient = recordCascadeFailure(root, { ...identity, ...scope, row, failureClass,
+      failedAt: '2026-01-02T00:12:00Z' });
+    assert.equal(reviewerTimeoutBudget(laterTransient, { ...scope, row }).parked, true);
+    assert.equal(reviewerTimeoutBudget(laterTransient, { ...scope, row: {
+      ...row, rereview_requested_at: '2026-01-02T00:13:00Z',
+    } }).parked, false, 'a new operator request grants another probe');
+  }));
+}
+
+test('CASCADECAP-01 legacy re-arm accepts missing timeout timestamps and rejects known stale requests', () => {
+  const row = { reviewer_head_sha: scope.headSha, rereview_reason: 'retrigger-review: operator probe',
+    rereview_requested_at: '2026-01-02T00:00:00Z' };
+  for (const lastFailureAt of [undefined, null, 'invalid']) {
+    const legacy = { transientFailureBreakdown: { 'reviewer-timeout': 2 }, lastFailureAt };
+    assert.equal(reviewerTimeoutBudget(legacy, { ...scope, row }).parked, false);
+  }
+  const legacy = { transientFailureBreakdown: { 'reviewer-timeout': 2 },
+    lastFailureClass: 'reviewer-timeout', lastFailureAt: '2026-01-02T00:01:00Z' };
+  assert.equal(reviewerTimeoutBudget(legacy, { ...scope, row }).parked, true);
+  assert.equal(reviewerTimeoutBudget({ ...legacy, lastFailureClass: 'cascade' }, { ...scope, row }).parked, false);
+  assert.equal(reviewerTimeoutBudget(legacy, { ...scope, row: {
+    ...row, rereview_requested_at: 'invalid',
+  } }).parked, true);
+});
+
+test('CASCADECAP-01 changed build persists through non-timeout failures without renewing its probe', () => fixture(root => {
+  timeout(root);
+  timeout(root);
+  const build = { ...scope, reviewerBuildId: 'build-b' };
+  const transient = recordCascadeFailure(root, { ...identity, ...build, failureClass: 'cascade',
+    failedAt: '2026-01-02T00:00:00Z' });
+  assert.equal(transient.reviewerTimeout.reviewerBuildId, 'build-b');
+  const retry = reviewerTimeoutBudget(readCascadeState(root, identity), build);
+  assert.equal(retry.changed, false);
+  assert.equal(retry.count, 0);
+  assert.equal(retry.limit, 1);
+  assert.equal(retry.total, 2);
+  assert.equal(retry.parked, false);
+  const parked = timeout(root, { ...build, failedAt: '2026-01-02T00:02:00Z' });
+  assert.equal(reviewerTimeoutBudget(parked, build).parked, true);
+  assert.equal(parked.reviewerTimeout.total, 3);
+}));
+
 test('CASCADECAP-01 timeout limit has a positive integer environment override', () => {
   for (const input of [undefined, '', '0', '-1', 'invalid', 'Infinity', '1.5']) {
     assert.equal(resolveReviewerTimeoutSameHeadLimit({ ADVERSARIAL_REVIEWER_TIMEOUT_SAME_HEAD_LIMIT: input }), 2);

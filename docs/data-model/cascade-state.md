@@ -3,7 +3,7 @@
 **Owner:** reviewer transient-failure backoff and route selection
 **Store:** `data/cascade-state/`
 **Source of truth:** `src/reviewer-cascade.mjs`
-**Runtime surface:** `src/reviewer-cascade.mjs`, `src/watcher.mjs`, `src/reviewer-route-selection.mjs`, `src/review-pipeline-health.mjs`, `src/token-refresh-hold.mjs`
+**Runtime surface:** `src/reviewer-cascade.mjs`, `src/watcher.mjs`, `src/reviewer-route-selection.mjs`, `src/review-pipeline-health.mjs`, `src/token-refresh-hold.mjs`, `src/reviewer-timeout-budget.mjs`, `src/pollonce-phases.mjs`, `src/reviewer-spawn-settle.mjs`, `src/reviewer-pass-reaper.mjs`
 
 ## Purpose
 
@@ -41,6 +41,7 @@ Directory: `data/cascade-state/`
 | `nextRetryAfter` | string | ISO-8601 PR-level backoff expiry. This is computed from the cascade backoff schedule, never from a provider-supplied reset hint. The one exception is a token-refresh hold (below), which sets it to `tokenRefreshHold.holdUntil`: never earlier than the backoff floor and never later than `tokenRefreshHold.maxHoldUntil`. |
 | `providerRetryAfter` | string | Optional diagnostic provider reset hint. It is recorded only when supplied, is replaced on each write, and never gates reviewer dispatch. |
 | `backoffMinutes` | number | Backoff duration used to compute `nextRetryAfter`. |
+| `reviewerTimeout` | object | Optional head/build timeout budget with `count`, `total`, `limit`, `rearmAt`, and `lastTimeoutAt`; see CASCADECAP-01 below. |
 | `tokenRefreshHold` | object | Optional TOKDZ-01 hold written by `recordTokenRefreshHold` when the Claude reviewer refused a broker token that was waiting on a rotation (`token-refresh-pending`). Fields: `reviewerModel`, `startedAt` (first refusal of this hold), `lastRefusalAt`, `refusals`, `expectedRotationAt` (token expiry minus the bridge refresh window, or null when the refusal carried no lifetime), `holdUntil`, `maxHoldUntil` (`startedAt` plus `ADVERSARIAL_REVIEW_TOKEN_REFRESH_HOLD_MAX_MINUTES`, default 30), `maxHoldMs`. Carried forward across later transient-failure writes; dropped by `clearCascadeState`. |
 | `capExhaustedAlertedAt` | string | Optional debounce marker for a cascade-cap-exhausted alert. |
 | `capExhaustedAlert` | object | Optional diagnostic payload containing failure class, attempts, cap, and reason for the cap-exhausted alert. |
@@ -106,10 +107,14 @@ the bound.
 ## Repeated same-head timeouts (CASCADECAP-01)
 
 `reviewerTimeout` records `{ headSha, reviewerBuildId, count, total, limit,
-rearmAt }`. Normal settlement and the running-pass reaper both write it,
+rearmAt, lastTimeoutAt }`. Normal settlement and the running-pass reaper both write it,
 including terminal failures at the infrastructure cap. `count` measures timeouts
 in the current head/build/re-arm series; `total` retains timeout evidence on the
-head for dispatch fairness. Other transient failures preserve this object.
+head for dispatch fairness. `lastTimeoutAt` records the latest timeout on that
+head, independently of the PR-wide `lastFailureAt`. Scoped non-timeout failures
+persist the current build and consumed operator re-arm without charging a
+timeout; failures without head evidence preserve the object. Both retain the
+ordinary cascade backoff.
 
 The default limit is two timeouts. A positive integer
 `ADVERSARIAL_REVIEWER_TIMEOUT_SAME_HEAD_LIMIT` overrides it without a config
@@ -121,13 +126,17 @@ The underlying `[reviewer-timeout]` classifier remains available to the existing
 operator-label-gated timeout-exhaustion handoff; that gate is unchanged.
 
 A new head starts a fresh budget. An explicit `retrigger-review:` operator
-request newer than the recorded failure, or a different reviewer build, permits
-one probe on the same head; a timeout from that probe parks again. Builds default
-to a process-start content digest of reviewer sources, runtime adapters and
+request newer than the last timeout, or a different reviewer build, permits
+one timeout on the same head; a timeout from that probe parks again. Non-timeout
+transients retain that allowance across cascade retries without renewing the
+build/re-arm reset. An already consumed operator request cannot reset it again.
+Builds default to a process-start content digest of reviewer sources, runtime adapters and
 reviewer prompts. A deployment can supply `ADVERSARIAL_REVIEWER_BUILD_ID` instead. The
 build is captured in pass metadata so reaping an old pass attributes its failure
 to the build that actually ran. Legacy files use the failed row's head and flat
-timeout count until a scoped failure is recorded.
+timeout count until a scoped failure is recorded. Files lacking `lastTimeoutAt`
+use `lastFailureAt` only when `lastFailureClass` is `reviewer-timeout`; otherwise
+an unseen, valid operator request is accepted without a timestamp comparison.
 
 Timeout retries yield to waiting first-pass and re-review candidates in the
 shared WAKESTARVE-01 wake/wait ordering, including retries with retained wakes

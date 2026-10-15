@@ -426,12 +426,17 @@ function recordCascadeFailure(rootDir, {
     modelCounts[normalizedFailureClass] = Number(modelCounts[normalizedFailureClass] || 0) + 1;
     transientFailureBreakdownByModel[normalizedModel] = modelCounts;
   }
-  const timeout = normalizedFailureClass === 'reviewer-timeout' && headSha
+  // Settle a scoped build/re-arm reset even when the attempt did not time out.
+  // Otherwise later retries either lose the re-arm or keep rediscovering the
+  // same build change. Only actual timeouts spend the timeout allowance.
+  const timeout = headSha
     ? reviewerTimeoutBudget(previous, { headSha, reviewerBuildId, row }) : null;
+  const timeoutIncrement = normalizedFailureClass === 'reviewer-timeout' ? 1 : 0;
   return writeCascadeState(rootDir, { repo, prNumber }, {
     ...(timeout ? { reviewerTimeout: {
-      headSha, reviewerBuildId, count: timeout.count + 1, total: timeout.total + 1,
+      headSha, reviewerBuildId, count: timeout.count + timeoutIncrement, total: timeout.total + timeoutIncrement,
       limit: timeout.limit, rearmAt: timeout.rearmAt,
+      lastTimeoutAt: timeoutIncrement ? new Date(failedAtMs).toISOString() : timeout.lastTimeoutAt,
     } } : previous?.reviewerTimeout ? { reviewerTimeout: previous.reviewerTimeout } : {}),
     consecutiveTransientFailures,
     transientFailureBreakdown,

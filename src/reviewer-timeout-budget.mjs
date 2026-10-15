@@ -65,8 +65,16 @@ export function reviewerTimeoutBudget(state, {
   });
   const sameHead = Boolean(headSha && previous?.headSha === headSha);
   const buildChanged = sameHead && previous.reviewerBuildId !== reviewerBuildId;
+  // Only timeout evidence can invalidate a re-arm. A later provider failure
+  // advances lastFailureAt without spending the operator's timeout probe.
+  // Older files can recover that evidence only when their latest failure was
+  // itself a timeout; missing evidence must still permit an explicit re-arm.
+  const lastTimeoutAt = sameHead ? previous?.lastTimeoutAt
+    || (state?.lastFailureClass === 'reviewer-timeout' ? state.lastFailureAt : null) || null : null;
+  const lastTimeoutMs = Date.parse(lastTimeoutAt || '');
   const rearmed = sameHead && rearmAt && rearmAt !== previous.rearmAt
-    && Date.parse(rearmAt) > Date.parse(state?.lastFailureAt || '');
+    && Number.isFinite(Date.parse(rearmAt))
+    && (!Number.isFinite(lastTimeoutMs) || Date.parse(rearmAt) > lastTimeoutMs);
   const reset = !sameHead || buildChanged || rearmed;
   const count = reset ? 0 : Number(previous?.count || 0);
   const limit = buildChanged || rearmed ? 1 : sameHead
@@ -75,6 +83,7 @@ export function reviewerTimeoutBudget(state, {
   return {
     headSha: headSha || null, reviewerBuildId, count, limit,
     total: sameHead ? Number(previous?.total ?? previous?.count ?? 0) : 0,
+    lastTimeoutAt,
     rearmAt: rearmAt || (sameHead ? previous?.rearmAt : null) || null,
     parked: Boolean(headSha && count >= limit),
     changed: Boolean(sameHead && (buildChanged || rearmed)),

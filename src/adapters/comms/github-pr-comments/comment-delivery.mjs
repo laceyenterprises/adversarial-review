@@ -1,3 +1,4 @@
+import { resolveReconcileWorkerClass } from '../../../remediation-worker-routing.mjs';
 import { filterGitHubBody } from '../../../github-outbound-body.mjs';
 // Durable PR-comment delivery state for terminal follow-up jobs.
 //
@@ -91,6 +92,38 @@ const NON_RETRYABLE_DELIVERY_REASONS = new Set([
 // records) would skip it forever. With this shape on the record, the
 // retry walker has every field it needs (body, repo, prNumber,
 // workerClass) to deliver without touching any other artifact.
+function buildReconcileCommentDelivery({
+  job,
+  worker,
+  action,
+  reply = null,
+  reReview = null,
+  failure = null,
+  now = () => new Date().toISOString(),
+}) {
+  const workerClass = resolveReconcileWorkerClass(job, worker);
+  const body = buildRemediationOutcomeCommentBody({
+    workerClass,
+    worker,
+    action,
+    job,
+    reply,
+    reReview,
+    failure,
+  });
+  const commentDelivery = buildOwedDelivery({
+    body,
+    repo: job?.repo,
+    prNumber: job?.prNumber,
+    workerClass,
+    owedAt: now(),
+    revisionRef: job?.revisionRef || null,
+    round: job?.remediationPlan?.currentRound || null,
+    kind: 'remediation-reply',
+  });
+  return { body, workerClass, commentDelivery };
+}
+
 function buildOwedDelivery({
   body,
   repo,
@@ -1125,6 +1158,7 @@ export {
   addToDeliveryRetryIndex,
   buildAttemptingDelivery,
   buildOwedDelivery,
+  buildReconcileCommentDelivery,
   buildPendingDelivery,
   clearPostedSidecar,
   deliveryLockPath,

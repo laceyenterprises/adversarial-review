@@ -9,6 +9,7 @@ import { requestWatcherWake } from './watcher-wake.mjs';
 import { requestRereviewWake, REREVIEW_WAKE_REASONS } from './rereview-wake.mjs';
 import { resolveRemediationReplyTarget, resolveReplyStorageKey } from './remediation-reply-paths.mjs';
 import { hasWorkerJobTrailer } from './comment-only-final-round.mjs';
+import { addToDeliveryRetryIndex, buildReconcileCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 
 function isCurrentAttemptReply(replyPath, round, worker) {
   const spawnedMs = Date.parse(worker.spawnedAt || round?.spawnedAt || '');
@@ -95,12 +96,17 @@ export function completeWorkerPublishedHead({
       let reReview = job.finalRound === 'comment-only'
         ? { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' }
         : { requested: true, status: 'pending', requestedAt: completedAt, reason: reply?.reReview?.reason || null };
+      const { commentDelivery } = buildReconcileCommentDelivery({
+        job, worker, action: 'completed', reply, reReview, now: () => completedAt,
+      });
       const completed = markFollowUpJobCompleted({ rootDir, jobPath, completedAt,
         resultingHeadSha: headSha,
         remediationWorker: { ...worker, state: 'completed', reconciledAt: completedAt },
-        remediationReply, reReview,
+        remediationReply, reReview, commentDelivery,
         completion: { ...job.completion, source: 'worker-published-head-recovery', publishEvidence: evidence.source },
       });
+      // The sweep owns posting, including after the history index was seeded.
+      addToDeliveryRetryIndex(rootDir, completed.jobPath);
       if (job.finalRound === 'comment-only') {
         reReview = { requested: false, status: 'suppressed', suppressed: 'comment-only-final-round' };
         requestWatcherWakeImpl({ rootDir, reason: 'comment-only-final-round-completed',
@@ -121,6 +127,9 @@ export function completeWorkerPublishedHead({
         }
       }
       completed.job.reReview = reReview;
+      completed.job.commentDelivery = buildReconcileCommentDelivery({
+        job: completed.job, worker, action: 'completed', reply, reReview, now: () => completedAt,
+      }).commentDelivery;
       const targetRound = completed.job.remediationPlan?.rounds?.find(entry => Number(entry.round) === Number(round.round));
       if (targetRound) targetRound.reReview = reReview;
       writeFollowUpJob(completed.jobPath, completed.job);

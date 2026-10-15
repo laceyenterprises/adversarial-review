@@ -16,7 +16,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
-const RANGE_PROBE = /\/usr\/bin\/perl[^]*?> "\$\{TMPDIR:-\/tmp\}\/ham-<<PR_NUMBER>>-range\.json"/;
+const RANGE_PROBE = /\/usr\/bin\/perl[^]*?> "\$HAM_RUN_DIR\/range\.json"/;
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
 const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
@@ -49,13 +49,13 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   }
 });
 
-test('hammer terminal evidence producers and predicate inputs honor TMPDIR', () => {
+test('hammer terminal evidence producers and predicate inputs use the private run directory', () => {
   for (const suffix of ['terminal-remediation', 'commit', 'range']) {
-    assert.ok(HAMMER_TEMPLATE.includes(`--ham-${suffix} "\${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${suffix}.json"`));
+    assert.ok(HAMMER_TEMPLATE.includes(`--ham-${suffix} "$HAM_RUN_DIR/${suffix}.json"`));
     assert.ok(!HAMMER_TEMPLATE.includes(`/tmp/ham-<<PR_NUMBER>>-${suffix}.json`));
   }
-  assert.ok(HAMMER_TEMPLATE.includes('> "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json"'));
-  assert.ok(HAMMER_TEMPLATE.includes('Write `${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json`'));
+  assert.ok(HAMMER_TEMPLATE.includes('> "$HAM_RUN_DIR/commit.json"'));
+  assert.ok(HAMMER_TEMPLATE.includes('Write `$HAM_RUN_DIR/terminal-remediation.json`'));
 });
 
 test('ordinary remediation publishes before validating the live head', () => {

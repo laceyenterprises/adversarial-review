@@ -25,9 +25,6 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   const prNumber = String(1_000_000 + process.pid);
   t.after(() => {
     rmSync(dir, { recursive: true, force: true });
-    for (const name of readdirSync('/tmp')) {
-      if (name.startsWith(`ham-${prNumber}-`)) rmSync(join('/tmp', name), { force: true });
-    }
   });
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -46,7 +43,7 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
   ]) {
     const shell = `PHASE=${phase}\n${wrapper}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
     const result = run('/bin/bash', ['-c', shell], {
-      HAM_ROOT_DIR: root, HAM_PR_URL: `https://github.com/acme/repo/pull/${prNumber}`, HAM_REPO: 'acme/repo',
+      HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: `https://github.com/acme/repo/pull/${prNumber}`, HAM_REPO: 'acme/repo',
       HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer', HAM_NODE_BIN: leaseNode,
@@ -88,7 +85,7 @@ esac
   writeFileSync(proof, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;; *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
   const env = {
     HAM_NODE_BIN: proof, REAL_NODE: process.execPath, HAM_BASE_HEAD: 'a'.repeat(40),
-    HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
+    HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
     HAM_PR_NUMBER: '424242', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
     HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
     HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
@@ -198,7 +195,7 @@ test('API fallback push rejection releases the lease under set -e for both push 
   writeFileSync(join(dir, 'publisher'), '#!/bin/sh\nprintf "%s\\n" "$PUBLISH_RESULT"\n', { mode: 0o755 });
   writeFileSync(join(dir, 'git'), '#!/bin/sh\nprintf "%s\\n" "$*" > "$PUSH_ARGS_FILE"\nexit 1\n', { mode: 0o755 });
   const source = readFileSync(join(root, 'bin/hammer-publish.sh'), 'utf8')
-    .replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1')
+    .replaceAll('<<RUN_DIR>>', dir).replaceAll('<<ROOT_DIR>>', root).replaceAll('<<REPO>>', 'fixture/repo').replaceAll('<<PR_URL>>', '1')
     .replaceAll('<<REVIEWED_SHA>>', 'a'.repeat(40)).replaceAll('<<PR_NUMBER>>', '1');
   const script = join(dir, 'publish.sh');
   writeFileSync(script, source);
@@ -238,7 +235,7 @@ test('merge refuses an ineligible predicate before reading the green gate', (t) 
   writeFileSync(nodeStub, '#!/bin/sh\nexit 0\n');
   chmodSync(nodeStub, 0o755);
   const env = {
-    HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424243', HAM_REPO: 'acme/repo',
+    HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424243', HAM_REPO: 'acme/repo',
     HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
     HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
     HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
@@ -276,7 +273,7 @@ test('merge defers unknown primary-change evidence and releases the lease', (t) 
   writeFileSync(nodeStub, '#!/bin/sh\nif [ \"$1\" = --input-type=module ]; then cat >/dev/null; echo \'{\"ok\":false,\"headMatches\":true,\"state\":\"OPEN\",\"checksConclusion\":\"SUCCESS\",\"reasons\":[\"primary-change-unknown\"]}\'; fi\nif [ \"$2\" = append ]; then echo \"AUDIT_ARGS=$*\"; fi\nexit 0\n');
   chmodSync(nodeStub, 0o755);
   const env = {
-    HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424243', HAM_REPO: 'acme/repo',
+    HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424243', HAM_REPO: 'acme/repo',
     HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
     HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
     HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
@@ -308,7 +305,7 @@ test('rendered hammer prompt stays under a 60 KiB byte budget', () => {
     // Keep this prompt-size fixture independent of the checkout path length.
     hqRoot: '/tmp/hq', rootDir: '/tmp/adversarial-review', hqOwnerUser: 'tester', reviewedBy: 'reviewer',
     reviewer: 'reviewer', dispatchedAt: '2026-09-27T00:00:00Z', amaTrailers: '',
-    templateBody: template,
+    templateBody: template, scratchDir: '/fixture/scratch',
   });
   assert.ok(Buffer.byteLength(rendered) <= 60 * 1024, `prompt is ${Buffer.byteLength(rendered)} bytes`);
   assert.doesNotMatch(rendered, /<<[A-Z_]+>>/);
@@ -541,7 +538,7 @@ esac
     const trailers = composeAmaTrailers({ workerClass: 'hammer', reviewerFamily: 'claude', riskClass: 'medium',
       eligibilityReason: 'ham-terminal-remediation', auditRef: `ama-audit:acme/repo:pr-424244:head-${head}` });
     const env = {
-      HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424244', HAM_REPO: 'acme/repo',
+      HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424244', HAM_REPO: 'acme/repo',
       HAM_PR_NUMBER: '424244', HAM_REVIEWED_SHA: successfulMerge ? reviewedHead : head, HAM_TARGET_REMEDIATION_SHA: head,
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: userInfo().username,
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
@@ -630,7 +627,7 @@ echo '{"head":{"sha":"${'a'.repeat(40)}"},"labels":[]}'
     const env = { HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
       HAM_PR_NUMBER: '424242', HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
-      HAM_ROOT_DIR: root, HAM_AUDIT_PATH: join(dir, 'audit'), HAM_REVIEWER: 'claude',
+      HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_AUDIT_PATH: join(dir, 'audit'), HAM_REVIEWER: 'claude',
       HAM_NODE_BIN: process.execPath, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir, SCENARIO: scenario };
     const verify = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-verify-head', '--render'], env);
     const merge = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
@@ -691,9 +688,8 @@ test('HAMLEASE-01 lease timeout note and audit retain waited and configured seco
   const pr = String(2_000_000 + process.pid);
   t.after(() => {
     rmSync(dir, { recursive: true, force: true });
-    rmSync(`/tmp/ham-${pr}-merge-lease-acquire.json`, { force: true });
   });
-  const env = { HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir, HAM_REPO: 'acme/repo', HAM_PR_NUMBER: pr,
+  const env = { HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir, HAM_REPO: 'acme/repo', HAM_PR_NUMBER: pr,
     HAM_PR_URL: `https://github.com/acme/repo/pull/${pr}`, HAM_REVIEWED_SHA: 'a'.repeat(40),
     HAM_REVIEWER: 'reviewer', HAM_RISK_CLASS: 'medium' };
   const rendered = run(process.execPath, ['bin/hammer-procedure.mjs', 'hammer-verify-head', '--render'], env);
@@ -703,7 +699,7 @@ test('HAMLEASE-01 lease timeout note and audit retain waited and configured seco
   const stub = join(dir, 'audit-node');
   writeFileSync(stub, '#!/bin/sh\nwhile [ "$#" -gt 1 ]; do\nif [ "$1" = --attempt-json ]; then cat "$2"; exit 0; fi\nshift\ndone\nexit 1\n', { mode: 0o755 });
   for (const evidence of [{ waited_s: 900 }, { waited_s: 0 }, { waited_s: null }, {}]) {
-    writeFileSync(`/tmp/ham-${pr}-merge-lease-acquire.json`, JSON.stringify({ timedOut: true, configured_s: 900, ...evidence }));
+    writeFileSync(join(dir, 'merge-lease-acquire.json'), JSON.stringify({ timedOut: true, configured_s: 900, ...evidence }));
     const result = run('bash', ['-c', `HAM_MERGE_LEASE_ACQUIRE_EXIT=75 HAM_MERGE_LEASE_WAIT_SECONDS=900 HAM_NODE_BIN="$1" POST_REMEDIATION_SHA=${'a'.repeat(40)}
 phase() { ${rendered.stdout.slice(start, end)} }
 phase
@@ -723,8 +719,7 @@ for (const scenario of ['first retry visible', 'already visible', 'two lag polls
     const prNumber = String(2_000_000 + process.pid);
     t.after(() => {
       rmSync(dir, { recursive: true, force: true });
-      rmSync(`/tmp/ham-${prNumber}-pr-after.json`, { force: true });
-      for (const name of readdirSync('/tmp').filter(name => name.startsWith(`ham-${prNumber}-head-probe.`))) {
+        for (const name of readdirSync('/tmp').filter(name => name.startsWith(`ham-${prNumber}-head-probe.`))) {
         rmSync(join('/tmp', name), { recursive: true, force: true });
       }
     });
@@ -739,7 +734,7 @@ case "$2" in
   */statuses\\?*) echo "$2" >> "$TMPDIR/check-api-reads"; printf '[]'; exit 0 ;;
 esac
 n=$(cat "$TMPDIR/polls"); n=$((n + 1)); echo "$n" > "$TMPDIR/polls"
-if [ "$n" -eq 3 ]; then cp /tmp/ham-${prNumber}-pr-after.json "$TMPDIR/cache-after-probe"; fi
+if [ "$n" -eq 3 ]; then cp "$HAM_RUN_DIR/pr-after.json" "$TMPDIR/cache-after-probe"; fi
 if [ "$n" -ge 2 ]; then
   case "$HAM_TEST_SCENARIO" in
     'transient TLS'|'transient HTTP 503'|'probe alarm'|'transient exhaustion'|'permanent error'|'permanent numbered URL')
@@ -770,7 +765,7 @@ esac
 printf '{"head":{"sha":"%s"},"base":{"ref":"main"}}\\n' "$head"
 `, { mode: 0o755 });
     const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: prNumber,
-      HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
+      HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
       HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low', HAM_MERGE_METHOD: 'squash', HAM_TARGET_REMEDIATION_SHA: before, HAM_PUSHED_HEAD: pushed,
       HAM_PUSHED_FROM_HEAD: before, HAM_TEST_SCENARIO: scenario, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir };
     const rendered = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-verify-head', '--render'], env);
@@ -837,13 +832,13 @@ exit "$rc"`], env);
       assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 21);
       assert.deepEqual(readFileSync(join(dir, 'sleeps'), 'utf8').trim().split('\n').map(Number),
         [2, ...Array(19).fill(15), 13], 'polling clamps its last delay to the deadline');
-      assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, before);
+      assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);
     } else if (['permanent error', 'permanent numbered URL', 'malformed JSON', 'missing head', 'invalid head'].includes(scenario)) {
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stdout, /OUTCOME=verify-head-error rc=1/);
       assert.doesNotMatch(result.stdout, /CONTINUE_TO_CHECKS/);
       assert.equal(Number(readFileSync(join(dir, 'polls'), 'utf8')), 2);
-      assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, before);
+      assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, before);
     } else {
       assert.equal(result.status, 0, result.stderr);
       const recovered = ['transient TLS', 'transient HTTP 503', 'probe alarm'].includes(scenario);
@@ -852,7 +847,7 @@ exit "$rc"`], env);
       if (recovered) {
         assert.match(result.stdout, /waited=17/);
         assert.equal(JSON.parse(readFileSync(join(dir, 'cache-after-probe'), 'utf8')).headRefOid, before);
-        assert.equal(JSON.parse(readFileSync(`/tmp/ham-${prNumber}-pr-after.json`, 'utf8')).headRefOid, pushed);
+        assert.equal(JSON.parse(readFileSync(join(dir, 'pr-after.json'), 'utf8')).headRefOid, pushed);
       }
       if (scenario === 'two lag polls') {
         assert.match(result.stdout, /CHILD_HEAD_WAIT=17 CHILD_CHECK_WAIT=0/);
@@ -883,7 +878,7 @@ for (const route of ['API commit', 'git fallback', 'git fallback without API hea
     const publication = route === 'API commit' ? { route: 'published', head: pushed, previousHead: before }
       : { route: 're-review', ...(route === 'git fallback' ? { previousHead: before, fallbackHead: before, branch: 'repair' } : {}) };
     const env = { HAM_PR_URL: 'https://github.com/fixture/repo/pull/1', HAM_PR_NUMBER: '1',
-      HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
+      HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
       HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low',
       HAM_COMMIT_PUBLICATION_ONLY: '1', HAM_NODE_BIN: join(dir, 'publisher'), HAM_BASE_HEAD: before,
       POST_REMEDIATION_SHA: '',
@@ -908,7 +903,7 @@ test('GHBUDGET-01: rendered pending CI uses at most eleven REST check snapshots 
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const head = 'a'.repeat(40);
   const env = {
-    HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
+    HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
     HAM_PR_URL: 'https://github.com/fixture/repo/pull/42', HAM_REVIEWED_SHA: head,
     HAM_TARGET_REMEDIATION_SHA: head, HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash',
     HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'fixture', HAM_AUDIT_PATH: join(dir, 'audit'), HAM_REVIEWER: 'fixture',
@@ -978,6 +973,11 @@ test('GHBUDGET-01: REST hammer checks preserve latest reruns and commit statuses
 test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-common-budget-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const sharedTmp = dir;
+  const legacyPath = join(sharedTmp, 'ham-42-pr-after.json');
+  writeFileSync(legacyPath, 'foreign read-only evidence', { mode: 0o444 });
+  const scratchDir = join(dir, 'private-scratch');
+  mkdirSync(scratchDir, { mode: 0o700 });
   const { default: Database } = await import('better-sqlite3');
   // Render against an isolated root while reusing the checked-in procedures.
   for (const name of ['bin', 'src', 'node_modules', 'domains']) {
@@ -992,7 +992,7 @@ test('GHBUDGET-01: count a rendered common hammer close with fake gh', async t =
   db.close();
   const head = 'a'.repeat(40), base = 'b'.repeat(40);
   const env = {
-    HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
+    HAM_RUN_DIR: scratchDir, HAM_ROOT_DIR: dir, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '42',
     HAM_PR_URL: 'https://github.com/fixture/repo/pull/42', HAM_REVIEWED_SHA: head,
     HAM_TARGET_REMEDIATION_SHA: head, HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash',
     HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'fixture', HAM_AUDIT_PATH: join(dir, 'audit'), HAM_REVIEWER: 'fixture',
@@ -1063,6 +1063,8 @@ echo COMMON_CLOSE_SUCCEEDED
   const calls = readFileSync(join(dir, 'calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const graphql = calls.filter(args => args[0] === 'pr' || args.includes('graphql'));
   const rest = calls.filter(args => !graphql.includes(args));
+  assert.equal(readFileSync(legacyPath, 'utf8'), 'foreign read-only evidence');
+  assert.equal(readFileSync(join(scratchDir, 'pr-after.json'), 'utf8').includes(head), true);
   t.diagnostic(`GHBUDGET common close: GraphQL=${graphql.length} REST=${rest.length} total=${calls.length}`);
   assert.equal(graphql.length, 2, 'the existing gh pr comment and merge commands use GraphQL');
   assert.equal(rest.length, 42);

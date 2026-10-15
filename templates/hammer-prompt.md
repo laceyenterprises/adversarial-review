@@ -73,6 +73,7 @@ export HAM_BASE_HEAD
 # Capture this once before edits. Start from this exact head; never change HAM_BASE_HEAD after a push.
 export HAM_REVIEWED_SHA='<<REVIEWED_SHA>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 export HAM_RISK_CLASS='<<RISK_CLASS>>' HAM_MERGE_METHOD='<<MERGE_METHOD>>'
+export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
@@ -520,7 +521,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
 Fetch the live PR and final review:
 
 ```bash
-ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > /tmp/ham-<<PR_NUMBER>>-pr-before.json
+ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_RUN_DIR/pr-before.json"
 ```
 
 Identify the newest authoritative adversarial review whose commit is
@@ -620,7 +621,7 @@ When the rebase loop above hits a conflict, this is the procedure to run only
 after `ham_release_merge_lease` has completed:
 
 ```bash
-BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)
+BASE_BRANCH=$(jq -r '.baseRefName' "$HAM_RUN_DIR/pr-after.json")
 HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName')
 ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
 git checkout "$HEAD_BRANCH"
@@ -657,9 +658,9 @@ done
 HAM_COMMIT_PUBLICATION_ONLY=1
 export HAM_COMMIT_PUBLICATION_ONLY
 GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
-  "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render > /tmp/ham-<<PR_NUMBER>>-publish-commits.sh || exit 1
+  "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render > "$HAM_RUN_DIR/publish-commits.sh" || exit 1
 GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
-  source /tmp/ham-<<PR_NUMBER>>-publish-commits.sh || exit 1
+  source "$HAM_RUN_DIR/publish-commits.sh" || exit 1
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
@@ -673,10 +674,10 @@ In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/ha
 
 
 ```bash
-ham_pr --json reviews > /tmp/ham-<<PR_NUMBER>>-reviews.json
+ham_pr --json reviews > "$HAM_RUN_DIR/reviews.json"
 
-base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" | jq -sRr @uri)
-protection_err="/tmp/ham-<<PR_NUMBER>>-protection.stderr"
+base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$HAM_RUN_DIR/pr-after.json")" | jq -sRr @uri)
+protection_err="$HAM_RUN_DIR/protection.stderr"
 trap 'rm -f "$protection_err"; ham_release_merge_lease' EXIT
 # HAMBG-02: GitHub's live wording. A private repo on the free plan answers
 # "Upgrade to GitHub Pro or make this repository public to enable this
@@ -689,15 +690,15 @@ protection_attempt=1
 protection_max_attempts=3
 while true; do
   : > "$protection_err"
-  if ham_gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ham-<<PR_NUMBER>>-protection.json 2> "$protection_err"; then
+  if ham_gh api "repos/<<REPO>>/branches/$base_enc/protection" > "$HAM_RUN_DIR/protection.json" 2> "$protection_err"; then
     break
   fi
   if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
-    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > /tmp/ham-<<PR_NUMBER>>-protection.json
+    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > "$HAM_RUN_DIR/protection.json"
     break
   fi
   if grep -Eiq "$protection_not_protected_re" "$protection_err"; then
-    jq -n '{ status: "404", message: "Branch not protected" }' > /tmp/ham-<<PR_NUMBER>>-protection.json
+    jq -n '{ status: "404", message: "Branch not protected" }' > "$HAM_RUN_DIR/protection.json"
     break
   fi
   if [ "$protection_attempt" -lt "$protection_max_attempts" ] && grep -Eiq "$protection_transient_re" "$protection_err"; then
@@ -710,15 +711,15 @@ while true; do
   cat "$protection_err" >&2
   exit 1
 done
-ham_gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR_NUMBER>>-timeline.json
-ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json"
+ham_gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > "$HAM_RUN_DIR/timeline.json"
+ham_gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > "$HAM_RUN_DIR/commit.json"
 ```
 
 Remediate, rebase and validate; reuse an already-fixed head. Proven fleet
 ancestry merges under lease; failed proofs request one exact-head review for
 daemon closure, never operator escalation.
 
-Write `${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json`. The entitled audit
+Write `$HAM_RUN_DIR/terminal-remediation.json`. The entitled audit
 must record `HAM-Validated-Head: <exact SHA>`.
 Start from the captured `HAM_BASE_HEAD`. Prove it first using the reviewed head,
 an App-authored `HAM-Base-Head` / `HAM-Validated-Head` chain, or completed
@@ -734,7 +735,7 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-  > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json" || {
+  > "$HAM_RUN_DIR/range.json" || {
     # Every failed provenance proof uses exact-head review.
     ham_release_merge_lease
     HAM_REVIEW_ROUTE_NOTICE=$(printf '%s' "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review." |
@@ -792,18 +793,18 @@ chmod 600 "$HAM_VERDICT_FILE"
 export HAM_VERDICT_FILE
 HAM_VERDICT_READY_FILE=""
 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/ama-check.mjs \
-  --pr /tmp/ham-<<PR_NUMBER>>-pr-after.json \
-  --reviews /tmp/ham-<<PR_NUMBER>>-reviews.json \
-  --protection /tmp/ham-<<PR_NUMBER>>-protection.json \
-  --timeline /tmp/ham-<<PR_NUMBER>>-timeline.json \
+  --pr "$HAM_RUN_DIR/pr-after.json" \
+  --reviews "$HAM_RUN_DIR/reviews.json" \
+  --protection "$HAM_RUN_DIR/protection.json" \
+  --timeline "$HAM_RUN_DIR/timeline.json" \
   --repo <<REPO>> \
   --root-dir <<ROOT_DIR>> \
   --reviewed-sha <<REVIEWED_SHA>> \
   --reviewer <<REVIEWER>> \
   --risk-class <<RISK_CLASS>> \
-  --ham-terminal-remediation "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-terminal-remediation.json" \
-  --ham-commit "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-commit.json" \
-  --ham-range "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json" \
+  --ham-terminal-remediation "$HAM_RUN_DIR/terminal-remediation.json" \
+  --ham-commit "$HAM_RUN_DIR/commit.json" \
+  --ham-range "$HAM_RUN_DIR/range.json" \
   --primary-change "$HAM_PRIMARY_CHANGE_FILE" \
   > "$HAM_VERDICT_FILE" || exit 1
 HAM_VERDICT_READY_FILE="$HAM_VERDICT_FILE"

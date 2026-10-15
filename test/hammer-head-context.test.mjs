@@ -180,7 +180,7 @@ test('dispatched prompt exports the daemon root used by completed-round verifica
   writeFileSync(join(dir, 'fixture__repo-pr-1-round.json'), JSON.stringify({ repo: 'fixture/repo', prNumber: 1,
     status: 'completed', remediationPlan: { rounds: [{ state: 'completed',
       startHeadSha: 'reviewed', resultingHeadSha: 'head' }] } }));
-  const prompt = composeCloserPrompt({ rootDir: f.root, hqRoot: join(f.root, 'hq'), hqOwnerUser: 'fixture',
+  const prompt = composeCloserPrompt({ rootDir: f.root, scratchDir: f.root, hqRoot: join(f.root, 'hq'), hqOwnerUser: 'fixture',
     templateBody: template });
   const exportLine = prompt.split('\n').find(line => line.startsWith('export HAM_ROOT_DIR='));
   assert.ok(exportLine);

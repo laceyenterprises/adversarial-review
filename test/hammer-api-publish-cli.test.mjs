@@ -277,7 +277,7 @@ else if (args[1] === 'graphql') {
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root,
       AGENT_OS_CONFIG_PATH: config, GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'budget.json'),
       GH_TOKEN: 'synthetic-token', HAMMER_LACEY_GH_TOKEN: 'synthetic-token',
-      HAM_ROOT_DIR: repoRoot, HAM_NODE_BIN: process.execPath, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: pr,
+      HAM_RUN_DIR: root, HAM_ROOT_DIR: repoRoot, HAM_NODE_BIN: process.execPath, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: pr,
       HAM_PR_URL: `https://github.com/fixture/repo/pull/${pr}`, HAM_REVIEWED_SHA: reviewed, HAM_BASE_HEAD: reviewed,
       HAM_AUDIT_REMEDIATED_TOTAL: '1', HAM_AUDIT_REMEDIATED_BLOCKING: '1', HAM_AUDIT_REMEDIATED_NON_BLOCKING: '0',
       HAM_FAILING_TESTS_FIXED: 'suite already green', HAM_DOC_CURRENCY: 'not applicable',
@@ -316,7 +316,7 @@ source "$1"
       protection: { required_status_checks: { contexts: ['agent-os/adversarial-gate'] } },
       timeline: comments.map(comment => ({ event: 'commented', ...comment })),
       'ham-terminal-remediation': evidence, 'ham-commit': rawCommit, 'primary-change': primary,
-      'ham-range': JSON.parse(readFileSync(join(env.TMPDIR, `ham-${pr}-range.json`), 'utf8')) };
+      'ham-range': JSON.parse(readFileSync(join(env.HAM_RUN_DIR, 'range.json'), 'utf8')) };
     const args = [];
     for (const [key, value] of Object.entries(paths)) {
       const path = join(root, `${key}.json`); writeFileSync(path, JSON.stringify(value)); args.push(`--${key}`, path);

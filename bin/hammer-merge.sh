@@ -18,7 +18,7 @@ HAM_REMOTE_CI_POLL_SECONDS="${HAM_REMOTE_CI_POLL_SECONDS:-30}"
 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3}"
 HAM_MERGE_RETRY_CAP="${HAM_MERGE_RETRY_CAP:-4}"
 HAM_MERGE_BACKOFF_BASE_SECONDS="${HAM_MERGE_BACKOFF_BASE_SECONDS:-2}"
-HAM_MERGE_TMP_PREFIX="${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${HAM_MERGE_LEASE_ID:-no-lease}-$$"
+HAM_MERGE_TMP_PREFIX="<<RUN_DIR>>/${HAM_MERGE_LEASE_ID:-no-lease}-$$"
 HAM_MERGE_STDOUT=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stdout.XXXXXX") || { ham_release_merge_lease; return 1; }
 HAM_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stderr.XXXXXX") || { ham_release_merge_lease; return 1; }
 HAM_GATE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.github-gate.XXXXXX") || { ham_release_merge_lease; return 1; }
@@ -259,13 +259,13 @@ ham_fire_watcher_merge_wake() {
     --pr <<PR_NUMBER>> \
     --head-sha "$POST_REMEDIATION_SHA" \
     --reason hammer-pr-eligible \
-    > /tmp/ham-<<PR_NUMBER>>-watcher-wake.json; then
+    > "<<RUN_DIR>>/watcher-wake.json"; then
     echo "HAM watcher wake fired for eligible head ${POST_REMEDIATION_SHA}" >&2
     return 0
   fi
   HAM_WATCHER_WAKE_EXIT=$?
   echo "HAM watcher wake hook failed (exit ${HAM_WATCHER_WAKE_EXIT}); continuing with held merge lease" >&2
-  cat /tmp/ham-<<PR_NUMBER>>-watcher-wake.json >&2 || true
+  cat "<<RUN_DIR>>/watcher-wake.json" >&2 || true
   return 0
 }
 
@@ -690,7 +690,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     local ham_pph_out_var="$2"
     shift 2
     local ham_pph_attempts=0
-    local ham_pph_stderr="/tmp/ham-<<PR_NUMBER>>-${ham_pph_label}.stderr"
+    local ham_pph_stderr="<<RUN_DIR>>/${ham_pph_label}.stderr"
     local ham_pph_output=""
     while [ "$ham_pph_attempts" -lt "$HAM_MERGE_RETRY_CAP" ]; do
       ham_pph_attempts=$((ham_pph_attempts + 1))

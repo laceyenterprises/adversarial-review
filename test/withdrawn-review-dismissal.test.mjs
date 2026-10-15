@@ -140,7 +140,7 @@ esac
     const python = join(bin, 'fixture-python'); writeFileSync(python, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const verdict = join(dir, 'verdict.json');
     writeFileSync(verdict, JSON.stringify({ eligible: true, trace: { headMatch: { current: headSha }, branchProtection: { required: true } } }));
-    const env = { ...process.env, HAM_ROOT_DIR: dir, HAM_PR_URL: 'https://github.com/fixture/repo/pull/42',
+    const env = { ...process.env, HAM_RUN_DIR: dir, HAM_ROOT_DIR: dir, HAM_PR_URL: 'https://github.com/fixture/repo/pull/42',
       HAM_REPO: repo, HAM_PR_NUMBER: '42', HAM_REVIEWED_SHA: headSha, HAM_TARGET_REMEDIATION_SHA: headSha,
       HAM_RISK_CLASS: 'critical', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_REVIEWER: 'codex',
       HAM_AMA_TRAILERS: composeAmaTrailers({ workerClass: 'hammer', reviewerFamily: 'codex', riskClass: 'critical',

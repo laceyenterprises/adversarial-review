@@ -72,7 +72,7 @@ HAM_BUILT_HEAD=$(git rev-parse HEAD) || { ham_publish_abort 1; return 1; }
 if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ] ||
   ! /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
     <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-    > "${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-range.json"; then
+    > "<<RUN_DIR>>/range.json"; then
   HAM_PHASE_OUTCOME=exact-head-review-required
   ham_publish_abort 20; return 20
 fi

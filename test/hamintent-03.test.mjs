@@ -171,7 +171,7 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
     }
   `);
   writeFileSync(join(directory, 'gh'), '#!/bin/sh\necho offline-fixture-gh >&2\nexit 1\n', { mode: 0o755 });
-  const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '1',
+  const env = { ...process.env, PATH: `${directory}:${process.env.PATH}`, HAM_RUN_DIR: directory, HAM_ROOT_DIR: root, HAM_REPO: 'fixture/repo', HAM_PR_NUMBER: '1',
     HAM_PR_URL: 'https://github.com/fixture/repo/pull/1',
     HAM_REVIEWED_SHA: author, HAM_TARGET_REMEDIATION_SHA: head, HAM_MERGE_METHOD: 'squash',
     HAM_HQ_ROOT: directory, HAM_REVIEWER: 'claude', HAM_RISK_CLASS: 'low',

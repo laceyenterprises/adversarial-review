@@ -50,6 +50,8 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
+  rmSync,
   readFileSync,
   statSync,
   writeFileSync,
@@ -974,6 +976,30 @@ function hammerCloserWorkerIdFromRecord(prNumber, record = null, fallbackScope =
   return hammerCloserWorkerId(prNumber, fallbackScope);
 }
 
+// Keep each run's evidence under watcher-owned state, with no shared scratch names.
+export function createHammerScratchDir(promptDir) {
+  mkdirSync(promptDir, { recursive: true });
+  const scratchDir = mkdtempSync(join(promptDir, 'hammer-scratch-'));
+  chmodSync(scratchDir, 0o700);
+  return scratchDir;
+}
+
+function cleanupHammerScratchDir(record, logger = console) {
+  const scratchDir = record?.scratchDir;
+  // Records from before HAMTMP-01 have no directory. Restrict removal to the
+  // exact child namespace we create; never follow a record outside prompt state.
+  if (!scratchDir || !record.promptDir
+    || dirname(resolve(scratchDir)) !== resolve(record.promptDir)
+    || !basename(scratchDir).startsWith('hammer-scratch-')) return;
+  try { rmSync(scratchDir, { recursive: true, force: true }); }
+  catch (err) {
+    const message = `hammer scratch cleanup failed: ${err.message}`;
+    if (typeof logger?.warn === 'function') logger.warn(message);
+    else if (typeof logger?.error === 'function') logger.error(message);
+    else if (typeof logger === 'function') logger(message);
+  }
+}
+
 async function cleanupHammerCloserWorker({
   prNumber,
   workerClass,
@@ -1005,6 +1031,7 @@ async function cleanupHammerCloserWorker({
         status: 'ok',
         attempts: attempt + 1,
       }));
+      cleanupHammerScratchDir(existingRecord, logger);
       return { ok: true, workerId, reason, attempts: attempt + 1 };
     } catch (err) {
       const error = String(err?.stderr || err?.message || err);
@@ -1016,6 +1043,7 @@ async function cleanupHammerCloserWorker({
           status: 'not-found',
           attempts: attempt + 1,
         }));
+        cleanupHammerScratchDir(existingRecord, logger);
         return { ok: true, workerId, reason, alreadyAbsent: true, attempts: attempt + 1 };
       }
       const transient = isTransientHqDispatchError(error);
@@ -2047,6 +2075,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       lastObservedStatus: preserve ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
       terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
     }, null, 2)}\n`);
+    cleanupHammerScratchDir(current, options.log || options.logger);
     logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_capacity_reconciled', {
       repo: record.repo, prNumber: record.prNumber, launchRequestId: record.launchRequestId,
       terminalStatus, backend: probe.target?.backend || options.ledgerTarget?.backend || null,
@@ -2433,6 +2462,15 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
   const next = mutate(existing ? { ...existing } : null);
   if (!next) return existing;
   writeAmaCloserDispatchRecord(rootDir, identity, next);
+  // HQ cancellation also settles runs through this writer, without teardown.
+  // Only a fresh terminal observation owns cleanup; launch intents can carry
+  // a predecessor's status until dispatch returns and must retain new scratch.
+  const status = normalizeWorkerRunStatus(next.lastObservedStatus);
+  if (existing?.state !== 'dispatching' && next.state !== 'dispatching'
+    && status !== normalizeWorkerRunStatus(existing?.lastObservedStatus)
+    && AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(status)) {
+    cleanupHammerScratchDir(next);
+  }
   return next;
 }
 
@@ -3942,6 +3980,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.auditPath       — absolute path inside HQ_ROOT, used only inside the closer
  * @param {string} args.hqRoot          — HQ root path (closer passes to `ama-audit append --hq-root`)
  * @param {string} args.rootDir         — adversarial-review checkout root for ama-check ledger probes
+ * @param {string=} args.scratchDir     — private per-run scratch directory; omitted preserves <<RUN_DIR>> for dispatch-time substitution
  * @param {string} args.hqOwnerUser     — HQ owner user required for direct audit writes
  * @param {string} args.reviewedBy
  * @param {string} args.reviewer
@@ -3962,6 +4001,7 @@ export function composeCloserPrompt({
   auditPath,
   hqRoot,
   rootDir = SUBMODULE_ROOT,
+  scratchDir = '<<RUN_DIR>>',
   hqOwnerUser,
   reviewedBy,
   reviewer,
@@ -3985,6 +4025,7 @@ export function composeCloserPrompt({
     AUDIT_PATH: auditPath,
     HQ_ROOT: hqRoot,
     ROOT_DIR: rootDir,
+    RUN_DIR: scratchDir,
     HQ_OWNER: hqOwnerUser,
     REVIEWED_BY: reviewedBy,
     REVIEWER: reviewer,
@@ -4776,6 +4817,8 @@ export async function maybeDispatchAmaCloser({
     dispatchedAt: dispatchContext.dispatchedAt,
     amaTrailers,
     templateBody,
+    // Allocated only once the dispatch lease is acquired, below.
+    scratchDir: '<<RUN_DIR>>',
     strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
     // Forward the dispatch-time final-hammer observation only as context; the
     // closer's ama-check invocation recomputes exhaustion from the current
@@ -6447,13 +6490,6 @@ export async function maybeDispatchAmaCloser({
     promptDir,
     `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.md`,
   );
-  if (writeFileImpl) {
-    writeFileImpl(promptDir, promptPath, prompt);
-  } else {
-    mkdirSync(promptDir, { recursive: true });
-    writeFileSync(promptPath, prompt, { encoding: 'utf8' });
-  }
-
   // An interrupted in-flight dispatch already bumped retryCount before it was
   // killed without completing an attempt. Roll that phantom increment back so
   // the redispatch bound reflects only genuine completed failures and does not
@@ -6647,7 +6683,20 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  // Allocate only for a lease-owning launch attempt.
+  let scratchDir;
+  let retainScratchDir = false;
   try {
+  try {
+  scratchDir = createHammerScratchDir(promptDir);
+  prompt = substituteTemplate(prompt, { RUN_DIR: scratchDir });
+  if (writeFileImpl) {
+    writeFileImpl(promptDir, promptPath, prompt);
+  } else {
+    mkdirSync(promptDir, { recursive: true });
+    writeFileSync(promptPath, prompt, { encoding: 'utf8' });
+  }
+
     writeAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, {
       schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
       repo,
@@ -6661,6 +6710,7 @@ export async function maybeDispatchAmaCloser({
       workerId,
       promptPath,
       promptDir,
+      scratchDir,
       hqRoot,
       dispatchTimeoutMs,
       lastAttemptedAt: dispatchContext.dispatchedAt,
@@ -6983,6 +7033,8 @@ export async function maybeDispatchAmaCloser({
       }
     }
   }
+  // The final worker-liveness check has cleared the previous run.
+  cleanupHammerScratchDir(existingRecord, logger);
   const argsWithPriority = ['dispatch', '--priority', dispatchPriority, ...args.slice(1)];
   let activeArgs = argsWithPriority;
   let execResult;
@@ -7010,9 +7062,12 @@ export async function maybeDispatchAmaCloser({
         killSignal: 'SIGTERM',
         ...(signal ? { signal } : {}),
       });
+      retainScratchDir = true;
       throwIfAborted(signal);
       break;
     } catch (err) {
+      const launchEvidence = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
+      retainScratchDir ||= Boolean(launchEvidence.launchRequestId || launchEvidence.dispatchId);
       throwIfAborted(signal);
       // Older / forked `hq` that predates `--priority`: retry once without the
       // flag so the closer still dispatches (degraded to default-`normal`
@@ -7034,6 +7089,7 @@ export async function maybeDispatchAmaCloser({
       }
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
+      retainScratchDir ||= ambiguousLaunch;
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
       const dispatchError = formatHqDispatchError(err);
       if (branchHolderBlocked && isHammerWorkerClass(workerClass) && !samePrHammerHolderRetryUsed) {
@@ -7265,4 +7321,7 @@ export async function maybeDispatchAmaCloser({
     leasePath: leaseResult.leasePath,
     ...(leaseUpdateError ? { leaseUpdateError } : {}),
   };
+  } finally {
+    if (!retainScratchDir) cleanupHammerScratchDir({ scratchDir, promptDir }, logger);
+  }
 }

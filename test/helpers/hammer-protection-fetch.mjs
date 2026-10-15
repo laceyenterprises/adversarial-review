@@ -10,7 +10,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const PR_NUMBER = '4242';
 
 export const GITHUB_PLAN_UNAVAILABLE_STDERR =
   'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)';
@@ -20,7 +19,7 @@ export const BRANCH_NOT_PROTECTED_STDOUT =
 
 export function hammerProtectionFetchScript() {
   const template = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
-  const start = template.indexOf('protection_err="/tmp/ham-<<PR_NUMBER>>-protection.stderr"');
+  const start = template.indexOf('protection_err="$HAM_RUN_DIR/protection.stderr"');
   if (start < 0) throw new Error('hammer prompt has no protection fetch loop');
   const end = template.indexOf('\ndone\n', start);
   if (end < 0) throw new Error('hammer prompt protection fetch loop has no closing done');
@@ -41,13 +40,14 @@ export function runHammerProtectionFetch({ stdout = '', stderr = '', exitCode = 
       '',
     ].join('\n'));
     chmodSync(ghStub, 0o755);
-    const protectionPath = join(dir, `ham-${PR_NUMBER}-protection.json`);
+    const protectionPath = join(dir, 'protection.json');
     const script = [
       `ham_gh() { "${process.execPath}" "${REPO_ROOT}/bin/metered-gh.mjs" exec "$@"; }`,
+      `HAM_RUN_DIR='${dir}'`,
       'base_enc=main',
       'ham_release_merge_lease() { :; }',
       hammerProtectionFetchScript()
-        .replaceAll('/tmp/ham-<<PR_NUMBER>>', join(dir, `ham-${PR_NUMBER}`))
+        .replaceAll('<<RUN_DIR>>', dir)
         .replaceAll('<<REPO>>', 'laceyenterprises/example'),
     ].join('\n');
     const result = spawnSync('bash', ['-c', script], {

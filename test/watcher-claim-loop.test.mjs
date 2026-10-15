@@ -2407,8 +2407,9 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 }
 
-for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota', 'overdue']) test(capacity === 'overdue'
+for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota', 'overdue', 'spawn-throw', 'spawn-refusal', 'spawn-started-failure']) test(capacity === 'overdue'
   ? 'WAKESTARVE-01: production discovery admits overdue work before newer wakes'
+  : capacity === 'spawn-started-failure' ? 'WAKESTARVE-01: a started process consumes its wake even when review fails'
   : `WAKESTARVE-01: production ${capacity} deferral retains a wake across polls`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-retained-wake-'));
   try {
@@ -2454,7 +2455,35 @@ for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota
         }
       `;
     }
-    let loader = buildLoaderSource();
+    let loader = buildLoaderSource(capacity.startsWith('spawn-') ? {
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return { spawnReviewer: async (payload) => {
+            if (!globalThis.__wakeTestSeats) {
+              if (${capacity === 'spawn-throw'}) throw new Error('synthetic spawn failure');
+              if (${capacity === 'spawn-started-failure'}) {
+                payload.onReviewerPgid({ pgid: 123456, spawnedAt: new Date().toISOString() });
+              }
+              return { ok: false, failureClass: 'fixture-failure', stderr: '' };
+            }
+            globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+            payload.onReviewerPgid({ pgid: 123456, spawnedAt: new Date().toISOString() });
+            assertWakeConsumed(payload);
+            return { ok: true, stdout: '', stderr: '' };
+          }, cancel: async () => {}, reattach: async () => ({}) };
+        }
+        function assertWakeConsumed(payload) {
+          if (globalThis.__retainedWakeStore.matches({ repoPath: payload.subjectContext.repo,
+            prNumber: payload.subjectContext.prNumber, headSha: payload.subjectContext.reviewerHeadSha })) {
+            throw new Error('wake must be consumed at confirmed process start');
+          }
+        }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    } : {});
     if (capacity === 'credential') loader = loader.replace(
       'export function shouldPauseReviewerModel() { return { paused: false }; }',
       'export function shouldPauseReviewerModel() { return { paused: !globalThis.__wakeTestSeats }; }');
@@ -2480,19 +2509,27 @@ for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota
           pollOptions.wakePayload = { repo: repoPath, pr_number: 102 };
         }
       `,
-      afterFirstPoll: capacity === 'overdue' ? `
+      afterFirstPoll: capacity === 'spawn-started-failure' ? `
+        assert.equal(globalThis.__retainedWakeStore.matches({ repoPath, prNumber: 101, headSha: 'sha-happy-101' }), false);
+      ` : capacity === 'overdue' ? `
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns[0].subjectContext.prNumber, 101);
       ` : `
         const retained = globalThis.__retainedWakeStore;
         assert.equal(retained.matches({ repoPath, prNumber: 101, headSha: 'sha-happy-101' }), true);
         assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).length, 0);
         globalThis.__wakeTestSeats = 1;
+        if (${capacity.startsWith('spawn-')}) {
+          // Model the existing retry lane admitting this failed head again.
+          db.prepare("UPDATE reviewed_prs SET review_status = 'pending', review_attempts = 0, failed_at = NULL, reviewer_session_uuid = NULL WHERE pr_number = 101").run();
+        }
         pollOptions.wakePayload = { repo: repoPath, pr_number: 102 };
         await pollOnce(octokit, pollOptions);
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns[0].subjectContext.prNumber, 101);
         assert.equal(retained.matches({ repoPath, prNumber: 101, headSha: 'sha-happy-101' }), false);
       `,
-    }));
+    }).replace('await pollOnce(octokit, pollOptions);', capacity === 'spawn-throw'
+      ? "await assert.rejects(pollOnce(octokit, pollOptions), /synthetic spawn failure/);"
+      : 'await pollOnce(octokit, pollOptions);'));
     const run = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
       cwd: REPO_ROOT, encoding: 'utf8', timeout: 30_000,
       env: fixtureEnv({ ...installGhFixture(tmp),
@@ -2500,7 +2537,7 @@ for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota
     });
     const output = `${run.stdout || ''}${run.stderr || ''}`;
     assert.equal(run.status, 0, output);
-    assert.match(output, capacity === 'overdue'
+    if (capacity !== 'spawn-started-failure') assert.match(output, capacity === 'overdue'
       ? /reviewer priority dispatch .*retained_wake=false wait_threshold_exceeded=true/
       : /reviewer priority dispatch .*retained_wake=true/);
     if (capacity === 'quota' || capacity === 'fallback-quota') {

@@ -64,7 +64,8 @@ test('terminal observations and authoritative closure remove retained wakes', as
   store.retain(identity);
   store.observe({ ...identity, terminal: true });
   assert.deepEqual(store.subjects(), []);
-  for (const live of [{ state: 'closed' }, { state: 'open', mergedAt: '2026-01-01T00:00:00Z' }]) {
+  for (const live of [{ state: 'closed' }, { state: 'CLOSED' }, { state: 'merged' },
+    { state: 'MERGED' }, { state: 'open', mergedAt: '2026-01-01T00:00:00Z' }]) {
     store.retain(identity);
     await store.reconcileMissing({ repoPath: identity.repoPath, discoveredPrNumbers: new Set(),
       readLive: async () => live });

@@ -24,8 +24,11 @@ newest 64 subjects.
 ## Retained priority
 
 Retained wakes survive restarts without a TTL. A changed head, terminal subject
-observation or settled dispatch removes them. For subjects absent from open PR
-discovery, a live read confirms closure or head movement, accepting either raw
+observation or confirmed reviewer process start removes them. Failed launches
+preserve priority, including fresh wakes consumed in that tick. Successful
+runtime results also settle priority when an adapter has no process callback.
+For subjects absent from open PR discovery, a live read confirms closure or
+merge (case-insensitive states or a merge timestamp) or head movement, accepting either raw
 `headRefOid` or normalized `headSha`. Absence alone and failed live reads keep
 the record. A stale dispatch cannot remove a wake retained for a newer head.
 Malformed records and write failures do not refuse ordinary reviewer admission.

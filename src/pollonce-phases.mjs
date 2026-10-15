@@ -3836,6 +3836,7 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
                   reviewerProcessStarted = true;
+                  retainedWatcherWakes?.drop(wakeIdentity);
                   healthProbe?.recordSpawn?.(healthTick, {
                     repo: repoPath,
                     prNumber,
@@ -3880,7 +3881,6 @@ export async function processReviewSubject(entry, ctx) {
                   + `retained_wake=${Boolean(dispatchCandidate.retainedWakePriority)} `
                   + `wait_threshold_exceeded=${waitThresholdExceeded}`);
               }
-              retainedWatcherWakes?.drop(wakeIdentity);
               reviewerSpawned = true;
               if (depthSpillReserved) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
@@ -3902,6 +3902,7 @@ export async function processReviewSubject(entry, ctx) {
                   })
                   : await spawnReviewer(spawnReviewerArgs);
               } catch (error) {
+                if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
                 if (credentialProbeReservation?.probe && !reviewerProcessStarted) {
                   try {
                     releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
@@ -3911,6 +3912,10 @@ export async function processReviewSubject(entry, ctx) {
                 }
                 throw error;
               }
+              // Some runtime adapters settle without a process-start callback.
+              // A failed launch keeps even a fresh, already-consumed wake alive.
+              if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);
+              else if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
               if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
                 try {
                   releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);

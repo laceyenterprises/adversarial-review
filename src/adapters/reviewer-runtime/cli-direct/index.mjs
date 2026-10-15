@@ -520,7 +520,7 @@ function createCliDirectReviewerRuntimeAdapter({
               changedLines: Number.MAX_SAFE_INTEGER, env: reviewerEnv,
             }) * 1000)
             : isGeminiModel(req.model)
-              ? Math.max(req.timeoutMs || 0, resolveGeminiReviewerProcessTimeoutMs(reviewerEnv))
+              ? req.timeoutMs || resolveGeminiReviewerProcessTimeoutMs(reviewerEnv)
               : req.timeoutMs || resolveReviewerTimeoutMs(reviewerEnv),
           progressTimeout: resolveProgressTimeoutForModel(req.model, reviewerEnv),
           signal: controller.signal,

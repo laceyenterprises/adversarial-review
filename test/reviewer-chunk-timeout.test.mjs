@@ -169,3 +169,25 @@ test('CHUNKTIME-01: prompt bytes include context and repeated context increases 
   }
   assert.ok(counts[1] > counts[0], `${counts}`);
 });
+
+
+test('CHUNKTIME-01: the outer Gemini runtime defaults to the cap and honors an explicit bound', async () => {
+  const { createCliDirectReviewerRuntimeAdapter } = await import('../src/adapters/reviewer-runtime/cli-direct/index.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'chunk-runtime-'));
+  const seen = [];
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({ rootDir,
+      preflightImpl: async () => ({ ok: true }),
+      spawnCapturedImpl: async (_command, _args, options) => {
+        seen.push(options.timeout);
+        return { stdout: '', stderr: '' };
+      },
+    });
+    for (const [sessionUuid, timeoutMs] of [['synthetic-default', undefined], ['synthetic-explicit', 100]]) {
+      await adapter.spawnReviewer({ model: 'gemini', prompt: '', timeoutMs, sessionUuid,
+        subjectContext: { domainId: 'code-pr', repo: 'example/project', prNumber: 1 } });
+    }
+    assert.equal(seen[0], timeouts.resolveGeminiReviewerProcessTimeoutMs());
+    assert.equal(seen[1], 100);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

@@ -5,13 +5,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'acorn';
+import { recoveryDigest, recoveryRecordPath, withCommentOnlyRecovery } from '../src/comment-only-recovery-record.mjs';
 import { postRemediationOutcomeComment, extractRemediationCommentMarker } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
-import { markFollowUpJobCompleted, markFollowUpJobFailed, markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
+import { archiveStoppedFollowUpJobs, markFollowUpJobCompleted, markFollowUpJobFailed, markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
 import { completeWorkerPublishedHead } from '../src/remediation-published-head.mjs';
 import {
   buildReconcileCommentDelivery,
   deliveryLockPath,
   deliveryRetryIndexDir,
+  historicalDeliverySidecarPath,
   REMEDIATION_REPLY_BACKFILL_SENTINEL,
   retryFailedCommentDeliveries,
   seedDeliveryRetryIndexFromHistory,
@@ -323,4 +325,76 @@ test('REMCOMMENT-01: backfill scans history once and retains the existing attemp
   }));
   assert.equal((await sweep()).retried, 0, 'the one-time migration must not scan history again');
   assert.equal(JSON.parse(readFileSync(laterPath, 'utf8')).commentDelivery, undefined);
+});
+
+for (const archivedBeforeBackfill of [true, false]) {
+  test(`REMCOMMENT-01: archived stopped records retain their owed reply (archived before backfill=${archivedBeforeBackfill})`, async t => {
+    const f = fixture(t);
+    const old = legacyTerminal(f, { status: 'stopped' });
+    writeFileSync(old.jobPath, JSON.stringify({ ...old.job, stoppedAt: completedAt }));
+    const archive = () => archiveStoppedFollowUpJobs({ rootDir: f.rootDir,
+      nowMs: Date.parse('2026-01-04T00:00:00.000Z'),
+    });
+    let attempts = 0;
+    const sweep = () => retryFailedCommentDeliveries({ rootDir: f.rootDir, log,
+      postCommentImpl: async ({ body }) => {
+        assert.ok(body.includes(f.payload.summary));
+        attempts++;
+        return archivedBeforeBackfill || attempts > 1
+          ? { posted: true } : { posted: false, reason: 'gh-cli-failure' };
+      },
+    });
+    let archived;
+    if (archivedBeforeBackfill) archived = archive();
+    else {
+      assert.equal((await sweep()).failed, 1);
+      archived = archive();
+    }
+    assert.equal(archived.archived, 1);
+    assert.equal((await sweep()).posted, 1);
+    assert.equal((await sweep()).retried, 0);
+    assert.equal(JSON.parse(readFileSync(archived.archivedPaths[0], 'utf8')).commentDelivery.posted, true);
+    assert.equal(attempts, archivedBeforeBackfill ? 1 : 2);
+  });
+}
+
+test('REMCOMMENT-01: comment backfill and archival preserve digest-pinned final-round recovery authority', async t => {
+  const f = fixture(t);
+  const old = legacyTerminal(f, { status: 'stopped' });
+  const job = { ...old.job, stoppedAt: completedAt, finalRound: 'comment-only', completion: { withheldPushHeadSha: headSha } };
+  writeFileSync(old.jobPath, JSON.stringify(job));
+  const sourceBytes = readFileSync(old.jobPath, 'utf8');
+  const recoveryPath = recoveryRecordPath(f.rootDir, job.jobId, 1);
+  mkdirSync(dirname(recoveryPath), { recursive: true });
+  writeFileSync(recoveryPath, JSON.stringify({ schemaVersion: 1, jobId: job.jobId,
+    repo: job.repo, prNumber: job.prNumber, sourceDigest: recoveryDigest(job),
+    reviewedHead: job.revisionRef, head: headSha, completed: true,
+    completion: { workerPushedHeadSha: headSha,
+      workerPushProof: { method: 'git-cherry-replay', generatedIndexPolicy: 'agent-os-main-index-v1' },
+      finalRoundOutcome: { completed: true } },
+  }));
+  assert.ok(withCommentOnlyRecovery(f.rootDir, job).finalRoundRecovery);
+  let posts = 0;
+  const sweep = () => retryFailedCommentDeliveries({ rootDir: f.rootDir, log,
+    postCommentImpl: async ({ body }) => {
+      assert.ok(body.includes(f.payload.summary));
+      posts++;
+      return posts > 1 ? { posted: true } : { posted: false, reason: 'gh-cli-failure' };
+    },
+  });
+  assert.equal((await sweep()).failed, 1);
+  assert.equal(readFileSync(old.jobPath, 'utf8'), sourceBytes);
+  const archived = archiveStoppedFollowUpJobs({ rootDir: f.rootDir,
+    nowMs: Date.parse('2026-01-04T00:00:00.000Z'),
+  });
+  assert.equal(archived.archived, 1);
+  const archivedPath = archived.archivedPaths[0];
+  assert.equal((await sweep()).posted, 1);
+  assert.equal((await sweep()).retried, 0);
+  assert.equal(posts, 2);
+  assert.equal(readFileSync(archivedPath, 'utf8'), sourceBytes, 'historical terminal bytes are authority evidence');
+  assert.ok(withCommentOnlyRecovery(f.rootDir, JSON.parse(sourceBytes)).finalRoundRecovery);
+  const delivery = JSON.parse(readFileSync(historicalDeliverySidecarPath(archivedPath), 'utf8'));
+  assert.equal(delivery.posted, true);
+  assert.equal(delivery.attempts, 2);
 });

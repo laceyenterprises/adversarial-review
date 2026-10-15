@@ -381,6 +381,8 @@ test('AGYTOKEN-02: added identities require token readiness and retain older-hel
       [`ready token with keychain ${item}`, { ...ready, 'keychain.item': item }, null]),
     ...['missing', 'wrong-owner', 'wrong-mode', 'not-regular', 'symlinked-parent', 'home-not-0700', 'unreadable', 'unknown', ''].map((file) =>
       [`token file ${file || 'empty'}`, { ...ready, 'token.file': file }, `agy token file ${file || 'unknown'}`]),
+    ...['missing', 'unreadable', 'unknown', ''].map((file) =>
+      [`token file ${file || 'empty'} without metadata`, { ...ready, 'token.file': file, 'token.owner': undefined, 'token.mode': undefined }, `agy token file ${file || 'unknown'}`]),
     ['wrong owner', { ...ready, 'token.owner': 'no' }, 'agy token owner no (expected yes)'],
     ['wrong mode', { ...ready, 'token.mode': '644' }, 'agy token mode 644 (expected 600)'],
     ['home not 0700', { ...ready, 'home.mode': '755' }, 'agy home mode 755 (expected 700)'],

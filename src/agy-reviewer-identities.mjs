@@ -819,9 +819,12 @@ function createAgyReviewerIdentityPool({
       const fields = parseHelperKeyValues(status.stdout);
       if (fields['keychain.exists'] !== 'yes') reasons.push('login keychain missing');
       if (Object.prototype.hasOwnProperty.call(fields, 'token.file')) {
-        if (fields['token.file'] !== 'ready') reasons.push(`agy token file ${fields['token.file'] || 'unknown'}`);
-        if (fields['token.owner'] !== 'yes') reasons.push(`agy token owner ${fields['token.owner'] || 'unknown'} (expected yes)`);
-        if (fields['token.mode'] !== '600') reasons.push(`agy token mode ${fields['token.mode'] || 'unknown'} (expected 600)`);
+        if (fields['token.file'] !== 'ready') {
+          reasons.push(`agy token file ${fields['token.file'] || 'unknown'}`);
+        } else {
+          if (fields['token.owner'] !== 'yes') reasons.push(`agy token owner ${fields['token.owner'] || 'unknown'} (expected yes)`);
+          if (fields['token.mode'] !== '600') reasons.push(`agy token mode ${fields['token.mode'] || 'unknown'} (expected 600)`);
+        }
         if (fields['home.mode'] !== '700') reasons.push(`agy home mode ${fields['home.mode'] || 'unknown'} (expected 700)`);
         if (fields['keychain.item'] !== 'readable') {
           log.debug?.(`[agy-identities] identity=${state.user} keychain.item=${fields['keychain.item'] || 'unknown'} (diagnostic only)`);

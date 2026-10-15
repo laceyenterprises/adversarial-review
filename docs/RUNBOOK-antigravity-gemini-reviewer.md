@@ -212,7 +212,9 @@ An identity is isolated when:
 - the added identity's helper reports a token file that is not ready, is not
   owned by that identity (`token.owner=yes`), is not mode `600`, or has a home
   directory mode other than `700`. This is the token file background reviews
-  read. When `token.file` is present, `keychain.item` is diagnostic only;
+  read. Ownership and file-mode diagnostics are checked only when the token
+  file is ready; the home-directory mode check remains independent.
+  When `token.file` is present, `keychain.item` is diagnostic only;
   when an older pinned helper omits `token.file`, the watcher retains the
   `keychain.item=readable` requirement until that helper is re-installed;
 - its settings drift from the HQ-owner path's effective agy settings;

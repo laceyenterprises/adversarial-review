@@ -124,14 +124,15 @@ A new head starts a fresh budget. An explicit `retrigger-review:` operator
 request newer than the recorded failure, or a different reviewer build, permits
 one probe on the same head; a timeout from that probe parks again. Builds default
 to a process-start content digest of reviewer sources, runtime adapters and
-prompts. A deployment can supply `ADVERSARIAL_REVIEWER_BUILD_ID` instead. The
+reviewer prompts. A deployment can supply `ADVERSARIAL_REVIEWER_BUILD_ID` instead. The
 build is captured in pass metadata so reaping an old pass attributes its failure
 to the build that actually ran. Legacy files use the failed row's head and flat
 timeout count until a scoped failure is recorded.
 
 Timeout retries yield to waiting first-pass and re-review candidates in the
 shared WAKESTARVE-01 wake/wait ordering, including retries with retained wakes
-or long waits. A partial discovery wave containing such a retry waits for full
+or long waits. Timeout retries do not reserve first-pass lane capacity ahead
+of waiting re-reviews. A partial discovery wave containing such a retry waits for full
 discovery, so later subjects can enter that same ordering. Successful reviews
 clear cascade state as before. Real upstream failures retain the existing
 backoff and cap-override behavior.

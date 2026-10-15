@@ -428,7 +428,9 @@ function pendingLaneCounts(entries) {
   let firstPass = 0;
   let rereview = 0;
   for (const entry of entries) {
-    if (entry.started) continue;
+    // A timeout retry cannot reserve lane capacity ahead of fresh work.
+    // Its eventual admission still uses the shared priority comparator.
+    if (entry.started || entry.candidate?.sameHeadTimeoutRetry === true) continue;
     if (reviewerDispatchIsFirstPass(entry.candidate)) firstPass += 1;
     else rereview += 1;
   }

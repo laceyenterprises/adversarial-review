@@ -2060,3 +2060,16 @@ for (const laneState of [null, createReviewerLaneState({ firstPassBurstLimit: 1 
     assert.equal(claimed[0], 2, 'first-pass is claimed first at one seat');
   });
 }
+
+test('CASCADECAP-01 timeout retries cannot reserve a first-pass seat ahead of waiting re-review work', async () => {
+  const claimed = [];
+  const make = (id, options) => ({ repoPath: 'example/review-service', prNumber: id,
+    reviewerModel: 'gemini', run: async () => { claimed.push(id); }, ...options });
+  await runBoundedReviewerDispatchQueue([
+    make(1, { sameHeadTimeoutRetry: true, hasPriorPostedReview: false }),
+    make(2, { hasPriorPostedReview: true }),
+  ], { maxConcurrent: 2, geminiCredentialConcurrency: 2,
+    activeReviewerCounts: { __total__: 1, '__lane:rereview': 1, gemini: 1 },
+    singleWave: true, singleWaveSettleGraceMs: 0, logger: { log() {}, warn() {} } });
+  assert.equal(claimed[0], 2, 'the free identity seat goes to waiting re-review work');
+});

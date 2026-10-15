@@ -10,13 +10,13 @@ export const REVIEWER_TIMEOUT_REPEATED_REASON = 'reviewer-timeout-repeated-same-
 // build it actually ran even when a deployment replaces files on disk.
 function reviewerBuildDigest() {
   const hash = createHash('sha256');
-  const add = (relative) => {
+  const add = (relative, include = () => true) => {
     const url = new URL(relative, import.meta.url);
     const entries = readdirSync(url, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const path = `${relative}${entry.name}`;
-      if (entry.isDirectory()) add(`${path}/`);
-      else if (entry.isFile()) hash.update(path).update('\0').update(readFileSync(new URL(path, import.meta.url)));
+      if (entry.isDirectory()) add(`${path}/`, include);
+      else if (entry.isFile() && include(entry.name)) hash.update(path).update('\0').update(readFileSync(new URL(path, import.meta.url)));
     }
   };
   for (const name of readdirSync(new URL('.', import.meta.url)).sort()) {
@@ -25,7 +25,7 @@ function reviewerBuildDigest() {
     }
   }
   add('adapters/reviewer-runtime/');
-  add('../prompts/');
+  add('../prompts/', name => /^reviewer(?:\.|$)/.test(name));
   return hash.digest('hex');
 }
 

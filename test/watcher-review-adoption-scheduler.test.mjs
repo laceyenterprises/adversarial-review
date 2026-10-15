@@ -109,7 +109,7 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.ok(dagAutowalk < maintenanceLoop, 'dag autowalk remains ahead of per-repo maintenance');
   assert.ok(drainBeforePostedHandlers < maintenanceLoop, 'reviewer dispatch does not wait for merge-side maintenance');
   assert.match(
-    watcher,
+    readFileSync(path.join(ROOT, 'src', 'watcher-reviewer-dispatch.mjs'), 'utf8'),
     /activeReviewerCounts: detachedReviewerDispatchTracker\.activeCounts\(\),[\s\S]*onCandidateStarted: \(started\) => \{[\s\S]*startedCandidates\.add\(started\.candidate\);[\s\S]*detachedReviewerDispatchTracker\.track\(started\);/,
     'reviewer drains include detached pre-registration launch reservations in model caps',
   );

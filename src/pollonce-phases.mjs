@@ -3257,10 +3257,10 @@ export async function processReviewSubject(entry, ctx) {
               ? resolveReviewerCeilingSeconds({ changedLines: Number.MAX_SAFE_INTEGER }) * 1000
               : route.reviewerModel === 'gemini' ? resolveGeminiReviewerProcessTimeoutMs() : resolveReviewerTimeoutMs();
             const reviewerLeaseExpiresAt = computeReviewerLeaseExpiryAt(attemptAt, reviewerTimeoutMs);
-            // Release-driven claims snapshot under the same write lock as
-            // their CAS, rather than using the older dispatch admission row.
+            // Queued and release-driven claims snapshot under the same write lock
+            // as their CAS so a freshness refusal can refund the exact claim.
             let preClaimRow = null;
-            const releaseUnexecutedHoldReviewClaim = () => {
+            const releaseUnexecutedReviewClaim = () => {
               // Undo all claim and routing mutations in one session-guarded
               // UPDATE. Releasing to plain pending would erase failure evidence
               // and let the next tick bypass the bounded retry CAS.
@@ -3369,7 +3369,7 @@ export async function processReviewSubject(entry, ctx) {
                 repoPath,
                 prNumber
               );
-            const claim = holdReleaseId ? db.transaction(() => {
+            const claim = (holdReleaseId || reviewerPoolConfig.enabled) ? db.transaction(() => {
               preClaimRow = stmtGetReviewRow.get(repoPath, prNumber);
               return claimReviewer();
             }).immediate() : claimReviewer();
@@ -3472,7 +3472,7 @@ export async function processReviewSubject(entry, ctx) {
                 // state for this exact session, without granting a retry.
                 if (isOperatorHeld(freshPR.labels)) observeHoldRelease({ db, repo: repoPath, prNumber,
                   headSha: freshPR.headRefOid || subject.headSha, liveLabels: freshPR.labels });
-                releaseUnexecutedHoldReviewClaim();
+                releaseUnexecutedReviewClaim();
                 reviewerHeadDispatchLease.release(dispatchLeaseKey);
                 return { dispatched: false, reason: 'hold-reapplied-before-spawn' };
               }
@@ -3493,12 +3493,12 @@ export async function processReviewSubject(entry, ctx) {
               }
             } catch (err) {
               if (holdReleaseId) {
-                releaseUnexecutedHoldReviewClaim();
+                releaseUnexecutedReviewClaim();
                 reviewerHeadDispatchLease.release(dispatchLeaseKey);
                 return { dispatched: false, reason: 'hold-release-read-deferred' };
               }
               if (reviewerPoolConfig.enabled) {
-                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                releaseUnexecutedReviewClaim();
                 this.retainWakeForCapacity();
                 console.warn(`[watcher] queued reviewer freshness read deferred for ${repoPath}#${prNumber}: ${err?.message || err}`);
                 return { dispatched: false, reason: 'freshness-read-deferred' };

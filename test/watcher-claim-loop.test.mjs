@@ -3751,3 +3751,58 @@ for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 }
+
+test('SEATIDLE-01: unreadable queued freshness refunds an unexecuted bounded retry without losing failure evidence', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'seatidle-freshness-refund-'));
+  const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+  try {
+    let loader = buildLoaderSource().replace('const overrides = globalThis.__watcherClaimLoopFreshHeads || {};',
+      "if (prNumber === 101 && globalThis.__seatIdleReadError) throw new Error('synthetic unavailable state'); const overrides = globalThis.__watcherClaimLoopFreshHeads || {};");
+    loader = loader.replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace(
+            "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+            '({ org: "example", repos: ["example/review-fixture"] })');
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, seatIdleSynthetic(loader));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    let runner = buildRunnerSource({
+      prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+          review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref, failed_at,
+          failure_message, reviewer_session_uuid, reviewer_timeout_ms)
+          VALUES ('example/review-fixture', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
+            'failed', 1, '[]', 'sha-happy-101', 'prior-revision', '2026-05-15T12:01:00Z',
+            'Command failed with code 1', 'prior-session', 1234)\`).run();
+        const before = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+      `,
+      afterFirstPoll: `
+        const refunded = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
+        for (const key of ['review_status', 'review_attempts', 'reviewer_head_sha', 'failed_at',
+          'failure_message', 'reviewer_session_uuid', 'reviewer_timeout_ms']) {
+          assert.equal(refunded[key], before[key], 'refunded ' + key);
+        }
+        assert.ok(!globalThis.__watcherClaimLoopReviewerSpawns.some(s => s.subjectContext.prNumber === 101));
+        globalThis.__seatIdleReadError = false;
+        await pollOnce(octokit, pollOptions);
+        assert.equal(claims.filter(c => c.prNumber === 101).length, 2);
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
+      `,
+    });
+    runner = runner.replace('claims.push(payload);', `
+      claims.push(payload);
+      if (payload.prNumber === 101 && claims.filter(c => c.prNumber === 101).length === 1) globalThis.__seatIdleReadError = true;
+    `);
+    writeFileSync(runnerPath, seatIdleSynthetic(runner));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 15000,
+        env: fixtureEnv(installGhFixture(tmp)),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

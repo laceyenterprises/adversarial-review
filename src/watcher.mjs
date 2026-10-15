@@ -107,6 +107,7 @@ import {
   createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
 } from './watcher-wake.mjs';
+import { createReviewerDispatchDrain } from './watcher-reviewer-dispatch.mjs';
 import { createReviewerAdmissionQueue } from './watcher-reviewer-admission.mjs';
 import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
@@ -396,7 +397,7 @@ import {
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
 } from './reviewed-head-dispatch-gate.mjs';
-import { createFirstPassSpilloverController, prepareQueueDepthSpillover } from './review-queue-depth.mjs';
+import { createFirstPassSpilloverController } from './review-queue-depth.mjs';
 import { createReviewerBurstController } from './reviewer-burst-lease.mjs';
 import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
@@ -486,7 +487,6 @@ const watcherHealthProbe = createWatcherHealthProbe();
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const ADVERSARIAL_REVIEW_STATE_DIR = resolveAdversarialReviewStateDir(ROOT, process.env);
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
-const REVIEWER_DISPATCH_DRAIN_WARN_MS = 30_000;
 
 const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({ watcherConfig: config });
 const DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS = 900;
@@ -1205,69 +1205,13 @@ async function pollOnceWithinBudget(
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   const drainReviewerDispatchCandidates = reviewerAdmission.drain;
-  reviewerAdmission.setDrain(async (reason) => {
-    if (readWatcherDrainState().active || !reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
-      return { dispatched: 0, maxObservedConcurrency: 0 };
-    }
-    const candidates = reviewerDispatchCandidates.splice(0, reviewerDispatchCandidates.length);
-    const startedCandidates = new Set();
-    const startedAt = process.hrtime.bigint();
-    console.log(
-      `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
-    );
-    try {
-      // Unknown broker capacity uses the pool's conservative single-Gemini cap.
-      const geminiCredentialConcurrency =
-        await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
-      const orderedCandidates = await prepareQueueDepthSpillover(candidates, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
-      const drainResult = await runBoundedReviewerDispatchQueue(orderedCandidates, {
-        maxConcurrent: reviewerPoolConfig.maxConcurrent,
-        geminiCredentialConcurrency,
-        activeReviewerCounts: detachedReviewerDispatchTracker.activeCounts(),
-        usePersistentReviewerLaneState: true,
-        singleWave: true,
-        singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
-        splitPostReviewSettlement: admissionSettlementSplitEnabled,
-        onCandidateStarted: (started) => {
-          startedCandidates.add(started.candidate);
-          detachedReviewerDispatchTracker.track(started);
-        },
-        logger: console,
-      });
-      if (drainResult.deferred > 0) {
-        const deferredCandidates = Array.isArray(drainResult.deferredCandidates)
-          ? drainResult.deferredCandidates
-          : [];
-        reviewerDispatchCandidates.unshift(...deferredCandidates);
-        console.log(
-          `[watcher] reviewer dispatch drain yielded after one launch wave: ` +
-          `dispatched=${drainResult.dispatched} deferred=${drainResult.deferred} ` +
-          `max_observed_concurrency=${drainResult.maxObservedConcurrency}` +
-          (drainResult.deferredReasonSummary ? ` deferred_reasons=${drainResult.deferredReasonSummary}` : '')
-        );
-      }
-      return { ...drainResult, admissions: [...startedCandidates].map(candidate => candidate.admissionOutcome) };
-    } catch (error) {
-      reviewerDispatchCandidates.unshift(...candidates.filter(candidate => !startedCandidates.has(candidate)));
-      throw error;
-    } finally {
-      // Also settle reservations when the drain throws before returning its
-      // deferred list. Started candidates own their spawn/refusal settlement.
-      for (const candidate of candidates) {
-        if (!startedCandidates.has(candidate)) {
-          candidate.retainWakeForCapacity?.();
-          candidate.refundDepthSpill?.();
-        }
-      }
-      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
-      if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
-        console.warn(
-          `[watcher] reviewer dispatch drain exceeded SLA: ` +
-          `elapsed_ms=${Math.round(elapsedMs)} candidates=${candidates.length} reason="${reason}"`
-        );
-      }
-    }
-  });
+  reviewerAdmission.setDrain(createReviewerDispatchDrain({
+    reviewerPoolConfig, reviewerDispatchCandidates, firstPassSpilloverController,
+    detachedReviewerDispatchTracker, readWatcherDrainState,
+    resolveGeminiCredentialConcurrencyForDispatchCandidates,
+    singleWaveSettleGraceMs: reviewerDispatchSingleWaveSettleGraceMs,
+    splitPostReviewSettlement: admissionSettlementSplitEnabled,
+  }));
   const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({
     priorityDiscoveryPending, reviewerDispatchCandidates, batchSize: Math.max(1, reviewerPoolConfig.maxConcurrent || 1),
     countOpenPrsAwaitingFirstPassReview, drain: drainReviewerDispatchCandidates,

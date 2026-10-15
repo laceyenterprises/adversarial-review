@@ -783,6 +783,9 @@ export function afhReviewerFallbackDecision({
   });
 
   if (!baseRoute || baseRoute.configBroken) return notApplied('no-route');
+  if (grounding?.reason === 'afh-reviewer-fallback-disabled') {
+    return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled');
+  }
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
   // An explicit operator reviewer pin outranks the AFH degradation path, exactly

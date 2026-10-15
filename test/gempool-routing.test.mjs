@@ -204,3 +204,15 @@ test('GEMPOOL-01: unrelated bug-class failures still charge a review attempt', (
     assert.equal(attempts, 3);
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
+
+
+test('GEMPOOL-01: pool grounding preserves the existing AFH disable switch', async () => {
+  const pool = makePool(new Set(['owner-identity', 'reviewer-b']));
+  const baseRoute = { reviewerModel: 'gemini', builderClass: 'codex' };
+  const decision = afhReviewerFallbackDecision({ builderClass: 'codex', baseRoute,
+    grounding: { available: false, reason: 'afh-reviewer-fallback-disabled',
+      geminiPoolAvailability: await readReviewerGeminiPoolAvailability({ pool, adapter }) },
+    geminiReviewerMode: 'always-on' });
+  assert.equal(decision.applied, false);
+  assert.equal(applyAfhReviewerFallbackDecision(baseRoute, decision), baseRoute);
+});

@@ -1,3 +1,4 @@
+import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation } from './rate-limit-throttle.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
@@ -455,6 +456,30 @@ function adapterUnsupportedError(err) {
   return isUnsupportedOperationPayload(err);
 }
 
+// The label adapter queries GraphQL before mutation. Its subprocess does not
+// share AsyncLocalStorage with the watcher, so account failures at this seam.
+async function executeLabelAdapter(execFileImpl, adapterBin, args, options) {
+  const index = args.indexOf('--auth');
+  const selector = index >= 0 ? args[index + 1] : 'default';
+  const tokenNames = args.flatMap((arg, i) => arg === '--pat-env' ? [args[i + 1]] : []);
+  const token = tokenNames.map(name => options.env[name]).find(Boolean);
+  const credential = token ? githubCredential({ token }) : `adapter:${selector}`;
+  await awaitThrottleIfNeeded('graphql', credential);
+  try {
+    const result = await execFileImpl(adapterBin, args, options);
+    const payload = parseAdapterJson(result.stdout, 'pull-request-label');
+    if (payload.ok === false) throw Object.assign(new Error(payload.message || 'GitHub label mutation failed'), { stdout: result.stdout });
+    return result;
+  } catch (err) {
+    if (isGitHubRateLimitError(err) && !err.budgetDeferred) {
+      const observation = extractRateLimitObservation(err.response?.headers, { resource: 'graphql', rateLimited: true });
+      err.rateLimited = true;
+      err.observation = await recordRateLimitedCall('graphql', credential, { ...observation, credentialSelector: selector });
+    }
+    throw err;
+  }
+}
+
 async function writeGitHubAdapter(kind, params = {}, {
   execFileImpl,
   env = process.env,
@@ -465,7 +490,8 @@ async function writeGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
-  const { stdout } = await execFileImpl(adapterBin, makeAdapterWriteArgs(kind, params, env), {
+  const execute = kind === 'pull-request-label' ? executeLabelAdapter : (impl, bin, args, options) => impl(bin, args, options);
+  const { stdout } = await execute(execFileImpl, adapterBin, makeAdapterWriteArgs(kind, params, env), {
     maxBuffer: ADAPTER_MAX_BUFFER,
     timeout: ADAPTER_TIMEOUT_MS,
     env: buildAdapterEnv(env),

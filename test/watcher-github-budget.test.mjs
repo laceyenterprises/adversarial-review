@@ -26,7 +26,7 @@ for (const names of [['hold', 'do-not-merge', 'operator-approved', 'retrigger-re
     writeFileSync(budgetPath, JSON.stringify({ version: 1, buckets: { core: {
       resource: 'core', remaining: 100, observedAt: new Date().toISOString(),
       resetAt: new Date(Date.now() + 60_000).toISOString(),
-    } } }));
+    }, graphql: { resource: 'graphql', remaining: 100, observedAt: new Date().toISOString(), resetAt: new Date(Date.now() + 60_000).toISOString() } } }));
     const gateDir = join(rootDir, 'data', 'adversarial-gate-status');
     mkdirSync(gateDir, { recursive: true });
     writeFileSync(join(gateDir, `fixture__repo-pr-42-${head}.json`), JSON.stringify({ state: 'success' }));

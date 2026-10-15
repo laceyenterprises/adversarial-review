@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { recordApiCall } from './api-telemetry.mjs';
@@ -20,15 +20,37 @@ const DEFAULT_SHARED_STATE_PATH = resolve(TOOL_ROOT, 'data', 'api-cache', 'rate-
 const budgetScopes = new AsyncLocalStorage();
 
 function withGitHubBudgetScope(options, fn) {
-  const scope = { urgent: false, rateLimited: false, deferred: false, ...options };
+  const scope = { urgent: false, rateLimited: false, deferred: false, ...options, limitedBudgets: new Map() };
   return budgetScopes.run(scope, () => fn(scope));
 }
 
 function currentGitHubBudgetScope() { return budgetScopes.getStore(); }
 
-function markGitHubRateLimited() {
+// Tokens never enter state or logs. A digest isolates credentials without
+// depending on which environment-variable alias supplied the token.
+function githubCredential({ env = process.env, token = env.GH_TOKEN || env.GITHUB_TOKEN } = {}) {
+  if (!token) return 'default';
+  return `token-${createHash('sha256').update(String(token)).digest('hex').slice(0, 24)}`;
+}
+
+function githubBudgetKey(resource, credential = 'default') {
+  return credential === 'default' ? normalizeResource(resource) : `${credential}/${normalizeResource(resource)}`;
+}
+
+function markGitHubRateLimited(resource = DEFAULT_RESOURCE, credential = 'default', observation = {}) {
   const scope = currentGitHubBudgetScope();
-  if (scope) scope.rateLimited = true;
+  const limited = { ...observation, resource: normalizeResource(resource), credential,
+    resetAt: normalizeTimestamp(observation.resetAt) || new Date(Date.now() + UNKNOWN_RATE_LIMIT_RESET_MS).toISOString() };
+  if (scope) {
+    scope.rateLimited = true; // Accounting summary only; never an admission gate.
+    scope.limitedBudgets.set(githubBudgetKey(resource, credential), limited);
+  }
+  return limited;
+}
+
+function scopedGitHubRateLimit(resource, credential = 'default', nowMs = Date.now()) {
+  const limited = currentGitHubBudgetScope()?.limitedBudgets.get(githubBudgetKey(resource, credential));
+  return limited && Date.parse(limited.resetAt) > nowMs ? limited : null;
 }
 
 function isGitHubRateLimitError(err) {
@@ -39,6 +61,8 @@ function isGitHubRateLimitError(err) {
 
 class GitHubBudgetDeferredError extends Error {
   constructor(observation) {
+    observation = { ...observation, resetAt: normalizeTimestamp(observation.resetAt)
+      || new Date(Date.now() + UNKNOWN_RATE_LIMIT_RESET_MS).toISOString() };
     super(`GitHub ${observation.resource} budget deferred until ${observation.resetAt}`);
     this.name = 'GitHubBudgetDeferredError';
     this.rateLimited = true;
@@ -104,6 +128,8 @@ function normalizeObservation(observation = null) {
   if (!normalizedResetAt || !normalizedObservedAt) return null;
   return {
     resource: normalizeResource(resource),
+    ...(observation.credential && observation.credential !== 'default' ? { credential: observation.credential } : {}),
+    ...(observation.credentialSelector ? { credentialSelector: observation.credentialSelector } : {}),
     remaining: normalizedRemaining,
     resetAt: normalizedResetAt,
     observedAt: normalizedObservedAt,
@@ -143,6 +169,8 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
     ...(Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) > 0
       ? { rateLimitedCalls: Math.max(left.rateLimitedCalls || 0, right.rateLimitedCalls || 0) } : {}),
     resource: left.resource,
+    ...(left.credential ? { credential: left.credential } : {}),
+    ...(right.credentialSelector || left.credentialSelector ? { credentialSelector: right.credentialSelector || left.credentialSelector } : {}),
     remaining: Math.min(left.remaining, right.remaining),
     resetAt: left.resetAt,
     observedAt: observationObservedAtMs(right) > observationObservedAtMs(left)
@@ -156,13 +184,13 @@ function normalizeObservationMap(value, now = Date.now()) {
   if (!value || typeof value !== 'object') return normalized;
   if ('remaining' in value || 'resetAt' in value) {
     const legacy = sanitizeObservation(value, now);
-    if (legacy) normalized[legacy.resource] = legacy;
+    if (legacy) normalized[githubBudgetKey(legacy.resource, legacy.credential)] = legacy;
     return normalized;
   }
   const buckets = value?.buckets && typeof value.buckets === 'object' ? value.buckets : value;
-  for (const [resource, observation] of Object.entries(buckets)) {
-    const normalizedObservation = sanitizeObservation({ ...observation, resource }, now);
-    if (normalizedObservation) normalized[normalizedObservation.resource] = normalizedObservation;
+  for (const [key, observation] of Object.entries(buckets)) {
+    const normalizedObservation = sanitizeObservation({ resource: key, ...observation }, now);
+    if (normalizedObservation) normalized[githubBudgetKey(normalizedObservation.resource, normalizedObservation.credential)] = normalizedObservation;
   }
   return normalized;
 }
@@ -194,7 +222,7 @@ async function writeStateFile(sharedStatePath, state, {
   const tmpPath = `${sharedStatePath}.tmp`;
   const handle = await openImpl(tmpPath, 'w', 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify({ version: 1, buckets: state }, null, 2)}\n`, 'utf8');
+    await handle.writeFile(`${JSON.stringify({ version: 2, buckets: state }, null, 2)}\n`, 'utf8');
     await handle.sync();
   } finally {
     await handle.close();
@@ -305,7 +333,7 @@ async function withSharedStateLock(sharedStatePath, callback, {
   }
 }
 
-function extractRateLimitObservation(headers, { observedAt = new Date().toISOString() } = {}) {
+function extractRateLimitObservation(headers, { observedAt = new Date().toISOString(), resource = DEFAULT_RESOURCE, rateLimited = false } = {}) {
   if (!headers) return null;
   const lookup = typeof headers.get === 'function'
     ? (name) => headers.get(name)
@@ -316,10 +344,13 @@ function extractRateLimitObservation(headers, { observedAt = new Date().toISOStr
       }
       return null;
     };
+  const retryAfter = lookup('retry-after');
+  const retryReset = retryAfter == null ? null : /^\d+(?:\.\d+)?$/.test(String(retryAfter).trim())
+    ? Date.parse(observedAt) + Number(retryAfter) * 1000 : normalizeTimestamp(retryAfter);
   return normalizeObservation({
-    resource: lookup('x-ratelimit-resource') || DEFAULT_RESOURCE,
-    remaining: lookup('x-ratelimit-remaining'),
-    resetAt: lookup('x-ratelimit-reset'),
+    resource: lookup('x-ratelimit-resource') || resource,
+    remaining: lookup('x-ratelimit-remaining') ?? (rateLimited ? 0 : null),
+    resetAt: lookup('x-ratelimit-reset') || retryReset,
     observedAt,
   });
 }
@@ -368,16 +399,19 @@ function createRateLimitThrottle({
         // Resolve missing-header failures under the lock so simultaneous first
         // failures share one window and increment the same durable counter.
         const resource = normalizeResource(observation.resource);
-        normalized = current[resource] || normalizeObservation({
-          resource, remaining: 0, resetAt: nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
+        const previous = current[githubBudgetKey(resource, observation.credential)];
+        normalized = normalized || previous || normalizeObservation({
+          ...observation, resource, credential: observation.credential, remaining: 0,
+          resetAt: previous?.resetAt || nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
           observedAt: nowMs(),
         });
       }
-      const previous = current[normalized.resource];
+      const key = githubBudgetKey(normalized.resource, normalized.credential);
+      const previous = current[key];
       const count = (previous?.resetAt === normalized.resetAt ? previous.rateLimitedCalls || 0 : 0)
         + (observation.rateLimited === true ? 1 : 0);
       const incoming = count > 0 ? { ...normalized, rateLimitedCalls: count } : normalized;
-      const merged = mergeObservationMaps(current, { [normalized.resource]: incoming }, nowMs());
+      const merged = mergeObservationMaps(current, { [key]: incoming }, nowMs());
       if (
         Object.keys(merged).length > 0
         && JSON.stringify(merged) !== JSON.stringify(current)
@@ -389,7 +423,7 @@ function createRateLimitThrottle({
         });
       }
       inMemoryObservations = mergeObservationMaps(inMemoryObservations, merged, nowMs());
-      return merged[normalized.resource] || null;
+      return merged[key] || null;
     }, {
       mkdirImpl,
       readFileImpl,
@@ -402,26 +436,29 @@ function createRateLimitThrottle({
   }
 
   async function recordResponseRateLimit(observation) {
+    if (observation?.rateLimited) markGitHubRateLimited(observation.resource, observation.credential, observation);
     return recordRateLimit(observation);
   }
 
-  async function recordRateLimitedCall(resource) {
-    markGitHubRateLimited();
-    await recordRateLimit({ resource, rateLimited: true }, true);
+  async function recordRateLimitedCall(resource, credential = 'default', observation = null) {
+    const marked = markGitHubRateLimited(resource, credential, observation || {});
+    const recorded = await recordRateLimit({ ...observation, resource, credential, rateLimited: true }, true);
+    markGitHubRateLimited(resource, credential, recorded || marked);
+    return recorded;
   }
 
-  async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE) {
+  async function awaitThrottleIfNeeded(resource = DEFAULT_RESOURCE, credential = 'default') {
     const normalizedResource = normalizeResource(resource);
+    const key = githubBudgetKey(resource, credential);
     const scope = currentGitHubBudgetScope();
-    if (scope?.rateLimited) {
-      throw new GitHubBudgetDeferredError({ resource: normalizedResource, resetAt: null });
-    }
+    const limited = scopedGitHubRateLimit(resource, credential, nowMs());
+    if (limited) throw new GitHubBudgetDeferredError(limited);
     // Scoped callers must decide independently of another caller's sleep or
     // deferral. Only un-scoped callers share the in-flight wait below.
     if (scope) {
       const floor = resolveThrottleFloor(env, logger);
       const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
-      const current = currentObservations[normalizedResource] || null;
+      const current = currentObservations[key] || null;
       if (!current || current.remaining >= floor) return false;
       // Reserve remaining capacity for an already-ready close; zero cannot
       // serve any request, urgent or otherwise.
@@ -429,14 +466,14 @@ function createRateLimitThrottle({
       scope.deferred = true;
       throw new GitHubBudgetDeferredError(current);
     }
-    if (activeThrottlePromises.has(normalizedResource)) {
-      return activeThrottlePromises.get(normalizedResource);
+    if (activeThrottlePromises.has(key)) {
+      return activeThrottlePromises.get(key);
     }
     const activePromise = (async () => {
       try {
         const floor = resolveThrottleFloor(env, logger);
         const currentObservations = mergeObservationMaps(inMemoryObservations, await readSharedState(), nowMs());
-        const current = currentObservations[normalizedResource] || null;
+        const current = currentObservations[key] || null;
         if (!current || current.remaining >= floor) return false;
         const waitMs = Math.max(0, observationResetAtMs(current) - nowMs());
         const resolvedSharedStatePath = resolveSharedStatePathNow();
@@ -449,6 +486,7 @@ function createRateLimitThrottle({
             reset_at: current.resetAt,
             floor,
             resource: normalizedResource,
+            credential,
           },
         });
         if (waitMs > 0) {
@@ -472,14 +510,14 @@ function createRateLimitThrottle({
           }
         }
         inMemoryObservations = mergeObservationMaps(inMemoryObservations, {
-          [normalizedResource]: sanitizeObservation(currentObservations[normalizedResource], nowMs()),
+          [key]: sanitizeObservation(currentObservations[key], nowMs()),
         }, nowMs());
         return true;
       } finally {
-        activeThrottlePromises.delete(normalizedResource);
+        activeThrottlePromises.delete(key);
       }
     })();
-    activeThrottlePromises.set(normalizedResource, activePromise);
+    activeThrottlePromises.set(key, activePromise);
     return activePromise;
   }
 
@@ -503,8 +541,8 @@ function createRateLimitThrottle({
 
 const defaultThrottle = createRateLimitThrottle();
 
-function awaitThrottleIfNeeded(resource) {
-  return defaultThrottle.awaitThrottleIfNeeded(resource);
+function awaitThrottleIfNeeded(resource, credential) {
+  return defaultThrottle.awaitThrottleIfNeeded(resource, credential);
 }
 
 function recordResponseRateLimit(observation) {
@@ -513,7 +551,7 @@ function recordResponseRateLimit(observation) {
 
 function readGitHubBudgetState() { return defaultThrottle.readSharedState(); }
 
-function recordRateLimitedCall(resource) { return defaultThrottle.recordRateLimitedCall(resource); }
+function recordRateLimitedCall(resource, credential, observation) { return defaultThrottle.recordRateLimitedCall(resource, credential, observation); }
 
 function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs = Date.now() } = {}) {
   const sharedStatePath = env.GHO_RATE_LIMIT_SHARED_STATE_PATH || resolve(rootDir, 'data', 'api-cache', 'rate-limit-state.json');
@@ -524,6 +562,8 @@ function readGitHubBudgetStatus({ rootDir = TOOL_ROOT, env = process.env, nowMs 
     remaining: buckets[resource]?.remaining ?? null,
     resetAt: buckets[resource]?.resetAt ?? null,
     rateLimitedCalls: buckets[resource]?.rateLimitedCalls || 0,
+    ...(buckets[resource]?.credential ? { credential: buckets[resource].credential } : {}),
+    ...(buckets[resource]?.credentialSelector ? { credentialSelector: buckets[resource].credentialSelector } : {}),
   }]));
 }
 
@@ -533,6 +573,9 @@ export {
   GitHubBudgetDeferredError,
   isGitHubRateLimitError,
   markGitHubRateLimited,
+  githubCredential,
+  githubBudgetKey,
+  scopedGitHubRateLimit,
   withGitHubBudgetScope,
   readGitHubBudgetState,
   readGitHubBudgetStatus,

@@ -59,6 +59,7 @@ const DEFAULT_FOLLOW_UP_JOBS_SOURCE = "export const FOLLOW_UP_JOB_DIRS = { pendi
 
 function buildLoaderSource({
   capRouteSource = null,
+  discoveryHookSource = '',
   subjectHeads = {},
   subject101Overrides = {},
   subjectRevisionRefs = {},
@@ -241,9 +242,10 @@ export async function load(url, context, nextLoad) {
           };
         }
 
-        export function createGitHubPRSubjectAdapter({ octokit } = {}) {
+        export function createGitHubPRSubjectAdapter({ octokit, repos } = {}) {
           return {
             async discoverSubjects() {
+              ${discoveryHookSource}
               return subjects.map((subject) => subject.ref);
             },
             async fetchState(ref) {
@@ -3416,4 +3418,56 @@ test('REVIEWDELAY-01: pollOnce records process starts before detached reviewers 
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+
+test('GHSCOPE-01: a rate-limited first discovery still fetches other repository lists in pollOnce', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-scoped-budget-'));
+  const loaderPath = path.join(tmp, 'loader.mjs');
+  const registerPath = path.join(tmp, 'register.mjs');
+  const runnerPath = path.join(tmp, 'runner.mjs');
+  try {
+    const loader = buildLoaderSource({
+      discoveryHookSource: 'return globalThis.__scopeDiscovery(repos[0]);',
+    }).replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace(
+            "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+            '({ org: "example", repos: [] })');
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    let runner = buildRunnerSource({
+      prePollSetup: `
+        const { meteredExecFile } = await import(${JSON.stringify(fileUrl('src', 'metered-gh.mjs'))});
+        const lists = [];
+        globalThis.__scopeDiscovery = async repo => {
+          if (!globalThis.__scopeFirstFailed) {
+            globalThis.__scopeFirstFailed = true;
+            await meteredExecFile(async () => { throw new Error('GraphQL: API rate limit exceeded'); },
+              'gh', ['api', 'graphql'], { env: { GH_TOKEN: 'synthetic-installation-a' } });
+          }
+          await meteredExecFile(async () => { lists.push(repo); return { stdout: '[]', stderr: '' }; },
+            'gh', ['api', 'repos/' + repo + '/pulls'], { env: { GH_TOKEN: 'synthetic-installation-a' } });
+          return [];
+        };
+      `,
+      afterFirstPoll: `
+        assert.ok(globalThis.__scopeFirstFailed);
+        assert.ok(lists.some(repo => repo.endsWith('/beta')), JSON.stringify(lists));
+        assert.ok(lists.some(repo => repo.endsWith('/gamma')), JSON.stringify(lists));
+      `,
+    });
+    runner = runner.replace("return [{ name: 'adversarial-review', archived: false }];",
+      "return ['alpha', 'beta', 'gamma'].map(name => ({ name, archived: false }));");
+    writeFileSync(runnerPath, runner.replaceAll('laceyenterprises', 'example'));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ AGENT_OS_CONFIG_PATH: path.join(tmp, 'config.yaml') }), timeout: 20_000 });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

@@ -163,7 +163,8 @@ for (const remaining of [100, 0]) {
         assert.equal(scope.deferred, true);
       }
     })));
-    await withGitHubBudgetScope({ urgent: true, rateLimited: true }, async () => {
+    await withGitHubBudgetScope({ urgent: true }, async () => {
+      await throttle.recordRateLimitedCall('graphql');
       await assert.rejects(throttle.awaitThrottleIfNeeded('graphql'), { name: 'GitHubBudgetDeferredError' });
     });
   });

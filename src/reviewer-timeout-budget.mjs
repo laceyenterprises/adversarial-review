@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 
 export const REVIEWER_TIMEOUT_SAME_HEAD_LIMIT = 2;
@@ -8,20 +9,31 @@ export const REVIEWER_TIMEOUT_REPEATED_REASON = 'reviewer-timeout-repeated-same-
 // Content identity survives restarts and bare clones, without shelling out to
 // git. Capture it once per watcher process, so an in-flight attempt keeps the
 // build it actually ran even when a deployment replaces files on disk.
-function reviewerBuildDigest() {
+const REVIEWER_SOURCE_URL = pathToFileURL(realpathSync(fileURLToPath(import.meta.url)));
+
+export function reviewerBuildDigest(moduleUrl = REVIEWER_SOURCE_URL) {
   const hash = createHash('sha256');
   const add = (relative, include = () => true) => {
-    const url = new URL(relative, import.meta.url);
-    const entries = readdirSync(url, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    const url = new URL(relative, moduleUrl);
+    let entries;
+    try { entries = readdirSync(url, { withFileTypes: true }); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      // Partial installations can import cascade utilities without prompts.
+      // Absence is part of their build identity, not an import-time crash.
+      hash.update(relative).update(':missing');
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const path = `${relative}${entry.name}`;
       if (entry.isDirectory()) add(`${path}/`, include);
-      else if (entry.isFile() && include(entry.name)) hash.update(path).update('\0').update(readFileSync(new URL(path, import.meta.url)));
+      else if (entry.isFile() && include(entry.name)) hash.update(path).update('\0').update(readFileSync(new URL(path, moduleUrl)));
     }
   };
-  for (const name of readdirSync(new URL('.', import.meta.url)).sort()) {
+  for (const name of readdirSync(new URL('.', moduleUrl)).sort()) {
     if (/^reviewer.*\.mjs$/.test(name) || name === 'domain-pipeline.mjs') {
-      hash.update(name).update('\0').update(readFileSync(new URL(name, import.meta.url)));
+      hash.update(name).update('\0').update(readFileSync(new URL(name, moduleUrl)));
     }
   }
   add('adapters/reviewer-runtime/');

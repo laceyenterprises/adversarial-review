@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
 import { recordCascadeFailure, readCascadeState } from '../src/reviewer-cascade.mjs';
-import { reviewerTimeoutBudget, resolveReviewerTimeoutSameHeadLimit } from '../src/reviewer-timeout-budget.mjs';
+import { reviewerBuildDigest, reviewerTimeoutBudget, resolveReviewerTimeoutSameHeadLimit } from '../src/reviewer-timeout-budget.mjs';
 
 function fixture(fn) {
   const root = mkdtempSync(join(tmpdir(), 'timeout-budget-'));
@@ -87,4 +88,21 @@ test('CASCADECAP-01 reaper records the original build even for terminal-at-cap t
     assert.equal(state.reviewerTimeout.reviewerBuildId, 'build-old');
     assert.equal(state.reviewerTimeout.count, 1);
   } finally { db.close(); }
+}));
+
+
+test('CASCADECAP-01 reviewer build identity supports partial installations and changes only for reviewer inputs', () => fixture(root => {
+  mkdirSync(join(root, 'src'));
+  writeFileSync(join(root, 'src', 'reviewer-fixture.mjs'), 'synthetic reviewer v1');
+  const moduleUrl = pathToFileURL(join(root, 'src', 'reviewer-timeout-budget.mjs'));
+  const partial = reviewerBuildDigest(moduleUrl);
+  assert.equal(reviewerBuildDigest(moduleUrl), partial);
+  mkdirSync(join(root, 'prompts'));
+  writeFileSync(join(root, 'prompts', 'reviewer.first.md'), 'synthetic prompt v1');
+  const complete = reviewerBuildDigest(moduleUrl);
+  assert.notEqual(complete, partial);
+  writeFileSync(join(root, 'prompts', 'remediator.first.md'), 'synthetic remediation prompt');
+  assert.equal(reviewerBuildDigest(moduleUrl), complete, 'unrelated remediation changes do not re-arm reviewers');
+  writeFileSync(join(root, 'prompts', 'reviewer.first.md'), 'synthetic prompt v2');
+  assert.notEqual(reviewerBuildDigest(moduleUrl), complete);
 }));

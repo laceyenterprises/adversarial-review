@@ -3582,7 +3582,8 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
       const result = spawnSync(process.execPath,
         ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
         { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ ...fixture,
-          ADVERSARIAL_REVIEWER_BUILD_ID: 'build-current' }), timeout: 60000 });
+          ADVERSARIAL_REVIEWER_BUILD_ID: 'build-current',
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: scenario === 'unchanged' ? '1' : '6' }), timeout: 60000 });
       const output = `${result.stdout || ''}${result.stderr || ''}`;
       assert.equal(result.status, 0, output);
       if (scenario !== 'upstream-503') assert.doesNotMatch(output,

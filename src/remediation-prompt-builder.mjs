@@ -153,6 +153,7 @@ This PR has a settled Comment only verdict. Address or explicitly account for it
     ? promptTemplate.replace(/## Convergence rule \(load-bearing\)[\s\S]*?(?=\n## |$)/u, finalRoundRules)
     : promptTemplate;
   const interpolatedTemplate = interpolatePromptTemplate(selectedTemplate, {
+    ADVERSARIAL_REVIEW_ROOT: ROOT,
     BASE_BRANCH: baseBranch,
     REPLY_PATH: replyContext.replyPath,
     ADV_REPLY_DIR: replyContext.replyDir,
@@ -192,7 +193,7 @@ ${formatFencedBlock(job.reviewBody, 'markdown')}${livePackContext}${governingDoc
   \`WORKER_TRAILER_CLASS=${workerTrailerClass}\`
   \`WORKER_JOB_ID=${job.jobId}\`
   \`WORKER_RUN_AT=<current ISO 8601 timestamp>\`
-- Never run a full local test suite. CI on the PR head is the full-suite merge gate. Run targeted tests only for files you changed. Run long tests and builds in one foreground tool call with a timeout and bounded tail (\`bin/run-bounded.sh --timeout <seconds> -- <command>\` from the adversarial-review checkout, or an equivalent checked-in runner). For external waits, use one bounded wait supported by the worker harness. Codex and Claude workers must never background tests and poll logs with \`sleep\`, \`tail\`, or \`cat\`, or narrate "still waiting".
+- Never run a full local test suite. CI on the PR head is the full-suite merge gate. Run targeted tests only for files you changed. Run long tests and builds in one foreground tool call with a timeout and bounded tail (\`"${ROOT}/bin/run-bounded.sh" --timeout <seconds> -- <command>\` from the adversarial-review checkout, or an equivalent checked-in runner). For external waits, use one bounded wait supported by the worker harness. Codex and Claude workers must never background tests and poll logs with \`sleep\`, \`tail\`, or \`cat\`, or narrate "still waiting".
 - Run the smallest relevant validation before finishing.
 - Before pushing, run targeted tests and every cheap local guard that corresponds to the files you touched or that the PR previously relied on; do not run the full suite locally. At minimum, run \`git diff --check\`; for Python repos with a checked-in Ruff baseline gate, run the repo's Ruff/format baseline command before commit. If a local guard fails, fix it before pushing.
 - Commit the remediation changes and push the PR branch with \`git-safe push\` if \`git-safe\` is on PATH, or \`git push\` otherwise. Use \`gh\` for read-only queries (\`gh pr view\`, \`gh pr checks\`, \`gh api\` GETs). Do not run mutating \`gh\` commands (comments, edits, labels, merges): when the worker shim is installed it refuses them with exit 78 unless an explicit worker token is present, and this job never needs them because your reply JSON requests re-review. Do not work around that refusal with other credentials.

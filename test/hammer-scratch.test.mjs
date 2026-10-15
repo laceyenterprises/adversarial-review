@@ -1,8 +1,11 @@
+import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
+import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
+import { HAMMER_PHASES } from '../src/hammer-procedure.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -136,13 +139,13 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
     assert.equal(statSync(scratchDir).mode & 0o777, 0o700);
     const values = Object.fromEntries([...readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8')
       .matchAll(/<<([A-Z_]+)>>/g)].map(m => [`HAM_${m[1]}`, 'synthetic']));
-    Object.assign(values, { HAM_ROOT_DIR: repoRoot, HAM_RUN_DIR: scratchDir, HAM_PR_NUMBER: '42' });
+    Object.assign(values, { HAM_ROOT_DIR: resolve(realpathSync(join(repoRoot, 'bin/hammer-procedure.mjs')), '..', '..'), HAM_RUN_DIR: scratchDir, HAM_PR_NUMBER: '42' });
     const prompt = composeCloserPrompt({ templateBody: readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8'),
       rootDir: repoRoot, scratchDir, prNumber: 42 });
     assert.doesNotMatch(prompt, /\/tmp\/ham-/);
     assert.ok(prompt.includes(`export HAM_RUN_DIR='${scratchDir}'`));
-    assert.ok(prompt.includes('source "$HAM_RUN_DIR/publish-commits.sh"'));
-    for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
+    assert.ok(prompt.includes(`source "${scratchDir}/hammer-publish.sh"`));
+    for (const phase of HAMMER_PHASES) {
       const rendered = spawnSync(process.execPath, [join(repoRoot, 'bin/hammer-procedure.mjs'), phase, '--render'], {
         env: { ...process.env, ...values }, encoding: 'utf8', timeout: 10000,
       });
@@ -152,6 +155,30 @@ test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses privat
     }
   }
   assert.equal(readdirSync(root).length, 2);
+});
+
+test('HAMTMP-02: base-head capture runs from a deployed root containing spaces', t => {
+  const root = join(fixture(t), 'deployed root');
+  const scratchDir = join(root, 'private run');
+  mkdirSync(join(root, 'bin'), { recursive: true });
+  mkdirSync(scratchDir);
+  const prUrl = 'https://github.com/fixture/repo/pull/42';
+  writeFileSync(join(root, 'bin/hammer-base-head.mjs'), `
+    import assert from 'node:assert/strict';
+    assert.deepEqual(process.argv.slice(2), [${JSON.stringify(prUrl)}]);
+    process.stdout.write('${head}');
+  `);
+  const prompt = composeCloserPrompt({
+    templateBody: readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8'),
+    rootDir: root, scratchDir, prUrl, prNumber: 42,
+  });
+  const capture = prompt.split('\n').find(line => line.startsWith('/usr/bin/perl') && line.includes('/bin/hammer-base-head.mjs'));
+  assert.ok(capture, 'prompt contains the initial base-head capture command');
+  const result = spawnSync('/bin/bash', ['-c', capture], {
+    env: { ...process.env, HAM_NODE_BIN: process.execPath }, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(scratchDir, 'base-head'), 'utf8'), head);
 });
 
 test('HAMTMP-01: a launch with an ambiguous response retains scratch until terminal reconciliation', async t => {
@@ -221,4 +248,97 @@ test('HAMTMP-01: dispatching and inherited predecessor statuses cannot remove a 
   assert.equal(existsSync(scratchDir), true);
   updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, lastObservedStatus: 'succeeded' }));
   assert.equal(existsSync(scratchDir), false);
+});
+
+
+test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only private absolute scripts', async t => {
+  const root = fixture(t);
+  // The state root deliberately contains a different PR-checkout procedure.
+  mkdirSync(join(root, 'bin'));
+  writeFileSync(join(root, 'bin/hammer-verify-head.sh'), 'synthetic untrusted procedure');
+  const args = dispatchArgs(root);
+  args.readTemplateImpl = () => readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8');
+  const result = await maybeDispatchAmaCloser({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root,
+    { repo: 'fixture/repo', prNumber: 42, headSha: head })));
+  const prompt = readFileSync(result.promptPath, 'utf8');
+  assert.doesNotMatch(prompt, /hammer-procedure\.mjs|--render|\/tmp\/ham-/);
+  assert.doesNotMatch(prompt, /(?:^|[\s`'"])bin\/(?:hammer-|run-bounded)/m);
+  assert.match(prompt, /each command runs in a fresh shell/i);
+  for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
+    const path = join(record.scratchDir, `${phase}.sh`);
+    assert.ok(prompt.includes(`source "${path}"`), phase);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const script = readFileSync(path, 'utf8');
+    assert.doesNotMatch(script, /\/tmp\/ham-|<<[A-Z_]+>>|synthetic untrusted procedure/);
+    assert.ok(script.includes(record.scratchDir));
+    assert.match(script, /ham_procedure_floor/);
+  }
+});
+
+test('HAMTMP-02: copied renderer refuses outside the real dispatch root; deployed renderer accepts aliases', t => {
+  const root = fixture(t);
+  const foreign = join(root, 'foreign');
+  mkdirSync(foreign);
+  cpSync(realpathSync(join(repoRoot, 'bin')), join(foreign, 'bin'), { recursive: true });
+  // Reusable implementation, if present, is part of the synthetic foreign checkout.
+  if (existsSync(join(repoRoot, 'src/hammer-procedure.mjs'))) {
+    mkdirSync(join(foreign, 'src'));
+    cpSync(join(repoRoot, 'src/hammer-procedure.mjs'), join(foreign, 'src/hammer-procedure.mjs'));
+  }
+  const env = Object.fromEntries([...readFileSync(join(repoRoot, 'bin/hammer-verify-head.sh'), 'utf8')
+    .matchAll(/<<([A-Z_]+)>>/g)].map(m => [`HAM_${m[1]}`, 'synthetic']));
+  Object.assign(env, { HAM_ROOT_DIR: resolve(realpathSync(join(repoRoot, 'bin/hammer-procedure.mjs')), '..', '..'), HAM_RUN_DIR: root });
+  const render = path => spawnSync(process.execPath, [path, 'hammer-verify-head', '--render'],
+    { env: { ...process.env, ...env }, encoding: 'utf8', timeout: 10000 });
+  const denied = render(join(foreign, 'bin/hammer-procedure.mjs'));
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /refus.*outside.*HAM_ROOT_DIR/i);
+  assert.equal(denied.stdout, '');
+  const alias = join(root, 'deployed-alias');
+  symlinkSync(env.HAM_ROOT_DIR, alias, 'dir');
+  env.HAM_ROOT_DIR = alias;
+  const accepted = render(join(repoRoot, 'bin/hammer-procedure.mjs'));
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stdout, /ham_verify_head/);
+});
+
+test('HAMTMP-02: hammer spawn inherits private TMPDIR and terminal cleanup removes improvised files', async t => {
+  const root = fixture(t);
+  let scratchDir;
+  const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root),
+    execFileImpl: async (_cmd, argv, options) => {
+      const prompt = readFileSync(argv[argv.indexOf('--prompt') + 1], 'utf8');
+      scratchDir = prompt.split('scratch=')[1];
+      assert.equal(options.env.TMPDIR, scratchDir);
+      const improvised = spawnSync('sh', ['-c', 'mktemp -d "${TMPDIR:-/tmp}/synthetic.XXXXXX"'],
+        { env: options.env, encoding: 'utf8', timeout: 5000 });
+      assert.equal(improvised.status, 0, improvised.stderr);
+      writeFileSync(join(improvised.stdout.trim(), 'state'), 'synthetic state');
+      return { stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) };
+    } });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  await reconcileAmaCloserDispatches(root, { logger,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }) });
+  assert.equal(existsSync(scratchDir), false);
+});
+
+
+test('HAMTMP-02: sibling remediation and fallback merge prompts invoke deployed helpers absolutely', () => {
+  const job = { jobId: 'synthetic-job', repo: 'fixture/repo', prNumber: 42, baseBranch: 'main',
+    reviewSummary: 'synthetic finding', reviewBody: 'synthetic review',
+    remediationPlan: { maxRounds: 3, currentRound: 0 } };
+  for (const round of [0, 1, 2]) {
+    const prompt = buildRemediationPrompt({ ...job, remediationPlan: { ...job.remediationPlan, currentRound: round } },
+      { hqRoot: '/fixture/hq', launchRequestId: 'synthetic-lrq' });
+    assert.ok(prompt.includes(`"${repoRoot}/bin/run-bounded.sh"`));
+    assert.doesNotMatch(prompt, /`bin\/run-bounded|\$\{ADVERSARIAL_REVIEW_ROOT\}/);
+  }
+  const prompt = buildMergeAgentPrompt(job, { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
+  for (const action of ['acquire', 'release', 'needs-revalidation']) {
+    assert.ok(prompt.includes(`'${repoRoot}/bin/merge-lease.mjs' ${action}`));
+  }
+  assert.doesNotMatch(prompt, /node bin\//);
 });

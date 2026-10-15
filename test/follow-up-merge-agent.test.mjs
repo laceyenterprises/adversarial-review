@@ -4811,7 +4811,7 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('never copy'));
   assert.ok(prompt.includes('quoted secrets'));
   assert.ok(prompt.includes('Merge gate for the rebase-to-merge step only'));
-  assert.ok(prompt.includes('merge-lease.mjs acquire'));
+  assert.ok(prompt.includes("merge-lease.mjs' acquire"));
   assert.ok(prompt.includes('set -euo pipefail'));
   assert.ok(prompt.includes("MERGE_REPO='laceyenterprises/agent-os'"));
   assert.ok(prompt.includes("MERGE_BASE='main'"));
@@ -4835,7 +4835,7 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('Run the project validation required for this PR here'));
   assert.ok(prompt.includes('CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")'));
   assert.ok(prompt.includes('git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"'));
-  assert.ok(prompt.includes('merge-lease.mjs needs-revalidation'));
+  assert.ok(prompt.includes("merge-lease.mjs' needs-revalidation"));
   assert.ok(prompt.includes('--current-base "$CURRENT_BASE"'));
   assert.ok(prompt.includes('--validation-base "$VALIDATION_BASE"'));
   assert.ok(prompt.includes('--changed-files-from "$POST_REMEDIATION_SHA"'));

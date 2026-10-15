@@ -2549,7 +2549,7 @@ export async function processReviewSubject(entry, ctx) {
         const reason = REVIEWER_TIMEOUT_REPEATED_REASON;
         const message = String(current?.failure_message || '[reviewer-timeout] Reviewer timed out');
         const parkedMessage = message.includes(`[${reason}]`) ? message
-          : `${message}\nSystem: [${reason}] timeouts=${timeoutBudget.count}/${timeoutBudget.limit}; reviewer build=${timeoutBudget.reviewerBuildId}`;
+          : `[reviewer-timeout] [${reason}] timeouts=${timeoutBudget.count}/${timeoutBudget.limit}; reviewer build=${timeoutBudget.reviewerBuildId}\n${message}`;
         const parked = db.prepare(`UPDATE reviewed_prs SET review_status = 'failed', failure_message = ?,
             reviewer_lease_expires_at = NULL
           WHERE repo = ? AND pr_number = ? AND review_status IN ('failed', 'pending', 'pending-upstream')

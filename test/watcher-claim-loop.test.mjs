@@ -3560,7 +3560,7 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
           assert.equal(claims.filter(claim => claim.prNumber === 101).length, 0, 'no third claim');
           const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
           assert.equal(row.review_status, 'failed');
-          assert.match(row.failure_message, /reviewer-timeout-repeated-same-head/);
+          assert.match(row.failure_message, /^\\[reviewer-timeout\\] \\[reviewer-timeout-repeated-same-head\\]/);
           assert.equal(globalThis.__timeoutAlerts, 1, 'operator alert fires once');
           assert.equal(claims[0].prNumber, 102, 'waiting first pass proceeds while timeout row is parked');
         ` : `
@@ -3570,7 +3570,7 @@ for (const scenario of ['unchanged', 'new-head', 'new-build', 'operator-rearm', 
             assert.equal(claims.filter(claim => claim.prNumber === 101).length, 1, 'failed probe parks again');
             const row = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
             assert.equal(row.review_status, 'failed');
-            assert.match(row.failure_message, /reviewer-timeout-repeated-same-head/);
+            assert.match(row.failure_message, /^\\[reviewer-timeout\\] \\[reviewer-timeout-repeated-same-head\\]/);
             assert.ok(row.infra_auto_recover_attempts <= 3);
           ` : ''}
 

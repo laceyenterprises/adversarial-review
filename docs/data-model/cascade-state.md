@@ -166,3 +166,8 @@ Sibling audit:
 - `reviewer-harness.mjs` has an internal transient Gemini subprocess ladder.
   Its fixed retry-delay array bounds retries inside one reviewer attempt;
   it cannot override the watcher's head/build park. It remains unchanged.
+- `ama/dispatch-closer.mjs` / `ama/hammer-retry-cap.mjs` grant one transient
+  stale-head retry per head after fresh eligibility checks; they retain the
+  lifetime dispatch ceiling. Deferral and unexecuted-launch refunds also have
+  independent durable limits. These bounded merge/remediation exceptions remain
+  unchanged; they do not reclaim a reviewer seat or bypass the timeout budget.

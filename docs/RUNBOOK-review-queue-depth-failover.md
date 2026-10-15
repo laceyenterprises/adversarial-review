@@ -35,6 +35,14 @@ separate burst-pressure trigger and leaves depth routing to pool admission.
 Depth re-evaluation also suppresses burst, so a depth spill spends only depth
 budget. Burst discovery remains available when that lane is disengaged or its
 depth budget is exhausted. Quota fallback remains available independently.
+The intermediate discovery wave waits for retained wakes and overdue reviews
+in later subjects or repositories to enter the candidate queue. This per-tick
+barrier covers only repositories being polled and subjects whose state was
+successfully fetched. Missing subjects, including externally closed PRs with
+stale open database rows, and failed discovery reads release their barrier;
+they cannot produce a candidate during that tick. This does not erase durable
+wake priority: absent subjects retain it until a live read confirms closure or
+head movement, and failed live reads preserve it for later polls.
 Candidates whose pipeline still requires Gemini seats cannot spill their main
 route, because that would not release Gemini capacity.
 A candidate refused by a later gate, or deferred by pool admission, refunds its

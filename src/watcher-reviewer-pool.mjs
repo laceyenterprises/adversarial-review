@@ -322,11 +322,36 @@ function reviewerDispatchIsFirstPass(candidate) {
 }
 
 function reviewerDispatchTierRank(candidate) {
-  if (candidate?.wakePriority === true) return 0;
-  return reviewerDispatchIsFirstPass(candidate) ? 1 : 2;
+  if (candidate?.retainedWakePriority === true) return 0;
+  if (candidate?.wakePriority === true) return 1;
+  return reviewerDispatchIsFirstPass(candidate) ? 2 : 3;
 }
 
-function compareReviewerDispatchCandidates(a, b) {
+function reviewerDispatchWaitPriority(candidate, {
+  nowMs = Date.now(), waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
+} = {}) {
+  const waitMs = reviewerDispatchWaitMs(candidate, nowMs);
+  return waitMs !== null && waitMs >= waitWarnMs ? waitMs : null;
+}
+
+function compareReviewerDispatchWait(a, b, options) {
+  const aWait = reviewerDispatchWaitPriority(a, options);
+  const bWait = reviewerDispatchWaitPriority(b, options);
+  if (aWait === null && bWait === null) return 0;
+  if (aWait === null) return 1;
+  if (bWait === null) return -1;
+  return bWait - aWait;
+}
+
+function reviewerDispatchEnqueuedAt(current) {
+  return current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || null;
+}
+
+function compareReviewerDispatchCandidates(a, b, {
+  nowMs = Date.now(), waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
+} = {}) {
+  const waitDelta = compareReviewerDispatchWait(a, b, { nowMs, waitWarnMs });
+  if (waitDelta !== 0) return waitDelta;
   const tierDelta = reviewerDispatchTierRank(a) - reviewerDispatchTierRank(b);
   if (tierDelta !== 0) return tierDelta;
   const timeDelta = reviewerDispatchSortTimeMs(a) - reviewerDispatchSortTimeMs(b);
@@ -336,8 +361,8 @@ function compareReviewerDispatchCandidates(a, b) {
   return Number(a?.prNumber || 0) - Number(b?.prNumber || 0);
 }
 
-function sortReviewerDispatchCandidates(candidates) {
-  return [...candidates].sort(compareReviewerDispatchCandidates);
+function sortReviewerDispatchCandidates(candidates, { nowMs = Date.now(), ...options } = {}) {
+  return [...candidates].sort((a, b) => compareReviewerDispatchCandidates(a, b, { ...options, nowMs }));
 }
 
 function createReviewerLaneState({
@@ -482,8 +507,15 @@ function compareReviewerDispatchEntries(
     laneStarts = null,
     concurrencyLimit = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
     pendingFirstPassAgeMs = null,
+    nowMs = Date.now(),
+    waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   } = {},
 ) {
+  const waitDelta = compareReviewerDispatchWait(a.candidate, b.candidate, { nowMs, waitWarnMs });
+  if (waitDelta !== 0) return waitDelta;
+  const aRetained = a?.candidate?.retainedWakePriority === true;
+  const bRetained = b?.candidate?.retainedWakePriority === true;
+  if (aRetained !== bRetained) return aRetained ? -1 : 1;
   const aWake = a?.candidate?.wakePriority === true;
   const bWake = b?.candidate?.wakePriority === true;
   if (aWake !== bWake) return aWake ? -1 : 1;
@@ -517,7 +549,7 @@ function compareReviewerDispatchEntries(
     }
   }
 
-  return compareReviewerDispatchCandidates(a.candidate, b.candidate);
+  return compareReviewerDispatchCandidates(a.candidate, b.candidate, { nowMs, waitWarnMs });
 }
 
 function orderPendingReviewerDispatchEntries(
@@ -527,6 +559,7 @@ function orderPendingReviewerDispatchEntries(
     laneStarts = null,
     concurrencyLimit = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
     nowMs = Date.now(),
+    waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   } = {},
 ) {
   const laneCounts = pendingLaneCounts(entries);
@@ -540,6 +573,8 @@ function orderPendingReviewerDispatchEntries(
     laneStarts,
     concurrencyLimit,
     pendingFirstPassAgeMs,
+    nowMs,
+    waitWarnMs,
   }));
 }
 
@@ -1155,7 +1190,10 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     : geminiConcurrencyLimit;
 
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
-  const queue = sortReviewerDispatchCandidates(candidates);
+  const hasTimedCandidates = candidates.some((candidate) => reviewerDispatchWaitMs(candidate, 0) !== null);
+  const queue = sortReviewerDispatchCandidates(candidates, {
+    nowMs: hasTimedCandidates ? safeReviewerNowMs(now) : Date.now(), waitWarnMs,
+  });
   const pending = queue.map((candidate) => ({ candidate, started: false }));
   const activeLaneState = laneState || (
     usePersistentReviewerLaneState ? refreshPersistentReviewerLaneState() : null
@@ -1280,23 +1318,25 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     });
     const rereviewCap = Math.max(0, concurrencyLimit - rereviewFloor);
     if (initiallyActive + active.size >= concurrencyLimit) {
-      const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
+      const resolvedNowMs = bothLanesPending || hasTimedCandidates ? safeReviewerNowMs(now) : undefined;
       for (const entry of orderPendingReviewerDispatchEntries(pending, {
         laneState: activeLaneState,
         laneStarts,
         concurrencyLimit,
         nowMs: resolvedNowMs,
+        waitWarnMs,
       })) {
         if (!entry.started) recordDeferredReason(entry, 'reviewer-pool-saturated');
       }
       return null;
     }
-    const resolvedNowMs = bothLanesPending ? safeReviewerNowMs(now) : undefined;
+    const resolvedNowMs = bothLanesPending || hasTimedCandidates ? safeReviewerNowMs(now) : undefined;
     for (const entry of orderPendingReviewerDispatchEntries(pending, {
       laneState: activeLaneState,
       laneStarts,
       concurrencyLimit,
       nowMs: resolvedNowMs,
+      waitWarnMs,
     })) {
       if (entry.started) continue;
       if (
@@ -1304,6 +1344,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         && rereviewCap > 0
         && reviewerDispatchPassKind(entry.candidate) === 'rereview'
         && initiallyActiveRereviews >= rereviewCap
+        && reviewerDispatchWaitPriority(entry.candidate, { nowMs: resolvedNowMs, waitWarnMs }) === null
       ) {
         recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
         continue;
@@ -1342,6 +1383,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       pendingLaneCounts(pending).firstPass > 0
       && concurrencyLimit > 1
       && reviewerDispatchPassKind(candidate) === 'rereview'
+      && reviewerDispatchWaitPriority(candidate, { nowMs: safeReviewerNowMs(now), waitWarnMs }) === null
       && initiallyActiveRereviews >= (
         concurrencyLimit - reviewerLaneFloor({
           concurrencyLimit,
@@ -1487,6 +1529,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     laneStarts,
     concurrencyLimit,
     nowMs: safeReviewerNowMs(now),
+    waitWarnMs,
   })
     .filter((entry) => !entry.started);
   const resolvedNowMs = Date.now();
@@ -1546,5 +1589,7 @@ export {
   persistedSpawnReservationSource,
   reviewerDispatchIsFirstPass,
   reviewerDispatchPassKind,
+  reviewerDispatchEnqueuedAt,
+  reviewerDispatchWaitPriority,
   reviewerSafetyPassKind,
 };

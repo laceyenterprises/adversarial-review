@@ -903,9 +903,11 @@ test('watcher.mjs builds the per-tick controller from both production depth coun
 
 test('watcher REVSLOT gate uses the delivered-pass-aware first-pass depth counter', () => {
   const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  const prioritySrc = readFileSync(new URL('../src/watcher-dispatch-priority.mjs', import.meta.url), 'utf8');
+  assert.match(src, /createWatcherDiscoveryBatchDrain\(\{[^}]*countOpenPrsAwaitingFirstPassReview/);
   assert.match(
-    src,
-    /reviewerDispatchCandidates\.every\(\(candidate\) => !reviewerDispatchIsFirstPass\(candidate\)\) && countOpenPrsAwaitingFirstPassReview\(\) > 0/,
+    prioritySrc,
+    /reviewerDispatchCandidates\.every\(\(candidate\) => !reviewerDispatchIsFirstPass\(candidate\)\)\s*&& countOpenPrsAwaitingFirstPassReview\(\) > 0/,
   );
 });
 

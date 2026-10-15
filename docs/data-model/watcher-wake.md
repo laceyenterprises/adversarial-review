@@ -1,8 +1,8 @@
 # Data Model - Watcher Wake
 
 **Owner:** watcher wake transport and subject priority
-**Store:** `data/watcher-wake.json`, `data/watcher-wake-consumed.json`
-**Source of truth:** `src/watcher-wake.mjs`
+**Store:** `data/watcher-wake.json`, `data/watcher-wake-consumed.json`, `data/watcher-wake-retained.json`
+**Source of truth:** `src/watcher-wake.mjs`, `src/watcher-retained-wakes.mjs`
 **Runtime surface:** `src/watcher.mjs`, `bin/watcher-wake.mjs`
 
 ## Purpose
@@ -19,6 +19,24 @@ newest 64 subjects.
 |---|---|---|
 | `data/watcher-wake.json` | JSON object | The current wake. `request_id` identifies a write; `requested_at` timestamps it; `reason` and top-level `repo`, `pr_number`, optional `head_sha` describe the newest request. `pending_subjects` holds the carried subjects, each with `repo`, `pr_number`, optional `head_sha`, and `requested_at`. |
 | `data/watcher-wake-consumed.json` | JSON object | `consumed_key` is the last delivered snapshot key: `request_id:<id>` or a `content:<sha256>` fallback for legacy files without a request ID. The watcher atomically replaces this receipt after accepting at least one subject (or a subjectless wake). |
+| `data/watcher-wake-retained.json` | JSON object | `schema_version: 1` and `subjects: [{ repoPath, prNumber, headSha }]`. The watcher atomically retains capacity-deferred wake priority by repository, PR and head; producers continue writing only the one-shot wake file. |
+
+## Retained priority
+
+Retained wakes survive restarts without a TTL. A changed head, terminal subject
+observation or confirmed reviewer process start removes them. Failed launches
+preserve priority, including fresh wakes consumed in that tick. Successful
+runtime results also settle priority when an adapter has no process callback.
+For subjects absent from open PR discovery, a live read confirms closure or
+merge (case-insensitive states or a merge timestamp) or head movement, accepting either raw
+`headRefOid` or normalized `headSha`. Absence alone and failed live reads keep
+the record. A stale dispatch cannot remove a wake retained for a newer head.
+Malformed records and write failures do not refuse ordinary reviewer admission.
+
+The per-tick priority discovery barrier is separate from this durable record.
+It drops subjects that cannot enter that tick's candidate queue without
+discarding their retained wakes; see the
+[discovery dispatch contract](../RUNBOOK-review-queue-depth-failover.md#what-it-does).
 
 ## Consumption and expiry
 

@@ -263,6 +263,8 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
   reserveReviewerMemoryAdmission,
   reviewerDispatchPassKind,
+  reviewerDispatchEnqueuedAt,
+  reviewerDispatchWaitPriority,
   reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
@@ -733,6 +735,7 @@ export async function processReviewSubject(entry, ctx) {
     shouldDeferReviewForActiveFollowUp,
     requestWatcherWakeImpl = requestWatcherWake,
     wakePayload = null,
+    retainedWatcherWakes = null,
     admissionSettlementSplitEnabled = false,
     consumeRereviewWakesImpl = consumeRereviewWakes,
     requestRereviewWakeImpl = requestRereviewWake,
@@ -741,6 +744,14 @@ export async function processReviewSubject(entry, ctx) {
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
   } = ctx;
 
+      const wakeIdentity = { repoPath, prNumber, headSha: subject.headSha };
+      retainedWatcherWakes?.observe({ ...wakeIdentity, terminal: subject.terminal });
+      const retainWakeForCapacity = () => {
+        if (retainedWatcherWakes?.matches(wakeIdentity) || watcherWakeMatchesSubject(wakePayload, wakeIdentity)) {
+          return retainedWatcherWakes?.retain(wakeIdentity) === true;
+        }
+        return false;
+      };
       const prTitle = subject.title || '';
       const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
       // RPL-04: a CI state transition that releases a parked re-review is an
@@ -1876,7 +1887,10 @@ export async function processReviewSubject(entry, ctx) {
         afhGrounding,
         emitCacheEvent,
       });
-      if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) return;
+      if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+        retainWakeForCapacity();
+        return;
+      }
       let depthSpillReserved = false;
       let dispatchHasPriorPostedReview;
       let depthPassKind;
@@ -2020,7 +2034,10 @@ export async function processReviewSubject(entry, ctx) {
 
       }
       await applyWorkerFallback();
-      if (logReviewerQuotaBlock({ repoPath, prNumber, route })) return;
+      if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+        retainWakeForCapacity();
+        return;
+      }
 
       if (route.reviewerModelFallback) {
         console.warn(
@@ -2531,6 +2548,7 @@ export async function processReviewSubject(entry, ctx) {
         reserve: false,
       });
       if (credentialOutagePreflight.paused) {
+        retainWakeForCapacity();
         markWatcherSpawnDecision({
           repo: repoPath,
           pr_number: prNumber,
@@ -3032,14 +3050,18 @@ export async function processReviewSubject(entry, ctx) {
         current,
         hasPriorPostedReview: getDispatchHasPriorPostedReview(),
         depthPassKind: getDepthPassKind(),
+        retainedWakePriority: retainedWatcherWakes?.matches(wakeIdentity) === true,
         wakePriority: watcherWakeMatchesSubject(wakePayload, {
           repoPath,
           prNumber,
           headSha: subject?.headSha,
-        }),
+        }) || retainedWatcherWakes?.matches(wakeIdentity) === true,
         pendingSince: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
-        enqueuedAt: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || null,
+        enqueuedAt: reviewerDispatchEnqueuedAt(current),
         preferredRoute: route,
+        retainWakeForCapacity() {
+          if (retainWakeForCapacity()) this.retainedWakePriority = true;
+        },
         refundDepthSpill() {
           if (!depthSpillReserved) return;
           firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason: 'pool-admission-deferred' });
@@ -3064,6 +3086,7 @@ export async function processReviewSubject(entry, ctx) {
         },
         async run() {
           if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+            this.retainWakeForCapacity();
             return { dispatched: false, reason: 'quota-blocked' };
           }
           // Pool admission can defer a release for several ticks. Fence the
@@ -3109,7 +3132,7 @@ export async function processReviewSubject(entry, ctx) {
           let credentialProbeReservation = null;
           let reviewerProcessStarted = false;
           const releaseReviewerReservation = () => {
-            if (!reservation || reservationReleased) return;
+            if (!reservation?.admit || reservationReleased) return;
             reservationReleased = true;
             reservation.release();
           };
@@ -3168,6 +3191,7 @@ export async function processReviewSubject(entry, ctx) {
                   `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
                   `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
               );
+              this.retainWakeForCapacity();
               return { dispatched: false, reason: 'memory-admission-deferred' };
             }
 
@@ -3378,6 +3402,7 @@ export async function processReviewSubject(entry, ctx) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
                 );
+                retainedWatcherWakes?.drop(wakeIdentity);
                 stmtMarkMerged.run(freshPR.mergedAt, repoPath, prNumber);
                 return { dispatched: false, reason: 'pr-merged-before-spawn' };
               }
@@ -3385,6 +3410,7 @@ export async function processReviewSubject(entry, ctx) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was closed since tick-start snapshot (state=${freshPR.state}) — marking row + skipping reviewer spawn`
                 );
+                retainedWatcherWakes?.drop(wakeIdentity);
                 stmtMarkClosed.run(new Date().toISOString(), repoPath, prNumber);
                 return { dispatched: false, reason: 'pr-closed-before-spawn' };
               }
@@ -3408,6 +3434,7 @@ export async function processReviewSubject(entry, ctx) {
                   `${String(reviewerHeadSha).slice(0, 12)} → ${String(freshHeadSha).slice(0, 12)} — ` +
                   'releasing claim and skipping stale reviewer spawn'
                 );
+                retainedWatcherWakes?.drop(wakeIdentity);
                 stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
                 return { dispatched: false, reason: 'head-moved-before-spawn' };
               }
@@ -3582,6 +3609,7 @@ export async function processReviewSubject(entry, ctx) {
               getHcpHealthzForTick,
             });
             if (!hcpPrecheck.proceed) {
+              this.retainWakeForCapacity();
               return { dispatched: false, reason: 'hcp-precheck-not-ready' };
             }
 
@@ -3728,6 +3756,7 @@ export async function processReviewSubject(entry, ctx) {
                     credentialOutageGate.state?.nextProbeAt ||
                     null,
                 });
+                this.retainWakeForCapacity();
                 return { dispatched: false, reason: 'reviewer-credential-outage-hold' };
               }
               if (credentialOutageGate.probe) {
@@ -3807,6 +3836,7 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
                   reviewerProcessStarted = true;
+                  retainedWatcherWakes?.drop(wakeIdentity);
                   healthProbe?.recordSpawn?.(healthTick, {
                     repo: repoPath,
                     prNumber,
@@ -3845,6 +3875,12 @@ export async function processReviewSubject(entry, ctx) {
               // (default OFF), drive the two-stage pipeline instead of a single
               // review and post the Win 2 rollup. Gate-off is byte-identical:
               // the else-branch is the unchanged v1 single `spawnReviewer` call.
+              const waitThresholdExceeded = reviewerDispatchWaitPriority(dispatchCandidate) !== null;
+              if (dispatchCandidate.retainedWakePriority || waitThresholdExceeded) {
+                console.log(`[watcher] reviewer priority dispatch ${repoPath}#${prNumber}: `
+                  + `retained_wake=${Boolean(dispatchCandidate.retainedWakePriority)} `
+                  + `wait_threshold_exceeded=${waitThresholdExceeded}`);
+              }
               reviewerSpawned = true;
               if (depthSpillReserved) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
@@ -3866,6 +3902,7 @@ export async function processReviewSubject(entry, ctx) {
                   })
                   : await spawnReviewer(spawnReviewerArgs);
               } catch (error) {
+                if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
                 if (credentialProbeReservation?.probe && !reviewerProcessStarted) {
                   try {
                     releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
@@ -3875,6 +3912,10 @@ export async function processReviewSubject(entry, ctx) {
                 }
                 throw error;
               }
+              // Some runtime adapters settle without a process-start callback.
+              // A failed launch keeps even a fresh, already-consumed wake alive.
+              if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);
+              else if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
               if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
                 try {
                   releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);

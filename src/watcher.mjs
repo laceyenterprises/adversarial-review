@@ -107,6 +107,7 @@ import {
   createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
 } from './watcher-wake.mjs';
+import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
   ensureReviewStateSchema,
@@ -406,7 +407,7 @@ import {
   compareReviewerDispatchCandidates,
   createDetachedReviewerDispatchTracker, persistedSpawnReservationSource,
   createReviewerMemoryAdmissionSampler,
-  reserveReviewerMemoryAdmission, reviewerDispatchIsFirstPass,
+  reserveReviewerMemoryAdmission,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -1259,6 +1260,7 @@ async function pollOnceWithinBudget(
   console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
+  const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingFirstPassReview, readRereviewDepth: countOpenPrsAwaitingRereview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
@@ -1270,8 +1272,6 @@ async function pollOnceWithinBudget(
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
-  const reviewerDiscoveryDrainBatchSize = Math.max(1, reviewerPoolConfig.maxConcurrent || 1);
-  let reviewerDiscoveryDrainUsed = false;
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
       return { dispatched: 0, maxObservedConcurrency: 0 };
@@ -1318,7 +1318,10 @@ async function pollOnceWithinBudget(
       // Also settle reservations when the drain throws before returning its
       // deferred list. Started candidates own their spawn/refusal settlement.
       for (const candidate of candidates) {
-        if (!startedCandidates.has(candidate)) candidate.refundDepthSpill?.();
+        if (!startedCandidates.has(candidate)) {
+          candidate.retainWakeForCapacity?.();
+          candidate.refundDepthSpill?.();
+        }
       }
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
       if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
@@ -1329,17 +1332,10 @@ async function pollOnceWithinBudget(
       }
     }
   }
-  async function drainReviewerDispatchCandidatesIfBatchReady(reason) {
-    if (reviewerDiscoveryDrainUsed) {
-      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
-    }
-    if (reviewerDispatchCandidates.length < reviewerDiscoveryDrainBatchSize) {
-      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
-    }
-    if (reviewerDispatchCandidates.every((candidate) => !reviewerDispatchIsFirstPass(candidate)) && countOpenPrsAwaitingFirstPassReview() > 0) return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
-    reviewerDiscoveryDrainUsed = true;
-    return drainReviewerDispatchCandidates(reason);
-  }
+  const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({
+    priorityDiscoveryPending, reviewerDispatchCandidates, batchSize: Math.max(1, reviewerPoolConfig.maxConcurrent || 1),
+    countOpenPrsAwaitingFirstPassReview, drain: drainReviewerDispatchCandidates,
+  });
   // ARC-03: pump every enabled domain through its own adapter set instead of
   // assuming a single hardcoded `code-pr` domain. Each enabled domain resolves
   // its own reviewer-runtime adapter (isolated from other domains); the primary
@@ -1367,6 +1363,11 @@ async function pollOnceWithinBudget(
     for (const repoPath of domainRepos) {
       domainRepoWork.push({ domainAdapterSet, repoPath });
     }
+  }
+
+  const discoveryRepos = new Set(domainRepoWork.map(({ repoPath }) => repoPath));
+  for (const identity of priorityDiscoveryPending) {
+    if (!discoveryRepos.has(identity.slice(0, identity.lastIndexOf('#')))) priorityDiscoveryPending.delete(identity);
   }
 
   for (const { domainAdapterSet, repoPath } of domainRepoWork) {
@@ -1397,9 +1398,15 @@ async function pollOnceWithinBudget(
       subjectRefs = await subjectAdapter.discoverSubjects();
     } catch (err) {
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
+      reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
       continue;
     }
 
+    await retainedWatcherWakes.reconcileMissing({
+      repoPath,
+      discoveredPrNumbers: new Set(subjectRefs.map((ref) => parseSubjectExternalId(ref.subjectExternalId).prNumber)),
+      readLive: (prNumber) => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),
+    });
     let subjectEntries = (await Promise.all(subjectRefs.map(async (subjectRef) => {
       try {
         const subject = await subjectAdapter.fetchState(subjectRef);
@@ -1410,6 +1417,9 @@ async function pollOnceWithinBudget(
         return null;
       }
     }))).filter(Boolean);
+    reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, {
+      repoPath, discoveredPrNumbers: new Set(subjectEntries.map(({ prNumber }) => prNumber)),
+    });
     subjectEntries = subjectEntries
       .map((entry) => ({
         ...entry,
@@ -1474,8 +1484,9 @@ async function pollOnceWithinBudget(
         isFastMergeSkipEnabled,
         normalizeReviewPopulationRetryConfig,
         shouldDeferReviewForActiveFollowUp,
-        wakePayload: wakePayloadForPoll(), admissionSettlementSplitEnabled,
+        wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
       });
+      priorityDiscoveryPending.delete(`${repoPath}#${subjectEntry.prNumber}`);
       firstPassSpilloverController.refundPendingSpill({ repo: repoPath, prNumber: subjectEntry.prNumber });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');
     }

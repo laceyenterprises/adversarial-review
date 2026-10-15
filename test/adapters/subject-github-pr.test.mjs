@@ -913,17 +913,19 @@ test('revisionRef only uses the real GitHub head SHA', () => {
 });
 
 test('stateFromSnapshot always emits a boolean terminal flag', () => {
-  const state = stateFromSnapshot({
-    domainId: 'code-pr',
-    subjectExternalId: 'laceyenterprises/clio#12',
-    revisionRef: 'sha-1',
-    title: 'Example',
-    state: '',
-    labels: [],
-  });
+  for (const [prState, terminal] of [['', false], ['open', false], ['closed', true], ['merged', true]]) {
+    const state = stateFromSnapshot({
+      domainId: 'code-pr',
+      subjectExternalId: 'laceyenterprises/clio#12',
+      revisionRef: 'sha-1',
+      title: 'Example',
+      state: prState,
+      labels: [],
+    });
 
-  assert.equal(state.terminal, false);
-  assert.equal(typeof state.terminal, 'boolean');
+    assert.equal(state.terminal, terminal);
+    assert.equal(typeof state.terminal, 'boolean');
+  }
 });
 
 test('stateFromSnapshot preserves branch and base evidence used by duplicate-family suppression', () => {

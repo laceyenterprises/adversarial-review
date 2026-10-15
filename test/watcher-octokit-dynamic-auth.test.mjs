@@ -76,3 +76,34 @@ test('createWatcherOctokit: fail-open when authProvider yields nothing (keeps ex
   // Empty provider -> don't overwrite any request auth already in place.
   assert.equal(opts.headers.authorization, 'token ghs_CONSTRUCT');
 });
+
+test('GHSCOPE-01: budget admission pins the same dynamic token that the request sends', async () => {
+  let calls = 0;
+  let observedAuthorization;
+  const octokit = createWatcherOctokit({
+    authProvider: () => ++calls === 1 ? 'synthetic-token-a' : 'synthetic-token-b',
+    octokitFactory: options => new Octokit({ ...options, request: {
+      fetch: async (_url, request) => {
+        observedAuthorization = request.headers.authorization;
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    } }),
+  });
+  await octokit.request('GET /user');
+  assert.equal(observedAuthorization, 'token synthetic-token-a');
+});
+
+test('GHSCOPE-01: a failed auth provider preserves existing request authentication', async () => {
+  let observedAuthorization;
+  const octokit = createWatcherOctokit({
+    authProvider: () => { throw new Error('synthetic provider unavailable'); },
+    octokitFactory: options => new Octokit({ ...options, request: {
+      fetch: async (_url, request) => {
+        observedAuthorization = request.headers.authorization;
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    } }),
+  });
+  await octokit.request('GET /user', { headers: { authorization: 'token synthetic-existing-token' } });
+  assert.equal(observedAuthorization, 'token synthetic-existing-token');
+});

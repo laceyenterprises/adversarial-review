@@ -190,6 +190,7 @@ function createWatcherOctokit({
   authProvider = null,
 } = {}) {
   const hasDynamicAuth = typeof authProvider === 'function';
+  const requestTokens = new WeakMap();
   const octokit = octokitFactory(hasDynamicAuth ? {} : { auth });
   // When an authProvider is supplied, refresh the Authorization header on EVERY
   // request from the live token. The watcher is a long-lived process and its
@@ -202,7 +203,7 @@ function createWatcherOctokit({
     octokit.hook.before('request', (options) => {
       let token;
       try {
-        token = authProvider();
+        token = requestTokens.has(options) ? requestTokens.get(options) : authProvider();
       } catch {
         token = null;
       }
@@ -214,7 +215,14 @@ function createWatcherOctokit({
   }
   octokit?.hook?.wrap?.('request', async (request, options) => {
     const resource = String(options.url || '').includes('/graphql') ? 'graphql' : 'core';
-    const token = hasDynamicAuth ? authProvider() : auth;
+    let token = auth;
+    if (hasDynamicAuth) {
+      try { token = authProvider(); } catch { token = null; }
+      token ||= String(options.headers?.authorization || '').replace(/^(?:token|bearer)\s+/i, '') || null;
+      // Pin the token for both admission and the before hook. A refresh during
+      // the asynchronous budget read must not charge one credential for another.
+      requestTokens.set(options, token);
+    }
     const credential = githubCredential({ token });
     await awaitThrottleIfNeeded(resource, credential);
     try {

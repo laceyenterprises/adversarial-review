@@ -27,6 +27,7 @@ function shellSingleQuote(value) {
 }
 
 function buildMergeAgentPrompt(job, { trigger = null } = {}) {
+  const mergeLeaseHelper = shellSingleQuote(fileURLToPath(new URL('../bin/merge-lease.mjs', import.meta.url)));
   const ciCostChecker = shellSingleQuote(fileURLToPath(new URL('../bin/ci-cost-check.mjs', import.meta.url)));
   const mergeRepoLiteral = shellSingleQuote(job.repo);
   const mergeBaseLiteral = shellSingleQuote(job.baseBranch);
@@ -293,7 +294,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('cleanup_merge_lease() {');
         lines.push('  status=$?');
         lines.push('  if [ -n "${MERGE_LEASE_ID:-}" ]; then');
-        lines.push('    node bin/merge-lease.mjs release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID" || true');
+        lines.push(`    node ${mergeLeaseHelper} release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID" || true`);
         lines.push('  fi');
         lines.push('  rm -f "$MERGE_LEASE_JSON" "$MERGE_REVALIDATION_JSON"');
         lines.push('  exit "$status"');
@@ -301,7 +302,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('trap cleanup_merge_lease EXIT');
         lines.push('');
         lines.push('set +e');
-        lines.push('node bin/merge-lease.mjs acquire --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --head "$MERGE_GATE_ATTEMPT_HEAD" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"');
+        lines.push(`node ${mergeLeaseHelper} acquire --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --head "$MERGE_GATE_ATTEMPT_HEAD" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"`);
         lines.push('MERGE_LEASE_EXIT=$?');
         lines.push('set -e');
         lines.push('if [ "$MERGE_LEASE_EXIT" -eq 70 ] && jq -e \'.parked == true\' "$MERGE_LEASE_JSON" >/dev/null; then');
@@ -327,7 +328,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"');
         lines.push('');
         lines.push('set +e');
-        lines.push('node bin/merge-lease.mjs needs-revalidation --repo-path "$PWD" --base "$MERGE_BASE" --validation-base "$VALIDATION_BASE" --current-base "$CURRENT_BASE" --changed-files-from "$POST_REMEDIATION_SHA" > "$MERGE_REVALIDATION_JSON"');
+        lines.push(`node ${mergeLeaseHelper} needs-revalidation --repo-path "$PWD" --base "$MERGE_BASE" --validation-base "$VALIDATION_BASE" --current-base "$CURRENT_BASE" --changed-files-from "$POST_REMEDIATION_SHA" > "$MERGE_REVALIDATION_JSON"`);
         lines.push('MERGE_REVALIDATION_EXIT=$?');
         lines.push('set -e');
         lines.push('if [ "$MERGE_REVALIDATION_EXIT" -ne 0 ]; then');

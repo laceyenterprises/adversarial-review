@@ -1,3 +1,5 @@
+import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
+import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -296,4 +298,22 @@ test('HAMTMP-02: hammer spawn inherits private TMPDIR and terminal cleanup remov
   await reconcileAmaCloserDispatches(root, { logger,
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }) });
   assert.equal(existsSync(scratchDir), false);
+});
+
+
+test('HAMTMP-02: sibling remediation and fallback merge prompts invoke deployed helpers absolutely', () => {
+  const job = { jobId: 'synthetic-job', repo: 'fixture/repo', prNumber: 42, baseBranch: 'main',
+    reviewSummary: 'synthetic finding', reviewBody: 'synthetic review',
+    remediationPlan: { maxRounds: 3, currentRound: 0 } };
+  for (const round of [0, 1, 2]) {
+    const prompt = buildRemediationPrompt({ ...job, remediationPlan: { ...job.remediationPlan, currentRound: round } },
+      { hqRoot: '/fixture/hq', launchRequestId: 'synthetic-lrq' });
+    assert.ok(prompt.includes(`"${repoRoot}/bin/run-bounded.sh"`));
+    assert.doesNotMatch(prompt, /`bin\/run-bounded|\$\{ADVERSARIAL_REVIEW_ROOT\}/);
+  }
+  const prompt = buildMergeAgentPrompt(job, { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
+  for (const action of ['acquire', 'release', 'needs-revalidation']) {
+    assert.ok(prompt.includes(`'${repoRoot}/bin/merge-lease.mjs' ${action}`));
+  }
+  assert.doesNotMatch(prompt, /node bin\//);
 });

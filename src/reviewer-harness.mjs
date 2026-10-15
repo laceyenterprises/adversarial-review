@@ -2654,6 +2654,9 @@ async function spawnAgyReview({
 // survivor exit; capture must not hold its bookkeeping lease for a drain timer.
 // Zero disables the capture's settle deadline, so use the minimum positive tick.
 const AGY_IDENTITY_SETTLE_AFTER_KILL_MS = 1;
+// The added-identity path runs agy through sudo, which forwards SIGTERM to its
+// child but cannot forward SIGKILL, so SIGKILL waits this long after SIGTERM.
+const AGY_IDENTITY_KILL_GRACE_MS = 2_000;
 
 function readCapturedFile(path, maxBytes) {
   let fd;
@@ -2711,7 +2714,9 @@ async function spawnAgyIdentityReview({ identity, agyArgs, timeout, signal, maxB
       stderrPath,
       settleAfterKillMs: AGY_IDENTITY_SETTLE_AFTER_KILL_MS,
       progressTimeout: timeout,
-      killGraceMs: 0,
+      // sudo relays SIGTERM to the pinned agy command but cannot relay SIGKILL;
+      // give it a moment to forward the TERM before the group is killed.
+      killGraceMs: AGY_IDENTITY_KILL_GRACE_MS,
     });
     return { ...result, ...captured() };
   } catch (err) {
@@ -3444,6 +3449,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   promptStage = 'first',
   reviewerSubprocessCwd = process.cwd(),
   onProgress = null,
+  signal,
   reviewWithClaudeImpl = reviewWithClaude,
   reviewWithCodexImpl = reviewWithCodex,
   reviewWithGeminiImpl = reviewWithGemini,
@@ -3463,7 +3469,7 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
       execution: typeof claudeResult === 'string' ? null : claudeResult?.execution, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
-    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd });
+    const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage, reviewerSubprocessCwd, ...(signal ? { signal } : {}) });
     return {
       rawReviewText: result.reviewText,
       reviewText: sanitizeReviewPayloadBestEffort(result.reviewText),

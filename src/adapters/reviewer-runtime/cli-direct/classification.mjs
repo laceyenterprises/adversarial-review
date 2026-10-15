@@ -67,7 +67,11 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   // identifies stale-head churn; an ordinary temporary failure keeps its class.
   const text = String(stderr || '');
   const lower = text.toLowerCase();
-  if (exitCode === REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE) return 'reviewer-chunk-budget-exceeded';
+  // Exit 77 is also sysexits EX_NOPERM, and this classifier also reads exit codes
+  // from other CLIs; only the reviewer's own marker identifies the budget refusal.
+  if (exitCode === REVIEWER_CHUNK_BUDGET_EXCEEDED_EXIT_CODE && text.includes('[reviewer-chunk-budget-exceeded]')) {
+    return 'reviewer-chunk-budget-exceeded';
+  }
   if (exitCode === REVIEWER_PROMPT_TOO_LARGE_EXIT_CODE) return 'reviewer-prompt-too-large';
   if (parseReviewerModelUnavailable(text)) return 'reviewer-model-unavailable';
   const normalizedErrorCode = String(errorCode || '').toUpperCase();

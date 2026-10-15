@@ -80,6 +80,7 @@ import {
   resolveSigtermFenceGraceSeconds,
 } from './reviewer-fence.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { createGeminiReviewerProcessDeadline } from './reviewer-process-deadline.mjs';
 import {
   configureReviewerWorkspaceAudit,
   ReviewerSnapshotBaseError,
@@ -2091,6 +2092,9 @@ async function main() {
   let tokenUsage = null;
   let reviewerExecution = null;
   const reviewerStartedAt = new Date().toISOString();
+  // CHUNKTIME-01: the Gemini reviewer bounds its own run; see reviewer-process-deadline.mjs.
+  const geminiDeadline = createGeminiReviewerProcessDeadline();
+  if (effectiveModel === 'gemini' || useAgyChunkFallback) geminiDeadline.arm();
   try {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     // Single selection site (GMW-01): claude / gemini / codex. gemini routes
@@ -2105,10 +2109,12 @@ async function main() {
             promptBytes: oversizedAgyRoute?.promptBytes,
             maxBytes: oversizedAgyRoute?.maxBytes,
             onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
+            signal: geminiDeadline.signal, onChunkPlan: geminiDeadline.extendForPlan,
           })
         : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
             promptStage: reviewModeDecision.promptStage,
             reviewerSubprocessCwd,
+            signal: effectiveModel === 'gemini' ? geminiDeadline.signal : undefined,
             onProgress: createReviewerProgressRecorder({ rootDir: ROOT, repo, prNumber, attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind, reviewerSessionUuid }),
           });
     } catch (firstErr) {
@@ -2127,12 +2133,14 @@ async function main() {
         checkoutDir: reviewerCheckoutDir,
         stateDir: reviewerWorkspaceStateDir,
       });
+      geminiDeadline.arm();
       dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
         promptStage: reviewModeDecision.promptStage,
         reviewerSubprocessCwd,
         promptBytes: oversizedAgyRoute.promptBytes,
         maxBytes: oversizedAgyRoute.maxBytes,
         onRejectedCodexOutput: (rejected) => persistRejectedCodexOutput({ repo, prNumber, ...rejected }),
+        signal: geminiDeadline.signal, onChunkPlan: geminiDeadline.extendForPlan,
       });
     }
     persistReviewElisions({ rootDir: ROOT, repo, prNumber,
@@ -2355,6 +2363,7 @@ async function main() {
       log: console,
     });
     console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+    geminiDeadline.dispose();
   } catch (err) {
     console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err.message);
     process.exit(reviewerPostFailureExitCode(err));

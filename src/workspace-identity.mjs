@@ -1,10 +1,10 @@
 import { existsSync, lstatSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { inspectWorkspaceState, preserveInvalidResumeWorkspace } from './remediation-git-pr-io.mjs';
 
 // Preserve workspace symlinks and unsafe metadata before Git touches them.
 export async function preserveUnsafeWorkspaceMetadata({
-  workspaceDir, workspaceRootDir, jobId, repo, execFileImpl, log,
+  workspaceDir, workspaceRootDir = dirname(workspaceDir), jobId, repo, execFileImpl, log,
 }) {
   // Check the workspace itself before any Git command can touch its target.
   if (lstatSync(workspaceDir, { throwIfNoEntry: false })?.isSymbolicLink()) {

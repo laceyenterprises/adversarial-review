@@ -376,7 +376,7 @@ function resetWorkspaceDir(workspaceDir) {
   rmSync(workspaceDir, { recursive: true, force: true });
 }
 
-function preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId, reason, log }) {
+function preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir = dirname(workspaceDir), jobId, reason, log }) {
   if (!existsSync(workspaceDir)) return;
   const backupDir = join(workspaceRootDir, `${jobId}.resume-backup-${Date.now()}-${process.pid}`);
   renameSync(workspaceDir, backupDir);
@@ -398,7 +398,7 @@ async function inspectWorkspaceForRetry({ workspaceDir, workspaceRootDir, jobId,
 }
 
 async function checkoutWorkspaceForRemediation({
-  workspaceDir, workspaceRootDir, job, repo, baseBranch, headRef, headRepo,
+  workspaceDir, workspaceRootDir = dirname(workspaceDir), job, repo, baseBranch, headRef, headRepo,
   resumeRequested, fetchEnv, execFileImpl = execFileAsync, log = console,
 }) {
   if ((headRepo && headRepo !== repo) || !headRef) {

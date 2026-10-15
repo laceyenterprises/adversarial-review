@@ -977,6 +977,7 @@ async function pushOssReadinessRemediationCommit({
 
 async function prepareWorkspaceForJob({
   rootDir = ROOT,
+  workspaceRootDir: callerWorkspaceRootDir,
   job,
   workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
   env = process.env,
@@ -987,7 +988,10 @@ async function prepareWorkspaceForJob({
   const startedAt = Date.now();
   let checkoutStartedAt = startedAt;
   let cloneSource = 'reused';
-  const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env });
+  // An explicit caller root must not be redirected by inherited host settings.
+  const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: callerWorkspaceRootDir
+    ? { ...env, [REMEDIATION_WORKSPACE_ROOT_ENV]: callerWorkspaceRootDir }
+    : env });
   const workspaceDir = join(workspaceRootDir, job.jobId);
   ensureWorkspaceRootDir(workspaceRootDir, env);
   const retryHistory = job?.remediationPlan?.retryHistory || [];
@@ -1056,6 +1060,7 @@ async function prepareWorkspaceForJob({
     preserveInvalidResumeWorkspace({ workspaceDir, workspaceRootDir, jobId: job.jobId, reason: err.message, log });
     return prepareWorkspaceForJob({
       rootDir,
+      workspaceRootDir,
       job: { ...job, remediationPlan: { ...job.remediationPlan, retryHistory: retryHistory.slice(0, -1) } },
       workerClass, env, execFileImpl, log,
     });

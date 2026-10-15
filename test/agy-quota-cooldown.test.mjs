@@ -22,7 +22,7 @@ function fixture(identities = [owner, added]) {
     readActiveRunRecordsImpl: () => [], readBootstrapRecordImpl: () => ({ ready: true }),
     referenceSettings: () => [], listUserProcessesImpl: async () => ({ ok: true, processes: [] }),
     runPinnedImpl: async ({ args }) => ({ code: 0, stdout: args[0] === 'status'
-      ? 'keychain.exists=yes\nkeychain.item=readable\nsettings.valid=yes\n' : '' }),
+      ? 'keychain.exists=yes\nkeychain.item=timeout\ntoken.file=ready\ntoken.owner=yes\ntoken.mode=600\nhome.mode=700\nsettings.valid=yes\n' : '' }),
   });
   const options = () => ({ rootDir, env, hqOwner: owner, nowMs: clock, log: {} });
   return { pool, rootDir, env, options, setClock: value => { clock = value; }, cleanup: () => rmSync(rootDir, { recursive: true, force: true }) };

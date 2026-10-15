@@ -652,6 +652,19 @@ failures and transient `agy models` transport failures use bounded
 retry/backoff before surfacing an OAuth failure; definitive missing-keychain and
 non-transient probe failures fail closed immediately.
 
+For an added reviewer OS identity, the watcher uses the pinned helper's
+`status` and `settings` contract instead of the HQ-owner preflight above.
+When status contains `token.file`, readiness requires `token.file=ready`,
+`token.owner=yes`, `token.mode=600` and `home.mode=700`: the token file is the
+store background reviews read. `keychain.item` is then diagnostic only. An
+older helper without `token.file` retains the `keychain.item=readable` gate.
+Both versions still require `keychain.exists=yes`, `settings.valid=yes` and
+settings parity with the HQ-owner path. After a failed review or bootstrap
+isolation, re-admission also requires the helper's authenticated tiny
+`agy --print` probe; `probe.reason` is included in isolation reasons when
+present. Probe cadence and timeouts stay unchanged. The HQ-owner recovery
+contract remains as documented above.
+
 The `agy` CLI can spawn a long-lived language-server descendant that inherits
 the parent's stdout/stderr pipes. In that failure shape the main `agy` process
 can exit successfully while the descendant keeps capture pipes open forever,

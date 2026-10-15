@@ -144,11 +144,22 @@ case "$1" in
   status)
     echo "keychain.exists=yes"
     if [ -e "$HOME/.item-missing" ]; then echo "keychain.item=missing"; else echo "keychain.item=readable"; fi
+    echo "token.path=$HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+    if [ -e "$HOME/.token-missing" ]; then echo "token.file=missing"; else echo "token.file=ready"; fi
+    echo "token.owner=yes"
+    echo "token.mode=600"
+    echo "home.mode=700"
     echo "settings.valid=yes" ;;
   settings) grep -v '^#' "$FAKE_ROOT/settings/$USER.conf" | sort ;;
   probe)
     echo "probe" >> "$HOME/probes.log"
-    if [ -e "$HOME/.probe-fails" ]; then echo "probe.ok=no"; exit 1; fi
+    echo "probe.kind=authenticated-print"
+    if [ -e "$HOME/.probe-fails" ]; then
+      echo "probe.ok=no"
+      echo "probe.reason=authentication-required"
+      echo "probe.exit=1"
+      exit 1
+    fi
     echo "probe.ok=yes" ;;
   *) exit 64 ;;
 esac
@@ -348,13 +359,53 @@ test('CCX-08: [<HQ owner>, agentos-reviewer] gives a cap of 2, the ready count, 
     });
     assert.equal(cap, 2);
     assert.equal(brokerFetches, 0, 'the broker credential count is not consulted');
-    // Only ready identities count: a missing keychain item drops the cap to 1.
-    writeFileSync(join(fake.home(REVIEWER_A), '.item-missing'), '');
+    // Only ready identities count: a missing token file drops the cap to 1.
+    writeFileSync(join(fake.home(REVIEWER_A), '.token-missing'), '');
     assert.equal(await pool.refreshReadiness(), 1);
     // A non-Gemini candidate set skips both.
     assert.equal(await resolveGeminiCredentialConcurrencyForDispatchCandidates([{ reviewerModel: 'codex' }], { identityPool: pool }), null);
   } finally {
     fake.cleanup();
+  }
+});
+
+test('AGYTOKEN-02: added identities require token readiness and retain older-helper compatibility', async (t) => {
+  const ready = {
+    'keychain.exists': 'yes', 'keychain.item': 'readable', 'settings.valid': 'yes',
+    'token.file': 'ready', 'token.owner': 'yes', 'token.mode': '600', 'home.mode': '700',
+  };
+  const legacy = { 'keychain.exists': 'yes', 'keychain.item': 'readable', 'settings.valid': 'yes' };
+  const cases = [
+    ['ready token', ready, null],
+    ...['timeout', 'missing', 'unreadable', 'unknown', undefined].map((item) =>
+      [`ready token with keychain ${item}`, { ...ready, 'keychain.item': item }, null]),
+    ...['missing', 'wrong-owner', 'wrong-mode', 'not-regular', 'symlinked-parent', 'home-not-0700', 'unreadable', 'unknown', ''].map((file) =>
+      [`token file ${file || 'empty'}`, { ...ready, 'token.file': file }, `agy token file ${file || 'unknown'}`]),
+    ['wrong owner', { ...ready, 'token.owner': 'no' }, 'agy token owner no (expected yes)'],
+    ['wrong mode', { ...ready, 'token.mode': '644' }, 'agy token mode 644 (expected 600)'],
+    ['home not 0700', { ...ready, 'home.mode': '755' }, 'agy home mode 755 (expected 700)'],
+    ...['token.owner', 'token.mode', 'home.mode'].map((key) =>
+      [`missing ${key}`, { ...ready, [key]: undefined }, `agy ${key.replace('.', ' ')} unknown (expected ${key === 'token.owner' ? 'yes' : key === 'token.mode' ? '600' : '700'})`]),
+    ['keychain absent', { ...ready, 'keychain.exists': 'no' }, 'login keychain missing'],
+    ['invalid settings', { ...ready, 'settings.valid': 'no' }, 'settings file invalid'],
+    ['legacy readable', legacy, null],
+    ['legacy missing', { ...legacy, 'keychain.item': 'missing' }, 'agy keychain item missing'],
+  ];
+  for (const [name, fields, reason] of cases) {
+    await t.test(name, async () => {
+      const diagnostics = [];
+      const pool = makePool(null, {
+        identities: ['reviewer-b'],
+        log: { ...quietLog(), debug: (line) => diagnostics.push(line) },
+        runPinnedImpl: async ({ args }) => ({ code: 0, stdout: args[0] === 'status'
+          ? Object.entries(fields).filter(([, value]) => value !== undefined).map(([key, value]) => `${key}=${value}`).join('\n')
+          : HQ_SETTINGS.join('\n') }),
+      });
+      assert.equal(await pool.refreshReadiness(), reason ? 0 : 1);
+      assert.deepEqual(pool.snapshot()[0].reasons, reason ? [reason] : []);
+      assert.equal(await pool.acquire({ reviewId: 'token-readiness' }) !== null, !reason);
+      assert.equal(diagnostics.length > 0, 'token.file' in fields && fields['keychain.item'] !== 'readable');
+    });
   }
 });
 
@@ -694,14 +745,14 @@ test('AGYDRIFT-01: first-pass proxy drift logs once per distinct reason set unti
     assert.equal(failures().length, 1, 'repeated failures do not repeat the log');
 
     // A second reason set is reported once, including when the first recurs.
-    writeFileSync(join(fake.home('reviewer-b'), '.item-missing'), '');
+    writeFileSync(join(fake.home('reviewer-b'), '.token-missing'), '');
     await pool.refreshReadiness();
     await pool.refreshReadiness();
     assert.deepEqual(failures(), [
       `warn [agy-identities] identity=reviewer-b not ready: ${driftReason}`,
-      `warn [agy-identities] identity=reviewer-b not ready: agy keychain item missing; ${driftReason}`,
+      `warn [agy-identities] identity=reviewer-b not ready: agy token file missing; ${driftReason}`,
     ]);
-    rmSync(join(fake.home('reviewer-b'), '.item-missing'));
+    rmSync(join(fake.home('reviewer-b'), '.token-missing'));
     await pool.refreshReadiness();
     assert.equal(failures().length, 2);
 
@@ -782,6 +833,8 @@ test('CCX-08: a failed review isolates only its identity, and a passing readines
     assert.equal(await pool.refreshReadiness(), 2);
     await pool.settleProbes();
     assert.equal(pool.readyCount(), 2);
+    assert.match(pool.snapshot().find((state) => state.user === REVIEWER_A).reasons[0],
+      /agy authenticated probe exited 1.*probe.reason=authentication-required/);
 
     // The next successful readiness check re-admits it, with no operator step.
     rmSync(join(fake.home(REVIEWER_A), '.probe-fails'));

@@ -95,7 +95,7 @@ const HELPER_TIMEOUT_MS = 30_000;
 // it left can hold them) before the capture settles without them.
 const PIPE_DRAIN_MS = 2_000;
 const KILL_GRACE_MS = 2_000;
-// `agy models` under launchd takes ~30s; the keychain helper bounds it at 60s.
+// The keychain helper bounds its authenticated probe at 60s.
 const PROBE_TIMEOUT_MS = 90_000;
 const EXTRACT_TIMEOUT_MS = 5 * 60_000;
 // Backoff before each re-attempt of a transiently failed snapshot extract.
@@ -772,9 +772,9 @@ function createAgyReviewerIdentityPool({
     transition(state, false, reasons);
   }
 
-  // A full `agy models` probe re-admits an identity whose failure the cheap
+  // An authenticated probe re-admits an identity whose failure the cheap
   // check cannot see (a failed review, a failed bootstrap probe). It runs in
-  // the background so a watcher pass never waits the ~30s it takes.
+  // the background so a watcher pass never waits for the bounded helper call.
   function startProbe(state) {
     if (probes.has(state.user)) return;
     const run = (async () => {
@@ -787,8 +787,12 @@ function createAgyReviewerIdentityPool({
           if (!ok) reason = `agy auth probe failed (${result?.reason || 'unknown'})`;
         } else {
           const result = await runHelper({ user: state.user, command: AGY_REVIEWER_KEYCHAIN_HELPER, args: ['probe'], timeoutMs: PROBE_TIMEOUT_MS });
-          ok = result.code === 0 && parseHelperKeyValues(result.stdout)['probe.ok'] === 'yes';
-          if (!ok) reason = describeFailure('agy models probe', result);
+          const fields = parseHelperKeyValues(result.stdout);
+          ok = result.code === 0 && fields['probe.ok'] === 'yes';
+          if (!ok) {
+            reason = describeFailure('agy authenticated probe', result);
+            if (fields['probe.reason']) reason += ` (probe.reason=${fields['probe.reason']})`;
+          }
         }
       } catch (err) {
         reason = `readiness probe threw: ${err?.message || err}`;
@@ -814,7 +818,18 @@ function createAgyReviewerIdentityPool({
     } else {
       const fields = parseHelperKeyValues(status.stdout);
       if (fields['keychain.exists'] !== 'yes') reasons.push('login keychain missing');
-      if (fields['keychain.item'] !== 'readable') reasons.push(`agy keychain item ${fields['keychain.item'] || 'unknown'}`);
+      if (Object.prototype.hasOwnProperty.call(fields, 'token.file')) {
+        if (fields['token.file'] !== 'ready') reasons.push(`agy token file ${fields['token.file'] || 'unknown'}`);
+        if (fields['token.owner'] !== 'yes') reasons.push(`agy token owner ${fields['token.owner'] || 'unknown'} (expected yes)`);
+        if (fields['token.mode'] !== '600') reasons.push(`agy token mode ${fields['token.mode'] || 'unknown'} (expected 600)`);
+        if (fields['home.mode'] !== '700') reasons.push(`agy home mode ${fields['home.mode'] || 'unknown'} (expected 700)`);
+        if (fields['keychain.item'] !== 'readable') {
+          log.debug?.(`[agy-identities] identity=${state.user} keychain.item=${fields['keychain.item'] || 'unknown'} (diagnostic only)`);
+        }
+      } else if (fields['keychain.item'] !== 'readable') {
+        // Compatibility with a pinned helper that has not been re-installed.
+        reasons.push(`agy keychain item ${fields['keychain.item'] || 'unknown'}`);
+      }
       if (fields['settings.valid'] !== 'yes') reasons.push('settings file invalid');
     }
     if (settings.code !== 0) {

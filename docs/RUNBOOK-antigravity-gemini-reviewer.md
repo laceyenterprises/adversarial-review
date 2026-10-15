@@ -208,8 +208,13 @@ way. The HQ owner is leasable without a pass, as it always was.
 
 An identity is isolated when:
 
-- its keychain or keychain item is missing or unreadable, or its settings file
-  is invalid;
+- its login keychain is missing or its settings file is invalid;
+- the added identity's helper reports a token file that is not ready, is not
+  owned by that identity (`token.owner=yes`), is not mode `600`, or has a home
+  directory mode other than `700`. This is the token file background reviews
+  read. When `token.file` is present, `keychain.item` is diagnostic only;
+  when an older pinned helper omits `token.file`, the watcher retains the
+  `keychain.item=readable` requirement until that helper is re-installed;
 - its settings drift from the HQ-owner path's effective agy settings;
 - a CCX-07 keychain-bootstrap record marks it not ready;
 - a review it ran fails with any failure class other than `cancelled`,
@@ -230,10 +235,12 @@ Log lines:
 
 An identity isolated by a failed review or a bootstrap record is re-admitted
 automatically. This happens once its cheap check passes and a background
-`agy models` probe (`probe` on the keychain helper; the auth probe for the HQ
-owner) succeeds. No operator step is needed. An identity that stays isolated
-lowers the cap by one. Fix the reason in the log line (keychain login,
-settings file) and the next drain re-admits it.
+authenticated tiny `agy --print` probe (`probe` on the added identity's
+keychain helper) succeeds. Helper failures include `probe.reason` in the
+isolation reason when available. The HQ owner keeps its existing auth probe.
+No operator step is needed. An identity that stays isolated lowers the cap by
+one. Fix the reason in the log line (token file, login keychain, settings file)
+and the next drain re-admits it. Probe cadence and timeouts are unchanged.
 
 **No lease available.** If no identity is ready and free within 5 minutes,
 the review does not run. It fails with the transient class
@@ -359,8 +366,10 @@ review attempt.
 CLI and `oauth_creds.json` before it spawns a Gemini reviewer. It skips that
 probe for a review leased to an added identity. That review runs agy as the
 added user and never touches the HQ owner's Gemini CLI. The pool leased the
-identity only after its own readiness check passed (keychain plus
-`agy models`), and that check is at most 60s old. A missing or expired
+identity only after its own readiness check passed (token file, login keychain
+and settings, with the authenticated helper probe required after review or
+bootstrap isolation), and that check is at most 60s old. Older helpers retain
+the keychain-item readiness check described above. A missing or expired
 HQ-owner Gemini CLI login therefore blocks only HQ-owner reviews.
 
 ## Output Guard And Timeout Behavior

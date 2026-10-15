@@ -30,8 +30,17 @@ function parseGhDebug(stderr, resource = 'core') {
   let rateLimited = false;
   let forbidden = false;
   let limitMessage = false;
+  let lastResponseRateLimit = null;
+  let requestResource = resource;
+  let lastResponseResource = resource;
   function flush() {
-    const observation = extractRateLimitObservation(headers, { resource, rateLimited: rateLimited || (forbidden && limitMessage) });
+    // GraphQL can report RATE_LIMITED with HTTP 200. Preserve only the last
+    // response's reset hint until stdout/error classification is available.
+    if (inRequest || Object.keys(headers).length) {
+      lastResponseResource = headers['x-ratelimit-resource'] || requestResource;
+      lastResponseRateLimit = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: true });
+    }
+    const observation = extractRateLimitObservation(headers, { resource: requestResource, rateLimited: rateLimited || (forbidden && limitMessage) });
     if (observation) observations.push({ ...observation, rateLimited: rateLimited || (forbidden && (observation.remaining === 0 || limitMessage)) });
     headers = {};
     rateLimited = false;
@@ -44,7 +53,10 @@ function parseGhDebug(stderr, resource = 'core') {
       diagnosticTail = [];
       flush();
       inRequest = true;
+      requestResource = resource;
     }
+    const requestUrl = line.match(/^\* Request to https?:\/\/[^/]+(\/[^ ?#]*)/);
+    if (requestUrl) requestResource = requestUrl[1].includes('/graphql') ? 'graphql' : 'core';
     const header = line.match(/^< (x-ratelimit-[\w-]+|retry-after):\s*(.*)$/i);
     if (header) headers[header[1].toLowerCase()] = header[2];
     if (/^< HTTP\/\S+ 429\b/.test(line)) rateLimited = true;
@@ -68,7 +80,7 @@ function parseGhDebug(stderr, resource = 'core') {
   }
   retained.push(...diagnosticTail);
   flush();
-  return { observations, stderr: retained.join('\n') };
+  return { observations, stderr: retained.join('\n'), lastResponseRateLimit, lastResponseResource };
 }
 
 function isRateLimitedError(err) {
@@ -96,8 +108,11 @@ function responseRateLimited(result, parsed, failed) {
   } catch { /* High-level commands need not produce JSON. */ }
   const limited = parsed.observations.some(observation => observation.rateLimited)
     || graphqlLimited || (failed && isRateLimitedError(result));
-  if (limited && !parsed.observations.some(observation => observation.rateLimited) && parsed.observations.length) {
-    parsed.observations.at(-1).rateLimited = true;
+  if (limited && !parsed.observations.some(observation => observation.rateLimited) && parsed.lastResponseRateLimit) {
+    const hint = parsed.lastResponseRateLimit;
+    const last = parsed.observations.at(-1);
+    if (last?.resource === hint.resource && last.resetAt === hint.resetAt) last.rateLimited = true;
+    else parsed.observations.push({ ...hint, rateLimited: true });
   }
   if (result?.message && result.stderr) result.message = result.message.replace(String(result.stderr), parsed.stderr);
   if (result && 'stderr' in result) {
@@ -117,7 +132,7 @@ async function finish(result, { failed = false, resource = 'core', credential = 
     // GraphQL errors can name a different pool from the command's fallback.
     result.observation = observation
       ? markGitHubRateLimited(observation.resource, credential, observation)
-      : await recordRateLimitedCall(resource, credential);
+      : await recordRateLimitedCall(parsed.lastResponseResource, credential);
   }
   return result;
 }
@@ -151,8 +166,8 @@ function finishSync(result, { failed = false, resource = 'core', env, credential
   if (parsed.observations.length) bridgeCall('record', parsed.observations.map(item => ({ ...item, credential })), env);
   if (limited) {
     const observation = parsed.observations.findLast(item => item.rateLimited);
-    result.observation = markGitHubRateLimited(observation?.resource || resource, credential, observation || {});
-    if (!observation) bridgeCall('limited', [{ resource, credential }], env);
+    result.observation = markGitHubRateLimited(observation?.resource || parsed.lastResponseResource, credential, observation || {});
+    if (!observation) bridgeCall('limited', [{ resource: parsed.lastResponseResource, credential }], env);
   }
   return result;
 }

@@ -134,3 +134,37 @@ test('GHSCOPE-01: a CLI-only exhausted credential cannot trigger the anonymous w
   for (const resource of ['core', 'graphql']) await budgetApi.recordResponseRateLimit({ credential, resource, remaining: 0, resetAt: new Date(Date.now() + 60_000).toISOString() });
   assert.equal(await runLowBudgetWatcherPoll({ db: { prepare: () => assert.fail('anonymous watcher must keep polling') } }), false);
 });
+
+for (const retryAfter of [null, '120']) test(`GHSCOPE-01: a mixed command keeps the failing last response separate, Retry-After=${retryAfter}`, async () => {
+  const env = { GH_TOKEN: `synthetic-mixed-${retryAfter || 'unknown'}-token` };
+  let calls = 0;
+  const now = Date.now();
+  await withGitHubBudgetScope({}, async () => {
+    await assert.rejects(meteredExecFile(async () => {
+      throw Object.assign(new Error('GraphQL: API rate limit exceeded'), {
+        stderr: `* Request at fixture\n< HTTP/2.0 200 OK\n< X-Ratelimit-Resource: core\n< X-Ratelimit-Remaining: 4900\n< X-Ratelimit-Reset: 4102444800\n* Request took 1ms\n* Request at fixture\n< HTTP/2.0 200 OK\n${retryAfter ? `< Retry-After: ${retryAfter}\n` : ''}* Request took 1ms\n`,
+      });
+    }, 'gh', ['pr', 'view', '7'], { env }), /rate limit/);
+    await meteredExecFile(async () => { calls++; return { stdout: '{}', stderr: '' }; }, 'gh', ['api', 'repos/example/alpha'], { env });
+    await assert.rejects(meteredExecFile(async () => assert.fail('limited GraphQL must defer'), 'gh', ['api', 'graphql'], { env }), error => {
+      const resetMs = Date.parse(error.observation.resetAt);
+      assert.ok(resetMs >= now + Number(retryAfter || 60) * 1000);
+      assert.ok(resetMs < now + Number(retryAfter || 60) * 1000 + 5000);
+      return error.budgetDeferred;
+    });
+  });
+  assert.equal(calls, 1);
+});
+
+test('GHSCOPE-01: a headerless mixed-command REST limit uses the request URL resource', async () => {
+  const env = { GH_TOKEN: 'synthetic-rest-trace-token' };
+  await withGitHubBudgetScope({}, async () => {
+    await assert.rejects(meteredExecFile(async () => {
+      throw Object.assign(new Error('API rate limit exceeded'), {
+        stderr: '* Request at fixture\n* Request to https://api.github.com/repos/example/alpha\n< HTTP/2.0 429\n* Request took 1ms\n',
+      });
+    }, 'gh', ['pr', 'view', '7'], { env }), /rate limit/);
+    await meteredExecFile(async () => ({ stdout: '{}', stderr: '' }), 'gh', ['api', 'graphql'], { env });
+    await assert.rejects(meteredExecFile(async () => assert.fail('core must defer'), 'gh', ['api', 'repos/example/alpha'], { env }), { budgetDeferred: true });
+  });
+});

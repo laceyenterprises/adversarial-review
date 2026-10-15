@@ -1,3 +1,4 @@
+import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { observeClosureWait } from './closure-wait.mjs';
@@ -3989,7 +3990,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.templateBody    — raw template content
  * @returns {string}
  */
-export function composeCloserPrompt({
+function closerTemplateValues({
   prUrl,
   repo,
   prNumber,
@@ -4007,11 +4008,10 @@ export function composeCloserPrompt({
   reviewer,
   dispatchedAt,
   amaTrailers,
-  templateBody,
   reviewCycleExhausted = false,
   strictNonBlockingRemediation = true,
 }) {
-  return substituteTemplate(templateBody, {
+  return {
     OPERATOR_LABEL_GATES: OPERATOR_LABEL_GATES.map(g => `- ${g.checks.join(" / ")}: ${g.label}`).join("\n"),
     PR_URL: prUrl,
     REPO: repo,
@@ -4035,7 +4035,11 @@ export function composeCloserPrompt({
     // Dispatch-time final-hammer observation forwarded only as audit context;
     // ama-check recomputes the durable ledger state before applying waivers.
     REVIEW_CYCLE_EXHAUSTED: reviewCycleExhausted === true ? 'true' : 'false',
-  });
+  };
+}
+
+export function composeCloserPrompt(inputs) {
+  return substituteTemplate(inputs.templateBody, closerTemplateValues(inputs));
 }
 
 /**
@@ -4799,7 +4803,7 @@ export async function maybeDispatchAmaCloser({
     auditRef,
     closedBy: undefined,
   });
-  let prompt = composeCloserPrompt({
+  const promptInputs = {
     prUrl: dispatchContext.prUrl,
     repo,
     prNumber,
@@ -4824,7 +4828,8 @@ export async function maybeDispatchAmaCloser({
     // closer's ama-check invocation recomputes exhaustion from the current
     // follow-up ledger before it honors any waiver.
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
-  });
+  };
+  let prompt = composeCloserPrompt(promptInputs);
 
   const hammerOwnerRoute = hammerOwnerRouteOf(dispatchContext);
   if (hammerOwnerRoute === 'review-cycle-cap' && useHammerTerminalRemediationPrompt) {
@@ -6689,6 +6694,11 @@ export async function maybeDispatchAmaCloser({
   try {
   try {
   scratchDir = createHammerScratchDir(promptDir);
+  const procedureValues = closerTemplateValues({ ...promptInputs, scratchDir });
+  for (const phase of HAMMER_PHASES) {
+    writeFileSync(join(scratchDir, `${phase}.sh`), renderHammerProcedure(phase, procedureValues),
+      { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  }
   prompt = substituteTemplate(prompt, { RUN_DIR: scratchDir });
   if (writeFileImpl) {
     writeFileImpl(promptDir, promptPath, prompt);
@@ -7040,7 +7050,8 @@ export async function maybeDispatchAmaCloser({
   let execResult;
   let transientRetryIndex = 0;
   let samePrHammerHolderRetryUsed = false;
-  const dispatchEnv = withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs);
+  const dispatchEnv = { ...withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs),
+    TMPDIR: scratchDir };
   for (;;) {
     try {
       throwIfAborted(signal);

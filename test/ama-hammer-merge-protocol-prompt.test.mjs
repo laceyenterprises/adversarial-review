@@ -20,7 +20,7 @@ const RANGE_PROBE = /\/usr\/bin\/perl[^]*?> "\$HAM_RUN_DIR\/range\.json"/;
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
 const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
-  /In (?:the persistent merge-lease shell, render and source|the same shell with dispatch values exported, render\/source) `node <<ROOT_DIR>>\/bin\/hammer-procedure\.mjs (hammer-[a-z-]+) --render`[^\n]*\n/g,
+  /In (?:the persistent merge-lease shell,|the same shell with dispatch values exported,) `source "<<RUN_DIR>>\/(hammer-[a-z-]+)\.sh"`[^\n]*\n/g,
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 
@@ -62,7 +62,7 @@ test('ordinary remediation publishes before validating the live head', () => {
   const ordinary = HAMMER_TEMPLATE.slice(HAMMER_TEMPLATE.indexOf('Commit the remediation:'),
     HAMMER_TEMPLATE.indexOf('## Resolving merge conflicts'));
   assert.match(ordinary, /HAM_COMMIT_PUBLICATION_ONLY=1/);
-  assert.match(ordinary, /hammer-procedure\.mjs hammer-publish --render/);
+  assert.match(ordinary, /source "<<RUN_DIR>>\/hammer-publish\.sh"/);
   assert.ok(ordinary.indexOf('HAM_COMMIT_PUBLICATION_ONLY=1') < ordinary.indexOf('Refresh and validate the live head'));
   assert.match(HAMMER_TEMPLATE, /rebased\/multi-commit history uses lease-protected git/);
 });
@@ -105,10 +105,10 @@ process.exit(${handoffStatus});
 }
 
 test('starting head capture aborts before edits when its retry helper fails', () => {
-  const block = HAMMER_TEMPLATE.match(/At run start,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
+  const block = HAMMER_TEMPLATE.match(/Before edits,[\s\S]*?```bash\n([\s\S]*?)\n```/)?.[1];
   assert.ok(block);
   assert.match(block, /hammer-base-head\.mjs/);
-  const script = block.replace(/HAM_BASE_HEAD=\([^]*?\) \|\| exit 1/, 'HAM_BASE_HEAD=$(exit 1) || exit 1');
+  const script = block.replace(/^.*hammer-base-head\.mjs.*$/m, '(exit 1) || exit 1');
   const result = spawnSync('bash', ['-c', `${script}\necho EDITS_STARTED`], { encoding: 'utf8', timeout: 5000 });
   assert.equal(result.status, 1);
   assert.doesNotMatch(result.stdout, /EDITS_STARTED/);

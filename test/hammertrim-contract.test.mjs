@@ -1,3 +1,4 @@
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import test from 'node:test';
@@ -20,6 +21,16 @@ function run(command, args, env = {}) {
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('HAM_')));
   return spawnSync(command, args, { encoding: 'utf8', timeout: subprocessTimeout, env: { ...cleanEnv, ...env } });
 }
+// Shell behavior fixtures may substitute isolated state roots; location refusal is
+// exercised through the real CLI in hammer-scratch.test.mjs.
+function renderPhase(phase, env) {
+  try {
+    const values = Object.fromEntries(Object.entries(env).map(([key, value]) => [key.replace(/^HAM_/, ''), value]));
+    return { status: 0, stdout: renderHammerProcedure(phase, values), stderr: '' };
+  } catch (error) {
+    return { status: error.exitCode || 1, stdout: '', stderr: error.message };
+  }
+}
 test('sourced phase wrapper reports terminal outcomes and keeps its shell alive', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'hammer-phase-'));
   const prNumber = String(1_000_000 + process.pid);
@@ -41,15 +52,19 @@ test('sourced phase wrapper reports terminal outcomes and keeps its shell alive'
     ['hammer-publish', 'hammer-publish-error', 'terminal-remediation audit must be written', 1],
     ['hammer-merge', 'merge-error', 'no hammer merge without holding', 1],
   ]) {
-    const shell = `PHASE=${phase}\n${wrapper}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
-    const result = run('/bin/bash', ['-c', shell], {
+    const env = {
       HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: `https://github.com/acme/repo/pull/${prNumber}`, HAM_REPO: 'acme/repo',
       HAM_PR_NUMBER: prNumber, HAM_REVIEWED_SHA: 'a'.repeat(40), HAM_TARGET_REMEDIATION_SHA: 'a'.repeat(40),
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
       HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer', HAM_NODE_BIN: leaseNode,
       HAMMER_LACEY_GH_TOKEN: 'fixture',
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
-    });
+    };
+    const rendered = renderPhase(phase, env);
+    assert.equal(rendered.status, 0, rendered.stderr);
+    writeFileSync(join(dir, `${phase}.sh`), rendered.stdout, { mode: 0o600 });
+    const shell = `PHASE=${phase}\n${wrapper.replaceAll('<<RUN_DIR>>', dir)}\necho SHELL_SURVIVED\nexit "$HAM_PHASE_STATUS"\n`;
+    const result = run('/bin/bash', ['-c', shell], env);
     assert.equal(result.status, status, `${phase}: ${result.stdout} ${result.stderr}`);
     assert.match(result.stdout, new RegExp(diagnostic));
     assert.match(result.stdout, new RegExp(`outcome=${outcome}`));
@@ -95,7 +110,7 @@ esac
     HAM_FAILING_TESTS_FIXED: 'suite already green', HAMMER_LACEY_GH_TOKEN: 'fixture',
     POSTED_BODY_PATH: bodyPath, PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
   };
-  const render = run('node', [join(root, 'bin/hammer-procedure.mjs'), 'hammer-publish', '--render'], env);
+  const render = renderPhase('hammer-publish', env);
   assert.equal(render.status, 0, render.stderr);
   const script = join(dir, 'publish.sh');
   writeFileSync(script, render.stdout);
@@ -241,7 +256,7 @@ test('merge refuses an ineligible predicate before reading the green gate', (t) 
     HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
     PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
   };
-  const render = run('node', [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+  const render = renderPhase('hammer-merge', env);
   assert.equal(render.status, 0, render.stderr);
   const script = join(dir, 'merge.sh');
   writeFileSync(script, render.stdout);
@@ -279,7 +294,7 @@ test('merge defers unknown primary-change evidence and releases the lease', (t) 
     HAM_AUDIT_PATH: join(dir, 'audit.json'), HAM_REVIEWER: 'reviewer',
     PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir,
   };
-  const render = run('node', [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+  const render = renderPhase('hammer-merge', env);
   assert.equal(render.status, 0, render.stderr);
   const script = join(dir, 'merge.sh');
   writeFileSync(script, render.stdout);
@@ -545,7 +560,7 @@ esac
       HAM_AMA_TRAILERS: trailers,
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, RECEIPT_SCENARIO: scenario, REAL_NODE: process.execPath,
     };
-    const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+    const render = renderPhase('hammer-merge', env);
     assert.equal(render.status, 0, render.stderr);
     const script = join(dir, 'merge.sh');
     writeFileSync(script, successfulMerge
@@ -629,8 +644,8 @@ echo '{"head":{"sha":"${'a'.repeat(40)}"},"labels":[]}'
       HAM_RISK_CLASS: 'medium', HAM_MERGE_METHOD: 'squash', HAM_HQ_ROOT: dir, HAM_HQ_OWNER: 'tester',
       HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_AUDIT_PATH: join(dir, 'audit'), HAM_REVIEWER: 'claude',
       HAM_NODE_BIN: process.execPath, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir, SCENARIO: scenario };
-    const verify = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-verify-head', '--render'], env);
-    const merge = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+    const verify = renderPhase('hammer-verify-head', env);
+    const merge = renderPhase('hammer-merge', env);
     assert.equal(verify.status, 0, verify.stderr);
     assert.equal(merge.status, 0, merge.stderr);
     const helper = verify.stdout.match(/ham_pr\(\) \{[^\n]+/)[0] + '\n' + verify.stdout.slice(verify.stdout.indexOf('ham_lease_pr_view() {'), verify.stdout.indexOf('ham_acquire_merge_lease() {'));
@@ -654,18 +669,18 @@ close
 }
 
 test('rendered hammer phases preserve their executable shebang', () => {
-  const env = Object.fromEntries([...template.matchAll(/<<([A-Z_]+)>>/g)].map((m) => [`HAM_${m[1]}`, 'fixture']));
+  const env = Object.fromEntries([...['hammer-verify-head', 'hammer-publish', 'hammer-merge'].map(phase => readFileSync(join(root, 'bin', `${phase}.sh`), 'utf8')).join('\n').matchAll(/<<([A-Z_]+)>>/g)].map((m) => [`HAM_${m[1]}`, 'fixture']));
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
-    const rendered = run(process.execPath, ['bin/hammer-procedure.mjs', phase, '--render'], env);
+    const rendered = renderPhase(phase, env);
     assert.equal(rendered.status, 0, rendered.stderr);
     assert.ok(rendered.stdout.startsWith('#!/usr/bin/env bash\n'), phase);
   }
 });
 
 test('HAMLEASE-01 rendered waits have procedure floors and permit increases', () => {
-  const env = Object.fromEntries([...template.matchAll(/<<([A-Z_]+)>>/g)].map((m) => [`HAM_${m[1]}`, 'fixture']));
+  const env = Object.fromEntries([...['hammer-verify-head', 'hammer-publish', 'hammer-merge'].map(phase => readFileSync(join(root, 'bin', `${phase}.sh`), 'utf8')).join('\n').matchAll(/<<([A-Z_]+)>>/g)].map((m) => [`HAM_${m[1]}`, 'fixture']));
   for (const phase of ['hammer-verify-head', 'hammer-merge']) {
-    const rendered = run(process.execPath, ['bin/hammer-procedure.mjs', phase, '--render'], env);
+    const rendered = renderPhase(phase, env);
     assert.equal(rendered.status, 0, rendered.stderr);
     assert.match(rendered.stdout, /Waits are fixed by the procedure; do not export or shorten them/);
     const helper = rendered.stdout.match(/ham_procedure_floor\(\) \{[\s\S]*?\n\}/)?.[0];
@@ -692,7 +707,7 @@ test('HAMLEASE-01 lease timeout note and audit retain waited and configured seco
   const env = { HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir, HAM_REPO: 'acme/repo', HAM_PR_NUMBER: pr,
     HAM_PR_URL: `https://github.com/acme/repo/pull/${pr}`, HAM_REVIEWED_SHA: 'a'.repeat(40),
     HAM_REVIEWER: 'reviewer', HAM_RISK_CLASS: 'medium' };
-  const rendered = run(process.execPath, ['bin/hammer-procedure.mjs', 'hammer-verify-head', '--render'], env);
+  const rendered = renderPhase('hammer-verify-head', env);
   assert.equal(rendered.status, 0, rendered.stderr);
   const start = rendered.stdout.indexOf('  if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75 ]');
   const end = rendered.stdout.indexOf('  if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -ne 0 ]', start);
@@ -768,7 +783,7 @@ printf '{"head":{"sha":"%s"},"base":{"ref":"main"}}\\n' "$head"
       HAM_REVIEWED_SHA: before, HAM_REPO: 'fixture/repo', HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_HQ_ROOT: dir,
       HAM_REVIEWER: 'synthetic-reviewer', HAM_RISK_CLASS: 'low', HAM_MERGE_METHOD: 'squash', HAM_TARGET_REMEDIATION_SHA: before, HAM_PUSHED_HEAD: pushed,
       HAM_PUSHED_FROM_HEAD: before, HAM_TEST_SCENARIO: scenario, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir };
-    const rendered = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-verify-head', '--render'], env);
+    const rendered = renderPhase('hammer-verify-head', env);
     assert.equal(rendered.status, 0, rendered.stderr);
     // Execute the actual visibility gate and intercept the following phase boundary.
     const prefix = rendered.stdout.slice(0, rendered.stdout.indexOf('BASE_BRANCH='));
@@ -796,7 +811,7 @@ case "$1" in
   *) exit 0 ;;
 esac
 `, { mode: 0o755 });
-      const merge = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+      const merge = renderPhase('hammer-merge', env);
       assert.equal(merge.status, 0, merge.stderr);
       const mergeScript = join(dir, 'merge.sh');
       writeFileSync(mergeScript, merge.stdout);
@@ -884,7 +899,7 @@ for (const route of ['API commit', 'git fallback', 'git fallback without API hea
       POST_REMEDIATION_SHA: '',
       HAM_REMOTE_CI_STARTED_AT: '1', HAM_NO_MERGE_NOTE: 'stale wait',
       PATH: `${dir}:${process.env.PATH}`, PUBLISH_RESULT: JSON.stringify(publication) };
-    const render = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-publish', '--render'], env);
+    const render = renderPhase('hammer-publish', env);
     assert.equal(render.status, 0, render.stderr);
     const script = join(dir, 'publish.sh');
     writeFileSync(script, render.stdout);
@@ -926,7 +941,7 @@ else if (path.includes('/statuses?')) console.log('[]');
 else if (path.endsWith('/pulls/42')) console.log(JSON.stringify({number:42,state:'open',draft:false,head:{sha:'${head}'},base:{sha:'${'b'.repeat(40)}',ref:'main'},mergeable:true,mergeable_state:'clean',labels:[]}));
 else process.exit(1);
 `, { mode: 0o755 });
-  const rendered = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], env);
+  const rendered = renderPhase('hammer-merge', env);
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.doesNotMatch(rendered.stdout, /(?:ham_gh|gh) pr checks[^\n]*--watch/);
   const helperStart = rendered.stdout.indexOf('ham_wait_for_check_poll() {');
@@ -1042,7 +1057,7 @@ else { console.error('Unexpected synthetic call: ' + JSON.stringify(args)); proc
 `, { mode: 0o755 });
   const phasePaths = [];
   for (const phase of ['hammer-verify-head', 'hammer-publish', 'hammer-merge']) {
-    const rendered = run(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), phase, '--render'], env);
+    const rendered = renderPhase(phase, env);
     assert.equal(rendered.status, 0, rendered.stderr);
     const path = join(dir, `${phase}.sh`);
     writeFileSync(path, rendered.stdout

@@ -2,13 +2,22 @@
 
 You are the **Hammer** closer for PR <<PR_URL>>.
 
-This prompt is TERMINAL. Except for the bounded provenance fallback below, do not request another adversarial review round, including
-for a disputed finding: the hammer's dispute adjudication is final (below). Do not defer the review findings into follow-up PRs, issues,
-or future refactors. The final adversarial review is the authority; the audit
-comment plus HAM provenance trailers replace a human re-review gate, and they do
-not replace the machine gate.
+This prompt is TERMINAL. Except for the bounded provenance fallback below, do
+not request another adversarial review, including for disputed findings: the
+hammer's adjudication is final. Address findings here, never defer them to future
+work. The final review is authoritative; audit and HAM provenance replace human
+re-review, while the machine gate remains mandatory.
 
 ## Shell safety
+
+Each command runs in a fresh shell unless you keep one open. Exports, variables,
+functions and the current directory do not survive a new command. Carry values
+between commands only in files under the literal private run directory
+`<<RUN_DIR>>`. Never write under `/tmp`; `TMPDIR` is `<<RUN_DIR>>` for this run.
+Always invoke procedure scripts and repository helpers by the absolute paths
+provided here, never relative to the working directory. For a pull request to
+this repository, the working directory contains that pull request's code.
+
 
 Every shell command you run must have an explicit wall-clock bound. On macOS,
 where GNU `timeout` may not exist, wrap commands like this:
@@ -30,7 +39,7 @@ scales for host load and retains a bounded fallback:
 
 The helper scales up to 6x and falls back to the nominal timeout on error. Never run unbounded
 recursive searches over `/tmp`, `/private/tmp`, `$HOME`,
-`/Users/airlock/agent-os-hq`, or an entire checkout when looking for review
+`$HQ_ROOT`, or an entire checkout when looking for review
 state. Prefer the live PR, the final review body, this prompt's audit inputs,
 and narrow repo-local paths. If GitHub GraphQL has no quota, use REST endpoints
 such as `ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews` or the dispatch
@@ -45,9 +54,14 @@ later retry.
 
 ## Cost and context discipline (Codex and Claude)
 
-At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once. Its bounded JSON reports PR state, current head and review findings on that head, required checks, diff stat, conflicts versus base, and any active remediation/lease state available to the worker. Use that snapshot before exploratory `gh`, `git`, or file reads. If `review.findingsTruncated` is true, fetch the full review body before triage. Recheck live state at the required merge predicate; this snapshot never replaces that fail-closed gate.
+At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once before exploratory reads. Its bounded JSON includes PR/head/findings, required checks, diff stat, conflicts, primary change and remediation/lease state. If `review.findingsTruncated` is true, fetch the full review body. This snapshot never replaces the live merge predicate.
 
-**Never run a full test suite locally.** PR-head CI runs the full suite and is the merge gate. Run only targeted tests for files you changed, including after a rebase or replay. For Codex and Claude alike, run long tests and builds in the foreground through `bin/run-bounded.sh --timeout <seconds> -- <command>` in one blocking tool call. It exits with the command status and prints at most 4 KiB of the combined tail. For external waits, use one bounded wait supported by the worker harness; otherwise use this local runner for local commands. Never background a command and poll it with `sleep`, `tail`, or `cat`. Never send narrated "still waiting" steps. Codex: do not create a background test session or call tools repeatedly to check its log; make one blocking tool call.
+**Never run a full test suite locally.** PR-head CI is the full-suite merge gate.
+Run only targeted tests for changed files, including after rebase/replay. Run long
+tests/builds through `<<ROOT_DIR>>/bin/run-bounded.sh --timeout <seconds> -- <command>`
+in one foreground blocking tool call; it preserves status and caps the tail at
+4 KiB. Use one bounded harness wait for external waits. Never background a command and poll with `sleep`, `tail`, or `cat`, or narrate "still waiting".
+Codex and Claude must not create background test sessions and repeatedly read logs.
 
 ## Snapshot
 
@@ -64,12 +78,18 @@ At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs 
 
 ## Versioned helper inputs
 
-At run start, before any edits, export these values in the shell used through publication and merge:
+Before edits, capture the base head once and save these inputs. Source
+`<<RUN_DIR>>/inputs.sh` in each fresh shell. Save later audit inputs in files
+under `<<RUN_DIR>>` and reload them before close-out. Never recapture the base
+head after edits or a push. Keep one Bash shell for verify/publish/merge.
 
 ```bash
+umask 077
+/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-base-head.mjs '<<PR_URL>>' > '<<RUN_DIR>>/base-head' || exit 1
+cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
+export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
+export TMPDIR='<<RUN_DIR>>'
 export HAM_PR_URL='<<PR_URL>>' HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
-HAM_BASE_HEAD=$(/usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-base-head.mjs '<<PR_URL>>') || exit 1
-export HAM_BASE_HEAD
 # Capture this once before edits. Start from this exact head; never change HAM_BASE_HEAD after a push.
 export HAM_REVIEWED_SHA='<<REVIEWED_SHA>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 export HAM_RISK_CLASS='<<RISK_CLASS>>' HAM_MERGE_METHOD='<<MERGE_METHOD>>'
@@ -77,16 +97,16 @@ export HAM_RUN_DIR='<<RUN_DIR>>'
 export HAM_ROOT_DIR='<<ROOT_DIR>>' HAM_HQ_ROOT='<<HQ_ROOT>>' HAM_HQ_OWNER='<<HQ_OWNER>>'
 export HAM_AUDIT_PATH='<<AUDIT_PATH>>' HAM_REVIEWER='<<REVIEWER>>'
 export HAM_AMA_TRAILERS=<<AMA_TRAILERS_SHELL>>
-ham_gh() { "${HAM_NODE_BIN:-node}" "$HAM_ROOT_DIR/bin/metered-gh.mjs" exec "$@"; }
-ham_pr() { "${HAM_NODE_BIN:-node}" "$HAM_ROOT_DIR/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
+ham_gh() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/metered-gh.mjs" exec "$@"; }
+ham_pr() { "${HAM_NODE_BIN:-node}" "<<ROOT_DIR>>/bin/hammer-pr-read.mjs" "$HAM_REPO" "$HAM_PR_NUMBER" "$@"; }
+HAM_INPUTS
+source "<<RUN_DIR>>/inputs.sh"
 ```
 
-`HAM_ROOT_DIR` is the adversarial-review daemon runtime root supplied by
-dispatch, containing `data/follow-up-jobs/completed`. Keep it exported for
-`hammer-head-context.mjs`; `HAM_HQ_ROOT` is a separate HQ root. Manual callers
-must supply `HAM_ROOT_DIR` when relying on completed-round proof.
+`HAM_ROOT_DIR` names the deployed daemon checkout and its completed-round ledger;
+keep it exported for `hammer-head-context.mjs`. `HAM_HQ_ROOT` is the separate HQ root.
 
-Before the merge lease, write the complete audit markdown to an absolute-path file and export
+Before the merge lease, write the complete audit markdown to a file under `<<RUN_DIR>>` and export
 `HAM_AUDIT_DETAILS_FILE`. Include `**Findings addressed**` and one single-line
 bullet per finding: exact review title, blocking class, changed files and fix.
 Export decimal `HAM_AUDIT_REMEDIATED_TOTAL`, `HAM_AUDIT_REMEDIATED_BLOCKING`,
@@ -99,15 +119,19 @@ docs when applicable. The publication step renders Doc-currency; omit it from
 the details file. Missing or placeholder inputs release the lease. Keep these
 values in the same shell for the merge audit.
 
-Use the shared-budget check-wait helper (minimum 30 seconds). Never use
+Use the bounded required-check wait already provided by `<<RUN_DIR>>/hammer-merge.sh`.
+Its GitHub reads use `<<ROOT_DIR>>/bin/metered-gh.mjs` through `ham_gh`. Never use
 `--watch` or add polling loops. All GitHub calls use these metered helpers.
 
 For each phase, in that shell, set `PHASE` to `hammer-verify-head`, `hammer-publish`, or `hammer-merge` and run:
 
 ```bash
-HAM_PHASE_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/ham-phase.XXXXXX") || exit 1
-node "${HAM_ROOT_DIR}/bin/hammer-procedure.mjs" "$PHASE" --render > "$HAM_PHASE_SCRIPT" || exit 1
-HAM_PHASE_LOG=$(mktemp "${TMPDIR:-/tmp}/ham-phase-log.XXXXXX") || exit 1
+case "$PHASE" in
+  hammer-verify-head) HAM_PHASE_SCRIPT='<<RUN_DIR>>/hammer-verify-head.sh' ;;
+  hammer-publish) HAM_PHASE_SCRIPT='<<RUN_DIR>>/hammer-publish.sh' ;;
+  hammer-merge) HAM_PHASE_SCRIPT='<<RUN_DIR>>/hammer-merge.sh' ;;
+esac
+HAM_PHASE_LOG=$(mktemp '<<RUN_DIR>>/phase-log.XXXXXX') || exit 1
 HAM_PHASE_OUTCOME=not-run
 # Descriptor 3 streams lease-wait progress; buffer diagnostics.
 if source "$HAM_PHASE_SCRIPT" 3>&2 > "$HAM_PHASE_LOG" 2>&1; then
@@ -116,7 +140,7 @@ else
   HAM_PHASE_STATUS=$?
 fi
 tail -c 4096 "$HAM_PHASE_LOG"
-rm -f "$HAM_PHASE_SCRIPT" "$HAM_PHASE_LOG"
+rm -f "$HAM_PHASE_LOG"
 if [ "$PHASE" = hammer-merge ] && [ -n "${HAM_VERDICT_FILE:-}" ]; then
   rm -f "$HAM_VERDICT_FILE"
   if [ -n "${HAM_PRIMARY_CHANGE_FILE:-}" ]; then rm -f "$HAM_PRIMARY_CHANGE_FILE"; fi
@@ -126,7 +150,12 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Build the terminal-remediation claim JSON and run the predicate before `hammer-merge`. Never execute these phases as separate processes: keep the verified head and lease in one persistent shell. If tool calls create fresh shells, run the whole close in one invocation or stop before lease acquisition. Failed render/source stops the close. Delete temporary scripts. Missing dispatch values exit 64; publish/merge require the held lease. Use this checkout's helpers; context/bounded runner need no Agent OS install. Keep the existing HQ merge-signal integration.
+Build the terminal-remediation claim JSON and run the predicate before `hammer-merge`.
+Source all phases in one persistent Bash shell (or one tool invocation); stop
+before acquiring a lease if you cannot keep that shell. Dispatch rendered these
+scripts from the deployed checkout. Use them unchanged; never render copies.
+Failed source stops the close. Publish/merge require the held lease. Keep the
+existing HQ merge-signal integration.
 
 Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. When true, required non-blocking findings may authorize specifically cited reversions. When false, advisory non-blocking findings never authorize reverting protected author code; preserve it and record the conflict rationale. The live predicate independently resolves policy.
 
@@ -165,7 +194,7 @@ The primary change is the actual author head immediately before the first hammer
 remediation, against its merge base. `hammer-context`
 includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
 `statedIntent` from the PR body (including Why or Operator decision sections).
-`bin/primary-change-context.mjs` supplies patches; use `--diagnostics` only outside merge execution. Context never waives blocking findings.
+`<<ROOT_DIR>>/bin/primary-change-context.mjs` supplies patches; use `--diagnostics` only outside merge execution. Context never waives blocking findings.
 If primary evidence is missing or unsupported, stop before remediation and
 print `primaryChange.reason` in the stop message. When the snapshot status is
 `history-read-failed` or the helper reports `historyReadFailed: true`, record a
@@ -456,7 +485,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    Before entering the final rebase→remote-CI→merge window, acquire the
    merge lease
    for `(<<REPO>>, base, PR <<PR_NUMBER>>)` with the blocking
-   `bin/merge-lease.mjs acquire` command below. The acquire waits; do not poll.
+   `<<ROOT_DIR>>/bin/merge-lease.mjs acquire` command below. The acquire waits; do not poll.
    If acquire returns `70` with `parked:true` or `75` with `timedOut:true`, log
    the AMG-04 park message and exit `0` so contention defers cleanly instead of
    re-entering the dispatcher as a transient failure.
@@ -467,7 +496,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    reports the branch is already up to date that confirms it is on the latest
    `main`. After
    the rebase, fetch the base, capture the exact current base SHA, and run
-   `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
+   `<<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
    changed-surface tests (mandate step 2b) and required checks only when
    `needsRevalidation` is true; otherwise trust the parallel-phase validation.
    Do not parse this boolean with a jq fallback such as
@@ -600,13 +629,13 @@ fi
 
 ```
 
-Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1`; render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the hammer `GH_TOKEN`. Stop on failure; unset the flag on success. Ordinary remediation uses the conflict-repair publication guards.
+Before head validation, export `HAM_COMMIT_PUBLICATION_ONLY=1`; `source "<<RUN_DIR>>/hammer-publish.sh"` with the hammer `GH_TOKEN`. Stop on failure; unset the flag on success. Ordinary remediation uses the conflict-repair publication guards.
 
 Refresh and validate the live head:
 
 These waits are fixed by the procedure; do not export or shorten them. A hammer that has only the lease left waits for it.
 
-In the same shell with dispatch values exported, render/source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-verify-head --render`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
+In the same shell with dispatch values exported, `source "<<RUN_DIR>>/hammer-verify-head.sh"`. Wait ≤300s for `HAM_PUSHED_HEAD` to replace `HAM_PUSHED_FROM_HEAD`. Retry transient errors/alarms within that bound; retain cached JSON. Permanent errors/invalid heads stop; third heads take the race path. Acquire the lease, rebase within bounds, validate. Nonzero stops: 20 parked/blocked, 21 conflict. Resolve, revalidate, rerun verify-head.
 
 
 ## Resolving merge conflicts
@@ -658,9 +687,7 @@ done
 HAM_COMMIT_PUBLICATION_ONLY=1
 export HAM_COMMIT_PUBLICATION_ONLY
 GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
-  "${HAM_NODE_BIN:-node}" <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render > "$HAM_RUN_DIR/publish-commits.sh" || exit 1
-GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" \
-  source "$HAM_RUN_DIR/publish-commits.sh" || exit 1
+  source "<<RUN_DIR>>/hammer-publish.sh" || exit 1
 unset HAM_COMMIT_PUBLICATION_ONLY
 ```
 
@@ -670,7 +697,7 @@ on the new head before re-acquiring the lease and merging.
 Post the PR audit comment. List every final finding with its blocking class and changed paths, using
 `HAMMER_LACEY_GH_TOKEN` (legacy: `MERGE_AGENT_GH_TOKEN`), never ambient credentials.
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-publish --render` with the exported dispatch values. Prove the starting base before posting the validation audit under lease. Nonzero status blocks continuation; status 20 (`exact-head-review-required`) releases the lease for LEASEDEFER-01 recovery.
+In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-publish.sh"` with the exported dispatch values. Prove the starting base before posting the validation audit under lease. Nonzero status blocks continuation; status 20 (`exact-head-review-required`) releases the lease for LEASEDEFER-01 recovery.
 
 
 ```bash
@@ -883,7 +910,7 @@ Do not merge unless all of these are true:
 
 In-lease merge:
 
-In the persistent merge-lease shell, render and source `node <<ROOT_DIR>>/bin/hammer-procedure.mjs hammer-merge --render` after exporting the dispatch values above. The helper requires the successful audit-publish marker and an eligible predicate verdict for `POST_REMEDIATION_SHA`, then checks the live head and required checks before merging under the held lease. It appends a `failed-without-merge` audit and releases the lease if either prerequisite fails. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the no-merge closing-status comment from mandate 0b when the PR remains open.
+In the persistent merge-lease shell, `source "<<RUN_DIR>>/hammer-merge.sh"` after exporting the dispatch values above. The helper requires the successful audit-publish marker and an eligible predicate verdict for `POST_REMEDIATION_SHA`, then checks the live head and required checks before merging under the held lease. It appends a `failed-without-merge` audit and releases the lease if either prerequisite fails. The wrapper prints its bounded diagnostic tail, status, outcome, and lease state; a nonzero status requires the no-merge closing-status comment from mandate 0b when the PR remains open.
 
 
 After the merged audit append succeeds, emit the merge signal and then release

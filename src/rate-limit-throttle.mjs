@@ -135,6 +135,7 @@ function normalizeObservation(observation = null) {
     observedAt: normalizedObservedAt,
     ...(Number.isInteger(observation.rateLimitedCalls) && observation.rateLimitedCalls > 0
       ? { rateLimitedCalls: observation.rateLimitedCalls } : {}),
+    ...(observation.resetUnknown === true && normalizedRemaining === 0 ? { resetUnknown: true } : {}),
   };
 }
 
@@ -162,8 +163,12 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
   if (!left) return right;
   if (!right) return left;
   // An active exhaustion/secondary-limit window must survive healthy primary
-  // quota observations, even when the primary quota resets later.
-  if (left.remaining === 0 && right.remaining > 0) return left;
+  // quota observations, even when the primary quota resets later. A window
+  // whose reset was only guessed (a headerless failure) is the exception: a
+  // newer healthy observation of the same credential and resource replaces it,
+  // so a recovered budget is not held for the guessed duration. Callers pass
+  // (older, newer).
+  if (left.remaining === 0 && right.remaining > 0) return left.resetUnknown === true ? right : left;
   if (right.remaining === 0 && left.remaining > 0) return right;
   const leftResetAtMs = observationResetAtMs(left);
   const rightResetAtMs = observationResetAtMs(right);
@@ -176,6 +181,7 @@ function mergeResourceObservations(current, incoming, nowMs = Date.now()) {
     ...(left.credential ? { credential: left.credential } : {}),
     ...(right.credentialSelector || left.credentialSelector ? { credentialSelector: right.credentialSelector || left.credentialSelector } : {}),
     remaining: Math.min(left.remaining, right.remaining),
+    ...(left.resetUnknown === true && right.resetUnknown === true ? { resetUnknown: true } : {}),
     resetAt: left.resetAt,
     observedAt: observationObservedAtMs(right) > observationObservedAtMs(left)
       ? right.observedAt
@@ -406,9 +412,11 @@ function createRateLimitThrottle({
         // failures share one window and increment the same durable counter.
         const resource = normalizeResource(observation.resource);
         const previous = current[githubBudgetKey(resource, observation.credential)];
+        const reused = previous?.remaining === 0 ? previous : null;
         normalized = normalized || normalizeObservation({
           ...observation, resource, credential: observation.credential, remaining: 0,
-          resetAt: (previous?.remaining === 0 ? previous.resetAt : null) || nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
+          resetAt: reused?.resetAt || nowMs() + UNKNOWN_RATE_LIMIT_RESET_MS,
+          resetUnknown: reused ? reused.resetUnknown === true : true,
           observedAt: nowMs(),
         });
       }

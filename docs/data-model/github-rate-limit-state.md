@@ -26,9 +26,13 @@ readable as anonymous observations; they do not throttle authenticated budgets.
 Writes hold the adjacent `.lock` directory, sync a temporary file and rename it
 over the store. Concurrent responses for the same window retain the lowest
 remaining count and increment rate-limited counters under the lock.
-An active zero-balance limit takes precedence over positive primary-quota
-observations regardless of their reset ordering; healthy responses cannot clear
-that hold before expiry. When both observations have zero balance, the later
+An active zero-balance limit whose reset GitHub reported (a `Retry-After` or a
+reset header) takes precedence over positive primary-quota observations
+regardless of their reset ordering; healthy responses cannot clear that hold
+before expiry. A zero-balance window created without any reset evidence carries
+`resetUnknown: true` (the conservative default below); its reset is a guess, so
+a newer healthy observation for the same credential and resource replaces it.
+When both observations have zero balance, the later
 reset wins. Rate-limited responses force `remaining: 0` even if GitHub reports
 positive primary capacity, and a usable `Retry-After` selects the secondary-limit
 reset ahead of the primary reset header.

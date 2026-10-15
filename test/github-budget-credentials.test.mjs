@@ -137,6 +137,35 @@ test('secondary-limit extraction overrides positive primary headers and uses Ret
   assert.equal(observation.resetAt, '2026-10-15T10:02:00.000Z');
 });
 
+test('a guessed (headerless) window yields to a newer healthy observation; a reported reset does not', async t => {
+  const root = fixture(t);
+  const sharedStatePath = join(root, 'budget.json');
+  const now = Date.now();
+  const writer = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
+  const healthy = resource => ({ resource, credential: 'credential-a', remaining: 4900, resetAt: now + 3600_000 });
+  const buckets = () => JSON.parse(readFileSync(sharedStatePath, 'utf8')).buckets;
+  await writer.recordResponseRateLimit(healthy('graphql'));
+  await writer.recordRateLimitedCall('graphql', 'credential-a'); // no headers: the reset is a guess
+  await writer.recordRateLimitedCall('core', 'credential-a', { resetAt: now + 120_000 }); // reported reset
+  assert.equal(buckets()['credential-a/graphql'].remaining, 0, 'an older healthy reading cannot clear a newer guess');
+  assert.equal(buckets()['credential-a/graphql'].resetUnknown, true);
+  assert.equal(buckets()['credential-a/core'].resetUnknown, undefined);
+  await writer.recordResponseRateLimit(healthy('graphql'));
+  await writer.recordResponseRateLimit(healthy('core'));
+  assert.equal(buckets()['credential-a/graphql'].remaining, 4900);
+  assert.equal(buckets()['credential-a/graphql'].resetUnknown, undefined);
+  assert.equal(buckets()['credential-a/core'].remaining, 0);
+  const reader = createRateLimitThrottle({ sharedStatePath, nowMs: () => now });
+  await withGitHubBudgetScope({ urgent: true }, async () => {
+    assert.equal(await reader.awaitThrottleIfNeeded('graphql', 'credential-a'), false);
+    await assert.rejects(reader.awaitThrottleIfNeeded('core', 'credential-a'), { budgetDeferred: true });
+  });
+  // A headerless failure inside a reported window keeps the reported reset.
+  await writer.recordRateLimitedCall('core', 'credential-a');
+  assert.equal(Date.parse(buckets()['credential-a/core'].resetAt), now + 120_000);
+  assert.equal(buckets()['credential-a/core'].resetUnknown, undefined);
+});
+
 test('runtime status resolves active credential aliases and retains other observed budgets', async t => {
   const root = fixture(t);
   const sharedStatePath = join(root, 'budget.json');

@@ -59,6 +59,8 @@ const DELIVERY_RETRY_INDEX_INIT_SENTINEL = '.initialized';
 // Independent of the original index seed: recovery jobs could lose their
 // delivery after that migration had already run.
 const REMEDIATION_REPLY_BACKFILL_SENTINEL = '.remediation-reply-backfilled-remcomment-01';
+const REMEDIATION_REPLY_BACKFILL_CURSOR = '.remediation-reply-backfill-cursor';
+const REMEDIATION_REPLY_BACKFILL_BUDGET = 100;
 const HISTORICAL_DELIVERY_ONLY = Symbol('historical-delivery-only');
 
 // Maximum number of times the retry pass will re-attempt a failed
@@ -874,7 +876,14 @@ function readCompletedWorkerReply(rootDir, record) {
     // conceal malformed files or other read failures with an older payload.
     if (error.cause?.code !== 'ENOENT') return null;
     try {
-      const reply = validateRemediationReply(record.remediationReply?.payload, { expectedJob: record });
+      // Replies have a job identity, but legacy payloads have no round field.
+      // Prefer the reply stored on this exact round; a job-level payload alone
+      // is unambiguous only on a single first-round job.
+      const singleRound = Number(round?.round) === 1 && record.remediationPlan.rounds.length === 1;
+      const payload = round?.remediationReply?.payload
+        || (singleRound ? record.remediationReply?.payload : null);
+      if (payload?.round != null && Number(payload.round) !== Number(round?.round)) return null;
+      const reply = validateRemediationReply(payload, { expectedJob: record });
       return { reply, worker };
     } catch { return null; }
   }
@@ -886,40 +895,74 @@ function readCompletedWorkerReply(rootDir, record) {
 function backfillCompletedWorkerReplyDeliveries(rootDir, { now, log }) {
   const sentinelPath = join(ensureDeliveryRetryIndexDir(rootDir), REMEDIATION_REPLY_BACKFILL_SENTINEL);
   if (existsSync(sentinelPath)) return;
+  const cursorPath = join(deliveryRetryIndexDir(rootDir), REMEDIATION_REPLY_BACKFILL_CURSOR);
+  let cursor = { directory: '', after: '' };
+  if (existsSync(cursorPath)) cursor = JSON.parse(readFileSync(cursorPath, 'utf8'));
+  const archiveRoot = getFollowUpJobDir(rootDir, 'stoppedArchived');
+  const directories = ['completed', 'stopped', 'failed'].map(key => getFollowUpJobDir(rootDir, key));
+  if (existsSync(archiveRoot)) {
+    directories.push(...readdirSync(archiveRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory()).map(entry => join(archiveRoot, entry.name)));
+  }
+  directories.sort();
+  let remaining = REMEDIATION_REPLY_BACKFILL_BUDGET;
   let complete = true;
-  for (const jobPath of listTerminalJobPaths(rootDir, { includeArchivedStopped: true })) {
-    let claimed = false;
-    try {
-      let record = readTerminalRecord(jobPath);
-      if (!readCompletedWorkerReply(rootDir, record)) continue;
-      const claim = tryAcquireDeliveryClaim(jobPath, buildClaimerId(), { now });
-      if (!claim.acquired) { complete = false; continue; }
-      claimed = true;
-      // A concurrent ordinary post may have stamped delivery since our scan.
-      record = readTerminalRecord(jobPath);
-      const completed = readCompletedWorkerReply(rootDir, record);
-      if (!completed) continue;
-      const { reply, worker } = completed;
-      record.commentDelivery = buildReconcileCommentDelivery({
-        job: record, worker, action: record.status,
-        reply, reReview: record.reReview, failure: record.failure, now,
-      }).commentDelivery;
-      // Write the pointer first. If persistence fails, the indexed legacy
-      // reconstruction still has the reply and another migration pass retries.
-      addToDeliveryRetryIndex(rootDir, jobPath);
-      writeTerminalRecord(jobPath, record);
-    } catch (err) {
-      complete = false;
-      log?.error?.(`[comment-delivery] failed to backfill ${jobPath}: ${err.message}`);
-    } finally {
-      if (claimed) releaseDeliveryClaim(jobPath);
+  // Persist progress across ticks/restarts. Enumerate only the current partition
+  // and parse at most 100 records under the queue lock, without dropping old debt.
+  scan: for (const directory of directories) {
+    if (directory < cursor.directory) continue;
+    if (remaining-- <= 0) { complete = false; break; }
+    let names;
+    try { names = readdirSync(directory).sort(); }
+    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    for (const name of names) {
+      if (!name.endsWith('.json') || (directory === cursor.directory && name <= cursor.after)) continue;
+      if (remaining-- <= 0) { complete = false; break scan; }
+      const jobPath = join(directory, name);
+      let processed = false;
+      let claimed = false;
+      try {
+        let record = readTerminalRecord(jobPath);
+        processed = true;
+        if (!readCompletedWorkerReply(rootDir, record)) continue;
+        const claim = tryAcquireDeliveryClaim(jobPath, buildClaimerId(), { now });
+        if (!claim.acquired) { processed = false; complete = false; break scan; }
+        claimed = true;
+        // A concurrent ordinary post may have stamped delivery since our scan.
+        record = readTerminalRecord(jobPath);
+        const completed = readCompletedWorkerReply(rootDir, record);
+        if (!completed) continue;
+        const { reply, worker } = completed;
+        record.commentDelivery = buildReconcileCommentDelivery({
+          job: record, worker, action: record.status,
+          reply, reReview: record.reReview, failure: record.failure, now,
+        }).commentDelivery;
+        // Write the pointer first. If persistence fails, the indexed legacy
+        // reconstruction still has the reply and another migration pass retries.
+        addToDeliveryRetryIndex(rootDir, jobPath);
+        writeTerminalRecord(jobPath, record);
+      } catch (err) {
+        processed = false;
+        complete = false;
+        log?.error?.(`[comment-delivery] failed to backfill ${jobPath}: ${err.message}`);
+        break scan;
+      } finally {
+        if (claimed) releaseDeliveryClaim(jobPath);
+        if (processed) cursor = { directory, after: name };
+      }
     }
+    cursor = { directory, after: '\uffff' };
   }
   // Held claims and failed writes defer completion of the migration, so a
   // transient failure cannot silently discard the remainder of the backfill.
   if (complete) {
-    try { writeFileSync(sentinelPath, `${now()}\n`, 'utf8'); }
+    try {
+      writeFileSync(sentinelPath, `${now()}\n`, 'utf8');
+      rmSync(cursorPath, { force: true });
+    }
     catch (err) { log?.error?.(`[comment-delivery] failed to finish reply backfill: ${err.message}`); }
+  } else {
+    writeFileAtomic(cursorPath, `${JSON.stringify(cursor)}\n`);
   }
 }
 

@@ -8,7 +8,7 @@ import { parse } from 'acorn';
 import { recoveryDigest, recoveryRecordPath, withCommentOnlyRecovery } from '../src/comment-only-recovery-record.mjs';
 import { postRemediationOutcomeComment, extractRemediationCommentMarker } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
 import { archiveStoppedFollowUpJobs, markFollowUpJobCompleted, markFollowUpJobFailed, markFollowUpJobStopped } from '../src/follow-up-jobs.mjs';
-import { completeWorkerPublishedHead } from '../src/remediation-published-head.mjs';
+import { completeWorkerPublishedHead, completeKnownWorkerPublish } from '../src/remediation-published-head.mjs';
 import {
   buildReconcileCommentDelivery,
   deliveryLockPath,
@@ -263,6 +263,66 @@ test('REMCOMMENT-01: backfill validates the stored reply when its artifact was p
   assert.equal(JSON.parse(readFileSync(old.jobPath, 'utf8')).commentDelivery.posted, true);
 });
 
+for (const source of ['previous-round', 'next-round', 'current-round', 'explicit-mismatch']) {
+  test(`REMCOMMENT-01: pruned replies require current-round correspondence (${source})`, async t => {
+    const f = fixture(t, { reply: false });
+    const old = legacyTerminal(f);
+    const currentReply = { ...f.payload, summary: 'Current round repair was validated.' };
+    old.job.remediationWorker = null;
+    old.job.remediationPlan = { currentRound: 2, rounds: [
+      { round: 1, worker: old.job.remediationWorker, remediationReply: old.job.remediationReply },
+      { round: 2, worker: { ...f.job.remediationWorker, state: 'completed' } },
+      { round: 3, remediationReply: { payload: f.payload } },
+    ] };
+    if (source === 'current-round' || source === 'explicit-mismatch') {
+      old.job.remediationPlan.rounds[1].remediationReply = { payload: source === 'current-round'
+        ? currentReply : { ...currentReply, round: 1 } };
+    }
+    if (source === 'next-round') old.job.remediationReply.payload = { ...f.payload, round: 3 };
+    writeFileSync(old.jobPath, JSON.stringify(old.job));
+    let posts = 0;
+    await retryFailedCommentDeliveries({ rootDir: f.rootDir, log,
+      postCommentImpl: async ({ body }) => {
+        assert.ok(body.includes(currentReply.summary));
+        posts++;
+        return { posted: true };
+      },
+    });
+    assert.equal(posts, source === 'current-round' ? 1 : 0);
+  });
+}
+
+test('REMCOMMENT-01: historical reply backfill resumes in bounded chunks without losing old archives', async t => {
+  const f = fixture(t, { reply: false });
+  const old = legacyTerminal(f);
+  rmSync(old.jobPath);
+  const records = [];
+  for (let index = 0; index < 135; index++) {
+    const jobId = `historical-${String(index).padStart(3, '0')}`;
+    const directory = join(f.rootDir, 'data', 'follow-up-jobs', 'stopped-archived', index < 110 ? '2020-01' : '2021-02');
+    mkdirSync(directory, { recursive: true });
+    const jobPath = join(directory, `${jobId}.json`);
+    writeFileSync(jobPath, JSON.stringify({ ...old.job, jobId, status: 'stopped',
+      remediationReply: { ...old.job.remediationReply, payload: { ...f.payload, jobId } },
+    }));
+    records.push(jobPath);
+  }
+  let posts = 0;
+  const sweep = () => retryFailedCommentDeliveries({ rootDir: f.rootDir, log, budget: 200,
+    postCommentImpl: async () => { posts++; return { posted: true }; },
+  });
+  const sentinel = join(deliveryRetryIndexDir(f.rootDir), REMEDIATION_REPLY_BACKFILL_SENTINEL);
+  await sweep();
+  assert.ok(posts > 0 && posts <= 100, 'one tick must bound its historical record work');
+  assert.equal(existsSync(sentinel), false, 'partial progress must not certify the migration');
+  assert.equal(JSON.parse(readFileSync(records.at(-1), 'utf8')).commentDelivery, undefined);
+  await sweep();
+  assert.equal(posts, records.length, 'the durable cursor must continue into the next archive partition');
+  assert.equal(existsSync(sentinel), true);
+  await sweep();
+  assert.equal(posts, records.length, 'completed migration must remain idempotent');
+});
+
 for (const invalid of ['missing', 'malformed', 'wrong-job', 'not-completed', 'exempt',
   'stored-wrong-job', 'stored-wrong-repo', 'stored-wrong-pr', 'stored-malformed', 'unreadable']) {
   test(`REMCOMMENT-01: backfill skips ineligible reply (${invalid})`, async t => {
@@ -355,17 +415,30 @@ test('REMCOMMENT-01: recovery holds delivery ownership until the final re-review
   assert.equal(posts, 1);
 });
 
-test('REMCOMMENT-01: an existing delivery claim never changes published-head completion', async t => {
+test('REMCOMMENT-01: an existing delivery claim defers published-head completion without mutations', async t => {
   const f = fixture(t);
   const terminalDir = join(f.rootDir, 'data', 'follow-up-jobs', 'completed');
   mkdirSync(terminalDir, { recursive: true });
   const terminalPath = join(terminalDir, `${f.job.jobId}.json`);
   writeFileSync(deliveryLockPath(terminalPath), JSON.stringify({ claimer: 'synthetic-retained-claim', claimedAt: new Date().toISOString() }));
-  const result = completeWorkerPublishedHead({ ...f, headSha, completedAt });
+  const before = readFileSync(f.jobPath, 'utf8');
+  let requests = 0;
+  const recover = () => completeWorkerPublishedHead({ ...f, headSha, completedAt,
+    requestReviewRereviewImpl: () => { requests++; return { triggered: true, status: 'pending' }; },
+  });
+  assert.equal(recover().reason, 'delivery-claim-held');
+  assert.equal(completeKnownWorkerPublish({ ...f, proof: { headSha }, completedAt }).action, 'active');
+  assert.equal(readFileSync(f.jobPath, 'utf8'), before);
+  assert.equal(existsSync(terminalPath), false);
+  assert.equal(requests, 0);
+  assert.ok(existsSync(deliveryLockPath(terminalPath)), 'recovery must retain another claimant\'s lock');
+  rmSync(deliveryLockPath(terminalPath));
+  const result = recover();
   assert.equal(result.job.status, 'completed');
   assert.equal(result.job.reReview.triggered, true);
   assert.equal(result.job.commentDelivery.posted, false);
-  assert.ok(existsSync(deliveryLockPath(terminalPath)), 'recovery must retain another claimant\'s lock');
+  assert.equal(requests, 1);
+  assert.equal(existsSync(deliveryLockPath(terminalPath)), false);
 });
 
 for (const status of ['stopped', 'failed']) {

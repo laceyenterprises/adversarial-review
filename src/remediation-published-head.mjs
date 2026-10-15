@@ -88,8 +88,9 @@ export function completeWorkerPublishedHead({
       // written into the body. Otherwise a sweep could post the provisional
       // body and have its posted stamp overwritten by our final job write.
       const deliveryClaim = tryAcquireDeliveryClaim(terminalPath, `published-head-recovery:${process.pid}`);
-      // A retained claim already keeps the sweep out. Recovery still completes
-      // under the job lock; contention must not turn a proven publish into a stop.
+      // The queue lock does not own another sweep's delivery claim. Leave all
+      // recovery evidence intact and retry after that claim releases or expires.
+      if (!deliveryClaim.acquired) return { action: 'active', deferred: true, reason: 'delivery-claim-held', job, jobPath };
       try {
         headSha = evidence.headSha;
         const { round, worker, reply, replyPath } = evidence;

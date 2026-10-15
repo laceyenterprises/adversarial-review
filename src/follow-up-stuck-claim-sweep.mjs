@@ -962,7 +962,11 @@ async function sweepStuckInProgressClaims({
       const lifecycle = await resolveJobPRLifecycleSafe({ rootDir, job, resolvePRLifecycleImpl, execFileImpl, log });
       if (lifecycle?.source === 'live' && lifecycle.prState === 'open') {
         const settled = completePublishedHeadImpl({ rootDir, jobPath, headSha: lifecycle.headSha, completedAt: reclaimedAtIso });
-        if (settled) { completed += 1; continue; }
+        if (settled) {
+          if (settled.deferred) skipped += 1;
+          else completed += 1;
+          continue;
+        }
       }
       // A durable result is processed by ordinary reconciliation before any reclaim.
       if (hasWorkerPublishArtifacts({ rootDir, job, includeWorkspace: false })) {

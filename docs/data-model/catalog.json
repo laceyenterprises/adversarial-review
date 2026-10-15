@@ -179,6 +179,7 @@
       "infrastructureRefundEvidenceFields": ["remediationPlan.rounds[].startHeadSha", "remediationPlan.rounds[].publishedHeadSha", "remediationWorker.recordedOutcome", "remediationPlan.publishedRoundsForPR", "remediationPlan.retryHistory[].retryMetadata"],
       "completedRemediationHeadEvidenceFields": ["remediationPlan.rounds[].state", "remediationPlan.rounds[].startHeadSha", "remediationPlan.rounds[].resultingHeadSha"],
       "publishedHeadRecoveryCompletionEvidenceFields": ["completion.source", "completion.publishEvidence", "remediationPlan.rounds[].completion.source", "remediationPlan.rounds[].completion.publishEvidence"],
+      "remediationReplyBackfillCursor": { "store": "data/follow-up-jobs/delivery-retry-index/.remediation-reply-backfill-cursor", "fields": ["directory", "after"], "workBudgetPerTick": 100, "retention": "removed after successful complete backfill" },
       "conflictedBaseProbeRetryCode": "hq-conflicted-base-probe-transient",
       "conflictedBaseProbeExhaustionCode": "hq-conflicted-base-probe-retries-exhausted",
       "pendingCiRereviewEvidenceFields": ["reReview.ciSettlement", "reReview.ciGate", "remediationPlan.rounds[].reReview.ciSettlement", "remediationPlan.rounds[].reReview.ciGate"],

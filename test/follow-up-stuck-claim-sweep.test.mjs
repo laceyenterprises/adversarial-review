@@ -1886,3 +1886,42 @@ test('REMLINK-01 comment-only recovery writes terminal state before waking closu
   assert.equal(completed.job.reReview.suppressed, 'comment-only-final-round');
   assert.equal(wakes, 1);
 });
+
+for (const status of ['pending', 'in_progress']) {
+  test(`REMCOMMENT-01 held recovery delivery claim preserves ${status} work across lifecycle gates`, async t => {
+    const f = await seedRemlink(t);
+    const { deliveryLockPath } = await import('../src/adapters/comms/github-pr-comments/comment-delivery.mjs');
+    const { shouldDeferReviewForActiveFollowUp } = await import('../src/follow-up-active-defer.mjs');
+    if (status === 'pending') {
+      f.job.status = status;
+      f.job.remediationPlan.currentRound = 0;
+      writeFollowUpJob(f.jobPath, f.job);
+    }
+    const completedPath = path.join(getFollowUpJobDir(f.rootDir, 'completed'), path.basename(f.jobPath));
+    mkdirSync(path.dirname(completedPath), { recursive: true });
+    writeFileSync(deliveryLockPath(completedPath), JSON.stringify({ claimer: 'competing-sweep', claimedAt: new Date().toISOString() }));
+    const before = readFileSync(f.jobPath, 'utf8');
+    const decision = shouldDeferReviewForActiveFollowUp({ rootDir: f.rootDir, repo: f.job.repo, prNumber: 1,
+      latestJobFinder: () => ({ job: f.job, jobPath: f.jobPath }), currentRevisionRef: f.head,
+      nowMs: Date.parse('2026-01-01T00:24:00.000Z'),
+      markStoppedImpl: () => assert.fail('claim contention must not stop proven published work'),
+      staleSignalImpl: () => assert.fail('claim contention must not signal proven published work'), log: { info() {}, warn() {} } });
+    assert.equal(decision.defer, true);
+    assert.equal(readFileSync(f.jobPath, 'utf8'), before);
+    if (status === 'in_progress') {
+      const result = await sweepStuckInProgressClaims({ rootDir: f.rootDir,
+        nowMs: Date.parse('2026-01-01T00:24:00.000Z'), thresholdMs: 600_000,
+        readWorkerCpuImpl: () => 0, isWorkerRunning: () => true,
+        resolvePRLifecycleImpl: async () => ({ source: 'live', prState: 'open', headSha: f.head }),
+        completePublishedHeadImpl: f.completePublishedHeadImpl,
+        processKill: () => assert.fail('claim contention must not reclaim proven published work'), log: { log() {}, warn() {} } });
+      assert.equal(result.completed, 0);
+      assert.equal(result.requeued, 0);
+      assert.equal(result.skipped, 1);
+      assert.equal(readFileSync(f.jobPath, 'utf8'), before);
+    }
+    assert.ok(existsSync(deliveryLockPath(completedPath)));
+    assert.equal(existsSync(completedPath), false);
+    assert.equal(f.followOns(), 0);
+  });
+}

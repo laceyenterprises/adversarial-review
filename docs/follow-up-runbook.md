@@ -79,6 +79,12 @@ Recovery writes the completed job before requesting re-review or waking the
 comment-only final-round closure lane. It registers the delivery retry pointer
 after persisting the final re-review outcome and comment body, while holding
 the delivery claim. The daemon logs its `completed` count.
+An unexpired claim held by another delivery worker defers recovery without
+mutating the job; completion retries after the claim releases or expires.
+Historical reply backfill advances a durable cursor in batches of at most 100
+records/directory transitions per tick and writes its sentinel only after all
+partitions finish. Pruned multi-round replies require a current-round cached
+payload rather than an ambiguous job-level reply.
 The stale-claim sweep still signals and requeues hung workers when reply
 reconciliation returns `active` after the stale activity gates pass. See the
 [job data model](data-model/follow-up-jobs.md#published-head-recovery-remlink-01)

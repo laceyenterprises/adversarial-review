@@ -148,11 +148,31 @@ the existing cap/closure lane with re-review suppressed. Recovery itself grants
 no CI waiver or merge decision.
 
 Recovery holds a delivery claim across completion and follow-on dispatch. It
+defers without changing the job or dispatching follow-on work if another
+unexpired claim owns the terminal path; retained publish evidence is retried. It
 registers the delivery retry index pointer only after persisting the final
 `reReview` outcome and rendered `commentDelivery.body`. The one-time completed
 worker backfill can use `remediationReply.payload` when the reply artifact read
 fails with `ENOENT`; it revalidates that payload against the job identity and
-reply contract. Other artifact read or validation errors do not use the fallback.
+reply contract. Multi-round jobs require the payload stored on the current
+round's `remediationReply`; the top-level payload is accepted only for an
+unambiguous single first round. An explicit payload round must match.
+Other artifact read or validation errors do not use the fallback.
+
+The backfill examines at most 100 records and directory transitions per tick,
+including all historical archive months, before releasing the queue lock.
+`data/follow-up-jobs/delivery-retry-index/.remediation-reply-backfill-cursor`
+atomically stores resumable progress until the completion sentinel is written:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `directory` | absolute path string | Last terminal directory visited, in sorted path order. |
+| `after` | string | Last processed filename in that directory; `\uffff` marks a finished directory. |
+
+The cursor has no foreign keys. Failed writes and held claims retain the cursor
+before that record for the next tick. Completion removes the cursor; deleting it
+early safely restarts the idempotent scan. The sentinel is never written for a
+partial or failed scan.
 
 The stale-claim sweep probes recovery after its activity, age and CPU gates.
 An exited worker with current result artifacts can be reconciled earlier.

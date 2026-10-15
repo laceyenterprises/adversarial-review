@@ -599,6 +599,60 @@ function rebasePatchIdentity(files) {
   }).sort((a, b) => a[0].localeCompare(b[0])));
 }
 
+// Carry an approval only over the same reviewed patch, modulo a base rebase
+// and whole-path reversals independently authorized by live required guards.
+export function guardRepairReviewCoverage(evidence, reviewedHead, currentHead) {
+  const proofs = verifiedGuardReversals(evidence, currentHead);
+  if (!reviewedHead || !proofs.length || !checkPrimaryChange(evidence, currentHead).ok) return false;
+  const direct = reviewedHead === evidence.primaryHead;
+  const snapshot = evidence.guardReviewSnapshots?.find(snapshot => snapshot.headSha === reviewedHead);
+  const reviewed = direct ? evidence.primaryFiles : snapshot?.files;
+  if (!Array.isArray(reviewed)) return false;
+  if (!direct && (snapshot.reviewToPrimary !== 'diverged' || snapshot.baseAncestry !== 'ahead'
+    || snapshot.fromBase === evidence.mergeBase || snapshot.toBase !== evidence.mergeBase)) return false;
+  const paths = new Set(proofs.map(proof => proof.path));
+  const remaining = files => files.filter(file => !paths.has(file.filename) && !paths.has(file.previous_filename));
+  try {
+    if (direct) {
+      const identity = files => JSON.stringify(remaining(files).map(file => [file.filename, file.previous_filename,
+        file.status, file.sha, file.patch]).sort((a, b) => a[0].localeCompare(b[0])));
+      return identity(reviewed) === identity(evidence.finalFiles);
+    }
+    return rebasePatchIdentity(remaining(reviewed)) === rebasePatchIdentity(remaining(evidence.finalFiles));
+  } catch { return false; }
+}
+
+async function fetchGuardReviewSnapshots(args, evidence) {
+  if (!verifiedGuardReversals(evidence, args.headSha).length) return {};
+  try {
+    const reviews = await args.get(`repos/${args.repo}/pulls/${args.prNumber}/reviews?per_page=100`);
+    if (!Array.isArray(reviews) || reviews.length >= 100) return {};
+    const families = new Map();
+    for (const review of reviews) {
+      const family = amaReviewerFamilyForLogin(review.user?.login);
+      if (family && SHA.test(review.commit_id || '')) families.set(family, review);
+    }
+    const guardReviewSnapshots = [];
+    for (const review of families.values()) {
+      if (review.commit_id === evidence.primaryHead) continue;
+      const snapshot = await args.get(`repos/${args.repo}/compare/${evidence.baseSha}...${review.commit_id}`);
+      if (Array.isArray(snapshot.files) && (snapshot.filesComplete === true || snapshot.files.length < 300)
+        && SHA.test(snapshot.merge_base_commit?.sha || '')) {
+        const metadata = args.get.metadata || args.get;
+        const reviewToPrimary = await metadata(`repos/${args.repo}/compare/${review.commit_id}...${evidence.primaryHead}`);
+        const baseAncestry = await metadata(`repos/${args.repo}/compare/${snapshot.merge_base_commit.sha}...${evidence.mergeBase}`);
+        guardReviewSnapshots.push({ headSha: review.commit_id, files: snapshot.files,
+          fromBase: snapshot.merge_base_commit.sha, toBase: evidence.mergeBase,
+          reviewToPrimary: reviewToPrimary.status, baseAncestry: baseAncestry.status });
+      }
+    }
+    return { guardReviewSnapshots };
+  } catch (error) {
+    if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
+    return {}; // Missing coverage leaves exact-head review mandatory.
+  }
+}
+
 async function attestedReversal(commit, repo, read, prNumber) {
   const comments = await read(`repos/${repo}/issues/${prNumber}/comments?per_page=100`);
   return Array.isArray(comments) && comments.length < 100 && comments.some(comment => exactHammerValidation(comment, commit.sha));
@@ -1019,7 +1073,8 @@ export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost }
   const ciCost = await fetchCiCostImpl({ ...args, get: path =>
     args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
   const guardEvidence = await fetchGuardReversals(args, history);
-  return { ...history, ciCost, ...guardEvidence };
+  const evidence = { ...history, ciCost, ...guardEvidence };
+  return { ...evidence, ...await fetchGuardReviewSnapshots(args, evidence) };
 }
 
 // Explicit operator context only. Merge-authority callers use fetchPrimaryChange

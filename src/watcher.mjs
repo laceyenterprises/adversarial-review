@@ -107,7 +107,7 @@ import {
   createWatcherWakePayloadAccessor,
   createWatcherWakeSource,
 } from './watcher-wake.mjs';
-import { createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
+import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
   ensureReviewStateSchema,
@@ -407,7 +407,7 @@ import {
   compareReviewerDispatchCandidates,
   createDetachedReviewerDispatchTracker, persistedSpawnReservationSource,
   createReviewerMemoryAdmissionSampler,
-  reserveReviewerMemoryAdmission, reviewerDispatchIsFirstPass,
+  reserveReviewerMemoryAdmission,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -1272,8 +1272,6 @@ async function pollOnceWithinBudget(
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
-  const reviewerDiscoveryDrainBatchSize = Math.max(1, reviewerPoolConfig.maxConcurrent || 1);
-  let reviewerDiscoveryDrainUsed = false;
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
       return { dispatched: 0, maxObservedConcurrency: 0 };
@@ -1334,17 +1332,10 @@ async function pollOnceWithinBudget(
       }
     }
   }
-  async function drainReviewerDispatchCandidatesIfBatchReady(reason) {
-    if (reviewerDiscoveryDrainUsed || priorityDiscoveryPending.size > 0) {
-      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
-    }
-    if (reviewerDispatchCandidates.length < reviewerDiscoveryDrainBatchSize) {
-      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
-    }
-    if (reviewerDispatchCandidates.every((candidate) => !reviewerDispatchIsFirstPass(candidate)) && countOpenPrsAwaitingFirstPassReview() > 0) return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
-    reviewerDiscoveryDrainUsed = true;
-    return drainReviewerDispatchCandidates(reason);
-  }
+  const drainReviewerDispatchCandidatesIfBatchReady = createWatcherDiscoveryBatchDrain({
+    priorityDiscoveryPending, reviewerDispatchCandidates, batchSize: Math.max(1, reviewerPoolConfig.maxConcurrent || 1),
+    countOpenPrsAwaitingFirstPassReview, drain: drainReviewerDispatchCandidates,
+  });
   // ARC-03: pump every enabled domain through its own adapter set instead of
   // assuming a single hardcoded `code-pr` domain. Each enabled domain resolves
   // its own reviewer-runtime adapter (isolated from other domains); the primary

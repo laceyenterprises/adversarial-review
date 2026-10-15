@@ -1,5 +1,25 @@
 import { createRetainedWatcherWakes } from './watcher-retained-wakes.mjs';
-import { reviewerDispatchEnqueuedAt, reviewerDispatchWaitPriority } from './watcher-reviewer-pool.mjs';
+import { reviewerDispatchEnqueuedAt, reviewerDispatchIsFirstPass, reviewerDispatchWaitPriority } from './watcher-reviewer-pool.mjs';
+
+// Own the one-wave discovery admission guard here so the scheduler only wires
+// its candidate queue and drain; priority and lane guards stay together.
+export function createWatcherDiscoveryBatchDrain({
+  priorityDiscoveryPending, reviewerDispatchCandidates, batchSize,
+  countOpenPrsAwaitingFirstPassReview, drain,
+}) {
+  let used = false;
+  return async (reason) => {
+    if (used || priorityDiscoveryPending.size > 0 || reviewerDispatchCandidates.length < batchSize) {
+      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
+    }
+    if (reviewerDispatchCandidates.every((candidate) => !reviewerDispatchIsFirstPass(candidate))
+        && countOpenPrsAwaitingFirstPassReview() > 0) {
+      return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
+    }
+    used = true;
+    return drain(reason);
+  };
+}
 
 // A partial discovery batch must not spend the only seat before priority work
 // from a later subject or repository has had a chance to enter the queue.

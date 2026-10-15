@@ -67,7 +67,7 @@ async function fetchConditionalRestPage({
   allowConditionalRequest = true,
   recordApiCallImpl = recordApiCall,
   putCachedEtagImpl = putCachedEtag,
-  credential = githubCredential({ token: process.env.GITHUB_TOKEN || process.env.GH_TOKEN }),
+  credential = githubCredential({ token: process.env.GITHUB_TOKEN || null }),
 } = {}) {
   if (!rootDir) throw new TypeError('rootDir is required for conditional REST cache');
   if (typeof request !== 'function') {
@@ -223,7 +223,7 @@ function createWatcherOctokit({
       // the asynchronous budget read must not charge one credential for another.
       requestTokens.set(options, token);
     }
-    const credential = githubCredential({ token });
+    const credential = githubCredential({ token: token || null });
     await awaitThrottleIfNeeded(resource, credential);
     try {
       const response = await request(options);

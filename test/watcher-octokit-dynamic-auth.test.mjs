@@ -107,3 +107,25 @@ test('GHSCOPE-01: a failed auth provider preserves existing request authenticati
   await octokit.request('GET /user', { headers: { authorization: 'token synthetic-existing-token' } });
   assert.equal(observedAuthorization, 'token synthetic-existing-token');
 });
+
+test('GHSCOPE-01: an unauthenticated Octokit request does not inherit the CLI token budget', async t => {
+  const { withGitHubBudgetScope, githubCredential, markGitHubRateLimited } = await import('../src/rate-limit-throttle.mjs');
+  const keys = ['GITHUB_TOKEN', 'GH_TOKEN'];
+  const old = keys.map(key => process.env[key]);
+  delete process.env.GITHUB_TOKEN;
+  process.env.GH_TOKEN = 'synthetic-cli-only-token';
+  t.after(() => keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; }));
+  let reads = 0;
+  const octokit = createWatcherOctokit({ octokitFactory: options => new Octokit({ ...options, request: {
+    fetch: async (_url, request) => {
+      reads++;
+      assert.equal(request.headers.authorization, undefined);
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  } }) });
+  await withGitHubBudgetScope({}, async () => {
+    markGitHubRateLimited('core', githubCredential());
+    await octokit.request('GET /user');
+  });
+  assert.equal(reads, 1);
+});

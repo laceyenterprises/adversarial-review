@@ -120,3 +120,17 @@ test('GHSCOPE-01: adapter subprocess failures carry their selector into the encl
     assert.equal(state[budgetApi.githubBudgetKey('graphql', credential)].credentialSelector, 'merge-agent');
   });
 });
+
+test('GHSCOPE-01: a CLI-only exhausted credential cannot trigger the anonymous watcher shortcut', async t => {
+  const { runLowBudgetWatcherPoll } = await import('../src/watcher-github-budget.mjs');
+  const root = fixture(t);
+  const keys = ['GH_TOKEN', 'GITHUB_TOKEN', 'GHO_RATE_LIMIT_SHARED_STATE_PATH'];
+  const old = keys.map(key => process.env[key]);
+  process.env.GH_TOKEN = 'synthetic-cli-shortcut-token';
+  delete process.env.GITHUB_TOKEN;
+  process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = join(root, 'budget.json');
+  t.after(() => keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; }));
+  const credential = budgetApi.githubCredential();
+  for (const resource of ['core', 'graphql']) await budgetApi.recordResponseRateLimit({ credential, resource, remaining: 0, resetAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(await runLowBudgetWatcherPoll({ db: { prepare: () => assert.fail('anonymous watcher must keep polling') } }), false);
+});

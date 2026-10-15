@@ -440,33 +440,66 @@ test('workspace escape audit records post-probe errors without false escape path
   }
 });
 
-test('checkout HEAD movement makes a workspace escape audit event ambiguous', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-head-move-'));
-  try {
-    const checkoutDir = makeRepo(root, 'repo');
-    const stateDir = join(root, 'state');
-    const beforeHead = git(checkoutDir, 'rev-parse', 'HEAD');
-    configureReviewerWorkspaceAudit({
-      repo: 'laceyenterprises/agent-os', prNumber: 1129, reviewerModel: 'claude',
-      headSha: 'pr-head', checkoutDir, stateDir,
-    });
-    await auditReviewerSubprocess(async ({ onSpawn }) => {
-      onSpawn({ pid: process.pid });
-      writeFileSync(join(checkoutDir, 'tracked.txt'), 'main-catchup update\n');
+for (const extra of ['none', 'untracked', 'modified', 'overlapping']) {
+  test(`checkout HEAD movement explains deploy paths and preserves ${extra} writes`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-head-move-'));
+    const originalConsoleError = console.error;
+    const records = [];
+    try {
+      const checkoutDir = makeRepo(root, 'repo');
+      const stateDir = join(root, 'state');
+      const auditDir = join(stateDir, 'reviewer-workspace-audit');
+      writeFileSync(join(checkoutDir, 'extra.txt'), 'base extra\n');
+      git(checkoutDir, 'add', 'extra.txt');
+      git(checkoutDir, 'commit', '-qm', 'fixture base');
+      const beforeHead = git(checkoutDir, 'rev-parse', 'HEAD');
+      writeFileSync(join(checkoutDir, 'tracked.txt'), 'deployed content\n');
       git(checkoutDir, 'add', 'tracked.txt');
-      git(checkoutDir, 'commit', '-qm', 'main-catchup update');
-    });
-    const event = JSON.parse(readFileSync(join(stateDir, 'reviewer-workspace-audit', 'reviewer-workspace-escapes.jsonl'), 'utf8').trim());
-    assert.equal(event.checkoutHeadBefore, beforeHead);
-    assert.equal(event.checkoutHeadAfter, git(checkoutDir, 'rev-parse', 'HEAD'));
-    assert.equal(event.ambiguous, true);
-    assert.equal(event.attribution, 'checkout-head-moved');
-    assert.deepEqual(event.paths, ['tracked.txt']);
-  } finally {
-    configureReviewerWorkspaceAudit(null);
-    removeFixture(root);
-  }
-});
+      git(checkoutDir, 'commit', '-qm', 'fixture deploy');
+      const afterHead = git(checkoutDir, 'rev-parse', 'HEAD');
+      git(checkoutDir, 'reset', '--hard', beforeHead);
+      console.error = (line) => { records.push(JSON.parse(line)); };
+      configureReviewerWorkspaceAudit({
+        repo: 'example/repository', prNumber: 1, reviewerModel: 'fixture',
+        headSha: 'review-head', checkoutDir, stateDir,
+      });
+      await auditReviewerSubprocess(async ({ onSpawn }) => {
+        onSpawn({ pid: process.pid });
+        git(checkoutDir, 'reset', '--hard', afterHead);
+        if (extra === 'untracked') writeFileSync(join(checkoutDir, 'new.txt'), 'reviewer write\n');
+        if (extra === 'modified') writeFileSync(join(checkoutDir, 'extra.txt'), 'reviewer write\n');
+        if (extra === 'overlapping') writeFileSync(join(checkoutDir, 'tracked.txt'), 'reviewer write\n');
+        return { conversationId: 'fixture-conversation' };
+      });
+      const escapes = records.filter((record) => record.event === 'reviewer_workspace_escape');
+      const headMoves = records.filter((record) => record.event === 'reviewer_workspace_head_moved');
+      if (extra === 'none') {
+        assert.deepEqual(escapes, []);
+        assert.equal(existsSync(join(auditDir, 'reviewer-workspace-escapes.jsonl')), false);
+        assert.equal(headMoves.length, 1);
+        assert.equal(headMoves[0].checkoutHeadBefore, beforeHead);
+        assert.equal(headMoves[0].checkoutHeadAfter, afterHead);
+        assert.equal(headMoves[0].explainedPathCount, 1);
+      } else {
+        assert.equal(escapes.length, 1);
+        assert.deepEqual(headMoves, []);
+        const event = escapes[0];
+        assert.equal(event.checkoutHeadBefore, beforeHead);
+        assert.equal(event.checkoutHeadAfter, afterHead);
+        assert.equal(event.ambiguous, false);
+        assert.equal(event.attribution, 'unattributed');
+        assert.deepEqual(event.paths, [extra === 'untracked' ? 'new.txt' : extra === 'modified' ? 'extra.txt' : 'tracked.txt']);
+        assert.equal(event.agyConversationId, 'fixture-conversation');
+        assert.deepEqual(JSON.parse(readFileSync(join(auditDir, 'reviewer-workspace-escapes.jsonl'), 'utf8').trim()), event);
+      }
+      assert.equal(existsSync(join(auditDir, `live-${process.pid}`)), false);
+    } finally {
+      console.error = originalConsoleError;
+      configureReviewerWorkspaceAudit(null);
+      removeFixture(root);
+    }
+  });
+}
 
 test('workspace audit bounds reads of large untracked files', async () => {
   const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-large-file-'));

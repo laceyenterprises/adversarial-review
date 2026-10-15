@@ -50,6 +50,7 @@ export function checkMap(map, readSource, graphHash) {
     for (const edge of object.transitions) {
       assert.ok((states.has(edge.from) || edge.from === '[*]') && (states.has(edge.to) || edge.to === '[*]'));
       assert.ok(edge.trigger && map.sourceProjectionSha256[edge.codeSource]);
+      assert.ok(object.codeSources.includes(edge.codeSource), `missing code source: ${object.id}: ${edge.codeSource}`);
     }
   }
   for (const [file, hash] of Object.entries(map.sourceProjectionSha256)) assert.equal(digest(stateProjection(readSource(file))), hash, `source drift: ${file}; review states AND transitions before refreshing`);

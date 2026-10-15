@@ -804,11 +804,16 @@ status. Its initial/final node is an evaluation boundary. Lease removal is not
 permission to merge. Semantic source fingerprints track state writers, guards and terminal sets:
 review the state/edge inventory, update the map and independent graph snapshot,
 then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
+Each object's `codeSources` includes every transition's source file.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
 README equivalence; mutation tests alter both a state and a CAS edge in source.
 
 Run `node bin/smv-smoke.mjs` from this checkout. It emits one JSON verdict per
-step followed by the aggregate report. Setup, closed stdin, process group kill,
+step followed by the aggregate report. `SMV_COMMIT` overrides Git metadata lookup;
+lookup failures emit failed step rows and an aggregate failure with commit `unknown`.
+The isolated child PATH includes `/usr/local/bin` and `/opt/homebrew/bin` for
+package-managed Git, after the fake external commands and system directories.
+Setup, closed stdin, process group kill,
 child wait and disposable-store cleanup fit within the 180-second total budget.
 Each child has isolated state, a credential-free environment, network refusal,
 fake external commands and a file-only Git remote. The watcher entry is the

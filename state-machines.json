@@ -18,7 +18,10 @@
         "src/review-state-db.mjs",
         "src/reviewer-ci-admission.mjs",
         "src/review-statuses.mjs",
-        "src/fast-merge-processing.mjs"
+        "src/fast-merge-processing.mjs",
+        "src/reviewer.mjs",
+        "src/orphan-post-reconcile.mjs",
+        "src/posted-review-row.mjs"
       ],
       "states": [
         {"name": "pending","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},

@@ -9,7 +9,7 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const declaration = JSON.parse(readFileSync(join(root, 'post-merge-verify.json')));
 const mode = process.env.SMV_MODE || 'sandbox';
 const started = performance.now();
-const commit = process.env.SMV_COMMIT || execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
+let commit = process.env.SMV_COMMIT || 'unknown';
 const scratch = mkdtempSync(join(tmpdir(), 'smv-'));
 const steps = [];
 let child;
@@ -17,6 +17,7 @@ const signalGroup = () => { if (child?.pid) { try { process.kill(-child.pid, 'SI
 const interrupted = () => { process.exitCode = 1; signalGroup(); };
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, interrupted);
 try {
+  if (!process.env.SMV_COMMIT) commit = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
   if (!['sandbox', 'host'].includes(mode)) throw new Error('unknown SMV mode');
   if (mode === 'host' && (process.env.SMV_HOST_CANARY_APPROVED !== '1' || process.env.HQ_WORKER_ID)) throw new Error('host canary requires SRE approval outside a worker');
   const fakeBin = join(scratch, 'bin');
@@ -30,7 +31,7 @@ try {
     let stdout = '', stderr = '', timedOut = false;
     child = spawn(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', join(mirror, 'test/helpers/smv-scenario.mjs'), step.id], {
       cwd: mirror, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { PATH: [fakeBin, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter), HOME: scratch,
+      env: { PATH: [fakeBin, dirname(process.execPath), '/usr/bin', '/bin', '/usr/local/bin', '/opt/homebrew/bin'].join(delimiter), HOME: scratch,
         TMPDIR: scratch, LANG: 'C', AGENT_OS_CONFIG_PATH: join(scratch, 'absent.yaml'),
         AGENT_OS_SESSION_LEDGER_VDB: 'false', AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'off',
         GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_ALLOW_PROTOCOL: 'file' },

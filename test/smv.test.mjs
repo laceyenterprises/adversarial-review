@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checkMap, diagrams, stateProjection } from './helpers/smv-contracts.mjs';
+import { checkMap, diagrams, digest, stateProjection } from './helpers/smv-contracts.mjs';
 const root = new URL('../', import.meta.url);
 const read = file => readFileSync(new URL(file, root), 'utf8');
 const map = JSON.parse(read('state-machines.json'));
-const GRAPH_HASH = '6acff15affebff43e8aba6e5e55a0f8f7a344dc52e2faf020c87f4bb925835a7'; // Independent reviewed snapshot; not generated at test time.
+const GRAPH_HASH = '47fd59a4136a9ddb7e1fe9b4c56458d0f2e3fd19c6838a12e61f2813a2568ed6'; // Independent reviewed snapshot; not generated at test time.
 test('SMV independent graph, producer state and transition drift', () => {
   checkMap(map, read, GRAPH_HASH);
   assert.equal(read('README.md').split('<!-- smv:diagrams:start -->\n')[1].split('\n<!-- smv:diagrams:end -->')[0], diagrams(map));
@@ -24,6 +26,36 @@ for (const [name, before, after] of [
 });
 test('SMV detects imported state constant drift', () => {
   assert.throws(() => checkMap(map, file => file === 'src/review-statuses.mjs' ? read(file).replace('ci-blocked', 'invented') : read(file), GRAPH_HASH), /source drift/);
+});
+test('SMV rejects transition sources omitted from the object inventory', () => {
+  for (const file of ['src/reviewer.mjs', 'src/orphan-post-reconcile.mjs', 'src/posted-review-row.mjs']) {
+    const mutated = structuredClone(map);
+    const row = mutated.objects.find(o => o.id === 'review-row');
+    row.codeSources = row.codeSources.filter(source => source !== file);
+    assert.throws(() => checkMap(mutated, read, digest(JSON.stringify(mutated.objects))), /missing code source/);
+  }
+});
+test('SMV reports Git metadata failures as JSON from an archive checkout', () => {
+  const archive = mkdtempSync(join(tmpdir(), 'smv-archive-'));
+  try {
+    mkdirSync(join(archive, 'bin'));
+    copyFileSync(new URL('../bin/smv-smoke.mjs', import.meta.url), join(archive, 'bin/smv-smoke.mjs'));
+    copyFileSync(new URL('../post-merge-verify.json', import.meta.url), join(archive, 'post-merge-verify.json'));
+    for (const path of [process.env.PATH, '']) {
+      const result = spawnSync(process.execPath, [join(archive, 'bin/smv-smoke.mjs')], {
+        env: { ...process.env, PATH: path, SMV_COMMIT: '', SMV_MODE: 'sandbox', GIT_CEILING_DIRECTORIES: archive, GIT_DIR: join(archive, 'absent.git') },
+        encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      assert.equal(result.status, 1, result.stderr);
+      const lines = result.stdout.trim().split('\n').map(line => JSON.parse(line));
+      const report = lines.at(-1);
+      assert.equal(lines.length, 5);
+      assert.equal(report.commit, 'unknown');
+      assert.equal(report.verdict, 'fail');
+      assert.equal(report.steps.length, 4);
+      assert.ok(report.steps.every(s => s.verdict === 'fail' && /git/.test(s.evidence.error)));
+    }
+  } finally { rmSync(archive, { recursive: true, force: true }); }
 });
 test('SMV transition projection distinguishes opposite guard branches', () => {
   assert.notEqual(stateProjection("if (ready) { row.status = 'dispatched'; }"), stateProjection("if (ready) {} else { row.status = 'dispatched'; }"));

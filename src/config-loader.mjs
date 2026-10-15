@@ -309,6 +309,47 @@ function schemaV1() {
           timeout_seconds: { __type: TYPE_INT, __default: 150, __min: 1, __max: 180 },
         },
       },
+      // WGT-02: strict mirror of the optional Python-owned identity contract.
+      network: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          identity: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              state_dir: {__type: TYPE_STRING, __default: ""},
+              binary_path: {__type: TYPE_STRING, __default: ""},
+              custodian_host: {__type: TYPE_STRING, __default: ""},
+              custodian_user: {__type: TYPE_STRING, __default: ""},
+              known_hosts_file: {__type: TYPE_STRING, __default: ""},
+              ssh_identity_file: {__type: TYPE_STRING, __default: ""},
+              enabled: {__type: TYPE_BOOL, __default: false},
+              custodian_principal: {__type: TYPE_STRING, __default: "fleet-ca-custodian"},
+              custodian_port: {__type: TYPE_INT, __default: 22, __min: 1, __max: 65535},
+            },
+          },
+          cross_node: {
+            __type: TYPE_DICT, __strict: true, __keys: {
+              enabled: { __type: TYPE_BOOL, __default: false },
+              auth_mode: { __type: TYPE_STRING, __default: null, __nullable: true },
+              advertised_address: { __type: TYPE_STRING, __default: 'host.docker.internal' },
+              prometheus_scrape_host: { __type: TYPE_STRING, __default: null, __nullable: true },
+              oauth_broker: { __type: TYPE_DICT, __strict: true, __keys: {
+                bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
+                advertised_address: { __type: TYPE_STRING, __default: null, __nullable: true },
+              } },
+              observability_exporters: { __type: TYPE_DICT, __strict: true, __keys: {
+                bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
+                advertised_address: { __type: TYPE_STRING, __default: null, __nullable: true },
+              } },
+              session_ledger: { __type: TYPE_DICT, __strict: true, __keys: {
+                federation_dsn: { __type: TYPE_STRING, __default: null, __nullable: true },
+              } },
+            },
+          },
+        },
+      },
       sharedOwners: {
         __type: TYPE_LIST,
         __item: { __type: TYPE_STRING },
@@ -3366,6 +3407,19 @@ function postgresRuntimeAlias(value) {
 const identity = (v) => v;
 
 export const ENV_ALIASES = {
+  ...Object.fromEntries([
+    'enabled',
+    'state_dir',
+    'binary_path',
+    'custodian_host',
+    'custodian_user',
+    'known_hosts_file',
+    'ssh_identity_file',
+    'custodian_principal',
+    'custodian_port',
+  ].map((key) => [`network.identity.${key}`, {
+    canonical: `AGENT_OS_NETWORK_IDENTITY_${key.toUpperCase()}`, aliases: [],
+  }])),
   'update.channel': {
     canonical: 'AGENT_OS_UPDATE_CHANNEL',
     aliases: [],

@@ -1,3 +1,4 @@
+import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
 import { operatorHeldSql } from './operator-hold-labels.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
@@ -107,6 +108,9 @@ export const MARK_TOKEN_REFRESH_RECOVERY_ATTEMPT_STARTED_SQL =
      )
      AND COALESCE(pr_state, 'open') != 'merged'`;
 
+// Timeout probes after a changed build use the separate head/build budget.
+// Keep their infra counter at its cap; real upstream cascades retain their
+// existing steady-state attempt accounting.
 export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -121,7 +125,11 @@ export const MARK_INFRA_AUTO_RECOVERY_ATTEMPT_STARTED_SQL =
          failed_at = NULL,
          failure_message = NULL,
          quota_reset_at_utc = NULL,
-         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
+         infra_auto_recover_attempts = CASE
+           WHEN lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%'
+             THEN MIN(COALESCE(infra_auto_recover_attempts, 0) + 1, ${DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS})
+           ELSE COALESCE(infra_auto_recover_attempts, 0) + 1
+         END
    WHERE repo = ?
      AND pr_number = ?
      AND (

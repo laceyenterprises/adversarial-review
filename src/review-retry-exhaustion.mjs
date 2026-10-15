@@ -21,12 +21,12 @@ export function readReviewFailureDecision(rootDir, repo, prNumber, headSha) {
 
 export async function parkExhaustedReview({
   rootDir, repo, prNumber, headSha, reason, deliverAlertFn, logger = console,
+  operatorReason = 'review-retry-cap-exhausted', fingerprint = operatorReason,
 }) {
   try {
     const identity = { repo, prNumber };
     // Keep the legacy fingerprint so deploying durable records does not re-page
     // heads whose existing lane debounce is still authoritative.
-    const fingerprint = 'review-retry-cap-exhausted';
     const lane = readNoProgressLane(rootDir, identity, { logger });
     const existing = readReviewFailureDecision(rootDir, repo, prNumber, headSha);
     const sameSeries = lane?.headSha === headSha && lane?.fingerprint === fingerprint
@@ -58,12 +58,12 @@ export async function parkExhaustedReview({
     recordNoProgressLaneRun(rootDir, identity, {
       headSha, fingerprint, decisionFingerprint: fingerprint,
       progressClass: PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED,
-      operatorReason: 'review-retry-cap-exhausted',
+      operatorReason,
       now, logger,
     });
     const paged = await maybeFireOperatorDecisionRequiredAlert({
       rootDir, identity, headSha, fingerprint,
-      operatorReason: 'review-retry-cap-exhausted',
+      operatorReason,
       noProgressTicks: 1, thresholdTicks: 1,
       deliverAlertFn: typeof deliverAlertFn === 'function' ? (text, event) => deliverAlertFn(
         `${text} Failure record ${decision.id}: ${reason}. This record is informational; use the existing operator controls to retrigger, approve risk, or block.`,

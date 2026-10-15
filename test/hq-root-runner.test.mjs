@@ -19,7 +19,11 @@ test('runner replaces inherited HQ roots, ignores exhausted home quota and clean
       mkdirSync(join(root, 'quota'), { recursive: true });
       writeFileSync(join(root, 'quota', 'google-agy.status.json'), status);
     }
-    for (const primary of [inheritedRoot, '']) {
+    for (const { primary, fail } of [
+      { primary: inheritedRoot, fail: false },
+      { primary: '', fail: false },
+      { primary: inheritedRoot, fail: true },
+    ]) {
       const report = mkdtempSync(join(fixture, 'reports-'));
       const env = {
         ...process.env,
@@ -27,12 +31,14 @@ test('runner replaces inherited HQ roots, ignores exhausted home quota and clean
         HQ_ROOT: primary,
         AGENT_OS_HQ_ROOT: secondaryRoot,
         HQ_ROOT_FIXTURE_REPORT: report,
+        HQ_ROOT_FIXTURE_FAIL: fail ? '1' : '0',
       };
       delete env.NODE_TEST_CONTEXT;
       const child = spawnSync(process.execPath, [join(testDir, 'run-tests.mjs'), 'hq-root-runner-probe.test.mjs', 'hq-root-runner-peer.test.mjs'], {
         env, encoding: 'utf8', timeout: 30_000,
       });
-      assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+      assert.equal(child.status, fail ? 1 : 0, `${child.stdout}\n${child.stderr}`);
+      if (fail) assert.match(child.stdout + child.stderr, /synthetic fixture failure/);
       const reports = readdirSync(report).map((file) => JSON.parse(readFileSync(join(report, file), 'utf8')));
       assert.equal(reports.length, 2);
       assert.equal(new Set(reports.map(({ root }) => root)).size, 2, 'each file must get a different HQ root');

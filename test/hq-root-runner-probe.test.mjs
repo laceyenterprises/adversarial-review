@@ -58,4 +58,5 @@ test('runner quota probe cannot see an inherited exhausted Gemini status', async
   assert.equal(result.ok, true);
   // Exercise a write through the shared root as well as a quota read.
   writeFileSync(join(resolveHqRoot(), 'fixture-state.json'), '{}');
+  if (process.env.HQ_ROOT_FIXTURE_FAIL === '1') assert.fail('synthetic fixture failure');
 });

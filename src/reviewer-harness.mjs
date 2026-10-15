@@ -43,6 +43,7 @@ import { CHUNK_HEAD_LEGEND, annotateRemovedDiffLines, buildPostImageContext, spl
 import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
   resolveAgyPrintTimeoutMs,
+  resolveAgyChunkTimeoutPlan,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
   resolveFirstOutputTimeoutMs,
@@ -2518,13 +2519,16 @@ async function withGeminiSubprocessRetry(operation, {
   sleepImpl = sleep,
   log = console,
   isRetryableError = isRetryableGeminiSubprocessError,
+  signal,
 } = {}) {
   let lastErr = null;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
+      signal?.throwIfAborted();
       return await operation();
     } catch (err) {
       lastErr = err;
+      signal?.throwIfAborted();
       if (!isRetryableError(err) || attempt >= retryDelaysMs.length) {
         throw err;
       }
@@ -2556,6 +2560,7 @@ async function spawnGeminiReview({
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
+  signal,
   maxBuffer = 10 * 1024 * 1024,
   spawnWithInputImpl = spawnWithInput,
 }) {
@@ -2568,6 +2573,7 @@ async function spawnGeminiReview({
       cwd,
       input: prompt,
       timeout,
+      signal,
       maxBuffer,
     },
   );
@@ -2580,6 +2586,7 @@ async function spawnAgyReview({
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
+  signal,
   printTimeoutMs = resolveAgyPrintTimeoutMs(env),
   maxBuffer = 10 * 1024 * 1024,
   spawnWithInputImpl = spawnWithInput,
@@ -2599,7 +2606,7 @@ async function spawnAgyReview({
   assertAgyPromptFitsArgv(prompt, { maxBytes: resolveAgyArgvMaxBytes(env) });
   const agyArgs = buildAgyReviewArgs({ model, prompt, printTimeoutMs, workspaceDir: identity ? identity.workspaceDir : cwd });
   if (identity) {
-    return spawnAgyIdentityReview({ identity, agyArgs, timeout: effectiveTimeout, maxBuffer, spawnWithInputImpl });
+    return spawnAgyIdentityReview({ identity, agyArgs, timeout: effectiveTimeout, signal, maxBuffer, spawnWithInputImpl });
   }
   return spawnWithInputImpl(
     agyCli,
@@ -2610,6 +2617,7 @@ async function spawnAgyReview({
       // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
       input: '',
       timeout: effectiveTimeout,
+      signal,
       maxBuffer,
       // agy leaves a long-lived language-server child holding our stdout/stderr
       // pipes; without this the capture never sees EOF and every review stalls
@@ -2654,7 +2662,7 @@ function readCapturedFile(path, maxBytes) {
 // and `settleAfterKillMs` settles even if sudo itself outlives the kill. What
 // survives is the watcher's to handle: the identity is not leased again while
 // any process still runs as that user.
-async function spawnAgyIdentityReview({ identity, agyArgs, timeout, maxBuffer, spawnWithInputImpl }) {
+async function spawnAgyIdentityReview({ identity, agyArgs, timeout, signal, maxBuffer, spawnWithInputImpl }) {
   const printIndex = agyArgs.indexOf('--print');
   const prompt = agyArgs[printIndex + 1];
   const safeArgs = [...agyArgs];
@@ -2673,6 +2681,7 @@ async function spawnAgyIdentityReview({ identity, agyArgs, timeout, maxBuffer, s
       cwd: identity.cwd,
       input: prompt,
       timeout,
+      signal,
       maxBuffer,
       reapGroupOnExit: true,
       stdoutPath,
@@ -2711,6 +2720,8 @@ async function reviewWithGemini(diff, extraContext = '', {
   sleepImpl = sleep,
   log = console,
   promptOverride = null,
+  signal,
+  timeoutMs = null,
   // CCX-08: the added reviewer identity this review leased (`{ user, reviewId }`),
   // null for the HQ owner. Defaults to what the watcher put in the child env.
   agyIdentity = undefined,
@@ -2742,6 +2753,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   let fallbackLock = null;
   let quotaSignal = false;
   let spendReported = false;
+  signal?.throwIfAborted();
   console.error('[reviewWithGemini] asserting OAuth...');
   if (runtime === 'antigravity' && !addedIdentity) {
     if (!geminiReviewerSessionPreflightDone) {
@@ -2836,6 +2848,7 @@ async function reviewWithGemini(diff, extraContext = '', {
     selectedModel = model;
 
     console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
+    signal?.throwIfAborted();
     subprocessStarted = true;
     const result = runtime === 'antigravity'
       ? await withGeminiSubprocessRetry(
@@ -2845,11 +2858,12 @@ async function reviewWithGemini(diff, extraContext = '', {
           model,
           env: reviewEnv,
           cwd: reviewerSubprocessCwd,
-          timeout: resolveReviewerTimeoutMs(reviewEnv),
+          timeout: timeoutMs ?? resolveReviewerTimeoutMs(reviewEnv),
+          signal,
           maxBuffer: 10 * 1024 * 1024,
           ...(identityRun ? { identity: identityRun } : {}),
         }),
-        { retryDelaysMs, sleepImpl },
+        { retryDelaysMs, sleepImpl, signal },
       )
       : await withGeminiSubprocessRetry(
         () => spawnGeminiReviewImpl({
@@ -2858,10 +2872,11 @@ async function reviewWithGemini(diff, extraContext = '', {
           model,
           env: reviewEnv,
           cwd: reviewerSubprocessCwd,
-          timeout: resolveReviewerTimeoutMs(reviewEnv),
+          timeout: timeoutMs ?? resolveReviewerTimeoutMs(reviewEnv),
+          signal,
           maxBuffer: 10 * 1024 * 1024,
         }),
-        { retryDelaysMs, sleepImpl },
+        { retryDelaysMs, sleepImpl, signal },
       );
     stdout = result.stdout || '';
     stderr = result.stderr || '';
@@ -3502,6 +3517,8 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   reviewWithGeminiImpl = reviewWithGemini,
   maxChunks = resolveAgyChunkMaxChunks(env),
   onRejectedCodexOutput = null,
+  onChunkPlan = null,
+  signal,
 } = {}) {
   const configuredHardMaxBytes = Number(env.ADVERSARIAL_REVIEW_CHUNK_HARD_MAX_BYTES);
   const hardMaxBytes = Number.isFinite(configuredHardMaxBytes) && configuredHardMaxBytes > 0
@@ -3550,40 +3567,58 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
       + `repo prompt size=${promptBytes ?? 'unknown'} maxBytes=${maxBytes} chunks=${split.chunks.length}`
     );
   }
+  // Plan before acquiring a credential or preparing an identity workspace.
+  // The outer process uses the cap as a backstop; this timer is the actual
+  // plan-derived deadline, shared by all calls and in-call retries.
+  const timeoutPlan = reviewerModel === 'gemini'
+    ? resolveAgyChunkTimeoutPlan({ chunkCount: split.chunks.length, promptBytes, env }) : null;
+  onChunkPlan?.(timeoutPlan);
+  const controller = new AbortController();
+  const chunkSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  const deadlineError = timeoutPlan && Object.assign(new Error(`Command timed out after ${timeoutPlan.timeoutMs}ms (chunks=${timeoutPlan.chunkCount})`), { timedOut: true });
+  const timer = timeoutPlan ? setTimeout(() => controller.abort(deadlineError), timeoutPlan.timeoutMs) : null;
   const chunkReviews = [];
   const chunkUsages = [];
   let execution = null;
-  for (let index = 0; index < split.chunks.length; index += 1) {
-    const chunk = split.chunks[index];
-    const baseChunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}${chunkLegend}`;
-    const splitRecord = splitRecordByChunk.get(chunk);
-    const chunkContext = splitRecord
-      ? `${baseChunkContext}${buildPostImageContext(splitHunkPostImages(splitRecord), {
-        fits: (postImage) => chunkPromptBytes(chunk.diff, `${baseChunkContext}${postImage}`) <= maxBytes })}`
-      : baseChunkContext;
-    const result = reviewerModel === 'gemini'
-      ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd })
-      : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd });
-    if (result.needsSanitize) {
-      try {
-        result.reviewText = sanitizeCodexReviewPayload(result.rawReviewText);
-      } catch (error) {
+  try {
+    for (let index = 0; index < split.chunks.length; index += 1) {
+      chunkSignal.throwIfAborted();
+      const chunk = split.chunks[index];
+      const baseChunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}${chunkLegend}`;
+      const splitRecord = splitRecordByChunk.get(chunk);
+      const chunkContext = splitRecord
+        ? `${baseChunkContext}${buildPostImageContext(splitHunkPostImages(splitRecord), {
+          fits: (postImage) => chunkPromptBytes(chunk.diff, `${baseChunkContext}${postImage}`) <= maxBytes })}`
+        : baseChunkContext;
+      const result = reviewerModel === 'gemini'
+        ? await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd, signal: chunkSignal, timeoutMs: timeoutPlan.perChunkTimeoutMs })
+        : await dispatchReviewerModelImpl(reviewerModel, chunk.diff, chunkContext, { promptStage, reviewerSubprocessCwd });
+      if (result.needsSanitize) {
         try {
-          await onRejectedCodexOutput?.({ rawReviewText: result.rawReviewText,
-            rejectionReason: error.message, chunkIndex: index + 1 });
-        } catch (persistError) {
-          console.error(`[reviewer] WARN: failed to persist rejected codex chunk output: ${persistError.message}`);
+          result.reviewText = sanitizeCodexReviewPayload(result.rawReviewText);
+        } catch (error) {
+          try {
+            await onRejectedCodexOutput?.({ rawReviewText: result.rawReviewText,
+              rejectionReason: error.message, chunkIndex: index + 1 });
+          } catch (persistError) {
+            console.error(`[reviewer] WARN: failed to persist rejected codex chunk output: ${persistError.message}`);
+          }
+          throw error;
         }
-        throw error;
       }
+      chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
+      execution ||= result.execution || null;
+      chunkReviews.push({
+        index: index + 1,
+        promptBytes: chunk.promptBytes,
+        reviewText: result.reviewText,
+      });
     }
-    chunkUsages.push(normalizeTokenUsage(result.tokenUsage));
-    execution ||= result.execution || null;
-    chunkReviews.push({
-      index: index + 1,
-      promptBytes: chunk.promptBytes,
-      reviewText: result.reviewText,
-    });
+  } catch (error) {
+    if (controller.signal.aborted) throw deadlineError;
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   const mergedReviewText = mergeChunkedAgyReviews(chunkReviews, {
     truncated: split.truncated,
@@ -3732,6 +3767,7 @@ const __test__ = {
   resolveAgyCliPath,
   resolveAgyOversizedReviewRoute,
   resolveAgyPrintTimeoutMs,
+  resolveAgyChunkTimeoutPlan,
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveClaudeAuthProbeTimeoutMs,
   resolveClaudeCliPath,

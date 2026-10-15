@@ -40,7 +40,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = storedRowFailureSignal(reviewRow);
   const message = rawMessage.toLowerCase();
   const tagMatch = message.match(
-    /^\[(reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
+    /^\[(reviewer-chunk-budget-exceeded|reviewer-model-unavailable|reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|reviewer-output|oauth-broken|token-refresh-pending|attestation-sign-failed|hcp-unavailable|infra-runtime-missing-library|agy-identity-unavailable|dispatch-failed|adapter_spawn_timeout|daemon-bounce)\]/
   );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
@@ -147,7 +147,7 @@ function infraRecoverableFailureClass(reviewRow) {
   const known = reviewerFailureClassFromStoredRow(reviewRow);
   // A refused model cannot recover without a configuration change. Keep its
   // diagnostic class, but exclude it from automatic same-head infra retries.
-  if (known === 'reviewer-model-unavailable') return null;
+  if (known === 'reviewer-model-unavailable' || known === 'reviewer-chunk-budget-exceeded') return null;
   if (known) return known;
   const message = String(reviewRow?.failure_message || '').toLowerCase();
   if (message.includes('[oauth-broken]')) {

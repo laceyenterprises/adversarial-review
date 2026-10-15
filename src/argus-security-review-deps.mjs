@@ -132,11 +132,11 @@ export function createDefaultArgusReviewDeps({
           if (!failed) {
             const signal = parseReviewerQuotaExhaustion({ error: err, nowMs: nowMs() });
             signal.resetAt ||= resolveQuotaResetIso(diagnostic, { nowMs: nowMs() });
-            const cooldown = startGeminiQuotaCooldown({
+            startGeminiQuotaCooldown({
               ...identityOptions(), signal, log: logger,
               hqOwner: identityPool.plan().hqOwner, identityUser: lease.user,
             });
-            err.resetAt = signal.resetAt || cooldown.resetAt;
+            err.resetAt = signal.resetAt;
           }
           throw err;
         } finally {

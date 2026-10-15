@@ -249,13 +249,16 @@ export function applyArgusReviewOutcome({
 
   const error = String(outcome?.error || 'argus review returned no outcome');
   const attempts = (drain.attempts || 0) + 1;
+  const attemptHistory = [...(drain.attemptHistory || []), {
+    attempt: attempts, error, modelAttempts: outcome?.modelAttempts || null,
+  }];
   if (attempts >= maxAttempts) {
     const failed = failArgusJob({
       rootDir,
       jobPath,
       failedAt: nowIso,
       error: `argus review failed after ${attempts} attempt(s): ${error}`,
-      job: { ...job, drain: { ...drain, attempts, lastError: error, cachedReview: null } },
+      job: { ...job, drain: { ...drain, attempts, attemptHistory, lastError: error, cachedReview: null } },
     });
     logger?.error?.(`[argus-drain] ${label} failed after ${attempts} attempt(s): ${error}`);
     return { applied: 'failed', ...failed };
@@ -269,6 +272,7 @@ export function applyArgusReviewOutcome({
       drain: {
         ...drain,
         attempts,
+        attemptHistory,
         lastError: error,
         lastAttemptAt: nowIso,
         notBefore: new Date(nowMs + backoffMs).toISOString(),

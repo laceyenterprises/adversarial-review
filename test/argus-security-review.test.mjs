@@ -165,12 +165,12 @@ test('an unparseable first model falls through to the next available model', asy
 test('when every model fails the job is retried with each failure named', async () => {
   const { deps: d } = deps({
     runReviewerModel: async ({ model }) => {
-      throw new Error(`${model} quota exhausted`);
+      throw new Error(`${model} execution failed`);
     },
   });
   const outcome = await reviewArgusJob({ job: job(), deps: d, workDir: '/x', nowMs: NOW, logger: quiet, promptTemplate: 'T' });
   assert.equal(outcome.kind, ARGUS_REVIEW_OUTCOME.RETRY);
-  assert.match(outcome.error, /claude: claude quota exhausted \| gemini: gemini quota exhausted/u);
+  assert.match(outcome.error, /claude: claude execution failed \| gemini: gemini execution failed/u);
 });
 
 test('no available reviewer model defers instead of failing', async () => {

@@ -12,6 +12,7 @@ import {
 import {
   REVIEWER_ROUTE_BY_MODEL as REVIEWER_ROUTE_TABLE_BY_MODEL,
   isCrossModelReviewWaived,
+  reviewerRefusesBuilder,
 } from './adapters/subject/github-pr/routing.mjs';
 
 const execFileAsync = promisify(execFileCb);
@@ -322,7 +323,8 @@ export function applyReviewerWorkerClassFallbackToRoute({
   // the author the CALLER believes in, so no future trigger can reach the route
   // swap with a class-X reviewer for a class-X PR.
   const author = authorClass ?? route?.builderClass ?? null;
-  if (author && violatesWriterDiversity(author, workerClass) && decision.lastResort !== true) {
+  if (reviewerRefusesBuilder(author, reviewerModel)
+    || (author && violatesWriterDiversity(author, workerClass) && decision.lastResort !== true)) {
     return { applied: false, route, reason: 'writer-diversity-violation' };
   }
 
@@ -455,6 +457,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   );
   const sameWriterLastResorts = quotaTrackedFallbacks.filter(
     (candidate) => violatesWriterDiversity(author, candidate)
+      && !reviewerRefusesBuilder(author, reviewerModelForWorkerClass(candidate))
   );
   if (quotaTrackedFallbacks.length === 0) {
     return { ...base, ...depthFields, reason: 'no-available-fallback' };
@@ -564,5 +567,12 @@ export async function resolveReviewerWorkerClassWithFallback({
     return { ...base, reason: 'fleet-quota-status-parse-error', error: message };
   }
 
-  return { ...base, reason: 'no-available-fallback', primaryState: primaryAvail.state };
+  return {
+    ...base, reason: 'no-allowed-reviewer-available', primaryState: primaryAvail.state,
+    quotaBlocked: true,
+    quotaGrounding: {
+      reviewer: reviewerModelForWorkerClass(primaryClass), state: primaryAvail.state,
+      source: primaryAvail.source || 'fleet-quota-status', reason: 'no-allowed-reviewer-available',
+    },
+  };
 }

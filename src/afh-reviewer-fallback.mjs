@@ -70,6 +70,7 @@ import {
   ROUTE_BY_BUILDER_CLASS,
   geminiMayReviewBuilder,
   isCrossModelReviewWaived,
+  reviewerRefusesBuilder,
   normalizeBuilderClass,
   normalizeReviewerModel,
 } from './adapters/subject/github-pr/routing.mjs';
@@ -641,8 +642,10 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
   };
   if (model === 'gemini' && grounding?.geminiPoolAvailability) {
     const status = grounding.geminiPoolAvailability;
-    return { ...base, state: status.state, source: status.source, known: true,
-      hardGrounded: !status.available, grounded: !status.available, poolGrounded: !status.available };
+    return {
+      ...base, state: status.state, source: status.source, known: true,
+      hardGrounded: !status.available, grounded: !status.available, poolGrounded: !status.available,
+    };
   }
   if (model === 'claude' && grounding?.localRuntimeGrounding?.claude?.available === false) {
     const runtimeStatus = grounding.localRuntimeGrounding.claude;
@@ -666,6 +669,7 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
       softVerdict,
       known: true,
       localRuntimeGrounded: true,
+      source: 'local-claude-runtime-probe',
     };
   }
   if (!grounding?.available || !provider) return base;
@@ -824,7 +828,7 @@ export function afhReviewerFallbackDecision({
         continue;
       }
     }
-    if (candidate === 'codex' && isCrossModelReviewWaived(normalizedBuilder, candidate)) {
+    if (reviewerRefusesBuilder(normalizedBuilder, candidate)) {
       considered.push({ reviewerModel: candidate, selected: false, reason: 'codex-builder-integrity-guard' });
       continue;
     }
@@ -866,7 +870,16 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
   if (!baseRoute) return baseRoute;
   if (!decision?.applied) {
     if (decision?.primary?.brokerProvider === 'codex-corp') return { ...baseRoute, codexBrokerProvider: 'codex-corp' };
-    if (decision?.primary?.grounded) return { ...baseRoute, quotaBlocked: true };
+    if (decision?.primary?.grounded) {
+      return {
+        ...baseRoute, quotaBlocked: true,
+        quotaGrounding: {
+          reviewer: decision.primary.model, state: decision.primary.state,
+          source: decision.primary.source || decision.primary.softVerdict?.source || 'fleet-quota-status',
+          reason: decision.reason,
+        },
+      };
+    }
     return baseRoute;
   }
   const target = REVIEWER_ROUTE_BY_MODEL[decision.to];
@@ -876,6 +889,7 @@ export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
     reviewerModel: target.reviewerModel,
     codexBrokerProvider: decision.brokerProvider || 'codex',
     quotaBlocked: false,
+    quotaGrounding: null,
     botTokenEnv: target.botTokenEnv,
     afhReviewerFallback: {
       fromReviewerModel: decision.from,

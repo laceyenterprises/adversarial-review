@@ -1,3 +1,4 @@
+import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { maybeDeliverOperatorDecisionNotice } from './operator-decision-notice.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
@@ -600,6 +601,7 @@ const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache({
   emitCacheEvent: (event) => emitReviewCacheLatencyEvent(event),
 });
 const previousAfhGroundingByProbeKey = new Map();
+const logReviewerQuotaBlock = createReviewerQuotaBlockLogger();
 
 // A terminal reviewer failure does NOT always land as review_status='failed'.
 //
@@ -1862,11 +1864,6 @@ export async function processReviewSubject(entry, ctx) {
           `[watcher] reviewer-selection ${repoPath}#${prNumber} ` +
             `${describeAfhReviewerFallback(afhSelection.decision)}`
         );
-      } else if (afhSelection.decision.reason === 'all-candidates-grounded') {
-        console.warn(
-          `[watcher] afh-reviewer-fallback found no ungrounded reviewer for ${repoPath}#${prNumber}; ` +
-            `keeping reviewer=${geminiBaseRoute.reviewerModel} (auto-reverts on provider recovery)`
-        );
       }
       let route = selectReviewerRouteForAttempt({
         subject,
@@ -1879,7 +1876,7 @@ export async function processReviewSubject(entry, ctx) {
         afhGrounding,
         emitCacheEvent,
       });
-      if (route.quotaBlocked) return;
+      if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) return;
       let depthSpillReserved = false;
       let dispatchHasPriorPostedReview;
       let depthPassKind;
@@ -1947,6 +1944,9 @@ export async function processReviewSubject(entry, ctx) {
             : {}),
         });
 
+        if (rwfDecision.quotaBlocked) {
+          route = { ...route, quotaBlocked: true, quotaGrounding: rwfDecision.quotaGrounding };
+        }
         if (rwfDecision.reason === 'fleet-quota-status-unavailable') {
           console.warn(
             `[watcher] review-worker-class-fallback-fail-open repo=${repoPath} pr=${prNumber} ` +
@@ -2018,6 +2018,7 @@ export async function processReviewSubject(entry, ctx) {
 
       }
       await applyWorkerFallback();
+      if (logReviewerQuotaBlock({ repoPath, prNumber, route })) return;
 
       if (route.reviewerModelFallback) {
         console.warn(
@@ -3060,6 +3061,9 @@ export async function processReviewSubject(entry, ctx) {
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         async run() {
+          if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+            return { dispatched: false, reason: 'quota-blocked' };
+          }
           // Pool admission can defer a release for several ticks. Fence the
           // release-driven review before the claim spends any attempt budget.
           if (holdReleaseId) {

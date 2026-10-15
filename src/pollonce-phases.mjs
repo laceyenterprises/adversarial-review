@@ -1946,6 +1946,8 @@ export async function processReviewSubject(entry, ctx) {
 
         if (rwfDecision.quotaBlocked) {
           route = { ...route, quotaBlocked: true, quotaGrounding: rwfDecision.quotaGrounding };
+        } else if (route.quotaBlocked) {
+          route = { ...route, quotaBlocked: false, quotaGrounding: null };
         }
         if (rwfDecision.reason === 'fleet-quota-status-unavailable') {
           console.warn(

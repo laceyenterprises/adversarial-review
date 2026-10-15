@@ -85,9 +85,17 @@ test('GEMPOOL-01: all identities cooled grounds Gemini; cooldown recovery is rea
   const cooled = new Set(['owner-identity', 'reviewer-b']);
   const pool = makePool(cooled);
   assert.equal(reviewerModelGrounding(await grounding(pool), 'gemini').grounded, true);
+  const resolveSpill = () => resolveReviewerWorkerClassWithFallback({
+    authorClass: 'codex', primary: 'gemini', fallbackWorkerClasses: ['codex', 'claude-code'],
+    agyReviewerIdentityPool: pool, execFileImpl: async () => ({ stdout: fleet }), logger: quiet,
+  });
+  assert.equal((await resolveSpill()).quotaBlocked, true);
   cooled.delete('reviewer-b');
   await pool.refreshReadiness();
   assert.equal(reviewerModelGrounding(await grounding(pool), 'gemini').grounded, false);
+  const recovered = await resolveSpill();
+  assert.equal(recovered.reason, 'primary-available');
+  assert.notEqual(recovered.quotaBlocked, true);
 });
 
 test('GEMPOOL-01: legacy pool and runtime without identity support retain fleet grounding', async () => {

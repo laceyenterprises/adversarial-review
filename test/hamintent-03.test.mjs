@@ -1,3 +1,4 @@
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -182,7 +183,7 @@ test('rendered hammer merge gate and ama-check agree on non-blocking HAM citatio
     assert.equal(result.status, 0, result.stderr);
     return result.stdout;
   };
-  const rendered = run([join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render']);
+  const rendered = renderHammerProcedure('hammer-merge', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value])));
   const gate = rendered.match(/ham_refresh_github_gate_once\(\)[\s\S]*?<<'NODE' > "\$HAM_GATE_JSON"\n([\s\S]*?)\nNODE/)?.[1];
   assert.ok(gate, 'rendered hammer merge must contain its live gate heredoc');
   const cliArgs = [join(root, 'bin/ama-check.mjs'),

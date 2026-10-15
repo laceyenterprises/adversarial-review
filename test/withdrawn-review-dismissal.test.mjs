@@ -1,3 +1,4 @@
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -147,9 +148,8 @@ esac
         eligibilityReason: 'hammer-adjudicated', auditRef: `ama-audit:${repo}:pr-42:head-${headSha}` }),
       AGENT_OS_GITHUB_TOKEN_CLASS: 'hammer',
       PATH: `${bin}:${process.env.PATH}`, TMPDIR: dir, AGENT_OS_ROOT: dir, HAM_PYTHON_BIN: python };
-    const rendered = spawnSync(process.execPath, [join(root, 'bin/hammer-procedure.mjs'), 'hammer-merge', '--render'], { env, encoding: 'utf8', timeout: 5000 });
-    assert.equal(rendered.status, 0, rendered.stderr);
-    const script = join(dir, 'merge.sh'); writeFileSync(script, rendered.stdout);
+    const script = join(dir, 'merge.sh');
+    writeFileSync(script, renderHammerProcedure('hammer-merge', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]))));
     const shell = `HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture POST_REMEDIATION_SHA=${headSha} HAM_PUBLISHED_AUDIT_HEAD=${headSha} HAM_NODE_BIN=${nodeStub} HAM_VERDICT_FILE=${verdict} HAM_VERDICT_READY_FILE=${verdict} HAM_MERGE_RETRY_CAP=1
 ham_release_merge_lease() { HAM_MERGE_LEASE_HELD=0; }
 ham_mark_merge_lease_retryable_abort() { :; }

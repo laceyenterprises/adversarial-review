@@ -11,13 +11,11 @@ re-review, while the machine gate remains mandatory.
 ## Shell safety
 
 Each command runs in a fresh shell unless you keep one open. Exports, variables,
-functions and the current directory do not survive a new command. Carry values
-between commands only in files under the literal private run directory
-`<<RUN_DIR>>`. Never write under `/tmp`; `TMPDIR` is `<<RUN_DIR>>` for this run.
-Always invoke procedure scripts and repository helpers by the absolute paths
-provided here, never relative to the working directory. For a pull request to
-this repository, the working directory contains that pull request's code.
-
+functions and cwd reset. Carry values between commands only in files under the
+literal private run directory `<<RUN_DIR>>`. Never write under `/tmp`; TMPDIR is
+`<<RUN_DIR>>`. Always invoke procedure scripts and helpers by the absolute paths
+given here, never relative to cwd, which contains the PR's code, including for
+pull requests to this repository.
 
 Every shell command you run must have an explicit wall-clock bound. On macOS,
 where GNU `timeout` may not exist, wrap commands like this:
@@ -26,10 +24,9 @@ where GNU `timeout` may not exist, wrap commands like this:
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
 ```
 
-Use focused timeouts that match the operation: short reads/searches should be
-seconds, test suites and GitHub waits can be longer. **For test suites, size the
-alarm with the load-aware helper**. Pass the idle-host suite duration; it
-scales for host load and retains a bounded fallback:
+Match timeouts to the operation. **For test suites, size the alarm with the
+load-aware helper**: pass the idle-host suite duration; it scales for host load
+and retains a bounded fallback:
 
 ```bash
 /usr/bin/perl -e '$t = shift || 360; alarm $t; exec @ARGV' \
@@ -90,7 +87,6 @@ cat > '<<RUN_DIR>>/inputs.sh' <<'HAM_INPUTS'
 export HAM_BASE_HEAD="$(cat '<<RUN_DIR>>/base-head')"
 export TMPDIR='<<RUN_DIR>>'
 export HAM_PR_URL='<<PR_URL>>' HAM_REPO='<<REPO>>' HAM_PR_NUMBER='<<PR_NUMBER>>'
-# Capture this once before edits. Start from this exact head; never change HAM_BASE_HEAD after a push.
 export HAM_REVIEWED_SHA='<<REVIEWED_SHA>>' HAM_TARGET_REMEDIATION_SHA='<<TARGET_REMEDIATION_SHA>>'
 export HAM_RISK_CLASS='<<RISK_CLASS>>' HAM_MERGE_METHOD='<<MERGE_METHOD>>'
 export HAM_RUN_DIR='<<RUN_DIR>>'
@@ -151,11 +147,10 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 ```
 
 Build the terminal-remediation claim JSON and run the predicate before `hammer-merge`.
-Source all phases in one persistent Bash shell (or one tool invocation); stop
-before acquiring a lease if you cannot keep that shell. Dispatch rendered these
-scripts from the deployed checkout. Use them unchanged; never render copies.
-Failed source stops the close. Publish/merge require the held lease. Keep the
-existing HQ merge-signal integration.
+Source phases in one persistent Bash shell or tool invocation; stop before lease
+acquisition if that is impossible. Dispatch rendered these scripts from the
+deployed checkout. Use them unchanged; never render copies. A failed source stops
+the close. Publish/merge require the held lease. Keep HQ merge-signal integration.
 
 Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. When true, required non-blocking findings may authorize specifically cited reversions. When false, advisory non-blocking findings never authorize reverting protected author code; preserve it and record the conflict rationale. The live predicate independently resolves policy.
 

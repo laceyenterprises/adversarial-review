@@ -1,3 +1,4 @@
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -284,7 +285,7 @@ else if (args[1] === 'graphql') {
       HAM_DOC_CURRENCY_REASON: `changed files covered: ${filename}`, HAM_AUDIT_DETAILS_FILE: join(root, 'details.md') };
     writeFileSync(env.HAM_AUDIT_DETAILS_FILE, `**Findings addressed**\n- **Fix feature** (blocking): ${filename} repair\nDoc-currency: stale wording\n`);
     const script = join(root, 'publish.sh');
-    writeFileSync(script, (await exec(process.execPath, [join(repoRoot, 'bin/hammer-procedure.mjs'), 'hammer-publish', '--render'], { env, timeout: 10000 })).stdout);
+    writeFileSync(script, renderHammerProcedure('hammer-publish', Object.fromEntries(Object.entries(env).filter(([key]) => key.startsWith('HAM_')).map(([key, value]) => [key.slice(4), value]))));
     const run = (command, args, extra = {}) => exec(command, args, { cwd: work, env, timeout: 20000, ...extra });
     await run('/bin/bash', ['-c', 'source "$1"', '_', script], { env: { ...env, HAM_COMMIT_PUBLICATION_ONLY: '1' } });
     const published = await git('rev-parse', 'HEAD');

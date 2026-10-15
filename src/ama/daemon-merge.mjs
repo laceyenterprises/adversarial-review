@@ -732,6 +732,7 @@ async function attemptDaemonCleanMergeInner({
   const admittedWithNoCi = Boolean(noCiEvidence);
   let attempts = 0;
   let merged = false;
+  let guardReversals = [];
   let terminal = null; // { reason, permanent, reasons }
 
   while (attempts < retryCap && !merged && !terminal) {
@@ -850,6 +851,7 @@ async function attemptDaemonCleanMergeInner({
       break;
     }
 
+    guardReversals = elig.guardReversals || [];
     const mergeCapability = evaluateMergeCapabilityEnforcement({
       enforcement: mergeCapabilityEnforcement,
       credentialClass: mergeCredentialClass,
@@ -991,6 +993,7 @@ async function attemptDaemonCleanMergeInner({
           outcome: 'succeeded',
           path: closureAuthority,
           attemptPhase: 'daemon-merged',
+          ...(guardReversals.length ? { guardReversals } : {}),
           reason: 'merged',
           ...(noCiEvidence ? { ciConfiguration: noCiEvidence } : {}),
           validatedHead,
@@ -1008,6 +1011,7 @@ async function attemptDaemonCleanMergeInner({
           outcome: 'failed-without-merge',
           path: closureAuthority,
           attemptPhase: 'daemon-failed',
+          ...(guardReversals.length ? { guardReversals } : {}),
           reason: terminal.reason,
           ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
           permanent: Boolean(terminal.permanent),

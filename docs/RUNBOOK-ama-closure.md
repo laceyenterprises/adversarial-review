@@ -1617,8 +1617,9 @@ Unavailable or incomplete evidence grants no waiver. A guard must publish an
 explicit path-specific prohibition in its summary, text or annotations; its
 name or a generic failed CI run is insufficient.
 
-The audit's `trace.primaryChange.guardReversals` and the hammer's live
-`githubGate.guardReversals` record `Reversal-Authorized-By: guard:<check name>`,
+The audit's `trace.primaryChange.guardReversals`, daemon terminal-attempt
+`guardReversals` and the hammer's live `githubGate.guardReversals` record
+`Reversal-Authorized-By: guard:<check name>`,
 the path list, failing/passing run IDs and exact head SHAs. This live evidence
 is collected outside the immutable history cache, so a required-context or
 check rerun change cannot reuse stale authority. The history cache version

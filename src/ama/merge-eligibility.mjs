@@ -246,11 +246,13 @@ function headMatches(state) {
  */
 export function evaluateMergeEligibility(state = {}) {
   const reasons = [];
+  let guardReversals = [];
   if (state.primaryChange || state.requirePrimaryChange === true) {
     const intent = checkPrimaryChange(state.primaryChange, state.candidateHead, {
       strictNonBlockingRemediation: state.strictNonBlockingRemediation,
     });
     if (!intent.ok) reasons.push(intent.reason);
+    else guardReversals = intent.guardReversals || [];
   }
   const operatorOverride = hasOperatorApprovedOverride({
     operatorApprovedEvidence: state.operatorApprovedEvidence,
@@ -277,7 +279,8 @@ export function evaluateMergeEligibility(state = {}) {
     reasons.push(DUPLICATE_FAMILY_UNRESOLVED_REASON);
   }
 
-  return { eligible: reasons.length === 0, reasons };
+  return { eligible: reasons.length === 0, reasons,
+    ...(guardReversals.length ? { guardReversals } : {}) };
 }
 
 // Internal helpers exposed for unit tests so each gate can be probed in

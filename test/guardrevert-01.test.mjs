@@ -101,6 +101,8 @@ test('GUARDREVERT-01: approved generated-file edit, guard repair and green CI pa
   assert.equal(result.merged, true, JSON.stringify(result));
   assert.equal(merges, 1);
   assert.ok(audits.length > 0);
+  assert.deepEqual(audits.find(record => record.attempt.outcome === 'succeeded').attempt.guardReversals,
+    terminal.trace.primaryChange.guardReversals);
 });
 
 test('GUARDREVERT-01: guard-only approval coverage survives a rebase; other edits require exact-head review', async () => {

@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
 import { evaluateHammerRetryCap, readHammerRetryCapLedger } from './ama/hammer-retry-cap.mjs';
@@ -20,7 +21,6 @@ import { observeClosureLag } from './ama/closure-lag.mjs';
 // re-derived/moved verbatim (pure, derivable from the same inputs).
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
@@ -1536,7 +1536,7 @@ async function dispatchAmaClosureFor({
       ? currentPrHeadSha : reviewState.headSha,
   });
   if (!autonomousMergeExecutionEnabled) {
-    const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+    const hqRoot = resolveHqRoot(env);
     const disabledAudit = writeAutonomousMergeDisabledAuditImpl({
       hqRoot,
       repoPath,

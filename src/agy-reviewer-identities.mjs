@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 // CCX-08 — multi-identity agy reviewer (credential-capacity-expansion SPEC
 // §2b, §3 CCX-08).
 //
@@ -604,7 +605,7 @@ async function finishAgyIdentityReview(run, { cleanupImpl = cleanupAgyReviewWork
 // ── Watcher-side identity pool ──────────────────────────────────────────────
 
 function readBootstrapRecord(user, { env = process.env } = {}) {
-  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  const hqRoot = resolveHqRoot(env);
   try {
     return JSON.parse(readFileSync(join(hqRoot, ...STATE_SUBDIR, `${user}.json`), 'utf8'));
   } catch {

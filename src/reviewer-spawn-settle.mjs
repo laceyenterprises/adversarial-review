@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
 // verbatim from watcher.mjs. This is the core reviewer state machine —
 // spawnReviewer + the gated pipeline entry point + settleReviewerAttempt +
@@ -25,7 +26,6 @@ import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
 import { startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 import { readFileSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { reviewerRuntimeState } from './reviewer-runtime-adapter.mjs';
@@ -171,7 +171,7 @@ function resolveReviewerQuotaStatusDir(env = process.env) {
     contextKey: 'reviewer.quota_status_dir',
   }).get('reviewer.quota_status_dir', null);
   if (typeof configured === 'string' && configured.trim()) return configured.trim();
-  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  const hqRoot = resolveHqRoot(env);
   return join(hqRoot, 'quota');
 }
 
@@ -390,7 +390,7 @@ function readJsonFile(path) {
 }
 
 function mainCatchupOutageSignal({ env = process.env } = {}) {
-  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  const hqRoot = resolveHqRoot(env);
   const state = readJsonFile(join(hqRoot, 'main-catchup', '.state.json'));
   if (!state || typeof state !== 'object') return null;
   if (state.__unreadableJson) {

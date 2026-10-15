@@ -1,3 +1,4 @@
+import { resolveHqRoot } from './hq-root.mjs';
 // ── SVD-02: dismiss a blocking verdict that a HAM terminal remediation superseded ──
 //
 // SEV `docs/postmortems/SEV-stale-blocking-verdict-is-structurally-undismissable-2026-08-26.md`.
@@ -36,7 +37,6 @@
 // verdict with no resolvable `commit_id` is retained too (fail closed).
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { readAmaAuditEntry } from './ama/audit.mjs';
@@ -121,7 +121,7 @@ export async function dismissSupersededBlockingVerdictAtRemediatedHead({
   try {
     // Condition 1 — a validated HAM terminal remediation AT THIS HEAD.
     const resolvedHqRoot =
-      hqRoot || env?.HQ_ROOT || env?.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+      hqRoot || resolveHqRoot(env || {});
     const hamValidated = hamTerminalRemediationValidated === true ||
       await headHasValidatedHamTerminalRemediationImpl({
         hqRoot: resolvedHqRoot,

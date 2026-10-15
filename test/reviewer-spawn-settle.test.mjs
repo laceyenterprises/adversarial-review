@@ -20,6 +20,7 @@ test('spawnReviewer posts successful adapter-produced review bodies through GitH
   const posted = [];
   const spawnRequests = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 14,
@@ -75,6 +76,7 @@ test('spawnReviewer does not fail a posted pass when post-operation callback thr
   console.warn = (message) => warnings.push(String(message));
   try {
     const result = await spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 15,
@@ -130,6 +132,7 @@ test('failure diagnostics truncation does not leave a dangling surrogate', () =>
 test('spawnReviewer discards adapter review body when current PR head moved before post', async () => {
   const posted = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 140,
@@ -172,6 +175,7 @@ test('spawnReviewer retries transient freshness probes before discarding stale a
   const sleeps = [];
   let fetchAttempts = 0;
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 141,
@@ -252,6 +256,7 @@ test('settleReviewerAttempt releases stale-head reviewer claims without consumin
 test('spawnReviewer does not post unmarked adapter review bodies', async () => {
   const posted = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 15,
@@ -290,6 +295,7 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
   let readBestArgs = null;
   const settled = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 21,
@@ -351,6 +357,7 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
 test('spawnReviewer enriches adapter usage with worker_run_id and preserves reported total', async () => {
   const settled = [];
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 24,
@@ -430,6 +437,7 @@ test('spawnReviewer retries transient ledger contention and preserves adapter co
   console.warn = (message) => warnings.push(String(message));
   try {
     const result = await spawnReviewer({
+      readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 25,
@@ -508,6 +516,7 @@ test('spawnReviewer keeps retrying token-only evidence until worker attribution 
   const settled = [];
   let lookupCalls = 0;
   await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 251,
@@ -574,6 +583,7 @@ test('spawnReviewer leaves repairable attribution after bounded transient ledger
   console.warn = (message) => warnings.push(String(message));
   try {
     await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
       repo: 'laceyenterprises/demo',
       prNumber: 26,
@@ -672,6 +682,7 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
     });
 
     await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
       rootDir,
       repo: 'laceyenterprises/demo',
       prNumber: 121,
@@ -726,6 +737,7 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
   const settled = [];
   let lookupLaunchRequestId = null;
   const result = await spawnReviewer({
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'fixture', provider: 'google' }),
     rootDir: mkdtempSync(path.join(tmpdir(), 'spawn-settle-reviewer-')),
     repo: 'laceyenterprises/demo',
     prNumber: 22,

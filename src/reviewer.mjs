@@ -2016,6 +2016,7 @@ async function main() {
       console.warn(
         `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=${oversizedAgyRoute.reason} ` +
           `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
+          `diff_bytes=${oversizedAgyRoute.diffBytes} context_bytes=${oversizedAgyRoute.contextBytes} prompt_overhead_bytes=${oversizedAgyRoute.promptOverheadBytes} ` +
           `routed=${effectiveModel} original=gemini refs=#3074,#3122,#3124`
       );
     } else {
@@ -2023,6 +2024,7 @@ async function main() {
       console.warn(
         `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=${oversizedAgyRoute.reason} ` +
           `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
+          `diff_bytes=${oversizedAgyRoute.diffBytes} context_bytes=${oversizedAgyRoute.contextBytes} prompt_overhead_bytes=${oversizedAgyRoute.promptOverheadBytes} ` +
           `routed=${effectiveModel}-chunks original=${reviewerModel} refs=#3074,#3122,#3124`
       );
     }

@@ -2827,6 +2827,12 @@ async function reviewWithGemini(diff, extraContext = '', {
     }
   }
 
+  const callTimeoutMs = timeoutMs ?? (runtime === 'antigravity'
+    ? resolveAgyReviewerSubprocessTimeoutMs(reviewEnv) : resolveReviewerTimeoutMs(reviewEnv));
+  const callController = new AbortController();
+  const callTimeoutError = Object.assign(new Error(`Command timed out after ${callTimeoutMs}ms`), { timedOut: true });
+  const callTimer = setTimeout(() => callController.abort(callTimeoutError), callTimeoutMs);
+  signal = signal ? AbortSignal.any([signal, callController.signal]) : callController.signal;
   let stdout = '';
   let stderr = '';
   let selectedModel = null;
@@ -2882,7 +2888,7 @@ async function reviewWithGemini(diff, extraContext = '', {
           model,
           env: reviewEnv,
           cwd: reviewerSubprocessCwd,
-          timeout: timeoutMs ?? resolveReviewerTimeoutMs(reviewEnv),
+          timeout: callTimeoutMs,
           signal,
           maxBuffer: 10 * 1024 * 1024,
           ...(identityRun ? { identity: identityRun } : {}),
@@ -2896,7 +2902,7 @@ async function reviewWithGemini(diff, extraContext = '', {
           model,
           env: reviewEnv,
           cwd: reviewerSubprocessCwd,
-          timeout: timeoutMs ?? resolveReviewerTimeoutMs(reviewEnv),
+          timeout: callTimeoutMs,
           signal,
           maxBuffer: 10 * 1024 * 1024,
         }),
@@ -2919,6 +2925,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       }
     }
   } catch (err) {
+    if (signal.aborted) throw signal.reason;
     if (err.failureClass === 'reviewer-model-unavailable') throw err;
     stdout = err.stdout || '';
     stderr = err.stderr || '';
@@ -2939,6 +2946,7 @@ async function reviewWithGemini(diff, extraContext = '', {
       stdout, stderr, ...(modelUnavailable ? { failureClass: 'reviewer-model-unavailable', failureDetail: modelUnavailable } : {}),
     });
   } finally {
+    clearTimeout(callTimer);
     if (identityRun) {
       await finishAgyIdentityReviewImpl(identityRun, { log });
     }
@@ -3091,11 +3099,14 @@ function resolveAgyOversizedReviewRoute({
     promptStage, runtime: target === 'gemini' ? geminiRuntime : undefined,
   }));
   const promptBytes = bytesFor(model);
-  if (promptBytes <= budget) return { oversized: false, promptBytes, maxBytes: budget, route: { reviewerModel, botTokenEnv } };
+  const diffBytes = agyPromptBytes(diff);
+  const contextBytes = agyPromptBytes(extraContext);
+  const components = { diffBytes, contextBytes, promptOverheadBytes: promptBytes - diffBytes - contextBytes };
+  if (promptBytes <= budget) return { oversized: false, ...components, promptBytes, maxBytes: budget, route: { reviewerModel, botTokenEnv } };
   const candidate = isAgy ? chooseAgyOversizedCrossModelRoute(builderTag) : null;
   const route = candidate && bytesFor(candidate.reviewerModel) <= reviewerPromptBudget(candidate.reviewerModel, env)
     ? candidate : null;
-  return { oversized: true, promptBytes, maxBytes: budget, route,
+  return { oversized: true, ...components, promptBytes, maxBytes: budget, route,
     reason: isAgy ? 'agy-argv-budget-exceeded' : 'reviewer-prompt-budget-exceeded' };
 }
 
@@ -3596,6 +3607,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   // plan-derived deadline, shared by all calls and in-call retries.
   const timeoutPlan = reviewerModel === 'gemini'
     ? resolveAgyChunkTimeoutPlan({ chunkCount: split.chunks.length, promptBytes, env }) : null;
+  if (timeoutPlan) console.error(`[reviewer] agy-chunk-plan chunks=${timeoutPlan.chunkCount} perChunkTimeoutMs=${timeoutPlan.perChunkTimeoutMs} timeoutMs=${timeoutPlan.timeoutMs} capMs=${timeoutPlan.capMs} diffBytes=${agyPromptBytes(diff)} contextBytes=${agyPromptBytes(extraContext)} promptBytes=${promptBytes ?? 'unknown'}`);
   onChunkPlan?.(timeoutPlan);
   const controller = new AbortController();
   const chunkSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;

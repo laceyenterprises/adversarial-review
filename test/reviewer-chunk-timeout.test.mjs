@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as timeouts from '../src/reviewer-timeout.mjs';
-import { reviewAgyOversizedInChunks, reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
+import { resolveAgyOversizedReviewRoute, reviewAgyOversizedInChunks, reviewWithGemini, __test__ as harness } from '../src/reviewer-harness.mjs';
 import { reviewerExecutionFailureExitCode } from '../src/reviewer-outcomes.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
@@ -122,4 +122,50 @@ test('CHUNKTIME-01: the plan timer aborts a late chunk without rerunning earlier
     },
   }), /Command timed out after .*chunks=/);
   assert.equal(calls, 2);
+});
+
+test('CHUNKTIME-01: Argus outer deadline covers its sequential model fallback plan', async () => {
+  const { resolveArgusReviewChildTimeoutMs } = await import('../src/argus-security-drain.mjs');
+  const { resolveReviewerCeilingConfig } = await import('../src/reviewer-timeout-model.mjs');
+  const env = { ADVERSARIAL_ARGUS_REVIEWER_MODELS: 'claude,gemini,codex' };
+  const required = 2 * resolveReviewerCeilingConfig(env).max * 1000
+    + timeouts.resolveAgyReviewerSubprocessTimeoutMs(env);
+  assert.ok(resolveArgusReviewChildTimeoutMs(env) >= required);
+});
+
+test('CHUNKTIME-01: native Gemini retries share one call budget', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let calls = 0;
+  await assert.rejects(reviewWithGemini('+synthetic', '', {
+    timeoutMs: 100, agyIdentity: null,
+    resolveGeminiRuntimeImpl: () => 'cli',
+    assertOAuthImpl: async () => {},
+    retryDelaysMs: [1],
+    sleepImpl: async () => { t.mock.timers.tick(100); },
+    spawnGeminiReviewImpl: async () => {
+      calls += 1;
+      throw new Error('HTTP 503 service unavailable');
+    },
+  }), /Command timed out after 100ms/);
+  assert.equal(calls, 1);
+});
+
+
+test('CHUNKTIME-01: prompt bytes include context and repeated context increases chunk count', async () => {
+  const context = 'synthetic context\n'.repeat(500);
+  const route = resolveAgyOversizedReviewRoute({ reviewerModel: 'gemini', geminiRuntime: 'antigravity',
+    diff, extraContext: context, env: {} });
+  assert.equal(route.diffBytes, Buffer.byteLength(diff));
+  assert.equal(route.contextBytes, Buffer.byteLength(context));
+  assert.ok(route.promptOverheadBytes > 0);
+  assert.equal(route.promptBytes, route.diffBytes + route.contextBytes + route.promptOverheadBytes);
+  const counts = [];
+  for (const extraContext of ['', context]) {
+    await reviewAgyOversizedInChunks(diff, extraContext, {
+      env: {}, maxBytes: 60000,
+      onChunkPlan: (plan) => counts.push(plan.chunkCount),
+      reviewWithGeminiImpl: async () => ({ reviewText: '## Verdict\nComment only' }),
+    });
+  }
+  assert.ok(counts[1] > counts[0], `${counts}`);
 });

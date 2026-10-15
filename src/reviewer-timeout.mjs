@@ -17,7 +17,9 @@ const DEFAULT_FIRST_OUTPUT_TIMEOUT_MS = 0;
 const DEFAULT_AGY_PRINT_TIMEOUT_MS = 19 * 60 * 1000;
 const AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS = 30 * 1000;
 const AGY_CHUNK_TIMEOUT_SLACK_MS = 2 * 60 * 1000;
-const AGY_CHUNK_TIMEOUT_CAP_MS = 3 * 60 * 60 * 1000;
+// A multi-megabyte diff can require more than nine 20-minute calls. Permit
+// up to seventeen at the default call budget, while keeping a hard bound.
+const AGY_CHUNK_TIMEOUT_CAP_MS = 6 * 60 * 60 * 1000;
 // Covers snapshot/context preparation and posting outside the chunk loop.
 const REVIEWER_PROCESS_SLACK_MS = 5 * 60 * 1000;
 

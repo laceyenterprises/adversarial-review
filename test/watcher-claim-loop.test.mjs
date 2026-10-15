@@ -3475,7 +3475,9 @@ test('GHSCOPE-01: a rate-limited first discovery still fetches other repository 
     });
     runner = runner.replace("return [{ name: 'adversarial-review', archived: false }];",
       "return ['alpha', 'beta', 'gamma'].map(name => ({ name, archived: false }));");
-    writeFileSync(runnerPath, runner.replaceAll('laceyenterprises', 'example'));
+    // Only rewrite fixture identities: the checkout path in import URLs may
+    // itself contain the owner name (for example a remediation workspace).
+    writeFileSync(runnerPath, runner.replaceAll("'laceyenterprises/adversarial-review'", "'example/adversarial-review'"));
     const result = spawnSync(process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
       { cwd: REPO_ROOT, encoding: 'utf8', env: fixtureEnv({ AGENT_OS_CONFIG_PATH: path.join(tmp, 'config.yaml') }), timeout: 20_000 });

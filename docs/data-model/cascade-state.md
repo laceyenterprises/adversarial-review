@@ -102,3 +102,67 @@ the bound.
   the same durable owner and atomic-write behavior as the backoff state.
 - The files contain transient failure diagnostics and no secrets or review
   bodies.
+
+## Repeated same-head timeouts (CASCADECAP-01)
+
+`reviewerTimeout` records `{ headSha, reviewerBuildId, count, total, limit,
+rearmAt }`. Normal settlement and the running-pass reaper both write it,
+including terminal failures at the infrastructure cap. `count` measures timeouts
+in the current head/build/re-arm series; `total` retains timeout evidence on the
+head for dispatch fairness. Other transient failures preserve this object.
+
+The default limit is two timeouts. A positive integer
+`ADVERSARIAL_REVIEWER_TIMEOUT_SAME_HEAD_LIMIT` overrides it without a config
+schema change. At the limit, the watcher parks the row before another claim,
+persists `reviewer-timeout-repeated-same-head` in `failure_message` and the
+existing review-failure decision record, and uses the existing operator-decision
+alert path once per series. An expired cascade backoff cannot bypass this park.
+The underlying `[reviewer-timeout]` classifier remains available to the existing
+operator-label-gated timeout-exhaustion handoff; that gate is unchanged.
+
+A new head starts a fresh budget. An explicit `retrigger-review:` operator
+request newer than the recorded failure, or a different reviewer build, permits
+one probe on the same head; a timeout from that probe parks again. Builds default
+to a process-start content digest of reviewer sources, runtime adapters and
+prompts. A deployment can supply `ADVERSARIAL_REVIEWER_BUILD_ID` instead. The
+build is captured in pass metadata so reaping an old pass attributes its failure
+to the build that actually ran. Legacy files use the failed row's head and flat
+timeout count until a scoped failure is recorded.
+
+Timeout retries yield to waiting first-pass and re-review candidates in the
+shared WAKESTARVE-01 wake/wait ordering, including retries with retained wakes
+or long waits. A partial discovery wave containing such a retry waits for full
+discovery, so later subjects can enter that same ordering. Successful reviews
+clear cascade state as before. Real upstream failures retain the existing
+backoff and cap-override behavior.
+
+Sibling audit:
+
+- `pollonce-phases.mjs` and `review-state-statements.mjs`: the cascade override
+  was the unbounded path for both first-pass and re-review timeouts. Both now
+  consult the shared timeout budget, including a recheck before the claim CAS.
+  Changed-build probes use that budget; their infra counter stays at its cap.
+- `reviewer-spawn-settle.mjs` and `reviewer-pass-reaper.mjs`: both persist head
+  and build evidence. The reaper now records terminal-at-cap timeouts too.
+- `argus-security-drain.mjs` / `argus-reviewer-failures.mjs`: actual review and
+  child timeouts are charged against `maxAttempts`. Only quota and unavailable
+  identity deferrals avoid that counter, before model execution. Quota-only
+  failed-job recovery requires quota-only history, so a timeout cannot use it.
+  No behavior change needed.
+- `follow-up-remediation.mjs` / `follow-up-jobs.mjs`: transient HQ dispatch
+  failures and CI repair reuse a round but charge the job-scoped transient
+  retry budget, which is checked before requeueing. Provider/identity holds
+  before execution intentionally avoid charging it. No cascade override of
+  that budget exists; no behavior change needed.
+- Token-refresh and model-scoped credential-outage holds deliberately preserve
+  their existing bounded probe/hold rules. Neither classification converts a
+  recorded reviewer timeout into an unlimited retry.
+- Additional remediation recoveries (`remediation-missing-artifact.mjs`,
+  `remediation-claimed-requeue.mjs`, `remediation-worker-resume.mjs`, and the
+  stale-claim sweep) check the same transient budget before requeueing.
+  `remediation-round-accounting.mjs` can refund an infrastructure failure
+  without charging that budget, but only once per round and within the existing
+  PR-wide infrastructure-refund limit. These remain unchanged.
+- `reviewer-harness.mjs` has an internal transient Gemini subprocess ladder.
+  Its fixed retry-delay array bounds retries inside one reviewer attempt;
+  it cannot override the watcher's head/build park. It remains unchanged.

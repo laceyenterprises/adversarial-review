@@ -2040,3 +2040,23 @@ test('health spawn listing ignores malformed array and object entries', () => {
     assert.deepEqual(tracker.liveSpawnEntries(), [live]);
   }
 });
+
+for (const laneState of [null, createReviewerLaneState({ firstPassBurstLimit: 1 })]) {
+  test(`CASCADECAP-01 timeout retry yields one seat to first-pass and re-review (lanes=${Boolean(laneState)})`, async () => {
+    const claimed = [];
+    const make = (id, options) => ({
+      repoPath: 'example/review-service', prNumber: id, reviewerModel: 'gemini',
+      run: async () => { claimed.push(id); }, ...options,
+    });
+    const retry = make(1, { sameHeadTimeoutRetry: true, hasPriorPostedReview: false,
+      retainedWakePriority: true, wakePriority: true, enqueuedAtMs: 0 });
+    const first = make(2, { hasPriorPostedReview: false, enqueuedAtMs: 999999 });
+    const rereview = make(3, { hasPriorPostedReview: true, enqueuedAtMs: 999999 });
+    const candidates = [retry, first, rereview];
+    assert.deepEqual(sortReviewerDispatchCandidates(candidates, { nowMs: 1000000 }).map(item => item.prNumber), [2, 3, 1]);
+    await runBoundedReviewerDispatchQueue(candidates, { maxConcurrent: 1, geminiCredentialConcurrency: 1,
+      laneState, now: () => 1000000, logger: { log() {}, warn() {} } });
+    assert.equal(claimed.at(-1), 1, 'both lanes run ahead of a timeout retry, including its retained wake and old wait');
+    assert.equal(claimed[0], 2, 'first-pass is claimed first at one seat');
+  });
+}

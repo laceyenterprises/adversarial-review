@@ -95,3 +95,14 @@ test('discovery batch admission retains the batch-size and first-pass backlog gu
   assert.equal((await drainIfReady('first-pass queued')).dispatched, 3);
   assert.equal(drains, 1);
 });
+
+test('CASCADECAP-01 timeout retries wait for full discovery before spending a seat', async () => {
+  let drains = 0;
+  const drain = createWatcherDiscoveryBatchDrain({ priorityDiscoveryPending: new Set(),
+    reviewerDispatchCandidates: [{ hasPriorPostedReview: false, sameHeadTimeoutRetry: true }], batchSize: 1,
+    countOpenPrsAwaitingFirstPassReview: () => 0,
+    drain: async () => { drains++; return { dispatched: 1 }; },
+  });
+  assert.equal((await drain('partial discovery')).dispatched, 0);
+  assert.equal(drains, 0, 'later first-pass and re-review subjects must enter the shared ordering first');
+});

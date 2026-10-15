@@ -48,6 +48,7 @@ import {
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import { formatAdvisoryFindingsContext } from './prompt-context.mjs';
+import { loadGuardForbiddenPaths } from './guard-forbidden-paths.mjs';
 import { buildReviewModeAuditBlock, selectReviewMode } from './review-mode-selection.mjs';
 import {
   VERDICT_MODE_ADVISORY_ONLY,
@@ -1982,12 +1983,16 @@ async function main() {
 
   persistSingleReviewDecision({ rootDir: ROOT, repo, prNumber, attemptNumber: Number(reviewDbAttemptNumber ?? reviewAttemptNumber), reviewerClass: reviewerModel, passKind, headSha: reviewerHeadSha, singleReview: reviewModeDecision.singleReview });
 
+  const guardForbiddenPaths = await loadGuardForbiddenPaths({
+    repo, baseRef: prContext?.baseRefOid || prContext?.baseRefName, log: console,
+  });
   const extraContext = await buildReviewerExtraContext({
     repo,
     prNumber,
     prContext,
     diff,
     advisoryFindings,
+    guardForbiddenPaths,
     reviewModeDecision,
     repoRoot: join(ROOT, '..', '..'),
     log: console,

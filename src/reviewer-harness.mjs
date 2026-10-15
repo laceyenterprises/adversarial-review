@@ -2650,9 +2650,10 @@ async function spawnAgyReview({
   }
 }
 
-// How long an added identity's review may outlive its SIGKILL (or its own
-// exit) before the capture settles without it.
-const AGY_IDENTITY_SETTLE_AFTER_KILL_MS = 10_000;
+// Settle on the next timer turn after a kill attempt. The pool observes actual
+// survivor exit; capture must not hold its bookkeeping lease for a drain timer.
+// Zero disables the capture's settle deadline, so use the minimum positive tick.
+const AGY_IDENTITY_SETTLE_AFTER_KILL_MS = 1;
 
 function readCapturedFile(path, maxBytes) {
   let fd;

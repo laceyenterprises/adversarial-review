@@ -65,11 +65,11 @@ test('CHUNKTIME-01: chunk execution receives the plan deadline and an abort sign
   assert.equal(plan.chunkCount, calls);
 });
 
-test('CHUNKTIME-01: abort reaches the fake agy child before credential release', async () => {
-  const controller = new AbortController();
+test('CHUNKTIME-01: timeout stops fake agy and releases its credential lease in the same tick', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const events = [];
   await assert.rejects(reviewWithGemini('+synthetic', '', {
-    signal: controller.signal, agyIdentity: null,
+    timeoutMs: 100, agyIdentity: null,
     resolveGeminiRuntimeImpl: () => 'antigravity',
     purgeStaleGeminiReviewerSessionDirsImpl: () => {},
     checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'synthetic-checkout' }),
@@ -79,7 +79,7 @@ test('CHUNKTIME-01: abort reaches the fake agy child before credential release',
     spawnAgyReviewImpl: async ({ signal }) => {
       assert.ok(signal instanceof AbortSignal);
       signal.addEventListener('abort', () => events.push('stopped'), { once: true });
-      controller.abort();
+      t.mock.timers.tick(100);
       signal.throwIfAborted();
     },
   }));

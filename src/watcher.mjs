@@ -411,6 +411,8 @@ import {
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
+  reviewerDispatchEnqueuedAt,
+  reviewerDispatchWaitPriority,
   sortReviewerDispatchCandidates,
 } from './watcher-reviewer-pool.mjs';
 import {
@@ -1273,9 +1275,19 @@ async function pollOnceWithinBudget(
   const getHcpHealthzForTick = createTickHcpHealthzProbe();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   const reviewerDiscoveryDrainBatchSize = Math.max(1, reviewerPoolConfig.maxConcurrent || 1);
-  // A partial discovery batch must not spend the only seat before a
-  // capacity-deferred wake from a later subject or repository is discovered.
-  const deferReviewerDiscoveryDrain = retainedWatcherWakes.subjects().length > 0;
+  // A partial batch must not spend the only seat before priority work from
+  // a later subject or repository has had a chance to enter the queue.
+  const priorityDiscoveryPending = new Set(retainedWatcherWakes.subjects()
+    .map(({ repoPath, prNumber }) => `${repoPath}#${prNumber}`));
+  const discoveryNowMs = Date.now();
+  for (const row of db.prepare(`SELECT repo, pr_number, head_wait_started_at,
+    rereview_requested_at, reviewed_at FROM reviewed_prs
+    WHERE review_status IN ('pending', 'pending-upstream', 'failed')
+      AND COALESCE(pr_state, 'open') NOT IN ('merged', 'closed')`).all()) {
+    if (reviewerDispatchWaitPriority({ enqueuedAt: reviewerDispatchEnqueuedAt(row) }, { nowMs: discoveryNowMs }) !== null) {
+      priorityDiscoveryPending.add(`${row.repo}#${row.pr_number}`);
+    }
+  }
   let reviewerDiscoveryDrainUsed = false;
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
@@ -1338,7 +1350,7 @@ async function pollOnceWithinBudget(
     }
   }
   async function drainReviewerDispatchCandidatesIfBatchReady(reason) {
-    if (reviewerDiscoveryDrainUsed || deferReviewerDiscoveryDrain) {
+    if (reviewerDiscoveryDrainUsed || priorityDiscoveryPending.size > 0) {
       return { dispatched: 0, maxObservedConcurrency: 0, deferred: 0 };
     }
     if (reviewerDispatchCandidates.length < reviewerDiscoveryDrainBatchSize) {
@@ -1489,6 +1501,7 @@ async function pollOnceWithinBudget(
         shouldDeferReviewForActiveFollowUp,
         wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
       });
+      priorityDiscoveryPending.delete(`${repoPath}#${subjectEntry.prNumber}`);
       firstPassSpilloverController.refundPendingSpill({ repo: repoPath, prNumber: subjectEntry.prNumber });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');
     }

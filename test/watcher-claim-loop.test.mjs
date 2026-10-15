@@ -2382,6 +2382,95 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 }
 
+for (const capacity of ['pool', 'memory', 'credential', 'overdue']) test(capacity === 'overdue'
+  ? 'WAKESTARVE-01: production discovery admits overdue work before newer wakes'
+  : `WAKESTARVE-01: production ${capacity} deferral retains a wake across polls`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-retained-wake-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const poolUrl = fileUrl('src', 'watcher-reviewer-pool.mjs');
+    const storeUrl = fileUrl('src', 'watcher-retained-wakes.mjs');
+    const routeUrl = fileUrl('src', 'reviewer-route-selection.mjs');
+    const sources = {
+      [storeUrl]: `
+        import { createRetainedWatcherWakes as create } from '${storeUrl}?actual';
+        export function createRetainedWatcherWakes() {
+          const store = create({ rootDir: ${JSON.stringify(tmp)} });
+          globalThis.__retainedWakeStore = store;
+          return store;
+        }
+      `,
+      [routeUrl]: `
+        import * as actual from '${routeUrl}?actual';
+        import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
+        export * from '${routeUrl}?actual';
+        export function selectReviewerRouteForAttempt(args) {
+          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini };
+        }
+      `,
+      [poolUrl]: `
+        import * as actual from '${poolUrl}?actual';
+        export * from '${poolUrl}?actual';
+        export async function runBoundedReviewerDispatchQueue(candidates, options) {
+          return actual.runBoundedReviewerDispatchQueue(candidates, { ...options,
+            maxConcurrent: 1, geminiCredentialConcurrency: ${capacity === 'pool' ? 'globalThis.__wakeTestSeats || 0' : '1'} });
+        }
+      `,
+    };
+    let loader = buildLoaderSource();
+    if (capacity === 'credential') loader = loader.replace(
+      'export function shouldPauseReviewerModel() { return { paused: false }; }',
+      'export function shouldPauseReviewerModel() { return { paused: !globalThis.__wakeTestSeats }; }');
+    if (capacity === 'memory') loader = loader.replace(
+      'admit: true, reason: null', 'admit: Boolean(globalThis.__wakeTestSeats), reason: null');
+    writeFileSync(loaderPath, loader.replace('  return nextLoad(url, context);', `
+      const source = new Map(${JSON.stringify(Object.entries(sources))}).get(url);
+      if (source) return { format: 'module', shortCircuit: true, source };
+      return nextLoad(url, context);
+    `));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource({
+      healthProbeSetup: `
+        const repoPath = db.prepare('SELECT repo FROM reviewed_prs LIMIT 1').get().repo;
+        db.prepare('UPDATE reviewed_prs SET reviewed_at = ?').run(new Date().toISOString());
+        pollOptions.wakePayload = { repo: repoPath, pr_number: 101, head_sha: 'sha-happy-101' };
+        if (${capacity === 'overdue'}) {
+          const queuedAt = new Date(Date.now() - 900_001).toISOString();
+          db.prepare(\`INSERT INTO reviewed_prs
+            (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts)
+            VALUES (?, 101, ?, 'gemini', 'open', 'pending', 0)\`).run(repoPath, queuedAt);
+          db.prepare('DELETE FROM reviewed_prs WHERE pr_number = 102').run();
+          pollOptions.wakePayload = { repo: repoPath, pr_number: 102 };
+        }
+      `,
+      afterFirstPoll: capacity === 'overdue' ? `
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns[0].subjectContext.prNumber, 101);
+      ` : `
+        const retained = globalThis.__retainedWakeStore;
+        assert.equal(retained.matches({ repoPath, prNumber: 101, headSha: 'sha-happy-101' }), true);
+        assert.equal((globalThis.__watcherClaimLoopReviewerSpawns || []).length, 0);
+        globalThis.__wakeTestSeats = 1;
+        pollOptions.wakePayload = { repo: repoPath, pr_number: 102 };
+        await pollOnce(octokit, pollOptions);
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns[0].subjectContext.prNumber, 101);
+        assert.equal(retained.matches({ repoPath, prNumber: 101, headSha: 'sha-happy-101' }), false);
+      `,
+    }));
+    const run = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', timeout: 30_000,
+      env: fixtureEnv({ ...installGhFixture(tmp),
+        AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '1' }),
+    });
+    const output = `${run.stdout || ''}${run.stderr || ''}`;
+    assert.equal(run.status, 0, output);
+    assert.match(output, capacity === 'overdue'
+      ? /reviewer priority dispatch .*retained_wake=false wait_threshold_exceeded=true/
+      : /reviewer priority dispatch .*retained_wake=true/);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
 for (const burst of [false, true]) test(`engaged discovery depth keeps priority over burst=${burst} and refreshes spawn waivers`, () => {
   const { summary, output } = runDepthDiscoveryScenario({ burst });
   assert.match(output, /Draining 2 reviewer dispatch candidate\(s\) before continuing reviewer discovery/);

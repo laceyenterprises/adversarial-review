@@ -263,6 +263,8 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
   reserveReviewerMemoryAdmission,
   reviewerDispatchPassKind,
+  reviewerDispatchEnqueuedAt,
+  reviewerDispatchWaitPriority,
   reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
 import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
@@ -744,6 +746,12 @@ export async function processReviewSubject(entry, ctx) {
 
       const wakeIdentity = { repoPath, prNumber, headSha: subject.headSha };
       retainedWatcherWakes?.observe({ ...wakeIdentity, terminal: subject.terminal });
+      const retainWakeForCapacity = () => {
+        if (retainedWatcherWakes?.matches(wakeIdentity) || watcherWakeMatchesSubject(wakePayload, wakeIdentity)) {
+          return retainedWatcherWakes?.retain(wakeIdentity) === true;
+        }
+        return false;
+      };
       const prTitle = subject.title || '';
       const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
       // RPL-04: a CI state transition that releases a parked re-review is an
@@ -1879,7 +1887,10 @@ export async function processReviewSubject(entry, ctx) {
         afhGrounding,
         emitCacheEvent,
       });
-      if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) return;
+      if (route.quotaBlocked && logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+        retainWakeForCapacity();
+        return;
+      }
       let depthSpillReserved = false;
       let dispatchHasPriorPostedReview;
       let depthPassKind;
@@ -2534,6 +2545,7 @@ export async function processReviewSubject(entry, ctx) {
         reserve: false,
       });
       if (credentialOutagePreflight.paused) {
+        retainWakeForCapacity();
         markWatcherSpawnDecision({
           repo: repoPath,
           pr_number: prNumber,
@@ -3042,10 +3054,10 @@ export async function processReviewSubject(entry, ctx) {
           headSha: subject?.headSha,
         }),
         pendingSince: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || current?.last_attempted_at || null,
-        enqueuedAt: current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at || null,
+        enqueuedAt: reviewerDispatchEnqueuedAt(current),
         preferredRoute: route,
         retainWakeForCapacity() {
-          if (this.wakePriority && retainedWatcherWakes?.retain(wakeIdentity)) this.retainedWakePriority = true;
+          if (retainWakeForCapacity()) this.retainedWakePriority = true;
         },
         refundDepthSpill() {
           if (!depthSpillReserved) return;
@@ -3116,7 +3128,7 @@ export async function processReviewSubject(entry, ctx) {
           let credentialProbeReservation = null;
           let reviewerProcessStarted = false;
           const releaseReviewerReservation = () => {
-            if (!reservation || reservationReleased) return;
+            if (!reservation?.admit || reservationReleased) return;
             reservationReleased = true;
             reservation.release();
           };
@@ -3593,6 +3605,7 @@ export async function processReviewSubject(entry, ctx) {
               getHcpHealthzForTick,
             });
             if (!hcpPrecheck.proceed) {
+              this.retainWakeForCapacity();
               return { dispatched: false, reason: 'hcp-precheck-not-ready' };
             }
 
@@ -3739,6 +3752,7 @@ export async function processReviewSubject(entry, ctx) {
                     credentialOutageGate.state?.nextProbeAt ||
                     null,
                 });
+                this.retainWakeForCapacity();
                 return { dispatched: false, reason: 'reviewer-credential-outage-hold' };
               }
               if (credentialOutageGate.probe) {
@@ -3856,6 +3870,12 @@ export async function processReviewSubject(entry, ctx) {
               // (default OFF), drive the two-stage pipeline instead of a single
               // review and post the Win 2 rollup. Gate-off is byte-identical:
               // the else-branch is the unchanged v1 single `spawnReviewer` call.
+              const waitThresholdExceeded = reviewerDispatchWaitPriority(dispatchCandidate) !== null;
+              if (dispatchCandidate.retainedWakePriority || waitThresholdExceeded) {
+                console.log(`[watcher] reviewer priority dispatch ${repoPath}#${prNumber}: `
+                  + `retained_wake=${Boolean(dispatchCandidate.retainedWakePriority)} `
+                  + `wait_threshold_exceeded=${waitThresholdExceeded}`);
+              }
               retainedWatcherWakes?.drop(wakeIdentity);
               reviewerSpawned = true;
               if (depthSpillReserved) {

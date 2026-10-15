@@ -69,6 +69,9 @@ test('GUARDREVERT-01: refusal identity ignores attempt IDs and reason/object ord
   assert.equal(f.pages.length, 1);
   const state = JSON.parse(readFileSync(join(f.rootDir, 'data/follow-up-jobs/hammer-stop-hold/fixture-repository-pr-1.json'), 'utf8'));
   assert.deepEqual(state.heads[head].refusal.missingEvidence, missingEvidence);
+  f.record('2026-01-01T00:01:30Z', { outcome: 'deferred', reason: 'required-checks-pending', eligibilityTrace: null });
+  assert.equal((await evaluateHammerStopHold(f.args)).action, 'hold', 'a later deferral cannot erase the refusal');
+  assert.equal(f.pages.length, 1);
   f.record('2026-01-01T00:02:00Z', { missingEvidence: { ...missingEvidence, summary: 'A different missing finding' } });
   assert.equal((await evaluateHammerStopHold(f.args)).action, 'hold');
   assert.equal(f.pages.length, 2, 'a distinct refusal gets its own page');

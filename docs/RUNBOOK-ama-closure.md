@@ -1643,7 +1643,7 @@ A changed head, review evidence or external check status clears the refusal;
 base/mergeability and explicit operator-hold release retain their existing
 release semantics. A fresh primary-change probe also releases a missing-authority
 hold when authority becomes verifiable or the missing evidence changes. An
-unchanged refusal survives watcher restart; a distinct refusal has a distinct
+unchanged refusal survives watcher restart and later audit deferrals; a distinct refusal has a distinct
 page generation. Transient reads retain their bounded retry and page grace.
 
 GUARDREVERT-01 sibling audit (sentinel trap 227):

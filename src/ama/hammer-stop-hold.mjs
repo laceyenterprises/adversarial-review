@@ -179,8 +179,9 @@ function isHammerAttempt(attempt, doc) {
  * audit file for that head and from the reviewed head's file (a hammer that
  * pushes a new head records its stop on the reviewed head with the new head
  * named in `head`/`currentHead`). Returns the stop only when that latest
- * hammer terminal attempt is a no-merge; a later hammer `deferred` or
- * `succeeded` clears it. Daemon attempts do not set or clear hammer decisions.
+ * hammer terminal attempt is a no-merge. A later `deferred` clears legacy
+ * opaque stops, but preserves deterministic refusals; `succeeded` clears both.
+ * Daemon attempts do not set or clear hammer decisions.
  */
 export function readHammerStopForHead({
   hqRoot,
@@ -223,8 +224,15 @@ export function readHammerStopForHead({
   }
   if (terminal.length === 0) return null;
   terminal.sort((a, b) => (a.at - b.at) || (a.order - b.order));
-  const latest = terminal.at(-1);
-  if (!STOP_OUTCOMES.has(latest.outcome)) return null;
+  let latest = terminal.at(-1);
+  if (!STOP_OUTCOMES.has(latest.outcome)) {
+    // A later wait/read deferral is not new predicate evidence. It cannot
+    // erase a deterministic refusal and re-arm dispatch on unchanged inputs.
+    if (latest.outcome !== 'deferred') return null;
+    latest = [...terminal].reverse().find(item => STOP_OUTCOMES.has(item.outcome)
+      && deterministicRefusal(item.attempt, { repo, prNumber, headSha }));
+    if (!latest) return null;
+  }
   const { attempt } = latest;
   return {
     headSha,

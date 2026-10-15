@@ -14,6 +14,12 @@ import { createArgusReviewerModelResolver } from './argus-reviewer-routing.mjs';
 import { reviewWithClaude, reviewWithCodex, reviewWithGemini } from './reviewer-harness.mjs';
 import { fetchPRDiff } from './reviewer-diff-fetch.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
+import { getAgyReviewerIdentityPool, AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS } from './agy-reviewer-identities.mjs';
+import { acquireArgusGeminiLease, argusGeminiAvailability } from './argus-reviewer-identity.mjs';
+import { classifyReviewerFailure } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { parseReviewerQuotaExhaustion } from './reviewer-quota-signal.mjs';
+import { resolveQuotaResetIso } from './quota-exhaustion.mjs';
+import { startGeminiQuotaCooldown } from './gemini-quota-cooldown.mjs';
 
 export {
   ARGUS_REVIEWER_MODELS_ENV,
@@ -51,8 +57,17 @@ export function createDefaultArgusReviewDeps({
   execGhWithRetryImpl = execGhWithRetry,
   logger = console,
   resolveReviewerModels = null,
+  // Undefined for direct callers; null means the watcher could not lease one.
+  agyLease = undefined,
+  geminiResetAt = null,
+  identityPool = getAgyReviewerIdentityPool(),
+  reviewWithGeminiImpl = reviewWithGemini,
+  nowMs = () => Date.now(),
   evidenceIo = createDefaultArgusEvidenceIo({ env, execGhWithRetryImpl, logger }),
 } = {}) {
+  const identityOptions = () => ({ rootDir, env, pool: identityPool, logger, nowMs: nowMs() });
+  let availability = { available: agyLease !== null, resetAt: geminiResetAt };
+  const resolveModels = resolveReviewerModels || createArgusReviewerModelResolver({ env, logger });
   return {
     async fetchPullRequest({ repo, prNumber }) {
       const { stdout } = await execGhWithRetryImpl({
@@ -83,13 +98,51 @@ export function createDefaultArgusReviewDeps({
       return Buffer.isBuffer(bytes) ? bytes.toString('utf8') : String(bytes ?? '');
     },
 
-    resolveReviewerModels: resolveReviewerModels || createArgusReviewerModelResolver({ env, logger }),
+    async resolveReviewerModels(args) {
+      const models = await resolveModels(args);
+      if (models.includes('gemini') && agyLease === undefined) {
+        availability = await argusGeminiAvailability(identityOptions());
+      }
+      return availability.available ? models : models.filter((model) => model !== 'gemini');
+    },
+    reviewerDeferral: () => ({ resetAt: availability.resetAt }),
 
     async runReviewerModel({ model, prompt, cwd, diff }) {
       const options = { promptOverride: prompt, reviewerSubprocessCwd: cwd };
       let output;
       if (model === 'claude') output = await reviewWithClaude(diff || '', '', options);
-      else if (model === 'gemini') output = await reviewWithGemini(diff || '', '', options);
+      else if (model === 'gemini') {
+        const { lease, resetAt } = agyLease === undefined
+          ? await acquireArgusGeminiLease(identityOptions()) : { lease: agyLease, resetAt: geminiResetAt };
+        if (!lease) {
+          const error = new Error(`[${AGY_IDENTITY_UNAVAILABLE_FAILURE_CLASS}] no ready agy reviewer identity`);
+          error.resetAt = resetAt;
+          throw error;
+        }
+        let failed = false;
+        let reason = '';
+        try {
+          output = await reviewWithGeminiImpl(diff || '', '', {
+            ...options, agyIdentity: lease.hqOwner ? null : { user: lease.user, reviewId: lease.reviewId },
+          });
+        } catch (err) {
+          const diagnostic = [err?.message, err?.stderr].filter(Boolean).join('\n');
+          reason = classifyReviewerFailure(diagnostic, null, err?.code, err);
+          failed = reason !== 'quota-exhausted';
+          if (!failed) {
+            const signal = parseReviewerQuotaExhaustion({ error: err, nowMs: nowMs() });
+            signal.resetAt ||= resolveQuotaResetIso(diagnostic, { nowMs: nowMs() });
+            const cooldown = startGeminiQuotaCooldown({
+              ...identityOptions(), signal, log: logger,
+              hqOwner: identityPool.plan().hqOwner, identityUser: lease.user,
+            });
+            err.resetAt = signal.resetAt || cooldown.resetAt;
+          }
+          throw err;
+        } finally {
+          if (agyLease === undefined) await identityPool.release(lease, { failed, reason });
+        }
+      }
       else if (model === 'codex') output = await reviewWithCodex(diff || '', '', options);
       else throw new Error(`unknown Argus reviewer model ${JSON.stringify(model)}`);
       const text = typeof output === 'string' ? output : output?.reviewText;

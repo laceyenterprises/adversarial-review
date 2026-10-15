@@ -50,7 +50,11 @@ async function main() {
   try {
     emit(await reviewArgusJob({
       job,
-      deps: createDefaultArgusReviewDeps({ rootDir, env: process.env, logger }),
+      deps: createDefaultArgusReviewDeps({
+        rootDir, env: process.env, logger,
+        agyLease: argValue('--agy-lease') === null ? undefined : JSON.parse(argValue('--agy-lease')),
+        geminiResetAt: argValue('--gemini-reset-at') || null,
+      }),
       workDir,
       logger,
     }));

@@ -440,7 +440,7 @@ test('workspace escape audit records post-probe errors without false escape path
   }
 });
 
-for (const extra of ['none', 'untracked', 'modified', 'overlapping']) {
+for (const extra of ['none', 'untracked', 'modified', 'overlapping', 'staged-overlap', 'deleted-recreated', 'renamed-overlap', 'diff-failure']) {
   test(`checkout HEAD movement explains deploy paths and preserves ${extra} writes`, async () => {
     const root = mkdtempSync(join(tmpdir(), 'reviewer-workspace-head-move-'));
     const originalConsoleError = console.error;
@@ -455,10 +455,12 @@ for (const extra of ['none', 'untracked', 'modified', 'overlapping']) {
       const beforeHead = git(checkoutDir, 'rev-parse', 'HEAD');
       writeFileSync(join(checkoutDir, 'tracked.txt'), 'deployed content\n');
       git(checkoutDir, 'add', 'tracked.txt');
+      if (extra === 'deleted-recreated') git(checkoutDir, 'rm', 'extra.txt');
+      if (extra === 'renamed-overlap') git(checkoutDir, 'mv', 'extra.txt', 'renamed\nfile.txt');
       git(checkoutDir, 'commit', '-qm', 'fixture deploy');
       const afterHead = git(checkoutDir, 'rev-parse', 'HEAD');
       git(checkoutDir, 'reset', '--hard', beforeHead);
-      console.error = (line) => { records.push(JSON.parse(line)); };
+      console.error = (line) => { if (line.startsWith('{')) records.push(JSON.parse(line)); };
       configureReviewerWorkspaceAudit({
         repo: 'example/repository', prNumber: 1, reviewerModel: 'fixture',
         headSha: 'review-head', checkoutDir, stateDir,
@@ -468,7 +470,18 @@ for (const extra of ['none', 'untracked', 'modified', 'overlapping']) {
         git(checkoutDir, 'reset', '--hard', afterHead);
         if (extra === 'untracked') writeFileSync(join(checkoutDir, 'new.txt'), 'reviewer write\n');
         if (extra === 'modified') writeFileSync(join(checkoutDir, 'extra.txt'), 'reviewer write\n');
-        if (extra === 'overlapping') writeFileSync(join(checkoutDir, 'tracked.txt'), 'reviewer write\n');
+        if (extra === 'overlapping' || extra === 'staged-overlap') {
+          writeFileSync(join(checkoutDir, 'tracked.txt'), 'reviewer write\n');
+          if (extra === 'staged-overlap') git(checkoutDir, 'add', 'tracked.txt');
+        }
+        if (extra === 'deleted-recreated') writeFileSync(join(checkoutDir, 'extra.txt'), 'reviewer write\n');
+        if (extra === 'renamed-overlap') writeFileSync(join(checkoutDir, 'renamed\nfile.txt'), 'reviewer write\n');
+        if (extra === 'diff-failure') {
+          writeFileSync(join(checkoutDir, 'new.txt'), 'reviewer write\n');
+          // Only the old commit object is removed; HEAD and post-state probes
+          // remain readable, but the deployment diff cannot be established.
+          rmSync(join(checkoutDir, '.git', 'objects', beforeHead.slice(0, 2), beforeHead.slice(2)));
+        }
         return { conversationId: 'fixture-conversation' };
       });
       const escapes = records.filter((record) => record.event === 'reviewer_workspace_escape');
@@ -486,9 +499,14 @@ for (const extra of ['none', 'untracked', 'modified', 'overlapping']) {
         const event = escapes[0];
         assert.equal(event.checkoutHeadBefore, beforeHead);
         assert.equal(event.checkoutHeadAfter, afterHead);
-        assert.equal(event.ambiguous, false);
-        assert.equal(event.attribution, 'unattributed');
-        assert.deepEqual(event.paths, [extra === 'untracked' ? 'new.txt' : extra === 'modified' ? 'extra.txt' : 'tracked.txt']);
+        assert.equal(event.ambiguous, extra === 'diff-failure');
+        assert.equal(event.attribution, extra === 'diff-failure' ? 'checkout-head-moved' : 'unattributed');
+        const expectedPaths = {
+          untracked: ['new.txt'], modified: ['extra.txt'], overlapping: ['tracked.txt'],
+          'staged-overlap': ['tracked.txt'], 'deleted-recreated': ['extra.txt'],
+          'renamed-overlap': ['renamed\nfile.txt'], 'diff-failure': ['new.txt', 'tracked.txt'],
+        };
+        assert.deepEqual(event.paths, expectedPaths[extra]);
         assert.equal(event.agyConversationId, 'fixture-conversation');
         assert.deepEqual(JSON.parse(readFileSync(join(auditDir, 'reviewer-workspace-escapes.jsonl'), 'utf8').trim()), event);
       }

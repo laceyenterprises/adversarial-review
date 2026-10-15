@@ -59,6 +59,7 @@ function snapshotInUse(repoCacheDir, sha) {
   return false;
 }
 const AUDIT_DIRNAME = 'reviewer-workspace-audit';
+const GIT_AUDIT_TIMEOUT_MS = 15_000;
 const GIT_AUDIT_MAX_BUFFER = 64 * 1024 * 1024;
 const AUDIT_HASH_MAX_BYTES = 8 * 1024 * 1024;
 // reviewer.mjs handles one PR per process. A multi-PR process must pass this
@@ -573,6 +574,27 @@ function changedCheckoutPaths(before, after) {
   }).sort();
 }
 
+async function explainedCheckoutPaths(checkoutDir, beforeHead, afterHead, afterState) {
+  const diffPaths = async (revisions) => {
+    const { stdout } = await execFileAsync('git', [
+      '--no-optional-locks', 'diff', '--no-ext-diff', '--no-renames', '--ignore-submodules=none', '--name-only', '-z', ...revisions, '--',
+    ], {
+      cwd: checkoutDir, encoding: 'utf8', maxBuffer: GIT_AUDIT_MAX_BUFFER, timeout: GIT_AUDIT_TIMEOUT_MS,
+    });
+    return new Set(String(stdout || '').split('\0').filter(Boolean));
+  };
+  const [commitPaths, dirtyPaths] = await Promise.all([
+    diffPaths([beforeHead, afterHead]),
+    // Compare against the captured new HEAD, including staged changes. A clean
+    // index alone cannot establish that the working tree matches the deploy.
+    diffPaths([afterHead]),
+  ]);
+  return new Set([...commitPaths].filter((path) => !dirtyPaths.has(path)
+    // Includes untracked recreations of paths deleted by the deploy, which git
+    // diff against HEAD cannot see, and dirt observed by the post-spawn probe.
+    && !(afterState.get(path) || []).some((signature) => signature.startsWith('worktree:'))));
+}
+
 function changedStatusPaths(before, after) {
   const beforeSet = new Set(before);
   const changed = after.filter((line) => !beforeSet.has(line));
@@ -706,9 +728,36 @@ async function auditReviewerSubprocess(spawnOperation) {
         err: probeError,
       });
     } else {
-      const paths = changedCheckoutPaths(before, after);
+      let paths = changedCheckoutPaths(before, after);
+      let ambiguous = false;
+      if (checkoutHeadBefore !== checkoutHeadAfter) {
+        try {
+          const explained = await explainedCheckoutPaths(context.checkoutDir, checkoutHeadBefore, checkoutHeadAfter, after);
+          const unexplained = paths.filter((path) => !explained.has(path));
+          if (unexplained.length === 0) {
+            console.error(JSON.stringify({
+              event: 'reviewer_workspace_head_moved',
+              ts: endedAt,
+              repo: context.repo,
+              prNumber: context.prNumber,
+              reviewerModel: context.reviewerModel,
+              headSha: context.headSha,
+              subprocessPid,
+              window: { startedAt, endedAt },
+              checkoutHeadBefore,
+              checkoutHeadAfter,
+              explainedPathCount: paths.length,
+            }));
+          }
+          paths = unexplained;
+        } catch (err) {
+          // Missing/pruned objects, timeouts or unreadable evidence must retain
+          // the original changed set and the conservative ambiguous attribution.
+          ambiguous = true;
+          console.error(`[reviewer] workspace escape HEAD diff failed: ${err.message}`);
+        }
+      }
       if (paths.length > 0) {
-        const ambiguous = checkoutHeadBefore !== checkoutHeadAfter;
         const event = {
           event: 'reviewer_workspace_escape',
           ts: endedAt,

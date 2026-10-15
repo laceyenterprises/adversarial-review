@@ -7,7 +7,7 @@ const directory = rootDir => join(rootDir, 'data', 'primary-change-history');
 // PRIMARYRENAME-01: old history records lack commit-level rename proof. Re-read
 // those once so a cached refusal cannot strand an otherwise preserved head.
 // v2 also recomputes records which omitted builder-originated rename proof.
-const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'primary-rename-v2'];
+const identity = args => [args.repo, Number(args.prNumber), args.baseSha, args.headSha, args.mergeBase, args.reviewKey || null, args.launchHead || null, 'guard-reversal-v1'];
 const pathFor = args => join(directory(args.rootDir), `${createHash('sha256').update(JSON.stringify(identity(args))).digest('hex')}.json`);
 
 // Atomic replacement inherits the writer's UID. Never let a worker replace

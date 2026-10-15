@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { storedPrimaryChange } from './primary-change-store.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
+import { fetchGuardReversals, verifiedGuardReversals } from './guard-reversal.mjs';
 import { amaAllAuthoritativeReviewerLogins, amaReviewerFamilyForLogin, isCurrentAuthoritativeFamilyReview } from './reviewer-authority.mjs';
 import { isTransientGhError } from '../gh-cli.mjs';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -490,6 +491,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
     if (evidence.completeFileLists !== true && [evidence.primaryFiles, evidence.finalFiles]
       .some(files => files?.length >= 300)) throw new Error('missing or capped file list');
     const authorizationCache = new Map();
+    const guardReversals = verifiedGuardReversals(evidence, headSha);
     const primary = changes(evidence.primaryFiles);
     const aliases = new Map([...primary].map(([path, change]) => [change.filename, path]));
     const final = changes(evidence.finalFiles, evidencePaths(primary, evidence.finalFiles), aliases);
@@ -505,6 +507,7 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
             reversalAuthorized(evidence, path, unit, diagnosticCache, strictNonBlockingRemediation))) };
     };
     for (const [path, change] of primary) {
+      if (guardReversals.some(proof => proof.path === path)) continue;
       const actual = final.get(path);
       if (isTestPath(path) && isTestPath(change.filename)
         && (!actual || isTestPath(actual.filename))) continue;
@@ -556,7 +559,11 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
         }
       }
     }
-    return { ok: true, applicable: true, testRegionsChanged: testChanges };
+    return { ok: true, applicable: true, testRegionsChanged: testChanges,
+      ...(guardReversals.length ? { guardReversals: guardReversals.map(({ authorization, path, failedRun, passingRun }) => ({
+        authorization, paths: [path], failedCheckRun: failedRun.id, passingCheckRun: passingRun.id,
+        failedHead: failedRun.head_sha, passingHead: passingRun.head_sha,
+      })) } : {}) };
   } catch (error) {
     return { ok: false, reason: 'primary-change-unknown', detail: evidence.reason || error.message };
   }
@@ -862,6 +869,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       testChanges = testRegionsChanged(primaryChanges, finalChanges);
     } catch { /* Retain raw evidence; the evaluator fails closed on unsupported patches. */ }
     return { headSha, hasHammerCommits: true, primaryHead, mergeBase,
+      ...(pr.base.ref ? { baseSha: pr.base.sha, baseRef: pr.base.ref } : {}),
       ...(builderBoundary ? { builderBoundary } : {}),
       // Retain the trusted range for rename proof and refusal attribution.
       diagnosticCommitRange: history.commits.slice(history.commits.indexOf(first)).map(commit => ({ sha: commit.sha })),
@@ -1010,7 +1018,8 @@ export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost }
   if (![true, false].includes(history.hasHammerCommits) || history.headMismatch) return history;
   const ciCost = await fetchCiCostImpl({ ...args, get: path =>
     args.get.metadata && path.includes('/compare/') ? args.get.metadata(path) : args.get(path) });
-  return { ...history, ciCost };
+  const guardEvidence = await fetchGuardReversals(args, history);
+  return { ...history, ciCost, ...guardEvidence };
 }
 
 // Explicit operator context only. Merge-authority callers use fetchPrimaryChange

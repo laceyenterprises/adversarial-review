@@ -115,6 +115,7 @@ test('SEATIDLE-01: queue refresh preserves FIFO and an empty handoff waits for d
   const f = fixture(t);
   f.admission.capacityFreed(); await f.schedulerTick();
   assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.logs, [], 'empty capacity handoffs do not log admissions');
   f.enqueue(201); f.enqueue(202); f.enqueue(201);
   assert.deepEqual(f.admission.candidates.map(c => c.prNumber), [201, 202]);
   const drain = f.admission.drain('new poll'); await f.launchWave(); await drain;
@@ -122,6 +123,17 @@ test('SEATIDLE-01: queue refresh preserves FIFO and an empty handoff waits for d
   for (const completion of f.completions) completion.resolve();
   await flush(); await f.schedulerTick();
   assert.deepEqual(f.starts, [201, 202]);
+});
+
+test('SEATIDLE-01: a refused candidate does not log a successful capacity handoff', async t => {
+  const f = fixture(t);
+  f.admission.enqueue({
+    repoPath: 'example/review-fixture', prNumber: 201, reviewerModel: 'gemini',
+    async run() { return { dispatched: false, reason: 'freshness-read-deferred' }; },
+  });
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.logs, [], 'queue attempts that never spawn do not log admissions');
 });
 
 

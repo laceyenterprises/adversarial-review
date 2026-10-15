@@ -57,7 +57,9 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
         const dispatched = outcomes.filter(outcome => outcome?.dispatched);
         const count = outcomes.length ? dispatched.length : result?.dispatched || 0;
         const admittedAt = dispatched.length ? Math.min(...dispatched.map(outcome => outcome.at)) : now();
-        logger.log?.(`[watcher] reviewer admission on capacity-freed: dispatched=${count} idle_ms=${Math.max(0, admittedAt - event.freedAt)}`);
+        if (count > 0) {
+          logger.log?.(`[watcher] reviewer admission on capacity-freed: dispatched=${count} idle_ms=${Math.max(0, admittedAt - event.freedAt)}`);
+        }
       }).catch(error => {
         logger.error?.('[watcher] reviewer admission on capacity-freed failed:', error?.message || error);
       });

@@ -3752,7 +3752,7 @@ for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
   });
 }
 
-test('SEATIDLE-01: unreadable queued freshness refunds an unexecuted bounded retry without losing failure evidence', () => {
+for (const priorStatus of ['pending', 'failed']) test(`SEATIDLE-01: unreadable queued freshness refunds a ${priorStatus} claim and releases its same-head lease`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'seatidle-freshness-refund-'));
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
   try {
@@ -3776,8 +3776,9 @@ test('SEATIDLE-01: unreadable queued freshness refunds an unexecuted bounded ret
           review_status, review_attempts, labels_json, reviewer_head_sha, revision_ref, failed_at,
           failure_message, reviewer_session_uuid, reviewer_timeout_ms)
           VALUES ('example/review-fixture', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
-            'failed', 1, '[]', 'sha-happy-101', 'prior-revision', '2026-05-15T12:01:00Z',
-            'Command failed with code 1', 'prior-session', 1234)\`).run();
+            '${priorStatus}', 1, '[]', 'sha-happy-101', 'prior-revision',
+            ${priorStatus === 'failed' ? "'2026-05-15T12:01:00Z'" : 'NULL'},
+            ${priorStatus === 'failed' ? "'Command failed with code 1'" : 'NULL'}, 'prior-session', 1234)\`).run();
         const before = db.prepare('SELECT * FROM reviewed_prs WHERE pr_number = 101').get();
       `,
       afterFirstPoll: `
@@ -3790,6 +3791,8 @@ test('SEATIDLE-01: unreadable queued freshness refunds an unexecuted bounded ret
         globalThis.__seatIdleReadError = false;
         await pollOnce(octokit, pollOptions);
         assert.equal(claims.filter(c => c.prNumber === 101).length, 2);
+        assert.equal(claims.filter(c => c.prNumber === 101)[0].reviewerHeadSha,
+          claims.filter(c => c.prNumber === 101)[1].reviewerHeadSha, 'retry reacquires the same head');
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
       `,
     });
@@ -3804,5 +3807,7 @@ test('SEATIDLE-01: unreadable queued freshness refunds an unexecuted bounded ret
         env: fixtureEnv(installGhFixture(tmp)),
       });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.match(result.stderr, /queued reviewer freshness read deferred/);
+    assert.doesNotMatch(result.stdout, /dispatch lease already held/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

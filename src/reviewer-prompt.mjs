@@ -15,6 +15,7 @@ import { readFindingDisputeReservations } from './ama/finding-dispute-context.mj
 import { buildObviousDocsGuidance, fetchLinkedSpecContents, formatAdvisoryFindingsContext, formatPrIntentContext, formatFindingDisputeContext } from './prompt-context.mjs';
 import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
 import { buildSlimReviewerExtraContext } from './review-mode-selection.mjs';
+import { formatGuardForbiddenPaths } from './guard-forbidden-paths.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -86,6 +87,7 @@ async function buildReviewerExtraContext({
   prContext = null,
   diff = '',
   advisoryFindings = [],
+  guardForbiddenPaths = [],
   reviewModeDecision = null,
   repoRoot = join(ROOT, '..', '..'),
   rootDir = ROOT,
@@ -102,7 +104,7 @@ async function buildReviewerExtraContext({
   // RPL-08: slim mode trims context, never the review contract. See
   // buildSlimReviewerExtraContext for what is dropped and why.
   if (reviewModeDecision?.slim) {
-    return disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
+    return formatGuardForbiddenPaths(guardForbiddenPaths) + disputeContext + formatPrIntentContext(prContext?.body) + buildSlimReviewerExtraContext({ repo, prNumber, decision: reviewModeDecision, advisoryFindings, log });
   }
 
   let extraContext = buildObviousDocsGuidance();
@@ -140,7 +142,7 @@ async function buildReviewerExtraContext({
     log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
-  return extraContext + formatPrIntentContext(prContext?.body) + disputeContext;
+  return formatGuardForbiddenPaths(guardForbiddenPaths) + extraContext + formatPrIntentContext(prContext?.body) + disputeContext;
 }
 
 function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}) {

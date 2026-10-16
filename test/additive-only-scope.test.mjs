@@ -5,6 +5,7 @@ import {
   SCOPE_EXPAND_LABEL,
   appendScopeViolationFinding,
   evaluateAdditiveOnlyScope,
+  fetchAdditiveOnlyScopeSnapshot,
   resolveAdditiveOnlyScopeReview,
   reviewBodyHasScopeViolationFinding,
 } from '../src/additive-only-scope.mjs';
@@ -19,19 +20,21 @@ function committedTimelineEvent(sha, committedAt) {
 
 function evaluate(overrides = {}) {
   return evaluateAdditiveOnlyScope({
-    repo: 'laceyenterprises/adversarial-review',
+    repo: 'example/review-service',
     prNumber: 57,
     prCreatedAt: '2026-06-19T10:00:00.000Z',
     prAuthor: 'codex-worker',
     currentHeadSha: 'later',
     labels: [],
+    openingHeadSha: 'initial',
+    openingFiles: { files: [{ filename: 'projects/sample-pack/plan.json' }], truncated: false },
     commits: [
       commit('initial', '2026-06-19T09:55:00.000Z'),
       commit('later', '2026-06-19T10:10:00.000Z'),
     ],
     filesByCommit: {
-      initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
-      later: [{ filename: 'modules/sentinel/lib/scope.mjs' }],
+      initial: [{ filename: 'projects/sample-pack/plan.json' }],
+      later: [{ filename: 'src/feature.mjs' }],
     },
     timeline: [
       committedTimelineEvent('later', '2026-06-19T10:10:00.000Z'),
@@ -48,7 +51,7 @@ test('labeled additive-only PR with later outside-allowlist commit emits high sc
   assert.equal(result.additiveOnly, true);
   assert.equal(result.finding?.kind, 'scope-violation');
   assert.equal(result.finding?.severity, 'high');
-  assert.deepEqual(result.finding?.violating_files, ['modules/sentinel/lib/scope.mjs']);
+  assert.deepEqual(result.finding?.violating_files, ['src/feature.mjs']);
   assert.match(result.finding?.detail, /commit later/);
 });
 
@@ -60,7 +63,7 @@ test('backdated later commit is still scanned using PR commit order', () => {
       commit('backdated-later', '2026-06-19T09:50:00.000Z'),
     ],
     filesByCommit: {
-      initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
+      initial: [{ filename: 'projects/sample-pack/plan.json' }],
       'backdated-later': [{ filename: 'src/evil.mjs' }],
     },
     timeline: [
@@ -92,16 +95,26 @@ test('labeled additive-only PR scans initial commit violations too', () => {
 });
 
 test('unlabeled PR derives additive-only from initial diff and is enforced without being branded', () => {
-  // This used to assert `backfillNeeded === true` alongside the finding. That
-  // pairing is the agent-os#5879 trap: the label is self-proving once written, so
-  // stamping it on a violating PR made the violation permanent. Derivation and
-  // enforcement are unchanged; only the brand is withheld. See
-  // additive-only-scope-backfill-on-violation.test.mjs.
   const result = evaluate();
 
   assert.equal(result.derivedAdditiveOnly, true);
   assert.equal(result.finding?.kind, 'scope-violation');
   assert.equal(result.backfillNeeded, false);
+});
+
+test('opening head whitespace preserves derivation and the later-commit boundary', () => {
+  const result = evaluate({ openingHeadSha: ' \tinitial\n' });
+
+  assert.equal(result.initialHeadSha, 'initial');
+  assert.equal(result.derivedAdditiveOnly, true);
+  assert.equal(result.violatingCommitSha, 'later');
+  assert.deepEqual(result.finding?.violating_files, ['src/feature.mjs']);
+  assert.equal(result.backfillNeeded, false);
+
+  const clean = evaluate({ openingHeadSha: ' \tlater\n' });
+  assert.equal(clean.initialHeadSha, 'later');
+  assert.equal(clean.derivedAdditiveOnly, true);
+  assert.equal(clean.finding, null);
 });
 
 test('resolver attempts additive-only label backfill without depending on delivery success', async () => {
@@ -111,19 +124,21 @@ test('resolver attempts additive-only label backfill without depending on delive
   // additive-only-scope-backfill-on-violation.test.mjs.)
   const calls = [];
   const result = await resolveAdditiveOnlyScopeReview({
-    repo: 'laceyenterprises/adversarial-review',
+    repo: 'example/review-service',
     prNumber: 57,
     snapshot: {
       prCreatedAt: '2026-06-19T10:00:00.000Z',
       currentHeadSha: 'later',
       labels: [],
+      openingHeadSha: 'initial',
+      openingFiles: { files: [{ filename: 'projects/sample-pack/plan.json' }], truncated: false },
       commits: [
         commit('initial', '2026-06-19T09:55:00.000Z'),
         commit('later', '2026-06-19T10:10:00.000Z'),
       ],
       filesByCommit: {
-        initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
-        later: [{ filename: 'projects/codex-runaway-guardrails/SPEC.md' }],
+        initial: [{ filename: 'projects/sample-pack/plan.json' }],
+        later: [{ filename: 'projects/sample-pack/SPEC.md' }],
       },
       timeline: [],
     },
@@ -136,14 +151,14 @@ test('resolver attempts additive-only label backfill without depending on delive
   assert.equal(result.finding, null);
   assert.deepEqual(result.backfill, { attempted: true, added: false, error: 'missing label provisioning' });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].repo, 'laceyenterprises/adversarial-review');
+  assert.equal(calls[0].repo, 'example/review-service');
 });
 
 test('labeled additive-only PR with allowlist-only later commit has no finding', () => {
   const result = evaluate({
     labels: [{ name: ADDITIVE_ONLY_LABEL }],
     filesByCommit: {
-      initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
+      initial: [{ filename: 'projects/sample-pack/plan.json' }],
       later: [{ filename: 'docs/AUDIT-2026-06-19.md' }],
     },
   });
@@ -236,7 +251,7 @@ test('truncated commit file coverage fails closed as an inconclusive scope viola
   const result = evaluate({
     labels: [{ name: ADDITIVE_ONLY_LABEL }],
     filesByCommit: {
-      initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
+      initial: [{ filename: 'projects/sample-pack/plan.json' }],
       later: { files: [{ filename: 'docs/AUDIT-2026-06-19.md' }], truncated: true },
     },
   });
@@ -249,9 +264,10 @@ test('truncated commit file coverage fails closed as an inconclusive scope viola
 
 test('unlabeled PR whose initial diff was mixed is ignored regardless of later paths', () => {
   const result = evaluate({
+    openingFiles: { files: [{ filename: 'src/watcher.mjs' }], truncated: false },
     filesByCommit: {
       initial: [{ filename: 'src/watcher.mjs' }],
-      later: [{ filename: 'modules/sentinel/lib/scope.mjs' }],
+      later: [{ filename: 'src/feature.mjs' }],
     },
   });
 
@@ -277,4 +293,189 @@ test('scope finding detector ignores unstructured discussion of scope-violation'
   ].join('\n');
 
   assert.equal(reviewBodyHasScopeViolationFinding(body), false);
+});
+
+test('doc-first PR opened with implementation does not derive additive-only', () => {
+  const result = evaluate({
+    openingHeadSha: 'later',
+    openingFiles: { files: [
+      { filename: 'projects/sample/SCOPE.md' },
+      { filename: 'src/feature.mjs' },
+    ], truncated: false },
+  });
+  assert.equal(result.additiveOnly, false);
+  assert.equal(result.finding, null);
+  assert.equal(result.backfillNeeded, false);
+});
+
+test('unknown, truncated or rebased opening evidence does not derive a class', () => {
+  for (const evidence of [
+    { openingHeadSha: null },
+    { openingHeadSha: 'rebased-away' },
+    { openingFiles: null },
+    { openingFiles: { files: [{ filename: 'projects/sample/SCOPE.md' }], truncated: true } },
+  ]) {
+    const result = evaluate(evidence);
+    assert.equal(result.additiveOnly, false);
+    assert.equal(result.finding, null);
+    assert.equal(result.backfillNeeded, false);
+    assert.equal(evaluate({ ...evidence, labels: [ADDITIVE_ONLY_LABEL] }).finding?.kind, 'scope-violation');
+  }
+});
+
+test('resolver re-derives every pass and withdraws a prior scope finding without branding', async () => {
+  const snapshots = [
+    { openingHeadSha: 'initial', openingFiles: { files: [{ filename: 'projects/sample/SCOPE.md' }], truncated: false } },
+    { openingHeadSha: 'later', openingFiles: { files: [{ filename: 'projects/sample/SCOPE.md' }, { filename: 'src/feature.mjs' }], truncated: false } },
+  ];
+  let fetches = 0;
+  const options = {
+    repo: 'example/review-service', prNumber: 57,
+    fetchSnapshotImpl: async () => ({
+      currentHeadSha: 'later', commits: [{ sha: 'initial' }, { sha: 'later' }],
+      filesByCommit: { initial: [{ filename: 'projects/sample/SCOPE.md' }], later: [{ filename: 'src/feature.mjs' }] },
+      ...snapshots[fetches++],
+    }),
+    backfillLabelImpl: async () => assert.fail('a violating or non-additive PR must not be branded'),
+  };
+  assert.equal((await resolveAdditiveOnlyScopeReview(options)).finding?.kind, 'scope-violation');
+  const next = await resolveAdditiveOnlyScopeReview(options);
+  assert.equal(next.additiveOnly, false);
+  assert.equal(next.finding, null);
+  assert.equal(fetches, 2);
+});
+
+function snapshotExecutor({ events = [], openingFiles = [], fail = null, labeled = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    execFileImpl: async (_file, args) => {
+      const endpoint = args[1];
+      calls.push(endpoint);
+      if (fail && endpoint.includes(fail)) throw new Error('synthetic lookup failure');
+      let data;
+      if (endpoint === 'repos/example/review-service/pulls/57') data = { id: 42, head: { sha: 'later' } };
+      else if (endpoint.includes('/labels?')) data = labeled ? [{ name: ADDITIVE_ONLY_LABEL }] : [];
+      else if (endpoint.includes('/pulls/57/commits?')) data = [{ sha: 'initial' }, { sha: 'later' }];
+      else if (endpoint.includes('/timeline?')) data = [];
+      else if (endpoint.includes('/events?')) data = typeof events === 'function' ? events(endpoint) : events;
+      else if (endpoint.includes('/compare/')) data = { files: openingFiles };
+      else if (endpoint.includes('/commits/initial?')) data = { files: [{ filename: 'projects/sample/SCOPE.md' }] };
+      else if (endpoint.includes('/commits/later?')) data = { files: [{ filename: 'src/feature.mjs' }] };
+      else assert.fail(`unexpected endpoint ${endpoint}`);
+      return { stdout: JSON.stringify(data) };
+    },
+  };
+}
+
+function openedEvent(head = 'later', overrides = {}) {
+  return { type: 'PullRequestEvent', payload: {
+    action: 'opened', number: 57,
+    pull_request: { id: 42, base: { sha: 'base' }, head: { sha: head } },
+    ...overrides,
+  } };
+}
+
+async function acquire(options) {
+  const executor = snapshotExecutor(options);
+  const snapshot = await fetchAdditiveOnlyScopeSnapshot({
+    repo: 'example/review-service', prNumber: 57, execFileImpl: executor.execFileImpl,
+    logger: { warn() {} },
+  });
+  return { snapshot, calls: executor.calls, result: evaluateAdditiveOnlyScope(snapshot) };
+}
+
+test('snapshot classifies the net diff of both opening SHAs, including all opening commits', async () => {
+  const { result, calls } = await acquire({ events: [openedEvent()], openingFiles: [
+    { filename: 'projects/sample/SCOPE.md' }, { filename: 'src/feature.mjs' },
+  ] });
+  assert.equal(result.additiveOnly, false);
+  assert.equal(result.finding, null);
+  assert.ok(calls.includes('repos/example/review-service/compare/base...later?per_page=1'));
+});
+
+test('snapshot retains enforcement for code pushed after a doc-only opening', async () => {
+  const { result } = await acquire({ events: [openedEvent('initial')], openingFiles: [{ filename: 'projects/sample/SCOPE.md' }] });
+  assert.equal(result.derivedAdditiveOnly, true);
+  assert.deepEqual(result.finding?.violating_files, ['src/feature.mjs']);
+  assert.equal(result.backfillNeeded, false);
+});
+
+test('clean net opening diff does not brand a PR that the wider labeled scan would flag', async () => {
+  const { result } = await acquire({ events: [openedEvent()], openingFiles: [{ filename: 'projects/sample/SCOPE.md' }] });
+  assert.equal(result.derivedAdditiveOnly, true);
+  assert.equal(result.finding, null);
+  assert.equal(result.backfillNeeded, false);
+});
+
+test('opening event lookup paginates and ignores other PRs and later actions', async () => {
+  const { result, calls } = await acquire({
+    events: (endpoint) => endpoint.endsWith('page=1')
+      ? Array.from({ length: 100 }, () => openedEvent('initial', { number: 99 }))
+      : [openedEvent('initial', { action: 'reopened' }), openedEvent()],
+    openingFiles: [{ filename: 'src/feature.mjs' }],
+  });
+  assert.equal(result.additiveOnly, false);
+  assert.ok(calls.some((endpoint) => endpoint.endsWith('/events?per_page=100&page=2')));
+  assert.ok(calls.includes('repos/example/review-service/compare/base...later?per_page=1'));
+});
+
+test('missing, expired, mismatched, rebased or unreadable opening evidence declines derivation', async () => {
+  for (const options of [
+    {}, { events: [openedEvent('rebased-away')] },
+    { events: [openedEvent(null)] }, { events: [openedEvent()], openingFiles: null },
+    { events: [openedEvent('initial', { pull_request: { id: 99, head: { sha: 'initial' }, base: { sha: 'base' } } })] },
+    { fail: '/events?' }, { events: [openedEvent()], fail: '/compare/' },
+    { events: [openedEvent()], openingFiles: Array.from({ length: 300 }, () => ({ filename: 'projects/sample/SCOPE.md' })) },
+  ]) {
+    const { result } = await acquire(options);
+    assert.equal(result.additiveOnly, false);
+    assert.equal(result.finding, null);
+  }
+});
+
+test('labeled snapshot does not depend on opening evidence and scans all commits', async () => {
+  const { result, calls } = await acquire({ labeled: true, fail: '/events?' });
+  assert.equal(result.finding?.kind, 'scope-violation');
+  assert.equal(calls.some((endpoint) => endpoint.includes('/events?')), false);
+});
+
+test('derived class retains current-head, non-author scope-expand authority rules', () => {
+  for (const labels of [[SCOPE_EXPAND_LABEL], [ADDITIVE_ONLY_LABEL, SCOPE_EXPAND_LABEL]]) {
+    for (const [actor, afterHead, accepted] of [
+      ['operator', true, true], ['codex-worker', true, false], ['operator', false, false],
+    ]) {
+      const approval = { event: 'labeled', label: { name: SCOPE_EXPAND_LABEL }, actor: { login: actor } };
+      const pushed = committedTimelineEvent('later', '2026-06-19T10:10:00.000Z');
+      const result = evaluate({ labels, timeline: afterHead ? [pushed, approval] : [approval, pushed] });
+      assert.equal(Boolean(result.overrideActive), accepted);
+      assert.equal(Boolean(result.finding), !accepted);
+      assert.equal(result.backfillNeeded, false);
+    }
+  }
+});
+
+
+test('opening lookup is bounded when the opening event has left the activity window', async () => {
+  const { result, calls } = await acquire({
+    events: Array.from({ length: 100 }, () => openedEvent('initial', { number: 99 })),
+  });
+  assert.equal(result.additiveOnly, false);
+  assert.equal(calls.filter((endpoint) => endpoint.includes('/events?')).length, 3);
+  assert.equal(calls.some((endpoint) => endpoint.includes('/compare/')), false);
+});
+
+
+test('net opening evidence derives freely but never brands unreadable opening history', () => {
+  const result = evaluate({
+    openingHeadSha: 'later',
+    openingFiles: { files: [{ filename: 'projects/sample/SCOPE.md' }], truncated: false },
+    filesByCommit: {
+      initial: { files: [{ filename: 'projects/sample/SCOPE.md' }], truncated: true },
+      later: [{ filename: 'projects/sample/PLAN.md' }],
+    },
+  });
+  assert.equal(result.derivedAdditiveOnly, true);
+  assert.equal(result.finding, null);
+  assert.equal(result.backfillNeeded, false);
 });

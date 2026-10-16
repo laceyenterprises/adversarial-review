@@ -1,34 +1,4 @@
-/** Enforcement must honour the same carve-out that derivation does.
- *
- * `additive-only-scope-registry-carveout.test.mjs` pins DERIVATION: a build
- * pack's file set counts as additive-only via the registry/baseline exceptions.
- * That path is `changedFilesWithinAdditiveOnlyAllowlist`.
- *
- * ENFORCEMENT took a different path and did not apply the carve-out at all. It
- * scanned each commit with the bare `additiveOnlyPathAllowed`, whose allowlist
- * is only projects/**, post-merge-actions/**, POSTMORTEM-*, AUDIT-*. Neither
- * `scripts/oss-readiness-allowlist.registry.json` nor
- * `scripts/oss-readiness-category-baseline.json` is in it.
- *
- * The result was self-contradictory: a build pack's initial commit DERIVES as
- * additive-only through the carve-out, so the reviewer backfills the label onto
- * the PR -- and then enforcement violates the PR using a rule that ignores the
- * same carve-out. Every build pack tripped it.
- *
- * agent-os#5465 is the worked example. Commit 1 carried projects/**, the
- * post-merge YAML, and the registry (additions=48, deletions=0) -- clean.
- * Commit 2 carried only the ratchet lift to the baseline. The emitted finding
- * named commit 2 and `scripts/oss-readiness-category-baseline.json`.
- *
- * A scope violation SUPPRESSES ALL AUTOMATED DISPATCH on the PR, so the pack got
- * no review and no remediation for 7 hours; `retrigger-review` and
- * `retrigger-remediation` both landed on a PR the pipeline had stopped serving.
- *
- * The forcing relationship is also PR-wide, not per-commit: the YAML is written
- * first and the correct ratchet number is only knowable after running the audit
- * against it, so the baseline bump is naturally a later commit. Requiring both in
- * one commit made the exception unreachable in the normal workflow.
- */
+// Derivation and enforcement share the registry/baseline carve-out.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,7 +7,7 @@ import { evaluateAdditiveOnlyScope } from '../src/additive-only-scope.mjs';
 
 const REGISTRY = 'scripts/oss-readiness-allowlist.registry.json';
 const BASELINE = 'scripts/oss-readiness-category-baseline.json';
-const PACK_YAML = 'modules/worker-pool/post-merge-actions/app-standup-official-record-bump.yaml';
+const PACK_YAML = 'modules/worker-pool/post-merge-actions/sample-pack-official-record-bump.yaml';
 
 function file(filename, { additions = 1, deletions = 0, status = 'modified' } = {}) {
   return { filename, status, additions, deletions };
@@ -49,27 +19,29 @@ function scope({ commits, labeled = true }) {
     filesByCommit[sha] = { files, truncated: false };
   }
   return evaluateAdditiveOnlyScope({
-    repo: 'laceyenterprises/agent-os',
-    prNumber: 5465,
+    repo: 'example/sample-repo',
+    prNumber: 57,
     labels: labeled ? [{ name: 'pr-class: additive-only' }] : [],
     prAuthor: 'builder',
     currentHeadSha: Object.keys(commits).at(-1),
     commits: Object.keys(commits).map((sha) => ({ sha })),
     filesByCommit,
+    openingHeadSha: Object.keys(commits)[0],
+    openingFiles: filesByCommit[Object.keys(commits)[0]],
     timeline: [],
   });
 }
 
-test('agent-os#5465 shape: YAML in commit 1, ratchet lift in commit 2 — no violation', () => {
+test('synthetic pack shape: YAML in commit 1, ratchet lift in commit 2 — no violation', () => {
   const result = scope({
     commits: {
-      cd69b78f7432: [
-        file('projects/app-standup/SPEC.md', { status: 'added' }),
-        file('projects/app-standup/plan.json', { status: 'added' }),
+      opening: [
+        file('projects/sample-pack/SPEC.md', { status: 'added' }),
+        file('projects/sample-pack/plan.json', { status: 'added' }),
         file(PACK_YAML, { status: 'added', additions: 30 }),
         file(REGISTRY, { additions: 48, deletions: 0 }),
       ],
-      e099eeb2ff84: [file(BASELINE, { additions: 2, deletions: 2 })],
+      later: [file(BASELINE, { additions: 2, deletions: 2 })],
     },
   });
   assert.equal(result.finding, null, 'the ratchet lift is forced by the YAML earlier in the PR');
@@ -80,7 +52,7 @@ test('registry and baseline in the SAME commit as the YAML — no violation', ()
   const result = scope({
     commits: {
       aaaaaaaaaaaa: [
-        file('projects/app-standup/SPEC.md', { status: 'added' }),
+        file('projects/sample-pack/SPEC.md', { status: 'added' }),
         file(PACK_YAML, { status: 'added' }),
         file(REGISTRY, { additions: 8, deletions: 0 }),
         file(BASELINE, { additions: 1, deletions: 1 }),
@@ -184,4 +156,15 @@ test('an unrelated non-allowlisted file is still a violation in a forced PR', ()
   });
   assert.ok(result.finding, 'forcing licenses the registry and baseline only, nothing else');
   assert.deepEqual(result.finding.violating_files, ['modules/worker-pool/lib/hq-common.sh']);
+});
+
+
+test('unlabeled pack opening uses the same registry and baseline carve-out', () => {
+  const result = scope({ labeled: false, commits: {
+    opening: [file(PACK_YAML, { status: 'added' }), file(REGISTRY, { additions: 5 }), file(BASELINE)],
+    later: [file('projects/sample-pack/plan.json')],
+  } });
+  assert.equal(result.derivedAdditiveOnly, true);
+  assert.equal(result.finding, null);
+  assert.equal(result.backfillNeeded, true);
 });

@@ -26,10 +26,9 @@ test('durable refill bounds reads, advances past refused rows and wraps without 
   const f = fixture(t, 2);
   for (let pr = 1; pr <= 5; pr++) f.add(pr);
   f.onSettled({ repoPath: 'example/fixture', prNumber: 1 });
-  assert.deepEqual(f.refill([]).map(c => c.prNumber), [2]);
-  assert.deepEqual(f.refill([]).map(c => c.prNumber), [3, 4]);
-  assert.deepEqual(f.refill([]).map(c => c.prNumber), [5]);
-  assert.deepEqual(f.refill([{ repoPath: 'example/fixture', prNumber: 2 }]), []);
+  assert.deepEqual(f.refill([]).map(c => c.prNumber), [2, 3]);
+  assert.deepEqual(f.refill([]).map(c => c.prNumber), [4, 5]);
+  assert.deepEqual(f.refill([{ repoPath: 'example/fixture', prNumber: 2 }]).map(c => c.prNumber), [3]);
 });
 
 test('durable refill excludes held, closed, claimed and unrequested posted rows', t => {
@@ -98,4 +97,24 @@ test('settling an obsolete candidate does not suppress an already observed newer
   f.add(1, { revision_ref: 'head-b' });
   f.onSettled({ repoPath: 'example/fixture', prNumber: 1, subject: { headSha: 'head-a' } });
   assert.deepEqual(f.refill([]).map(c => c.prNumber), [1]);
+});
+
+
+test('unchanged settled rows cannot consume the bounded page ahead of admissible work', t => {
+  const f = fixture(t, 2);
+  for (let pr = 1; pr <= 4; pr++) f.add(pr);
+  for (let pr = 1; pr <= 3; pr++) f.onSettled({ repoPath: 'example/fixture', prNumber: pr });
+  assert.deepEqual(f.refill([]).map(c => c.prNumber), [4]);
+  f.db.prepare("UPDATE reviewed_prs SET rereview_requested_at = '2026-01-02' WHERE pr_number = 1").run();
+  assert.deepEqual(f.refill([]).map(c => c.prNumber), [1, 4]);
+});
+
+test('refill scopes the database page before its bound, excluding rows without an enabled discovery context', t => {
+  const f = fixture(t, 2);
+  f.add(1, { repo: 'example/disabled' });
+  f.add(2, { repo: 'example/disabled' });
+  f.add(3);
+  const scoped = createDurableReviewerRefill({ db: f.db, limit: 2,
+    scope: () => ['code-pr:example/fixture'], createCandidate: row => ({ prNumber: row.pr_number }) });
+  assert.deepEqual(scoped.refill([]).map(c => c.prNumber), [3]);
 });

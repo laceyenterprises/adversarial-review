@@ -3,23 +3,29 @@ import { isOperatorHeld, operatorHeldSql } from './operator-hold-labels.mjs';
 const identity = row => `${row.repo}#${row.pr_number}`;
 // Claim bookkeeping must not itself rearm a refused row. A new head, request,
 // status, label observation or failure disposition is a meaningful state edge.
-const state = row => JSON.stringify([
-  row?.pr_state, row?.review_status, row?.revision_ref, row?.reviewer_head_sha,
-  row?.reviewer, row?.labels_json, row?.rereview_requested_at,
-  row?.rereview_reason, row?.failure_message,
-]);
+const stateColumns = [
+  'pr_state', 'review_status', 'revision_ref', 'reviewer_head_sha',
+  'reviewer', 'labels_json', 'rereview_requested_at', 'rereview_reason', 'failure_message',
+];
+const state = row => JSON.stringify(stateColumns.map(column => row?.[column] ?? null));
 
-export function createDurableReviewerRefill({ db, createCandidate, limit = 50 }) {
+export function createDurableReviewerRefill({ db, createCandidate, scope = () => null, limit = 50 }) {
   // Include admitted attempts that rearm pending after an obsolete-head result.
   // Reusing their discovery cache cannot discover a new head; the poll remains
   // the backstop for that state edge rather than spinning another review.
   const settled = new Map();
   let cursor = 0;
   const readRow = db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?');
-  const readRows = db.prepare(`SELECT * FROM reviewed_prs
+  const readRows = db.prepare(`WITH settled AS (SELECT key, value FROM json_each(?))
+    SELECT * FROM reviewed_prs
     WHERE pr_state = 'open' AND review_status IN ('pending', 'pending-upstream')
       AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL)
       AND NOT ${operatorHeldSql()} AND id > ?
+      AND revision_ref IS NOT NULL AND revision_ref <> ''
+      AND (? IS NULL OR COALESCE(domain_id, 'code-pr') || ':' || repo IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS (SELECT 1 FROM settled
+        WHERE settled.key = repo || '#' || pr_number
+          AND settled.value = json_array(${stateColumns.join(', ')}))
     ORDER BY id LIMIT ?`);
   return {
     onSettled(candidate) {
@@ -32,8 +38,11 @@ export function createDurableReviewerRefill({ db, createCandidate, limit = 50 })
       }
     },
     refill(queued) {
-      let rows = readRows.all(cursor, limit);
-      if (!rows.length && cursor) rows = readRows.all(0, limit);
+      const snapshots = JSON.stringify(Object.fromEntries(settled));
+      const keys = scope();
+      const allowed = keys === null ? null : JSON.stringify(keys);
+      let rows = readRows.all(snapshots, cursor, allowed, allowed, limit);
+      if (!rows.length && cursor) rows = readRows.all(snapshots, 0, allowed, allowed, limit);
       cursor = rows.at(-1)?.id || 0;
       const present = new Set(queued.map(candidate => `${candidate.repoPath}#${candidate.prNumber}`));
       return rows.flatMap(row => {
@@ -84,4 +93,25 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
       return prepared.run();
     },
   };
+}
+
+
+export function attachDurableReviewerRefill({ db, contexts, admission, processSubject, readScope }) {
+  const refill = createDurableReviewerRefill({
+    db,
+    scope: () => {
+      const { repos, domains } = readScope();
+      return [...contexts.keys()].filter(key => {
+        const separator = key.indexOf(':');
+        return repos.includes(key.slice(separator + 1)) && domains.includes(key.slice(0, separator));
+      });
+    },
+    createCandidate(row) {
+      const registration = contexts.get(`${row.domain_id || readScope().primaryDomainId}:${row.repo}`);
+      return registration ? createDurableReviewerCandidate(row, {
+        ...registration, processSubject, enqueue: admission.enqueue,
+      }) : null;
+    },
+  });
+  admission.setRefill(refill.refill, refill.onSettled);
 }

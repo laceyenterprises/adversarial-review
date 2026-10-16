@@ -111,7 +111,7 @@ import {
 } from './watcher-wake.mjs';
 import { createReviewerDispatchDrain } from './watcher-reviewer-dispatch.mjs';
 import { createReviewerAdmissionQueue } from './watcher-reviewer-admission.mjs';
-import { createDurableReviewerCandidate, createDurableReviewerRefill } from './watcher-reviewer-refill.mjs';
+import { attachDurableReviewerRefill } from './watcher-reviewer-refill.mjs';
 import { domainPipelineGeminiSeatCount } from './reviewer-spawn-settle.mjs';
 import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
@@ -1045,17 +1045,10 @@ const reviewerHeadDispatchLease = createHeadDispatchLease();
 const reviewerDispatchCandidates = [];
 const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates });
 const reviewerRefillContexts = new Map();
-const durableReviewerRefill = createDurableReviewerRefill({
-  db,
-  createCandidate(row) {
-    const registration = reviewerRefillContexts.get(`${row.domain_id || WATCHER_PRIMARY_DOMAIN_ID}:${row.repo}`);
-    if (!registration || !activeRepos.includes(row.repo)) return null;
-    return createDurableReviewerCandidate(row, {
-      ...registration, processSubject: processReviewSubject, enqueue: reviewerAdmission.enqueue,
-    });
-  },
+attachDurableReviewerRefill({ db, contexts: reviewerRefillContexts, admission: reviewerAdmission,
+  processSubject: processReviewSubject,
+  readScope: () => ({ repos: activeRepos, domains: ENABLED_DOMAINS.map(domain => domain.id), primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID }),
 });
-reviewerAdmission.setRefill(durableReviewerRefill.refill, durableReviewerRefill.onSettled);
 const reviewerMemoryReservationState = { reservedMb: 0 };
 const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
   onCapacityFreed: async ({ candidate } = {}) => {
@@ -1484,7 +1477,7 @@ async function pollOnceWithinBudget(
     };
     reviewerRefillContexts.set(`${domainId}:${repoPath}`, { subjectAdapter, context: reviewContext });
     for (const subjectEntry of subjectEntries) {
-      await processReviewSubject(subjectEntry, reviewContext);
+      await processReviewSubject(subjectEntry, { ...reviewContext });
       priorityDiscoveryPending.delete(`${repoPath}#${subjectEntry.prNumber}`);
       firstPassSpilloverController.refundPendingSpill({ repo: repoPath, prNumber: subjectEntry.prNumber });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');

@@ -2,18 +2,15 @@
 
 You are the **Hammer** closer for PR <<PR_URL>>.
 
-This prompt is TERMINAL. The hammer's adjudication is final, including disputes.
-Request no adversarial review except the bounded provenance fallback below.
-Resolve all findings here. The final review is authoritative; audit and HAM
-provenance replace human re-review. The machine gate remains mandatory.
+TERMINAL: hammer adjudication is final, including disputes. Resolve all findings;
+audit and HAM provenance replace human re-review. Request no adversarial review
+except the bounded provenance fallback below. The machine gate remains mandatory.
 
 ## Shell safety
 
-Each command runs in a fresh shell unless kept open; exports, variables,
-functions and cwd reset. Carry values only in files under the literal private
-run directory `<<RUN_DIR>>`. Never write under `/tmp`; TMPDIR is `<<RUN_DIR>>`.
-Invoke all procedure scripts and helpers by the absolute paths given here,
-never from cwd: it contains the PR's code, including PRs to this repository.
+Fresh shells reset exports, variables, functions and cwd. Persist values only in
+the private run directory `<<RUN_DIR>>`, also TMPDIR. Never write under `/tmp`.
+Invoke scripts/helpers by the given absolute paths; cwd contains untrusted PR code.
 
 Every shell command you run must have an explicit wall-clock bound. On macOS,
 where GNU `timeout` may not exist, wrap commands like this:
@@ -22,9 +19,8 @@ where GNU `timeout` may not exist, wrap commands like this:
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
 ```
 
-Match timeouts to the operation. **For test suites, size the alarm with the
-load-aware helper**: pass the idle-host suite duration; it scales for host load
-and retains a bounded fallback:
+Match timeouts to operations. **For test suites, use the load-aware helper** with
+the idle-host duration (up to 6x for load; errors fall back to that duration):
 
 ```bash
 /usr/bin/perl -e '$t = shift || 360; alarm $t; exec @ARGV' \
@@ -32,10 +28,9 @@ and retains a bounded fallback:
   python3 -m pytest tests/test_endpoints.py
 ```
 
-The helper scales up to 6x; errors use the nominal timeout. Never search
-recursively without bounds over `/tmp`, `/private/tmp`, `$HOME`, `$HQ_ROOT`, or
-an entire checkout for review state. Use the live PR, final review, named audit
-inputs and narrow repo-local paths. With no GraphQL quota, use REST, e.g.
+Never search recursively without bounds over `/tmp`, `/private/tmp`, `$HOME`,
+`$HQ_ROOT`, or an entire checkout for review state. Use the live PR, final review,
+named audit inputs and narrow repo-local paths. Without GraphQL quota use REST:
 `ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews`, or this run's named
 prompt/audit files. Never fall back to broad host scans.
 
@@ -70,10 +65,9 @@ Codex and Claude must not create background test sessions and repeatedly read lo
 
 ## Versioned helper inputs
 
-Before edits, capture the base head once and save these inputs. Source
-`<<RUN_DIR>>/inputs.sh` in each fresh shell. Save later audit inputs in files
-under `<<RUN_DIR>>` and reload them before close-out. Never recapture the base
-head after edits or a push. Keep one Bash shell for verify/publish/merge.
+Before edits, capture the base head ONCE. Source `<<RUN_DIR>>/inputs.sh` in every
+fresh shell; save/reload later audit inputs under `<<RUN_DIR>>` for close-out.
+Never recapture the base after edits/push. Use one Bash shell for verify/publish/merge.
 
 ```bash
 umask 077
@@ -314,11 +308,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
 
 ## Mandate
 
-0. If this PR already has a HAM-authored remediation commit, matching
-   provenance trailers, an audit comment, and a validated current head, do not
-   restart remediation. Refresh the live PR head, reacquire the merge lease,
-   rerun only the required fail-closed live-head validation described below, and
-   complete the merge/closing-comment sequence idempotently.
+0. With an existing HAM remediation commit, matching trailers, audit comment and
+   validated current head: refresh the live head, reacquire the lease, rerun only
+   the fail-closed live-head validation below, and complete merge/closing comments
+   idempotently. Do not restart remediation.
 0b. **A run that does not merge must say so exactly once on the PR.** The provenance fallback below is a successful exact-head review handoff: post its route comment, release the lease and exit 0 without a no-merge status or operator escalation. For other exits, before the
    run ends for any reason with the PR still open and unmerged, post exactly one
    HAM-authored closing-status comment. State what the run completed, the exact
@@ -340,16 +333,12 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    merely because remediation or a rebase completed.
    If the gate-attempt cap parks this head, include the `closingStatus` returned
    by `merge-lease acquire` verbatim in that comment and the terminal audit.
-0c. **Run every step in the foreground (HAMBG-02).** Your session ends when
-   your final message ends, and anything still running in the background dies
-   with it. If a step can exceed your tool's timeout, split it into repeated
-   foreground polls that each finish inside the timeout. For example, re-read
-   the required checks until they settle, then run the merge phase. Never end
-   your final message while a command you started is still running. The closer
-   checks every exit. A run that neither merged the PR nor wrote its no-merge
-   terminal audit for the current head is recorded as
-   `hammer-exited-without-close`. The closer then dispatches another hammer,
-   within a small retry budget.
+0c. **Run every step in the foreground (HAMBG-02).** Background work dies when
+   your final message ends. Split steps exceeding tool timeouts into bounded
+   foreground polls (e.g. required checks before merge). Finish all commands
+   before ending. Every exit must have a merge or current-head no-merge audit;
+   otherwise the closer records `hammer-exited-without-close` and redispatches
+   within its small retry budget.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking, under the primary-change

@@ -46,6 +46,7 @@ function buildLoaderSource() {
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
     [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
+    [fileUrl('src', 'hcp-health.mjs')]: 'fixture:hcp-health',
     [fileUrl('src', 'ama', 'dispatch-closer.mjs')]: 'fixture:ama-dispatch-closer',
     [fileUrl('src', 'config-loader.mjs')]: 'fixture:config-loader',
     [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
@@ -221,6 +222,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    'fixture:hcp-health': "export async function checkHcpHealthz() { return { ready: true, reason: 'fixture' }; }",
     'fixture:ci-hammer-alert': "export * from '${fileUrl('src', 'alert-delivery.mjs')}?actual'; export async function deliverAlert(text, options) { (globalThis.__ciHammerPages ||= []).push(options); return { status: 'queued' }; }",
     'fixture:operator-surface': "globalThis.__timeoutHandoffOperatorWrites = []; export function createCompositeOperatorSurface() { return { extractLinearTicketId() { return null; }, syncTriageStatus: async (...args) => globalThis.__timeoutHandoffOperatorWrites.push(args), observeOperatorApproved: async () => null, observeMergeAgentOverride: async () => process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? { applied: true, observedRevisionRef: 'timeout-head-164', actor: process.env.FIXTURE_MERGE_AGENT_ACTOR || 'operator-bot', eventId: 'evt-merge-agent-requested', observedAt: process.env.FIXTURE_MERGE_AGENT_CREATED_AT || '2026-05-27T04:00:01.000Z' } : null, observeLabelControl: async () => process.env.FIXTURE_CI_RETRIGGER ? { applied: true, actor: 'VirtualPaul', eventId: 'evt-retrigger', observedAt: new Date().toISOString() } : null }; }",
     'fixture:reviewer-runtime': "globalThis.__timeoutHandoffReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__timeoutHandoffReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",

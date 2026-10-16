@@ -919,7 +919,7 @@ stateDiagram-v2
     s0 --> s1: review-row.15 upstream outage
     s1 --> s0: review-row.16 provider recovery
     s2 --> s3: review-row.17 red CI without remediation
-    s3 --> s0: review-row.18 CI green or changed head
+    s3 --> s0: review-row.18 confirmed current-head green CI
     s4 --> s0: review-row.19 accepted rereview
     s5 --> s0: review-row.20 new head archives failure
     s6 --> s4: review-row.21 posted review reconciliation

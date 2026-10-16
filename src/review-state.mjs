@@ -60,8 +60,9 @@ import {
  *                                               failed external CI on the
  *                                               current head and no follow-up
  *                                               job exists to requeue; not
- *                                               claimable until head moves, CI
- *                                               turns green, or an operator/
+ *                                               claimable until confirmed
+ *                                               current-head CI turns green
+ *                                               or an operator/
  *                                               remediation reset uses
  *                                               requestReviewRereview)
  *   reviewing ─► failed-orphan                 (watcher restart; safe recovery

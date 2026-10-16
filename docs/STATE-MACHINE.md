@@ -195,7 +195,7 @@ new PR
             │
             ├─ rereview admission sees failed external CI and no follow-up job
             │    └─ ci-blocked
-            │         ├─ ownership released + non-HAM head advances or original-head CI turns green (no final hammer outcome) ── pending
+            │         ├─ confirmed current-head external CI turns green ── pending (normal FIFO admission)
             │         └─ remediation/operator reset ───────── pending
             │
             ├─ lease-released same-head terminal failure exhausts retry cap

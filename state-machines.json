@@ -21,7 +21,8 @@
         "src/fast-merge-processing.mjs",
         "src/reviewer.mjs",
         "src/orphan-post-reconcile.mjs",
-        "src/posted-review-row.mjs"
+        "src/posted-review-row.mjs",
+        "src/pollonce-phases.mjs"
       ],
       "states": [
         {"name": "pending","terminal": false,"exitOwner": "watcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "No unconditional elapsed-time exit is enforced for this state; bound and recipient are proposed."},
@@ -55,7 +56,7 @@
         {"id": "review-row.15","from": "pending","to": "pending-upstream","trigger": "upstream outage","codeSource": "src/review-state-statements.mjs"},
         {"id": "review-row.16","from": "pending-upstream","to": "pending","trigger": "provider recovery","codeSource": "src/review-state-statements.mjs"},
         {"id": "review-row.17","from": "reviewing","to": "ci-blocked","trigger": "red CI without remediation","codeSource": "src/review-state-statements.mjs"},
-        {"id": "review-row.18","from": "ci-blocked","to": "pending","trigger": "CI green or changed head","codeSource": "src/watcher.mjs"},
+        {"id": "review-row.18","from": "ci-blocked","to": "pending","trigger": "confirmed current-head green CI","codeSource": "src/pollonce-phases.mjs"},
         {"id": "review-row.19","from": "posted","to": "pending","trigger": "accepted rereview","codeSource": "src/review-state.mjs"},
         {"id": "review-row.20","from": "failed","to": "pending","trigger": "new head archives failure","codeSource": "src/review-state.mjs"},
         {"id": "review-row.21","from": "failed-orphan","to": "posted","trigger": "posted review reconciliation","codeSource": "src/orphan-post-reconcile.mjs"},
@@ -231,6 +232,7 @@
     }
   ],
   "sourceProjectionSha256": {
+    "src/pollonce-phases.mjs": "f5d71e055b557e533c5a6ec1dfd3430965e0597c5d877fed2e6b81943d4070cb",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/acpx/index.mjs": "6debe24b7efd8a3ddf08b7e7c1dc2be5b09d2956fa7e4e2f25d9663d7490e658",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "a83781bddccbb314e837659c5319f7c7fd99cbe42b545f55a214079f2e58a8f1",
@@ -247,7 +249,7 @@
     "src/orphan-post-reconcile.mjs": "53fb34ad540b5f4a7290b548a3f52519f742a2ca0aba527ab79fa81681a1a220",
     "src/posted-review-row.mjs": "8edfebcef0cbc9849a97bab961b327c8735a8318e8a2690b7145a6627f6aff4d",
     "src/review-state-db.mjs": "00643b25fe87659240688c37dbdf738d0b839eaaac22274378592d2ea4ef4dfd",
-    "src/review-state-statements.mjs": "f693727fcb842889613ecda0665dc464821def63a36f91e58e9eb4b8c06b0662",
+    "src/review-state-statements.mjs": "fe5c0f0fc600f005d1046dd37bae0b51fa33eca41feb66399509ab5c72bf9fab",
     "src/review-state.mjs": "2dc94ed74bcd4800fbd26dbedbaee763723ec4566baa5b5258ce9de72ce244a5",
     "src/reviewer-ci-admission.mjs": "9d25ef0c43880794b16f034bf41dd18700cbfb5f56aefc6bd87374618d3936c7",
     "src/reviewer-reattach.mjs": "9df7360283cbf984c030e675cf731ae7d10a43657096dff7082ec957d212849c",

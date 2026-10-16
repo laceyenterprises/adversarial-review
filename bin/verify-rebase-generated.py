@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tarfile
 import tempfile
 
 
@@ -19,10 +18,15 @@ def git(*args, cwd=None):
 
 
 def main():
+    # Resolve policy from this deployed helper's installation, never inherited
+    # PYTHONPATH or the worker checkout's replacement cwp_dispatch package.
+    trusted_root = Path(__file__).resolve().parents[3]
+    sys.path.insert(0, str(trusted_root / "modules/worker-pool/lib/python"))
     from cwp_dispatch import generated_conflicts as policy
 
+    if not Path(policy.__file__).resolve().is_relative_to(trusted_root):
+        raise ValueError("Generated policy is not installed with this helper")
     repo, action, *rest = sys.argv[1:]
-    trusted_root = policy.REGISTRY_PATH.parents[3]
     origin = (
         git("config", "--get", "remote.origin.url", cwd=trusted_root).decode().strip()
     )
@@ -36,11 +40,39 @@ def main():
     sha, *paths = rest
     if action != "verify" or not paths or set(paths) - entries.keys():
         raise ValueError("Unknown generated verification request")
-    archive = git("archive", "--format=tar", sha)
+    tree = git("ls-tree", "-rz", "--full-tree", sha).split(b"\0")
+    files = []
+    for entry in filter(None, tree):
+        metadata, path = entry.split(b"\t", 1)
+        mode, kind, oid = metadata.split()
+        if kind == b"commit":  # Submodule contents cannot supply output evidence.
+            continue
+        if mode not in (b"100644", b"100755"):
+            raise ValueError("Generated verification requires a regular-file tree")
+        files.append((path.decode(), mode, oid))
+    # Read raw blobs: archive export-ignore/export-subst and checkout filters
+    # must never change the merged sources that we verify.
+    blobs = subprocess.check_output(
+        ["git", "cat-file", "--batch"],
+        input=b"".join(oid + b"\n" for _, _, oid in files),
+        timeout=30,
+    )
     with tempfile.TemporaryDirectory(prefix="rebase-generated-") as directory:
         root = Path(directory)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(root, filter="data")
+        stream = io.BytesIO(blobs)
+        for path, mode, oid in files:
+            object_id, kind, size = stream.readline().split()
+            if object_id != oid or kind != b"blob":
+                raise ValueError("Unreadable source object")
+            content = stream.read(int(size))
+            if len(content) != int(size) or stream.read(1) != b"\n":
+                raise ValueError("Truncated source object")
+            target = root / path
+            if not target.resolve().is_relative_to(root) or ".git" in target.parts:
+                raise ValueError("Unsafe source path")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            target.chmod(0o755 if mode == b"100755" else 0o644)
         expected = {}
         for path in paths:
             target = root / path

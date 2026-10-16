@@ -258,7 +258,11 @@ export async function fetchHammerHeadRange(options) {
       if (coverage) return { verified: true, reviewedHead, currentHead, baseSha: base.sha,
         commits: [...coverage.replayedCommits, ...(target !== currentHead ? [currentHead] : [])],
         proof: coverage.proof, rebaseCoverage: coverage };
-    } catch { /* Missing objects or policy cannot authorize a rebased starting base. */ }
+      // A failed content proof for a rewritten starting base cannot be rescued
+      // by a fleet actor alone: conflict ownership is not review authority.
+      const comparison = await get(`repos/${repo}/compare/${reviewedHead}...${target}`);
+      if (!['ahead', 'identical'].includes(comparison?.status)) return null;
+    } catch { return null; /* Missing objects or policy cannot authorize a rebased starting base. */ }
   }
   if (!reviewedHead || !target || reviewedHead === target || !loadActivityPage || !prNumber) return null;
   try {

@@ -17,6 +17,27 @@ if (!baseRef) throw new Error('hammer PR base is missing');
 if (process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead && !prNumber) {
   throw new Error('hammer PR number is missing; supply a PR URL or HAM_PR_NUMBER');
 }
+const loadRebaseCoverage = async ({ base, head }) => {
+  if (![reviewedHead, head, base].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null;
+  const { proveReviewedRebase } = await import('../src/ama/reviewed-rebase.mjs');
+  const execute = promisify(execFile);
+  const git = async args => (await execute('git', args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+  const generatedHelper = fileURLToPath(new URL('./verify-rebase-generated.py', import.meta.url));
+  let generatedFiles = [];
+  try {
+    generatedFiles = JSON.parse((await execute('python3', [generatedHelper, repo, 'policy'], { timeout: 15000 })).stdout);
+    if (!Array.isArray(generatedFiles)) generatedFiles = [];
+  } catch { /* No installed policy: only whole-patch equivalence is available. */ }
+  try { await git(['cat-file', '-e', `${reviewedHead}^{commit}`]); }
+  catch { try { await git(['fetch', '--no-tags', 'origin', reviewedHead]); } catch { return null; } }
+  const verifyGenerated = async (sha, paths) => {
+    try {
+      return (await execute('python3', [generatedHelper, repo, 'verify', sha, ...paths],
+        { timeout: 60000, maxBuffer: 1024 * 1024 })).stdout.trim() === 'verified';
+    } catch { return false; }
+  };
+  return proveReviewedRebase({ reviewedHead, head, base, git, generatedFiles, verifyGenerated });
+};
 const loadComments = async () => {
   const comments = [];
   for (let page = 1; process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead; page++) {
@@ -57,27 +78,6 @@ const loadActivityPage = async path => {
   const next = nextUrl ? new URL(nextUrl) : null;
   if (next && !next.pathname.endsWith('/activity')) return null;
   return { nodes: JSON.parse(body), next: next ? `${next.pathname.replace(/^\//, '')}${next.search}` : null };
-};
-const loadRebaseCoverage = async ({ base, head }) => {
-  if (![reviewedHead, head, base].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null;
-  const { proveReviewedRebase } = await import('../src/ama/reviewed-rebase.mjs');
-  const execute = promisify(execFile);
-  const git = async args => (await execute('git', args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout;
-  const generatedHelper = fileURLToPath(new URL('./verify-rebase-generated.py', import.meta.url));
-  let generatedFiles = [];
-  try {
-    generatedFiles = JSON.parse((await execute('python3', [generatedHelper, repo, 'policy'], { timeout: 15000 })).stdout);
-    if (!Array.isArray(generatedFiles)) generatedFiles = [];
-  } catch { /* No installed policy: only whole-patch equivalence is available. */ }
-  try { await git(['cat-file', '-e', `${reviewedHead}^{commit}`]); }
-  catch { try { await git(['fetch', '--no-tags', 'origin', reviewedHead]); } catch { return null; } }
-  const verifyGenerated = async (sha, paths) => {
-    try {
-      return (await execute('python3', [generatedHelper, repo, 'verify', sha, ...paths],
-        { timeout: 60000, maxBuffer: 1024 * 1024 })).stdout.trim() === 'verified';
-    } catch { return false; }
-  };
-  return proveReviewedRebase({ reviewedHead, head, base, git, generatedFiles, verifyGenerated });
 };
 const range = await fetchHammerHeadRange({ loadRebaseCoverage, repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
   remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),

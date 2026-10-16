@@ -41,6 +41,24 @@ for (const generated of [false, true]) {
 }
 test('REBASEPROV-01 unreviewed source resolution fails closed', async t => {
   const { options } = fixture(t, { generated: true, changed: true });
+  // A trusted fleet push actor is not authority for unreviewed source edits.
+  options.env = { OAUTH_BROKER_CODEX_AGENT_PROVIDER: 'github-app-synthetic-owner' };
+  options.prNumber = 42;
+  options.loadActivityPage = async () => ({ nodes: [
+    { before: options.hammerBaseHead, after: options.currentHead },
+    { before: options.reviewedHead, after: options.hammerBaseHead },
+  ].map(event => ({ ...event, ref: 'refs/heads/feature', activity_type: 'force_push',
+    actor: { type: 'Bot', login: 'synthetic-owner[bot]' }, timestamp: '2026-01-01T00:00:00Z' })), next: null });
+  const get = options.get;
+  options.get = async path => {
+    if (path.endsWith('/pulls/42')) return { head: { ref: 'feature', repo: { full_name: 'fixture/repo' } } };
+    if (path.includes('/compare/')) return { status: 'diverged' };
+    if (path.endsWith(`/commits/${options.hammerBaseHead}`) || path.endsWith(`/commits/${options.currentHead}`)) {
+      return { sha: path.split('/').at(-1), author: { login: 'synthetic-owner[bot]' }, committer: { login: 'web-flow' },
+        commit: { verification: { verified: true, reason: 'valid' } } };
+    }
+    return get(path);
+  };
   assert.equal(await fetchHammerHeadRange(options), null);
 });
 test('REBASEPROV-01 unverified generated output fails closed', async t => {

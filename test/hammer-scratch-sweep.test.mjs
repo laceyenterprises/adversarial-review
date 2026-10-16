@@ -145,6 +145,34 @@ for (const state of ['MERGED', 'CLOSED', 'OPEN']) {
   });
 }
 
+test('HAMTMP-05: a failed legacy PR read preserves its scratch and continues the sweep', async t => {
+  const f = fixture(t);
+  const paths = [f.scratch(), f.scratch(), f.scratch()];
+  for (const [index, path] of paths.entries()) {
+    const owner = f.record(path, { prNumber: index + 1, lastObservedStatus: 'starting' });
+    writeFileSync(join(dirname(owner), `synthetic-pr-${index + 1}.json`), readFileSync(owner));
+    rmSync(owner);
+  }
+  const probes = [];
+  let completed = false;
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    readWorkerStatusImpl: () => ({ ok: false, reason: 'missing-worker-run-row' }),
+    readPullRequestStateImpl: async ({ prNumber }) => {
+      probes.push(prNumber);
+      if (probes.length === 1) throw new Error('synthetic gh subprocess failure');
+      return { state: 'MERGED' };
+    },
+    onSweepComplete: () => { completed = true; },
+  });
+  assert.equal(probes.length, 3, 'a failed PR lookup must not abort independent candidates');
+  assert.equal(removed.length, 2);
+  assert.equal(completed, true);
+  for (const [index, path] of paths.entries()) {
+    assert.equal(existsSync(path), index + 1 === probes[0], 'only the unreadable PR retains scratch');
+  }
+});
+
 test('HAMTMP-05: terminal launch still retains scratch referenced by a live process', async t => {
   const f = fixture(t);
   const path = f.scratch();

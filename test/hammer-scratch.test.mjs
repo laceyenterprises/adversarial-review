@@ -89,13 +89,17 @@ test('HAMTMP-05: terminal lease handling persists ledger status before retry adm
   updateAmaCloserLease({ rootDir: root, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge' });
   updateAmaCloserDispatchRecord(root, identity, record => ({ ...record, retryCount: 2 }));
   assert.equal(existsSync(scratchDir), true);
+  const beforeObservation = Date.now();
   const observed = await maybeDispatchAmaCloser({ ...args,
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'canceled' } }),
     execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'synthetic-unknown' }) }),
   });
+  const afterObservation = Date.now();
   const record = JSON.parse(readFileSync(path));
   assert.equal(record.lastObservedStatus, 'canceled', JSON.stringify(observed));
   assert.equal(record.terminalLaunchStatus, 'canceled');
+  assert.ok(Date.parse(record.lastObservedAt) >= beforeObservation
+    && Date.parse(record.lastObservedAt) <= afterObservation, 'terminal observation uses the current wall clock');
   assert.equal(existsSync(scratchDir), false);
 });
 

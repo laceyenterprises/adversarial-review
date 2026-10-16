@@ -5037,7 +5037,7 @@ export async function maybeDispatchAmaCloser({
     // ledger terminality before retry/refund/PR evidence can return early.
     if (probe?.ok && isTerminalLaunchRequestStatus(probe.row?.status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
-        normalizeWorkerRunStatus(probe.row.status), dispatchContext.dispatchedAt || new Date().toISOString());
+        normalizeWorkerRunStatus(probe.row.status), new Date().toISOString());
     }
     const terminal = probe?.ok && ['failed', 'succeeded'].includes(probe.row?.status);
     const reason = terminal ? unexecutedHammerReason(probe.row) : null;
@@ -5340,7 +5340,7 @@ export async function maybeDispatchAmaCloser({
     existingDispatchStatus = status;
     if (isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
-        status, dispatchContext.dispatchedAt || new Date().toISOString());
+        status, new Date().toISOString());
     }
     // A durable closing decision outranks the process exit (including failure
     // after posting it) and certified parks. Unknown evidence holds the launch;

@@ -204,9 +204,14 @@ async function isTerminalOwner(record, options, deadline) {
   // live PR. A database failure above must never become this fallback.
   if (!record.repo || !Number.isInteger(Number(record.prNumber)) || Number(record.prNumber) <= 0
     || Date.now() >= deadline) return false;
-  const pr = await options.readPullRequestStateImpl({ repo: record.repo, prNumber: record.prNumber,
-    env: options.env, timeout: Math.max(1, Math.min(5000, deadline - Date.now())) });
-  return ['MERGED', 'CLOSED'].includes(String(pr?.state || '').toUpperCase());
+  try {
+    const pr = await options.readPullRequestStateImpl({ repo: record.repo, prNumber: record.prNumber,
+      env: options.env, timeout: Math.max(1, Math.min(5000, deadline - Date.now())) });
+    return ['MERGED', 'CLOSED'].includes(String(pr?.state || '').toUpperCase());
+  } catch {
+    // An unreadable PR protects this owner without deferring independent ones.
+    return false;
+  }
 }
 
 // This is disk maintenance only; it never changes leases or grants merge/retry

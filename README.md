@@ -185,12 +185,12 @@ When a provider is *grounded* — a hard 429/`exhausted` probe state, or the AFH
 soft-grounding verdict (`afhGrounding` on `hq fleet quota status --json`, which
 catches a flapping provider the hard gate misses) — the assigned reviewer cannot
 spawn at all, so `src/afh-reviewer-fallback.mjs` walks an ordered fallback:
-current reviewer → the per-tag cross-model primary → Gemini → **Claude, last
-resort only**. The ordering is the point: a `[claude-code]` PR is covered by
-Gemini whenever Gemini is available, so a Codex outage degrades to a *different*
-model rather than to Claude reviewing Claude. Claude-reviewing-Claude is
-reachable only when Gemini is grounded too or `reviewer.gemini.mode=off`, and it
-is stamped as a cross-model waiver in the review body. Fallback is stateless and
+current reviewer → the per-tag cross-model primary → Gemini → Claude, skipping
+candidates that would violate the builder-family refusal. Both Claude accounts
+are refused for Claude-family builds, including last-resort fallback. A
+`[claude-code]` PR uses Gemini during a Codex outage when Gemini is eligible and
+available; if Gemini is also grounded or disabled, review dispatch holds until
+an eligible cross-model reviewer recovers. Fallback is stateless and
 per attempt, so it auto-reverts the moment the provider recovers — there is
 nothing to un-pin. Every failure of the quota read (missing `hq`, non-zero exit,
 timeout, unparseable JSON, absent verdict) fails open to the configured

@@ -147,6 +147,21 @@ test('malformed or stale quota facts cannot authorize corporate or cause an acco
   assert.equal(selectClaudeAccountLane(JSON.stringify(fixture), { workerClass: 'claude-reviewer' }).hold, true);
 });
 
+test('provider name casing and whitespace preserve stale-evidence guards for both accounts', () => {
+  for (const provider of ['Anthropic', ' anthropic ', ' ANTHROPIC ']) {
+    const fixture = claudeAccountFixture();
+    for (const row of fixture.providerStatuses.slice(0, 2)) row.provider = provider;
+    const select = () => selectClaudeAccountLane(JSON.stringify(fixture), { workerClass: 'claude-reviewer' });
+    assert.equal(select().provider, 'claude-code-corp');
+    fixture.providerStatuses[1].cachedEvidenceStale = true;
+    assert.equal(select().hold, true);
+    fixture.reserveFloors['anthropic-oauth-corp'].nearCap = true;
+    assert.equal(select().provider, 'claude-code');
+    fixture.providerStatuses[0].cachedEvidenceStale = true;
+    assert.equal(select().hold, true);
+  }
+});
+
 test('a stale-if-error cache cannot authorize a new corporate reviewer', async () => {
   let now = 1000;
   let reads = 0;

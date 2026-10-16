@@ -3210,6 +3210,15 @@ the registry's trusted-code checks. Verification copies raw Git blobs into a
 temporary directory; it does not execute a branch-supplied registry or alter the
 worker checkout. Unsupported trees and unavailable generators refuse coverage.
 Without an installed registry, whole-patch equivalence remains available.
+The verifier accepts `--trusted-root <installed-policy-root>` for standalone
+helper installations; the closer supplies its configured `HAM_HQ_ROOT`.
+Otherwise it discovers the nearest ancestor with the installed policy. In both
+cases the installed root's origin must match the repository under validation,
+and inherited `PYTHONPATH` cannot supply policy. Missing commit objects are
+fetched with three bounded attempts, retrying transport failures after 500ms
+and 1000ms; permanent failures refuse proof immediately.
+The audit-base resolver reads the runtime `HAM_RUN_DIR/range.json`, with the
+rendered dispatch directory as its fallback.
 Required checks, the exact-head lease/CAS and primary-change checks still apply.
 
 Conflicting duplicate identity trailers confer no direct hammer provenance,

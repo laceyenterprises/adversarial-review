@@ -20,9 +20,10 @@ for (const kind of ['rebase', 'ordinary', 'malformed']) {
     const rendered = renderHammerProcedure('hammer-publish', { RUN_DIR: root, ROOT_DIR: root,
       REPO: 'fixture/repo', PR_NUMBER: '42', PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWED_SHA: reviewed });
     assert.doesNotMatch(rendered, /<<[A-Z_]+>>/);
-    const block = rendered.slice(rendered.indexOf('ham_resolve_audit_base_head()'), rendered.indexOf('HAM_AUDIT_BASE_HEAD='));
+    // Exercise the source resolver directly with the runtime directory.
+    const block = source.slice(source.indexOf('ham_resolve_audit_base_head()'), source.indexOf('HAM_AUDIT_BASE_HEAD='));
     const script = `HAM_BASE_HEAD=${rebased}\nham_is_full_sha() { [[ "$1" =~ ^[a-f0-9]{40}$ ]]; }\n${block}\nham_resolve_audit_base_head`;
-    const run = () => execFileSync('bash', ['-c', script], { encoding: 'utf8', stdio: 'pipe' });
+    const run = () => execFileSync('bash', ['-c', script], { encoding: 'utf8', stdio: 'pipe', env: { ...process.env, HAM_RUN_DIR: root } });
     if (kind === 'malformed') { assert.throws(run); return; }
     const base = run();
     assert.equal(base, kind === 'rebase' ? reviewed : rebased);

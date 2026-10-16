@@ -79,13 +79,13 @@ fi
 # REBASEPROV-01: persist the independently proven R -> current edge so daemon
 # reconstruction remains valid after the hammer exits. Keep HAM_BASE_HEAD for CAS.
 ham_resolve_audit_base_head() {
-  local base
+  local base range_dir="${HAM_RUN_DIR:-<<RUN_DIR>>}"
   base=$(jq -er --arg base "$HAM_BASE_HEAD" '
     if .proof == "reviewed-rebase-patch-equivalence" then
       if .verified == true and .reviewedHead == .rebaseCoverage.reviewedHead then
         .reviewedHead
       else error("invalid reviewed rebase coverage") end
-    else $base end' "<<RUN_DIR>>/range.json") || return 1
+    else $base end' "$range_dir/range.json") || return 1
   ham_is_full_sha "$base" || return 1
   printf '%s' "$base"
 }

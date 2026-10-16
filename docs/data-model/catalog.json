@@ -527,6 +527,8 @@
       "owner": "AMA closer dispatch, live launch-capacity reconciliation, lifecycle settlement, stale-head redrive, and recovery",
       "headContextFields": { "observedHeadSha": "optional string or null" },
       "headContextRefusalReasons": ["dispatch-head-context-changed", "dispatch-head-context-unavailable"],
+      "foreignLaunchEvidenceFields": ["unadoptedLaunchRequestId"],
+      "foreignLaunchRefusalReason": "non-hammer-launch-not-adopted",
       "nonExecutionRefundFields": ["unexecutedRefundCount", "previousUnexecutedLaunchRequestId"],
       "operatorLabelRefundFields": ["labelGateRefundedLaunchRequestId"],
       "operatorLabelRefundsLifetime": false,

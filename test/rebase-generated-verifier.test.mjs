@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const helper = fileURLToPath(new URL('../bin/verify-rebase-generated.py', import.meta.url));
-for (const mode of ['valid', 'symlink-temp', 'mixed-case-repo', 'forged', 'mutated-source']) {
+for (const mode of ['valid', 'symlink-temp', 'mixed-case-repo', 'explicit-root', 'forged', 'mutated-source']) {
   const valid = !['forged', 'mutated-source'].includes(mode);
   test(`REBASEPROV-01 verifies raw merged-source generated output mode=${mode} without host state`, t => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'generated-verifier-')));
@@ -15,8 +15,10 @@ for (const mode of ['valid', 'symlink-temp', 'mixed-case-repo', 'forged', 'mutat
     const source = join(root, 'source');
     const installed = join(root, 'installed');
     const pkg = join(installed, 'modules/worker-pool/lib/python/cwp_dispatch');
-    const installedHelper = join(installed, 'tools/adversarial-review/bin/verify-rebase-generated.py');
-    mkdirSync(join(installed, 'tools/adversarial-review/bin'), { recursive: true });
+    const helperDir = mode === 'explicit-root' ? join(root, 'standalone/bin') : join(installed, 'tools/adversarial-review/bin');
+    const installedHelper = join(helperDir, 'verify-rebase-generated.py');
+    mkdirSync(helperDir, { recursive: true });
+    const policyArgs = mode === 'explicit-root' ? ['--trusted-root', installed] : [];
     writeFileSync(installedHelper, readFileSync(helper));
     for (const dir of [source, installed, pkg]) mkdirSync(dir, { recursive: true });
     const env = { ...process.env, PYTHONPATH: join(root, 'python'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
@@ -53,14 +55,14 @@ def regenerate_conflicts(root, paths, trusted_root):
     writeFileSync(join(source, '.gitattributes'), 'input.txt export-ignore\n');
     git(source, 'add', '--all'); git(source, 'commit', '-qm', 'Merged sources');
     const sha = git(source, 'rev-parse', 'HEAD');
-    const run = () => execFileSync('python3', [installedHelper, 'fixture/repo', 'verify', sha, 'generated.txt'], { cwd: source, env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const run = () => execFileSync('python3', [installedHelper, ...policyArgs, 'fixture/repo', 'verify', sha, 'generated.txt'], { cwd: source, env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
     if (valid) assert.equal(run().trim(), 'verified');
     else assert.throws(run, /Command failed/);
     assert.equal(readFileSync(join(source, 'generated.txt'), 'utf8'), mode !== 'forged' ? 'MERGED INPUT\n' : 'forged payload\n');
     assert.equal(git(source, 'status', '--porcelain'), '');
-    assert.throws(() => execFileSync('python3', [installedHelper, 'fixture/other', 'policy'], { cwd: source, env, stdio: 'pipe' }));
+    assert.throws(() => execFileSync('python3', [installedHelper, ...policyArgs, 'fixture/other', 'policy'], { cwd: source, env, stdio: 'pipe' }));
     rmSync(pkg, { recursive: true });
-    assert.throws(() => execFileSync('python3', [installedHelper, 'fixture/repo', 'policy'], { cwd: source, env, stdio: 'pipe' }));
+    assert.throws(() => execFileSync('python3', [installedHelper, ...policyArgs, 'fixture/repo', 'policy'], { cwd: source, env, stdio: 'pipe' }));
     assert.equal(existsSync(join(root, 'shadow-loaded')), false, 'missing installed policy must not execute a worker package');
   });
 }

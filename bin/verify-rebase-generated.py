@@ -21,7 +21,16 @@ def git(*args, cwd=None):
 def main():
     # Resolve policy from this deployed helper's installation, never inherited
     # PYTHONPATH or the worker checkout's replacement cwp_dispatch package.
-    trusted_root = Path(__file__).resolve().parents[3]
+    args = sys.argv[1:]
+    if args[:1] == ["--trusted-root"]:
+        trusted_root = Path(args[1]).resolve(strict=True)
+        args = args[2:]
+    else:
+        # Discover an ancestor installation instead of assuming a fixed depth.
+        trusted_root = next((root for root in Path(__file__).resolve().parents
+                             if (root / "modules/worker-pool/lib/python/cwp_dispatch/generated_conflicts.py").is_file()), None)
+        if trusted_root is None:
+            raise ValueError("No installed generated-file policy; supply --trusted-root")
     library = trusted_root / "modules/worker-pool/lib/python"
     module = library / "cwp_dispatch/generated_conflicts.py"
     if not module.is_file() or not module.resolve().is_relative_to(trusted_root):
@@ -31,7 +40,7 @@ def main():
 
     if not Path(policy.__file__).resolve().is_relative_to(trusted_root):
         raise ValueError("Generated policy is not installed with this helper")
-    repo, action, *rest = sys.argv[1:]
+    repo, action, *rest = args
     origin = (
         git("config", "--get", "remote.origin.url", cwd=trusted_root).decode().strip()
     )

@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { execGhWithRetry } from '../src/gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from '../src/gh-cli.mjs';
 import { fetchHammerHeadRange, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 const [repo, reviewedHead, currentHead, baseArg, prUrl] = process.argv.slice(2);
 if (!repo || !reviewedHead || !currentHead || !baseArg || (baseArg === '--pr' && !prUrl)) {
@@ -29,18 +29,27 @@ const loadRebaseCoverage = async ({ base, head }) => {
   const execute = promisify(execFile);
   const git = async args => (await execute('git', args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout;
   const generatedHelper = fileURLToPath(new URL('./verify-rebase-generated.py', import.meta.url));
+  const trustedRootArgs = process.env.HAM_HQ_ROOT ? ['--trusted-root', process.env.HAM_HQ_ROOT] : [];
   let generatedFiles = [];
   try {
-    generatedFiles = JSON.parse((await execute('python3', [generatedHelper, repo, 'policy'], { timeout: 15000 })).stdout);
+    generatedFiles = JSON.parse((await execute('python3', [generatedHelper, ...trustedRootArgs, repo, 'policy'], { timeout: 15000 })).stdout);
     if (!Array.isArray(generatedFiles)) generatedFiles = [];
   } catch { /* No installed policy: only whole-patch equivalence is available. */ }
   for (const sha of [reviewedHead, base, head]) {
     try { await git(['cat-file', '-e', `${sha}^{commit}`]); }
-    catch { try { await git(['fetch', '--no-tags', 'origin', sha]); } catch { return null; } }
+    catch {
+      for (let attempt = 0; ; attempt++) {
+        try { await git(['fetch', '--no-tags', 'origin', sha]); break; }
+        catch (error) {
+          if (attempt === 2 || !isTransientGhError(error)) return null;
+          await new Promise(resolve => setTimeout(resolve, 500 * 2 ** attempt));
+        }
+      }
+    }
   }
   const verifyGenerated = async (sha, paths) => {
     try {
-      return (await execute('python3', [generatedHelper, repo, 'verify', sha, ...paths],
+      return (await execute('python3', [generatedHelper, ...trustedRootArgs, repo, 'verify', sha, ...paths],
         { timeout: 60000, maxBuffer: 1024 * 1024 })).stdout.trim() === 'verified';
     } catch { return false; }
   };

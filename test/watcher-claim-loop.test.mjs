@@ -3657,7 +3657,9 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
               payload.onReviewerPgid?.({ pgid: 123456, spawnedAt: new Date().toISOString() });
               globalThis.__seatIdleWaiters.get(pr)?.();
               await new Promise(resolve => globalThis.__seatIdleReturns.set(pr, resolve));
-              return { ok: true, stdout: '', stderr: '' };
+              // This runtime stub has no review-capture ledger; supply the
+              // durable post evidence that the production spawn result carries.
+              return { ok: true, stdout: '', stderr: '', durablePostedAt: Date.now() - 1000 };
             }, cancel: async () => {}, reattach: async () => ({}) };
           }
           export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
@@ -3841,6 +3843,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
       assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
       assert.match(result.stdout, /reviewer admission on capacity-freed: dispatched=1 idle_ms=\d+/);
       if (stale === 'durable-refill') assert.match(result.stdout, /reviewer admission refill: candidates=2 admitted=1 idle_ms=\d+/);
+      if (['none', 'durable-refill'].includes(stale)) assert.match(result.stdout, /reviewer seat handoff: model=\S+ post_to_spawn_ms=\d+/);
       const freshnessEvidence = {
         'head-moved': /head moved since reviewer claim/,
         closed: /was closed since tick-start snapshot/,

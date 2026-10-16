@@ -160,6 +160,7 @@ export async function runGatedReviewPipeline({
   }
 
   const ok = disposition !== 'pending' && decidingBody != null;
+  const durablePostedAt = Date.parse(pipelineResult.rollupReceipt?.deliveredAt);
   const result = {
     ok,
     reviewBody: ok ? decidingBody : null,
@@ -170,6 +171,7 @@ export async function runGatedReviewPipeline({
     signal: null,
     pgid: null,
     spawnedAt: observedAt || new Date().toISOString(),
+    ...(Number.isFinite(durablePostedAt) ? { durablePostedAt } : {}),
     reattachToken: null,
     // Pipeline provenance for callers/tests that want the structured outcome.
     pipeline: pipelineResult,

@@ -15,7 +15,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixture(t) {
+function fixture(t, { splitPostReviewSettlement = false } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let now = 1000;
   const scheduled = [], logs = [], starts = [], completions = [];
@@ -33,7 +33,7 @@ function fixture(t) {
     readWatcherDrainState: () => ({ active: false }),
     resolveGeminiCredentialConcurrencyForDispatchCandidates: async () => 1,
     prepareSpillover: async candidates => candidates,
-    singleWaveSettleGraceMs: 0, logger: quiet,
+    singleWaveSettleGraceMs: 0, splitPostReviewSettlement, logger: quiet,
   });
   admission.setDrain(async () => {
     concurrentDrains++;
@@ -277,3 +277,35 @@ test('SEATIDLE-04: an admitted attempt rearmed on its unchanged discovery head c
   for (const completion of f.completions) completion.resolve();
   await flush();
 });
+
+for (const fails of [false, true]) {
+  test(`SEATIDLE-04: split admission snapshots pending state after completion (fails=${fails})`, async t => {
+    const f = fixture(t, { splitPostReviewSettlement: true });
+    const completion = deferred();
+    let attempts = 0;
+    const d = durableFixture(t, f, row => ({
+      ...f.candidate(row.pr_number),
+      async run() {
+        attempts++;
+        d.db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing' WHERE pr_number = 201").run();
+        this.markAdmissionStarted();
+        this.admissionReleaseCapacity();
+        await completion.promise;
+        d.db.prepare("UPDATE reviewed_prs SET review_status = 'pending-upstream', failure_message = 'retry later' WHERE pr_number = 201").run();
+        if (fails) throw new Error('execution failed');
+      },
+    }));
+    d.insert(201);
+    f.admission.capacityFreed(); await f.schedulerTick();
+    assert.equal(attempts, 1);
+    await f.schedulerTick(); // the split release may wake refill while claimed
+    assert.equal(attempts, 1);
+    completion.resolve(); await flush();
+    f.admission.capacityFreed(); await f.schedulerTick();
+    assert.equal(attempts, 1, 'unchanged rearmed state must stay excluded after completion');
+    d.db.prepare("UPDATE reviewed_prs SET rereview_requested_at = '2026-01-02' WHERE pr_number = 201").run();
+    f.admission.capacityFreed(); await f.schedulerTick();
+    assert.equal(attempts, 2, 'a new durable request must remain eligible');
+    await flush();
+  });
+}

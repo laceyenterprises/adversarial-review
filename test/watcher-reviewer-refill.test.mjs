@@ -43,6 +43,14 @@ test('durable refill excludes held, closed, claimed and unrequested posted rows'
   assert.deepEqual(f.refill([]).map(c => c.prNumber), [6, 7]);
 });
 
+test('unassigned rows cannot consume the bounded refill page', t => {
+  const f = fixture(t, 2);
+  f.add(1, { reviewer: '' });
+  f.add(2, { reviewer: '' });
+  f.add(3);
+  assert.deepEqual(f.refill([]).map(c => c.prNumber), [3]);
+});
+
 for (const transition of [
   "UPDATE reviewed_prs SET pr_state = 'closed' WHERE pr_number = 1",
   "UPDATE reviewed_prs SET pr_state = 'merged' WHERE pr_number = 1",
@@ -122,6 +130,31 @@ test('durable candidate forwards spawn timing and the post timestamp before rele
   assert.deepEqual(events, ['admitted', 'spawned', ['released', postedAt, { dispatched: true }]]);
 });
 
+for (const fails of [false, true]) {
+  test(`durable candidate preserves the posted timestamp without admission split (fails=${fails})`, async () => {
+    const postedAt = Date.parse('2026-10-16T10:00:00Z');
+    const candidate = createDurableReviewerCandidate({
+      repo: 'example/fixture', pr_number: 1, reviewer: 'gemini', revision_ref: 'head-a',
+    }, {
+      context: { supportsAdmissionSplit: false, hasPriorPostedReview: () => false },
+      subjectAdapter: { async fetchState() { return { headSha: 'head-a', labels: [] }; } },
+      async processSubject(_entry, context) {
+        context.enqueueReviewerDispatchCandidate({ reviewerModel: 'gemini', async run() {
+          await Promise.resolve();
+          this.durablePostedAt = postedAt;
+          if (fails) throw new Error('post bookkeeping failed');
+          return { dispatched: true };
+        } });
+      },
+      enqueue() { assert.fail('unchanged route should retain its reservation'); },
+    });
+    assert.equal(candidate.supportsAdmissionSplit, false);
+    if (fails) await assert.rejects(candidate.run(), /post bookkeeping failed/);
+    else assert.deepEqual(await candidate.run(), { dispatched: true });
+    assert.equal(candidate.durablePostedAt, postedAt);
+  });
+}
+
 for (const subject of [{ terminal: true }, { headSha: 'head-b' }, { labels: ['merge-agent-skip'] }, { labelsKnown: false }]) {
   test(`durable candidate refuses changed or held subject ${JSON.stringify(subject)}`, async () => {
     const f = candidateFixture({ subject });
@@ -171,15 +204,39 @@ test('startup refill defers durable work until discovery registers its repo cont
   f.add(1);
   const contexts = new Map();
   let refill;
+  let scopeReads = 0;
   attachDurableReviewerRefill({ db: f.db, contexts,
     admission: { setRefill: impl => { refill = impl; }, enqueue() {} },
     processSubject() { assert.fail('refill must defer discovery until admission'); },
-    readScope: () => ({ repos: ['example/fixture'], domains: ['code-pr'], primaryDomainId: 'code-pr' }),
+    readScope: () => {
+      scopeReads++;
+      return { repos: ['example/fixture'], domains: ['code-pr'], primaryDomainId: 'code-pr' };
+    },
   });
+  assert.equal(scopeReads, 0, 'attachment must not read scope before watcher initialization');
   assert.deepEqual(refill([]), []);
   contexts.set('code-pr:example/fixture', {
     subjectAdapter: { fetchState() { assert.fail('refill must defer API work until admission'); } },
     context: { domainId: 'code-pr', hasPriorPostedReview: () => false },
   });
   assert.deepEqual(refill([]).map(c => c.prNumber), [1]);
+});
+
+test('attached refill uses the configured primary domain for legacy null-domain rows', t => {
+  const f = fixture(t);
+  f.add(1);
+  f.add(2, { domain_id: 'research-finding' });
+  f.add(3, { domain_id: 'code-pr' });
+  const contexts = new Map([['research-finding:example/fixture', {
+    subjectAdapter: { fetchState() { assert.fail('refill must defer API work until admission'); } },
+    context: { domainId: 'research-finding', hasPriorPostedReview: () => false },
+  }]]);
+  let refill;
+  attachDurableReviewerRefill({ db: f.db, contexts,
+    admission: { setRefill: impl => { refill = impl; }, enqueue() {} },
+    processSubject() { assert.fail('refill must defer discovery until admission'); },
+    readScope: () => ({ repos: ['example/fixture'], domains: ['research-finding'], primaryDomainId: 'research-finding' }),
+  });
+  assert.deepEqual(refill([]).map(c => c.prNumber), [1, 2]);
+  assert.deepEqual(refill([]).map(c => c.prNumber), [1, 2], 'cursor wrap retains the primary-domain scope');
 });

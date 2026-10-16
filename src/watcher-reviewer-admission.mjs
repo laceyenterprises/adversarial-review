@@ -34,10 +34,8 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     };
     const run = candidate.run;
     candidate.run = async function () {
-      let settlementObserved = false;
       const observeSettlement = () => {
-        if (settlementObserved) return;
-        try { onSettled?.(candidate); settlementObserved = true; }
+        try { onSettled?.(candidate); }
         catch (error) { logger.error?.('[watcher] reviewer settlement snapshot failed:', error?.message || error); }
       };
       const release = this.admissionReleaseCapacity;
@@ -48,6 +46,8 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
       try {
         return await run.call(this);
       } finally {
+        // Split capacity release can precede the final durable state. Always
+        // refresh the snapshot when the continuation finishes or throws.
         observeSettlement();
         if (!admitted) resolveAdmission({ dispatched: false, at: now() });
       }

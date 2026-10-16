@@ -10,7 +10,7 @@ const stateColumns = [
 const state = row => JSON.stringify(stateColumns.map(column => row?.[column] ?? null));
 const isPending = row => row?.pr_state === 'open' && ['pending', 'pending-upstream'].includes(row.review_status);
 
-export function createDurableReviewerRefill({ db, createCandidate, scope = () => null, limit = 50 }) {
+export function createDurableReviewerRefill({ db, createCandidate, scope = () => null, readPrimaryDomainId = () => 'code-pr', limit = 50 }) {
   // Include admitted attempts that rearm pending after an obsolete-head result.
   // Reusing their discovery cache cannot discover a new head; the poll remains
   // the backstop for that state edge rather than spinning another review.
@@ -23,7 +23,8 @@ export function createDurableReviewerRefill({ db, createCandidate, scope = () =>
       AND (rereview_requested_at IS NOT NULL OR posted_at IS NULL)
       AND NOT ${operatorHeldSql()} AND id > ?
       AND revision_ref IS NOT NULL AND revision_ref <> ''
-      AND (? IS NULL OR COALESCE(domain_id, 'code-pr') || ':' || repo IN (SELECT value FROM json_each(?)))
+      AND reviewer IS NOT NULL AND reviewer <> ''
+      AND (? IS NULL OR COALESCE(domain_id, ?) || ':' || repo IN (SELECT value FROM json_each(?)))
       AND NOT EXISTS (SELECT 1 FROM settled
         WHERE settled.key = repo || '#' || pr_number
           AND settled.value = json_array(${stateColumns.join(', ')}))
@@ -50,8 +51,9 @@ export function createDurableReviewerRefill({ db, createCandidate, scope = () =>
       const snapshots = JSON.stringify(Object.fromEntries(settled));
       const keys = scope();
       const allowed = keys === null ? null : JSON.stringify(keys);
-      let rows = readRows.all(snapshots, cursor, allowed, allowed, limit);
-      if (!rows.length && cursor) rows = readRows.all(snapshots, 0, allowed, allowed, limit);
+      const primaryDomainId = readPrimaryDomainId();
+      let rows = readRows.all(snapshots, cursor, allowed, primaryDomainId, allowed, limit);
+      if (!rows.length && cursor) rows = readRows.all(snapshots, 0, allowed, primaryDomainId, allowed, limit);
       cursor = rows.at(-1)?.id || 0;
       const present = new Set(queued.map(candidate => `${candidate.repoPath}#${candidate.prNumber}`));
       return rows.flatMap(row => {
@@ -105,7 +107,11 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
         this.durablePostedAt = prepared.durablePostedAt;
         return release(...args);
       };
-      return prepared.run();
+      try {
+        return await prepared.run();
+      } finally {
+        this.durablePostedAt = prepared.durablePostedAt;
+      }
     },
   };
 }
@@ -114,6 +120,8 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
 export function attachDurableReviewerRefill({ db, contexts, admission, processSubject, readScope }) {
   const refill = createDurableReviewerRefill({
     db,
+    // Watcher scope is initialized after attachment; read it only on refill.
+    readPrimaryDomainId: () => readScope().primaryDomainId,
     scope: () => {
       const { repos, domains } = readScope();
       return [...contexts.keys()].filter(key => {

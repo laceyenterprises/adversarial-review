@@ -799,6 +799,19 @@ blocking operator-facing contract drift; at cap exhaustion, accepting that risk
 uses the same scoped `operator-approved` recovery path as other final-round
 accepted findings.
 
+When a diff changes an owner's lifecycle states, transitions, durable status
+values, smoke-verified promises or post-deploy verification steps, and that owner
+declares `state-machines.json` and/or `post-merge-verify.json` beside its README,
+canonical doc-currency also covers the affected declarations and the README's
+state/smoke section, plus the smoke harness when a verified promise changed.
+Regenerate any committed generated state index if the repository has one (for
+example `docs/architecture/STATE-MACHINES.md`); after conflicts, regenerate from
+merged declarations rather than hand-merging generated output. Missing updates
+are blocking contract drift, like stale data-model docs, including in final
+reviews. Remediators and the hammer update only owners the change actually
+affects as part of landing it. Owners with no declarations yet need not add
+them in an unrelated PR; at most leave a non-blocking note.
+
 Gemini remediation is a public third-lane remediator. In direct dispatch, the
 daemon spawns the native `gemini` CLI in headless approval mode, requires local
 subscription OAuth at `GEMINI_AUTH_PATH` or `${GEMINI_HOME:-$HOME/.gemini}/oauth_creds.json`,
@@ -2643,6 +2656,10 @@ walkthrough. Repositories without those documentation surfaces are exempt; if a
 submodule change owes documentation in a superproject, the merge-agent records
 the skipped superproject-doc obligation in its audit or closing comment instead
 of inventing local docs.
+
+The state/smoke declaration currency rule above also applies to these
+clean-verdict and final-pass dispatches, including regeneration from merged
+declarations after conflicts and the exemption for owners without declarations.
 
 AMA closer labels are separate from the merge-agent dispatch labels above. `adversarial-merge-blocked` is an AMA-only hard stop: when the current PR labels include it, AMA closure is refused unless a non-null, attributable label-event snapshot proves the latest block event is stale or unapplied for the current head. Missing or null block evidence fails closed on raw label presence. `adversarial-merge-requested` is an AMA-only risk-class request: it must be an attributable non-author label event scoped to the current head and bypasses only AMA's risk-class gate. It is mandatory for unknown risk, and for high/critical risk unless `eligibility.high_risk_requires_two_key=false` and the concrete risk class is included in `risk_classes`; in that configured single-key mode, high/critical follow the same risk-class gate as low/medium. Whenever two-key is required, `adversarial-merge-requested` still needs simultaneous scoped `operator-approved` evidence plus all structural hard gates. The watcher initializes both labels idempotently by name and preserves operator-customized colors/descriptions.
 

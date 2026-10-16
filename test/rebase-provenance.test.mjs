@@ -16,15 +16,15 @@ function fixture(t, { generated = false, changed = false } = {}) {
   write('source.txt', 'original\n'); write('generated.txt', 'old output\n');
   const fork = commit('Initial');
   write('feature.txt', 'reviewed feature\n');
-  const reviewedHead = commit('Reviewed\n\nWorker-Class: hammer');
+  const reviewedHead = commit(`Reviewed\n\nWorker-Class: hammer\nReviewed-Head: ${fork}\nClosed-By: hammer (adversarial-pipe-mode)`);
   run('checkout', '-qb', 'base', fork); write('base.txt', 'new base\n');
   if (generated) write('generated.txt', 'merged output\n');
   const base = commit('Base advancement');
   run('checkout', '-qb', 'replay');
   if (generated) write('generated.txt', 'regenerated merged output\n');
   write('feature.txt', changed ? 'unreviewed change\n' : 'reviewed feature\n');
-  const head = commit('Replayed\n\nWorker-Class: hammer\nWorker-Class: codex');
-  write('repair.txt', 'hammer remediation\n'); const currentHead = commit('Hammer fix');
+  const head = commit(`Replayed\n\nWorker-Class: hammer\nReviewed-Head: ${fork}\nClosed-By: hammer (adversarial-pipe-mode)\nWorker-Class: codex`);
+  write('repair.txt', 'hammer remediation\n'); const currentHead = commit(`Hammer fix\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${reviewedHead}\nClosed-By: hammer (adversarial-pipe-mode)`);
   return { options: { repo: 'fixture/repo', reviewedHead, currentHead, hammerBaseHead: head,
     git: async args => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }),
     generatedFiles: generated ? ['generated.txt'] : [],

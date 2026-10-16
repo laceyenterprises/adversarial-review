@@ -23,6 +23,7 @@ const REMEDIATOR_CLASS_BY_QUOTA_LABEL = Object.freeze({
   codex: 'codex',
   'remediator-codex-corp': 'remediator-codex-corp',
   'remediator-claude': 'claude-code',
+  'remediator-claude-corp': 'remediator-claude-corp',
   claude: 'claude-code',
   'claude-code': 'claude-code',
   gemini: 'gemini',

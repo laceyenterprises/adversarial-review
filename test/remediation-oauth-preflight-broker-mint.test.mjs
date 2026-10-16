@@ -398,3 +398,25 @@ test('a wrong-provider token is rejected by the provider guard', async () => {
     (err) => err instanceof OAuthError,
   );
 });
+
+test('corporate mint refuses primary or unbound responses on every broker endpoint', async () => {
+  for (const provider of ['claude-code', undefined]) {
+    const calls = [];
+    await assert.rejects(() => mintClaudeCodeRemediationBrokerToken({
+      env: { CLAUDE_BROKER_PROVIDER: 'claude-code-corp', OAUTH_BROKER_SHARED_SECRET: 'synthetic-secret' },
+      fetchImpl: async url => {
+        calls.push(url);
+        return jsonResponse({ access_token: 'synthetic-grant', provider });
+      },
+    }), /no usable/);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(url => new URL(url).searchParams.get('provider') === 'claude-code-corp'));
+  }
+});
+
+test('corporate mint cannot use native keychain transport', async () => {
+  await assert.rejects(() => mintClaudeCodeRemediationBrokerToken({
+    env: { CLAUDE_BROKER_PROVIDER: 'claude-code-corp', ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'keychain' },
+    fetchImpl: async () => { throw new Error('must not fetch'); },
+  }), /requires broker/);
+});

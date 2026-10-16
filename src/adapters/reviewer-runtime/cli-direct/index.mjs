@@ -414,6 +414,7 @@ function createCliDirectReviewerRuntimeAdapter({
       reviewerEnv[AGY_IDENTITY_USER_ENV] = String(agyIdentity.user);
       reviewerEnv[AGY_IDENTITY_REVIEW_ID_ENV] = String(agyIdentity.reviewId || '');
     }
+    reviewerEnv.CLAUDE_BROKER_PROVIDER = req?.subjectContext?.claudeBrokerProvider || 'claude-code';
     reviewerEnv.CODEX_BROKER_PROVIDER = req?.subjectContext?.codexBrokerProvider || 'codex';
     let corporateAuth = null;
     let stripped = [];

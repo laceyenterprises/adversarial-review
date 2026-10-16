@@ -1,3 +1,4 @@
+import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 // Cap-aware remediation worker-class fallback (the remediation-dispatch analogue
 // of the AMA closer HHR harness-fallback in ./ama/harness-fallback.mjs).
 //
@@ -39,7 +40,8 @@ import { execFile as execFileCb } from 'node:child_process';
 
 import {
   harnessCapFromStatuses,
-  parseHqFleetQuotaStatus,
+  parseHqFleetQuotaSnapshot,
+  quotaStatusesFromSnapshot,
   providerForQuotaHarness,
 } from './fleet-quota-status.mjs';
 import { resolveRemediatorFallback } from './role-config.mjs';
@@ -62,6 +64,7 @@ export function normalizeRemediationWorkerClass(workerClassInput) {
   switch (workerClass) {
     case 'remediator-codex-corp':
     case 'remediator-claude':
+    case 'remediator-claude-corp':
       return workerClass;
     case 'codex':
     case 'codex-remediation':
@@ -147,7 +150,8 @@ async function readFleetQuotaStatuses({ env, hqPath, execFileImpl }) {
       timeout: FLEET_QUOTA_STATUS_TIMEOUT_MS,
     });
     const stdout = typeof result === 'string' ? result : String(result?.stdout || '');
-    return { statuses: parseHqFleetQuotaStatus(stdout), error: null };
+    const snapshot = parseHqFleetQuotaSnapshot(stdout);
+    return { statuses: quotaStatusesFromSnapshot(snapshot), snapshot, error: null };
   } catch (err) {
     // Fail-open: a status we cannot read is not authoritative grounding.
     return { statuses: null, error: String(err?.message || err) };
@@ -183,7 +187,7 @@ export async function resolveRemediationWorkerClassWithFallback({
   hqPath = resolveHqPath(env),
   execFileImpl = execFileAsync,
 } = {}) {
-  const primaryClass = String(primary || '').trim().toLowerCase();
+  let primaryClass = String(primary || '').trim().toLowerCase();
   const fallbacks = [...new Set((Array.isArray(fallbackWorkerClasses) ? fallbackWorkerClasses : [])
     .map((value) => String(value || '').trim().toLowerCase())
     .filter(Boolean))];
@@ -199,7 +203,7 @@ export async function resolveRemediationWorkerClassWithFallback({
   }
 
   const evidence = remediatorQuotaEvidence(job, { nowMs });
-  const { statuses, error } = await readFleetQuotaStatuses({ env, hqPath, execFileImpl });
+  const { statuses, snapshot, error } = await readFleetQuotaStatuses({ env, hqPath, execFileImpl });
   // Model lookups only matter against fleet `models[]` rows.
   const capOf = (workerClass) => classCapState(workerClass, {
     evidence,
@@ -207,7 +211,26 @@ export async function resolveRemediationWorkerClassWithFallback({
     model: statuses ? modelOf(modelForClass, workerClass) : null,
   });
 
-  const primaryCap = capOf(primaryClass);
+  const accountLane = (name) => snapshot ? selectClaudeAccountLaneFromSnapshot(snapshot, {
+    statuses,
+    blockedWorkerClasses: ['remediator-claude', 'remediator-claude-corp'].filter(name => capOf(name).capped),
+    workerClass: ['claude', 'claude-code'].includes(name) ? 'remediator-claude' : name,
+    model: modelOf(modelForClass, name),
+  }) : null;
+  const primaryAccount = accountLane(primaryClass);
+  if (primaryAccount?.reason === 'claude-account-evidence-unknown'
+    || (!snapshot && primaryClass === 'remediator-claude-corp')) {
+    return { ...base, hold: true, holdUntil: holdUntilFor(null, nowMs),
+      reason: primaryAccount?.reason || 'fleet-quota-status-unavailable' };
+  }
+  if (primaryAccount && !primaryAccount.hold) {
+    primaryClass = primaryAccount.workerClass;
+    Object.assign(base, { workerClass: primaryClass, fellBack: primaryClass !== primary,
+      from: primary, to: primaryClass });
+  }
+  const primaryCap = primaryAccount?.hold
+    ? { ...capOf(primaryClass), capped: true, available: false, capSource: primaryAccount.reason }
+    : capOf(primaryClass);
   const lastRetry = job?.remediationPlan?.retryHistory?.findLast((entry) =>
     entry.round === job.remediationPlan.currentRound && entry.retryMetadata?.code === 'infrastructure-refund');
   const infrastructureFallback = lastRetry?.retryMetadata?.code === 'infrastructure-refund'
@@ -240,8 +263,14 @@ export async function resolveRemediationWorkerClassWithFallback({
   }
 
   const skipped = [];
-  for (const candidate of fallbacks) {
+  for (let candidate of fallbacks) {
     if (candidate === primaryClass) continue;
+    const account = accountLane(candidate);
+    if (account?.hold) {
+      skipped.push({ workerClass: candidate, reason: account.reason });
+      continue;
+    }
+    if (account) candidate = account.workerClass;
     if (!providerForQuotaHarness(candidate)) {
       skipped.push({ workerClass: candidate, reason: 'provider-untracked' });
       continue;
@@ -341,7 +370,7 @@ function remediatorModelForClass(workerClass, { job, env }) {
       ? resolveConfiguredNonBlockingCodexModel(env).resolvedModel
       : resolveCodexRemediationModel(env);
   }
-  if (['claude-code', 'remediator-claude'].includes(workerClass)) return resolveClaudeRemediationModel(env).resolvedModel;
+  if (['claude-code', 'remediator-claude', 'remediator-claude-corp'].includes(workerClass)) return resolveClaudeRemediationModel(env).resolvedModel;
   if (workerClass === 'gemini') return resolveGeminiRemediationModel(env);
   return null;
 }

@@ -17,6 +17,7 @@ test('isHammerWorkerClass accepts all hammer classes and rejects everything else
   assert.equal(isHammerWorkerClass('hammer'), true);
   assert.equal(isHammerWorkerClass('hammer-corp'), true);
   assert.equal(isHammerWorkerClass('hammer-claude'), true);
+  assert.equal(isHammerWorkerClass('hammer-claude-corp'), true);
   // Whitespace tolerance (the config value is trimmed at every gate).
   assert.equal(isHammerWorkerClass('  hammer-claude  '), true);
   assert.equal(isHammerWorkerClass('  hammer-corp  '), true);
@@ -30,7 +31,7 @@ test('isHammerWorkerClass accepts all hammer classes and rejects everything else
 });
 
 test('HAMMER_WORKER_CLASSES is the frozen canonical set', () => {
-  assert.deepEqual([...HAMMER_WORKER_CLASSES], ['hammer', 'hammer-corp', 'hammer-claude']);
+  assert.deepEqual([...HAMMER_WORKER_CLASSES], ['hammer', 'hammer-corp', 'hammer-claude', 'hammer-claude-corp']);
   assert.equal(Object.isFrozen(HAMMER_WORKER_CLASSES), true);
 });
 

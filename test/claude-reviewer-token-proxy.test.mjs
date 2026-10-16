@@ -5,6 +5,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   CLAUDE_REVIEWER_PROXIED_HANDOFF_FLOOR_MS,
   claudeReviewerTokenProxyEnabled,
@@ -513,6 +516,69 @@ test('reviewWithClaude with the proxy disabled keeps the direct handoff and its 
     await assert.rejects(result, (err) => err.failureClass === 'token-refresh-pending' && /handoff=direct/.test(err.message));
     assert.equal(proxies.length, 0);
   } finally {
+    await upstream.close();
+  }
+});
+
+test('both Claude accounts resolve the canonical reviewer model before mint and renewal', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'claude-reviewer-role-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'registry'));
+  await writeFile(join(root, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+    'claude-reviewer': { defaultModel: 'synthetic-governed-review-model' },
+  } }));
+  for (const provider of ['claude-code', 'claude-code-corp']) {
+    const mints = [];
+    const auth = await prepareClaudeOAuthEnv({
+      sourceEnv: { HQ_ROOT: root, AGENT_OS_DEPLOY_CHECKOUT: root, CLAUDE_BROKER_PROVIDER: provider,
+        ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker' },
+      logger: quietLogger,
+      nowMs: FIXTURE_NOW_MS,
+      mintClaudeCodeBrokerTokenImpl: async request => {
+        mints.push({ provider: request.provider, model: request.model });
+        return { token: 'synthetic-grant', expiresAt: '2026-09-28T20:54:30Z' };
+      },
+    });
+    await auth.remint();
+    assert.deepEqual(mints, Array(2).fill({ provider, model: 'synthetic-governed-review-model' }));
+  }
+});
+
+test('corporate reviewer spawn, proactive renewal and rejection renewal keep the corporate provider through broker failover', async () => {
+  const upstream = await startFakeUpstream();
+  const requests = [];
+  let grant = 'grant-a';
+  let proxy;
+  try {
+    const auth = await prepareClaudeOAuthEnv({
+      model: 'synthetic-review-model',
+      sourceEnv: { CLAUDE_BROKER_PROVIDER: 'claude-code-corp', OAUTH_BROKER_SHARED_SECRET: 'synthetic-secret',
+        OAUTH_BROKER_URL: 'http://127.0.0.1:4099', OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4097' },
+      nowMs: FIXTURE_NOW_MS,
+      logger: quietLogger,
+      // Exercise the real mint helper: no provider or credential I/O occurs.
+      fetchImpl: async url => {
+        requests.push(new URL(url));
+        assert.equal(new URL(url).searchParams.get('provider'), 'claude-code-corp');
+        assert.equal(new URL(url).searchParams.get('model'), 'synthetic-review-model');
+        if (new URL(url).port === '4099') return new Response('{}', { status: 403 });
+        return new Response(JSON.stringify({ access_token: grant, provider: 'claude-code-corp', expires_at: '2026-09-28T20:54:30Z' }));
+      },
+    });
+    assert.equal(auth.provider, 'claude-code-corp');
+    await auth.remint(); // proactive re-read uses the identical binding
+    proxy = await startClaudeReviewerTokenProxyForAuth({ auth, logger: quietLogger, startImpl: options => startClaudeReviewerTokenProxy({
+      ...options, upstream: upstream.url, now: () => FIXTURE_NOW_MS, remintCooldownMs: 0,
+    }) });
+    assert.equal((await post(proxy.baseUrl)).status, 200);
+    upstream.rotate('grant-a', 'grant-b');
+    grant = 'grant-b';
+    assert.equal((await post(proxy.baseUrl)).status, 200);
+    assert.equal(proxy.stats().rejectionsRecovered, 1);
+    assert.ok(requests.length >= 6);
+    assert.ok(requests.every(url => url.searchParams.get('provider') === 'claude-code-corp'));
+  } finally {
+    await proxy?.close();
     await upstream.close();
   }
 });

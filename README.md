@@ -185,17 +185,26 @@ When a provider is *grounded* — a hard 429/`exhausted` probe state, or the AFH
 soft-grounding verdict (`afhGrounding` on `hq fleet quota status --json`, which
 catches a flapping provider the hard gate misses) — the assigned reviewer cannot
 spawn at all, so `src/afh-reviewer-fallback.mjs` walks an ordered fallback:
-current reviewer → the per-tag cross-model primary → Gemini → **Claude, last
-resort only**. The ordering is the point: a `[claude-code]` PR is covered by
-Gemini whenever Gemini is available, so a Codex outage degrades to a *different*
-model rather than to Claude reviewing Claude. Claude-reviewing-Claude is
-reachable only when Gemini is grounded too or `reviewer.gemini.mode=off`, and it
-is stamped as a cross-model waiver in the review body. Fallback is stateless and
+current reviewer → the per-tag cross-model primary → Gemini → Claude, skipping
+candidates that would violate the builder-family refusal. Both Claude accounts
+are refused for Claude-family builds, including last-resort fallback. A
+`[claude-code]` PR uses Gemini during a Codex outage when Gemini is eligible and
+available; if Gemini is also grounded or disabled, review dispatch holds until
+an eligible cross-model reviewer recovers. Fallback is stateless and
 per attempt, so it auto-reverts the moment the provider recovers — there is
 nothing to un-pin. Every failure of the quota read (missing `hq`, non-zero exit,
 timeout, unparseable JSON, absent verdict) fails open to the configured
 primary/Gemini route with a degraded-read breadcrumb; it never blocks a tick.
 Set `ADVERSARIAL_AFH_REVIEWER_FALLBACK=0` to disable the hop entirely.
+
+When Claude account selection reports a hold, AFH skips Claude as a fallback
+candidate, including when corporate account evidence is unknown or stale. Unknown
+evidence alone does not trigger a switch away from an assigned Claude reviewer;
+its spawn preflight retains the account hold. Reviewer quota preflight uses only
+the selected reviewer's account: a corporate Claude selection cannot change
+Gemini's Google quota check. Both Claude accounts resolve the governed model from
+the canonical `claude-reviewer` role; the selected broker provider binds token
+mints and renewals to the account.
 
 **2. The reviewer prompt is adversarial, not consultative.** The standard
 reviewer prompt explicitly tells the model: *"You did NOT write this code.

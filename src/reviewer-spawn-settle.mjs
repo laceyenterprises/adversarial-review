@@ -1,3 +1,4 @@
+import { reviewerCredentialKey } from './claude-account-routing.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
@@ -179,6 +180,7 @@ function resolveReviewerQuotaStatusDir(env = process.env) {
 async function readReviewerQuotaDecision({
   reviewerModel,
   codexBrokerProvider = 'codex',
+  claudeBrokerProvider = 'claude-code',
   env = process.env,
   readdirImpl = readdir,
   readFileImpl = readFile,
@@ -211,15 +213,18 @@ async function readReviewerQuotaDecision({
         // looking for a valid record; if none exists, the decision fails open.
       }
     }
-    const accountAuthPath = codexBrokerProvider === 'codex-corp' ? 'oauth-corp' : 'oauth';
-    const accountStatuses = statuses.filter((entry) => codexBrokerProvider === 'codex-corp'
+    const corporateAccount = reviewerModel === 'codex'
+      ? codexBrokerProvider === 'codex-corp'
+      : normalizeReviewerModel(reviewerModel) === 'claude' && claudeBrokerProvider === 'claude-code-corp';
+    const accountAuthPath = corporateAccount ? 'oauth-corp' : 'oauth';
+    const accountStatuses = statuses.filter((entry) => corporateAccount
       ? entry.authPath === accountAuthPath : entry.authPath !== 'oauth-corp');
     const status = accountStatuses.find((entry) => entry.authPath === accountAuthPath) || accountStatuses[0];
     if (!status) {
       return { available: true, state: 'missing-provider-status', provider };
     }
     const cap = harnessCapFromStatuses(parseHqFleetQuotaStatus(JSON.stringify({ providerStatuses: accountStatuses })), {
-      harness: reviewerModel === 'codex' && codexBrokerProvider === 'codex-corp' ? 'codex-corp' : reviewerModel,
+      harness: corporateAccount ? (reviewerModel === 'codex' ? 'codex-corp' : 'claude-reviewer-corp') : reviewerModel,
       model: reviewerModel === 'codex'
         ? resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel
         : null,
@@ -544,7 +549,8 @@ async function spawnReviewer(args) {
   const fallback = args.geminiQuotaFallbackRoute;
   const canFallback = fallback && !fallback.quotaBlocked && normalizeReviewerModel(fallback.reviewerModel) !== 'gemini';
   const runFallback = async (quotaResult = null) => {
-    const gate = shouldPauseReviewerModel(rootDir, fallback.reviewerModel);
+    const credentialKey = reviewerCredentialKey(fallback.reviewerModel, args.claudeAccountSelection?.provider);
+    const gate = shouldPauseReviewerModel(rootDir, credentialKey);
     if (gate.paused) {
       // Keep the triggering quota hold (and both retry budgets) while the
       // fallback credential is held. Do not manufacture an OAuth failure.
@@ -585,7 +591,7 @@ async function spawnReviewer(args) {
       });
     } finally {
       if (gate.probe && !runtimeStarted) {
-        releaseReviewerCredentialProbe(rootDir, fallback.reviewerModel, gate);
+        releaseReviewerCredentialProbe(rootDir, credentialKey, gate);
       }
     }
   };
@@ -635,7 +641,18 @@ async function spawnReviewer(args) {
   return result;
 }
 
-async function spawnReviewerOnce({
+async function spawnReviewerOnce(args) {
+  const corporateClaude = normalizeReviewerModel(args.reviewerModel) === 'claude'
+    && args.claudeAccountSelection?.provider === 'claude-code-corp';
+  const withAccount = result => corporateClaude ? { ...result, claudeBrokerProvider: 'claude-code-corp' } : result;
+  return withAccount(await spawnReviewerOnceWithAccount({ ...args,
+    ...(args.onPostOperationSettled ? {
+      onPostOperationSettled: result => args.onPostOperationSettled(withAccount(result)),
+    } : {}),
+  }));
+}
+
+async function spawnReviewerOnceWithAccount({
   repo,
   prNumber,
   reviewerModel,
@@ -660,6 +677,7 @@ async function spawnReviewerOnce({
   crossModelReviewWaiverReason = null,
   afhReviewerFallback = null,
   codexBrokerProvider = 'codex',
+  claudeAccountSelection = null,
   onReviewerPgid = () => {},
   onReviewerRuntimeStarted = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
@@ -679,7 +697,8 @@ async function spawnReviewerOnce({
   if (reviewerRefusesBuilder(builderTag, reviewerModel)) {
     return {
       ok: false, effectiveReviewerModel: reviewerModel, failureClass: 'bug',
-      routingRefusal: true, error: CODEX_BUILDER_REVIEW_REFUSAL,
+      routingRefusal: true, error: normalizeReviewerModel(reviewerModel) === 'claude'
+        ? 'Claude-family reviewer cannot review a Claude-family builder' : CODEX_BUILDER_REVIEW_REFUSAL,
     };
   }
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
@@ -695,10 +714,12 @@ async function spawnReviewerOnce({
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
   let quotaDecision;
+  const claudeBrokerProvider = claudeAccountSelection?.provider || 'claude-code';
   try {
     quotaDecision = await readReviewerQuotaDecisionImpl({
       reviewerModel,
       codexBrokerProvider,
+      claudeBrokerProvider,
       env: quotaCheckEnv,
     });
     if (normalizeReviewerModel(reviewerModel) === 'gemini' && quotaDecision.state !== 'disabled') {
@@ -713,6 +734,9 @@ async function spawnReviewerOnce({
       state: 'probe-error',
       provider: providerForQuotaHarness(reviewerModel),
     };
+  }
+  if (normalizeReviewerModel(reviewerModel) === 'claude' && claudeAccountSelection?.hold) {
+    quotaDecision = { available: false, capped: true, state: claudeAccountSelection.reason, provider: 'anthropic' };
   }
   if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
     const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
@@ -855,6 +879,7 @@ async function spawnReviewerOnce({
           crossModelReviewWaiverReason,
           afhReviewerFallback,
           codexBrokerProvider,
+          claudeBrokerProvider,
           ...(agyIdentity ? { agyIdentity } : {}),
           // Persisted in the run record so a restarted watcher keeps this
           // identity out while this review still runs.
@@ -1300,7 +1325,7 @@ function settleReviewerAttempt({
     const postedAt = new Date().toISOString();
     let recoveredOutage = null;
     try {
-      recoveredOutage = reviewerModel ? clearReviewerCredentialOutage(rootDir, reviewerModel) : null;
+      recoveredOutage = reviewerModel ? clearReviewerCredentialOutage(rootDir, reviewerCredentialKey(reviewerModel, result.claudeBrokerProvider)) : null;
     } catch (error) {
       log?.warn?.(`[watcher] Credential outage clear failed for ${reviewerModel}: ${error?.message || error}`);
     }
@@ -1308,7 +1333,7 @@ function settleReviewerAttempt({
         typeof statements.rearmReviewerCredentialOutage?.run === 'function') {
       withSqliteBusyRetrySync(
         () => statements.rearmReviewerCredentialOutage.run(
-          `[outage-transient:reviewer-credential:${String(reviewerModel).toLowerCase()}]%`
+          `[outage-transient:reviewer-credential:${String(recoveredOutage.reviewerModel || reviewerModel).toLowerCase()}]%`
         ),
         { label: `reviewer-credential-outage-rearm:${reviewerModel}`, log }
       );
@@ -1354,7 +1379,8 @@ function settleReviewerAttempt({
   const reviewCreateFailure = classifyGitHubReviewCreateFailure(fullFailureOutput);
   const failureClass = reviewCreateFailure?.failureClass || result.failureClass || 'unknown';
 
-  const routingRefusal = failureClass === 'bug' && result.error === CODEX_BUILDER_REVIEW_REFUSAL;
+  const routingRefusal = failureClass === 'bug'
+    && (result.routingRefusal === true || result.error === CODEX_BUILDER_REVIEW_REFUSAL);
   if (routingRefusal || failureClass === 'stale-review-head') {
     // Claim identity comes from dispatch, not the runtime adapter's result.
     // Failure/lease statements charge attempts and cannot handle head churn.
@@ -1466,7 +1492,7 @@ function settleReviewerAttempt({
   if (failureClass === 'oauth-broken') {
     try {
       oauthCredentialState = recordReviewerCredentialFailure(rootDir, {
-        reviewerModel,
+        reviewerModel: reviewerCredentialKey(reviewerModel, result.claudeBrokerProvider),
         repo: repoPath,
         prNumber,
         failedAt: failureAt,

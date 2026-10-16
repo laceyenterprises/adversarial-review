@@ -1,3 +1,4 @@
+import { selectClaudeAccountLaneFromSnapshot } from '../claude-account-routing.mjs';
 // HHR — harness-fallback protection for the AMA closer/hammer.
 //
 // The AMA closer worker_class defaults to `hammer`, a codex (OpenAI OAuth)
@@ -54,7 +55,8 @@ import { fileURLToPath } from 'node:url';
 import {
   isGroundedProviderState,
   harnessCapFromStatuses,
-  parseHqFleetQuotaStatus,
+  parseHqFleetQuotaSnapshot,
+  quotaStatusesFromSnapshot,
   providerAvailabilityFromStatuses,
   providerSoftGroundingFromStatuses,
 } from '../fleet-quota-status.mjs';
@@ -77,6 +79,7 @@ export const CLOSER_WORKER_CLASS_PROVIDER = Object.freeze({
   // identity on the claude harness, so its gating provider is anthropic (the
   // whole point is that it's live when codex/openai is grounded).
   'hammer-claude': 'anthropic',
+  'hammer-claude-corp': 'anthropic',
   codex: 'openai',
   'claude-code': 'anthropic',
   claude: 'anthropic',
@@ -164,7 +167,7 @@ export async function resolveCloserDispatchHarness({
   try {
     stdout = await readFleetQuotaStatusStdout({ hqPath, execFileImpl, env });
   } catch (err) {
-    return { ...base, reason: 'fleet-quota-status-unavailable', error: String(err?.message || err) };
+    return { ...base, hold: primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unavailable', error: String(err?.message || err) };
   }
 
   // Both limbs are read from the SAME single status payload, so the hard state
@@ -175,14 +178,31 @@ export async function resolveCloserDispatchHarness({
   // — fail open to the primary here too, rather than leaning on the call site's
   // catch, so this module's own contract holds.
   let providerStatuses;
+  let snapshot;
   let primaryAvailability;
   let primarySoft;
   try {
-    providerStatuses = parseHqFleetQuotaStatus(stdout);
-    primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary === 'hammer-corp' ? 'oauth-corp' : null });
-    primarySoft = providerSoftGroundingFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary === 'hammer-corp' ? 'oauth-corp' : null });
+    snapshot = parseHqFleetQuotaSnapshot(stdout);
+    providerStatuses = quotaStatusesFromSnapshot(snapshot);
+    primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null });
+    primarySoft = providerSoftGroundingFromStatuses(providerStatuses, { provider: primaryProvider, authPath: primary.endsWith('-corp') ? 'oauth-corp' : null });
   } catch (err) {
-    return { ...base, reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
+    return { ...base, hold: primary === 'hammer-claude-corp', reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
+  }
+
+  const accountLane = (name) => selectClaudeAccountLaneFromSnapshot(snapshot, {
+    statuses: providerStatuses,
+    workerClass: ['claude', 'claude-code'].includes(name) ? 'hammer-claude' : name,
+    model: modelForWorkerClass(name),
+  });
+  const primaryAccount = accountLane(primary);
+  if (primaryAccount?.reason === 'claude-account-evidence-unknown') {
+    return { ...base, hold: true, reason: primaryAccount.reason };
+  }
+  if (primaryAccount && !primaryAccount.hold) {
+    return { ...base, workerClass: primaryAccount.workerClass,
+      fellBack: primaryAccount.workerClass !== primary, from: primary, to: primaryAccount.workerClass,
+      provider: primaryProvider, fallbackProvider: primaryProvider, reason: primaryAccount.reason };
   }
 
   const primaryCap = harnessCapFromStatuses(providerStatuses, {
@@ -191,7 +211,7 @@ export async function resolveCloserDispatchHarness({
   });
   const hardGrounded = isGroundedProviderState(primaryAvailability.state) || primaryCap.capSource === 'model-exhausted';
   const softGrounded = primarySoft.grounded === true;
-  if (!hardGrounded && !softGrounded) {
+  if (!primaryAccount?.hold && !hardGrounded && !softGrounded) {
     // Primary is `ok` (healthy → auto-revert) or ambiguous (degraded/unknown/
     // missing, and no soft verdict → do not guess). Either way, keep the primary.
     return {
@@ -221,13 +241,16 @@ export async function resolveCloserDispatchHarness({
   //
   // CCX-04: screen model caps and soft grounding on every candidate too.
   // With no admitting candidate the caller holds instead of spawning capped.
-  for (const candidate of fallbacks) {
+  for (let candidate of fallbacks) {
     if (candidate === primary) continue;
+    const account = accountLane(candidate);
+    if (account?.hold) continue;
+    if (account) candidate = account.workerClass;
     const candidateProvider = providerForCloserWorkerClass(candidate);
     if (candidateProvider) {
       const candidateAvailability = providerAvailabilityFromStatuses(providerStatuses, {
         provider: candidateProvider,
-        authPath: candidate === 'hammer-corp' ? 'oauth-corp' : null,
+        authPath: candidate.endsWith('-corp') ? 'oauth-corp' : null,
       });
       const candidateCap = harnessCapFromStatuses(providerStatuses, {
         harness: candidateProvider === 'openai' ? (candidate === 'hammer-corp' ? 'codex-corp' : 'codex') : candidate,
@@ -236,7 +259,7 @@ export async function resolveCloserDispatchHarness({
       if (candidateCap.capped || isGroundedProviderState(candidateAvailability.state)) continue;
       if (candidate === 'hammer-corp' && !candidateCap.available) continue;
       if (screenSoftGroundedFallbacks
-        && providerSoftGroundingFromStatuses(providerStatuses, { provider: candidateProvider, authPath: candidate === 'hammer-corp' ? 'oauth-corp' : null }).grounded === true) {
+        && providerSoftGroundingFromStatuses(providerStatuses, { provider: candidateProvider, authPath: candidate.endsWith('-corp') ? 'oauth-corp' : null }).grounded === true) {
         continue;
       }
     }

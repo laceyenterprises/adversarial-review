@@ -99,7 +99,7 @@ test('CCX-04 both accounts capped: declared Claude fallbacks, no capped spawn', 
     fallbackWorkerClasses: ['hammer-corp', 'hammer-claude'], execFileImpl: probe(statuses) })).workerClass, 'hammer-claude');
   assert.equal((await resolveRemediationWorkerClassWithFallback({ primary: 'codex',
     fallbackWorkerClasses: ['remediator-codex-corp', 'remediator-claude'], execFileImpl: probe(statuses) })).workerClass, 'remediator-claude');
-  assert.equal(reviewer(statuses).reviewerModel, 'claude');
+  assert.equal(reviewer(statuses).quotaBlocked, true, 'Claude cannot review this Claude build');
   statuses[2].state = 'exhausted';
   assert.equal(reviewer(statuses).quotaBlocked, true);
   assert.equal((await resolveCloserDispatchHarness({ workerClass: 'hammer',
@@ -110,7 +110,7 @@ test('CCX-04 both accounts capped: declared Claude fallbacks, no capped spawn', 
 
 for (const corp of ['unknown', 'degraded', 'grounded']) {
   test(`CCX-04 corporate ${corp} is not admitting`, () => {
-    assert.equal(reviewer(rows('exhausted', corp)).reviewerModel, 'claude');
+    assert.equal(reviewer(rows('exhausted', corp)).quotaBlocked, true);
   });
 }
 
@@ -128,7 +128,7 @@ test('CCX-04 reviewer screens the routed model on each account', () => {
   const statuses = rows('ok', 'ok', { models: [{ model: 'test-model', state: 'exhausted' }] });
   assert.equal(reviewer(statuses, 'claude-code', 'test-model').codexBrokerProvider, 'codex-corp');
   statuses[0].models = [{ model: 'test-model', state: 'exhausted' }];
-  assert.equal(reviewer(statuses, 'claude-code', 'test-model').reviewerModel, 'claude');
+  assert.equal(reviewer(statuses, 'claude-code', 'test-model').quotaBlocked, true);
 });
 
 test('CCX-04 codex-corp belongs to codex for routing and never-review-own-builder', () => {

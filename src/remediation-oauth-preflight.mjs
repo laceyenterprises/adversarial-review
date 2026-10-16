@@ -1,3 +1,4 @@
+import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Per-worker-class OAuth pre-flight assertions for remediation workers.
 //
 // Extracted VERBATIM from follow-up-remediation.mjs (ARC-19 wave10). This leaf
@@ -199,7 +200,6 @@ const CLAUDE_CODE_REQUIRED_API_PROVIDER = 'firstParty';
 // keychain-stored claude-code OAuth. Set 'keychain' explicitly to force the
 // direct-CLI path, or 'broker' to force the fleet posture before the secret is
 // provisioned.
-const CLAUDE_CODE_BROKER_PROVIDER = 'claude-code';
 const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
 const DEFAULT_OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4097';
 const BROKER_READYZ_TIMEOUT_MS = 2_500;
@@ -239,16 +239,16 @@ function resolveBrokerReadyzUrls(env = process.env) {
 // get a token" gate. A rejected/dead grant reads `can_serve: false`, and an
 // absent provider is not serviceable at all. Fall back to the boolean readiness
 // verdict in `providers` when the richer `provider_states` map is unavailable.
-function claudeCodeServiceableFromReadyz(body) {
+function claudeCodeServiceableFromReadyz(body, provider = 'claude-code') {
   if (!body || typeof body !== 'object') return false;
-  const state = body.provider_states?.[CLAUDE_CODE_BROKER_PROVIDER];
+  const state = body.provider_states?.[provider];
   if (state && typeof state === 'object' && typeof state.can_serve === 'boolean') {
     return state.can_serve === true;
   }
-  return body.providers?.[CLAUDE_CODE_BROKER_PROVIDER] === true;
+  return body.providers?.[provider] === true;
 }
 
-async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, timeoutMs = BROKER_READYZ_TIMEOUT_MS }) {
+async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, provider = 'claude-code', timeoutMs = BROKER_READYZ_TIMEOUT_MS }) {
   // Bound the whole exchange (headers AND body read) so a wedged broker can
   // never hang the remediation drain. `/readyz` is a PUBLIC endpoint (no shared
   // secret), so this needs no credential injection. It returns HTTP 200 when
@@ -268,11 +268,11 @@ async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, timeoutMs = BROK
     } catch (err) {
       return { ok: false, reason: `${url}/readyz body not JSON (http ${res.status}): ${err.message}` };
     }
-    if (claudeCodeServiceableFromReadyz(body)) {
+    if (claudeCodeServiceableFromReadyz(body, provider)) {
       return { ok: true };
     }
-    const state = body?.provider_states?.[CLAUDE_CODE_BROKER_PROVIDER];
-    const known = body?.providers && CLAUDE_CODE_BROKER_PROVIDER in body.providers;
+    const state = body?.provider_states?.[provider];
+    const known = body?.providers && provider in body.providers;
     const detail = state?.kind || (known ? 'not-ready' : 'provider-absent');
     return { ok: false, reason: `${url}/readyz reports claude-code not serviceable (${detail})` };
   } catch (err) {
@@ -290,14 +290,15 @@ async function assertClaudeCodeBrokerOAuth({
   if (typeof fetchImpl !== 'function') {
     throw new OAuthError('claude-code', 'no fetch implementation available to probe the OAuth broker');
   }
+  const provider = resolveClaudeBrokerProvider(env);
   const urls = resolveBrokerReadyzUrls(env);
   const failures = [];
   for (const url of urls) {
     // Mirror the worker's own primary->standby fetch order; either endpoint
     // vending claude-code is enough.
-    const result = await probeBrokerReadyzForClaudeCode(url, { fetchImpl, timeoutMs });
+    const result = await probeBrokerReadyzForClaudeCode(url, { fetchImpl, timeoutMs, provider });
     if (result.ok) {
-      return { transport: 'broker', brokerUrl: url, provider: CLAUDE_CODE_BROKER_PROVIDER };
+      return { transport: 'broker', brokerUrl: url, provider };
     }
     failures.push(result.reason);
   }
@@ -398,13 +399,13 @@ async function resolveBrokerSharedSecret(env = process.env) {
   return '';
 }
 
-function usableBrokerAccessToken(body) {
+function usableBrokerAccessToken(body, provider) {
   if (!body || typeof body !== 'object') return null;
   const token = body.access_token;
   if (typeof token !== 'string' || token.length === 0 || token === 'null') return null;
   // Provider guard: the broker echoes the provider it minted for. Accept an
-  // absent provider (older broker builds) or an exact claude-code match.
-  if (body.provider != null && body.provider !== CLAUDE_CODE_BROKER_PROVIDER) return null;
+  // absent provider only for primary (older brokers); corporate must echo its identity.
+  if ((body.provider == null ? provider !== 'claude-code' : body.provider !== provider)) return null;
   return token;
 }
 
@@ -413,8 +414,8 @@ function usableBrokerAccessToken(body) {
 // the caller whether retrying this same endpoint could plausibly succeed. Never
 // throws: the fetch rejection is classified and returned so the retry ladder and
 // the primary->standby failover both read one uniform shape.
-async function attemptBrokerClaudeCodeTokenFetch({ base, secret, model, fetchImpl, timeoutMs }) {
-  let url = `${base}/token?provider=${CLAUDE_CODE_BROKER_PROVIDER}`;
+async function attemptBrokerClaudeCodeTokenFetch({ base, secret, model, provider, fetchImpl, timeoutMs }) {
+  let url = `${base}/token?provider=${provider}`;
   if (model) url += `&model=${encodeURIComponent(model)}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -440,7 +441,7 @@ async function attemptBrokerClaudeCodeTokenFetch({ base, secret, model, fetchImp
       // fail-closed.
       return { ok: false, reason: `${base}/token body not JSON: ${err.message}`, transient: true };
     }
-    const token = usableBrokerAccessToken(body);
+    const token = usableBrokerAccessToken(body, provider);
     if (!token) {
       // The broker answered cleanly and declined: a wrong-provider echo or an
       // absent access_token is a real fault (`/readyz` already asserted
@@ -478,20 +479,25 @@ async function attemptBrokerClaudeCodeTokenFetch({ base, secret, model, fetchImp
 // `timeoutMs`, so a wedged broker can never hang the remediation drain.
 async function mintClaudeCodeRemediationBrokerToken({
   env = process.env,
+  provider = resolveClaudeBrokerProvider(env),
   model = String(env.CLAUDE_MODEL_ID || env.CLAUDE_CODE_MODEL_ID || '').trim(),
   fetchImpl = globalThis.fetch,
   timeoutMs = BROKER_TOKEN_TIMEOUT_MS,
   retryDelaysMs = BROKER_TOKEN_RETRY_DELAYS_MS,
   log = null,
 } = {}) {
+  resolveClaudeBrokerProvider({ CLAUDE_BROKER_PROVIDER: provider });
+  if (provider === 'claude-code-corp' && resolveClaudeCodeOAuthTransport(env) !== 'broker') {
+    throw new OAuthError('claude-code', 'corporate Claude requires broker transport');
+  }
   // Only the broker transport mints. A keychain-configured host authenticates
   // the direct CLI itself, so leave its env untouched.
   if (resolveClaudeCodeOAuthTransport(env) !== 'broker') {
     return { injected: false, reason: 'transport-not-broker' };
   }
-  // Respect an already-present token (an os-mode seed or an operator override):
-  // never clobber a credential the caller deliberately supplied.
-  if (env.ANTHROPIC_AUTH_TOKEN && String(env.ANTHROPIC_AUTH_TOKEN).trim()) {
+  // Primary callers retain their seeded token. Corporate grants must be
+  // minted with an explicit provider echo, never borrowed from ambient auth.
+  if (provider === 'claude-code' && env.ANTHROPIC_AUTH_TOKEN && String(env.ANTHROPIC_AUTH_TOKEN).trim()) {
     return { injected: false, reason: 'token-already-present' };
   }
   if (typeof fetchImpl !== 'function') {
@@ -520,13 +526,13 @@ async function mintClaudeCodeRemediationBrokerToken({
   const failures = [];
   for (const base of resolveBrokerReadyzUrls(env)) {
     for (let attempt = 0; attempt <= delays.length; attempt += 1) {
-      const result = await attemptBrokerClaudeCodeTokenFetch({ base, secret, model, fetchImpl, timeoutMs });
+      const result = await attemptBrokerClaudeCodeTokenFetch({ base, secret, model, provider, fetchImpl, timeoutMs });
       if (result.ok) {
         return {
           injected: true,
           token: result.token,
           brokerUrl: base,
-          provider: CLAUDE_CODE_BROKER_PROVIDER,
+          provider,
           expiresAt: result.expiresAt,
         };
       }
@@ -571,31 +577,19 @@ async function assertClaudeCodeOAuth({
   // first call honest and silences subsequent ones.
   // See the cache comment block above `assertCodexOAuth` for full
   // rationale.
+  const resolvedTransport = transport || resolveClaudeCodeOAuthTransport(env);
+  // Broker readiness is cheap and account-bound; a primary cache hit cannot
+  // authorize corporate, and a transient failure must clear on the next job.
+  if (resolvedTransport === 'broker') {
+    await assertClaudeCodeBrokerOAuth({ env, fetchImpl });
+    return;
+  }
+  if (resolveClaudeBrokerProvider(env) === 'claude-code-corp') {
+    throw new OAuthError('claude-code', 'corporate Claude requires broker transport');
+  }
   const cached = __oauthPreflightCache['claude-code'];
   if (cached === true) return;
   if (cached instanceof OAuthError) throw cached;
-
-  const resolvedTransport = transport || resolveClaudeCodeOAuthTransport(env);
-  if (resolvedTransport === 'broker') {
-    // NOTE: the broker path caches SUCCESS only, never the failure. The
-    // keychain/codex/gemini paths cache their OAuthError because re-probing
-    // costs a subprocess spawn and a macOS TCC prompt, so a permanently
-    // sticky error is the cheaper trade. The broker probe is just an HTTP GET
-    // to a loopback `/readyz`: no TCC prompt, no subprocess, bounded by an
-    // AbortController. And `assertClaudeCodeBrokerOAuth` throws an OAuthError
-    // for TRANSIENT conditions too — ECONNREFUSED / timeout while the local
-    // broker restarts. Caching that in the process-global cache would turn a
-    // few-second broker bounce into a permanent remediation outage: every
-    // later consume tick would re-throw the cached error without re-probing,
-    // and the daemon could never spawn a claude-code worker again until it
-    // was manually bounced. So let the next tick re-probe.
-    await assertClaudeCodeBrokerOAuth({ env, fetchImpl });
-    __oauthPreflightCache['claude-code'] = true;
-    // Returns undefined, matching the cache-hit path above and the
-    // codex/gemini pre-flights: the contract is "throws or resolves", never a
-    // payload whose presence depends on cache state.
-    return;
-  }
 
   // transport === 'keychain': legacy direct-CLI login-state probe. Only correct
   // for a dev/local host that runs `claude` against a login-keychain session and

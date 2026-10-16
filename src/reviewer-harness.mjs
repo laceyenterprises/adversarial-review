@@ -1,3 +1,4 @@
+import { resolveClaudeBrokerProvider } from './claude-account-routing.mjs';
 // Reviewer model-execution harness.
 //
 // ARC-10: the bespoke per-harness spawn surface (Claude/Codex/Gemini/Antigravity
@@ -285,6 +286,7 @@ async function withClaudeLaunchctlRetry(operation, {
 }
 
 async function prepareClaudeOAuthEnv({
+  model = null,
   sourceEnv = process.env,
   fetchImpl = globalThis.fetch,
   mintClaudeCodeBrokerTokenImpl = mintClaudeCodeRemediationBrokerToken,
@@ -297,11 +299,19 @@ async function prepareClaudeOAuthEnv({
   proxied = claudeReviewerTokenProxyEnabled(sourceEnv),
 } = {}) {
   const { env, stripped } = scrubOAuthFallbackEnv(sourceEnv);
+  const provider = resolveClaudeBrokerProvider(env);
   const transport = resolveClaudeReviewerOAuthTransport(env);
+  if (provider === 'claude-code-corp' && transport !== 'broker') {
+    throw new OAuthError('claude', 'corporate Claude reviewer requires broker transport');
+  }
   if (transport !== 'broker') {
     return { env, stripped, transport: 'keychain' };
   }
 
+  const brokerModel = model || resolveReviewerExecution('claude', { env, log: logger }).model;
+  if (provider === 'claude-code-corp' && !brokerModel) {
+    throw new OAuthError('claude', 'corporate Claude reviewer requires a governed model');
+  }
   const brokerEnv = {
     ...env,
     ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker',
@@ -309,6 +319,8 @@ async function prepareClaudeOAuthEnv({
   delete brokerEnv.ANTHROPIC_AUTH_TOKEN;
   const minted = await mintClaudeCodeBrokerTokenImpl({
     env: brokerEnv,
+    provider,
+    ...(brokerModel ? { model: brokerModel } : {}),
     fetchImpl,
     log: logger,
   });
@@ -340,6 +352,7 @@ async function prepareClaudeOAuthEnv({
     env: authEnv,
     stripped,
     transport: 'broker',
+    provider,
     tokenInjected: minted?.injected === true || Boolean(minted?.token),
     brokerUrl: minted?.brokerUrl || null,
     expiresAt: minted?.expiresAt || null,
@@ -347,7 +360,7 @@ async function prepareClaudeOAuthEnv({
     // `/token` mint as above, never a refresh; the shared secret stays in this
     // closure and never reaches the subprocess env.
     remint: async () => {
-      const again = await mintClaudeCodeBrokerTokenImpl({ env: brokerEnv, fetchImpl, log: logger });
+      const again = await mintClaudeCodeBrokerTokenImpl({ env: brokerEnv, provider, ...(brokerModel ? { model: brokerModel } : {}), fetchImpl, log: logger });
       return { token: again?.token || null, expiresAt: again?.expiresAt || null };
     },
   };
@@ -1097,7 +1110,9 @@ function readCodexConfigTopLevelValues(keys, {
 
 function resolveReviewerExecution(harness, { env = process.env, fallbackModel = null, fallbackEffort = null, log = console } = {}) {
   const pin = harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '';
-  const resolution = resolveRemediationModel(`${harness}-reviewer`, { env, pin, fallbackModel });
+  // Account routing changes the broker binding, not the governed reviewer role.
+  const className = `${harness}-reviewer`;
+  const resolution = resolveRemediationModel(className, { env, pin, fallbackModel });
   const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;
   const modelSource = resolution.modelSource === 'fallback-constant' ? (fallbackModel ? 'host-config' : 'cli-default') : resolution.modelSource;

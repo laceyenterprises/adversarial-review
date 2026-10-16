@@ -1,3 +1,6 @@
+import { reviewerCredentialKey } from '../src/claude-account-routing.mjs';
+import { afhGroundingSnapshotFromStdout } from '../src/afh-reviewer-fallback.mjs';
+import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -104,6 +107,25 @@ test('healthy reviewer status dispatches normally', async () => {
     assert.equal(capture.completed[0].status, 'completed');
   });
 });
+
+for (const [state, expectedSpawns] of [['ok', 1], ['exhausted', 0]]) {
+  test(`Gemini ${state} quota stays independent of a selected corporate Claude account`, async () => {
+    await withStatusFile('exhausted', async (statusDir) => {
+      await writeFile(join(statusDir, 'google-oauth.status.json'), JSON.stringify({ state, authPath: 'oauth' }));
+      const capture = newCapture();
+      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir }, capture });
+      args.reviewerModel = 'gemini';
+      args.botTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
+      args.claudeAccountSelection = { provider: 'claude-code-corp', hold: false };
+      const result = await spawnReviewer(args);
+      assert.equal(capture.spawnCalls, expectedSpawns);
+      if (!expectedSpawns) {
+        assert.equal(result.failureClass, 'quota-exhausted');
+        assert.equal(capture.completed[0].metadata.quotaState, 'exhausted');
+      } else assert.equal(result.ok, true);
+    });
+  });
+}
 
 test('unreadable reviewer status fails open and dispatches normally', async () => {
   await withStatusFile('unused', async (statusDir) => {
@@ -704,5 +726,68 @@ test('AGYCOOLDOWN-01: runtime quota evidence records the identity from its lease
     const cooldown = readGeminiQuotaCooldown({ rootDir, env, identityUser: 'reviewer-b' });
     assert.ok(Date.parse(cooldown.resetAt) > Date.now() + 49 * 3600000);
     assert.equal(readGeminiQuotaCooldown({ rootDir, env, identityUser: 'owner-identity' }), null);
+  } finally { await rm(rootDir, { recursive: true, force: true }); }
+});
+
+for (const [options, expectedProvider] of [[{}, 'claude-code-corp'], [{ corpNearCap: true }, 'claude-code'],
+  [{ corpReady: false }, 'claude-code'], [{ corp: 'exhausted', primary: 'exhausted' }, null]]) {
+  test(`Claude account decision reaches runtime: ${JSON.stringify(options)}`, async () => {
+    const capture = newCapture();
+    const args = spawnArgs({ env: {}, capture });
+    args.builderTag = 'codex';
+    args.readReviewerQuotaDecisionImpl = async ({ claudeBrokerProvider }) => {
+      assert.equal(claudeBrokerProvider, expectedProvider || 'claude-code');
+      return { available: true, state: 'ok' };
+    };
+    args.claudeAccountSelection = afhGroundingSnapshotFromStdout(JSON.stringify(claudeAccountFixture(options))).claudeAccountSelection;
+    args.reviewerRuntimeAdapterOverride.spawnReviewer = async request => {
+      capture.spawnCalls++;
+      assert.equal(request.subjectContext.claudeBrokerProvider, expectedProvider);
+      return { ok: true, reviewBody: 'synthetic', reviewBodyDelivery: 'adapter' };
+    };
+    const result = await spawnReviewer(args);
+    assert.equal(capture.spawnCalls, expectedProvider ? 1 : 0);
+    if (expectedProvider === 'claude-code-corp') assert.equal(result.claudeBrokerProvider, expectedProvider);
+    if (!expectedProvider) assert.equal(result.failureClass, 'quota-exhausted');
+  });
+}
+
+test('Claude builders cannot reach either Claude reviewer account', async () => {
+  for (const builderTag of ['claude-code', 'claude-code-corp']) {
+    const capture = newCapture();
+    const args = spawnArgs({ env: {}, capture });
+    args.builderTag = builderTag;
+    args.readReviewerQuotaDecisionImpl = async () => { throw new Error('refusal must precede quota read'); };
+    const result = await spawnReviewer(args);
+    assert.equal(result.routingRefusal, true);
+    assert.equal(capture.spawnCalls, 0);
+  }
+});
+
+test('corporate credential failures and recovery neither pause nor clear primary credential state', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'claude-account-outage-'));
+  const corp = reviewerCredentialKey('claude-code', 'claude-code-corp');
+  const rearmed = [];
+  const statements = {
+    markPosted: { run() {} }, markReviewerCredentialOutage: { run() {} },
+    getReviewRow: { get: () => null },
+    rearmReviewerCredentialOutage: { run: pattern => rearmed.push(pattern) },
+  };
+  try {
+    for (const reviewerModel of [corp, 'claude-code']) {
+      recordReviewerCredentialFailure(rootDir, { reviewerModel, repo: 'example/synthetic', prNumber: 1 });
+    }
+    settleReviewerAttempt({ rootDir, repoPath: 'example/synthetic', prNumber: 2, reviewerModel: 'claude-code',
+      result: { ok: false, failureClass: 'oauth-broken', claudeBrokerProvider: 'claude-code-corp' }, statements,
+      log: { warn() {}, log() {} } });
+    assert.equal(readReviewerCredentialOutage(rootDir, corp).active, true);
+    assert.equal(readReviewerCredentialOutage(rootDir, 'claude-code').active, false);
+    assert.equal(readReviewerCredentialOutage(rootDir, 'claude-code').distinctPrCount, 1);
+    settleReviewerAttempt({ rootDir, repoPath: 'example/synthetic', prNumber: 2, reviewerModel: 'claude-code',
+      result: { ok: true, claudeBrokerProvider: 'claude-code-corp' }, statements,
+      log: { warn() {}, log() {} } });
+    assert.equal(readReviewerCredentialOutage(rootDir, corp), null);
+    assert.equal(readReviewerCredentialOutage(rootDir, 'claude-code').distinctPrCount, 1);
+    assert.deepEqual(rearmed, ['[outage-transient:reviewer-credential:claude-code-corp]%']);
   } finally { await rm(rootDir, { recursive: true, force: true }); }
 });

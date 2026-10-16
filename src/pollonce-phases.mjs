@@ -1,3 +1,4 @@
+import { reviewerCredentialKey } from './claude-account-routing.mjs';
 import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './reviewer-timeout-budget.mjs';
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
@@ -2585,7 +2586,7 @@ export async function processReviewSubject(entry, ctx) {
         });
         return;
       }
-      const credentialOutagePreflight = shouldPauseReviewerModel(ROOT, route.reviewerModel, {
+      const credentialOutagePreflight = shouldPauseReviewerModel(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), {
         reserve: false,
       });
       if (credentialOutagePreflight.paused) {
@@ -3802,7 +3803,7 @@ export async function processReviewSubject(entry, ctx) {
               declineFleetSelfRepairRereview(skipReviewerSpawnReason);
               return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
-              const credentialOutageGate = shouldPauseReviewerModel(ROOT, route.reviewerModel);
+              const credentialOutageGate = shouldPauseReviewerModel(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider));
               if (credentialOutageGate.probe) credentialProbeReservation = credentialOutageGate;
               if (credentialOutageGate.paused) {
                 stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
@@ -3838,6 +3839,7 @@ export async function processReviewSubject(entry, ctx) {
                   || completedRemediationRounds > 0,
               });
               const spawnReviewerArgs = {
+                claudeAccountSelection: afhGrounding?.claudeAccountSelection || null,
                 repo: repoPath,
                 prNumber,
                 reviewerModel: route.reviewerModel,
@@ -3863,7 +3865,7 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerSessionUuid = nextSessionUuid;
                   reviewerProcessStarted = false;
                   if (credentialProbeReservation?.probe) {
-                    releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                    releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
                     credentialProbeReservation = null;
                   }
                 },
@@ -3965,7 +3967,7 @@ export async function processReviewSubject(entry, ctx) {
                 if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
                 if (credentialProbeReservation?.probe && !reviewerProcessStarted) {
                   try {
-                    releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                    releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
                   } catch (releaseError) {
                     console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
                   }
@@ -3978,7 +3980,7 @@ export async function processReviewSubject(entry, ctx) {
               else if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
               if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
                 try {
-                  releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                  releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
                 } catch (releaseError) {
                   console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
                 }
@@ -4024,7 +4026,7 @@ export async function processReviewSubject(entry, ctx) {
           } finally {
             if (credentialProbeReservation?.probe && !reviewerSpawned) {
               try {
-                releaseReviewerCredentialProbe(ROOT, route.reviewerModel, credentialProbeReservation);
+                releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
               } catch (releaseError) {
                 console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
               }

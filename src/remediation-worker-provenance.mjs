@@ -57,12 +57,14 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 // laceyenterprises/{adversarial-review,agent-os} on 2026-08-08 via a
 // throwaway-ref create/delete probe against each App's broker-minted token.
 REMEDIATION_WORKER_IDENTITY_DEFAULTS['remediator-codex-corp'] = REMEDIATION_WORKER_IDENTITY_DEFAULTS.codex;
+REMEDIATION_WORKER_IDENTITY_DEFAULTS['remediator-claude-corp'] = REMEDIATION_WORKER_IDENTITY_DEFAULTS['claude-code'];
 REMEDIATION_WORKER_IDENTITY_DEFAULTS['remediator-claude'] = REMEDIATION_WORKER_IDENTITY_DEFAULTS['claude-code'];
 
 const REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS = {
   codex: 'github-app-codex-agent',
   'remediator-codex-corp': 'github-app-codex-agent',
   'remediator-claude': 'github-app-claude-agent',
+  'remediator-claude-corp': 'github-app-claude-agent',
   'claude-code': 'github-app-claude-agent',
   gemini: 'github-app-gemini-agent',
 };
@@ -78,7 +80,7 @@ const WORKFLOW_PUSH_PROVIDER = 'github-app-merge-agent';
 // merge-agent fallback (loud + audited) rather than silently failing the push:
 // the operator action is to grant the per-harness App push access and add the
 // harness here.
-const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gemini', 'remediator-codex-corp', 'remediator-claude']);
+const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gemini', 'remediator-codex-corp', 'remediator-claude', 'remediator-claude-corp']);
 
 // Resolve the broker push provider for a physical harness class. Precedence:
 //   1. workflow-file remediation requirement -> merge-agent App, unless the
@@ -180,6 +182,7 @@ function remediationWorkerTrailerClass(workerClass) {
       return GEMINI_REMEDIATION_WORKER_TRAILER_CLASS;
     case 'claude-code':
     case 'remediator-claude':
+    case 'remediator-claude-corp':
       return 'claude-code-remediation';
     case 'codex':
     default:

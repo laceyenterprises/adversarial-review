@@ -985,20 +985,42 @@ export function createHammerScratchDir(promptDir) {
   return scratchDir;
 }
 
-function cleanupHammerScratchDir(record, logger = console) {
+export function cleanupHammerScratchDir(record, logger = console) {
   const scratchDir = record?.scratchDir;
   // Records from before HAMTMP-01 have no directory. Restrict removal to the
   // exact child namespace we create; never follow a record outside prompt state.
   if (!scratchDir || !record.promptDir
     || dirname(resolve(scratchDir)) !== resolve(record.promptDir)
-    || !basename(scratchDir).startsWith('hammer-scratch-')) return;
-  try { rmSync(scratchDir, { recursive: true, force: true }); }
+    || !basename(scratchDir).startsWith('hammer-scratch-')) return false;
+  try {
+    rmSync(scratchDir, { recursive: true, force: true });
+    return true;
+  }
   catch (err) {
     const message = `hammer scratch cleanup failed: ${err.message}`;
     if (typeof logger?.warn === 'function') logger.warn(message);
     else if (typeof logger?.error === 'function') logger.error(message);
     else if (typeof logger === 'function') logger(message);
+    return false;
   }
+}
+
+// Scratch ownership ends independently of merge/retry authority. In particular,
+// merged-PR reconciliation writes outcome=succeeded without changing the last
+// observed worker status. Do not broaden the authority status sets for cleanup.
+const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
+  'merged', 'closed', 'stopped', 'reaped', 'rejected',
+  'succeeded', 'completed', 'failed', 'failed-without-merge', 'superseded',
+  'cancelled', 'canceled', 'terminal', 'not-found', 'unverified-terminal-success',
+  'operator_triage_required', 'reaped_stuck_requested', 'pr-closed-externally',
+  'no-merge:pr-closed-externally',
+]);
+
+export function isTerminalHammerScratchRecord(record) {
+  if (!record || record.state === 'dispatching') return false;
+  return record.state === 'launch-terminal' || record.state === 'dispatch-failed'
+    || [record.lastObservedStatus, record.outcome, record.terminalOutcome]
+      .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value)));
 }
 
 async function cleanupHammerCloserWorker({
@@ -2464,12 +2486,11 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
   if (!next) return existing;
   writeAmaCloserDispatchRecord(rootDir, identity, next);
   // HQ cancellation also settles runs through this writer, without teardown.
-  // Only a fresh terminal observation owns cleanup; launch intents can carry
-  // a predecessor's status until dispatch returns and must retain new scratch.
-  const status = normalizeWorkerRunStatus(next.lastObservedStatus);
+  // Launch intents can carry a predecessor's status until dispatch returns.
+  // Otherwise retry cleanup on repeated observations too: an earlier removal
+  // may have failed, or this may be a pre-cleanup terminal record after restart.
   if (existing?.state !== 'dispatching' && next.state !== 'dispatching'
-    && status !== normalizeWorkerRunStatus(existing?.lastObservedStatus)
-    && AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(status)) {
+    && isTerminalHammerScratchRecord(next)) {
     cleanupHammerScratchDir(next);
   }
   return next;

@@ -102,6 +102,21 @@ test('unlabeled PR derives additive-only from initial diff and is enforced witho
   assert.equal(result.backfillNeeded, false);
 });
 
+test('opening head whitespace preserves derivation and the later-commit boundary', () => {
+  const result = evaluate({ openingHeadSha: ' \tinitial\n' });
+
+  assert.equal(result.initialHeadSha, 'initial');
+  assert.equal(result.derivedAdditiveOnly, true);
+  assert.equal(result.violatingCommitSha, 'later');
+  assert.deepEqual(result.finding?.violating_files, ['src/feature.mjs']);
+  assert.equal(result.backfillNeeded, false);
+
+  const clean = evaluate({ openingHeadSha: ' \tlater\n' });
+  assert.equal(clean.initialHeadSha, 'later');
+  assert.equal(clean.derivedAdditiveOnly, true);
+  assert.equal(clean.finding, null);
+});
+
 test('resolver attempts additive-only label backfill without depending on delivery success', async () => {
   // The snapshot below is clean, so the resolver reaches the backfill. Delivery
   // failure must still not stop enforcement. (A snapshot carrying a violation

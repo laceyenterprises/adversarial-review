@@ -35,7 +35,7 @@ reviews. Classify advisory-only status from the first line's exact
 disclaimer alone. Enforce-mode posts use the same first-line shape without that
 parenthetical: `## Adversarial Review — <displayName> (<reviewerIdentity>)`.
 | `operator-approved: full-review` | PR-wide while present | Raw label presence on the reviewer process; no attributable-event requirement, because the label can only ever ADD review context. | Forces the RPL-08 review mode to `forced-full`, so the reviewer builds the full linked-spec and hardening-ledger context bundle even when the low-risk slim predicate would have accepted the PR. It changes context volume only: verdict semantics, the adversarial gate, required checks, and merge authority are untouched, and the label cannot make a review skip, pass, or block. See [`RUNBOOK-slim-review-fast-lane.md`](RUNBOOK-slim-review-fast-lane.md). |
-| `pr-class: additive-only` | Current PR diff | Raw label presence; the reviewer may also backfill it when the initial commit is entirely within the additive-only allowlist. | Enables additive-only scope enforcement. Labeled PRs are scanned across all PR commits for out-of-allowlist files; truncated file coverage fails closed as an inconclusive scope violation. The OSS-readiness baseline exception requires a worker-pool post-merge action in the final PR state, so add-then-remove or rename-away history does not license a baseline bump. |
+| `pr-class: additive-only` | Current PR diff | Raw label presence; the reviewer may also derive it from the net PR opening diff and backfill it after a complete, clean scan of all PR commits. See the opening-evidence limits below. | Enables additive-only scope enforcement. Labeled PRs are scanned across all PR commits for out-of-allowlist files; truncated file coverage fails closed as an inconclusive scope violation. The OSS-readiness baseline exception requires a worker-pool post-merge action in the final PR state, so add-then-remove or rename-away history does not license a baseline bump. |
 | `operator-approved: scope-expand` | Current PR head SHA | Attributable non-author scoped `LabeledEvent` for the latest observed head. Author self-application, unknown actor, unknown PR author, stale label order, or head mismatch fails closed. | Allows an additive-only PR to expand outside the allowlist for the current head. This label is matched exactly and is not a generic `operator-approved` merge override. |
 | `live-pack-edit-approved` | PR-wide while present | Raw label presence from the current PR label read immediately before posting; dispatch-time and pre-review snapshots cannot authorize the waiver. A failed current-label read grants no waiver; no attributable-event requirement. Worker `gh` shims refuse label mutations, and the remediation prompt forbids applying it. | Waives the LIVEPACK-01 `live_pack_cross_edit` blocking finding: a PR that edits `projects/<slug>/{SPEC.md,SPEC.meta.json,plan.json,prompts/**}` of a build pack whose plan has a `pending`, `running`, `parked` or `awaiting-merge` DAG run, where the PR's own ticket (branch tail or leading title ticket) is not one of that pack's plan tickets. Without the label the reviewer injects the finding into `## Blocking issues`, forces `Request changes`, and fails closed when the plan or ledger is unreadable. The waived packs are logged by the reviewer. LIVEPACKSTAMP-01: a pack's own post-merge gate stamp needs no label. It is exempt only when the PR author is a `[bot]` login of `entitlements.post-merge-actions-worker.gh_bot_login`, the branch is `post-merge-actions/<slug>-gate-stamp-<hash>`, the pack's only changed file is `projects/<slug>/plan.json`, and the parsed base and head plans differ only in `postMergeActions.dispatchGate.completedSpecRef`, whose new value ends `@<hash>`. The exemption is recorded under `## Live Pack Gate-Stamp Exemption` in the review body. |
 | `adversarial-merge-requested` | Current PR head SHA | Attributable non-author scoped label event. | AMA-only request to evaluate closure for otherwise risk-class-blocked PRs. It does not trigger merge-agent fallback. |
@@ -48,3 +48,28 @@ parenthetical: `## Adversarial Review — <displayName> (<reviewerIdentity>)`.
 | `duplicate-family-loser` | PR-wide while present | Watcher-owned projection after `duplicate-family select`. | Identifies candidates that remain held. After the survivor merges, the watcher posts survivor/report links and closes each non-ignored loser before resolving the family. |
 | `not-a-duplicate-stack` | PR-wide while present | Operator-applied suppression label, persisted by the duplicate-family census. | Releases a false-positive duplicate-family candidate without closing either PR. The watcher removes `duplicate-family-hold` on the next duplicate-family census/reconciliation tick after observing the label. The suppression survives head movement and must be removed manually when it should no longer apply. |
 | `merge-agent-stuck` | PR-wide while present, with current-head recovery exception | Raw label presence blocks by default; scoped `merge-agent-requested` may bypass for explicit recovery. | Marks PRs that need operator attention after merge-agent or watcher convergence stalls. |
+
+## Additive-only opening-evidence limits
+
+For an unlabeled PR, `src/additive-only-scope.mjs` resolves the original base
+and head SHAs from the matching `PullRequestEvent` with action `opened` in the
+repository activity stream, then compares those SHAs to classify the net
+opening diff across all commits present at creation. An allowlisted first
+commit alone does not establish additive-only intent. Later commits are
+checked against that opening boundary on each review pass; permanent label
+backfill also requires a complete, clean scan of every PR commit.
+
+The activity lookup reads at most three pages of 100 events. High repository
+activity can evict the opening event from this 300-event window before a queued
+review runs. Missing, delayed, unreadable or mismatched evidence, an opening
+head absent from the current PR commit list, or an inconclusive opening file
+list declines derivation and automatic label backfill. Ordinary review still
+runs. The current implementation does not reconstruct opening SHAs from the
+issue timeline or commit timestamps; those do not establish the immutable
+opening base and head pair.
+
+If automatic classification was missed, an operator can inspect the PR's full
+history and apply `pr-class: additive-only` manually when appropriate. Explicit
+label presence enables enforcement across all PR commits without depending on
+the opening activity event. It does not waive violations or incomplete file
+coverage; the separate current-head scope-expand rules still apply.

@@ -127,13 +127,14 @@ function initialCommitWindow(commits = [], openingHeadSha = null) {
   const normalized = commits
     .map((commit) => ({ ...commit, sha: normalizeSha(commit?.sha) }))
     .filter((commit) => commit.sha);
-  const index = openingHeadSha
-    ? normalized.findIndex((commit) => commit.sha === openingHeadSha)
+  const targetSha = normalizeSha(openingHeadSha);
+  const index = targetSha
+    ? normalized.findIndex((commit) => commit.sha === targetSha)
     : -1;
   if (index < 0) return { laterCommits: [], initialHeadSha: null };
   return {
     laterCommits: normalized.slice(index + 1),
-    initialHeadSha: openingHeadSha,
+    initialHeadSha: targetSha,
   };
 }
 

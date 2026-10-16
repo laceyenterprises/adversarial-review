@@ -1000,6 +1000,19 @@ function schemaV1() {
           // Parse-only mirror of the placey-side Keychain bridge recovery
           // capability. Python owns the values and launchd rendering, but the
           // shared config cascade must remain valid under this strict loader.
+          // CLC14PREP-01: parse-only mirror of the Python-owned corporate
+          // bridge deployment keys. Empty endpoints/source keep it absent.
+          claude_code_corp_bridge: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              port: { __type: TYPE_INT, __default: 4093, __min: 1024, __max: 65535 },
+              primary_url: { __type: TYPE_STRING, __default: '', __nullable: false },
+              standby_url: { __type: TYPE_STRING, __default: '', __nullable: false },
+              watchdog_status_url: { __type: TYPE_STRING, __default: '', __nullable: false },
+              secret_mirror_source: { __type: TYPE_STRING, __default: '', __nullable: false },
+            },
+          },
           keychain_bridge: {
             __type: TYPE_DICT,
             __strict: true,
@@ -3963,6 +3976,26 @@ export const ENV_ALIASES = {
   'oauth_broker.watchdog.refresh_wedge_threshold_seconds': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS',
     aliases: [['OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS', Number]],
+  },
+  'oauth_broker.claude_code_corp_bridge.port': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_PORT',
+    aliases: [],
+  },
+  'oauth_broker.claude_code_corp_bridge.primary_url': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_PRIMARY_URL',
+    aliases: [],
+  },
+  'oauth_broker.claude_code_corp_bridge.standby_url': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_STANDBY_URL',
+    aliases: [],
+  },
+  'oauth_broker.claude_code_corp_bridge.watchdog_status_url': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_WATCHDOG_STATUS_URL',
+    aliases: [['OAUTH_BROKER_WATCHDOG_CLAUDE_CODE_CORP_STATUS_URL', identity]],
+  },
+  'oauth_broker.claude_code_corp_bridge.secret_mirror_source': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_SECRET_MIRROR_SOURCE',
+    aliases: [['CLAUDE_CODE_CORP_BRIDGE_SECRET_MIRROR_SRC', identity]],
   },
   'oauth_broker.keychain_bridge.auto_unlock.enabled': {
     canonical: 'AGENT_OS_OAUTH_BROKER_KEYCHAIN_BRIDGE_AUTO_UNLOCK_ENABLED',

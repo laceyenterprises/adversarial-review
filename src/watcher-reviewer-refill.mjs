@@ -98,7 +98,13 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
         return { dispatched: false, reason: 'durable-refill-route-changed' };
       }
       prepared.markAdmissionStarted = () => this.markAdmissionStarted?.();
-      prepared.admissionReleaseCapacity = this.admissionReleaseCapacity;
+      prepared.markReviewerSpawned = () => this.markReviewerSpawned?.();
+      const release = this.admissionReleaseCapacity;
+      if (release) prepared.admissionReleaseCapacity = (...args) => {
+        // The tracker observes the outer refill candidate at capacity release.
+        this.durablePostedAt = prepared.durablePostedAt;
+        return release(...args);
+      };
       return prepared.run();
     },
   };

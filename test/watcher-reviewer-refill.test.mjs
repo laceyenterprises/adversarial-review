@@ -97,6 +97,31 @@ test('durable candidate defers API/discovery until pool admission and preserves 
   assert.deepEqual(f.counts(), { reads: 1, processes: 1, runs: 1, admissions: 1, releases: 1 });
 });
 
+test('durable candidate forwards spawn timing and the post timestamp before releasing capacity', async () => {
+  const events = [];
+  const postedAt = Date.parse('2026-10-16T10:00:00Z');
+  const candidate = createDurableReviewerCandidate({
+    repo: 'example/fixture', pr_number: 1, reviewer: 'gemini', revision_ref: 'head-a',
+  }, {
+    context: { hasPriorPostedReview: () => false },
+    subjectAdapter: { async fetchState() { return { headSha: 'head-a', labels: [] }; } },
+    async processSubject(_entry, context) {
+      context.enqueueReviewerDispatchCandidate({ reviewerModel: 'gemini', async run() {
+        this.markAdmissionStarted();
+        this.markReviewerSpawned?.();
+        this.durablePostedAt = postedAt;
+        this.admissionReleaseCapacity?.({ dispatched: true });
+      } });
+    },
+    enqueue() { assert.fail('unchanged route should retain its reservation'); },
+  });
+  candidate.markAdmissionStarted = () => events.push('admitted');
+  candidate.markReviewerSpawned = () => events.push('spawned');
+  candidate.admissionReleaseCapacity = result => events.push(['released', candidate.durablePostedAt, result]);
+  await candidate.run();
+  assert.deepEqual(events, ['admitted', 'spawned', ['released', postedAt, { dispatched: true }]]);
+});
+
 for (const subject of [{ terminal: true }, { headSha: 'head-b' }, { labels: ['merge-agent-skip'] }, { labelsKnown: false }]) {
   test(`durable candidate refuses changed or held subject ${JSON.stringify(subject)}`, async () => {
     const f = candidateFixture({ subject });

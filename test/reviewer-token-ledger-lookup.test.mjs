@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { readReviewerEvidenceInWorker } from '../src/reviewer-token-ledger-lookup.mjs';
+import { createReviewerEvidenceReader, readReviewerEvidenceInWorker } from '../src/reviewer-token-ledger-lookup.mjs';
 import { readBestReviewerEvidenceTokenUsage } from '../src/reviewer-pass-tokens.mjs';
 import { runBoundedReviewerDispatchQueue } from '../src/watcher-reviewer-pool.mjs';
 import { createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
@@ -62,4 +62,36 @@ test('successful evidence exits naturally without racing a process-group signal'
 test('a refused group signal still reaps a timed-out reader and reports the timeout', async () => {
   await assert.rejects(readReviewerEvidenceInWorker({ action: 'timeout' }, { workerUrl, timeoutMs: 100,
     killProcessGroup() { throw Object.assign(new Error('synthetic refused signal'), { code: 'EPERM' }); } }), /timed out/);
+});
+
+test('isolated ledger pools preserve their own concurrency limit and drain queued work', { timeout: 5000 }, async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'seatidle-isolated-pools-'));
+  const releasePath = path.join(rootDir, 'release');
+  const readA = createReviewerEvidenceReader({ maxConcurrent: 1 });
+  const readB = createReviewerEvidenceReader({ maxConcurrent: 1 });
+  let notifyReady;
+  const ready = new Promise(resolve => { notifyReady = resolve; });
+  const blocked = readA({ releasePath }, { workerUrl, onReady: notifyReady });
+  let queuedStarted = false;
+  let queued;
+  try {
+    await ready;
+    queued = readA({ releasePath }, { workerUrl, onReady() { queuedStarted = true; } });
+    assert.deepEqual(await readB({ action: 'reply' }, { workerUrl }), { input: 7 });
+    assert.equal(queuedStarted, false, 'a busy pool must retain its queued lookup');
+    writeFileSync(releasePath, 'release');
+    assert.deepEqual(await blocked, { input: 7 });
+    assert.deepEqual(await queued, { input: 7 });
+    assert.equal(queuedStarted, true);
+  } finally {
+    writeFileSync(releasePath, 'release');
+    await Promise.allSettled([blocked, queued]);
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('ledger pools reject invalid concurrency limits', () => {
+  for (const maxConcurrent of [0, -1, 1.5, NaN, Infinity]) {
+    assert.throws(() => createReviewerEvidenceReader({ maxConcurrent }), RangeError);
+  }
 });

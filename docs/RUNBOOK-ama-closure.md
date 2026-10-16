@@ -3172,3 +3172,11 @@ No host environment edit is required when
 `ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT` is unset. Explicit `0`, `false`,
 `no`, or `off` retain legacy settlement inside admission as an operator rollback.
 No CI runner, trigger, or gate is added.
+
+The durable post lookup uses the effective reviewer model, including fallback
+routes, to match the persisted reviewer pass. Token-ledger evidence uses a
+shared two-worker reader by default. Tests and embedded runtimes may use
+`createReviewerEvidenceReader({ maxConcurrent })` from
+`src/reviewer-token-ledger-lookup.mjs` to own an isolated accounting queue;
+its limit must be a positive integer. Queue capacity is released on worker close,
+including reader failure and timeout, before the next queued lookup starts.

@@ -984,7 +984,8 @@ async function spawnReviewerOnceWithAccount({
     }
     if (result.ok) {
       try {
-        const postedAt = readDurablePostedAtImpl({ rootDir, repo, prNumber, reviewerHeadSha, reviewerModel,
+        const postedAt = readDurablePostedAtImpl({ rootDir, repo, prNumber, reviewerHeadSha,
+          reviewerModel: result.effectiveReviewerModel || reviewerModel,
           attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind });
         if (postedAt) result.durablePostedAt = Date.parse(postedAt);
       } catch (error) {

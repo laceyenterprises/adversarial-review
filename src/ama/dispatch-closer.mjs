@@ -2486,10 +2486,12 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
   if (!next) return existing;
   writeAmaCloserDispatchRecord(rootDir, identity, next);
   // HQ cancellation also settles runs through this writer, without teardown.
-  // Launch intents can carry a predecessor's status until dispatch returns.
+  // Launch intents can carry a predecessor's status until dispatch returns,
+  // but an explicit dispatch-failed state proves this launch did not start.
   // Otherwise retry cleanup on repeated observations too: an earlier removal
   // may have failed, or this may be a pre-cleanup terminal record after restart.
-  if (existing?.state !== 'dispatching' && next.state !== 'dispatching'
+  if (next.state !== 'dispatching'
+    && (existing?.state !== 'dispatching' || next.state === 'dispatch-failed')
     && isTerminalHammerScratchRecord(next)) {
     cleanupHammerScratchDir(next);
   }

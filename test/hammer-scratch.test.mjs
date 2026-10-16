@@ -260,6 +260,19 @@ test('HAMTMP-03: repeated terminal observation retries cleanup of an older recor
   assert.equal(existsSync(scratchDir), false);
 });
 
+test('HAMTMP-03: recording an initial dispatch failure immediately removes scratch', t => {
+  const root = fixture(t);
+  const scratchDir = createHammerScratchDir(root);
+  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+  updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatching',
+    lastObservedStatus: 'failed', scratchDir, promptDir: root }));
+  writeFileSync(join(scratchDir, 'ci-failed.log'), 'synthetic CI output');
+  assert.equal(existsSync(scratchDir), true);
+  updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, state: 'dispatch-failed',
+    lastObservedStatus: null }));
+  assert.equal(existsSync(scratchDir), false);
+});
+
 test('HAMTMP-01: dispatching and inherited predecessor statuses cannot remove a new run directory', t => {
   const root = fixture(t);
   const scratchDir = createHammerScratchDir(root);

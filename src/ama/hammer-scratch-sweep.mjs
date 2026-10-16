@@ -11,12 +11,14 @@ export const HAMMER_SCRATCH_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 
-export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl = execFileAsync }) {
+export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl = execFileAsync,
+  platform = process.platform }) {
   // TMPDIR is inherited by the hammer and its children. Include environments so
   // even an idle orphan with no open scratch file is protected. Never log this
   // output: it may contain credentials. An unavailable/truncated census holds.
   const results = await Promise.allSettled([
-    execFileImpl('ps', ['eww', '-axo', 'pid=,command='], {
+    // Darwin's -e lists processes; -E explicitly includes their environments.
+    execFileImpl('ps', [platform === 'darwin' ? '-Eww' : 'eww', '-axo', 'pid=,command='], {
       encoding: 'utf8', timeout, maxBuffer: 32 * 1024 * 1024,
     }),
     // Open files and cwd also protect descendants that cleared TMPDIR. Hammer

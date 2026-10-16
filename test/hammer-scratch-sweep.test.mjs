@@ -11,25 +11,27 @@ const nowMs = Date.parse('2026-10-16T12:00:00Z');
 const old = new Date(nowMs - HAMMER_SCRATCH_MAX_AGE_MS - 60_000);
 const identity = { repo: 'fixture/repo', prNumber: 42, headSha: 'synthetic-head' };
 
-test('HAMTMP-03: process census includes environments, cwd and open files with bounded commands', async () => {
-  const calls = [];
-  const snapshot = await readHammerScratchProcessSnapshot({ timeout: 1234,
-    execFileImpl: async (command, args, options) => {
-      calls.push({ command, args, options });
-      return { stdout: command === 'ps' ? '123 synthetic-hammer TMPDIR=/fixture/scratch' : 'p123\nn/fixture/open-file' };
-    } });
-  assert.match(snapshot, /TMPDIR=\/fixture\/scratch/);
-  assert.match(snapshot, /n\/fixture\/open-file/);
-  assert.deepEqual(calls[0].args, ['eww', '-axo', 'pid=,command=']);
-  assert.equal(calls[1].command, 'lsof');
-  assert.deepEqual(calls[1].args, ['-nP', '-a', '-u', String(process.getuid()), '-F', 'n']);
-  assert.ok(calls.every(call => call.options.timeout === 1234 && call.options.maxBuffer > 0));
-  await assert.rejects(readHammerScratchProcessSnapshot({ timeout: 1234,
-    execFileImpl: async command => {
-      if (command === 'lsof') throw new Error('synthetic unavailable command');
-      return { stdout: 'synthetic process' };
-    } }), /unreadable process census/);
-});
+for (const platform of ['darwin', 'linux']) {
+  test(`HAMTMP-03: ${platform} process census includes environments, cwd and open files with bounded commands`, async () => {
+    const calls = [];
+    const snapshot = await readHammerScratchProcessSnapshot({ timeout: 1234, platform,
+      execFileImpl: async (command, args, options) => {
+        calls.push({ command, args, options });
+        return { stdout: command === 'ps' ? '123 synthetic-hammer TMPDIR=/fixture/scratch' : 'p123\nn/fixture/open-file' };
+      } });
+    assert.match(snapshot, /TMPDIR=\/fixture\/scratch/);
+    assert.match(snapshot, /n\/fixture\/open-file/);
+    assert.deepEqual(calls[0].args, [platform === 'darwin' ? '-Eww' : 'eww', '-axo', 'pid=,command=']);
+    assert.equal(calls[1].command, 'lsof');
+    assert.deepEqual(calls[1].args, ['-nP', '-a', '-u', String(process.getuid()), '-F', 'n']);
+    assert.ok(calls.every(call => call.options.timeout === 1234 && call.options.maxBuffer > 0));
+    await assert.rejects(readHammerScratchProcessSnapshot({ timeout: 1234,
+      execFileImpl: async command => {
+        if (command === 'lsof') throw new Error('synthetic unavailable command');
+        return { stdout: 'synthetic process' };
+      } }), /unreadable process census/);
+  });
+}
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-sweep-test-'));

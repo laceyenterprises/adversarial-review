@@ -102,15 +102,25 @@ Each closer run owns one private `hammer-scratch-*` directory beneath
 `data/follow-up-jobs/ama-closer-prompts`. Recording a terminal outcome removes
 that directory, including CI logs, pytest trees and database WAL files. Scratch
 log retention is zero; dispatch records, prompts and the existing AMA audit
-remain available. Terminal cleanup retries on repeated observations.
+remain available. Terminal cleanup retries on repeated observations, including
+an initial `dispatching` to `dispatch-failed` transition. Launch intents and
+successful launches carrying a predecessor's terminal status retain scratch
+until a fresh terminal observation.
 
 At watcher startup and the first poll at least an hour after the previous pass,
 a sweep reclaims terminal or orphan directories whose entire tree has been
 idle for at least two hours. A pass removes at most 64 directories and has a
-10-second scan budget; unfinished work waits for the next pass. The sweep
-preserves nonterminal records, live worker PIDs, process references in arguments
+10-second scan budget. Each pass restarts the complete dispatch-record census;
+it does not resume an interrupted scan. If retained historical records exhaust
+the budget, the pass defers without deleting scratch and logs
+`scratch record scan budget exhausted`. Repeated occurrences can stall
+reclamation; incremental scanning with ownership freshness checks remains a
+follow-up. Filtering by record age alone is unsafe because an old record can
+still own a live run. Do not prune dispatch evidence to unblock the sweep.
+The sweep preserves nonterminal records, live worker PIDs, process references in arguments
 or environments, and open files or working directories. `ps` and `lsof` must be
-available to the watcher; unavailable process evidence, unreadable worker
+available to the watcher (`ps -Eww` on Darwin, `ps eww` on Linux, to include
+environments); unavailable process evidence, unreadable worker
 evidence or corrupt dispatch records preserve scratch rather than imply an
 absent owner. Directory symlinks are never followed. Each removal emits one
 `ama_closer.scratch_swept` line with the scratch name and allocated `bytesFreed`.

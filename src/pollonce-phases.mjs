@@ -177,7 +177,6 @@ import {
   stmtMarkMerged,
   stmtMarkMergedPendingReviewSkipped,
   stmtMarkRereviewCiBlocked,
-  stmtMarkRereviewCiBlockedRecheck,
   stmtMarkReviewCycleCapPaused,
   stmtMarkReviewPopulationRetryAttemptStarted,
   stmtMarkReviewerCommandFailedRecoveredPosted,
@@ -193,10 +192,9 @@ import {
   requestReviewRereview,
 } from './review-state.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
+import { inspectRemediationCiRegression } from './remediation-ci-regression.mjs';
 import {
-  REREVIEW_WAKE_REASONS,
   consumeRereviewWakes,
-  requestRereviewWake,
 } from './rereview-wake.mjs';
 import {
   buildDuplicateReviewSkipAudit,
@@ -238,7 +236,6 @@ import {
 import { invalidationReasonForGrounding } from './context/hot-path-cache.mjs';
 import {
   guardRereviewCiBeforeReviewer,
-  shouldRecheckCiBlockedRereview,
 } from './reviewer-ci-admission.mjs';
 import {
   createAfhReviewerGroundingCache,
@@ -743,7 +740,6 @@ export async function processReviewSubject(entry, ctx) {
     retainedWatcherWakes = null,
     admissionSettlementSplitEnabled = false,
     consumeRereviewWakesImpl = consumeRereviewWakes,
-    requestRereviewWakeImpl = requestRereviewWake,
     runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
@@ -761,34 +757,6 @@ export async function processReviewSubject(entry, ctx) {
       };
       const prTitle = subject.title || '';
       const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
-      // RPL-04: a CI state transition that releases a parked re-review is an
-      // eligibility EDGE, not a poll result. Enqueuing a durable wake here is
-      // what lets the next tick start immediately instead of at the next poll
-      // interval, and it leaves a record an operator can read afterwards. It
-      // fires only when the transition actually re-armed the row, so a refused
-      // reset never produces a phantom wake.
-      const requestCiTransitionRereviewWake = ({ repoPath: wakeRepo, prNumber: wakePr, headSha, armed, detail }) => {
-        if (!armed) return null;
-        try {
-          return requestRereviewWakeImpl({
-            rootDir: ROOT,
-            repo: wakeRepo,
-            prNumber: wakePr,
-            headSha: headSha || null,
-            reason: REREVIEW_WAKE_REASONS.CI_TRANSITION,
-            source: 'watcher-ci-admission',
-            sourceRef: detail,
-            domainId: effectiveDomainId,
-            log: console,
-          });
-        } catch (err) {
-          console.error(
-            `[watcher] CI-transition rereview wake for ${wakeRepo}#${wakePr} failed:`,
-            err?.message || err
-          );
-          return null;
-        }
-      };
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       const staleDriftSkip = shouldSkipReviewerForStaleDrift({
         number: prNumber,
@@ -1665,6 +1633,70 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      // CI reconciliation does not need a reviewer seat or a routing decision.
+      // A quota hold must never hide a repaired head from the review queue.
+      if (existing?.review_status === REREVIEW_CI_BLOCKED_STATUS && !subject.terminal) {
+        let ciBlockedRow = stmtGetReviewRow.get(repoPath, prNumber);
+        const pendingRevisionRef = subject.ref?.revisionRef || subject.headSha || null;
+        try {
+          consumeRereviewWakesImpl({
+            rootDir: ROOT, repo: repoPath, prNumber, reviewRow: ciBlockedRow,
+            currentHeadSha: subject.headSha || pendingRevisionRef,
+            subjectTerminal: false, log: console,
+          });
+        } catch (err) {
+          console.error(`[watcher] rereview wake drain for ${repoPath}#${prNumber} failed:`, err?.message || err);
+        }
+        if (ciBlockedRow?.review_status !== REREVIEW_CI_BLOCKED_STATUS) return;
+        // CIBLOCKSTALE-01: probe the live head on EVERY poll, before hammer
+        // ownership, closer suppression or follow-up deferral can retain a
+        // stale parking marker. The inspector shares external-CI admission's
+        // classifier and excludes our own pending gate.
+        const ciGate = await inspectRemediationCiRegression({
+          repo: repoPath, prNumber, execFileImpl: execFileAsync,
+          env: process.env, log: console, cfg: domainAdapterSet?.domainConfig,
+        });
+        const currentHeadSha = subject.headSha || pendingRevisionRef;
+        const checkedCurrentHead = Boolean(currentHeadSha && ciGate.headSha &&
+          String(ciGate.headSha) === String(currentHeadSha));
+        if (checkedCurrentHead && ciGate.state === 'green') {
+          const refreshResult = requestReviewRereview({
+            rootDir: ROOT, db, repo: repoPath, prNumber,
+            targetRevisionRef: pendingRevisionRef,
+            reason: `auto-refresh: ci-blocked current head ${currentHeadSha} has green external CI.`,
+          });
+          ciBlockedRow = stmtGetReviewRow.get(repoPath, prNumber);
+          if (refreshResult.triggered) {
+            console.log(`ci-blocked released: head ${currentHeadSha} green`);
+          }
+          // Re-enter normal FIFO discovery next poll. A release is not a
+          // priority wake or an inline reviewer claim.
+          await projectGateStatusSafe(ciBlockedRow);
+          return;
+        }
+        // Red/pending heads remain unclaimable. Rebind a moved head only when
+        // the CI response confirms the discovery snapshot, so old-head CI can
+        // neither release nor pin the row. Unknown/racing responses retry next poll.
+        db.prepare(`UPDATE reviewed_prs SET last_attempted_at = ?,
+            reviewer_head_sha = COALESCE(?, reviewer_head_sha),
+            revision_ref = COALESCE(?, revision_ref)
+          WHERE repo = ? AND pr_number = ? AND review_status = ?
+            AND reviewer_head_sha IS ?`).run(
+          new Date().toISOString(), checkedCurrentHead ? currentHeadSha : null,
+          checkedCurrentHead ? pendingRevisionRef : null,
+          repoPath, prNumber, REREVIEW_CI_BLOCKED_STATUS, ciBlockedRow.reviewer_head_sha,
+        );
+        ciBlockedRow = stmtGetReviewRow.get(repoPath, prNumber);
+        const hammerRoute = await maybeRouteCiBlockedToHammer({
+          ciAdmission: { hammerOwner: true, reason: 'ci-blocked-owner-reconcile', ciGate },
+          rootDir: ROOT, db, repoPath, prNumber, existing: ciBlockedRow,
+          subjectRef: subject.ref, currentRevisionRef: pendingRevisionRef,
+          labelNames: prLabelNames, execFileImpl: execFileAsync,
+        });
+        if (!hammerRoute.prTerminal) await projectGateStatusSafe(ciBlockedRow);
+        return;
+      }
+
       if (domainId === 'code-pr') {
         const reconciled = resolveBuilderProvenanceRouting(subject, {
           repo: repoPath, prNumber, rootDir: ROOT,
@@ -2361,164 +2393,6 @@ export async function processReviewSubject(entry, ctx) {
             `[watcher] pending review head refresh for ${repoPath}#${prNumber} failed:`,
             err?.message || err
           );
-        }
-      }
-      if (
-        current?.review_status === REREVIEW_CI_BLOCKED_STATUS &&
-        !subject.terminal
-      ) {
-        // The parked row is the durable hammer hand-off. Reconcile it before
-        // head refresh, CI backoff, or remediation admission can hide its owner.
-        const hammerRoute = await maybeRouteCiBlockedToHammer({
-          ciAdmission: { hammerOwner: true, reason: 'ci-blocked-owner-reconcile' },
-          rootDir: ROOT, db, repoPath, prNumber, existing: current,
-          subjectRef: subject.ref, currentRevisionRef: pendingRevisionRef,
-          labelNames: prLabelNames, execFileImpl: execFileAsync,
-        });
-        const closerHead = await resolveHeadCloserCommitSuppression();
-        if (closerHead.suppressed || hammerRoute.prTerminal ||
-            ['ama-dispatched', 'ama-pending'].includes(hammerRoute.outcome) ||
-            ['hammer-no-merge', 'hammer-cap-exhausted'].includes(hammerRoute.outcome)) {
-          // Launch intent, a running worker, or unresolved closure evidence
-          // retains the durable reconciliation marker before the first HAM
-          // push too. CI greenness and unrelated pushes cannot release it.
-          await projectGateStatusSafe(current);
-          return;
-        }
-        const ciBlockedActiveFollowUp = shouldDeferReviewForActiveFollowUp({
-          rootDir: ROOT,
-          repo: repoPath,
-          prNumber,
-          currentRevisionRef: pendingRevisionRef,
-        });
-        if (ciBlockedActiveFollowUp.defer) {
-          console.log(
-            `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: active follow-up job` +
-              (ciBlockedActiveFollowUp.jobId ? ` ${ciBlockedActiveFollowUp.jobId}` : '') +
-              ` is ${ciBlockedActiveFollowUp.latestJobStatus}`
-          );
-          await projectGateStatusSafe(current);
-          return;
-        }
-        const blockedHeadSha = current.reviewer_head_sha || current.revision_ref || null;
-        const blockedHeadMoved =
-          blockedHeadSha &&
-          pendingRevisionRef &&
-          String(blockedHeadSha) !== String(pendingRevisionRef);
-        if (blockedHeadMoved) {
-          try {
-            const refreshResult = requestReviewRereview({
-              rootDir: ROOT,
-              repo: repoPath,
-              prNumber,
-              targetRevisionRef: pendingRevisionRef,
-              reason:
-                `auto-refresh: ci-blocked re-review parked on stale head ` +
-                `${String(blockedHeadSha).slice(0, 12)}; ` +
-                `current head is ${String(pendingRevisionRef).slice(0, 12)}`,
-            });
-            current = stmtGetReviewRow.get(repoPath, prNumber);
-            if (refreshResult.triggered || current?.review_status === 'pending') {
-              console.log(
-                `[watcher] re-armed CI-blocked re-review for ${repoPath}#${prNumber}: ` +
-                  `${String(blockedHeadSha).slice(0, 12)} -> ${String(pendingRevisionRef).slice(0, 12)}`
-              );
-            }
-            requestCiTransitionRereviewWake({
-              repoPath,
-              prNumber,
-              headSha: pendingRevisionRef,
-              armed: refreshResult.triggered || current?.review_status === 'pending',
-              detail: 'ci-blocked-head-moved',
-            });
-          } catch (err) {
-            console.error(
-              `[watcher] CI-blocked re-review head refresh for ${repoPath}#${prNumber} failed:`,
-              err?.message || err
-            );
-          }
-        } else {
-          const ciBlockedRecheck = shouldRecheckCiBlockedRereview(current, {
-            nowMs: Date.now(),
-            env: process.env,
-          });
-          if (!ciBlockedRecheck.shouldRecheck) {
-            console.log(
-              `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: ` +
-                `same-head CI recheck backoff active until ${ciBlockedRecheck.nextCheckAt}`
-            );
-            await projectGateStatusSafe(current);
-            return;
-          }
-          const recheckAt = new Date().toISOString();
-          const recheckUpdate = stmtMarkRereviewCiBlockedRecheck.run(
-            recheckAt,
-            repoPath,
-            prNumber
-          );
-          if (recheckUpdate.changes !== 1) {
-            current = stmtGetReviewRow.get(repoPath, prNumber);
-            await projectGateStatusSafe(current);
-            return;
-          }
-          current = stmtGetReviewRow.get(repoPath, prNumber) || current;
-          const ciAdmission = await guardRereviewCiBeforeReviewer({
-            rootDir: ROOT,
-            repo: repoPath,
-            prNumber,
-            passKind: 'rereview',
-            reviewerHeadSha: blockedHeadSha || pendingRevisionRef,
-            execFileImpl: execFileAsync,
-            env: process.env,
-            log: console,
-            cfg: domainAdapterSet?.domainConfig,
-          });
-          if (ciAdmission.proceed) {
-            try {
-              const refreshResult = requestReviewRereview({
-                rootDir: ROOT,
-                repo: repoPath,
-                prNumber,
-                targetRevisionRef: pendingRevisionRef,
-                reason:
-                  `auto-refresh: ci-blocked re-review for ${repoPath}#${prNumber} ` +
-                  'now has green external CI on the parked head.',
-              });
-              current = stmtGetReviewRow.get(repoPath, prNumber);
-              if (refreshResult.triggered || current?.review_status === 'pending') {
-                console.log(
-                  `[watcher] re-armed CI-blocked re-review for ${repoPath}#${prNumber}: external CI is green`
-                );
-              }
-              requestCiTransitionRereviewWake({
-                repoPath,
-                prNumber,
-                headSha: pendingRevisionRef || blockedHeadSha,
-                armed: refreshResult.triggered || current?.review_status === 'pending',
-                detail: 'ci-green-on-parked-head',
-              });
-            } catch (err) {
-              console.error(
-                `[watcher] CI-blocked re-review green-CI refresh for ${repoPath}#${prNumber} failed:`,
-                err?.message || err
-              );
-            }
-          } else {
-            markWatcherSpawnDecision({
-              repo: repoPath,
-              pr_number: prNumber,
-              decision: ciAdmission.reason,
-              failure_class: 'ci-regression',
-              previous_status: current.review_status,
-              reviewer_head_sha: blockedHeadSha || pendingRevisionRef,
-            });
-            console.log(
-              `[watcher] Holding CI-blocked re-review for ${repoPath}#${prNumber}: ` +
-                `${ciAdmission.reason}; reviewer admission requires green external CI.`
-            );
-            await projectGateStatusSafe(current);
-            return;
-          }
         }
       }
       if (current?.review_status === REREVIEW_CI_BLOCKED_STATUS) {

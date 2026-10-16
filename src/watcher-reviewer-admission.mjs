@@ -4,6 +4,7 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   let drainImpl = async () => ({ dispatched: 0 });
   let tail = Promise.resolve();
   let capacityEvent = null;
+  const postedByModel = new Map();
   const identity = candidate => `${candidate.repoPath}#${candidate.prNumber}`;
 
   function enqueue(candidate) {
@@ -14,8 +15,15 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     let resolveAdmission;
     candidate.admissionOutcome = new Promise(resolve => { resolveAdmission = resolve; });
     candidate.markAdmissionStarted = () => {
+      if (admitted) return;
       admitted = true;
-      resolveAdmission({ dispatched: true, at: now() });
+      const at = now();
+      const postedAt = postedByModel.get(candidate.reviewerModel);
+      if (Number.isFinite(postedAt)) {
+        logger.log?.(`[watcher] reviewer seat handoff: model=${candidate.reviewerModel} post_to_spawn_ms=${Math.max(0, at - postedAt)}`);
+        postedByModel.delete(candidate.reviewerModel);
+      }
+      resolveAdmission({ dispatched: true, at });
     };
     const run = candidate.run;
     candidate.run = async function () {
@@ -44,7 +52,10 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     return result;
   }
 
-  function capacityFreed() {
+  function capacityFreed({ candidate } = {}) {
+    if (Number.isFinite(candidate?.durablePostedAt)) {
+      postedByModel.set(candidate.reviewerModel, candidate.durablePostedAt);
+    }
     if (capacityEvent) return;
     const event = { freedAt: now() };
     capacityEvent = event;

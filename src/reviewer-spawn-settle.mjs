@@ -1,3 +1,4 @@
+import { openReviewStateDb } from './review-state.mjs';
 import { reviewerCredentialKey } from './claude-account-routing.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
@@ -303,6 +304,20 @@ async function fetchReviewerPostFreshnessWithRetry({
     }
   }
   throw lastError;
+}
+
+function readDurableReviewerPostedAt({ rootDir = ROOT, repo, prNumber, reviewerHeadSha, reviewerModel, attemptNumber, passKind }) {
+  const stateDb = rootDir === ROOT ? db : openReviewStateDb(rootDir);
+  try {
+    return stateDb.prepare(`SELECT body_captured_at FROM reviewer_passes
+      WHERE repo = ? AND pr_number = ? AND head_sha = ? AND reviewer_model = ?
+      AND attempt_number = ? AND pass_kind = ? AND gh_comment_id IS NOT NULL
+      AND gh_comment_id <> ''`).get(
+      repo, prNumber, reviewerHeadSha, reviewerModel, attemptNumber, passKind,
+    )?.body_captured_at;
+  } finally {
+    if (stateDb !== db) stateDb.close();
+  }
 }
 
 async function defaultPostGitHubReviewWithCapture(args) {
@@ -692,7 +707,7 @@ async function spawnReviewerOnceWithAccount({
   fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
   freshnessCheckSleepImpl = sleepMs,
   onPostOperationSettled = null,
-  readDurablePostedAtImpl = ({ repo, prNumber, reviewerHeadSha, reviewerModel, attemptNumber, passKind }) => db.prepare(`SELECT body_captured_at FROM reviewer_passes WHERE repo = ? AND pr_number = ? AND head_sha = ? AND reviewer_model = ? AND attempt_number = ? AND pass_kind = ? AND gh_comment_id IS NOT NULL`).get(repo, prNumber, reviewerHeadSha, reviewerModel, attemptNumber, passKind)?.body_captured_at,
+  readDurablePostedAtImpl = readDurableReviewerPostedAt,
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
   if (reviewerRefusesBuilder(builderTag, reviewerModel)) {
@@ -969,7 +984,7 @@ async function spawnReviewerOnceWithAccount({
     }
     if (result.ok) {
       try {
-        const postedAt = readDurablePostedAtImpl({ repo, prNumber, reviewerHeadSha, reviewerModel,
+        const postedAt = readDurablePostedAtImpl({ rootDir, repo, prNumber, reviewerHeadSha, reviewerModel,
           attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind });
         if (postedAt) result.durablePostedAt = Date.parse(postedAt);
       } catch (error) {
@@ -1095,6 +1110,7 @@ async function spawnReviewerOnceWithAccount({
         }
         tokenUsage = tagTokenUsage(rawTokenUsage, 'guardrail');
         if (tokenUsage) {
+          const artifactStartedAt = Date.now();
           reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
             workspacePath: workspacePath || rootDir,
             repo,
@@ -1113,6 +1129,7 @@ async function spawnReviewerOnceWithAccount({
               reattachToken: result.reattachToken || null,
             },
           }, { repo, prNumber, reviewerSessionUuid });
+          console.log(`[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-artifact elapsed_ms=${Date.now() - artifactStartedAt}`);
         }
       } catch (tokenErr) {
         console.warn(

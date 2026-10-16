@@ -1,3 +1,4 @@
+import { openReviewStateDb } from '../src/review-state.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -884,4 +885,46 @@ test('spawnReviewer preserves worker run_id when the adapter throws (error-path 
   assert.equal(settled.length, 1);
   assert.equal(settled[0].status, 'failed');
   assert.equal(settled[0].workerRunId, 'run_wcw_error_path');
+});
+
+
+test('SEATIDLE-03: durable post timestamp and released process reservation precede slow token settlement', { timeout: 5000 }, async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'seatidle-post-origin-'));
+  const postedAt = '2026-01-02T03:04:05.000Z';
+  let releaseLedger, notifyPosted, observed;
+  const ledger = new Promise(resolve => { releaseLedger = resolve; });
+  const posted = new Promise(resolve => { notifyPosted = resolve; });
+  let completed = false;
+  const running = spawnReviewer({ rootDir, repo: 'example/review-fixture', prNumber: 201,
+    reviewerModel: 'codex', builderTag: 'claude-code', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    reviewerHeadSha: 'synthetic-head', reviewerSessionUuid: 'synthetic-session',
+    reviewAttemptNumber: 1, reviewDbAttemptNumber: 1, maxRemediationRounds: 2,
+    readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'disabled' }),
+    reviewerRuntimeAdapterOverride: { async spawnReviewer() {
+      return { ok: true, reviewBody: 'Synthetic review', reviewBodyDelivery: 'caller-post' };
+    } },
+    fetchPullRequestHeadAndStateImpl: currentHead('synthetic-head'),
+    postGitHubReviewWithCaptureImpl: async () => {
+      const stateDb = openReviewStateDb(rootDir);
+      try { stateDb.prepare(`UPDATE reviewer_passes SET body_captured_at = ?, gh_comment_id = 'synthetic-review'
+        WHERE repo = 'example/review-fixture' AND pr_number = 201`).run(postedAt); }
+      finally { stateDb.close(); }
+    },
+    onPostOperationSettled: result => {
+      observed = { postedAt: result.durablePostedAt, active: activeReviewerSpawns.size };
+      notifyPosted();
+    },
+    readBestReviewerEvidenceTokenUsageImpl: () => ledger,
+    ledgerLookupSleepImpl: async () => {},
+  }).then(result => { completed = true; return result; });
+  try {
+    await posted;
+    assert.equal(observed.postedAt, Date.parse(postedAt));
+    assert.equal(observed.active, 0, 'accounting must not retain a process reservation');
+    assert.equal(completed, false);
+  } finally {
+    releaseLedger(null);
+    await running;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

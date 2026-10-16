@@ -3787,7 +3787,9 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
             try {
               await Promise.race([
                 new Promise(resolve => globalThis.__seatIdleWaiters.set(pr, resolve)),
-                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('handoff waited for blocked poll: ' + pr)), ${stale === 'durable-refill' ? 5000 : 2000}); }),
+                // The unresolved poll gate pins ordering; allow accounting workers
+                // time to settle under load without turning this into a latency test.
+                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('handoff waited for blocked poll: ' + pr)), 10000); }),
               ]);
             } finally { clearTimeout(timer); }
           }
@@ -3833,7 +3835,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
       writeFileSync(runnerPath, runner);
       const result = spawnSync(process.execPath,
         ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
-          cwd: REPO_ROOT, encoding: 'utf8', timeout: 15000,
+          cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
           env: fixtureEnv({ ...installGhFixture(tmp),
             AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '1',
             ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS: '1',

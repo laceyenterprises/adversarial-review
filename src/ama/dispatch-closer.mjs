@@ -1569,6 +1569,19 @@ function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, head
   return headAdvanced ? 'superseded' : 'failed-without-merge';
 }
 
+function recordTerminalCloserLaunch(rootDir, identity, launchRequestId, status, now) {
+  let updated = false;
+  updateAmaCloserDispatchRecord(rootDir, identity, live => {
+    if (!live || live.state === 'dispatching' || live.launchRequestId !== launchRequestId) return null;
+    updated = true;
+    const preserve = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(live.lastObservedStatus));
+    return { ...live,
+      lastObservedStatus: preserve ? live.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(status),
+      lastObservedAt: now, terminalLaunchStatus: status };
+  });
+  return updated;
+}
+
 /**
  * Settle the current PR owner's terminal launch without evaluating eligibility.
  * The synchronous ledger adapter bounds subprocess reads with its existing
@@ -1626,6 +1639,10 @@ export function reconcileAmaCloserLease({
     // Do not reconcile an old launch over a newer dispatch intent.
     if (record && (record.state === 'dispatching'
       || (record.launchRequestId && record.launchRequestId !== launchRequestId))) return false;
+    // Disk ownership ends at terminal launch observation, even while merge
+    // evidence is unreadable or still inside the success-settlement grace.
+    // The shared writer runs terminal scratch cleanup without releasing leases.
+    if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now)) return false;
     const auditOutcome = readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
     // Merged completion rows are PR-scoped (their SHA may be the merge commit),
@@ -1657,18 +1674,9 @@ export function reconcileAmaCloserLease({
     // Re-read after external evidence: ownership may have changed while reading.
     const current = readAmaCloserLease(rootDir, identity);
     if (current?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || current.lrqId !== launchRequestId) return false;
-    if (record) {
-      let updated = false;
-      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (live) => {
-        if (!live || live.state === 'dispatching'
-          || live.launchRequestId !== record.launchRequestId) return null;
-        updated = true;
-        return { ...live,
-          lastObservedStatus: amaCloserStatusFromTerminalLaunchRequestStatus(status),
-          lastObservedAt: now, terminalLaunchStatus: status };
-      });
-      if (!updated) return false;
-    }
+    const liveRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+    if (liveRecord?.state === 'dispatching'
+      || (record && liveRecord?.launchRequestId !== launchRequestId)) return false;
     if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
       terminalOutcome, now, logger, repo, prNumber })) return false;
     logger?.info?.(JSON.stringify({ event: 'ama_closer.terminal_lease_reconciled',
@@ -5025,6 +5033,12 @@ export async function maybeDispatchAmaCloser({
     })).catch(() => ({ ok: false, reason: 'launch-request-unreadable' }));
     prefetchedLaunchRequestProbe = probe;
     throwIfAborted(signal);
+    // A terminal lease may already have been written by the worker. Persist
+    // ledger terminality before retry/refund/PR evidence can return early.
+    if (probe?.ok && isTerminalLaunchRequestStatus(probe.row?.status)) {
+      recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
+        normalizeWorkerRunStatus(probe.row.status), dispatchContext.dispatchedAt || new Date().toISOString());
+    }
     const terminal = probe?.ok && ['failed', 'succeeded'].includes(probe.row?.status);
     const reason = terminal ? unexecutedHammerReason(probe.row) : null;
     if (reason && !auditTerminalOutcome) {
@@ -5324,6 +5338,10 @@ export async function maybeDispatchAmaCloser({
     throwIfAborted(signal);
     let status = statusProbe?.status || null;
     existingDispatchStatus = status;
+    if (isTerminalLaunchRequestStatus(status)) {
+      recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
+        status, dispatchContext.dispatchedAt || new Date().toISOString());
+    }
     // A durable closing decision outranks the process exit (including failure
     // after posting it) and certified parks. Unknown evidence holds the launch;
     // only a readable absence of a decision permits normal retry admission.

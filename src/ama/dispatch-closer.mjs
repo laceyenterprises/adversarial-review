@@ -1019,7 +1019,7 @@ const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
 export function isTerminalHammerScratchRecord(record) {
   if (!record || record.state === 'dispatching') return false;
   return record.state === 'launch-terminal' || record.state === 'dispatch-failed'
-    || [record.lastObservedStatus, record.outcome, record.terminalOutcome]
+    || [record.state, record.lastObservedStatus, record.outcome, record.terminalOutcome]
       .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value)));
 }
 

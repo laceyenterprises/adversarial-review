@@ -1,6 +1,7 @@
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
+import { createHammerScratchSweepTicker } from './ama/hammer-scratch-sweep.mjs';
 /**
  * LAC-11: PR Watcher
  * Polls GitHub every N minutes for new agent-built PRs and spawns reviewer agents.
@@ -1729,6 +1730,8 @@ async function main() {
   const staleStateReaperTicker = await startWatcherStaleStateReaper({
     rootDir: ROOT, db, env: process.env, logger: console, isProcessAlive,
   });
+  const hammerScratchSweepTicker = createHammerScratchSweepTicker({ rootDir: ROOT, logger: console });
+  await hammerScratchSweepTicker.tick();
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped
   // on legitimate org-wide work (a single reviewer can consume most of
@@ -1851,6 +1854,7 @@ async function main() {
         console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
       }
       await staleStateReaperTicker.tick();
+      await hammerScratchSweepTicker.tick();
       pollResult = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
       watcherHeartbeat.markPollCompleted({ source, ok: Boolean(pollResult?.ok), timed_out: Boolean(pollResult?.timedOut), error: pollResult?.error ? String(pollResult.error?.message || pollResult.error) : null });
       return pollResult;

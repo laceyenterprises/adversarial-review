@@ -96,6 +96,30 @@ outside this commit-message protection.
 
 ## 1. Prerequisites
 
+### Hammer scratch lifetime (HAMTMP-03)
+
+Each closer run owns one private `hammer-scratch-*` directory beneath
+`data/follow-up-jobs/ama-closer-prompts`. Recording a terminal outcome removes
+that directory, including CI logs, pytest trees and database WAL files. Scratch
+log retention is zero; dispatch records, prompts and the existing AMA audit
+remain available. Terminal cleanup retries on repeated observations.
+
+At watcher startup and the first poll at least an hour after the previous pass,
+a sweep reclaims terminal or orphan directories whose entire tree has been
+idle for at least two hours. A pass removes at most 64 directories and has a
+10-second scan budget; unfinished work waits for the next pass. The sweep
+preserves nonterminal records, live worker PIDs, process references in arguments
+or environments, and open files or working directories. `ps` and `lsof` must be
+available to the watcher; unavailable process evidence, unreadable worker
+evidence or corrupt dispatch records preserve scratch rather than imply an
+absent owner. Directory symlinks are never followed. Each removal emits one
+`ama_closer.scratch_swept` line with the scratch name and allocated `bytesFreed`.
+
+After deployment, SRE confirms that the watcher restarted, checks the first
+sweep's removal lines and the drop in `ama-closer-prompts` size, then verifies
+that size remains roughly flat over a day of hammer runs. No manual cleanup of
+live runs is required.
+
 Merge execution evidence (OPSEV1-03) is appended under
 `$HQ_ROOT/dispatch/audit/automation-merge-actions/` by the daemon, fast-merge
 paths and hammer. Fast-merge owns its receipt and currently executes through

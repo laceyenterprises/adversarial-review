@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
@@ -114,6 +114,74 @@ for (const extra of ['empty', 'generated']) {
         assert.equal(proof.replayedCommits.length, 2);
         assert.equal(verified.length, extra === 'generated' ? 2 : 0);
       }
+    });
+  }
+}
+
+for (const kind of ['generated', 'empty']) {
+  for (const valid of [true, false]) {
+    test(`REBASEPROV-01 ${kind}-only series with valid=${valid} content`, async t => {
+      const dir = mkdtempSync(join(tmpdir(), 'rebase-only-'));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const git = args => execFileSync('git', args, { cwd: dir, encoding: 'utf8',
+        env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+      const commit = () => {
+        git(['add', '--all']); git(['commit', '--allow-empty', '-qm', 'Fixture']);
+        return git(['rev-parse', 'HEAD']).trim();
+      };
+      git(['init', '-q']); git(['config', 'user.name', 'Fixture']); git(['config', 'user.email', 'fixture@example.invalid']);
+      writeFileSync(join(dir, 'generated.txt'), 'initial output\n');
+      const fork = commit();
+      if (kind === 'generated') writeFileSync(join(dir, 'generated.txt'), 'reviewed output\n');
+      const reviewedHead = commit();
+      git(['checkout', '-qb', 'replay', fork]);
+      writeFileSync(join(dir, 'base.txt'), 'base advancement\n');
+      const base = commit();
+      if (kind === 'generated') writeFileSync(join(dir, 'generated.txt'), 'regenerated output\n');
+      if (kind === 'empty' && !valid) writeFileSync(join(dir, 'unexpected.txt'), 'unreviewed\n');
+      const head = commit();
+      const verified = [];
+      const proof = await proveReviewedRebase({ reviewedHead, head, base, git,
+        generatedFiles: kind === 'generated' ? ['generated.txt'] : [],
+        verifyGenerated: async (sha, paths) => { verified.push({ sha, paths }); return valid; } });
+      assert.equal(Boolean(proof), valid);
+      assert.deepEqual(verified, kind === 'generated' ? [{ sha: head, paths: ['generated.txt'] }] : []);
+    });
+  }
+}
+
+for (const changed of [false, true]) {
+  for (const generated of [false, true]) {
+    test(`REBASEPROV-01 subdirectory caller sees sibling changes=${changed}, generated=${generated}`, async t => {
+      const dir = mkdtempSync(join(tmpdir(), 'rebase-subdir-'));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const run = args => execFileSync('git', args, { cwd: dir, encoding: 'utf8',
+        env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+      const commit = () => {
+        run(['add', '--all']); run(['commit', '-qm', 'Fixture']);
+        return run(['rev-parse', 'HEAD']).trim();
+      };
+      run(['init', '-q']); run(['config', 'user.name', 'Fixture']); run(['config', 'user.email', 'fixture@example.invalid']);
+      mkdirSync(join(dir, 'tools'));
+      writeFileSync(join(dir, 'tools/local.txt'), 'initial\n');
+      writeFileSync(join(dir, 'sibling.txt'), 'initial\n');
+      writeFileSync(join(dir, 'generated.txt'), 'initial\n');
+      const fork = commit();
+      const feature = data => {
+        writeFileSync(join(dir, 'tools/local.txt'), 'reviewed\n');
+        writeFileSync(join(dir, 'sibling.txt'), data);
+        if (generated) writeFileSync(join(dir, 'generated.txt'), 'regenerated\n');
+        return commit();
+      };
+      const reviewedHead = feature('reviewed\n');
+      run(['checkout', '-qb', 'replay', fork]);
+      writeFileSync(join(dir, 'base.txt'), 'new base\n');
+      const base = commit();
+      const head = feature(changed ? 'unreviewed\n' : 'reviewed\n');
+      const proof = await proveReviewedRebase({ reviewedHead, head, base,
+        git: args => execFileSync('git', args, { cwd: join(dir, 'tools'), encoding: 'utf8' }),
+        generatedFiles: generated ? ['generated.txt'] : [], verifyGenerated: async () => true });
+      assert.equal(Boolean(proof), !changed);
     });
   }
 }

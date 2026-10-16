@@ -18,7 +18,7 @@ export async function proveReviewedRebase({ reviewedHead, head, base, git, gener
       || path.split('/').some(part => !part || part === '.' || part === '..') || /[\0\r\n]/.test(path))) return null;
     const exclusions = generatedFiles.map(path => `:(top,exclude,literal)${path}`);
     const patch = sha => git(['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--binary', '--full-index',
-      `${sha}^`, sha, '--', '.', ...exclusions]);
+      `${sha}^`, sha, '--', ':(top)', ...exclusions]);
     const oldSeries = await list(reviewedHead, fork);
     const newSeries = await list(head, onto);
     if (!oldSeries.length || oldSeries.length !== newSeries.length) return null;
@@ -36,7 +36,9 @@ export async function proveReviewedRebase({ reviewedHead, head, base, git, gener
         if (changed.length && !await verifyGenerated(sha, changed)) return null;
       }
     }
-    if (!reviewed.some(Boolean) || reviewed.some((diff, i) => diff !== replayed[i])) return null;
+    // Empty patches still occupy a series position. Generated-only replays
+    // have already passed verification above; all-empty series are equivalent.
+    if (reviewed.some((diff, i) => diff !== replayed[i])) return null;
     return { proof: 'reviewed-rebase-patch-equivalence', reviewedHead, rebasedHead: head,
       fork, rebaseBase: onto, reviewedCommits: oldSeries, replayedCommits: newSeries, generatedFiles };
   } catch { return null; }

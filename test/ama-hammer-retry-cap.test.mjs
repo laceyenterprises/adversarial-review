@@ -3672,13 +3672,67 @@ test('REBASEPROV-01 ambiguous dispatch cannot charge a conflict owner', async t 
   assert.equal(result.reason, 'non-hammer-launch-not-adopted');
   assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR_NUMBER }), null);
 });
-test('REBASEPROV-01 unreadable launch identity defers without a hammer charge', async t => {
-  const root = mkdtempSync(join(tmpdir(), 'unverified-launch-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const deps = hammerDispatchDeps({
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'unverified-launch' }) }),
+for (const ambiguous of [false, true]) {
+  test(`REBASEPROV-01 unreadable ${ambiguous ? 'ambiguous' : 'confirmed'} launch retains ownership`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'unverified-launch-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    let spawns = 0;
+    let ticket = null;
+    const deps = hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          spawns++;
+          const receipt = { stdout: JSON.stringify({ launchRequestId: 'unverified-launch' }) };
+          if (ambiguous) throw Object.assign(new Error('connection reset after launch'), receipt, { stderr: 'connection reset' });
+          return receipt;
+        }
+        return { stdout: JSON.stringify({ status: 'running' }) };
+      },
+      readLaunchRequestStatusImpl: () => ticket
+        ? { ok: true, row: { status: 'running', ticket_ref: ticket } }
+        : { ok: false, reason: 'missing-launch-request-row' },
+    });
+    const args = hammerDispatchArgs(root);
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    await maybeDispatchAmaCloser({ ...args, ...deps });
+    const record = readAmaCloserDispatchRecord(root, identity);
+    assert.equal(record.launchRequestId, 'unverified-launch');
+    assert.equal(record.state, 'dispatched');
+    assert.equal(readAmaCloserLease(root, identity).status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+    await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(spawns, 1, 'unknown ticket must not permit another spawn');
+    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 1, 'ambiguous launches are conservatively charged');
+    ticket = 'CONFLICT-PR-42-REBASE';
+    await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(readAmaCloserDispatchRecord(root, identity).launchRequestId, null);
+    assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
+    assert.equal(readHammerRetryCapLedger(root, identity).lifetimeAttemptCount, 0);
   });
-  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...deps });
-  assert.equal(result.reason, 'launch-ticket-unverified');
-  assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR_NUMBER }), null);
+}
+
+for (const key of ['ticketRef', 'ticket_ref', 'ticket']) {
+  for (const ambiguous of [false, true]) {
+    test(`REBASEPROV-01 key/value ${key} survives ${ambiguous ? 'interrupted' : 'successful'} dispatch`, async t => {
+      const root = mkdtempSync(join(tmpdir(), 'ticket-receipt-'));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const deps = hammerDispatchDeps({ execFileImpl: async () => {
+        const receipt = { stdout: `Starting worker\ndispatchId=dispatch_hammer\nlrq=lrq_hammer\n${key}=CONFLICT-PR-42-REBASE\n` };
+        if (ambiguous) throw Object.assign(new Error('Interrupted'), receipt);
+        return receipt;
+      } });
+      const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...deps });
+      assert.equal(result.reason, 'non-hammer-launch-not-adopted');
+      assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR_NUMBER }), null);
+    });
+  }
+}
+
+test('REBASEPROV-01 key/value HAM receipt preserves the launched lease during ledger lag', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'ham-ticket-receipt-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...hammerDispatchDeps({
+    execFileImpl: async () => ({ stdout: 'dispatchId=dispatch_hammer\nlaunchRequestId=lrq_hammer\nticketRef=HAM\n' }),
+  }) });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_hammer');
 });

@@ -76,6 +76,11 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 
 ## Operational Contract
 
+- A newly returned launch receipt retains `state: dispatched`, its launch IDs,
+  and its active lease when ticket evidence is unavailable. It is charged
+  conservatively until reconciliation; authoritative foreign-ticket evidence
+  retires the record and refunds that charge once. Missing ticket evidence
+  cannot create a `no-dispatch` record or authorize another spawn.
 - Active `dispatching` and `dispatched` records reserve the same `(repo, PR)`
   from follow-up consumption until the record reaches a terminal state or ages
   past the documented reclaim window.

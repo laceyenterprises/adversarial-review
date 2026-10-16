@@ -3191,7 +3191,8 @@ including reader failure and timeout, before the next queued lookup starts.
 Before publishing a HAM validation audit, `bin/hammer-head-context.mjs` can prove
 that the hammer's starting head is a replay of the reviewed series on the live
 base. `src/ama/reviewed-rebase.mjs` compares the ordered, complete binary patches
-of linear commit series, excluding base history. Whitespace, modes, renames,
+of linear commit series across the entire repository, regardless of the caller's
+working directory, excluding base history. Whitespace, modes, renames,
 binary content, missing patches and intermediate source edits remain significant.
 Commit counts and patch positions must match one-to-one, including empty commits
 and commits whose only changes are registered generated outputs.
@@ -3216,13 +3217,18 @@ regardless of order. Identical repeated values remain valid. A replayed commit
 with both `Worker-Class: hammer` and `Worker-Class: codex` therefore requires
 independent content coverage rather than first-value or last-value selection.
 
-The closer validates dispatch ticket evidence before recording or charging a
-hammer launch. Only `HAM` or the matching `AMA-PR-<N>` ticket qualifies; a
+The closer checks available dispatch ticket evidence before recording or charging
+a launch. Only `HAM` or the matching `AMA-PR-<N>` ticket confirms hammer identity; a
 `CONFLICT-PR-<N>-REBASE` launch is a separate owner. Its running or completed
 status cannot become a hammer attempt or `failed-without-merge` outcome.
 Previously misclassified launches with authoritative foreign-ticket evidence
 are retired and their matching series/target/lifetime charge is refunded once.
-Unreadable new launch identity is deferred without a hammer charge.
+A launch receipt with unreadable ticket evidence retains its active lease
+and launch IDs for reconciliation; absence of evidence cannot release ownership
+or trigger another spawn. It receives a conservative attempt charge, refunded
+once if authoritative foreign-ticket evidence appears. Explicit foreign tickets
+are refused before charging; ledger ticket evidence takes precedence over CLI
+output. JSON and key/value CLI receipts both preserve ticket identity.
 
 Agent-os follow-up: the conflict owner must preserve the original trailer block
 on every replayed commit. Do not append a second `Worker-Class` identity or

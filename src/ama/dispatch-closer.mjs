@@ -3632,14 +3632,17 @@ function parseAmaCloserDispatchOutput(stdout) {
 
   let dispatchId = null;
   let launchRequestId = null;
+  let ticketRef = null;
   for (const line of lines) {
     const trimmed = line.trim();
     const dispatchMatch = /^dispatchId=([A-Za-z0-9_-]+)/.exec(trimmed);
     if (dispatchMatch) dispatchId = dispatchMatch[1];
     const lrqMatch = /^(?:launchRequestId|lrq)=([A-Za-z0-9_-]+)/.exec(trimmed);
     if (lrqMatch) launchRequestId = lrqMatch[1];
+    const ticketMatch = /^(?:ticketRef|ticket_ref|ticket)=([^\s]+)\s*$/.exec(trimmed);
+    if (ticketMatch) ticketRef = ticketMatch[1];
   }
-  return (dispatchId || launchRequestId) ? { dispatchId, launchRequestId } : null;
+  return (dispatchId || launchRequestId) ? { dispatchId, launchRequestId, ticketRef } : null;
 }
 
 export function isAmaHammerLaunchTicket(ticket, prNumber) {
@@ -7122,6 +7125,18 @@ export async function maybeDispatchAmaCloser({
   let samePrHammerHolderRetryUsed = false;
   const dispatchEnv = { ...withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs),
     TMPDIR: scratchDir };
+  const promoteLaunchedLease = parsed => {
+    try {
+      updateAmaCloserLease({ rootDir, ...leaseIdentity,
+        status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+        lrqId: parsed.launchRequestId || parsed.dispatchId || 'unknown',
+        now: dispatchContext.dispatchedAt });
+      return null;
+    } catch (err) {
+      // A failed lease write must never undo a worker that already launched.
+      return String(err?.message || err);
+    }
+  };
   const refuseForeignLaunch = async payload => {
     if (!payload.launchRequestId) return null;
     const probe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
@@ -7129,11 +7144,14 @@ export async function maybeDispatchAmaCloser({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
     })).catch(() => ({ ok: false }));
     const ticket = probe?.ok && probe.row?.ticket_ref || payload.ticketRef;
-    if (isAmaHammerLaunchTicket(ticket, prNumber)) return null;
+    // A missing ledger row is not evidence of a foreign owner. Preserve the
+    // launch receipt and dispatched lease so later ticks cannot spawn a duplicate.
+    // Its conservative attempt charge is refunded if a foreign ticket appears.
+    if (!ticket || isAmaHammerLaunchTicket(ticket, prNumber)) return null;
     // Dispatch deduplication can return another owner's launch for this PR.
     // Never adopt its LRQ, charge its attempt, cancel it, or record its outcome.
-    const reason = ticket ? 'non-hammer-launch-not-adopted' : 'launch-ticket-unverified';
-    retainScratchDir = !ticket;
+    const reason = 'non-hammer-launch-not-adopted';
+    retainScratchDir = false;
     finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded',
       now: dispatchContext.dispatchedAt, logger, repo, prNumber });
     updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, current => ({
@@ -7187,7 +7205,8 @@ export async function maybeDispatchAmaCloser({
         transientRetryIndex = 0;
         continue;
       }
-      if (isTransientHqDispatchError(err) && transientRetryIndex < AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length) {
+      if (!launchEvidence.launchRequestId && !launchEvidence.dispatchId
+        && isTransientHqDispatchError(err) && transientRetryIndex < AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length) {
         const delayMs = Number(AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS[transientRetryIndex]) || 0;
         transientRetryIndex += 1;
         await sleep(delayMs, signal);
@@ -7284,6 +7303,7 @@ export async function maybeDispatchAmaCloser({
       // then dies early cannot re-fire forever. Branch-holder / transient / plain
       // dispatch-failed never spawned a worker and are intentionally NOT counted.
       if (ambiguousLaunch) {
+        promoteLaunchedLease(parsedFailure);
         recordHammerLaunchAgainstCap('ambiguous-launch-spawned');
       }
       let releasedPendingLease = false;
@@ -7382,18 +7402,7 @@ export async function maybeDispatchAmaCloser({
   // that hq accepted the launch request. Failure here is best-effort:
   // log via the result but do NOT undo the dispatch (the hammer worker
   // is already running). The next watcher tick will reconcile.
-  let leaseUpdateError = null;
-  try {
-    updateAmaCloserLease({
-      rootDir,
-      ...leaseIdentity,
-      status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
-      lrqId: parsed.launchRequestId || parsed.dispatchId || 'unknown',
-      now: dispatchContext.dispatchedAt,
-    });
-  } catch (err) {
-    leaseUpdateError = String(err?.message || err);
-  }
+  const leaseUpdateError = promoteLaunchedLease(parsed);
 
   // Count this genuine hammer launch against the per-PR retry cap ledger. Keyed on
   // the stable reviewed-head job key so the count accumulates across the head

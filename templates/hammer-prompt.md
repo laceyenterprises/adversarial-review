@@ -412,7 +412,7 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    force it.
 2c. **Keep the canonical documentation surfaces current — doc-currency for the
    change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
-   is NOT net-new feature scope.** If the post-remediation diff touches either
+   is NOT net-new feature scope.** If the post-remediation diff touches any
    surface below AND that surface exists in this PR's repository, update the
    matching docs in your remediation commit so they do not go stale:
    - **Schema change → data-model docs** (`docs/data-model/`). If the diff adds
@@ -430,11 +430,24 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
      changes a module's public interface, dispatch flow, or operational contract
      and a `modules/<name>/<name>-walkthrough.md` exists for that module, update
      it to match.
-   Only touch docs the change actually affects — a pure test/config/docs PR needs
-   none, and a PR in a repo without these surfaces (a submodule) is exempt (note
-   it in your audit comment if a superproject doc is owed). Do NOT land a schema
-   or module change that leaves an in-repo data-model doc or module walkthrough
-   stale.
+   - **State/smoke contract change → owner declarations.** When the diff changes an
+     owner's lifecycle states, transitions, durable status values, smoke-verified
+     promises or post-deploy verification steps, and that owner declares
+     `state-machines.json` and/or `post-merge-verify.json` beside its README,
+     update the affected declarations and the README's state/smoke section,
+     plus the smoke harness when a verified promise changed. Regenerate any
+     committed generated state index if the repository has one (for example
+     `docs/architecture/STATE-MACHINES.md`); regenerate from merged declarations
+     after conflicts. Missing updates are blocking contract drift, like stale
+     data-model docs. Only update owners the change actually affects. Owners with
+     no declarations yet need not add them in an unrelated PR; at most a
+     non-blocking note.
+   Only touch docs the change actually affects. Test/config/docs changes need
+   updates only when they affect a documented contract. A PR in a repo without
+   these surfaces is exempt (note it in your audit comment if a superproject
+   doc is owed). Do NOT land a schema
+   or module change that leaves an in-repo data-model doc, module walkthrough
+   or state/smoke declaration stale.
    **Dual-source migration parity is mandatory.** If a migration/schema change
    has SQLite and Postgres sources, update both sources and the generated or
    mirrored data-model catalog together. If the missing parity source lives in
@@ -978,6 +991,7 @@ hard-blocker report, and do not re-dispatch.
   except for the narrow strict-non-blocking `.active` lane described above.
 - No landing a schema or module change that leaves an in-repo data-model doc
   (`docs/data-model/`, incl. `catalog.json`) or module walkthrough
-  (`modules/<name>/<name>-walkthrough.md`) stale (mandate 2c).
+  (`modules/<name>/<name>-walkthrough.md`) or affected state/smoke declarations
+  (`state-machines.json`, `post-merge-verify.json`) stale (mandate 2c).
 
 <!-- hq:closeout:pr -->

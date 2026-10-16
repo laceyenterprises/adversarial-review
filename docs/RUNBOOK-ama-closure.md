@@ -989,6 +989,18 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    walkthrough. If the PR repository lacks those docs because they belong to a
    superproject or submodule boundary, the hammer leaves the repo-local surface
    alone and notes the skipped superproject-doc obligation in its audit comment.
+   When a diff changes an owner's lifecycle states, transitions, durable status
+   values, smoke-verified promises or post-deploy verification steps, and that owner
+   declares `state-machines.json` and/or `post-merge-verify.json` beside its README,
+   canonical doc-currency also covers the affected declarations and the README's
+   state/smoke section, plus the smoke harness when a verified promise changed.
+   Regenerate any committed generated state index if the repository has one (for
+   example `docs/architecture/STATE-MACHINES.md`); after conflicts, regenerate from
+   merged declarations rather than hand-merging generated output. Missing updates
+   are blocking contract drift, like stale data-model docs, including in final
+   reviews. Remediators and the hammer update only owners the change actually
+   affects as part of landing it. Owners with no declarations yet need not add
+   them in an unrelated PR; at most leave a non-blocking note.
 4. **Post a closing comment.** On a confirmed merge the hammer posts a
    `✅ Closed by Hammer` comment with the merged SHA, merge method, remediated
    finding counts, the failing tests it fixed, doc-currency work or skipped

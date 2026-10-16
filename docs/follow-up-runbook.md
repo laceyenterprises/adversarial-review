@@ -187,6 +187,19 @@ logged and retried on a later poll. See the
 - If the remote PR branch moves while the worker is running, the worker treats it as an optimistic-concurrency miss, not an immediate human handoff. The worker saves only its remediation commits as a patch series, fetches the fresh PR head, resets to that head, replays the patch with `git am --3way`, re-runs the contamination audit and relevant validation, and retries the push with `--force-with-lease=<fresh-head>`. This stale-head replay is bounded to three attempts and must not blindly rebase the whole in-progress worktree onto `origin/<this-pr-branch>`. The worker uses `operationalBlockers[]: [{ title: "stale-pr-head", ... }]` only when the bounded replay is exhausted, replay conflicts cannot be resolved safely, patch identity is ambiguous after a force-rewrite, or post-replay validation/audit fails.
 - Reviewer-bot tokens (`GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, `GH_GEMINI_REVIEWER_TOKEN`) are best-effort: a missing token at startup is logged as a warning, the daemon still runs consume/reconcile, and the comment poster records `token-env-missing` for later retry once the token is restored. Reconcile-time PR comments and first-pass review posts pass `--reviewer-login`, `--auth-mode env-token`, and the selected `GH_*_REVIEWER_TOKEN` env to the GitHub adapter so the write posts under the registered reviewer App/PAT identity, not the host's fallback Clio/ambient identity. A 1Password outage at boot does not block remediation.
 
+When a diff changes an owner's lifecycle states, transitions, durable status
+values, smoke-verified promises or post-deploy verification steps, and that owner
+declares `state-machines.json` and/or `post-merge-verify.json` beside its README,
+canonical doc-currency also covers the affected declarations and the README's
+state/smoke section, plus the smoke harness when a verified promise changed.
+Regenerate any committed generated state index if the repository has one (for
+example `docs/architecture/STATE-MACHINES.md`); after conflicts, regenerate from
+merged declarations rather than hand-merging generated output. Missing updates
+are blocking contract drift, like stale data-model docs, including in final
+reviews. Remediators and the hammer update only owners the change actually
+affects as part of landing it. Owners with no declarations yet need not add
+them in an unrelated PR; at most leave a non-blocking note.
+
 Operator levers (still available, override the daemon):
 
 ```bash

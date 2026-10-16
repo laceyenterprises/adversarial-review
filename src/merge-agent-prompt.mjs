@@ -181,8 +181,17 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' `node scripts/validate-data-model-catalog.mjs` (a red validator is a'
       + ' failing check). If the diff changes a module surface or behaviour and'
       + ' that module has a `modules/<name>/<name>-walkthrough.md`, update it too.'
+      + " If the diff changes an owner's lifecycle states, transitions, durable status values,"
+      + ' smoke-verified promises or post-deploy verification steps, and that owner'
+      + ' declares `state-machines.json` and/or `post-merge-verify.json` beside its README,'
+      + " update the affected declarations and the README's state/smoke section, plus the"
+      + ' smoke harness when a verified promise changed. Regenerate any committed generated state index'
+      + ' if the repository has one (for example `docs/architecture/STATE-MACHINES.md`);'
+      + ' regenerate from merged declarations after conflicts. Missing updates are blocking contract drift,'
+      + ' like stale data-model docs. Only update owners the change actually affects.'
+      + ' Owners with no declarations yet need not add them in an unrelated PR; at most a non-blocking note.'
       + ' Touch only the docs the change actually affects; never leave an in-repo'
-      + ' data-model doc or module walkthrough stale. If this PR is a submodule'
+      + ' data-model doc, module walkthrough or state/smoke declaration stale. If this PR is a submodule'
       + ' change and the owed canonical doc lives only in a superproject, record'
       + ' the skipped superproject-doc obligation in the audit or closing comment'
       + ' with the changed files that created the obligation.'

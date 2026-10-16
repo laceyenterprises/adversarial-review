@@ -30,6 +30,17 @@ follow up on the repo layout. If your remediation diff changes a module's
 public interface, dispatch flow, or operational contract and that module has
 `modules/<name>/<name>-walkthrough.md`, update the walkthrough too.
 
+If your remediation diff changes an owner's lifecycle states, transitions,
+durable status values, smoke-verified promises or post-deploy verification steps,
+and that owner declares `state-machines.json` and/or `post-merge-verify.json` beside
+its README, update the affected declarations and the README's state/smoke section,
+plus the smoke harness when a verified promise changed. Regenerate any committed
+generated state index if the repository has one (for example
+`docs/architecture/STATE-MACHINES.md`); regenerate from merged declarations after
+conflicts. Missing updates are blocking contract drift, like stale data-model
+docs. Only update owners the change actually affects. Owners with no declarations
+yet need not add them in an unrelated PR; at most a non-blocking note.
+
 Only touch docs the remediation actually affects. If this PR is in a repo or
 submodule without those canonical docs because they live in a superproject, do
 not invent local docs; record the skipped superproject-doc obligation in your

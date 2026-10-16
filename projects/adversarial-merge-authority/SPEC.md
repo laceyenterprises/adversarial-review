@@ -316,6 +316,19 @@ without these documentation surfaces, including submodules whose superproject
 owns the docs, are exempt, but the HAM audit comment must record any skipped
 superproject-doc obligation.
 
+When a diff changes an owner's lifecycle states, transitions, durable status
+values, smoke-verified promises or post-deploy verification steps, and that owner
+declares `state-machines.json` and/or `post-merge-verify.json` beside its README,
+canonical doc-currency also covers the affected declarations and the README's
+state/smoke section, plus the smoke harness when a verified promise changed.
+Regenerate any committed generated state index if the repository has one (for
+example `docs/architecture/STATE-MACHINES.md`); after conflicts, regenerate from
+merged declarations rather than hand-merging generated output. Missing updates
+are blocking contract drift, like stale data-model docs, including in final
+reviews. Remediators and the hammer update only owners the change actually
+affects as part of landing it. Owners with no declarations yet need not add
+them in an unrelated PR; at most leave a non-blocking note.
+
 Terminal-remediation eligibility and primary-change reversal authorization share
 `src/ama/ham-provenance.mjs::hamCommitIdentityMatches`. Any linked non-HAM
 author or committer is rejected. Otherwise, a linked HAM author is accepted; an unlinked author may

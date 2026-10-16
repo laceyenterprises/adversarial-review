@@ -651,6 +651,9 @@ export function evaluateNoProgressLane(ledger, {
     return { ...base, reason: 'head-changed' };
   }
   const noProgressTicks = normalizeCount(ledger.noProgressTicks);
+  if (ledger.hammerRouteActive === true) {
+    return { ...base, noProgressTicks, reason: 'hammer-route-active' };
+  }
   if (!hasOwn(ledger, 'progressClass')) {
     return {
       lane: LANE_OPERATOR_BLOCKED,
@@ -744,6 +747,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
   fingerprint,
   decisionFingerprint = null,
   progressClass = PROGRESS_CLASS_SELF_RESOLVING,
+  hammerRouteActive = false,
   operatorReason = null,
   urgent = false,
   escalate = true,
@@ -810,10 +814,10 @@ export function recordNoProgressLaneRun(rootDir, identity, {
     );
   }
   const normalizedProgressClass = normalizeProgressClass(progressClass);
-  const backoffTicks = normalizedProgressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+  const backoffTicks = hammerRouteActive ? 0 : normalizedProgressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
     ? operatorBlockedRewalkTicks(operatorRewalkTicks)
     : backoffTicksFor(noProgressTicks, { cap, maxBackoffTicks });
-  const lane = normalizedProgressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
+  const lane = hammerRouteActive ? LANE_ACTIVE : normalizedProgressClass === PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
     ? LANE_OPERATOR_BLOCKED
     : (backoffTicks > 0 ? LANE_SLOW : LANE_ACTIVE);
   const priorLane = sameHead ? (existing?.lane || LANE_ACTIVE) : LANE_ACTIVE;
@@ -863,6 +867,7 @@ export function recordNoProgressLaneRun(rootDir, identity, {
         : null),
     decisionResets,
     progressClass: normalizedProgressClass,
+    hammerRouteActive: hammerRouteActive === true,
     noProgressTicks,
     // A walked PR starts its next backoff window from zero regardless of outcome.
     skippedTicks: 0,

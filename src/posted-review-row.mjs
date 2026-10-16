@@ -26,6 +26,7 @@ import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestration.mjs';
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
+import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
 import {
   HAMMER_EVIDENCE_FAILURES,
@@ -705,6 +706,8 @@ export async function handlePostedReviewRow({
         );
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
+        ...(gateProjection?.decision?.operatorDecisionRequired === true
+          && !isSafetyRecoveryHold(amaClosureResult) ? { hammerRouteActive: true } : {}),
         gateDecision: gateProjection?.decision || null };
     }
 
@@ -961,9 +964,14 @@ export function createNoProgressLaneGate({
       const fingerprint = timedOut
         ? 'timed-out'
         : subjectProgressFingerprint(row, { headSha: handler.headSha || null });
-      const progressClass = value?.gateDecision?.operatorDecisionRequired === true
+      // The final review's generic operator flag does not describe closure
+      // ownership. A retained hammer route must run each tick, including while
+      // dispatch is queued; a named safety/operator refusal still wins.
+      const hammerRouteActive = !timedOut && value?.hammerRouteActive === true
+        && !isSafetyRecoveryHold(value?.amaClosureResult);
+      const progressClass = !hammerRouteActive && (value?.gateDecision?.operatorDecisionRequired === true
         || value?.amaClosureResult?.needsOperator === true
-        || value?.outcome === 'await-operator'
+        || value?.outcome === 'await-operator')
         ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
         : PROGRESS_CLASS_SELF_RESOLVING;
       const observedAt = now();
@@ -976,6 +984,7 @@ export function createNoProgressLaneGate({
         fingerprint,
         decisionFingerprint,
         progressClass,
+        hammerRouteActive,
         operatorReason: value?.amaClosureResult?.operatorReason || null,
         // HAMUNKNOWN-01: GitHub can finish computing without any review-row
         // change. Recovery bounds urgency to its tolerated cycle budget.

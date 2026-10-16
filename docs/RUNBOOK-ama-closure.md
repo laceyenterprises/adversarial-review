@@ -3120,7 +3120,12 @@ Non-pipeline reviews enable admission/settlement splitting by default. The
 watcher commits the post success or failure before releasing admission. The
 runtime and its identity lease have ended at this boundary; process reservations
 are removed before token accounting. Token-ledger lookup/retries, token artifact
-writing, and reviewer-pass completion continue outside the seat. A failed durable
+writing, and reviewer-pass completion continue outside the seat. The evidence
+reader can call `queryPostgresRows` / `spawnSync(psql)` (30-second subprocess
+timeout) and traverse transcripts synchronously, so it runs on a separate reader
+process. At most two accounting reader processes run concurrently; each active lookup has
+a bounded lifetime. A blocked ledger therefore cannot block the watcher's event
+loop after capacity release. A failed durable
 row write retains the seat through the fallback settlement path. Exceptions
 before release still reach the pool's thrown-failure circuit breaker.
 
@@ -3141,10 +3146,12 @@ pool rechecks capacity. Preparation errors retain the existing refusal behavior.
 
 `reviewer seat handoff: model=... post_to_spawn_ms=...` measures from the exact
 review attempt's captured durable post timestamp (`reviewer_passes.body_captured_at`)
-to the next runtime start on that model lane. It survives an empty handoff and a
-later poll admission. Missing post evidence produces no invented gap. The older
+to the next process-start callback on that model lane. It survives an empty handoff and a
+later poll admission. Missing post evidence or an adapter without a process-start
+callback produces no invented process gap. The older
 `reviewer admission on capacity-freed ... idle_ms=...` measures only release to
-runtime start, so it excludes the post-to-release interval. These logs describe
+runtime admission, so it excludes both the post-to-release interval and adapter
+startup before the process callback. These logs describe
 model lanes, not individual identities in a multi-identity pool; use the single
 seat deployment for the acceptance comparison.
 

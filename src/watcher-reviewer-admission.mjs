@@ -18,12 +18,17 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
       if (admitted) return;
       admitted = true;
       const at = now();
+      resolveAdmission({ dispatched: true, at });
+    };
+    let spawned = false;
+    candidate.markReviewerSpawned = () => {
+      if (spawned) return;
+      spawned = true;
       const postedAt = postedByModel.get(candidate.reviewerModel);
       if (Number.isFinite(postedAt)) {
-        logger.log?.(`[watcher] reviewer seat handoff: model=${candidate.reviewerModel} post_to_spawn_ms=${Math.max(0, at - postedAt)}`);
+        logger.log?.(`[watcher] reviewer seat handoff: model=${candidate.reviewerModel} post_to_spawn_ms=${Math.max(0, now() - postedAt)}`);
         postedByModel.delete(candidate.reviewerModel);
       }
-      resolveAdmission({ dispatched: true, at });
     };
     const run = candidate.run;
     candidate.run = async function () {

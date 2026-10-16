@@ -182,8 +182,12 @@ test('SEATIDLE-03: gap measures the durable post through settlement and a later 
   await flush(); // no backlog yet: preserve the post origin through an empty handoff
   now = 60_000;
   const next = { repoPath: 'example/review-fixture', prNumber: 202, reviewerModel: 'gemini',
-    async run() { this.markAdmissionStarted(); } };
+    async run() {
+      this.markAdmissionStarted();
+      now = 65_000; // the adapter takes another five seconds to create its process
+      this.markReviewerSpawned?.();
+    } };
   admission.enqueue(next);
   await next.run();
-  assert.deepEqual(logs, ['[watcher] reviewer seat handoff: model=gemini post_to_spawn_ms=50000']);
+  assert.deepEqual(logs, ['[watcher] reviewer seat handoff: model=gemini post_to_spawn_ms=55000']);
 });

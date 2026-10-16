@@ -1,3 +1,4 @@
+import { readReviewerEvidenceInWorker } from './reviewer-token-ledger-lookup.mjs';
 import { openReviewStateDb } from './review-state.mjs';
 import { reviewerCredentialKey } from './claude-account-routing.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
@@ -63,7 +64,6 @@ import {
   completeReviewerPass,
   normalizeReviewerClass,
   nextReviewerPassAttemptNumber,
-  readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
 } from './reviewer-pass-tokens.mjs';
 import { writeReviewerTokenUsageArtifactBestEffort } from './reviewer-runtime-support.mjs';
@@ -698,7 +698,7 @@ async function spawnReviewerOnceWithAccount({
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
   postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
-  readBestReviewerEvidenceTokenUsageImpl = readBestReviewerEvidenceTokenUsage,
+  readBestReviewerEvidenceTokenUsageImpl = readReviewerEvidenceInWorker,
   ledgerLookupSleepImpl = sleepMs,
   quotaCheckEnv = process.env,
   readReviewerQuotaDecisionImpl = readReviewerQuotaDecision,

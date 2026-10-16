@@ -3188,8 +3188,8 @@ export async function processReviewSubject(entry, ctx) {
               .filter(name => !['freshness', 'dedup'].includes(name)).map(readPreflight));
             // Fetch live state last, so slow reconciliation cannot age the
             // freshness snapshot before the pool consumes it.
-            preflight.invalidate(`${route.reviewerModel}:${route.botTokenEnv}:freshness`);
-            await Promise.allSettled([readPreflight('freshness')]);
+            for (const name of ['freshness', 'dedup']) preflight.invalidate(`${route.reviewerModel}:${route.botTokenEnv}:${name}`);
+            await Promise.allSettled([readPreflight('freshness'), readPreflight('dedup')]);
           })().finally(() => { preparation = null; });
           return preparation;
         },
@@ -3932,6 +3932,7 @@ export async function processReviewSubject(entry, ctx) {
                 onReviewerRuntimeStarted: () => dispatchCandidate.markAdmissionStarted?.(),
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
                   dispatchCandidate.markAdmissionStarted?.();
+                  dispatchCandidate.markReviewerSpawned?.();
                   reviewerProcessStarted = true;
                   retainedWatcherWakes?.drop(wakeIdentity);
                   healthProbe?.recordSpawn?.(healthTick, {

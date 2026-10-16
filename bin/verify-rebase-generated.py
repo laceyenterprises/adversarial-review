@@ -36,7 +36,7 @@ def main():
         git("config", "--get", "remote.origin.url", cwd=trusted_root).decode().strip()
     )
     canonical = origin.removesuffix(".git").replace(":", "/").split("/")[-2:]
-    if "/".join(canonical) != repo:
+    if "/".join(canonical).lower() != repo.lower():
         raise ValueError("Generated registry belongs to another repository")
     entries = policy.load_registry()
     if action == "policy":
@@ -63,7 +63,7 @@ def main():
         timeout=30,
     )
     with tempfile.TemporaryDirectory(prefix="rebase-generated-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         stream = io.BytesIO(blobs)
         source_digests = {}
         for path, mode, oid in files:

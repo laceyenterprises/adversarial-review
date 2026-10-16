@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
+import { proveReviewedRebase } from '../src/ama/reviewed-rebase.mjs';
 
 function fixture(t, { generated = false, changed = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rebase-proof-'));
@@ -73,3 +74,46 @@ test('REBASEPROV-01 coverage uses the live PR base even when it has no main ref'
   options.get = async () => { throw new Error('No main branch or API ancestry proof'); };
   assert.equal((await fetchHammerHeadRange(options))?.proof, 'reviewed-rebase-patch-equivalence');
 });
+
+for (const extra of ['empty', 'generated']) {
+  for (const replay of ['preserve', 'drop', 'move']) {
+    test(`REBASEPROV-01 ${replay} ${extra} commit preserves one-to-one patch positions`, async t => {
+      const dir = mkdtempSync(join(tmpdir(), 'rebase-series-'));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const run = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8',
+        env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+      const write = (path, data) => writeFileSync(join(dir, path), data);
+      const commit = message => {
+        run('add', '--all'); run('commit', '--allow-empty', '-qm', message);
+        return run('rev-parse', 'HEAD');
+      };
+      const intermediate = () => {
+        if (extra === 'generated') write('generated.txt', 'updated output\n');
+        commit('Intermediate');
+      };
+      const feature = () => { write('feature.txt', 'reviewed feature\n'); return commit('Feature'); };
+      run('init', '-q'); run('config', 'user.name', 'Fixture'); run('config', 'user.email', 'fixture@example.invalid');
+      write('generated.txt', 'original output\n');
+      const fork = commit('Initial');
+      intermediate();
+      const reviewedHead = feature();
+      run('checkout', '-qb', 'base', fork);
+      write('base.txt', 'base advancement\n');
+      const base = commit('Base');
+      if (replay === 'preserve') intermediate();
+      feature();
+      if (replay === 'move') intermediate();
+      const head = run('rev-parse', 'HEAD');
+      const verified = [];
+      const proof = await proveReviewedRebase({ reviewedHead, head, base,
+        git: async args => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }),
+        generatedFiles: ['generated.txt'], verifyGenerated: async sha => { verified.push(sha); return true; } });
+      assert.equal(proof?.proof ?? null, replay === 'preserve' ? 'reviewed-rebase-patch-equivalence' : null);
+      if (replay === 'preserve') {
+        assert.equal(proof.reviewedCommits.length, 2);
+        assert.equal(proof.replayedCommits.length, 2);
+        assert.equal(verified.length, extra === 'generated' ? 2 : 0);
+      }
+    });
+  }
+}

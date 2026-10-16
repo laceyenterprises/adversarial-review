@@ -3193,6 +3193,8 @@ that the hammer's starting head is a replay of the reviewed series on the live
 base. `src/ama/reviewed-rebase.mjs` compares the ordered, complete binary patches
 of linear commit series, excluding base history. Whitespace, modes, renames,
 binary content, missing patches and intermediate source edits remain significant.
+Commit counts and patch positions must match one-to-one, including empty commits
+and commits whose only changes are registered generated outputs.
 On success the HAM audit records the reviewed SHA as its base edge, allowing
 the daemon to reconstruct the exact-head App attestation after the worker exits.
 The proof is bounded to 256 commits per series. Missing objects, nonlinear

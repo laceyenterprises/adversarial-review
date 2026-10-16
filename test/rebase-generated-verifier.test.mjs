@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const helper = fileURLToPath(new URL('../bin/verify-rebase-generated.py', import.meta.url));
-for (const mode of ['valid', 'forged', 'mutated-source']) {
-  const valid = mode === 'valid';
+for (const mode of ['valid', 'symlink-temp', 'mixed-case-repo', 'forged', 'mutated-source']) {
+  const valid = !['forged', 'mutated-source'].includes(mode);
   test(`REBASEPROV-01 verifies raw merged-source generated output mode=${mode} without host state`, t => {
-    const root = mkdtempSync(join(tmpdir(), 'generated-verifier-'));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'generated-verifier-')));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const source = join(root, 'source');
     const installed = join(root, 'installed');
@@ -20,8 +20,15 @@ for (const mode of ['valid', 'forged', 'mutated-source']) {
     writeFileSync(installedHelper, readFileSync(helper));
     for (const dir of [source, installed, pkg]) mkdirSync(dir, { recursive: true });
     const env = { ...process.env, PYTHONPATH: join(root, 'python'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    if (mode === 'symlink-temp') {
+      const temp = join(root, 'real-temp');
+      mkdirSync(temp);
+      symlinkSync(temp, join(root, 'linked-temp'), 'dir');
+      env.TMPDIR = join(root, 'linked-temp');
+    }
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, env, encoding: 'utf8' }).trim();
-    git(installed, 'init', '-q'); git(installed, 'remote', 'add', 'origin', 'git@example.invalid:fixture/repo.git');
+    git(installed, 'init', '-q'); git(installed, 'remote', 'add', 'origin', mode === 'mixed-case-repo'
+      ? 'git@example.invalid:Fixture/Repo.git' : 'git@example.invalid:fixture/repo.git');
     const shadow = join(root, 'python/cwp_dispatch');
     mkdirSync(shadow, { recursive: true });
     writeFileSync(join(shadow, '__init__.py'), `from pathlib import Path\nPath(${JSON.stringify(join(root, 'shadow-loaded'))}).touch()\nraise RuntimeError("worker policy must not load")\n`);

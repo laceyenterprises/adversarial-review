@@ -34,7 +34,7 @@ const loadRebaseCoverage = async ({ base, head }) => {
     generatedFiles = JSON.parse((await execute('python3', [generatedHelper, repo, 'policy'], { timeout: 15000 })).stdout);
     if (!Array.isArray(generatedFiles)) generatedFiles = [];
   } catch { /* No installed policy: only whole-patch equivalence is available. */ }
-  for (const sha of [reviewedHead, base]) {
+  for (const sha of [reviewedHead, base, head]) {
     try { await git(['cat-file', '-e', `${sha}^{commit}`]); }
     catch { try { await git(['fetch', '--no-tags', 'origin', sha]); } catch { return null; } }
   }

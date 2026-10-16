@@ -8,10 +8,45 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
+import { proveReviewedRebase } from '../src/ama/reviewed-rebase.mjs';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-head-context.mjs', import.meta.url));
 const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+
+test('REBASEPROV-01 coverage fetches a missing replay head before proving its patches', async () => {
+  const reviewedHead = 'a'.repeat(40), base = 'b'.repeat(40), head = 'c'.repeat(40), fork = 'd'.repeat(40);
+  const present = new Set([reviewedHead, base]);
+  const fetched = [];
+  const source = readFileSync(cli, 'utf8');
+  const loader = source.slice(source.indexOf('const loadRebaseCoverage ='), source.indexOf('const loadComments ='))
+    .replace("await import('../src/ama/reviewed-rebase.mjs')", 'rebaseModule')
+    .replace('import.meta.url', 'cliUrl');
+  const load = runInNewContext(`${loader}\nloadRebaseCoverage`, {
+    reviewedHead, repo: 'fixture/repo', rebaseModule: { proveReviewedRebase },
+    fileURLToPath, URL, cliUrl: new URL('../bin/hammer-head-context.mjs', import.meta.url).href,
+    execFile: null, promisify: () => async (command, args) => {
+      if (command === 'python3') throw new Error('No installed policy');
+      assert.equal(command, 'git');
+      const [verb, ...rest] = args;
+      if (verb === 'cat-file') {
+        if (!present.has(rest[1].split('^')[0])) throw new Error('Missing object');
+        return { stdout: '' };
+      }
+      if (verb === 'fetch') { present.add(rest.at(-1)); fetched.push(rest.at(-1)); return { stdout: '' }; }
+      if (verb === 'merge-base') {
+        assert.ok(present.has(rest[0]), 'proof must have the starting head locally');
+        return { stdout: rest[0] === reviewedHead ? fork : base };
+      }
+      if (verb === 'rev-list') return { stdout: rest.includes('--parents')
+        ? `${rest.at(-1)} ${base}` : rest.at(-1).split('..')[1] };
+      if (verb === 'diff') return { stdout: 'identical reviewed patch' };
+      assert.fail(`Unexpected git command: ${args.join(' ')}`);
+    },
+  });
+  assert.equal((await load({ base, head }))?.proof, 'reviewed-rebase-patch-equivalence');
+  assert.deepEqual(fetched, [head]);
+});
 
 test('timeline loader omits absent and invalid cursors and forwards a valid cursor', async () => {
   // Isolate the CLI-local loader without executing the command's top-level flow.

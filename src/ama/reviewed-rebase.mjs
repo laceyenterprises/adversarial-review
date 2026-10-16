@@ -21,13 +21,13 @@ export async function proveReviewedRebase({ reviewedHead, head, base, git, gener
       `${sha}^`, sha, '--', '.', ...exclusions]);
     const oldSeries = await list(reviewedHead, fork);
     const newSeries = await list(head, onto);
-    if (!oldSeries.length || !newSeries.length) return null;
+    if (!oldSeries.length || oldSeries.length !== newSeries.length) return null;
     const reviewed = [];
-    for (const sha of oldSeries) { const diff = await patch(sha); if (diff) reviewed.push(diff); }
+    for (const sha of oldSeries) reviewed.push(await patch(sha));
     const replayed = [];
     for (const sha of newSeries) {
       const diff = await patch(sha);
-      if (diff) replayed.push(diff);
+      replayed.push(diff);
       if (generatedFiles.length) {
         // Base outputs are already authoritative. Any rewritten output must be
         // regenerated from this commit's merged sources, including intermediate commits.
@@ -36,7 +36,7 @@ export async function proveReviewedRebase({ reviewedHead, head, base, git, gener
         if (changed.length && !await verifyGenerated(sha, changed)) return null;
       }
     }
-    if (!reviewed.length || reviewed.length !== replayed.length || reviewed.some((diff, i) => diff !== replayed[i])) return null;
+    if (!reviewed.some(Boolean) || reviewed.some((diff, i) => diff !== replayed[i])) return null;
     return { proof: 'reviewed-rebase-patch-equivalence', reviewedHead, rebasedHead: head,
       fork, rebaseBase: onto, reviewedCommits: oldSeries, replayedCommits: newSeries, generatedFiles };
   } catch { return null; }

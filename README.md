@@ -1080,6 +1080,8 @@ stateDiagram-v2
     s4 --> s0: hammer-dispatch.13 bounded retry or changed context
     s6 --> s0: hammer-dispatch.14 bounded retry or changed context
     s7 --> s0: hammer-dispatch.15 bounded retry or changed context
+    s1 --> s7: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
+    s2 --> s7: hammer-dispatch.17 foreign ticket corrects terminal launch attribution
     s2 --> [*]
     s5 --> [*]
     s6 --> [*]

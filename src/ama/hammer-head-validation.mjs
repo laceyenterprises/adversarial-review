@@ -1,3 +1,4 @@
+import { proveReviewedRebase } from './reviewed-rebase.mjs';
 import { opendir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
@@ -245,6 +246,26 @@ export async function fetchHammerHeadRange(options) {
   const { repo, reviewedHead, currentHead, hammerBaseHead, get, loadActivityPage,
     prNumber, env = process.env } = options;
   const target = hammerBaseHead || currentHead;
+  // A separate conflict owner can rewrite the reviewed series before HAM starts.
+  // Identity trailers do not authorize that rewrite: independently compare content.
+  if ((options.git || (hammerBaseHead && options.loadRebaseCoverage
+    && /^[a-f0-9]{40}$/.test(reviewedHead) && /^[a-f0-9]{40}$/.test(target))) && reviewedHead && target && reviewedHead !== target) {
+    try {
+      const base = options.loadRebaseBase ? await options.loadRebaseBase()
+        : await get(`repos/${repo}/commits/${encodeURIComponent(options.baseRef || 'main')}`);
+      if (!base?.sha) return null;
+      const coverage = options.loadRebaseCoverage
+        ? await options.loadRebaseCoverage({ head: target, base: base.sha })
+        : await proveReviewedRebase({ ...options, head: target, base: base.sha });
+      if (coverage) return { verified: true, reviewedHead, currentHead, baseSha: base.sha,
+        commits: [...coverage.replayedCommits, ...(target !== currentHead ? [currentHead] : [])],
+        proof: coverage.proof, rebaseCoverage: coverage };
+      // A failed content proof for a rewritten starting base cannot be rescued
+      // by a fleet actor alone: conflict ownership is not review authority.
+      const comparison = await get(`repos/${repo}/compare/${reviewedHead}...${target}`);
+      if (!['ahead', 'identical'].includes(comparison?.status)) return null;
+    } catch { return null; /* Missing objects or policy cannot authorize a rebased starting base. */ }
+  }
   if (!reviewedHead || !target || reviewedHead === target || !loadActivityPage || !prNumber) return null;
   try {
     const pr = await get(`repos/${repo}/pulls/${prNumber}`);

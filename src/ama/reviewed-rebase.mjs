@@ -1,0 +1,44 @@
+// REBASEPROV-01: content proof, independent of rebased commit identities.
+// Full binary patches retain whitespace, modes, paths and intermediate edits.
+const LIMIT = 256;
+export async function proveReviewedRebase({ reviewedHead, head, base, git, generatedFiles = [], verifyGenerated = async () => false }) {
+  try {
+    const fork = (await git(['merge-base', reviewedHead, base])).trim();
+    const onto = (await git(['merge-base', head, base])).trim();
+    if (!fork || !onto) return null;
+    const list = async (tip, bottom) => {
+      const commits = (await git(['rev-list', '--parents', '--reverse', '--topo-order', `--max-count=${LIMIT + 1}`, `${bottom}..${tip}`]))
+        .trim().split(/\r?\n/).filter(Boolean).map(line => line.trim().split(/\s+/));
+      if (commits.length > LIMIT) throw new Error('rebase-proof-limit');
+      if (commits.some(commit => commit.length !== 2)) throw new Error('nonlinear-rebase');
+      return commits.map(([sha]) => sha);
+    };
+    if (generatedFiles.some(path => typeof path !== 'string' || !path || path.startsWith('/')
+      || path.split('/').some(part => !part || part === '.' || part === '..') || /[\0\r\n]/.test(path))) return null;
+    const exclusions = generatedFiles.map(path => `:(top,exclude,literal)${path}`);
+    const patch = sha => git(['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--binary', '--full-index',
+      `${sha}^`, sha, '--', ':(top)', ...exclusions]);
+    const oldSeries = await list(reviewedHead, fork);
+    const newSeries = await list(head, onto);
+    if (!oldSeries.length || oldSeries.length !== newSeries.length) return null;
+    const reviewed = [];
+    for (const sha of oldSeries) reviewed.push(await patch(sha));
+    const replayed = [];
+    for (const sha of newSeries) {
+      const diff = await patch(sha);
+      replayed.push(diff);
+      if (generatedFiles.length) {
+        // Base outputs are already authoritative. Any rewritten output must be
+        // regenerated from this commit's merged sources, including intermediate commits.
+        const changed = (await git(['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--name-only', '-z',
+          onto, sha, '--', ...generatedFiles.map(path => `:(top,literal)${path}`)])).split('\0').filter(Boolean);
+        if (changed.length && !await verifyGenerated(sha, changed)) return null;
+      }
+    }
+    // Empty patches still occupy a series position. Generated-only replays
+    // have already passed verification above; all-empty series are equivalent.
+    if (reviewed.some((diff, i) => diff !== replayed[i])) return null;
+    return { proof: 'reviewed-rebase-patch-equivalence', reviewedHead, rebasedHead: head,
+      fork, rebaseBase: onto, reviewedCommits: oldSeries, replayedCommits: newSeries, generatedFiles };
+  } catch { return null; }
+}

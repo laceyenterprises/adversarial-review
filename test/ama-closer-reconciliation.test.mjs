@@ -334,3 +334,20 @@ test('mixed ledger results expire only genuinely stale missing records', async (
   assert.equal(JSON.parse(readFileSync(old)).state, 'launch-terminal');
   assert.equal(JSON.parse(readFileSync(fresh)).state, 'dispatched');
 });
+
+for (const status of ['running', 'succeeded', 'failed']) {
+  test(`REBASEPROV-01 foreign ${status} launch holds no closer capacity or terminal outcome`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'foreign-closer-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: 'head' };
+    updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, workerClass: 'hammer',
+      state: 'dispatched', launchRequestId: 'foreign-launch', lastObservedStatus: 'running',
+      lastObservedAt: '2026-01-01T00:00:00Z' }));
+    const path = amaCloserDispatchFilePath(root, identity);
+    const before = readFileSync(path);
+    assert.equal((await findActiveAmaCloserLaunches(root, { now: '2026-01-01T00:01:00Z',
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status, ticket_ref: 'CONFLICT-PR-42-REBASE' } }),
+    })).length, 0);
+    assert.deepEqual(readFileSync(path), before, 'capacity reconciliation does not charge or record a hammer outcome');
+  });
+}

@@ -8,10 +8,72 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
+import { isTransientGhError } from '../src/gh-cli.mjs';
+import { proveReviewedRebase } from '../src/ama/reviewed-rebase.mjs';
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-head-context.mjs', import.meta.url));
 const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
+
+for (const failureMessage of ['connection reset', 'fatal: unable to access: Could not resolve host: github.com',
+  'ssh: Could not resolve hostname github.com', 'fatal: unable to access: Failed to connect to github.com port 443',
+  'kex_exchange_identification: Connection closed by remote host', 'SSL handshake failed']) {
+for (const failures of [0, 1, 2, 3, 'permanent']) {
+test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) before proving replay patches`, async () => {
+  const reviewedHead = 'a'.repeat(40), base = 'b'.repeat(40), head = 'c'.repeat(40), fork = 'd'.repeat(40);
+  const present = new Set([reviewedHead, base]);
+  const fetched = [];
+  const delays = [];
+  let attempts = 0;
+  const source = readFileSync(cli, 'utf8');
+  const loader = source.slice(source.indexOf('const loadRebaseCoverage ='), source.indexOf('const loadComments ='))
+    .replace("await import('../src/ama/reviewed-rebase.mjs')", 'rebaseModule')
+    .replace('import.meta.url', 'cliUrl');
+  const load = runInNewContext(`${loader}\nloadRebaseCoverage`, {
+    process: { env: { HAM_HQ_ROOT: '/trusted/install' } },
+    isTransientGhError, setTimeout: (resolve, ms) => { delays.push(ms); resolve(); },
+    reviewedHead, repo: 'fixture/repo', rebaseModule: { proveReviewedRebase },
+    fileURLToPath, URL, cliUrl: new URL('../bin/hammer-head-context.mjs', import.meta.url).href,
+    execFile: null, promisify: () => async (command, args) => {
+      if (command === 'python3') {
+        assert.deepEqual(Array.from(args.slice(1, 3)), ['--trusted-root', '/trusted/install']);
+        throw new Error('No installed policy');
+      }
+      assert.equal(command, 'git');
+      const [verb, ...rest] = args;
+      if (verb === 'cat-file') {
+        if (!present.has(rest[1].split('^')[0])) throw new Error('Missing object');
+        return { stdout: '' };
+      }
+      if (verb === 'fetch') {
+        attempts++;
+        if (failures === 'permanent') throw new Error('permission denied');
+        if (attempts <= failures) throw new Error(failureMessage);
+        present.add(rest.at(-1)); fetched.push(rest.at(-1)); return { stdout: '' };
+      }
+      if (verb === 'merge-base') {
+        assert.ok(present.has(rest[0]), 'proof must have the starting head locally');
+        return { stdout: rest[0] === reviewedHead ? fork : base };
+      }
+      if (verb === 'rev-list') {
+        assert.ok(rest.includes('--parents'));
+        return { stdout: `${rest.at(-1).split('..')[1]} ${base}` };
+      }
+      if (verb === 'diff') return { stdout: 'identical reviewed patch' };
+      assert.fail(`Unexpected git command: ${args.join(' ')}`);
+    },
+  });
+  const result = await load({ base, head });
+  if (failures === 3 || failures === 'permanent') assert.equal(result, null);
+  else {
+    assert.equal(result?.proof, 'reviewed-rebase-patch-equivalence');
+    assert.deepEqual(fetched, [head]);
+  }
+  assert.equal(attempts, failures === 'permanent' ? 1 : Math.min(failures + 1, 3));
+  assert.deepEqual(delays, failures === 'permanent' ? [] : [500, 1000].slice(0, failures));
+});
+}
+}
 
 test('timeline loader omits absent and invalid cursors and forwards a valid cursor', async () => {
   // Isolate the CLI-local loader without executing the command's top-level flow.
@@ -232,4 +294,21 @@ test('HAMCLOSE-07 head-context CLI uses branch activity after existing proofs de
   assert.deepEqual(result.steps, [{ before: 'reviewed', after: 'head', kind: 'push',
     actor: 'synthetic-remediator[bot]', time: '2026-01-01T00:00:00Z' }]);
   assert.equal(f.calls().length, 4);
+});
+
+test('REBASEPROV-01 content proof discovers the actual PR base and refuses a moved head', async () => {
+  const source = readFileSync(cli, 'utf8');
+  const loader = source.slice(source.indexOf('const loadRebaseBase ='), source.indexOf('const loadRebaseCoverage ='));
+  const current = 'c'.repeat(40), base = 'b'.repeat(40);
+  for (const [head, baseSha, expected] of [[current, base, base], ['d'.repeat(40), base, null], [current, '', null]]) {
+    const load = runInNewContext(`${loader}\nloadRebaseBase`, {
+      repo: 'fixture/repo', prNumber: 42, currentHead: current,
+      execGhWithRetry: async ({ args }) => {
+        assert.deepEqual(Array.from(args), ['api', 'repos/fixture/repo/pulls/42']);
+        return { stdout: JSON.stringify({ head: { sha: head }, base: { ref: 'release', sha: baseSha } }) };
+      },
+    });
+    const value = await load();
+    assert.equal(value?.sha ?? null, expected);
+  }
 });

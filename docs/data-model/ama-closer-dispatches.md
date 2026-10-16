@@ -50,6 +50,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
+| `unadoptedLaunchRequestId` | string, optional | Foreign launch receipt rejected using authoritative ticket evidence. Retained for diagnosis after clearing `launchRequestId` and `dispatchId`; it grants no closer ownership. Reconciliation refunds a previously charged foreign launch once. |
 | `infraRearmLoggedLaunchRequestId` | string, optional | Launch whose `ama_closer.infra_dead_hammer_rearm` event was already logged. The event is skipped while this equals `launchRequestId`, so it is logged once per launch whatever the re-arm reason. Stamped only while the record still names that launch. |
 | `retryCount` | non-negative integer | Monotonic launch/pass attempt identity. Admission subtracts `unexecutedRefundCount` from this value when enforcing the per-head redispatch bound. Transient and branch-holder refusals preserve budget. |
 | `unexecutedRefundCount` | non-negative integer, optional | Number of durable non-execution or independently observed operator-label deferral refunds reconciled for this dispatch head. A label-deferring hammer may have run; this is admission credit, not proof that it never executed. Defaults to zero; reset when the dispatch head advances. Does not reset retry/pass numbering or refund lifetime charges. |
@@ -76,6 +77,11 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 
 ## Operational Contract
 
+- A newly returned launch receipt retains `state: dispatched`, its launch IDs,
+  and its active lease when ticket evidence is unavailable. It is charged
+  conservatively until reconciliation; authoritative foreign-ticket evidence
+  retires the record and refunds that charge once. Missing ticket evidence
+  cannot create a `no-dispatch` record or authorize another spawn.
 - Active `dispatching` and `dispatched` records reserve the same `(repo, PR)`
   from follow-up consumption until the record reaches a terminal state or ages
   past the documented reclaim window.

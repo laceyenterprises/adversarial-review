@@ -76,6 +76,20 @@ if [ "$POST_REMEDIATION_SHA" != "$HAM_BUILT_HEAD" ] ||
   HAM_PHASE_OUTCOME=exact-head-review-required
   ham_publish_abort 20; return 20
 fi
+# REBASEPROV-01: persist the independently proven R -> current edge so daemon
+# reconstruction remains valid after the hammer exits. Keep HAM_BASE_HEAD for CAS.
+ham_resolve_audit_base_head() {
+  local base range_dir="${HAM_RUN_DIR:-<<RUN_DIR>>}"
+  base=$(jq -er --arg base "$HAM_BASE_HEAD" '
+    if .proof == "reviewed-rebase-patch-equivalence" then
+      if .verified == true and .reviewedHead == .rebaseCoverage.reviewedHead then
+        .reviewedHead
+      else error("invalid reviewed rebase coverage") end
+    else $base end' "$range_dir/range.json") || return 1
+  ham_is_full_sha "$base" || return 1
+  printf '%s' "$base"
+}
+HAM_AUDIT_BASE_HEAD=$(ham_resolve_audit_base_head) || { ham_publish_abort 1; return 1; }
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
 # Counts and finding bullets are supplied by the caller before rendering.
 ham_audit_is_nonnegative_int() {
@@ -119,7 +133,7 @@ HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediati
   "$HAM_AUDIT_COMMENT_DETAILS" \
   "$HAM_DOC_CURRENCY_LINE" \
   "$POST_REMEDIATION_SHA" \
-  "$HAM_BASE_HEAD" \
+  "$HAM_AUDIT_BASE_HEAD" \
   "$POST_REMEDIATION_SHA" \
   "$HAM_AUDIT_REMEDIATED_TOTAL" \
   "$HAM_AUDIT_REMEDIATED_BLOCKING" \

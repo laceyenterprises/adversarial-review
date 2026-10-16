@@ -98,7 +98,7 @@ for (const status of ['succeeded', 'failed', 'canceled', 'reaped']) {
   test(`HAMTMP-01: dispatch renders one private directory and ${status} run cleanup removes it`, async t => {
     const root = fixture(t);
     const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root),
-      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }) }) });
+      execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }) }) });
     assert.equal(result.dispatched, true, JSON.stringify(result));
     const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
     const record = JSON.parse(readFileSync(path));
@@ -185,7 +185,7 @@ test('HAMTMP-01: a launch with an ambiguous response retains scratch until termi
   const root = fixture(t);
   const result = await maybeDispatchAmaCloser({ ...dispatchArgs(root), execFileImpl: async () => {
     throw Object.assign(new Error('synthetic response lost after launch'), {
-      stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }),
+      stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq', dispatchId: 'synthetic-dispatch' }),
     });
   } });
   assert.equal(result.reason, 'dispatch-response-ambiguous');
@@ -212,7 +212,7 @@ test('HAMTMP-01: the next admitted run removes a dead predecessor and renders a 
   const args = dispatchArgs(root);
   args.dispatchContext.promptDir = promptDir;
   const result = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-new-lrq', dispatchId: 'synthetic-new-dispatch' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-new-lrq', dispatchId: 'synthetic-new-dispatch' }) }) });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
   const record = JSON.parse(readFileSync(path));
@@ -297,7 +297,7 @@ test('HAMTMP-02: dispatch snapshots deployed phases and the prompt sources only 
   const args = dispatchArgs(root);
   args.readTemplateImpl = () => readFileSync(join(repoRoot, 'templates/hammer-prompt.md'), 'utf8');
   const result = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    execFileImpl: async () => ({ stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq' }) }) });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root,
     { repo: 'fixture/repo', prNumber: 42, headSha: head })));
@@ -355,7 +355,7 @@ test('HAMTMP-02: hammer spawn inherits private TMPDIR and terminal cleanup remov
         { env: options.env, encoding: 'utf8', timeout: 5000 });
       assert.equal(improvised.status, 0, improvised.stderr);
       writeFileSync(join(improvised.stdout.trim(), 'state'), 'synthetic state');
-      return { stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) };
+      return { stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'synthetic-lrq' }) };
     } });
   assert.equal(result.dispatched, true, JSON.stringify(result));
   await reconcileAmaCloserDispatches(root, { logger,

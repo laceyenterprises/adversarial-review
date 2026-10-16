@@ -66,7 +66,7 @@ if (scenario === 'clean') {
       dispatchContext: { rootDir, repo, reviewedSha: headSha, riskClass: 'low', reviewedBy: 'synthetic-reviewer', reviewer: 'gemini',
         parentSession: 'synthetic-parent', hqPath: 'hq', hqRoot: join(rootDir, 'hq'), currentUser: userInfo().username, hqOwnerUser: userInfo().username,
         livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: headSha, headBranchExists: true, headRefName: 'synthetic' }) },
-      execFileImpl: async (_command, args) => { assert.ok(args.includes('dispatch')); return { stdout: JSON.stringify({ dispatchId: 'synthetic-hammer', launchRequestId: 'synthetic-hammer' }) }; },
+      execFileImpl: async (_command, args) => { assert.ok(args.includes('dispatch')); return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'synthetic-hammer', launchRequestId: 'synthetic-hammer' }) }; },
       readTemplateImpl: () => 'Synthetic hammer <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>', writeFileImpl() {},
       resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
       readBuildCompletionSignalForPrImpl: () => ({ ok: false }), readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }), logger: quiet,

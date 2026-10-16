@@ -97,7 +97,7 @@ esac
   chmodSync(gh, 0o755);
   writeFileSync(join(bin, 'git'), '#!/bin/sh\necho '+ 'a'.repeat(40) +'\n', { mode: 0o755 });
   const proof = join(bin, 'proof');
-  writeFileSync(proof, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;; *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\necho \"{}\"\n', { mode: 0o755 });
+  writeFileSync(proof, '#!/bin/sh\ncase "$1" in\n  */bin/metered-gh.mjs) shift 2; exec gh "$@" ;;\n  */bin/hammer-pr-read.mjs) repo="$2"; shift 2; number="$1"; shift; exec gh pr view "$number" -R "$repo" "$@" ;; *hammer-audit-comment-id.mjs) exit 0;; *github-outbound-body.mjs) exec "$REAL_NODE" "$@";; esac\nif [ \"${FAIL_PROOF:-0}\" = 1 ]; then exit 65; fi\nif [ -n \"${RANGE_PROOF:-}\" ]; then printf \"%s\\n\" \"$RANGE_PROOF\"; else echo \"{}\"; fi\n', { mode: 0o755 });
   const env = {
     HAM_NODE_BIN: proof, REAL_NODE: process.execPath, HAM_BASE_HEAD: 'a'.repeat(40),
     HAM_RUN_DIR: dir, HAM_ROOT_DIR: root, HAM_PR_URL: 'https://github.com/acme/repo/pull/424242', HAM_REPO: 'acme/repo',
@@ -156,6 +156,14 @@ echo "STATUS=$status HELD=$HAM_MERGE_LEASE_HELD PUBLISHED=\${HAM_PUBLISHED_AUDIT
   assert.match(body, /\*\*Fix gate\*\*/);
   assert.doesNotMatch(body, /<finding title>/);
   assert.match(body, /^Doc-currency: not applicable; changed files covered: bin\/gate.sh$/m);
+  // Exercise the whole production-rendered phase, including writing and reading
+  // RUN_DIR/range.json. The checked-in shell file is a template, not an entrypoint.
+  const rebasePublished = run('/bin/bash', ['-c', shell, '_', script], { ...env,
+    RANGE_PROOF: JSON.stringify({ verified: true, proof: 'reviewed-rebase-patch-equivalence',
+      reviewedHead: 'b'.repeat(40), rebaseCoverage: { reviewedHead: 'b'.repeat(40) } }) });
+  assert.match(rebasePublished.stdout, /STATUS=0 HELD=1 PUBLISHED=aaaaaaaa/);
+  assert.match(readFileSync(bodyPath, 'utf8'), new RegExp(`^HAM-Base-Head: ${'b'.repeat(40)}$`, 'm'));
+
   const applicable = run('/bin/bash', ['-c', shell, '_', script], { ...env,
     HAM_DOC_CURRENCY: 'applicable', HAM_DOC_CURRENCY_REASON: 'updated README.md for changed files bin/gate.sh, README.md; data-model docs not applicable' });
   assert.match(applicable.stdout, /STATUS=0 HELD=1/);

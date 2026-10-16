@@ -121,7 +121,7 @@ function closerDeps({ dispatch, alerts = [], status = null } = {}) {
         return { stdout: JSON.stringify(status || { status: 'running' }), stderr: '' };
       }
       if (dispatch) return dispatch(cmd, args);
-      return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
     },
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -923,7 +923,7 @@ for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'oth
       if (kind === 'same-live-multiline' || kind === 'multiline-mixed-error') error.stderr = error.stderr.replace('bash <script>', 'bash -c echo\nsynthetic');
       if (kind === 'mixed-error') error.stderr += '\n[hq] error: another refusal';
       if (kind === 'multiline-mixed-error') error.stderr += '\n[hq] error: another refusal';
-      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       throw error;
     } });
     const args = closerArgs(rootDir, { ...identity, reviewedSha: identity.headSha,
@@ -957,7 +957,14 @@ for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'oth
       assert.equal(result.releasedPendingLease, false);
       assert.equal(record.state, 'dispatched');
       assert.equal(record.launchRequestId, 'lrq_hammer');
-      assert.deepEqual(readAmaCloserLease(rootDir, identity), pendingLease);
+      const launchedLease = readAmaCloserLease(rootDir, identity);
+      assert.equal(pendingLease.status, 'pending', 'launch began under the pending lease');
+      assert.equal(launchedLease.status, 'dispatched', 'a receipt retains ownership after the dispatch error');
+      assert.equal(launchedLease.lrqId, 'lrq_hammer');
+      assert.equal(launchedLease.acquiredAt, pendingLease.acquiredAt);
+      const duplicate = closerDeps();
+      await maybeDispatchAmaCloser({ ...args, ...duplicate });
+      assert.equal(hqLaunches(duplicate).length, 0, 'ambiguous launch cannot spawn a duplicate');
     } else {
       assert.equal(result.reason, 'dispatch-failed');
       assert.match(record.lastError, /hq_acquire_lockdir/);
@@ -973,7 +980,7 @@ test('OWNERPROOF-01 recovery dispatch ignores its freshly acquired pending lease
     const lease = readAmaCloserLease(rootDir, identity);
     assert.equal(lease.status, 'pending');
     assert.equal(lease.watcherPid, process.pid);
-    return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+    return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
   } });
   const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ...identity,
     reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: new Date().toISOString(),

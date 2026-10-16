@@ -120,3 +120,82 @@ test('SEATIDLE-01: the real launch wave retains a refreshed waiting head exactly
   assert.deepEqual(starts, ['new-head']);
   assert.deepEqual(admission.candidates, []);
 });
+
+for (const liveDuringRetry of [false, true]) {
+  test(`SEATIDLE-02: stale credential accounting retries without a poll${liveDuringRetry ? ' and rechecks a newly live reviewer' : ''}`, async () => {
+    const starts = [], logs = [], delays = [];
+    let staleCount = 1, live = false;
+    const queue = [candidate(301, async () => { starts.push(301); }),
+      candidate(302, async () => { starts.push(302); })];
+    const tracker = createDetachedReviewerDispatchTracker({ logger: quiet });
+    const activeCounts = tracker.activeCounts;
+    tracker.activeCounts = () => {
+      const counts = activeCounts();
+      if (staleCount) counts.set('gemini', staleCount);
+      return counts;
+    };
+    tracker.liveSpawnEntries = () => live ? [{ reviewerModel: 'gemini' }] : [];
+    const drain = createReviewerDispatchDrain(options(queue, {
+      detachedReviewerDispatchTracker: tracker,
+      logger: { ...quiet, log: line => logs.push(line) },
+      capacityFreedRetryDelay: async ms => {
+        delays.push(ms);
+        staleCount = 0;
+        if (liveDuringRetry) { live = true; staleCount = 1; }
+      },
+    }));
+    const result = await drain('capacity-freed');
+    assert.deepEqual(delays, [2000], 'one bounded retry follows the stale saturation');
+    assert.equal(logs.filter(line => /capacity-freed drain retried: attempt=1/.test(line)).length, 1);
+    if (liveDuringRetry) {
+      assert.equal(result.dispatched, 0);
+      assert.deepEqual(starts, [], 'a genuine live reviewer retains the only credential seat');
+      assert.equal(queue.length, 2);
+    } else {
+      assert.equal(result.dispatched, 1);
+      assert.deepEqual(starts, [301]);
+      assert.deepEqual(queue.map(c => c.prNumber), [302]);
+    }
+  });
+}
+
+test('SEATIDLE-02: persistent stale saturation has three retries then returns to the poll', async () => {
+  const delays = [], logs = [];
+  const queue = [candidate(301)];
+  const drain = createReviewerDispatchDrain(options(queue, {
+    detachedReviewerDispatchTracker: {
+      activeCounts: () => new Map([['gemini', 1]]), liveSpawnEntries: () => [], track() {},
+    },
+    logger: { ...quiet, log: line => logs.push(line) },
+    capacityFreedRetryDelay: async ms => { delays.push(ms); },
+  }));
+  const result = await drain('capacity-freed');
+  assert.equal(result.dispatched, 0);
+  assert.deepEqual(delays, [2000, 2000, 2000]);
+  assert.equal(queue.length, 1);
+  assert.deepEqual(logs.filter(line => /capacity-freed drain retried/.test(line)),
+    [1, 2, 3].map(attempt => `[watcher] capacity-freed drain retried: attempt=${attempt}`));
+});
+
+for (const scenario of ['live', 'pipeline', 'unknown', 'poll', 'zero', 'other-reason', 'draining']) {
+  test(`SEATIDLE-02: no credential retry for ${scenario}`, async () => {
+    const delays = [], starts = [];
+    const queue = [candidate(301, async () => { starts.push(301); })];
+    const drain = createReviewerDispatchDrain(options(queue, {
+      readWatcherDrainState: () => ({ active: scenario === 'draining' }),
+      detachedReviewerDispatchTracker: {
+        activeCounts: () => new Map([['gemini', 1], ['__total__', scenario === 'other-reason' ? 3 : 0]]),
+        liveSpawnEntries: scenario === 'unknown' ? undefined : () => scenario === 'live'
+          ? [{ reviewerModel: 'gemini' }]
+          : scenario === 'pipeline' ? [{ reviewerModel: 'claude', pipelineGeminiSeats: 1 }] : [],
+        track() {},
+      },
+      resolveGeminiCredentialConcurrencyForDispatchCandidates: async () => scenario === 'zero' ? 0 : 1,
+      capacityFreedRetryDelay: async ms => { delays.push(ms); },
+    }));
+    await drain(scenario === 'poll' ? 'poll' : 'capacity-freed');
+    assert.deepEqual(delays, []);
+    assert.deepEqual(starts, []);
+    assert.equal(queue.length, 1);
+  });
+}

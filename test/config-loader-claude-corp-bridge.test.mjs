@@ -60,6 +60,15 @@ for (const body of ['port: 80', 'port: 65536', 'port: nope', 'port: true', 'prim
   }));
 }
 
+test('corporate audit context canonical override takes precedence over differing local CFG', () => fixture((topPath, dir) => {
+  writeFileSync(topPath, 'version: 1\n');
+  writeFileSync(join(dir, 'config.local.yaml'), 'oauth_broker:\n  claude_code_corp_bridge:\n    audit_context: "file-context"\n');
+  assert.equal(loadConfig({ topPath, env: {} }).get(`${prefix}.audit_context`), 'file-context');
+  assert.equal(loadConfig({ topPath, env: {
+    AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_AUDIT_CONTEXT: auditContext,
+  } }).get(`${prefix}.audit_context`), auditContext);
+}));
+
 for (const context of ['', auditContext]) {
   test(`corporate audit context survives local CFG and canonical override: ${JSON.stringify(context)}`, () => fixture((topPath, dir) => {
     writeFileSync(topPath, 'version: 1\n');

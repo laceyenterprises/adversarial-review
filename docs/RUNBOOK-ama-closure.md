@@ -96,7 +96,7 @@ outside this commit-message protection.
 
 ## 1. Prerequisites
 
-### Hammer scratch lifetime (HAMTMP-03)
+### Hammer scratch lifetime (HAMTMP-03 / HAMTMP-04)
 
 Each closer run owns one private `hammer-scratch-*` directory beneath
 `data/follow-up-jobs/ama-closer-prompts`. Recording a terminal outcome removes
@@ -107,17 +107,21 @@ an initial `dispatching` to `dispatch-failed` transition. Launch intents and
 successful launches carrying a predecessor's terminal status retain scratch
 until a fresh terminal observation.
 
-At watcher startup and the first poll at least an hour after the previous pass,
-a sweep reclaims terminal or orphan directories whose entire tree has been
-idle for at least two hours. A pass removes at most 64 directories and has a
-10-second scan budget. A metadata-validated in-memory index reuses unchanged
-historical dispatch records and reads at most 1024 new or changed JSON records
-per pass. Partial indexing survives a deferred pass, so large retained histories
-make progress across hourly passes instead of repeatedly parsing the same
-prefix. No scratch is removed until the complete current metadata census fits
-within the budget; unreadable or changed evidence still defers the pass. Record
-age never excludes an owner, and matching owners are re-read before deletion.
-The index resets on watcher restart; dispatch evidence is never pruned.
+At watcher startup, a sweep reclaims terminal or orphan directories whose entire
+tree has been idle for at least two hours. Until one full sweep completes, the
+first poll at least a minute after the previous attempt retries it; subsequent
+sweeps run hourly. Overlapping passes are suppressed. A pass removes at most 64
+directories and has a 10-second scan budget, with no production record-count cap.
+A metadata-validated index reuses unchanged historical dispatch records. Partial
+progress is atomically checkpointed to
+`data/follow-up-jobs/hammer-scratch-record-index.json`, including on a deferred
+pass, so deploy restarts cannot repeatedly discard the indexed prefix. The
+checkpoint is disposable: missing or invalid cache data forces a cold scan.
+Each pass verifies every source record's device, inode, size, modification time
+and change time before reusing an entry. No scratch is removed until the complete
+current metadata census fits within the budget; unreadable or changed evidence
+still defers the pass. Record age never excludes an owner, and matching owners
+are re-read before deletion. Dispatch evidence is never pruned.
 The sweep preserves nonterminal records, live worker PIDs, process references in arguments
 or environments, and open files or working directories. `ps` and `lsof` must be
 available to the watcher (`ps -Eww` on Darwin, `ps eww` on Linux, to include

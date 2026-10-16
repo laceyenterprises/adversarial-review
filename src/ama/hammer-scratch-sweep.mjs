@@ -10,6 +10,7 @@ import {
 
 export const HAMMER_SCRATCH_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+export const HAMMER_SCRATCH_SWEEP_RETRY_MS = 60 * 1000;
 const execFileAsync = promisify(execFile);
 // The disk checkpoint retains partial indexing across watcher restarts. Neither
 // cache authorizes deletion without a complete, current metadata census.
@@ -186,16 +187,24 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   const promptDir = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
   const removed = [];
   let dir;
+  let completed = false;
   try {
-    const parentStat = lstatSync(promptDir);
-    if (!parentStat.isDirectory()) return removed;
+    let parentStat;
+    try { parentStat = lstatSync(promptDir); }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      completed = true;
+      return removed;
+    }
+    if (!parentStat.isDirectory()) { completed = true; return removed; }
     // The deadline bounds production scans; a count cap must not stretch a
     // small retained history over hours. Tests may force partial checkpoints.
     const records = readRecords(rootDir, deadline, settings.maxRecordReads ?? Infinity, logger);
     dir = opendirSync(promptDir);
-    let entry;
     while (removed.length < (settings.maxRemovals ?? 64)
-      && Date.now() < deadline && (entry = dir.readSync())) {
+      && Date.now() < deadline) {
+      const entry = dir.readSync();
+      if (!entry) { completed = true; break; }
       if (!entry.isDirectory() || !entry.name.startsWith('hammer-scratch-')) continue;
       const scratchDir = join(promptDir, entry.name);
       const before = lstatSync(scratchDir);
@@ -234,7 +243,10 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
     }
   } catch (error) {
     if (error.code !== 'ENOENT') logger.warn?.(`hammer scratch sweep deferred: ${error.message}`);
-  } finally { dir?.closeSync(); }
+  } finally {
+    dir?.closeSync();
+    if (completed) settings.onSweepComplete?.();
+  }
   return removed;
 }
 
@@ -242,13 +254,20 @@ export function createHammerScratchSweepTicker({ rootDir, now = Date.now,
   sweepImpl = sweepHammerScratchDirs, ...options }) {
   let lastStartedAt = null;
   let running = false;
+  let completedOnce = false;
   return {
     async tick() {
       const nowMs = now();
-      if (running || (lastStartedAt !== null && nowMs - lastStartedAt < HAMMER_SCRATCH_SWEEP_INTERVAL_MS)) return [];
+      const interval = completedOnce ? HAMMER_SCRATCH_SWEEP_INTERVAL_MS : HAMMER_SCRATCH_SWEEP_RETRY_MS;
+      if (running || (lastStartedAt !== null && nowMs - lastStartedAt < interval)) return [];
       running = true;
       lastStartedAt = nowMs;
-      try { return await sweepImpl(rootDir, { ...options, nowMs }); }
+      try {
+        return await sweepImpl(rootDir, { ...options, nowMs, onSweepComplete: () => {
+          completedOnce = true;
+          options.onSweepComplete?.();
+        } });
+      }
       finally { running = false; }
     },
   };

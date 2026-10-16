@@ -118,6 +118,78 @@ test('HAMTMP-04: partial fingerprint indexing survives repeated watcher restarts
   }
 });
 
+test('HAMTMP-04: a scan deadline checkpoints its prefix before a restart', async t => {
+  const f = fixture(t);
+  const orphan = f.scratch();
+  f.history(5);
+  const { sweepHammerScratchDirs: firstSweep } = await freshSweeper();
+  let clockReads = 0;
+  const clock = t.mock.method(Date, 'now', () => clockReads++ < 3 ? 1000 : 1001);
+  try {
+    assert.deepEqual(await firstSweep(f.root, { ...f.options, scanBudgetMs: 1 }), []);
+  } finally { clock.mock.restore(); }
+  assert.match(f.logs[0], /scratch record scan budget exhausted/);
+  assert.equal(existsSync(orphan), true);
+  const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+  assert.equal((await restartedSweep(f.root, { ...f.options, maxRecordReads: 3 })).length, 1);
+  assert.equal(existsSync(orphan), false);
+});
+
+test('HAMTMP-04: a persisted fingerprint cannot hide a changed live owner after restart', async t => {
+  const f = fixture(t);
+  const owned = f.scratch();
+  f.record(owned);
+  f.history(3);
+  const { sweepHammerScratchDirs: firstSweep } = await freshSweeper();
+  await firstSweep(f.root, { ...f.options, maxRemovals: 0 });
+  f.record(owned, { lastObservedStatus: 'running' });
+  const orphan = f.scratch();
+  const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+  assert.deepEqual(await restartedSweep(f.root, { ...f.options, maxRecordReads: 0 }), []);
+  assert.equal(existsSync(orphan), true, 'stale cached ownership cannot authorize deletion');
+  assert.equal((await restartedSweep(f.root, { ...f.options, maxRecordReads: 1 })).length, 1);
+  assert.equal(existsSync(owned), true);
+  assert.equal(existsSync(orphan), false);
+});
+
+test('HAMTMP-04: a corrupt checkpoint falls back to source records and preserves unreadable ownership', async t => {
+  const f = fixture(t);
+  const owned = f.scratch();
+  const owner = f.record(owned, { lastObservedStatus: 'running' });
+  await sweepHammerScratchDirs(f.root, f.options);
+  const checkpoint = join(f.root, 'data', 'follow-up-jobs', 'hammer-scratch-record-index.json');
+  for (const contents of ['synthetic truncated checkpoint', JSON.stringify({ schemaVersion: 1,
+    entries: [['../synthetic-escape.json', { version: 'synthetic', record: {} }]] })]) {
+    writeFileSync(checkpoint, contents);
+    writeFileSync(owner, 'synthetic unreadable ownership');
+    const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
+    assert.deepEqual(await restartedSweep(f.root, f.options), []);
+    assert.equal(existsSync(owned), true);
+  }
+});
+
+test('HAMTMP-04: deferred first passes retry within a minute, then completed sweeps run hourly', async t => {
+  const f = fixture(t);
+  const orphan = f.scratch();
+  f.history(3);
+  let clock = nowMs;
+  const ticker = createHammerScratchSweepTicker({ rootDir: f.root, ...f.options,
+    now: () => clock, maxRecordReads: 1 });
+  for (let pass = 0; pass < 3; pass += 1) {
+    assert.equal((await ticker.tick()).length, pass === 2 ? 1 : 0);
+    assert.equal(existsSync(orphan), pass !== 2);
+    clock += 59_999;
+    assert.deepEqual(await ticker.tick(), []);
+    clock += 1;
+  }
+  const next = f.scratch();
+  assert.deepEqual(await ticker.tick(), []);
+  assert.equal(existsSync(next), true, 'a complete sweep switches to hourly maintenance');
+  clock += HAMMER_SCRATCH_SWEEP_INTERVAL_MS - 60_000;
+  assert.equal((await ticker.tick()).length, 1);
+  assert.equal(existsSync(next), false);
+});
+
 test('HAMTMP-03: an orphan older than the bound is removed and its freed bytes are logged', async t => {
   const f = fixture(t);
   const orphan = f.scratch();
@@ -319,7 +391,10 @@ test('HAMTMP-03: ticker runs at startup, hourly, and never overlaps', async () =
   let calls = 0;
   let finish;
   const ticker = createHammerScratchSweepTicker({ rootDir: '/fixture/state', now: () => clock,
-    sweepImpl: () => { calls += 1; return new Promise(resolve => { finish = resolve; }); } });
+    sweepImpl: (_root, options) => {
+      calls += 1;
+      return new Promise(resolve => { finish = result => { options.onSweepComplete(); resolve(result); }; });
+    } });
   const first = ticker.tick();
   assert.equal(calls, 1);
   clock += HAMMER_SCRATCH_SWEEP_INTERVAL_MS;

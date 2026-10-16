@@ -34,14 +34,13 @@ named audit inputs and narrow repo-local paths. Without GraphQL quota use REST:
 `ham_gh api repos/<<REPO>>/pulls/<<PR_NUMBER>>/reviews`, or this run's named
 prompt/audit files. Never fall back to broad host scans.
 
-For Git synchronization, use `ham_bounded_git_sync` below: load-aware timeout,
-one retry for transient failures. Do not wrap `git fetch` or other git sync
-in your own fixed alarm: interruption during shared worker-base ref updates can orphan
-a lock and poison retries.
+For Git synchronization, use `ham_bounded_git_sync` below (load-aware timeout,
+one transient retry). Do not wrap `git fetch` or other git sync in your own fixed alarm:
+interrupted shared worker-base ref updates can orphan locks and poison retries.
 
 ## Cost and context discipline (Codex and Claude)
 
-At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once before exploratory reads. Its bounded JSON includes PR/head/findings, required checks, diff stat, conflicts, primary change and remediation/lease state. If `review.findingsTruncated` is true, fetch the full review body. This snapshot never replaces the live merge predicate.
+At start and after **each push**, run `node <<ROOT_DIR>>/bin/hammer-context.mjs <<REPO>> <<PR_NUMBER>>` once before exploratory reads. Its bounded JSON covers PR/head/findings, checks, diff stat, conflicts, primary change and remediation/lease state. Fetch the full review if `review.findingsTruncated` is true. The live merge predicate remains mandatory.
 
 **Never run a full test suite locally.** PR-head CI is the full-suite merge gate.
 Run only targeted tests for changed files, including after rebase/replay. Run long
@@ -135,11 +134,11 @@ printf '\nHAM phase %s: status=%s outcome=%s lease-held=%s\n' \
 [ "$HAM_PHASE_STATUS" -eq 0 ]
 ```
 
-Build the terminal-remediation claim JSON and run the predicate before `hammer-merge`.
-Source phases in one persistent Bash shell or tool invocation; stop before lease
-acquisition if that is impossible. Dispatch rendered these scripts from the
-deployed checkout. Use them unchanged; never render copies. A failed source stops
-the close. Publish/merge require the held lease. Keep HQ merge-signal integration.
+Before `hammer-merge`, build the terminal-remediation claim JSON and run the
+predicate. Source phases in one persistent Bash shell/tool invocation; otherwise
+stop before acquiring a lease. Use dispatch's deployed scripts unchanged; never
+render copies. A failed source stops closure. Publish/merge require the held
+lease. Keep HQ merge-signal integration.
 
 Effective strict non-blocking remediation policy: `<<STRICT_NON_BLOCKING_REMEDIATION>>`. When true, required non-blocking findings may authorize specifically cited reversions. When false, advisory non-blocking findings never authorize reverting protected author code; preserve it and record the conflict rationale. The live predicate independently resolves policy.
 
@@ -163,10 +162,10 @@ bump.
 If the remaining refusal requires an operator override, stop with
 `operator-label-required:<label>`; do not apply labels, weaken the guard, or ask
 another worker to clear it. Do not rerun an unchanged refusal before an operator
-acts. For a composite check, name its failing guard and label from the output;
-do not infer a label gate from the composite job name. Advisory/successful checks
-are not blockers. Explain that the operator must inspect the refusal, apply the
-label if appropriate, and rerun the named check.
+acts. For composite checks, name the failing guard and label from the output,
+never infer them from the job name. Advisory/successful checks are not blockers.
+Explain: the operator must inspect the refusal, apply the label if appropriate,
+and rerun the named check.
 Write the existing AMA audit for the **current live head** with outcome `deferred`
 and an attempt JSON containing `reason: "operator-label-required:<label>"` and
 `startedAt` set to the current ISO timestamp. Release any merge lease and include
@@ -310,8 +309,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
 
 0. With an existing HAM remediation commit, matching trailers, audit comment and
    validated current head: refresh the live head, reacquire the lease, rerun only
-   the fail-closed live-head validation below, and complete merge/closing comments
-   idempotently. Do not restart remediation.
+   the fail-closed live-head validation below, and
+   complete the merge/closing-comment sequence idempotently. Do not restart remediation.
 0b. **A run that does not merge must say so exactly once on the PR.** The provenance fallback below is a successful exact-head review handoff: post its route comment, release the lease and exit 0 without a no-merge status or operator escalation. For other exits, before the
    run ends for any reason with the PR still open and unmerged, post exactly one
    HAM-authored closing-status comment. State what the run completed, the exact
@@ -334,9 +333,10 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    If the gate-attempt cap parks this head, include the `closingStatus` returned
    by `merge-lease acquire` verbatim in that comment and the terminal audit.
 0c. **Run every step in the foreground (HAMBG-02).** Background work dies when
-   your final message ends. Split steps exceeding tool timeouts into bounded
-   foreground polls (e.g. required checks before merge). Finish all commands
-   before ending. Every exit must have a merge or current-head no-merge audit;
+   your final message ends. If a step can exceed your tool's timeout, split it into repeated
+   foreground polls within that timeout (e.g. required checks before merge). Never end
+   your final message while a command you started is still running.
+   Every exit must have a merge or current-head no-merge audit;
    otherwise the closer records `hammer-exited-without-close` and redispatches
    within its small retry budget.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
@@ -461,9 +461,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    addressed it, with counts for blocking and non-blocking findings. Do NOT post
    it here: the audit is written in step 5 **under the merge lease, at the
    settled post-rebase head, immediately before the predicate**, so it names the
-   exact head that merges. Posting it before the rebase window re-staled it on
-   every rebase and made one hammer re-post a fresh audit per rebase (a single
-   hammer read as several — agent-os#4090). The predicate accepts only a matched
+   exact head that merges. Earlier audits became stale and duplicated on rebase
+   (agent-os#4090). The predicate accepts only a matched
    timeline comment whose author is the verified HAM commit author or an
    allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
@@ -475,10 +474,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    into `HAM_REQUIRES_UP_TO_DATE`), rebase ONCE onto a recent base and then merge
    the validated head even if it is `BEHIND` again — provided the PR is
    `MERGEABLE` and the newer base does not touch any file this PR changes
-   (`ham_base_touches_pr_files`). GitHub squash-merges a `BEHIND`-but-`MERGEABLE`
-   PR with a merge commit, so re-rebasing to chase a base that advances only
-   because OTHER PRs merged just re-runs the full required-check suite on
-   identical code (agent-os#5464). A genuine conflict (`DIRTY`) or a
+   (`ham_base_touches_pr_files`). GitHub can squash-merge that head; chasing
+   unrelated base advances needlessly repeats CI (agent-os#5464). A conflict (`DIRTY`) or a
    changed-file overlap still forces a rebase.
    Before entering the final rebase→remote-CI→merge window, acquire the
    merge lease
@@ -561,13 +558,10 @@ If there are merge conflicts, resolve them according to "Resolving merge conflic
 Commit the remediation:
 
 ```bash
-# SUBSYNC-01 (agent-os#7092): after ANY local head move (fetching and resetting
-# to a server-side `gh pr update-branch --rebase` head, `git rebase`, `git pull`),
-# the gitlink moves but the submodule CHECKOUT does not, and `.gitmodules`
-# `ignore = all` hides that stale checkout from `git status`/`git diff`. Staging
-# it rewinds the submodule on merge (agent-os#7092 would have rolled
-# adversarial-review back past two merged fixes). Re-sync initialized
-# submodules to the recorded commits first; uninitialized ones are untouched.
+# SUBSYNC-01 (agent-os#7092): ANY local head move (server-rebase fetch/reset,
+# git rebase/pull) moves gitlinks but leaves submodule checkouts stale.
+# `ignore = all` hides this from status/diff; staging can rewind the submodule.
+# Re-sync initialized submodules to recorded commits; leave uninitialized ones.
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 120 git submodule update --recursive
 git status --short --ignore-submodules=none
 git add <changed files>   # never a submodule path, never `git add -f`/`--force`
@@ -611,10 +605,9 @@ if [ -s "$HAM_STAGED_GITLINKS_FILE" ]; then
   exit 1
 fi
 rm -f "$HAM_STAGED_GITLINKS_FILE"
-# HSC-01 (agent-os#5908): put all trailers in ONE `-m`. Multiple `-m`
-# arguments insert blank paragraphs; the verifier recovered only the last
-# trailer, stranding stale-review-head. Emit a contiguous block even though
-# the parser now tolerates the old shape.
+# HSC-01 (agent-os#5908): all trailers in ONE `-m`, contiguously. Multiple `-m`
+# arguments insert blank paragraphs; the old verifier lost all but the last
+# trailer and stranded stale-review-head. Parser tolerance does not waive this.
 if ! git diff --cached --quiet; then
   git commit -m "HAM remediate final adversarial findings" -m "Worker-Class: hammer
 Worker-Ticket: HAM

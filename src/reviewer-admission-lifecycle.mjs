@@ -21,15 +21,16 @@ export function startReviewerHandoff(repo, pr, run) {
 }
 
 // Preparation owns no claim, memory reservation, credential probe or seat.
-// Expired snapshots refresh outside the pool; a launch consumes one snapshot.
-export function createReviewerPreflight({ now = Date.now, ttlMs = 10_000 } = {}) {
+// Maintenance survives a long review; mutable live evidence opts into a TTL.
+// Discovery replaces candidates (and caches); a launch consumes one snapshot.
+export function createReviewerPreflight({ now = Date.now, ttlMs = Infinity } = {}) {
   const cache = new Map();
   return {
-    take(key, run) { return cache.get(key)?.promise ?? this.read(key, run); },
+    take(key, run, options) { return cache.get(key)?.promise ?? this.read(key, run, options); },
     invalidate(key) { cache.delete(key); },
-    read(key, run) {
+    read(key, run, { ttlMs: entryTtlMs = ttlMs } = {}) {
       let entry = cache.get(key);
-      if (!entry || (entry.endedAt !== null && now() - entry.endedAt >= ttlMs)) {
+      if (!entry || (entry.endedAt !== null && now() - entry.endedAt >= entryTtlMs)) {
         entry = { endedAt: null };
         entry.promise = Promise.resolve().then(run).finally(() => { entry.endedAt = now(); });
         entry.promise.catch(() => {});

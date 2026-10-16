@@ -3118,7 +3118,7 @@ export async function processReviewSubject(entry, ctx) {
           const startedAt = Date.now();
           try { return await preflightTasks()[name](); }
           finally { console.log(`[watcher] reviewer preflight timing repo=${repoPath} pr=${prNumber} step=${name} elapsed_ms=${Date.now() - startedAt}`); }
-        });
+        }, { ttlMs: ['freshness', 'dedup'].includes(name) ? 0 : ['ci', 'hcp'].includes(name) ? 10_000 : Infinity });
       const dispatchCandidate = {
         repoPath,
         prNumber,
@@ -3174,8 +3174,8 @@ export async function processReviewSubject(entry, ctx) {
           if (preparation) return preparation;
           preparation = (async () => {
             if (reviewerHandoffPending(repoPath, prNumber)) return;
-            // Refresh live state each wave; reuse the expensive probes only
-            // within their short TTL. A launch consumes the prepared snapshot.
+            // Retain completed maintenance across a multi-minute review.
+            // Refresh mutable live evidence before consuming the snapshot.
             // Do not reconcile drafts or update triage for a closed, moved or
             // already-reviewed subject. run() retains the authoritative refusal.
             const [dedup, freshness] = await Promise.allSettled([readPreflight('dedup'), readPreflight('freshness')]);

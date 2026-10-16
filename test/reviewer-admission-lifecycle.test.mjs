@@ -36,3 +36,22 @@ test('preparation refreshes expired evidence outside admission; launch consumes 
   assert.equal(await prepared.take('synthetic-head', probe), 2, 'launch never repeats a prepared probe');
   assert.equal(await prepared.read('new-head', probe), 3, 'changed inputs cannot reuse old evidence');
 });
+
+
+test('SEATIDLE-03: a multi-minute review cannot expire completed maintenance and repeat it at handoff', async () => {
+  let now = 0, maintenance = 0, ciProbes = 0, liveProbes = 0;
+  const prepared = createReviewerPreflight({ now: () => now });
+  const maintenanceProbe = async () => ++maintenance;
+  const ciProbe = async () => ++ciProbes;
+  const liveProbe = async () => ++liveProbes;
+  assert.equal(await prepared.read('maintenance', maintenanceProbe), 1);
+  assert.equal(await prepared.read('ci', ciProbe, { ttlMs: 10_000 }), 1);
+  now += 5 * 60_000;
+  assert.equal(await prepared.read('maintenance', maintenanceProbe), 1);
+  assert.equal(await prepared.read('ci', ciProbe, { ttlMs: 10_000 }), 2, 'mutable CI evidence must refresh outside admission');
+  assert.equal(await prepared.take('maintenance', maintenanceProbe), 1);
+  assert.equal(maintenance, 1, 'handoff consumes maintenance prepared while the previous seat was busy');
+  assert.equal(await prepared.read('live-head', liveProbe, { ttlMs: 0 }), 1);
+  assert.equal(await prepared.read('live-head', liveProbe, { ttlMs: 0 }), 2, 'head evidence refreshes even without advancing the clock');
+  assert.equal(await prepared.take('live-head', liveProbe, { ttlMs: 0 }), 2, 'the admitted run consumes that fresh head snapshot');
+});

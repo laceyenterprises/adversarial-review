@@ -3137,9 +3137,12 @@ existing current-head, closer lease, and merge-eligibility checks still apply.
 Sequential pipeline domains retain their full-pass reservations.
 
 The shared dispatch drain prepares a bounded next wave while reviewers are
-busy. Preparation holds no claim or credential reservation. Short-lived probe
-results are keyed by route, and stale results refresh before the pool reserves
-capacity. Live PR state refreshes last on each admission wave. The admitted run
+busy. Preparation holds no claim or credential reservation. Completed maintenance
+is keyed by route and retained for that discovery snapshot, so a multi-minute
+review cannot expire it and repeat slow work at handoff. Rediscovery replaces
+the candidate and its cache. Mutable CI evidence uses a short TTL; live PR state
+and exact-head dedup refresh last on each admission wave before capacity is
+reserved. The admitted run
 consumes those results; the existing head lease, durable claim CAS, memory and
 credential gates still run. Route spillover prepares the new route before the
 pool rechecks capacity. Preparation errors retain the existing refusal behavior.

@@ -110,13 +110,14 @@ until a fresh terminal observation.
 At watcher startup and the first poll at least an hour after the previous pass,
 a sweep reclaims terminal or orphan directories whose entire tree has been
 idle for at least two hours. A pass removes at most 64 directories and has a
-10-second scan budget. Each pass restarts the complete dispatch-record census;
-it does not resume an interrupted scan. If retained historical records exhaust
-the budget, the pass defers without deleting scratch and logs
-`scratch record scan budget exhausted`. Repeated occurrences can stall
-reclamation; incremental scanning with ownership freshness checks remains a
-follow-up. Filtering by record age alone is unsafe because an old record can
-still own a live run. Do not prune dispatch evidence to unblock the sweep.
+10-second scan budget. A metadata-validated in-memory index reuses unchanged
+historical dispatch records and reads at most 1024 new or changed JSON records
+per pass. Partial indexing survives a deferred pass, so large retained histories
+make progress across hourly passes instead of repeatedly parsing the same
+prefix. No scratch is removed until the complete current metadata census fits
+within the budget; unreadable or changed evidence still defers the pass. Record
+age never excludes an owner, and matching owners are re-read before deletion.
+The index resets on watcher restart; dispatch evidence is never pruned.
 The sweep preserves nonterminal records, live worker PIDs, process references in arguments
 or environments, and open files or working directories. `ps` and `lsof` must be
 available to the watcher (`ps -Eww` on Darwin, `ps eww` on Linux, to include

@@ -210,6 +210,53 @@ test('HAMTMP-03: ownership changes during worker probing prevent removal', async
   assert.equal(existsSync(path), true);
 });
 
+test('HAMTMP-03: historical JSON indexing advances across bounded passes and refreshes changed owners', async t => {
+  const f = fixture(t);
+  const orphan = f.scratch();
+  const terminal = f.scratch();
+  const owner = f.record(terminal);
+  const historical = [];
+  for (let n = 0; n < 4; n += 1) {
+    const path = join(dirname(owner), `historical-${n}.json`);
+    writeFileSync(path, JSON.stringify({ state: 'succeeded', scratchDir: `/gone/${n}` }));
+    historical.push(path);
+  }
+  const options = { ...f.options, maxRecordReads: 1 };
+  for (let pass = 0; pass < 4; pass += 1) {
+    assert.deepEqual(await sweepHammerScratchDirs(f.root, options), []);
+    assert.equal(existsSync(orphan), true, 'partial ownership evidence cannot authorize deletion');
+  }
+  f.record(terminal, { lastObservedStatus: 'running' });
+  // A changed owner consumes a new read regardless of enumeration order.
+  await sweepHammerScratchDirs(f.root, options);
+  await sweepHammerScratchDirs(f.root, options);
+  assert.equal(existsSync(orphan), false, 'unchanged history must not starve reclamation');
+  assert.equal(existsSync(terminal), true, 'cached terminal state cannot override a new live owner');
+  writeFileSync(historical[0], 'invalid JSON');
+  const nextOrphan = f.scratch();
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, options), []);
+  assert.equal(existsSync(nextOrphan), true, 'new corruption invalidates the cached evidence');
+});
+
+test('HAMTMP-03: indexed history still admits new owners and refuses replaced records', async t => {
+  const f = fixture(t);
+  const terminal = f.scratch();
+  const owner = f.record(terminal, { lastObservedStatus: 'running' });
+  await sweepHammerScratchDirs(f.root, { ...f.options, maxRecordReads: 1 });
+  const newlyOwned = f.scratch();
+  const newOwner = join(dirname(owner), 'new-owner.json');
+  writeFileSync(newOwner, JSON.stringify({ state: 'dispatched', scratchDir: newlyOwned,
+    lastObservedStatus: 'running' }));
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options, maxRecordReads: 0 }), []);
+  await sweepHammerScratchDirs(f.root, { ...f.options, maxRecordReads: 1 });
+  assert.equal(existsSync(newlyOwned), true);
+  const orphan = f.scratch();
+  rmSync(newOwner);
+  symlinkSync(owner, newOwner);
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, f.options), []);
+  assert.equal(existsSync(orphan), true);
+});
+
 test('HAMTMP-03: ticker runs at startup, hourly, and never overlaps', async () => {
   let clock = nowMs;
   let calls = 0;

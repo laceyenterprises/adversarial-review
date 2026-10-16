@@ -10,6 +10,9 @@ import {
 export const HAMMER_SCRATCH_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const execFileAsync = promisify(execFile);
+// Retain partial indexing across passes; unchanged historical JSON is not read
+// again. Every pass still proves a complete, current metadata census.
+const recordIndexes = new Map();
 
 export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl = execFileAsync,
   platform = process.platform }) {
@@ -33,8 +36,14 @@ export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl =
   return results.map(result => result.value.stdout).join('\n');
 }
 
-function readRecords(rootDir, deadline) {
+function readRecords(rootDir, deadline, maxRecordReads) {
+  const directory = amaCloserDispatchDir(rootDir);
+  let index = recordIndexes.get(directory);
+  if (!index) { index = new Map(); recordIndexes.set(directory, index); }
   const records = [];
+  const seen = new Set();
+  let reads = 0;
+  const fingerprint = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
   let dir;
   try { dir = opendirSync(amaCloserDispatchDir(rootDir)); }
   catch (error) { if (error.code === 'ENOENT') return records; throw error; }
@@ -46,14 +55,30 @@ function readRecords(rootDir, deadline) {
       // A corrupt/unreadable record could own any directory. Never classify it
       // as missing and reclaim that run's scratch on a diagnostic read failure.
       if (!entry.isFile()) throw new Error('non-file scratch dispatch record');
-      const path = join(amaCloserDispatchDir(rootDir), entry.name);
-      const record = JSON.parse(readFileSync(path, 'utf8'));
-      if (!record || typeof record !== 'object' || Array.isArray(record)) {
-        throw new Error('invalid scratch dispatch record');
+      const path = join(directory, entry.name);
+      const stat = lstatSync(path, { bigint: true });
+      if (!stat.isFile()) throw new Error('non-file scratch dispatch record');
+      const version = fingerprint(stat);
+      let cached = index.get(entry.name);
+      if (!cached || cached.version !== version) {
+        if (reads >= maxRecordReads) throw new Error('scratch record indexing deferred');
+        reads += 1;
+        const record = JSON.parse(readFileSync(path, 'utf8'));
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+          throw new Error('invalid scratch dispatch record');
+        }
+        const after = lstatSync(path, { bigint: true });
+        if (!after.isFile() || fingerprint(after) !== version) {
+          throw new Error('scratch dispatch record changed during indexing');
+        }
+        cached = { version, path, record };
+        index.set(entry.name, cached);
       }
-      records.push({ path, record });
+      seen.add(entry.name);
+      records.push(cached);
     }
   } finally { dir.closeSync(); }
+  for (const name of index.keys()) if (!seen.has(name)) index.delete(name);
   return records;
 }
 
@@ -123,7 +148,7 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   try {
     const parentStat = lstatSync(promptDir);
     if (!parentStat.isDirectory()) return removed;
-    const records = readRecords(rootDir, deadline);
+    const records = readRecords(rootDir, deadline, settings.maxRecordReads ?? 1024);
     dir = opendirSync(promptDir);
     let entry;
     while (removed.length < (settings.maxRemovals ?? 64)

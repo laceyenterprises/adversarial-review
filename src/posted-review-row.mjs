@@ -27,11 +27,12 @@ import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestrat
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
-import { readPendingAmaHammerDispatch } from './ama-hammer-background-dispatch.mjs';
+import { clearPendingAmaHammerDispatch, readPendingAmaHammerDispatch } from './ama-hammer-background-dispatch.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
 import {
   HAMMER_EVIDENCE_FAILURES,
   HAMMER_EVIDENCE_RECHECK_INTERVAL_MS,
+  HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
   readHammerStopHoldForHead,
 } from './ama/hammer-stop-hold.mjs';
@@ -688,6 +689,8 @@ export async function handlePostedReviewRow({
     }
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;
+      const operatorHoldReason = amaClosureResult?.reason === HAMMER_STOP_HOLD_REASON
+        ? HAMMER_STOP_HOLD_REASON : null;
       // Log-feed noise control: this route retains ownership and re-polls a
       // stuck PR every tick. Log once per retained-worker state transition
       // instead of every poll; a new head/reason/worker identity still logs.
@@ -709,8 +712,9 @@ export async function handlePostedReviewRow({
         );
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
+        ...(operatorHoldReason ? { operatorHoldReason } : {}),
         ...(gateProjection?.decision?.operatorDecisionRequired === true
-          && !isSafetyRecoveryHold(amaClosureResult) ? { hammerRouteActive: true } : {}),
+          && !operatorHoldReason && !isSafetyRecoveryHold(amaClosureResult) ? { hammerRouteActive: true } : {}),
         gateDecision: gateProjection?.decision || null };
     }
 
@@ -975,13 +979,22 @@ export function createNoProgressLaneGate({
       // The final review's generic operator flag does not describe closure
       // ownership. A retained hammer route must run each tick, including while
       // dispatch is queued; a named safety/operator refusal still wins.
-      const hammerRouteActive = !timedOut && value?.hammerRouteActive === true
-        && !isSafetyRecoveryHold(value?.amaClosureResult);
+      const operatorHold = value?.outcome === 'await-operator' || value?.operatorHoldReason
+        || isSafetyRecoveryHold(value?.amaClosureResult);
+      const hammerRouteActive = !timedOut && value?.hammerRouteActive === true && !operatorHold;
       const progressClass = !hammerRouteActive && (value?.gateDecision?.operatorDecisionRequired === true
-        || value?.amaClosureResult?.needsOperator === true
-        || value?.outcome === 'await-operator')
+        || operatorHold)
         ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
         : PROGRESS_CLASS_SELF_RESOLVING;
+      if (operatorHold) {
+        try {
+          clearPendingAmaHammerDispatch(rootDir, { ...identity, headSha: handler.headSha }, { logger });
+        } catch (error) {
+          // Cleanup failure must never suppress the operator's durable lane or
+          // page. The old intent remains safe: retries still enter live guards.
+          logger?.warn?.(`[watcher] pending hammer hold cleanup failed: ${error.message}`);
+        }
+      }
       const observedAt = now();
       // LANESTARVE-01. A timed-out handler reported no decision at all, so it
       // carries no decision fingerprint — its `'timed-out'` row fingerprint is
@@ -993,7 +1006,7 @@ export function createNoProgressLaneGate({
         decisionFingerprint,
         progressClass,
         hammerRouteActive,
-        operatorReason: value?.amaClosureResult?.operatorReason || null,
+        operatorReason: value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,
         // HAMUNKNOWN-01: GitHub can finish computing without any review-row
         // change. Recovery bounds urgency to its tolerated cycle budget.
         urgent: value?.urgent === true,
@@ -1072,7 +1085,7 @@ export function createNoProgressLaneGate({
             rootDir,
             identity,
             headSha: handler.headSha || null,
-            operatorReason: value?.amaClosureResult?.operatorReason || null,
+            operatorReason: value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,
             fingerprint,
             noProgressTicks: outcome.noProgressTicks,
             firstNoProgressAt: outcome.firstNoProgressAt || null,

@@ -15,7 +15,9 @@ the existing lease, retry cap, lifetime ceiling, operator holds, and launch dedu
 The in-process queue admits at most one attempt per PR/head. An already launched
 hammer remains owned through the closer's normal reconciliation.
 
-Settled and cancelled queued entries remove their intent. A running cancellation
+Settled and cancelled queued entries remove their intent. A normal handler that
+reaches an explicit operator hold also retires interrupted intent before
+recording operator-blocked cadence. A running cancellation
 retains its record until settlement. Cleanup checks `attemptId` so a late callback
 cannot remove a replacement intent. A crash leaves intent for the next process;
 there is no expiry that could silently discard interrupted work. Records for a

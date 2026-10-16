@@ -38,7 +38,7 @@ test('HAMLANE-01 a real operator hold replaces hammer urgency and keeps its cade
     assert.equal(gate.evaluate(handler).run, true);
     for (const operatorReason of ['hammer-stop-awaiting-input-change',
       'hammer-lifetime-dispatch-ceiling', 'pr-is-draft', 'hard-stop-label']) {
-      const outcome = await gate.record(handler, { value: { outcome: 'await-operator',
+      const outcome = await gate.record(handler, { value: { outcome: 'await-operator', hammerRouteActive: true,
         gateDecision: finalGate, amaClosureResult: { needsOperator: true, operatorReason } } });
       assert.equal(outcome.lane, 'operator-blocked');
       for (let tick = 0; tick < 3; tick++) assert.equal(gate.evaluate(handler).run, false);
@@ -138,7 +138,7 @@ test('HAMLANE-01 the posted-review handler exposes hammer ownership despite the 
   const { rootDir, gate } = fixture();
   const row = { review_status: 'posted', pr_state: 'open', reviewer_head_sha: headSha };
   try {
-    for (const needsOperator of [false, true]) {
+    for (const { needsOperator, stopped } of [{ needsOperator: false }, { stopped: true }, { needsOperator: true }]) {
       const value = await handlePostedReviewRow({ rootDir, repoPath: handler.repoPath,
         prNumber: handler.prNumber, existing: row, currentRevisionRef: headSha, labelNames: [], logger,
         projectGateStatusSafe: async () => ({ decision: finalGate }),
@@ -148,12 +148,12 @@ test('HAMLANE-01 the posted-review handler exposes hammer ownership despite the 
         reviewBodyHasScopeViolationFindingImpl: () => false, currentReviewRowReader: () => row,
         resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
           outcome: needsOperator ? 'await-operator' : 'ama-pending',
-          amaClosureResult: { reason: needsOperator ? 'hammer-stop-awaiting-input-change' : 'ama-closer-dispatch-backgrounded',
+          amaClosureResult: { reason: needsOperator || stopped ? 'hammer-stop-awaiting-input-change' : 'ama-closer-dispatch-backgrounded',
             needsOperator, skipMergeAgent: true } }),
       });
-      assert.equal(value.hammerRouteActive === true, !needsOperator);
+      assert.equal(value.hammerRouteActive === true, !needsOperator && !stopped);
       await gate.record(handler, { value });
-      assert.equal(gate.evaluate(handler).run, !needsOperator);
+      assert.equal(gate.evaluate(handler).run, !needsOperator && !stopped);
     }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
@@ -258,6 +258,27 @@ test('HAMLANE-01 first adoption after restart prioritizes pending intent through
       sweepRereviewWakeQueueImpl: () => ({ scanned: 0 }), rereviewWakeBacklogImpl: () => ({ pending: 0 }),
     });
     assert.deepEqual(order, ['recovered', 'ordinary']);
+  } finally {
+    release?.({ dispatched: false });
+    await queue.drain();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('HAMLANE-01 an explicit stop settles stale restart intent and preserves operator backoff', async () => {
+  const { rootDir, gate } = fixture();
+  const queue = background.createAmaHammerBackgroundQueue();
+  const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+  let release;
+  try {
+    queue.submit({ key: background.amaHammerBackgroundKey(identity), pendingDispatch: { rootDir, ...identity },
+      run: () => new Promise(resolve => { release = resolve; }) });
+    assert.ok(background.readPendingAmaHammerDispatch(rootDir, identity));
+    await gate.record(handler, { value: { outcome: 'ama-pending', gateDecision: finalGate,
+      operatorHoldReason: 'hammer-stop-awaiting-input-change' } });
+    assert.equal(background.readPendingAmaHammerDispatch(rootDir, identity), null);
+    for (let tick = 0; tick < 3; tick++) assert.equal(gate.evaluate(handler).run, false);
+    assert.equal(gate.evaluate(handler).run, true);
   } finally {
     release?.({ dispatched: false });
     await queue.drain();

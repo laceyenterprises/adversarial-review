@@ -109,6 +109,15 @@ function clearPendingDispatch(entry) {
   if (current?.attemptId === intent.attemptId) rmSync(pendingDispatchPath(intent.rootDir, intent), { force: true });
 }
 
+// A normal handler can settle into an operator hold before it reaches the
+// queue. Retire the interrupted intent then, so it cannot override that hold's
+// cadence forever. This never changes the closer's launch/lease records.
+export function clearPendingAmaHammerDispatch(rootDir, identity, { logger = console } = {}) {
+  const current = readPendingAmaHammerDispatch(rootDir, identity, { logger });
+  if (!current) return;
+  clearPendingDispatch({ pendingDispatch: { ...current, rootDir } });
+}
+
 /**
  * A bounded background runner. One entry per key (PR@head), with at most one
  * running entry per PR; at most `maxConcurrent` runs overall. Eligible waiters

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { cancelCloserForTerminalPr, queueCloserCancelForClosedPr, retryPendingCloserCancels } from '../src/ama/closer-terminal-cancel.mjs';
 import { reconcileTerminalPrState } from '../src/pr-terminal-reconcile.mjs';
-import { amaCloserDispatchFilePath, isActiveAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { amaCloserDispatchFilePath, createHammerScratchDir, isActiveAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { findActiveRemediationJob } from '../src/ama/active-remediation-job.mjs';
 
 function fixture(t, prNumber = 7) {
@@ -23,6 +23,14 @@ function fixture(t, prNumber = 7) {
 
 test('merged PR at closer head succeeds without cancelling its HQ worker', async (t) => {
   const { rootDir, identity, dispatchPath } = fixture(t);
+  const promptDir = join(rootDir, 'prompts');
+  const scratchDir = createHammerScratchDir(promptDir);
+  writeFileSync(join(scratchDir, 'ci-failed.log'), 'synthetic CI output');
+  const pytestDir = join(scratchDir, 'pytest-of-synthetic', 'run');
+  mkdirSync(pytestDir, { recursive: true });
+  writeFileSync(join(pytestDir, 'ledger.db-wal'), 'synthetic WAL');
+  writeFileSync(dispatchPath, JSON.stringify({ ...identity, launchRequestId: 'lrq_7',
+    state: 'dispatched', lastObservedStatus: 'running', promptDir, scratchDir }));
   const result = await cancelCloserForTerminalPr({
     rootDir, hqRoot: rootDir, repo: 'o/r', prNumber: 7, transition: 'merged', live: { headRefOid: 'abc' },
     readAuditImpl: () => ({ status: 'succeeded' }),
@@ -31,7 +39,8 @@ test('merged PR at closer head succeeds without cancelling its HQ worker', async
   assert.equal(result.outcome, 'succeeded');
   assert.equal(result.cancelled, false);
   assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'succeeded');
-  assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).lastObservedStatus, null);
+  assert.equal(JSON.parse(readFileSync(dispatchPath, 'utf8')).lastObservedStatus, 'running');
+  assert.equal(existsSync(scratchDir), false, 'HAMTMP-03: a merged run leaves no scratch directory');
 });
 
 test('same-head external merge remains owned until authoritative settlement', async (t) => {

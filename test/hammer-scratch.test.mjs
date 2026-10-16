@@ -235,6 +235,44 @@ for (const status of ['succeeded', 'failed', 'cancelled']) {
   });
 }
 
+for (const outcome of ['merged', 'closed', 'stopped', 'failed', 'superseded']) {
+  test(`HAMTMP-03: terminal ${outcome} outcome removes all scratch without another dispatch`, t => {
+    const root = fixture(t);
+    const scratchDir = createHammerScratchDir(root);
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+    updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatched',
+      lastObservedStatus: 'running', scratchDir, promptDir: root }));
+    writeFileSync(join(scratchDir, 'ci-failed.log'), 'synthetic CI output');
+    updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, outcome }));
+    assert.equal(existsSync(scratchDir), false);
+  });
+}
+
+test('HAMTMP-03: repeated terminal observation retries cleanup of an older record', t => {
+  const root = fixture(t);
+  const scratchDir = createHammerScratchDir(root);
+  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+  const path = amaCloserDispatchFilePath(root, identity);
+  mkdirSync(resolve(path, '..'), { recursive: true });
+  writeFileSync(path, JSON.stringify({ ...identity, state: 'dispatched',
+    lastObservedStatus: 'succeeded', scratchDir, promptDir: root }));
+  updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, lastError: null }));
+  assert.equal(existsSync(scratchDir), false);
+});
+
+test('HAMTMP-03: recording an initial dispatch failure immediately removes scratch', t => {
+  const root = fixture(t);
+  const scratchDir = createHammerScratchDir(root);
+  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+  updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatching',
+    lastObservedStatus: 'failed', scratchDir, promptDir: root }));
+  writeFileSync(join(scratchDir, 'ci-failed.log'), 'synthetic CI output');
+  assert.equal(existsSync(scratchDir), true);
+  updateAmaCloserDispatchRecord(root, identity, current => ({ ...current, state: 'dispatch-failed',
+    lastObservedStatus: null }));
+  assert.equal(existsSync(scratchDir), false);
+});
+
 test('HAMTMP-01: dispatching and inherited predecessor statuses cannot remove a new run directory', t => {
   const root = fixture(t);
   const scratchDir = createHammerScratchDir(root);

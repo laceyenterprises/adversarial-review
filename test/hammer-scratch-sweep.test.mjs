@@ -47,6 +47,8 @@ function fixture(t) {
   const logs = [];
   const options = { nowMs, logger: { info: line => logs.push(line), warn: line => logs.push(line) },
     readProcessSnapshotImpl: async () => '123 synthetic-idle-process',
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readPullRequestStateImpl: () => ({ state: 'OPEN' }),
     readWorkerStatusImpl: () => ({ ok: true, row: { status: 'succeeded', pid: 12345 } }),
     processKillImpl: () => { throw Object.assign(new Error('synthetic absent process'), { code: 'ESRCH' }); } };
   function scratch() {
@@ -79,11 +81,163 @@ function fixture(t) {
   return { root, promptDir, logs, options, scratch, record, history };
 }
 
+for (const status of ['succeeded', 'canceled']) {
+  test(`HAMTMP-05: ledger ${status} reclaims old scratch owned by a starting record`, async t => {
+    const f = fixture(t);
+    const path = f.scratch();
+    f.record(path, { lastObservedStatus: 'starting' });
+    const calls = [];
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+      readLaunchRequestStatusImpl: args => {
+        calls.push(args);
+        return { ok: true, row: { status } };
+      } });
+    assert.equal(removed.length, 1);
+    assert.equal(existsSync(path), false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].launchRequestId, 'synthetic-lrq');
+  });
+}
+
+test('HAMTMP-05: injected subprocess handles launch and worker ledger probes within the scan budget', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path, { lastObservedStatus: 'starting' });
+  const calls = [];
+  const env = { SYNTHETIC_LEDGER: 'fixture' };
+  const probe = name => ({ spawnSyncImpl }) => {
+    const result = spawnSyncImpl('synthetic-ledger', [name], { timeout: 60_000, encoding: 'utf8', env });
+    assert.equal(result.stdout, 'synthetic response');
+    return { ok: true, row: { status: 'succeeded' } };
+  };
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 5000,
+    spawnSyncImpl: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: 'synthetic response' };
+    },
+    readLaunchRequestStatusImpl: probe('launch'),
+    readWorkerStatusImpl: probe('worker'),
+  });
+  assert.equal(removed.length, 1);
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(calls.map(call => call.args), [['launch'], ['worker']]);
+  for (const call of calls) {
+    assert.equal(call.command, 'synthetic-ledger');
+    assert.equal(call.options.encoding, 'utf8');
+    assert.equal(call.options.env, env);
+    assert.ok(call.options.timeout > 0 && call.options.timeout <= 5000);
+  }
+});
+
+test('HAMTMP-05: a running launch protects starting scratch until the ledger is terminal', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path, { lastObservedStatus: 'starting' });
+  let probes = 0;
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: () => { probes += 1; return { ok: true, row: { status: 'running' } }; },
+    readPullRequestStateImpl: () => ({ state: 'MERGED' }),
+  }), []);
+  assert.equal(probes, 1, 'consult ledger truth even when the record still says starting');
+  assert.equal(existsSync(path), true);
+  assert.equal((await sweepHammerScratchDirs(f.root, f.options)).length, 1);
+});
+
+test('HAMTMP-05: unreadable launch ledger blocks reclaim and reports deferral', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path, { lastObservedStatus: 'starting' });
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'synthetic-ledger-unavailable' }),
+    readPullRequestStateImpl: () => assert.fail('unreadable ledger must block PR fallback'),
+  }), []);
+  assert.equal(existsSync(path), true);
+  assert.match(f.logs[0], /sweep deferred.*unreadable launch ledger/);
+  assert.equal((await sweepHammerScratchDirs(f.root, f.options)).length, 1);
+});
+
+for (const state of ['MERGED', 'CLOSED', 'OPEN']) {
+  test(`HAMTMP-05: legacy starting owner with missing launch row uses live PR state ${state}`, async t => {
+    const f = fixture(t);
+    const path = f.scratch();
+    f.record(path, { lastObservedStatus: 'starting' });
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+      readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+      readWorkerStatusImpl: () => ({ ok: false, reason: 'missing-worker-run-row' }),
+      readPullRequestStateImpl: args => {
+        assert.equal(args.repo, identity.repo);
+        assert.ok(args.timeout > 0 && args.timeout <= 5000);
+        return { state };
+      },
+    });
+    assert.equal(removed.length, state === 'OPEN' ? 0 : 1);
+    assert.equal(existsSync(path), state === 'OPEN');
+  });
+}
+
+test('HAMTMP-05: a failed legacy PR read preserves its scratch and continues the sweep', async t => {
+  const f = fixture(t);
+  const paths = [f.scratch(), f.scratch(), f.scratch()];
+  for (const [index, path] of paths.entries()) {
+    const owner = f.record(path, { prNumber: index + 1, lastObservedStatus: 'starting' });
+    writeFileSync(join(dirname(owner), `synthetic-pr-${index + 1}.json`), readFileSync(owner));
+    rmSync(owner);
+  }
+  const probes = [];
+  let completed = false;
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
+    readWorkerStatusImpl: () => ({ ok: false, reason: 'missing-worker-run-row' }),
+    readPullRequestStateImpl: async ({ prNumber }) => {
+      probes.push(prNumber);
+      if (probes.length === 1) throw new Error('synthetic gh subprocess failure');
+      return { state: 'MERGED' };
+    },
+    onSweepComplete: () => { completed = true; },
+  });
+  assert.equal(probes.length, 3, 'a failed PR lookup must not abort independent candidates');
+  assert.equal(removed.length, 2);
+  assert.equal(completed, true);
+  for (const [index, path] of paths.entries()) {
+    assert.equal(existsSync(path), index + 1 === probes[0], 'only the unreadable PR retains scratch');
+  }
+});
+
+test('HAMTMP-05: terminal launch still retains scratch referenced by a live process', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path, { lastObservedStatus: 'starting' });
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+    readProcessSnapshotImpl: () => `123 synthetic-hammer TMPDIR=${path}` }), []);
+  assert.equal(existsSync(path), true);
+});
+
+test('HAMTMP-05: real offline launch ledger controls starting records', async t => {
+  const { createRequire } = await import('node:module');
+  const Database = createRequire(import.meta.url)('better-sqlite3');
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path, { lastObservedStatus: 'starting' });
+  const ledgerDbPath = join(f.root, 'synthetic-ledger.sqlite');
+  const db = new Database(ledgerDbPath);
+  t.after(() => db.close());
+  db.exec('CREATE TABLE launch_requests (launch_request_id TEXT PRIMARY KEY, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT)');
+  db.prepare('INSERT INTO launch_requests VALUES (?, ?, NULL, NULL, NULL)').run('synthetic-lrq', 'running');
+  const options = { ...f.options, ledgerDbPath, env: { AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite' } };
+  delete options.readLaunchRequestStatusImpl;
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, options), []);
+  assert.equal(existsSync(path), true);
+  db.prepare('UPDATE launch_requests SET status = ?').run('succeeded');
+  assert.equal((await sweepHammerScratchDirs(f.root, options)).length, 1);
+  assert.equal(existsSync(path), false);
+});
+
 test('HAMTMP-04: a cold sweep reclaims old scratch with more history than the former read cap', async t => {
   const f = fixture(t);
   const orphan = f.scratch();
   const live = f.scratch();
   f.record(live, { lastObservedStatus: 'running' });
+  f.options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
   f.history(3509);
   const { sweepHammerScratchDirs: coldSweep } = await freshSweeper();
   assert.equal((await coldSweep(f.root, f.options)).length, 1);
@@ -143,6 +297,7 @@ test('HAMTMP-04: a persisted fingerprint cannot hide a changed live owner after 
   const { sweepHammerScratchDirs: firstSweep } = await freshSweeper();
   await firstSweep(f.root, { ...f.options, maxRemovals: 0 });
   f.record(owned, { lastObservedStatus: 'running' });
+  f.options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
   const orphan = f.scratch();
   const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
   assert.deepEqual(await restartedSweep(f.root, { ...f.options, maxRecordReads: 0 }), []);
@@ -156,6 +311,7 @@ test('HAMTMP-04: a corrupt checkpoint falls back to source records and preserves
   const f = fixture(t);
   const owned = f.scratch();
   const owner = f.record(owned, { lastObservedStatus: 'running' });
+  f.options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
   await sweepHammerScratchDirs(f.root, f.options);
   const checkpoint = join(f.root, 'data', 'follow-up-jobs', 'hammer-scratch-record-index.json');
   for (const contents of ['synthetic truncated checkpoint', JSON.stringify({ schemaVersion: 1,
@@ -208,6 +364,7 @@ test('HAMTMP-03: a live run survives an effective sweep even with an old directo
   const live = f.scratch();
   const orphan = f.scratch();
   f.record(live, { lastObservedStatus: 'running' });
+  f.options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
   const removed = await sweepHammerScratchDirs(f.root, f.options);
   assert.equal(existsSync(live), true);
   assert.equal(existsSync(orphan), false, 'the sweep must actually run; a no-op is not protection');
@@ -356,6 +513,7 @@ test('HAMTMP-03: historical JSON indexing advances across bounded passes and ref
     assert.equal(existsSync(orphan), true, 'partial ownership evidence cannot authorize deletion');
   }
   f.record(terminal, { lastObservedStatus: 'running' });
+  options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
   // A changed owner consumes a new read regardless of enumeration order.
   await sweepHammerScratchDirs(f.root, options);
   await sweepHammerScratchDirs(f.root, options);
@@ -371,6 +529,7 @@ test('HAMTMP-03: indexed history still admits new owners and refuses replaced re
   const f = fixture(t);
   const terminal = f.scratch();
   const owner = f.record(terminal, { lastObservedStatus: 'running' });
+  f.options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
   await sweepHammerScratchDirs(f.root, { ...f.options, maxRecordReads: 1 });
   const newlyOwned = f.scratch();
   const newOwner = join(dirname(owner), 'new-owner.json');

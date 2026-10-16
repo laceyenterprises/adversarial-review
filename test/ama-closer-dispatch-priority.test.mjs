@@ -1380,7 +1380,6 @@ for (const evidence of ['merged signal', 'terminal audit', 'terminal audit witho
     }));
     const recordPath = amaCloserDispatchFilePath(rootDir, identity);
     const beforeLease = readAmaCloserLease(rootDir, identity);
-    const beforeRecord = readFileSync(recordPath, 'utf8');
     let merged = false;
     const args = { rootDir, ...identity, hqRoot: rootDir, now,
       ...testDeps(),
@@ -1391,7 +1390,9 @@ for (const evidence of ['merged signal', 'terminal audit', 'terminal audit witho
     if (evidence === 'terminal audit without hqRoot') delete args.hqRoot;
     assert.equal(reconcileAmaCloserLease(args), false);
     assert.deepEqual(readAmaCloserLease(rootDir, identity), beforeLease, 'holding must not refresh the reclaim clock');
-    assert.equal(readFileSync(recordPath, 'utf8'), beforeRecord);
+    const observed = JSON.parse(readFileSync(recordPath, 'utf8'));
+    assert.equal(observed.lastObservedStatus, 'unverified-terminal-success');
+    assert.equal(observed.terminalLaunchStatus, 'succeeded');
     if (evidence === 'merged signal') merged = true;
     else appendAmaAuditAttempt({ hqRoot: rootDir, ...identity, now, attempt: { outcome: 'succeeded' } });
     assert.equal(reconcileAmaCloserLease(args), true);

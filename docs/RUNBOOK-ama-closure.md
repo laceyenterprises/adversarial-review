@@ -130,6 +130,15 @@ evidence or corrupt dispatch records preserve scratch rather than imply an
 absent owner. Directory symlinks are never followed. Each removal emits one
 `ama_closer.scratch_swept` line with the scratch name and allocated `bytesFreed`.
 
+For legacy owners without a surviving launch row, the sweep falls back to live
+PR state. A failed PR lookup preserves that owner's scratch and continues with
+other candidates within the same scan budget. Terminal observations persisted
+by closer dispatch use the current observation time, rather than the original
+dispatch timestamp, for `lastObservedAt`.
+Tests may inject a timestamp or clock function through `maybeDispatchAmaCloser`'s
+`now` option. Scratch ledger probes honor the sweep's `spawnSyncImpl` option
+while retaining the scan deadline on each subprocess call.
+
 After deployment, SRE confirms that the watcher restarted, checks the first
 sweep's removal lines and the drop in `ama-closer-prompts` size, then verifies
 that size remains roughly flat over a day of hammer runs. No manual cleanup of

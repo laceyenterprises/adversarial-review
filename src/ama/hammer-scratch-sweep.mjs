@@ -3,7 +3,10 @@ import { lstatSync, opendirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { readLatestWorkerRunStatusFromLedger } from '../session-ledger-read-adapter.mjs';
+import { meteredExecFile } from '../metered-gh.mjs';
+import { withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
+import { readLatestWorkerRunStatusFromLedger, readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
+import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import {
   amaCloserDispatchDir, cleanupHammerScratchDir, isTerminalHammerScratchRecord,
 } from './dispatch-closer.mjs';
@@ -157,18 +160,59 @@ function pidMayBeAlive(pid, processKillImpl) {
 async function hasLiveWorker(record, options, deadline) {
   if (pidMayBeAlive(record.pid ?? record.worker_process_pid, options.processKillImpl)) return true;
   if (!record.launchRequestId) return false;
-  const probe = await options.readWorkerStatusImpl({
-    launchRequestId: record.launchRequestId, rootDir: options.rootDir,
-    hqRoot: record.hqRoot || options.hqRoot, env: options.env,
-    ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
-    spawnSyncImpl: (command, args, spawnOptions) => spawnSync(command, args, {
-      ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
-    }),
-  });
+  const probe = await options.readWorkerStatusImpl(ledgerReadArgs(record, options, deadline));
   if (!probe?.ok) return probe?.reason !== 'missing-worker-run-row';
   if (!probe.row) return true;
   if (pidMayBeAlive(probe.row.pid ?? probe.row.worker_process_pid, options.processKillImpl)) return true;
   return !isTerminalHammerScratchRecord({ lastObservedStatus: probe.row.status });
+}
+
+function ledgerReadArgs(record, options, deadline) {
+  const spawnSyncFn = options.spawnSyncImpl || spawnSync;
+  return {
+    launchRequestId: record.launchRequestId, rootDir: options.rootDir,
+    hqRoot: record.hqRoot || options.hqRoot, env: options.env,
+    ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
+    spawnSyncImpl: (command, args, spawnOptions) => spawnSyncFn(command, args, {
+      ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
+    }),
+  };
+}
+
+async function readScratchPullRequestState({ repo, prNumber, timeout, env }) {
+  // Maintenance defers under API pressure instead of sleeping past its budget.
+  const { stdout } = await withGitHubBudgetScope({}, () => meteredExecFile(execFileAsync, 'gh', ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state'], {
+    env, encoding: 'utf8', timeout, maxBuffer: 1024 * 1024,
+  }));
+  return JSON.parse(stdout);
+}
+
+async function isTerminalOwner(record, options, deadline) {
+  // A retry intent can still carry its predecessor's LRQ and terminal status.
+  if (record.state === 'dispatching' || Date.now() >= deadline) return false;
+  if (record.launchRequestId) {
+    const probe = await options.readLaunchRequestStatusImpl(ledgerReadArgs(record, options, deadline));
+    if (!probe?.ok && probe?.reason !== 'missing-launch-request-row') {
+      throw new Error('unreadable launch ledger');
+    }
+    if (probe?.ok) {
+      // Explicit live or unknown ledger state outranks stale record/PR state.
+      return isTerminalLaunchRequestStatus(probe.row?.status);
+    }
+  }
+  if (isTerminalHammerScratchRecord(record)) return true;
+  // Legacy records with no surviving launch row can still be settled by the
+  // live PR. A database failure above must never become this fallback.
+  if (!record.repo || !Number.isInteger(Number(record.prNumber)) || Number(record.prNumber) <= 0
+    || Date.now() >= deadline) return false;
+  try {
+    const pr = await options.readPullRequestStateImpl({ repo: record.repo, prNumber: record.prNumber,
+      env: options.env, timeout: Math.max(1, Math.min(5000, deadline - Date.now())) });
+    return ['MERGED', 'CLOSED'].includes(String(pr?.state || '').toUpperCase());
+  } catch {
+    // An unreadable PR protects this owner without deferring independent ones.
+    return false;
+  }
 }
 
 // This is disk maintenance only; it never changes leases or grants merge/retry
@@ -177,6 +221,8 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   const settings = {
     rootDir, env: process.env, processKillImpl: process.kill,
     readWorkerStatusImpl: readLatestWorkerRunStatusFromLedger,
+    readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedger,
+    readPullRequestStateImpl: readScratchPullRequestState,
     readProcessSnapshotImpl: readHammerScratchProcessSnapshot,
     ...options,
   };
@@ -211,13 +257,13 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       if (!before.isDirectory() || nowMs - before.mtimeMs < maxAgeMs) continue;
       const owners = records.filter(({ record }) => typeof record.scratchDir === 'string'
         && resolve(record.scratchDir) === resolve(scratchDir));
-      if (owners.some(({ record }) => !isTerminalHammerScratchRecord(record))) continue;
       const size = treeSize(scratchDir, deadline);
       if (nowMs - size.newestMtimeMs < maxAgeMs) continue;
       let live = false;
       for (const { path, record } of owners) {
         const current = JSON.parse(readFileSync(path, 'utf8'));
         if (JSON.stringify(current) !== JSON.stringify(record)
+          || !await isTerminalOwner(current, settings, deadline)
           || await hasLiveWorker(current, settings, deadline)) { live = true; break; }
       }
       if (live || Date.now() >= deadline) continue;

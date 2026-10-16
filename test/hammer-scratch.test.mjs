@@ -11,8 +11,9 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   amaCloserDispatchFilePath, composeCloserPrompt, createHammerScratchDir,
-  maybeDispatchAmaCloser, reconcileAmaCloserDispatches, substituteTemplate, updateAmaCloserDispatchRecord,
+  maybeDispatchAmaCloser, reconcileAmaCloserDispatches, reconcileAmaCloserLease, substituteTemplate, updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
+import { acquireAmaCloserLease, readAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
 const repoRoot = resolve(new URL('..', import.meta.url).pathname);
 const head = 'b'.repeat(40);
@@ -21,6 +22,32 @@ function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-scratch-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
+}
+
+for (const state of ['unreadable', 'OPEN']) {
+  test(`HAMTMP-05: terminal launch records status and cleans scratch while ${state} PR evidence retains lease`, t => {
+    const root = fixture(t);
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+    const now = '2026-10-01T00:00:00Z';
+    const scratchDir = createHammerScratchDir(root);
+    acquireAmaCloserLease({ rootDir: root, ...identity, now, host: 'synthetic-host', watcherPid: 123 });
+    updateAmaCloserLease({ rootDir: root, ...identity, status: 'dispatched', lrqId: 'synthetic-lrq', now });
+    updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, state: 'dispatched',
+      launchRequestId: 'synthetic-lrq', lastObservedStatus: 'starting', scratchDir, promptDir: root }));
+    const before = readAmaCloserLease(root, identity);
+    assert.equal(reconcileAmaCloserLease({ rootDir: root, hqRoot: root, ...identity, now, logger,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded', terminal_at: now } }),
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+      readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+      readPullRequestStateImpl: () => state === 'unreadable' ? null : { state },
+    }), false);
+    assert.deepEqual(readAmaCloserLease(root, identity), before, 'scratch cleanup cannot release merge authority');
+    const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root, identity)));
+    assert.equal(record.lastObservedStatus, 'unverified-terminal-success');
+    assert.equal(record.terminalLaunchStatus, 'succeeded');
+    assert.equal(record.lastObservedAt, now);
+    assert.equal(existsSync(scratchDir), false);
+  });
 }
 
 function dispatchArgs(root) {
@@ -48,6 +75,40 @@ function dispatchArgs(root) {
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     logger,
   };
+}
+
+for (const clock of ['wall', 'timestamp', 'function']) {
+  test(`HAMTMP-05: terminal lease handling persists ledger status with ${clock} clock before retry admission`, async t => {
+    const root = fixture(t);
+    const args = dispatchArgs(root);
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+    assert.equal((await maybeDispatchAmaCloser({ ...args,
+      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }),
+    })).dispatched, true);
+    const path = amaCloserDispatchFilePath(root, identity);
+    const scratchDir = JSON.parse(readFileSync(path)).scratchDir;
+    updateAmaCloserLease({ rootDir: root, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge' });
+    updateAmaCloserDispatchRecord(root, identity, record => ({ ...record, retryCount: 2 }));
+    assert.equal(existsSync(scratchDir), true);
+    const beforeObservation = Date.now();
+    const observationTime = '2026-10-02T12:34:56Z';
+    const observed = await maybeDispatchAmaCloser({ ...args,
+      now: clock === 'wall' ? null : clock === 'function' ? () => observationTime : observationTime,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'canceled' } }),
+      execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'synthetic-unknown' }) }),
+    });
+    const afterObservation = Date.now();
+    const record = JSON.parse(readFileSync(path));
+    assert.equal(record.lastObservedStatus, 'canceled', JSON.stringify(observed));
+    assert.equal(record.terminalLaunchStatus, 'canceled');
+    if (clock === 'wall') {
+      assert.ok(Date.parse(record.lastObservedAt) >= beforeObservation
+        && Date.parse(record.lastObservedAt) <= afterObservation, 'terminal observation uses the current wall clock');
+    } else {
+      assert.equal(record.lastObservedAt, observationTime, 'observation clock takes precedence over dispatch time');
+    }
+    assert.equal(existsSync(scratchDir), false);
+  });
 }
 
 for (const sink of ['warn', 'error', 'function']) {
@@ -111,6 +172,9 @@ for (const status of ['succeeded', 'failed', 'canceled', 'reaped']) {
     assert.equal(existsSync(record.scratchDir), true);
     await reconcileAmaCloserDispatches(root, options);
     assert.equal(existsSync(record.scratchDir), false);
+    const terminalRecord = JSON.parse(readFileSync(path));
+    assert.equal(terminalRecord.terminalLaunchStatus, status);
+    assert.notEqual(terminalRecord.lastObservedStatus, 'starting');
     // Reconciliation and next-run cleanup are idempotent.
     await reconcileAmaCloserDispatches(root, options);
   });

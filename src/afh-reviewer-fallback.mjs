@@ -863,6 +863,10 @@ export function afhReviewerFallbackDecision({
       continue;
     }
     const status = reviewerModelGrounding(grounding, candidate);
+    if (status.accountHold) {
+      considered.push({ reviewerModel: candidate, selected: false, reason: 'claude-account-hold' });
+      continue;
+    }
     if (status.grounded) {
       considered.push({ reviewerModel: candidate, selected: false, reason: groundedReason(status) });
       continue;

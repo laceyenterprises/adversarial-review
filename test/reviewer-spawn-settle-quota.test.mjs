@@ -108,6 +108,25 @@ test('healthy reviewer status dispatches normally', async () => {
   });
 });
 
+for (const [state, expectedSpawns] of [['ok', 1], ['exhausted', 0]]) {
+  test(`Gemini ${state} quota stays independent of a selected corporate Claude account`, async () => {
+    await withStatusFile('exhausted', async (statusDir) => {
+      await writeFile(join(statusDir, 'google-oauth.status.json'), JSON.stringify({ state, authPath: 'oauth' }));
+      const capture = newCapture();
+      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir }, capture });
+      args.reviewerModel = 'gemini';
+      args.botTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
+      args.claudeAccountSelection = { provider: 'claude-code-corp', hold: false };
+      const result = await spawnReviewer(args);
+      assert.equal(capture.spawnCalls, expectedSpawns);
+      if (!expectedSpawns) {
+        assert.equal(result.failureClass, 'quota-exhausted');
+        assert.equal(capture.completed[0].metadata.quotaState, 'exhausted');
+      } else assert.equal(result.ok, true);
+    });
+  });
+}
+
 test('unreadable reviewer status fails open and dispatches normally', async () => {
   await withStatusFile('unused', async (statusDir) => {
     const capture = newCapture();

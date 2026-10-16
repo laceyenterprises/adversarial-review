@@ -1110,8 +1110,8 @@ function readCodexConfigTopLevelValues(keys, {
 
 function resolveReviewerExecution(harness, { env = process.env, fallbackModel = null, fallbackEffort = null, log = console } = {}) {
   const pin = harness === 'gemini' ? env.GEMINI_REVIEWER_MODEL : '';
-  const className = harness === 'claude' && resolveClaudeBrokerProvider(env) === 'claude-code-corp'
-    ? 'claude-reviewer-corp' : `${harness}-reviewer`;
+  // Account routing changes the broker binding, not the governed reviewer role.
+  const className = `${harness}-reviewer`;
   const resolution = resolveRemediationModel(className, { env, pin, fallbackModel });
   const model = resolution.modelSource === 'fallback-constant' ? fallbackModel : resolution.resolvedModel;
   const effort = resolution.resolvedReasoningLevel || fallbackEffort;

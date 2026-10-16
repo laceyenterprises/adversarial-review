@@ -120,6 +120,22 @@ test('unknown corporate evidence cannot trigger a cross-account or cross-harness
   assert.equal(reviewerModelGrounding(grounding, 'claude').grounded, false);
 });
 
+test('AFH skips Claude fallback candidates with unknown or stale corporate evidence', () => {
+  for (const evidence of ['unknown', 'stale']) {
+    const fixture = claudeAccountFixture();
+    fixture.reserveFloors['anthropic-oauth-corp'].weeklyMeasurement = { status: evidence };
+    fixture.providerStatuses.push({ provider: 'google', authPath: 'oauth', state: 'exhausted' });
+    const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(fixture));
+    assert.equal(reviewerModelGrounding(grounding, 'claude').accountHold, true);
+    const route = applyAfhReviewerFallback({ builderClass: 'codex',
+      baseRoute: { reviewerModel: 'gemini', botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN' },
+      grounding, geminiReviewerMode: 'fallback' });
+    assert.equal(route.reviewerModel, 'gemini');
+    assert.equal(route.quotaBlocked, true);
+    assert.equal(route.afhReviewerFallback, undefined);
+  }
+});
+
 test('malformed or stale quota facts cannot authorize corporate or cause an account switch', () => {
   for (const value of [null, {}, { status: 'measured' }, { status: 'measured', percentRemaining: NaN }]) {
     const fixture = claudeAccountFixture();

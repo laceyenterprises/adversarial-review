@@ -197,6 +197,15 @@ timeout, unparseable JSON, absent verdict) fails open to the configured
 primary/Gemini route with a degraded-read breadcrumb; it never blocks a tick.
 Set `ADVERSARIAL_AFH_REVIEWER_FALLBACK=0` to disable the hop entirely.
 
+When Claude account selection reports a hold, AFH skips Claude as a fallback
+candidate, including when corporate account evidence is unknown or stale. Unknown
+evidence alone does not trigger a switch away from an assigned Claude reviewer;
+its spawn preflight retains the account hold. Reviewer quota preflight uses only
+the selected reviewer's account: a corporate Claude selection cannot change
+Gemini's Google quota check. Both Claude accounts resolve the governed model from
+the canonical `claude-reviewer` role; the selected broker provider binds token
+mints and renewals to the account.
+
 **2. The reviewer prompt is adversarial, not consultative.** The standard
 reviewer prompt explicitly tells the model: *"You did NOT write this code.
 Your job is to find problems. Do NOT summarize. Do NOT praise."* Full

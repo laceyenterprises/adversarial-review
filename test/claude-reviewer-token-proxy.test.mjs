@@ -5,6 +5,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request } from 'node:http';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   CLAUDE_REVIEWER_PROXIED_HANDOFF_FLOOR_MS,
   claudeReviewerTokenProxyEnabled,
@@ -514,6 +517,30 @@ test('reviewWithClaude with the proxy disabled keeps the direct handoff and its 
     assert.equal(proxies.length, 0);
   } finally {
     await upstream.close();
+  }
+});
+
+test('both Claude accounts resolve the canonical reviewer model before mint and renewal', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'claude-reviewer-role-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'registry'));
+  await writeFile(join(root, 'registry', 'worker-classes.json'), JSON.stringify({ classes: {
+    'claude-reviewer': { defaultModel: 'synthetic-governed-review-model' },
+  } }));
+  for (const provider of ['claude-code', 'claude-code-corp']) {
+    const mints = [];
+    const auth = await prepareClaudeOAuthEnv({
+      sourceEnv: { HQ_ROOT: root, AGENT_OS_DEPLOY_CHECKOUT: root, CLAUDE_BROKER_PROVIDER: provider,
+        ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker' },
+      logger: quietLogger,
+      nowMs: FIXTURE_NOW_MS,
+      mintClaudeCodeBrokerTokenImpl: async request => {
+        mints.push({ provider: request.provider, model: request.model });
+        return { token: 'synthetic-grant', expiresAt: '2026-09-28T20:54:30Z' };
+      },
+    });
+    await auth.remint();
+    assert.deepEqual(mints, Array(2).fill({ provider, model: 'synthetic-governed-review-model' }));
   }
 });
 

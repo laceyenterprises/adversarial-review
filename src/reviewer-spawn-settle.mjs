@@ -214,7 +214,8 @@ async function readReviewerQuotaDecision({
       }
     }
     const corporateAccount = reviewerModel === 'codex'
-      ? codexBrokerProvider === 'codex-corp' : claudeBrokerProvider === 'claude-code-corp';
+      ? codexBrokerProvider === 'codex-corp'
+      : normalizeReviewerModel(reviewerModel) === 'claude' && claudeBrokerProvider === 'claude-code-corp';
     const accountAuthPath = corporateAccount ? 'oauth-corp' : 'oauth';
     const accountStatuses = statuses.filter((entry) => corporateAccount
       ? entry.authPath === accountAuthPath : entry.authPath !== 'oauth-corp');

@@ -160,6 +160,33 @@ test('GUARDREVERT-01: guard-only approval coverage survives a rebase; other edit
   }
 });
 
+test('GUARDREVERT-01: later family comments retain every distinct authoritative approval head', async () => {
+  const original = 'd'.repeat(40), later = 'f'.repeat(40), originalBase = 'e'.repeat(40);
+  const user = { login: amaAllAuthoritativeReviewerLogins()[0] };
+  const f = fixture();
+  f.responses['pulls/1/reviews?per_page=100'] = [
+    { commit_id: original, user, state: 'APPROVED' },
+    { commit_id: original, user, state: 'COMMENTED' },
+    { commit_id: later, user, state: 'COMMENTED' },
+    { commit_id: approved, user, state: 'COMMENTED' },
+    { commit_id: '9'.repeat(40), user: { login: 'untrusted-reviewer' } },
+    { commit_id: 'invalid', user },
+  ];
+  for (const reviewed of [original, later]) {
+    f.responses[`compare/${base}...${reviewed}`] = { files: [report, index],
+      merge_base_commit: { sha: originalBase }, filesComplete: true };
+    f.responses[`compare/${reviewed}...${approved}`] = { status: 'diverged' };
+  }
+  f.responses[`compare/${originalBase}...${base}`] = { status: 'ahead' };
+  const primaryChange = await evidenceFor(f);
+  assert.deepEqual(primaryChange.guardReviewSnapshots.map(snapshot => snapshot.headSha), [original, later]);
+  for (const reviewed of [original, later]) {
+    assert.equal(f.calls.filter(call => call === `compare/${base}...${reviewed}`).length, 1);
+    const result = isEligibleForAmaClosure({ ...cleanReview, headSha: reviewed }, greenPr, cfg, { primaryChange });
+    assert.equal(result.eligible, true, JSON.stringify(result.reasons));
+  }
+});
+
 test('GUARDREVERT-01: failed, optional, stale, unnamed and partial restorations never gain guard authority', async () => {
   for (const mutate of [
     f => { f.responses['branches/main/protection/required_status_checks'] = { contexts: [] }; },
@@ -204,5 +231,49 @@ test('GUARDREVERT-01: explicit path prohibitions in summaries and generic error 
         message: `The file \`${path}\` is forbidden in pull requests.` }];
     }
     assert.equal(checkPrimaryChange(await evidenceFor(f), head).ok, true, source);
+  }
+});
+
+test('GUARDREVERT-01: annotation paths bind punctuated titles and later diagnostic sentences', async () => {
+  for (const annotation of [
+    { title: 'Guard check.', message: 'This file is forbidden in pull requests.' },
+    { title: 'Guard check.', message: 'Generated catalog detected. This file is forbidden in PRs. Restore the base.' },
+    { title: 'Guard check!', message: 'Generated catalog detected.\nThis file is forbidden in PRs.' },
+    { title: 'This file is forbidden in PRs.', message: 'Restore the generated catalog.' },
+  ]) {
+    const f = fixture();
+    f.responses['check-runs/11/annotations?per_page=100&page=1'] = [{ path, ...annotation }];
+    const result = checkPrimaryChange(await evidenceFor(f), head);
+    assert.equal(result.ok, true, JSON.stringify(annotation));
+    assert.equal(result.guardReversals.length, 1);
+  }
+});
+
+test('GUARDREVERT-01: punctuation never grants an unrelated path or combines separate assertions', async () => {
+  for (const annotation of [
+    { path: 'docs/unrelated.md', title: 'Guard check.', message: 'This file is forbidden in PRs.' },
+    { path: 'docs/unrelated.md', message: `${path} is allowed in PRs. docs/unrelated.md is forbidden in PRs.` },
+    { path, title: 'Pull request checks.', message: 'This file is forbidden.' },
+  ]) {
+    const f = fixture();
+    f.responses['check-runs/11/annotations?per_page=100&page=1'] = [annotation];
+    const result = checkPrimaryChange(await evidenceFor(f), head);
+    assert.equal(result.reason, 'primary-change-reverted', JSON.stringify(annotation));
+  }
+});
+
+test('GUARDREVERT-01: rejection recognizes PR context on either side of the named path', async () => {
+  for (const message of [`${path} is rejected in pull requests.`, `In pull requests, ${path} is rejected.`]) {
+    for (const source of ['summary', 'annotation', 'unrelated-annotation']) {
+      const f = fixture();
+      f.responses['check-runs/11/annotations?per_page=100&page=1'] = source === 'summary' ? []
+        : [{ path: source === 'annotation' ? path : '.github/workflows/guard.yml', message }];
+      if (source === 'summary') {
+        f.responses[`commits/${approved}/check-runs?per_page=100&page=1`].check_runs[0].output = { summary: message };
+      }
+      const result = checkPrimaryChange(await evidenceFor(f), head);
+      assert.equal(result.ok, true, `${source}: ${message}`);
+      assert.equal(result.guardReversals.length, 1);
+    }
   }
 });

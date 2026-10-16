@@ -2,7 +2,7 @@
 // hammer trailer or a PR body. Keep this evidence outside the history cache:
 // required contexts and check reruns can change without a head move.
 const SHA = /^[0-9a-f]{40}$/i;
-const forbidden = /\b(?:forbidden|not allowed|must not|cannot|do not|reject(?:ed)?)\b.*\b(?:pull requests?|PRs?)\b|\b(?:pull requests?|PRs?)\b.*\b(?:forbidden|not allowed|must not|cannot|do not)\b/i;
+const forbidden = /\b(?:forbidden|not allowed|must not|cannot|do not|reject(?:ed)?)\b.*\b(?:pull requests?|PRs?)\b|\b(?:pull requests?|PRs?)\b.*\b(?:forbidden|not allowed|must not|cannot|do not|reject(?:ed)?)\b/i;
 
 async function pages(get, path, field = null) {
   const items = [];
@@ -26,17 +26,21 @@ function latest(runs, head) {
   return result;
 }
 
+function statements(text) {
+  return String(text || '').split(/\n|;|\.\s+|\s+(?:but|whereas|while|except)\s+/i)
+    .map(line => line.trim()).filter(Boolean);
+}
+
 function namesPath(text, path) {
   // Bind the prohibition to this literal path's statement. Merely mentioning
   // an allowed file beside a different forbidden file grants no authority.
   const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const token = '[`"\']?' + escaped + '[`"\']?';
-  const subject = new RegExp('^(?:[-*]\\s+)?(?:the\\s+(?:file|path)\\s+)?' + token
+  const subject = new RegExp('^(?:[-*]\\s+)?(?:in\\s+(?:pull requests?|PRs?),?\\s+)?(?:the\\s+(?:file|path)\\s+)?' + token
     + '(?:\\s*:\\s*|\\s+(?:is\\s+)?(?:generated\\s+and\\s+)?(?=forbidden|not allowed|must not|cannot|do not|rejected))', 'i');
   const command = new RegExp('^(?:do not|must not|cannot)\\s+(?:edit|modify|change|include|regenerate)\\s+' + token + '(?:\\s|$)', 'i');
   const label = new RegExp('^forbidden in (?:pull requests?|PRs?)\\s*:\\s*' + token + '[.!]?$', 'i');
-  return String(text || '').split(/\n|;|\.\s+|\s+(?:but|whereas|while|except)\s+/i)
-    .map(line => line.trim()).some(line => forbidden.test(line)
+  return statements(text).some(line => forbidden.test(line)
       && (subject.test(line) || command.test(line) || label.test(line)));
 }
 
@@ -95,10 +99,14 @@ export async function fetchGuardReversals({ repo, prNumber, headSha, get }, evid
       const annotations = await pages(get, `repos/${repo}/check-runs/${failedRun.id}/annotations`);
       for (const path of paths) {
         if (baseDelta.some(file => file.filename === path || file.previous_filename === path)) continue;
-        const annotation = annotations.find(item => forbidden.test(`${item.title || ''} ${item.message || ''}`)
-          && (item.path === path || namesPath(`${item.title || ''} ${item.message || ''}`, path)));
-        const prohibition = annotation ? `${path}: ${annotation.title || ''} ${annotation.message || ''}`
-          : [failedRun.output?.summary, failedRun.output?.text].filter(Boolean).join('\n');
+        const annotationProhibition = annotations.map(item => {
+          const text = [item.title, item.message].filter(Boolean).join('\n');
+          // GitHub's annotation path binds every diagnostic statement, even
+          // after a punctuated title or an introductory message sentence.
+          return item.path === path ? statements(text).map(line => `${path}: ${line}`).join('\n') : text;
+        }).find(text => namesPath(text, path));
+        const prohibition = annotationProhibition
+          || [failedRun.output?.summary, failedRun.output?.text].filter(Boolean).join('\n');
         if (!namesPath(prohibition, path)) continue;
         guardReversals.push({ path, baseSha: pr.base.sha, restoredToBase: true,
           requiredCheck, failedRun, passingRun, prohibition,

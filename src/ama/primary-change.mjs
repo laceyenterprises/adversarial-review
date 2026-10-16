@@ -627,21 +627,22 @@ async function fetchGuardReviewSnapshots(args, evidence) {
   try {
     const reviews = await args.get(`repos/${args.repo}/pulls/${args.prNumber}/reviews?per_page=100`);
     if (!Array.isArray(reviews) || reviews.length >= 100) return {};
-    const families = new Map();
+    // Later notes by the same family must not erase an earlier approval head.
+    const reviewedCommits = new Set();
     for (const review of reviews) {
       const family = amaReviewerFamilyForLogin(review.user?.login);
-      if (family && SHA.test(review.commit_id || '')) families.set(family, review);
+      if (family && SHA.test(review.commit_id || '')) reviewedCommits.add(review.commit_id);
     }
     const guardReviewSnapshots = [];
-    for (const review of families.values()) {
-      if (review.commit_id === evidence.primaryHead) continue;
-      const snapshot = await args.get(`repos/${args.repo}/compare/${evidence.baseSha}...${review.commit_id}`);
+    for (const reviewedHead of reviewedCommits) {
+      if (reviewedHead === evidence.primaryHead) continue;
+      const snapshot = await args.get(`repos/${args.repo}/compare/${evidence.baseSha}...${reviewedHead}`);
       if (Array.isArray(snapshot.files) && (snapshot.filesComplete === true || snapshot.files.length < 300)
         && SHA.test(snapshot.merge_base_commit?.sha || '')) {
         const metadata = args.get.metadata || args.get;
-        const reviewToPrimary = await metadata(`repos/${args.repo}/compare/${review.commit_id}...${evidence.primaryHead}`);
+        const reviewToPrimary = await metadata(`repos/${args.repo}/compare/${reviewedHead}...${evidence.primaryHead}`);
         const baseAncestry = await metadata(`repos/${args.repo}/compare/${snapshot.merge_base_commit.sha}...${evidence.mergeBase}`);
-        guardReviewSnapshots.push({ headSha: review.commit_id, files: snapshot.files,
+        guardReviewSnapshots.push({ headSha: reviewedHead, files: snapshot.files,
           fromBase: snapshot.merge_base_commit.sha, toBase: evidence.mergeBase,
           reviewToPrimary: reviewToPrimary.status, baseAncestry: baseAncestry.status });
       }

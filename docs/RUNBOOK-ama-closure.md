@@ -1615,7 +1615,11 @@ Only readable added/modified text files qualify; partial repairs, renames,
 gitlinks, optional checks and unnamed paths retain ordinary preservation rules.
 Unavailable or incomplete evidence grants no waiver. A guard must publish an
 explicit path-specific prohibition in its summary, text or annotations; its
-name or a generic failed CI run is insufficient.
+name or a generic failed CI run is insufficient. A matching annotation path
+binds each title/message statement independently, including after sentence
+punctuation; annotations on other paths and check summaries must explicitly
+name the prohibited path in the same statement. Rejection phrasing accepts PR
+context before or after that path's prohibition.
 
 The audit's `trace.primaryChange.guardReversals`, daemon terminal-attempt
 `guardReversals` and the hammer's live `githubGate.guardReversals` record
@@ -1629,7 +1633,9 @@ also advances to collect the base identity needed by old cached refusals.
 only when every other file's reviewed diff is identical. The rebase variant
 requires a diverged reviewed-to-primary history, advancement from the reviewed
 merge base to the current merge base, and identical remaining patches modulo
-hunk-coordinate shifts. Any additional content change needs exact-head review.
+hunk-coordinate shifts. Coverage snapshots retain every distinct authoritative
+review commit, so later comments from the same reviewer family do not erase an
+earlier approval head. Any additional content change needs exact-head review.
 HAM App validation, current-head CI, mergeability, lease and other safety gates
 remain independently required by their existing execution paths.
 

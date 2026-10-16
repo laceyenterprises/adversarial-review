@@ -20,8 +20,8 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 
 | Field | Shape | Contract |
 |---|---|---|
-| `heads` | object keyed by head SHA | At most eight entries retained, newest `firstObservedAt` first. |
-| `currentHead` | head SHA | GUARDREVERT-01 clears old refusal entries on an observed head change, including a force-push away and back. |
+| `heads` | object keyed by head SHA | Cleared in full on an observed `currentHead` change. The writer defensively caps legacy or pre-seeded state at eight entries, newest `firstObservedAt` first. |
+| `currentHead` | head SHA | GUARDREVERT-01 clears all prior head entries on an observed head change, including a force-push away and back. |
 | `refusalGeneration` | integer | Monotonic generation for new holds; keeps process-local page debounce scoped to the current refusal. |
 | `heads[sha].refusal` | optional object | `{ key, reasons, missingEvidence, next }`; SHA-256 identity over repository, PR, head, sorted unique reasons and recursively key-sorted full missing evidence. Repeated audit attempts with this same identity reuse the hold. |
 | `heads[sha].refusalGeneration` | integer | Page generation for this hold. Persisted page receipts survive restart. A different refusal or a new stop after input release receives a new generation. |
@@ -97,7 +97,10 @@ delivery failure. A successful page also sets process-local debounce so failed
 state writes cannot page every tick; that fallback resets on process restart.
 Unreadable/malformed hold files are treated as empty state and rebuilt from
 audit evidence. Write failures are logged and the in-memory decision still
-applies for that tick. Retention is capped at eight heads per PR, with no TTL.
+applies for that tick. An observed `currentHead` change clears the entire `heads`
+map, so returning to a previously observed SHA establishes a fresh hold and page
+generation. The writer's eight-head cap is a defensive bound for legacy or
+pre-seeded state, not historical retention across head changes. There is no TTL.
 
 GUARDREVERT-01 adds a stable `review` fingerprint to `inputs`: reviewed head,
 verdict, remediation state, finding classifications/identities and the resolved

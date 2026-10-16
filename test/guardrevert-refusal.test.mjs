@@ -39,17 +39,26 @@ test('GUARDREVERT-01: second unchanged wake never dispatches and pages once acro
     { orphanRecovery: { ownerProof: true, headSha: head } }]) {
     const f = setup(t);
     let launches = 0;
+    let holdEvaluations = 0;
+    let ownershipProbes = 0;
     const invoke = () => maybeDispatchAmaCloser({ reviewState: f.reviewState, prMetadata: f.prMetadata,
       cfg: { enabled: true, workerClass: 'hammer', branchProtection: { required: false }, eligibility: { riskClasses: ['low'] } },
       options: {}, dispatchContext: { rootDir: f.rootDir, hqRoot: f.rootDir, repo, reviewedSha: reviewed,
         liveHeadCloserAuthored: true, ...route },
       execFileImpl: async () => { launches++; throw new Error('A refused head must never launch'); },
+      evaluateHammerStopHoldImpl: async args => {
+        holdEvaluations++;
+        return evaluateHammerStopHold(args);
+      },
+      readLaunchRequestStatusImpl: async () => { ownershipProbes++; return { status: 'running' }; },
       deliverAlertImpl: f.args.deliverAlertImpl, fetchPrimaryChangeImpl: f.args.fetchPrimaryChangeImpl, logger });
     const first = await invoke();
     assert.equal(first.reason, 'hammer-stop-awaiting-input-change');
     assert.equal(first.skipMergeAgent, true, 'the refusal fence must prevent legacy fallback');
     assert.equal(first.recoveryWait, true);
     assert.deepEqual(first.hammerStop.refusal.missingEvidence, missingEvidence);
+    assert.equal(holdEvaluations, 1, 'the pre-route fence evaluates the hold once per tick');
+    assert.equal(ownershipProbes, 0, 'a held refusal fences ownership probes');
     _resetHammerStopHoldPageDebounceForTests(); // Simulate a watcher restart.
     const second = await invoke();
     assert.equal(second.dispatched, false);
@@ -57,6 +66,8 @@ test('GUARDREVERT-01: second unchanged wake never dispatches and pages once acro
     assert.equal(second.skipMergeAgent, true);
     assert.equal(second.recoveryWait, true);
     assert.equal(launches, 0);
+    assert.equal(holdEvaluations, 2);
+    assert.equal(ownershipProbes, 0);
     assert.equal(f.pages.length, 1);
     assert.equal(f.pages[0].options.event, 'ama_closer.hammer_stop_hold');
     assert.deepEqual(f.pages[0].options.payload.refusal.reasons, [...reasons].sort());

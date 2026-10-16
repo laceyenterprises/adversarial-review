@@ -609,7 +609,7 @@ export function guardRepairReviewCoverage(evidence, reviewedHead, currentHead) {
   const reviewed = direct ? evidence.primaryFiles : snapshot?.files;
   if (!Array.isArray(reviewed)) return false;
   if (!direct && (snapshot.reviewToPrimary !== 'diverged' || snapshot.baseAncestry !== 'ahead'
-    || snapshot.fromBase === evidence.mergeBase || snapshot.toBase !== evidence.mergeBase)) return false;
+    || snapshot.fromBase === evidence.mergeBase)) return false;
   const paths = new Set(proofs.map(proof => proof.path));
   const remaining = files => files.filter(file => !paths.has(file.filename) && !paths.has(file.previous_filename));
   try {

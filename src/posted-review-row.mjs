@@ -1256,7 +1256,11 @@ export async function runQueuedReviewAdoptionPhase({
     handlerTimeoutMs: postedReviewHandlerTimeoutMs,
     minimumHandlerStartBudgetMs,
     laneGate: noProgressLaneGate,
-    priorityTargets: [...postedReviewPriorityTargets, ...pendingHammerTargets],
+    priorityTargets: [
+      ...(Array.isArray(postedReviewPriorityTargets) ? postedReviewPriorityTargets
+        : postedReviewPriorityTargets ? [postedReviewPriorityTargets] : []),
+      ...pendingHammerTargets,
+    ],
     logger,
   });
 

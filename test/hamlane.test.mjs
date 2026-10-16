@@ -245,6 +245,7 @@ test('HAMLANE-01 first adoption after restart prioritizes pending intent through
       progressClass: 'operator-decision-required', fingerprint: 'old-final-gate', logger });
     await runQueuedReviewAdoptionPhase({ rootDir, logger,
       noProgressLaneGate: gate,
+      postedReviewPriorityTargets: null,
       postedReviewHandlers: [
         { repoPath: handler.repoPath, prNumber: 43, headSha, run: async () => { order.push('ordinary'); } },
         { ...handler, run: async () => { order.push('recovered'); return pending; } },

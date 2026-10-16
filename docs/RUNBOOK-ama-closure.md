@@ -381,12 +381,21 @@ provenance still key off the configured logical class). It emits a loud
 HAMLANE-01 keeps final-review hammer ownership in the active lane even when the
 NOT CONVERGED gate requests an operator decision. A genuine safety or operator
 hold still uses the operator-blocked cadence and alert path.
+Pending results preserve the named operator hold and safety evidence (including
+`needsOperator`, draft, retry/lifetime cap and label holds); they never mark the
+hammer route active while that hold applies. Ordinary pending results omit
+closure details to keep submission/settlement changes out of lane fingerprints.
 
 Background submissions persist [retry intent](data-model/ama-hammer-background.md)
 before launch. On the first adoption phase after a watcher restart, matching-head
 intents bypass lane backoff and receive handler priority. The normal closer
 rechecks all live guards and deduplicates any launch that already succeeded.
-
+Restart priority and recovery logging run once per watcher process/root. Handlers
+deferred by the first phase's budget can still bypass lane backoff on a later
+normal scheduling pass while their intent remains. Confirmed dispatch or an
+existing `ama-closer-launch-in-progress` retires that head's interrupted intent:
+the closer ledger and lease own subsequent reconciliation. An operator/safety
+hold also retires intent before recording operator-blocked cadence.
 
 This is a v1 bug-fix/operational mitigation under the freeze above, not a new
 merge authority lane. The MSM decision tree is unchanged: a PR that needs the

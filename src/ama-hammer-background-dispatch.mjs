@@ -109,9 +109,9 @@ function clearPendingDispatch(entry) {
   if (current?.attemptId === intent.attemptId) rmSync(pendingDispatchPath(intent.rootDir, intent), { force: true });
 }
 
-// A normal handler can settle into an operator hold before it reaches the
-// queue. Retire the interrupted intent then, so it cannot override that hold's
-// cadence forever. This never changes the closer's launch/lease records.
+// A normal handler can find an operator hold or an existing launch before it
+// reaches the queue. Retire interrupted intent when that other owner takes
+// over. This never changes the closer's launch/lease records.
 export function clearPendingAmaHammerDispatch(rootDir, identity, { logger = console } = {}) {
   const current = readPendingAmaHammerDispatch(rootDir, identity, { logger });
   if (!current) return;

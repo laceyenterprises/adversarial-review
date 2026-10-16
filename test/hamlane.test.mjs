@@ -50,7 +50,7 @@ test('HAMLANE-01 a real operator hold replaces hammer urgency and keeps its cade
 // Two queues model process lifetimes; unresolved work in the first is lost on restart.
 // The durable closer fixture stands in for its normal lease and launch dedup.
 import * as background from '../src/ama-hammer-background-dispatch.mjs';
-import { recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
+import { readNoProgressLane, recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
 import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 
@@ -158,6 +158,86 @@ test('HAMLANE-01 the posted-review handler exposes hammer ownership despite the 
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
+async function handleClosureResult(rootDir, amaClosureResult, outcome = 'ama-pending') {
+  const row = { review_status: 'posted', pr_state: 'open', reviewer_head_sha: headSha };
+  return handlePostedReviewRow({ rootDir, repoPath: handler.repoPath,
+    prNumber: handler.prNumber, existing: row, currentRevisionRef: headSha, labelNames: [], logger,
+    projectGateStatusSafe: async () => ({ decision: finalGate }),
+    fetchMergeAgentCandidateImpl: async () => ({ merged: false, prState: 'open' }),
+    buildMergeAgentDispatchJobImpl: () => ({}),
+    latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
+    reviewBodyHasScopeViolationFindingImpl: () => false, currentReviewRowReader: () => row,
+    resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome, amaClosureResult }),
+  });
+}
+
+for (const amaClosureResult of [
+  ...['hammer-lifetime-dispatch-ceiling', 'hammer-retry-cap-exceeded', 'pr-is-draft', 'hard-stop-label']
+    .map(reason => ({ reason, needsOperator: true })),
+  { reason: 'background-pr-draft', needsOperator: true, operatorReason: 'pr-is-draft' },
+  { reason: 'not-eligible', reasons: ['two-key-required'] },
+  { reason: 'pr-is-draft' },
+  { needsOperator: true },
+]) {
+  test(`HAMLANE-01 pending hold preserves context and retires restart intent: ${JSON.stringify(amaClosureResult)}`, async () => {
+    const { rootDir, gate } = fixture();
+    const queue = background.createAmaHammerBackgroundQueue();
+    const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+    let release;
+    try {
+      queue.submit({ key: background.amaHammerBackgroundKey(identity), pendingDispatch: { rootDir, ...identity },
+        run: () => new Promise(resolve => { release = resolve; }) });
+      await gate.record(handler, { value: pending });
+      const value = await handleClosureResult(rootDir, amaClosureResult);
+      const reason = amaClosureResult.operatorReason || amaClosureResult.reason || 'ama-operator-hold';
+      assert.equal(value.operatorHoldReason, reason);
+      assert.deepEqual(value.amaClosureResult, amaClosureResult);
+      assert.notEqual(value.hammerRouteActive, true);
+      const recorded = await gate.record(handler, { value });
+      assert.equal(recorded.lane, 'operator-blocked');
+      assert.equal(readNoProgressLane(rootDir, identity).operatorReason, reason);
+      assert.equal(background.readPendingAmaHammerDispatch(rootDir, identity), null);
+      for (let tick = 0; tick < 3; tick++) assert.equal(gate.evaluate(handler).run, false);
+      assert.equal(gate.evaluate(handler).run, true);
+    } finally {
+      release?.({ dispatched: false });
+      await queue.drain();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const outcome of ['ama-pending', 'ama-dispatched']) {
+  test(`HAMLANE-01 reconciliation retires restart intent without a new submission: ${outcome}`, async () => {
+    const { rootDir, gate } = fixture();
+    const oldQueue = background.createAmaHammerBackgroundQueue();
+    const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+    let release;
+    try {
+      oldQueue.submit({ key: background.amaHammerBackgroundKey(identity), pendingDispatch: { rootDir, ...identity },
+        run: () => new Promise(resolve => { release = resolve; }) });
+      recordNoProgressLaneRun(rootDir, identity, { headSha,
+        progressClass: 'operator-decision-required', fingerprint: 'old-final-gate', logger });
+      assert.equal(gate.evaluate(handler).reason, 'hammer-dispatch-recovery');
+      const value = await handleClosureResult(rootDir, outcome === 'ama-pending'
+        ? { reason: 'ama-closer-launch-in-progress', skipMergeAgent: true, launchRequestId: 'lrq_existing' }
+        : { dispatched: true, dispatchId: 'lrq_existing', workerClass: 'hammer' }, outcome);
+      assert.equal(background.readPendingAmaHammerDispatch(rootDir, identity), null);
+      await gate.record(handler, { value });
+      assert.equal(gate.evaluate(handler).reason, 'hammer-route-active');
+      // Clearing a recovered intent must remain head-bound.
+      oldQueue.submit({ key: background.amaHammerBackgroundKey({ ...identity, headSha: 'b'.repeat(40) }),
+        pendingDispatch: { rootDir, ...identity, headSha: 'b'.repeat(40) }, run: async () => ({ dispatched: false }) });
+      await handleClosureResult(rootDir, { reason: 'ama-closer-launch-in-progress' });
+      assert.ok(background.readPendingAmaHammerDispatch(rootDir, { ...identity, headSha: 'b'.repeat(40) }));
+    } finally {
+      release?.({ dispatched: false });
+      await oldQueue.drain();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('HAMLANE-01 intent is saved before running, head-bound, and removed even when settle logging throws', async () => {
   const { rootDir, gate } = fixture();
   const queue = background.createAmaHammerBackgroundQueue();
@@ -237,13 +317,14 @@ test('HAMLANE-01 first adoption after restart prioritizes pending intent through
   const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
   let release;
   const order = [];
+  const messages = [];
   const noop = async () => ({ attempted: 0, checked: 0 });
   try {
     queue.submit({ key: background.amaHammerBackgroundKey(identity),
       pendingDispatch: { rootDir, ...identity }, run: () => new Promise(resolve => { release = resolve; }) });
     recordNoProgressLaneRun(rootDir, identity, { headSha,
       progressClass: 'operator-decision-required', fingerprint: 'old-final-gate', logger });
-    await runQueuedReviewAdoptionPhase({ rootDir, logger,
+    const phaseArgs = { rootDir, logger: { ...logger, log: message => messages.push(message) },
       noProgressLaneGate: gate,
       postedReviewPriorityTargets: null,
       postedReviewHandlers: [
@@ -257,8 +338,15 @@ test('HAMLANE-01 first adoption after restart prioritizes pending intent through
       retryPendingRetriggerAckCommentsImpl: noop, reportStalledRetriggerOutcomesImpl: noop,
       retryPendingRetriggerReviewAckCommentsImpl: noop,
       sweepRereviewWakeQueueImpl: () => ({ scanned: 0 }), rereviewWakeBacklogImpl: () => ({ pending: 0 }),
-    });
+    };
+    await runQueuedReviewAdoptionPhase(phaseArgs);
     assert.deepEqual(order, ['recovered', 'ordinary']);
+    assert.equal(messages.filter(message => message.includes('recovering pending AMA hammer dispatch')).length, 1);
+    await runQueuedReviewAdoptionPhase({ ...phaseArgs,
+      runPostedReviewHandlersFairlyImpl: async ({ priorityTargets }) => assert.deepEqual(priorityTargets, []),
+    });
+    assert.equal(messages.filter(message => message.includes('recovering pending AMA hammer dispatch')).length, 1,
+      'later adoption phases must not report ordinary in-flight work as restart recovery');
   } finally {
     release?.({ dispatched: false });
     await queue.drain();

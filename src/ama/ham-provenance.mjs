@@ -65,9 +65,13 @@ export function parseCommitTrailerValues(message) {
   return trailers;
 }
 
-// Preserve the existing single-value contract for provenance consumers.
+// Conflicting identity claims confer no provenance, independent of order.
+// Keep multi-valued evidence (for example reversal citations) in the values API.
+const IDENTITY_TRAILERS = new Set(['worker-class', 'worker-ticket', 'ticket', 'reviewed-head', 'closed-by']);
+// Preserve the existing single-value contract only for unambiguous identities.
 export function parseCommitTrailers(message) {
   return Object.fromEntries(Object.entries(parseCommitTrailerValues(message))
+    .filter(([key, values]) => !IDENTITY_TRAILERS.has(key) || new Set(values).size === 1)
     .map(([key, values]) => [key, values[0]]));
 }
 
@@ -102,6 +106,8 @@ export function hamCommitIdentityMatches(commit, {
   trailers = parseCommitTrailers(commit?.commit?.message || commit?.message || ''),
   loginMatches = hamAuditCommentAuthorMatches,
 } = {}) {
+  const values = parseCommitTrailerValues(commit?.commit?.message || commit?.message || '');
+  if (Object.entries(values).some(([key, entries]) => IDENTITY_TRAILERS.has(key) && new Set(entries).size > 1)) return false;
   const login = (identity) => normalizeHamLogin(typeof identity === 'object' ? identity?.login : identity);
   const author = login(commit?.author);
   const committer = login(commit?.committer);

@@ -32,7 +32,6 @@ export function createReviewerDispatchDrain({
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
       const eligible = candidates.filter(candidate => !candidate.admissionBlocked?.());
       const orderedCandidates = await prepareSpillover(eligible, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
-      await Promise.all(orderedCandidates.slice(0, reviewerPoolConfig.maxConcurrent).map(candidate => candidate.prepareAdmission?.()));
       const drainResult = await runQueue(orderedCandidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,

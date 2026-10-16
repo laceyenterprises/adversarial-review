@@ -1424,6 +1424,14 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         await entry.candidate.prepareForGeminiSaturation();
         continue;
       }
+      // Refusals and lane fairness can select a candidate beyond the warm
+      // wave. Prepare it before start() reserves capacity. Keep the selected
+      // lane order, but recheck credential capacity after the asynchronous work.
+      if (typeof entry.candidate.prepareAdmission === 'function') {
+        await entry.candidate.prepareAdmission();
+        if (isGeminiCandidate(entry.candidate)
+          && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiLimitForCandidate(entry.candidate)) continue;
+      }
       entry.started = true;
       const startedEntry = entry;
       recordLaneAdmission(startedEntry.candidate);

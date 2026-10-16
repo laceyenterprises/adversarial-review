@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { createReviewerAdmissionQueue } from '../src/watcher-reviewer-admission.mjs';
 import { createDetachedReviewerDispatchTracker } from '../src/watcher-reviewer-pool.mjs';
 import { createReviewerDispatchDrain } from '../src/watcher-reviewer-dispatch.mjs';
+import Database from 'better-sqlite3';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { createDurableReviewerRefill } from '../src/watcher-reviewer-refill.mjs';
 
 const quiet = { log() {}, warn() {}, error() {} };
 const flush = async () => { for (let turn = 0; turn < 40; turn++) await Promise.resolve(); };
@@ -12,7 +15,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fixture(t) {
+function fixture(t, { splitPostReviewSettlement = false } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let now = 1000;
   const scheduled = [], logs = [], starts = [], completions = [];
@@ -30,7 +33,7 @@ function fixture(t) {
     readWatcherDrainState: () => ({ active: false }),
     resolveGeminiCredentialConcurrencyForDispatchCandidates: async () => 1,
     prepareSpillover: async candidates => candidates,
-    singleWaveSettleGraceMs: 0, logger: quiet,
+    singleWaveSettleGraceMs: 0, splitPostReviewSettlement, logger: quiet,
   });
   admission.setDrain(async () => {
     concurrentDrains++;
@@ -40,10 +43,10 @@ function fixture(t) {
       return await drain('test');
     } finally { concurrentDrains--; }
   });
-  function enqueue(prNumber, hasPriorPostedReview = false, headSha = `head-${prNumber}`) {
+  function candidate(prNumber, hasPriorPostedReview = false, headSha = `head-${prNumber}`) {
     const completion = deferred();
     completions.push(completion);
-    admission.enqueue({
+    return {
       repoPath: 'example/review-fixture', prNumber, reviewerModel: 'gemini',
       hasPriorPostedReview, subject: { headSha },
       async run() {
@@ -53,8 +56,9 @@ function fixture(t) {
         await completion.promise;
         active--;
       },
-    });
+    };
   }
+  function enqueue(...args) { admission.enqueue(candidate(...args)); }
   async function launchWave() {
     await flush(); t.mock.timers.tick(0); await flush();
   }
@@ -63,7 +67,7 @@ function fixture(t) {
     for (const callback of scheduled.splice(0)) callback();
     await launchWave();
   }
-  return { admission, tracker, enqueue, completions, starts, logs, launchWave, schedulerTick,
+  return { admission, tracker, enqueue, candidate, completions, starts, logs, launchWave, schedulerTick,
     blockDrain: gate => { beforeDrain = () => gate.promise; },
     counts: () => ({ active, maxActive, maxDrains }), scheduled };
 }
@@ -191,3 +195,117 @@ test('SEATIDLE-03: gap measures the durable post through settlement and a later 
   await next.run();
   assert.deepEqual(logs, ['[watcher] reviewer seat handoff: model=gemini post_to_spawn_ms=55000']);
 });
+
+function durableFixture(t, f, createCandidate = row => f.candidate(row.pr_number)) {
+  const db = new Database(':memory:');
+  ensureReviewStateSchema(db);
+  t.after(() => db.close());
+  const refill = createDurableReviewerRefill({ db, createCandidate });
+  f.admission.setRefill(refill.refill, refill.onSettled);
+  const insert = db.prepare(`INSERT INTO reviewed_prs
+    (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, revision_ref)
+    VALUES ('example/review-fixture', ?, '2026-01-01', 'gemini', 'open', 'pending', ?)`);
+  return { db, insert: pr => insert.run(pr, `head-${pr}`), refill };
+}
+
+test('SEATIDLE-04: a spawn refusal refills two durable pending rows and admits the next without a poll', async t => {
+  const f = fixture(t);
+  const d = durableFixture(t, f);
+  d.insert(200); d.insert(201); d.insert(202);
+  const refusal = deferred();
+  let refusals = 0;
+  f.admission.enqueue({
+    ...f.candidate(200),
+    async run() { refusals++; await refusal.promise; return { dispatched: false, reason: 'failed-external-ci' }; },
+  });
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, []);
+  refusal.resolve(); await flush();
+  await f.schedulerTick();
+  assert.equal(refusals, 1);
+  assert.deepEqual(f.starts, [201]);
+  assert.deepEqual(f.admission.candidates.map(c => c.prNumber), [202]);
+  assert.match(f.logs.find(line => line.includes('admission refill:')), /candidates=2 admitted=1 idle_ms=1$/);
+  assert.equal(f.counts().maxActive, 1);
+  for (const completion of f.completions) completion.resolve();
+  await flush();
+});
+
+test('SEATIDLE-04: unchanged refused rows stay excluded on successive refills until durable state changes', async t => {
+  const f = fixture(t);
+  const attempts = [];
+  const d = durableFixture(t, f, row => ({
+    ...f.candidate(row.pr_number),
+    async run() { attempts.push(row.pr_number); return { dispatched: false, reason: 'comment-only-final-round' }; },
+  }));
+  d.insert(200);
+  f.admission.capacityFreed(); await f.schedulerTick();
+  await f.schedulerTick();
+  assert.deepEqual(attempts, [200]);
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(attempts, [200]);
+  d.db.prepare("UPDATE reviewed_prs SET rereview_requested_at = '2026-01-02' WHERE pr_number = 200").run();
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(attempts, [200, 200]);
+  await f.schedulerTick();
+});
+
+test('SEATIDLE-04: an empty durable backlog is a logged no-op without repeated scheduling', async t => {
+  const f = fixture(t);
+  durableFixture(t, f);
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.admission.candidates, []);
+  assert.deepEqual(f.scheduled, []);
+  assert.deepEqual(f.logs, ['[watcher] reviewer admission refill: candidates=0 admitted=0 idle_ms=1']);
+});
+
+
+test('SEATIDLE-04: an admitted attempt rearmed on its unchanged discovery head cannot spin through refill', async t => {
+  const f = fixture(t);
+  const d = durableFixture(t, f);
+  d.insert(201);
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, [201]);
+  // A stale-head result may leave pending intact; a cached discovery snapshot
+  // cannot authorize another attempt until discovery observes a state edge.
+  f.completions[0].resolve(); await flush(); await f.schedulerTick();
+  assert.deepEqual(f.starts, [201]);
+  d.db.prepare("UPDATE reviewed_prs SET rereview_requested_at = '2026-01-02' WHERE pr_number = 201").run();
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, [201, 201]);
+  for (const completion of f.completions) completion.resolve();
+  await flush();
+});
+
+for (const fails of [false, true]) {
+  test(`SEATIDLE-04: split admission snapshots pending state after completion (fails=${fails})`, async t => {
+    const f = fixture(t, { splitPostReviewSettlement: true });
+    const completion = deferred();
+    let attempts = 0;
+    const d = durableFixture(t, f, row => ({
+      ...f.candidate(row.pr_number),
+      async run() {
+        attempts++;
+        d.db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing' WHERE pr_number = 201").run();
+        this.markAdmissionStarted();
+        this.admissionReleaseCapacity();
+        await completion.promise;
+        d.db.prepare("UPDATE reviewed_prs SET review_status = 'pending-upstream', failure_message = 'retry later' WHERE pr_number = 201").run();
+        if (fails) throw new Error('execution failed');
+      },
+    }));
+    d.insert(201);
+    f.admission.capacityFreed(); await f.schedulerTick();
+    assert.equal(attempts, 1);
+    await f.schedulerTick(); // the split release may wake refill while claimed
+    assert.equal(attempts, 1);
+    completion.resolve(); await flush();
+    f.admission.capacityFreed(); await f.schedulerTick();
+    assert.equal(attempts, 1, 'unchanged rearmed state must stay excluded after completion');
+    d.db.prepare("UPDATE reviewed_prs SET rereview_requested_at = '2026-01-02' WHERE pr_number = 201").run();
+    f.admission.capacityFreed(); await f.schedulerTick();
+    assert.equal(attempts, 2, 'a new durable request must remain eligible');
+    await flush();
+  });
+}

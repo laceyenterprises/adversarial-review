@@ -3622,9 +3622,11 @@ function seatIdleSynthetic(source) {
     .replaceAll("name: 'adversarial-review'", "name: 'review-fixture'");
 }
 
-for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 'unreadable', 'slow-settlement']) {
+for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 'unreadable', 'slow-settlement', 'durable-refill']) {
   test(stale === 'slow-settlement'
     ? 'SEATIDLE-03: default admission hands off before slow runtime accounting finishes'
+    : stale === 'durable-refill'
+    ? 'SEATIDLE-04: real poll refills durable pending rows after the sole queued candidate refuses'
     : stale === 'release-order'
     ? 'SEATIDLE-02: real poll releases the credential reservation before an immediate handoff'
     : `SEATIDLE-01: real poll hands off retained candidates while posted work blocks (${stale})`, () => {
@@ -3655,7 +3657,9 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
               payload.onReviewerPgid?.({ pgid: 123456, spawnedAt: new Date().toISOString() });
               globalThis.__seatIdleWaiters.get(pr)?.();
               await new Promise(resolve => globalThis.__seatIdleReturns.set(pr, resolve));
-              return { ok: true, stdout: '', stderr: '' };
+              // This runtime stub has no review-capture ledger; supply the
+              // durable post evidence that the production spawn result carries.
+              return { ok: true, stdout: '', stderr: '', durablePostedAt: Date.now() - 1000 };
             }, cancel: async () => {}, reattach: async () => ({}) };
           }
           export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
@@ -3668,7 +3672,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
       const capacityUrl = fileUrl('src', 'reviewer-runtime-support.mjs');
       const wakeUrl = fileUrl('src', 'watcher-wake.mjs');
       loader = loader.replace('export async function resolve', `
-        if (${JSON.stringify(stale === 'release-order')}) {
+        if (${JSON.stringify(['release-order', 'durable-refill'].includes(stale))}) {
           stubs.set(${JSON.stringify(routeUrl)}, 'fixture:seatidle-route');
           stubs.set(${JSON.stringify(capacityUrl)}, 'fixture:seatidle-capacity');
         }
@@ -3688,6 +3692,10 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
             result.source = String(result.source).replace(
               "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
               '({ org: "example", repos: ["example/review-fixture"] })');
+            if (${JSON.stringify(stale === 'durable-refill')}) {
+              result.source = result.source.replace('const reviewerRefillContexts =',
+                'globalThis.__seatIdleAdmission = reviewerAdmission; const reviewerRefillContexts =');
+            }
             if (${JSON.stringify(stale === 'release-order')}) {
               result.source = result.source.replace(
                 'onCapacityFreed: async (',
@@ -3779,7 +3787,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
             try {
               await Promise.race([
                 new Promise(resolve => globalThis.__seatIdleWaiters.set(pr, resolve)),
-                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('handoff waited for blocked poll: ' + pr)), 2000); }),
+                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('handoff waited for blocked poll: ' + pr)), ${stale === 'durable-refill' ? 5000 : 2000}); }),
               ]);
             } finally { clearTimeout(timer); }
           }
@@ -3787,7 +3795,13 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
         afterFirstPoll: `
           assert.equal(pollFinished, false);
           assert.deepEqual(starts(), [201]);
-          globalThis.__seatIdleStale = ${JSON.stringify(['none', 'release-order', 'slow-settlement'].includes(stale) ? null : stale)};
+          ${stale === 'durable-refill' ? `
+            const queue = globalThis.__seatIdleAdmission.candidates;
+            queue.splice(0, queue.length, ...queue.filter(candidate => candidate.prNumber === 202));
+            assert.deepEqual(queue.map(candidate => candidate.prNumber), [202]);
+            assert.equal(db.prepare("SELECT COUNT(*) AS n FROM reviewed_prs WHERE pr_number IN (203, 204) AND review_status = 'pending'").get().n, 2);
+          ` : ''}
+          globalThis.__seatIdleStale = ${JSON.stringify(stale === 'durable-refill' ? 'head-moved' : ['none', 'release-order', 'slow-settlement'].includes(stale) ? null : stale)};
           globalThis.__seatIdleReturns.get(201)();
           await waitForStart(${['none', 'release-order', 'slow-settlement'].includes(stale) ? 202 : 203});
           assert.equal(pollFinished, false, 'next spawn precedes the end of posted-review work');
@@ -3828,6 +3842,8 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
         });
       assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
       assert.match(result.stdout, /reviewer admission on capacity-freed: dispatched=1 idle_ms=\d+/);
+      if (stale === 'durable-refill') assert.match(result.stdout, /reviewer admission refill: candidates=2 admitted=1 idle_ms=\d+/);
+      if (['none', 'durable-refill'].includes(stale)) assert.match(result.stdout, /reviewer seat handoff: model=\S+ post_to_spawn_ms=\d+/);
       const freshnessEvidence = {
         'head-moved': /head moved since reviewer claim/,
         closed: /was closed since tick-start snapshot/,

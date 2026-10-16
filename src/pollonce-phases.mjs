@@ -4034,6 +4034,9 @@ export async function processReviewSubject(entry, ctx) {
                 }
                 throw error;
               }
+              // The non-split path has no early post callback to forward this
+              // timestamp to admission's post-to-spawn handoff metric.
+              if (Number.isFinite(result.durablePostedAt)) dispatchCandidate.durablePostedAt = result.durablePostedAt;
               // Some runtime adapters settle without a process-start callback.
               // A failed launch keeps even a fresh, already-consumed wake alive.
               if (result.ok) retainedWatcherWakes?.drop(wakeIdentity);

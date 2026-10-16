@@ -5,6 +5,8 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   let tail = Promise.resolve();
   let capacityEvent = null;
   const postedByModel = new Map();
+  let refill = null;
+  let onSettled = null;
   const identity = candidate => `${candidate.repoPath}#${candidate.prNumber}`;
 
   function enqueue(candidate) {
@@ -32,9 +34,21 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     };
     const run = candidate.run;
     candidate.run = async function () {
+      const observeSettlement = () => {
+        try { onSettled?.(candidate); }
+        catch (error) { logger.error?.('[watcher] reviewer settlement snapshot failed:', error?.message || error); }
+      };
+      const release = this.admissionReleaseCapacity;
+      if (release) this.admissionReleaseCapacity = (...args) => {
+        observeSettlement();
+        return release(...args);
+      };
       try {
         return await run.call(this);
       } finally {
+        // Split capacity release can precede the final durable state. Always
+        // refresh the snapshot when the continuation finishes or throws.
+        observeSettlement();
         if (!admitted) resolveAdmission({ dispatched: false, at: now() });
       }
     };
@@ -52,7 +66,16 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   }
 
   function drain(reason) {
-    const result = tail.then(() => drainImpl(reason));
+    const result = tail.then(async () => {
+      const initial = await drainImpl(reason);
+      if (reason !== 'capacity-freed' || (initial?.dispatched > 0 || initial?.admissions?.length > 0) || !refill) return initial;
+      // Refill and re-drain share the poll/settlement mutex. Candidate preflight
+      // still runs only after the ordinary pool has reserved capacity.
+      const found = await refill(candidates);
+      for (const candidate of found) enqueue(candidate);
+      const refilled = found.length ? await drainImpl(reason) : initial;
+      return { ...refilled, refillFound: found.length };
+    });
     tail = result.catch(() => {});
     return result;
   }
@@ -74,6 +97,9 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
         const dispatched = outcomes.filter(outcome => outcome?.dispatched);
         const count = outcomes.length ? dispatched.length : result?.dispatched || 0;
         const admittedAt = dispatched.length ? Math.min(...dispatched.map(outcome => outcome.at)) : now();
+        if (result?.refillFound !== undefined) {
+          logger.log?.(`[watcher] reviewer admission refill: candidates=${result.refillFound} admitted=${count} idle_ms=${Math.max(0, admittedAt - event.freedAt)}`);
+        }
         if (count > 0) {
           logger.log?.(`[watcher] reviewer admission on capacity-freed: dispatched=${count} idle_ms=${Math.max(0, admittedAt - event.freedAt)}`);
         }
@@ -86,5 +112,6 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   return {
     candidates, enqueue, drain, capacityFreed,
     setDrain(impl) { drainImpl = impl; },
+    setRefill(impl, settled) { refill = impl; onSettled = settled; },
   };
 }

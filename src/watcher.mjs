@@ -111,6 +111,8 @@ import {
 } from './watcher-wake.mjs';
 import { createReviewerDispatchDrain } from './watcher-reviewer-dispatch.mjs';
 import { createReviewerAdmissionQueue } from './watcher-reviewer-admission.mjs';
+import { attachDurableReviewerRefill } from './watcher-reviewer-refill.mjs';
+import { domainPipelineGeminiSeatCount } from './reviewer-spawn-settle.mjs';
 import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
@@ -1042,6 +1044,13 @@ const reviewerHeadDispatchLease = createHeadDispatchLease();
 // Discovery and settlement share candidates and memory reservations across polls.
 const reviewerDispatchCandidates = [];
 const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates });
+// Startup settlements intentionally defer durable refill to initial discovery:
+// each repo needs its poll-built policy, runtime and adapter context first.
+const reviewerRefillContexts = new Map();
+attachDurableReviewerRefill({ db, contexts: reviewerRefillContexts, admission: reviewerAdmission,
+  processSubject: processReviewSubject,
+  readScope: () => ({ repos: activeRepos, domains: ENABLED_DOMAINS.map(domain => domain.id), primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID }),
+});
 const reviewerMemoryReservationState = { reservedMb: 0 };
 const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
   onCapacityFreed: async ({ candidate } = {}) => {
@@ -1416,56 +1425,61 @@ async function pollOnceWithinBudget(
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, octokit, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger: console, census: duplicateFamilyCensus, cfg: loadConfigCached({ env: process.env }).getMergeAuthorityConfig() });
+    const reviewContext = {
+      octokit,
+      operatorSurface,
+      healthProbe,
+      healthTick,
+      afterClaim,
+      watcherDrain,
+      reviewerPoolConfig,
+      reviewerMemoryPressureConfig,
+      reviewerDispatchCandidates,
+      enqueueReviewerDispatchCandidate: reviewerAdmission.enqueue,
+      readWatcherDrainState,
+      firstPassSpilloverController,
+      reviewerBurstController, postedReviewHandlers,
+      mergeAgentCandidateBranchProtectionCache,
+      reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
+      reviewerMemoryReservationState,
+      reviewerMemoryAdmissionSampleForTick,
+      getRoutingTierReadinessForTick,
+      getHcpHealthzForTick,
+      reviewerCommandFailedReviewProbe,
+      domainId,
+      domainReviewerRuntimeAdapter,
+      domainAdapterSet,
+      owner,
+      repo,
+      repoPath,
+      activeMergeAgentPRs,
+      currentRepoPRs,
+      ROOT,
+      execFileAsync,
+      WATCHER_PRIMARY_DOMAIN_ID,
+      reviewerHeadDispatchLease,
+      INFRA_AUTO_RECOVER_CAP,
+      REVIEW_UNKNOWN_FAILURE_MAX_RETRIES,
+      QUOTA_EXHAUSTED_BACKOFF_MS,
+      withApiTelemetry,
+      handlePollError,
+      markWatcherReviewHeartbeat,
+      markWatcherSpawnDecision: (extra) => watcherHeartbeat?.markSpawnDecision?.(extra), deliverAlertFn: defaultDeliverAlert,
+      resolveHardReviewCeiling,
+      resolveHardReviewAttemptCeiling,
+      reconcilePendingDraftsBeforeSpawn,
+      resolvePendingDraftRespawnAgeSeconds,
+      isFastMergeSkipEnabled,
+      normalizeReviewPopulationRetryConfig,
+      shouldDeferReviewForActiveFollowUp,
+      wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
+      pipelineGeminiSeats: domainPipelineGeminiSeatCount(domainAdapterSet.domainConfig),
+      supportsAdmissionSplit: admissionSettlementSplitEnabled && !isPipelineEnabled(domainAdapterSet.domainConfig),
+      hasPriorPostedReview: row => Boolean(stmtHasPostedReview.get(row.repo, row.pr_number)),
+    };
+    reviewerRefillContexts.set(`${domainId}:${repoPath}`, { subjectAdapter, context: reviewContext });
     for (const subjectEntry of subjectEntries) {
-      await processReviewSubject(subjectEntry, {
-        octokit,
-        operatorSurface,
-        healthProbe,
-        healthTick,
-        afterClaim,
-        watcherDrain,
-        reviewerPoolConfig,
-        reviewerMemoryPressureConfig,
-        reviewerDispatchCandidates,
-        enqueueReviewerDispatchCandidate: reviewerAdmission.enqueue,
-        readWatcherDrainState,
-        firstPassSpilloverController,
-        reviewerBurstController, postedReviewHandlers,
-        mergeAgentCandidateBranchProtectionCache,
-        reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
-        reviewerMemoryReservationState,
-        reviewerMemoryAdmissionSampleForTick,
-        getRoutingTierReadinessForTick,
-        getHcpHealthzForTick,
-        reviewerCommandFailedReviewProbe,
-        domainId,
-        domainReviewerRuntimeAdapter,
-        domainAdapterSet,
-        owner,
-        repo,
-        repoPath,
-        activeMergeAgentPRs,
-        currentRepoPRs,
-        ROOT,
-        execFileAsync,
-        WATCHER_PRIMARY_DOMAIN_ID,
-        reviewerHeadDispatchLease,
-        INFRA_AUTO_RECOVER_CAP,
-        REVIEW_UNKNOWN_FAILURE_MAX_RETRIES,
-        QUOTA_EXHAUSTED_BACKOFF_MS,
-        withApiTelemetry,
-        handlePollError,
-        markWatcherReviewHeartbeat,
-        markWatcherSpawnDecision: (extra) => watcherHeartbeat?.markSpawnDecision?.(extra), deliverAlertFn: defaultDeliverAlert,
-        resolveHardReviewCeiling,
-        resolveHardReviewAttemptCeiling,
-        reconcilePendingDraftsBeforeSpawn,
-        resolvePendingDraftRespawnAgeSeconds,
-        isFastMergeSkipEnabled,
-        normalizeReviewPopulationRetryConfig,
-        shouldDeferReviewForActiveFollowUp,
-        wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
-      });
+      await processReviewSubject(subjectEntry, { ...reviewContext });
       priorityDiscoveryPending.delete(`${repoPath}#${subjectEntry.prNumber}`);
       firstPassSpilloverController.refundPendingSpill({ repo: repoPath, prNumber: subjectEntry.prNumber });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');

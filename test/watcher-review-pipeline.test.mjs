@@ -129,6 +129,22 @@ test('gated hook: both stages clean → drop-in ok result with a clean verdict b
   assert.equal(result.pipeline.disposition, 'clean');
 });
 
+for (const deliveredAt of ['2026-10-16T10:00:00Z', undefined, 'invalid']) {
+  test(`gated hook forwards only a valid durable rollup timestamp (${deliveredAt})`, async () => {
+    const { spawnReviewer } = fakeSpawnReviewer({
+      'code-pr': cleanBody('cq'), 'code-pr-security': cleanBody('sec'),
+    });
+    const result = await runGatedReviewPipeline({
+      resolvedPipeline: resolved(), currentRevisionRef: 'posted-head',
+      spawnReviewer, spawnReviewerArgs: BASE_ARGS,
+      comms: { postPipelineRollup: async () => ({ deliveredAt }) },
+      rollupDeliveryKey: { kind: 'pipeline-rollup' },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.durablePostedAt, deliveredAt === '2026-10-16T10:00:00Z' ? Date.parse(deliveredAt) : undefined);
+  });
+}
+
 test('gated hook: fully carried-forward clean pipeline uses the persisted deciding body', async () => {
   const finalBody = cleanBody('persisted security');
   const stageStates = [

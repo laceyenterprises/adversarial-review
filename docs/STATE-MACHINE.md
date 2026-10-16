@@ -93,6 +93,27 @@ rediscovered PR replaces its queued snapshot in FIFO position. Starting a
 candidate removes only that exact snapshot; a newer queued snapshot remains
 eligible. Deferred candidates stay queued even if the drain throws.
 
+When a capacity-freed drain starts no queued candidate, durable refill reads
+up to 50 eligible pending rows per query, scoped to enabled repos/domains with
+a discovery context. Rows must have a revision and assigned reviewer; a null
+domain uses the configured primary domain when matching discovery contexts.
+Unchanged settled candidates are excluded before that bound to avoid spinning
+on refused work. Split admission snapshots settlement at capacity release and
+again when the candidate finishes or throws, so a later pending state is also
+excluded. Before each refill, missing, non-open or no-longer-pending rows are
+removed from the in-memory settled map, so their snapshots do not accumulate in
+subsequent SQLite exclusion payloads.
+
+Durable candidates forward the posted timestamp at split capacity release and
+at completion. Without admission splitting, the completed review result (or
+pipeline rollup delivery receipt) supplies the durable timestamp for the
+`post_to_spawn_ms` handoff metric.
+
+At startup, refill contexts intentionally remain empty until initial poll
+discovery registers each repo/domain's policy, runtime and subject adapter.
+A seat freed before its context is registered defers durable work to that
+initial discovery pass; it does not bypass discovery with a partial context.
+
 The per-head dispatch lease is released by the candidate's unconditional
 `finally`, including after a queued freshness-read failure refunds its SQLite
 claim. The detached dispatch tracker owns the capacity-freed signal: the

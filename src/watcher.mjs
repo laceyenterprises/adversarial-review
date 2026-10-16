@@ -1043,14 +1043,14 @@ const reviewerDispatchCandidates = [];
 const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates });
 const reviewerMemoryReservationState = { reservedMb: 0 };
 const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
-  onCapacityFreed: async ({ candidate }) => {
+  onCapacityFreed: async ({ candidate } = {}) => {
     // The tracker has removed the completed dispatch's credential reservation.
     // Both direct admission and the durable discovery wake follow that release.
     reviewerAdmission.capacityFreed();
     try {
       // Refusals should hand capacity to the retained queue without causing a
       // discovery loop. Preserve the durable wake only for an admitted spawn.
-      const outcome = await candidate.admissionOutcome;
+      const outcome = await candidate?.admissionOutcome;
       if (!outcome?.dispatched) return;
       requestWatcherWake({ rootDir: ROOT, reason: 'reviewer-capacity-freed' });
     } catch (wakeError) {

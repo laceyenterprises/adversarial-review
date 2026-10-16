@@ -82,7 +82,7 @@ export function createReviewerDispatchDrain({
     )) return false;
     // Missing liveness evidence is not proof of a freed credential. Include
     // inherited processes and pipeline reservations, even non-Gemini stages.
-    if (typeof detachedReviewerDispatchTracker.liveSpawnEntries !== 'function') return false;
+    if (typeof detachedReviewerDispatchTracker?.liveSpawnEntries !== 'function') return false;
     return !detachedReviewerDispatchTracker.liveSpawnEntries().some(reviewerDispatchCandidateUsesGemini);
   };
 

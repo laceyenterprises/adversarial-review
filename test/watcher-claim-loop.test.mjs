@@ -3680,6 +3680,9 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
               '({ org: "example", repos: ["example/review-fixture"] })');
             if (${JSON.stringify(stale === 'release-order')}) {
               result.source = result.source.replace(
+                'onCapacityFreed: async (',
+                'onCapacityFreed: globalThis.__seatIdleCapacityFreed = async (');
+              result.source = result.source.replace(
                 'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates })',
                 'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, schedule: callback => callback() })');
               result.source = result.source.replace(
@@ -3735,6 +3738,16 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
       writeFileSync(registerPath, buildRegisterSource(loaderPath));
       let runner = buildRunnerSource({
         prePollSetup: `
+          ${stale === 'release-order' ? `
+            await globalThis.__seatIdleCapacityFreed();
+            await globalThis.__seatIdleCapacityFreed({});
+            await globalThis.__seatIdleCapacityFreed({ candidate: null });
+            assert.deepEqual(globalThis.__seatIdleCapacityCounts, [0, 0, 0],
+              'missing candidate metadata still wakes retained admission');
+            assert.equal(globalThis.__seatIdleDurableWakes || 0, 0,
+              'missing admission outcomes do not request discovery');
+            globalThis.__seatIdleCapacityCounts.length = 0;
+          ` : ''}
           globalThis.__seatIdleLiveState = pr => {
             if (!globalThis.__seatIdleStale || pr !== 202) return null;
             if (globalThis.__seatIdleStale === 'unreadable') throw new Error('synthetic unavailable state');

@@ -64,6 +64,15 @@ if (process.env.FIXTURE_CI_MULTI_TICK || process.env.FIXTURE_CI_PRE_PUSH) {
 if (process.env.FIXTURE_CI_BLOCKED === '1') {
   stubs.set(${JSON.stringify(ciRegressionUrl)}, 'fixture:remediation-ci-regression');
 }
+if (process.env.FIXTURE_CI_EDGE === 'wake') {
+  stubs.set(${JSON.stringify(fileUrl('src', 'rereview-wake.mjs'))}, 'fixture:ci-wake');
+}
+if (process.env.FIXTURE_CI_EDGE === 'missing-head') {
+  stubs.set(${JSON.stringify(fileUrl('src', 'review-state-db.mjs'))}, 'fixture:ci-row');
+}
+if (process.env.FIXTURE_CI_EDGE === 'empty-route') {
+  stubs.set(${JSON.stringify(fileUrl('src', 'ci-blocked-hammer.mjs'))}, 'fixture:ci-route');
+}
 if (process.env.FIXTURE_CI_RELEASE) {
   stubs.set(${JSON.stringify(fileUrl('src', 'reviewer-route-selection.mjs'))}, 'fixture:ci-reviewer-routing');
 }
@@ -80,6 +89,37 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url === 'fixture:ci-wake') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'rereview-wake.mjs')}?actual';
+      export function consumeRereviewWakes({ repo, prNumber }) {
+        // A wake updates durable state without mutating the caller's snapshot.
+        globalThis.__timeoutHandoffDb.prepare(
+          "UPDATE reviewed_prs SET review_status = 'pending' WHERE repo = ? AND pr_number = ?"
+        ).run(repo, prNumber);
+      }
+    `)} };
+  }
+  if (url === 'fixture:ci-row') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'review-state-db.mjs')}?actual';
+      import { stmtGetReviewRow as actual } from '${fileUrl('src', 'review-state-db.mjs')}?actual';
+      export const stmtGetReviewRow = { get(...args) {
+        const row = actual.get(...args);
+        if (row?.reviewer_head_sha === null) delete row.reviewer_head_sha;
+        return row;
+      } };
+    `)} };
+  }
+  if (url === 'fixture:ci-route') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'ci-blocked-hammer.mjs')}?actual';
+      export async function maybeRouteCiBlockedToHammer() {
+        globalThis.__ciEmptyRoutes = (globalThis.__ciEmptyRoutes || 0) + 1;
+        return undefined;
+      }
+    `)} };
+  }
   if (url === 'fixture:ci-reviewer-routing') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
       import * as actual from '${fileUrl('src', 'reviewer-route-selection.mjs')}?actual';
@@ -102,7 +142,7 @@ export async function load(url, context, nextLoad) {
         (globalThis.__ciGateOwnership ||= []).push(snapshot.settledReview?.remediationPending);
         return snapshot;
       }
-      export async function projectAdversarialGateStatus() { return { decision: { state: 'pending' } }; }
+      export async function projectAdversarialGateStatus() { globalThis.__ciProjections = (globalThis.__ciProjections || 0) + 1; return { decision: { state: 'pending' } }; }
     `)} };
   }
 
@@ -326,6 +366,9 @@ if (capScenario) {
     null
   );
 }
+if (process.env.FIXTURE_CI_EDGE === 'missing-head') {
+  db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = NULL').run();
+}
 if (process.env.FIXTURE_CI_RETRIGGER) {
   const { createFollowUpJob, markFollowUpJobStopped } = await import(${JSON.stringify(fileUrl('src', 'follow-up-jobs.mjs') + '?actual')});
   const created = createFollowUpJob({ rootDir: process.env.FIXTURE_JOB_ROOT,
@@ -478,6 +521,8 @@ console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   closerCalls: globalThis.__timeoutHandoffCloserCalls || [],
   ciBlockedCloserCalls: globalThis.__ciBlockedCloserCalls || [],
   ciInspections: globalThis.__ciInspections || 0,
+  ciEmptyRoutes: globalThis.__ciEmptyRoutes || 0,
+  ciProjections: globalThis.__ciProjections || 0,
   ciParkedProbes: globalThis.__ciParkedProbes,
   ciReleaseSpawns: globalThis.__ciReleaseSpawns,
   ciGateOwnership: globalThis.__ciGateOwnership || [],
@@ -1001,6 +1046,42 @@ for (const transition of ['moved', 'red', 'same', 'hammer', 'moved-red', 'alread
         assert.equal(summary.reviewerSpawns.length, 1, output);
         assert.equal(summary.reviewerSpawns[0].subjectContext.reviewerHeadSha,
           transition === 'same' ? 'timeout-head-164' : 'non-ham-head-164');
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const edge of ['wake', 'missing-head', 'empty-route']) {
+  test(`CI-blocked reconciliation handles durable wake and absent fields: ${edge}`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-edge-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      writeFileSync(loaderPath, buildLoaderSource());
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource());
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, GITHUB_TOKEN: 'fixture-token', AGENT_OS_HQ_BIN: '/usr/bin/false',
+          ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false', FIXTURE_AMA_ENABLED: '1', FIXTURE_AMA_REASON: 'dispatched',
+          FIXTURE_CI_BLOCKED: '1', FIXTURE_JOB_ROOT: tmp, FIXTURE_CI_EDGE: edge },
+      });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      assert.doesNotMatch(output, /TypeError|SQLite3 can only bind|Error processing/);
+      const line = result.stdout.split(/\r?\n/).find(entry => entry.startsWith(SUMMARY_MARKER));
+      assert.ok(line, output);
+      const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+      assert.equal(summary.reviewStatus, edge === 'wake' ? 'pending' : 'ci-blocked', output);
+      assert.equal(summary.ciInspections, edge === 'wake' ? 0 : 1, output);
+      assert.equal(summary.reviewerSpawns.length, 0, 'no inline reviewer claim');
+      if (edge === 'missing-head') assert.equal(summary.ciBlockedCloserCalls.length, 1, output);
+      if (edge === 'empty-route') {
+        assert.equal(summary.ciEmptyRoutes, 1, output);
+        assert.ok(summary.ciProjections > 0, 'an absent route result still projects the gate');
       }
     } finally {
       rmSync(tmp, { recursive: true, force: true });

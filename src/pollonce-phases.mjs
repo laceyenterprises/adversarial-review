@@ -1648,6 +1648,7 @@ export async function processReviewSubject(entry, ctx) {
         } catch (err) {
           console.error(`[watcher] rereview wake drain for ${repoPath}#${prNumber} failed:`, err?.message || err);
         }
+        ciBlockedRow = stmtGetReviewRow.get(repoPath, prNumber);
         if (ciBlockedRow?.review_status !== REREVIEW_CI_BLOCKED_STATUS) return;
         // CIBLOCKSTALE-01: probe the live head on EVERY poll, before hammer
         // ownership, closer suppression or follow-up deferral can retain a
@@ -1681,7 +1682,7 @@ export async function processReviewSubject(entry, ctx) {
         const recheck = stmtMarkRereviewCiBlockedRecheck.run(
           new Date().toISOString(), checkedCurrentHead ? currentHeadSha : null,
           checkedCurrentHead ? pendingRevisionRef : null,
-          repoPath, prNumber, ciBlockedRow.reviewer_head_sha,
+          repoPath, prNumber, ciBlockedRow.reviewer_head_sha ?? null,
         );
         ciBlockedRow = stmtGetReviewRow.get(repoPath, prNumber);
         if (!checkedCurrentHead || recheck.changes !== 1) {
@@ -1706,7 +1707,7 @@ export async function processReviewSubject(entry, ctx) {
           subjectRef: subject.ref, currentRevisionRef: pendingRevisionRef,
           labelNames: prLabelNames, execFileImpl: execFileAsync,
         });
-        if (!hammerRoute.prTerminal) await projectGateStatusSafe(ciBlockedRow);
+        if (!hammerRoute?.prTerminal) await projectGateStatusSafe(ciBlockedRow);
         return;
       }
 

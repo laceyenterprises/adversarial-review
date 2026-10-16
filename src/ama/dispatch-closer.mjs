@@ -1586,7 +1586,7 @@ function retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIde
     jobKey: record.reviewedSha, headSha: record.headSha, launchRequestId, now, foreignLaunch: true,
   });
   updateAmaCloserDispatchRecord(rootDir, identity, current => current?.launchRequestId === launchRequestId ? {
-    ...current, state: 'non-hammer-launch', launchRequestId: null, dispatchId: null,
+    ...current, state: 'no-dispatch', reason: 'non-hammer-launch-not-adopted', launchRequestId: null, dispatchId: null,
     unadoptedLaunchRequestId: launchRequestId, outcome: null, lastError: null,
     retryCount: Math.max(0, Number(current.retryCount || 0) - 1),
   } : null);
@@ -7137,7 +7137,7 @@ export async function maybeDispatchAmaCloser({
     finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded',
       now: dispatchContext.dispatchedAt, logger, repo, prNumber });
     updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, current => ({
-      ...(current || {}), state: 'dispatch-deferred-non-hammer', reason,
+      ...(current || {}), state: 'no-dispatch', reason,
       launchRequestId: null, dispatchId: null, retryCount: priorRetryCount,
       lastError: null, unadoptedLaunchRequestId: payload.launchRequestId,
     }));

@@ -923,7 +923,7 @@ for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'oth
       if (kind === 'same-live-multiline' || kind === 'multiline-mixed-error') error.stderr = error.stderr.replace('bash <script>', 'bash -c echo\nsynthetic');
       if (kind === 'mixed-error') error.stderr += '\n[hq] error: another refusal';
       if (kind === 'multiline-mixed-error') error.stderr += '\n[hq] error: another refusal';
-      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      if (kind === 'launch-receipt') error.stdout = JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       throw error;
     } });
     const args = closerArgs(rootDir, { ...identity, reviewedSha: identity.headSha,

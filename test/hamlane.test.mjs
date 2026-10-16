@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createNoProgressLaneGate, handlePostedReviewRow, runQueuedReviewAdoptionPhase } from '../src/posted-review-row.mjs';
@@ -53,6 +53,65 @@ import * as background from '../src/ama-hammer-background-dispatch.mjs';
 import { readNoProgressLane, recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
 import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+
+test('pending dispatch recovery accepts numeric and string PR identities while preserving head binding', async () => {
+  const { rootDir } = fixture();
+  const queue = background.createAmaHammerBackgroundQueue();
+  let release;
+  try {
+    for (const prNumber of [42, '42']) {
+      const identity = { repo: handler.repoPath, prNumber, headSha };
+      queue.submit({ key: background.amaHammerBackgroundKey(identity), pendingDispatch: { rootDir, ...identity },
+        run: () => new Promise(resolve => { release = resolve; }) });
+      for (const lookupNumber of [42, '42']) {
+        assert.ok(background.readPendingAmaHammerDispatch(rootDir, { ...identity, prNumber: lookupNumber }));
+        assert.equal(background.readPendingAmaHammerDispatch(rootDir,
+          { ...identity, prNumber: lookupNumber, headSha: 'b'.repeat(40) }), null);
+      }
+      release({ dispatched: false });
+      await queue.drain();
+    }
+  } finally {
+    release?.({ dispatched: false });
+    await queue.drain();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('queued abort logs an unlink failure and allows the replacement head to run', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const { rootDir } = fixture();
+  const warnings = [];
+  const queue = background.createAmaHammerBackgroundQueue({ maxConcurrent: 1,
+    logger: { warn: message => warnings.push(message) } });
+  const identity = { repo: handler.repoPath, prNumber: 42, headSha };
+  let release;
+  let replacementRan = false;
+  const intentDir = join(rootDir, 'data', 'ama-hammer-background');
+  try {
+    queue.submit({ key: 'other/repo#1@busy', run: () => new Promise(resolve => { release = resolve; }) });
+    queue.submit({ key: background.amaHammerBackgroundKey(identity), pendingDispatch: { rootDir, ...identity },
+      run: async () => assert.fail('cancelled queued head must not run') });
+    chmodSync(intentDir, 0o500);
+    assert.equal(queue.abort(background.amaHammerBackgroundKey(identity)), true);
+    assert.match(warnings[0], /pending hammer dispatch cleanup failed/);
+    assert.equal(queue.snapshot().waiting, 0);
+    chmodSync(intentDir, 0o700);
+    const replacement = { ...identity, headSha: 'b'.repeat(40) };
+    queue.submit({ key: background.amaHammerBackgroundKey(replacement), pendingDispatch: { rootDir, ...replacement },
+      run: async () => { replacementRan = true; } });
+    release({ dispatched: false });
+    await queue.drain();
+    assert.equal(replacementRan, true);
+    assert.equal(background.readPendingAmaHammerDispatch(rootDir, replacement), null);
+  } finally {
+    chmodSync(intentDir, 0o700);
+    release?.({ dispatched: false });
+    await queue.drain();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
 
 function closerFixture(rootDir, onLaunch) {
   const requiredGate = 'fixture/adversarial-gate';
@@ -388,7 +447,7 @@ test('HAMLANE-01 first adoption after restart prioritizes pending intent through
       pendingDispatch: { rootDir, ...identity }, run: () => new Promise(resolve => { release = resolve; }) });
     recordNoProgressLaneRun(rootDir, identity, { headSha,
       progressClass: 'operator-decision-required', fingerprint: 'old-final-gate', logger });
-    const phaseArgs = { rootDir, logger: { ...logger, log: message => messages.push(message) },
+    const phaseArgs = { rootDir, recoveryRoots: new Set(), logger: { ...logger, log: message => messages.push(message) },
       noProgressLaneGate: gate,
       postedReviewPriorityTargets: null,
       postedReviewHandlers: [
@@ -411,6 +470,14 @@ test('HAMLANE-01 first adoption after restart prioritizes pending intent through
     });
     assert.equal(messages.filter(message => message.includes('recovering pending AMA hammer dispatch')).length, 1,
       'later adoption phases must not report ordinary in-flight work as restart recovery');
+    await runQueuedReviewAdoptionPhase({ ...phaseArgs, recoveryRoots: new Set(),
+      runPostedReviewHandlersFairlyImpl: async ({ priorityTargets }) => {
+        assert.equal(priorityTargets.length, 1);
+        assert.equal(priorityTargets[0].prNumber, handler.prNumber);
+      },
+    });
+    assert.equal(messages.filter(message => message.includes('recovering pending AMA hammer dispatch')).length, 2,
+      'a separate process lifetime can recover the same root in one test process');
   } finally {
     release?.({ dispatched: false });
     await queue.drain();

@@ -8,6 +8,8 @@ The queue atomically saves an intent before accepting background work, including
 work waiting for a queue slot. Each record contains `repo`, `prNumber`, `headSha`,
 `startedAt` (UTC submission time), and a unique `attemptId`. It contains no
 credentials, serialized executable work, or cached eligibility decision.
+Recovery compares PR numbers numerically so numeric and string callers match
+the same record; repository and head comparisons remain exact.
 
 The first posted-review adoption phase after startup reads matching current-head
 intents before lane decisions and prioritizes their normal handlers. The lane
@@ -35,5 +37,8 @@ removes the PR's intent regardless of head, including abandoned superseded-head
 records. The terminal `operator-skip-label` path performs the same cleanup.
 Other PRs' intents and the closer's lease/launch records are untouched.
 Submission fails if persistence fails; read and cleanup errors are logged.
+An unlink failure during queued cancellation does not retain the queue slot or
+prevent a newer head from being submitted. Its durable record remains available
+for guarded recovery until replacement or successful cleanup.
 
 This store authorizes a prompt retry only. It cannot authorize a launch or merge.

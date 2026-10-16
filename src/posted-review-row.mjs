@@ -1164,6 +1164,7 @@ export async function runQueuedReviewAdoptionPhase({
   // WPS-01 seams. Defaults reproduce production wiring; tests override them to
   // drive the budget/lane without a clock or a database.
   postedReviewFairness = postedReviewFairnessState,
+  recoveryRoots = postedReviewStartupRecoveryRoots,
   postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
   postedReviewReviewerPressurePhaseBudgetMs = resolvePostedReviewReviewerPressurePhaseBudgetMs(),
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
@@ -1271,11 +1272,11 @@ export async function runQueuedReviewAdoptionPhase({
 
   // Only the first adoption phase gets restart priority. Ordinary in-process
   // submissions also persist intent and must not masquerade as restarts.
-  const pendingHammerTargets = postedReviewStartupRecoveryRoots.has(rootDir) ? []
+  const pendingHammerTargets = recoveryRoots.has(rootDir) ? []
     : postedReviewHandlers.filter((handler) => readPendingAmaHammerDispatch(
       rootDir, { repo: handler.repoPath, prNumber: handler.prNumber, headSha: handler.headSha }, { logger },
     ));
-  postedReviewStartupRecoveryRoots.add(rootDir);
+  recoveryRoots.add(rootDir);
   for (const handler of pendingHammerTargets) {
     logger?.log?.(`[watcher] recovering pending AMA hammer dispatch for ${handler.repoPath}#${handler.prNumber}@${handler.headSha} through normal guards`);
   }

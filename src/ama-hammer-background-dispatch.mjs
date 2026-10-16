@@ -81,7 +81,7 @@ function pendingDispatchPath(rootDir, { repo, prNumber }) {
 export function readPendingAmaHammerDispatch(rootDir, identity, { logger = console } = {}) {
   try {
     const doc = JSON.parse(readFileSync(pendingDispatchPath(rootDir, identity), 'utf8'));
-    if (doc.repo !== identity.repo || doc.prNumber !== identity.prNumber
+    if (doc.repo !== identity.repo || Number(doc.prNumber) !== Number(identity.prNumber)
       || doc.headSha !== identity.headSha) return null;
     if (!doc.attemptId || !Number.isFinite(Date.parse(doc.startedAt))) {
       throw new Error('invalid pending hammer dispatch');
@@ -176,7 +176,8 @@ export function createAmaHammerBackgroundQueue({
     entry.controller.abort();
     settled.delete(key);
     if (entry.state === 'queued') {
-      clearPendingDispatch(entry);
+      try { clearPendingDispatch(entry); }
+      catch (error) { logger?.warn?.(`[watcher] pending hammer dispatch cleanup failed: ${error.message}`); }
       waiting.splice(waiting.indexOf(entry), 1);
       entries.delete(key);
     }

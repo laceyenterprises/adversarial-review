@@ -957,7 +957,14 @@ for (const kind of ['same-live', 'same-live-quoted', 'same-live-multiline', 'oth
       assert.equal(result.releasedPendingLease, false);
       assert.equal(record.state, 'dispatched');
       assert.equal(record.launchRequestId, 'lrq_hammer');
-      assert.deepEqual(readAmaCloserLease(rootDir, identity), pendingLease);
+      const launchedLease = readAmaCloserLease(rootDir, identity);
+      assert.equal(pendingLease.status, 'pending', 'launch began under the pending lease');
+      assert.equal(launchedLease.status, 'dispatched', 'a receipt retains ownership after the dispatch error');
+      assert.equal(launchedLease.lrqId, 'lrq_hammer');
+      assert.equal(launchedLease.acquiredAt, pendingLease.acquiredAt);
+      const duplicate = closerDeps();
+      await maybeDispatchAmaCloser({ ...args, ...duplicate });
+      assert.equal(hqLaunches(duplicate).length, 0, 'ambiguous launch cannot spawn a duplicate');
     } else {
       assert.equal(result.reason, 'dispatch-failed');
       assert.match(record.lastError, /hq_acquire_lockdir/);

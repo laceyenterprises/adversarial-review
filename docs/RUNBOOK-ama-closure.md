@@ -3238,6 +3238,11 @@ or trigger another spawn. It receives a conservative attempt charge, refunded
 once if authoritative foreign-ticket evidence appears. Explicit foreign tickets
 are refused before charging; ledger ticket evidence takes precedence over CLI
 output. JSON and key/value CLI receipts both preserve ticket identity.
+An accepted receipt promotes the existing pending lease to `dispatched`, retaining
+its acquisition time and launch-request ID so later polls cannot launch a duplicate.
+When updating this flow, keep the `hammer-dispatch` source projection in
+`state-machines.json` current and run the lease-reconciliation and state-machine
+tests; the projection fingerprint does not replace those behavior checks.
 
 Agent-os follow-up: the conflict owner must preserve the original trailer block
 on every replayed commit. Do not append a second `Worker-Class` identity or

@@ -433,7 +433,6 @@ test('HAMTMP-03: ownership changes during worker probing prevent removal', async
   f.record(path);
   await sweepHammerScratchDirs(f.root, { ...f.options, readWorkerStatusImpl: () => {
     f.record(path, { lastObservedStatus: 'running' });
-  f.options.readLaunchRequestStatusImpl = () => ({ ok: true, row: { status: 'running' } });
     return { ok: true, row: { status: 'succeeded' } };
   } });
   assert.equal(existsSync(path), true);

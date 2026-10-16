@@ -3,6 +3,8 @@ import { lstatSync, opendirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { meteredExecFile } from '../metered-gh.mjs';
+import { withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 import { readLatestWorkerRunStatusFromLedger, readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import {
@@ -177,9 +179,10 @@ function ledgerReadArgs(record, options, deadline) {
 }
 
 async function readScratchPullRequestState({ repo, prNumber, timeout, env }) {
-  const { stdout } = await execFileAsync('gh', ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state'], {
+  // Maintenance defers under API pressure instead of sleeping past its budget.
+  const { stdout } = await withGitHubBudgetScope({}, () => meteredExecFile(execFileAsync, 'gh', ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'state'], {
     env, encoding: 'utf8', timeout, maxBuffer: 1024 * 1024,
-  });
+  }));
   return JSON.parse(stdout);
 }
 

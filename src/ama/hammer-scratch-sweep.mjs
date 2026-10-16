@@ -168,11 +168,12 @@ async function hasLiveWorker(record, options, deadline) {
 }
 
 function ledgerReadArgs(record, options, deadline) {
+  const spawnSyncFn = options.spawnSyncImpl || spawnSync;
   return {
     launchRequestId: record.launchRequestId, rootDir: options.rootDir,
     hqRoot: record.hqRoot || options.hqRoot, env: options.env,
     ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
-    spawnSyncImpl: (command, args, spawnOptions) => spawnSync(command, args, {
+    spawnSyncImpl: (command, args, spawnOptions) => spawnSyncFn(command, args, {
       ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
     }),
   };

@@ -99,6 +99,36 @@ for (const status of ['succeeded', 'canceled']) {
   });
 }
 
+test('HAMTMP-05: injected subprocess handles launch and worker ledger probes within the scan budget', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path, { lastObservedStatus: 'starting' });
+  const calls = [];
+  const env = { SYNTHETIC_LEDGER: 'fixture' };
+  const probe = name => ({ spawnSyncImpl }) => {
+    const result = spawnSyncImpl('synthetic-ledger', [name], { timeout: 60_000, encoding: 'utf8', env });
+    assert.equal(result.stdout, 'synthetic response');
+    return { ok: true, row: { status: 'succeeded' } };
+  };
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 5000,
+    spawnSyncImpl: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: 'synthetic response' };
+    },
+    readLaunchRequestStatusImpl: probe('launch'),
+    readWorkerStatusImpl: probe('worker'),
+  });
+  assert.equal(removed.length, 1);
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(calls.map(call => call.args), [['launch'], ['worker']]);
+  for (const call of calls) {
+    assert.equal(call.command, 'synthetic-ledger');
+    assert.equal(call.options.encoding, 'utf8');
+    assert.equal(call.options.env, env);
+    assert.ok(call.options.timeout > 0 && call.options.timeout <= 5000);
+  }
+});
+
 test('HAMTMP-05: a running launch protects starting scratch until the ledger is terminal', async t => {
   const f = fixture(t);
   const path = f.scratch();

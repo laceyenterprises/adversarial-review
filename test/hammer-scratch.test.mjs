@@ -77,31 +77,39 @@ function dispatchArgs(root) {
   };
 }
 
-test('HAMTMP-05: terminal lease handling persists ledger status before retry admission', async t => {
-  const root = fixture(t);
-  const args = dispatchArgs(root);
-  const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
-  assert.equal((await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }),
-  })).dispatched, true);
-  const path = amaCloserDispatchFilePath(root, identity);
-  const scratchDir = JSON.parse(readFileSync(path)).scratchDir;
-  updateAmaCloserLease({ rootDir: root, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge' });
-  updateAmaCloserDispatchRecord(root, identity, record => ({ ...record, retryCount: 2 }));
-  assert.equal(existsSync(scratchDir), true);
-  const beforeObservation = Date.now();
-  const observed = await maybeDispatchAmaCloser({ ...args,
-    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'canceled' } }),
-    execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'synthetic-unknown' }) }),
+for (const clock of ['wall', 'timestamp', 'function']) {
+  test(`HAMTMP-05: terminal lease handling persists ledger status with ${clock} clock before retry admission`, async t => {
+    const root = fixture(t);
+    const args = dispatchArgs(root);
+    const identity = { repo: 'fixture/repo', prNumber: 42, headSha: head };
+    assert.equal((await maybeDispatchAmaCloser({ ...args,
+      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }),
+    })).dispatched, true);
+    const path = amaCloserDispatchFilePath(root, identity);
+    const scratchDir = JSON.parse(readFileSync(path)).scratchDir;
+    updateAmaCloserLease({ rootDir: root, ...identity, status: 'terminal', terminalOutcome: 'failed-without-merge' });
+    updateAmaCloserDispatchRecord(root, identity, record => ({ ...record, retryCount: 2 }));
+    assert.equal(existsSync(scratchDir), true);
+    const beforeObservation = Date.now();
+    const observationTime = '2026-10-02T12:34:56Z';
+    const observed = await maybeDispatchAmaCloser({ ...args,
+      now: clock === 'wall' ? null : clock === 'function' ? () => observationTime : observationTime,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'canceled' } }),
+      execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'synthetic-unknown' }) }),
+    });
+    const afterObservation = Date.now();
+    const record = JSON.parse(readFileSync(path));
+    assert.equal(record.lastObservedStatus, 'canceled', JSON.stringify(observed));
+    assert.equal(record.terminalLaunchStatus, 'canceled');
+    if (clock === 'wall') {
+      assert.ok(Date.parse(record.lastObservedAt) >= beforeObservation
+        && Date.parse(record.lastObservedAt) <= afterObservation, 'terminal observation uses the current wall clock');
+    } else {
+      assert.equal(record.lastObservedAt, observationTime, 'observation clock takes precedence over dispatch time');
+    }
+    assert.equal(existsSync(scratchDir), false);
   });
-  const afterObservation = Date.now();
-  const record = JSON.parse(readFileSync(path));
-  assert.equal(record.lastObservedStatus, 'canceled', JSON.stringify(observed));
-  assert.equal(record.terminalLaunchStatus, 'canceled');
-  assert.ok(Date.parse(record.lastObservedAt) >= beforeObservation
-    && Date.parse(record.lastObservedAt) <= afterObservation, 'terminal observation uses the current wall clock');
-  assert.equal(existsSync(scratchDir), false);
-});
+}
 
 for (const sink of ['warn', 'error', 'function']) {
   test(`HAMTMP-01: scratch cleanup failures reach the ${sink} logger`, async t => {

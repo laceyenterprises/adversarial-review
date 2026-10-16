@@ -135,6 +135,9 @@ PR state. A failed PR lookup preserves that owner's scratch and continues with
 other candidates within the same scan budget. Terminal observations persisted
 by closer dispatch use the current observation time, rather than the original
 dispatch timestamp, for `lastObservedAt`.
+Tests may inject a timestamp or clock function through `maybeDispatchAmaCloser`'s
+`now` option. Scratch ledger probes honor the sweep's `spawnSyncImpl` option
+while retaining the scan deadline on each subprocess call.
 
 After deployment, SRE confirms that the watcher restarted, checks the first
 sweep's removal lines and the drop in `ama-closer-prompts` size, then verifies

@@ -2,6 +2,16 @@
   "version": 1,
   "entries": [
     {
+      "id": "ama-hammer-background",
+      "title": "Pending Background Hammer Dispatches",
+      "path": "docs/data-model/ama-hammer-background.md",
+      "store": "data/ama-hammer-background/",
+      "schemaSurface": "src/ama-hammer-background-dispatch.mjs",
+      "relatedSchemaSurfaces": ["src/posted-review-row.mjs", "src/ama-closure-orchestration.mjs"],
+      "owner": "watcher background hammer recovery",
+      "retirement": "queue settlement/cancellation checks head and attempt; operator/safety holds, confirmed dispatch and active-launch reconciliation check head; confirmed pr-terminal reconciliation removes any head's intent for the PR"
+    },
+    {
       "id": "github-rate-limit-state",
       "title": "GitHub Rate Limit State",
       "path": "docs/data-model/github-rate-limit-state.md",

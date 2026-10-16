@@ -26,10 +26,17 @@ import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestration.mjs';
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
+import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
+import {
+  clearPendingAmaHammerDispatch,
+  clearPendingAmaHammerDispatchForTerminalPr,
+  readPendingAmaHammerDispatch,
+} from './ama-hammer-background-dispatch.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
 import {
   HAMMER_EVIDENCE_FAILURES,
   HAMMER_EVIDENCE_RECHECK_INTERVAL_MS,
+  HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
   readHammerStopHoldForHead,
 } from './ama/hammer-stop-hold.mjs';
@@ -332,6 +339,13 @@ export async function handlePostedReviewRow({
   logger = console,
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
+  const retireTerminalHammerIntent = () => {
+    try {
+      clearPendingAmaHammerDispatchForTerminalPr(rootDir, { repo: repoPath, prNumber });
+    } catch (error) {
+      logger?.warn?.(`[watcher] pending hammer terminal cleanup failed: ${error.message}`);
+    }
+  };
   const rereadPostedReviewRow = (stage, { allowPending = false } = {}) => {
     let currentRow;
     try {
@@ -552,6 +566,7 @@ export async function handlePostedReviewRow({
     if (gateDecision?.reason === 'operator-skip-label') {
       const terminalReason = liveCandidateTerminalReason(candidate);
       if (terminalReason) {
+        retireTerminalHammerIntent();
         logger.log(
           `[watcher] AMA/merge-agent skipped for ${repoPath}#${prNumber}: PR already ` +
           `${terminalReason} under operator-skip-label — dropping ownership`
@@ -657,7 +672,20 @@ export async function handlePostedReviewRow({
         },
       };
     }
+    if (coexistenceDecision.outcome === 'ama-dispatched'
+      || coexistenceDecision.amaClosureResult?.reason === 'ama-closer-launch-in-progress') {
+      // Reconciliation can find the old process's launch without submitting to
+      // this process's queue. The launch ledger now owns recovery, not intent.
+      try {
+        clearPendingAmaHammerDispatch(rootDir, {
+          repo: repoPath, prNumber, headSha: currentRevisionRef,
+        }, { logger });
+      } catch (error) {
+        logger?.warn?.(`[watcher] pending hammer launch cleanup failed: ${error.message}`);
+      }
+    }
     if (coexistenceDecision.outcome === 'pr-terminal') {
+      retireTerminalHammerIntent();
       // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership instead of retaining
       // it and re-evaluating (and re-failing the daemon merge) every tick.
@@ -680,10 +708,15 @@ export async function handlePostedReviewRow({
         `[watcher] AMA hammer dispatched for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
       );
-      return { handled: true, outcome: 'ama-dispatched', gateDecision: gateProjection?.decision || null };
+      return { handled: true, outcome: 'ama-dispatched',
+        ...(gateProjection?.decision?.operatorDecisionRequired === true ? { hammerRouteActive: true } : {}),
+        gateDecision: gateProjection?.decision || null };
     }
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;
+      const operatorHoldReason = isSafetyRecoveryHold(amaClosureResult)
+        || amaClosureResult?.reason === HAMMER_STOP_HOLD_REASON
+        ? amaClosureResult?.operatorReason || amaClosureResult?.reason || 'ama-operator-hold' : null;
       // Log-feed noise control: this route retains ownership and re-polls a
       // stuck PR every tick. Log once per retained-worker state transition
       // instead of every poll; a new head/reason/worker identity still logs.
@@ -705,6 +738,9 @@ export async function handlePostedReviewRow({
         );
       }
       return { handled: true, outcome: 'ama-pending', urgent: coexistenceDecision.urgent === true,
+        ...(operatorHoldReason ? { operatorHoldReason, amaClosureResult } : {}),
+        ...(gateProjection?.decision?.operatorDecisionRequired === true
+          && !operatorHoldReason ? { hammerRouteActive: true } : {}),
         gateDecision: gateProjection?.decision || null };
     }
 
@@ -869,6 +905,7 @@ export async function handlePostedReviewRow({
 // so a handler the per-tick budget cut off is promoted to the front of the NEXT
 // tick instead of being cut off in the same position forever.
 const postedReviewFairnessState = createPostedReviewFairnessState();
+const postedReviewStartupRecoveryRoots = new Set();
 
 /**
  * Bind the no-progress lane to real review-state rows.
@@ -896,7 +933,12 @@ export function createNoProgressLaneGate({
     evaluate(handler) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
-      let decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
+      // Consult durable intent BEFORE the lane: an interrupted background call
+      // must reach normal live-head/lease/retry/dedup guards on the first tick.
+      const pending = readPendingAmaHammerDispatch(rootDir, { ...identity, headSha: handler.headSha }, { logger });
+      let decision = pending
+        ? { lane: 'active', due: true, reason: 'hammer-dispatch-recovery', backoffTicks: 0 }
+        : evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
       const observedAt = now();
       let reviewedSha = null;
       try {
@@ -961,11 +1003,25 @@ export function createNoProgressLaneGate({
       const fingerprint = timedOut
         ? 'timed-out'
         : subjectProgressFingerprint(row, { headSha: handler.headSha || null });
-      const progressClass = value?.gateDecision?.operatorDecisionRequired === true
-        || value?.amaClosureResult?.needsOperator === true
-        || value?.outcome === 'await-operator'
+      // The final review's generic operator flag does not describe closure
+      // ownership. A retained hammer route must run each tick, including while
+      // dispatch is queued; a named safety/operator refusal still wins.
+      const operatorHold = value?.outcome === 'await-operator' || value?.operatorHoldReason
+        || isSafetyRecoveryHold(value?.amaClosureResult);
+      const hammerRouteActive = !timedOut && value?.hammerRouteActive === true && !operatorHold;
+      const progressClass = !hammerRouteActive && (value?.gateDecision?.operatorDecisionRequired === true
+        || operatorHold)
         ? PROGRESS_CLASS_OPERATOR_DECISION_REQUIRED
         : PROGRESS_CLASS_SELF_RESOLVING;
+      if (operatorHold) {
+        try {
+          clearPendingAmaHammerDispatch(rootDir, { ...identity, headSha: handler.headSha }, { logger });
+        } catch (error) {
+          // Cleanup failure must never suppress the operator's durable lane or
+          // page. The old intent remains safe: retries still enter live guards.
+          logger?.warn?.(`[watcher] pending hammer hold cleanup failed: ${error.message}`);
+        }
+      }
       const observedAt = now();
       // LANESTARVE-01. A timed-out handler reported no decision at all, so it
       // carries no decision fingerprint — its `'timed-out'` row fingerprint is
@@ -976,7 +1032,8 @@ export function createNoProgressLaneGate({
         fingerprint,
         decisionFingerprint,
         progressClass,
-        operatorReason: value?.amaClosureResult?.operatorReason || null,
+        hammerRouteActive,
+        operatorReason: value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,
         // HAMUNKNOWN-01: GitHub can finish computing without any review-row
         // change. Recovery bounds urgency to its tolerated cycle budget.
         urgent: value?.urgent === true,
@@ -1055,7 +1112,7 @@ export function createNoProgressLaneGate({
             rootDir,
             identity,
             headSha: handler.headSha || null,
-            operatorReason: value?.amaClosureResult?.operatorReason || null,
+            operatorReason: value?.operatorHoldReason || value?.amaClosureResult?.operatorReason || null,
             fingerprint,
             noProgressTicks: outcome.noProgressTicks,
             firstNoProgressAt: outcome.firstNoProgressAt || null,
@@ -1107,6 +1164,7 @@ export async function runQueuedReviewAdoptionPhase({
   // WPS-01 seams. Defaults reproduce production wiring; tests override them to
   // drive the budget/lane without a clock or a database.
   postedReviewFairness = postedReviewFairnessState,
+  recoveryRoots = postedReviewStartupRecoveryRoots,
   postedReviewPhaseBudgetMs = resolvePostedReviewPhaseBudgetMs(),
   postedReviewReviewerPressurePhaseBudgetMs = resolvePostedReviewReviewerPressurePhaseBudgetMs(),
   postedReviewHandlerTimeoutMs = resolvePostedReviewHandlerTimeoutMs(),
@@ -1212,6 +1270,17 @@ export async function runQueuedReviewAdoptionPhase({
   // stale terminal rows are cleaned before any per-PR hammer path can wait.
   await promoteStarvedNoProgressLaneLedgers(rootDir, { logger });
 
+  // Only the first adoption phase gets restart priority. Ordinary in-process
+  // submissions also persist intent and must not masquerade as restarts.
+  const pendingHammerTargets = recoveryRoots.has(rootDir) ? []
+    : postedReviewHandlers.filter((handler) => readPendingAmaHammerDispatch(
+      rootDir, { repo: handler.repoPath, prNumber: handler.prNumber, headSha: handler.headSha }, { logger },
+    ));
+  recoveryRoots.add(rootDir);
+  for (const handler of pendingHammerTargets) {
+    logger?.log?.(`[watcher] recovering pending AMA hammer dispatch for ${handler.repoPath}#${handler.prNumber}@${handler.headSha} through normal guards`);
+  }
+
   await runPostedReviewHandlersFairlyImpl({
     handlers: postedReviewHandlers,
     state: postedReviewFairness,
@@ -1219,7 +1288,11 @@ export async function runQueuedReviewAdoptionPhase({
     handlerTimeoutMs: postedReviewHandlerTimeoutMs,
     minimumHandlerStartBudgetMs,
     laneGate: noProgressLaneGate,
-    priorityTargets: postedReviewPriorityTargets,
+    priorityTargets: [
+      ...(Array.isArray(postedReviewPriorityTargets) ? postedReviewPriorityTargets
+        : postedReviewPriorityTargets ? [postedReviewPriorityTargets] : []),
+      ...pendingHammerTargets,
+    ],
     logger,
   });
 

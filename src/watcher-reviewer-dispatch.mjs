@@ -1,5 +1,5 @@
 import { prepareQueueDepthSpillover } from './review-queue-depth.mjs';
-import { compareReviewerDispatchCandidates, runBoundedReviewerDispatchQueue } from './watcher-reviewer-pool.mjs';
+import { compareReviewerDispatchCandidates, reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from './watcher-reviewer-pool.mjs';
 
 // Both poll and settlement admissions call this drain under the same mutex.
 // Keep capacity, ordering and reservation settlement in one implementation.
@@ -11,8 +11,9 @@ export function createReviewerDispatchDrain({
   logger = console,
   prepareSpillover = prepareQueueDepthSpillover,
   runQueue = runBoundedReviewerDispatchQueue,
+  capacityFreedRetryDelay = ms => new Promise(resolve => setTimeout(resolve, ms)),
 }) {
-  return async (reason) => {
+  const drainOnce = async (reason) => {
     if (readWatcherDrainState().active || !reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
       return { dispatched: 0, maxObservedConcurrency: 0 };
     }
@@ -72,5 +73,29 @@ export function createReviewerDispatchDrain({
         );
       }
     }
+  };
+
+  const shouldRetry = (result) => {
+    if (result.dispatched !== 0 || result.maxObservedConcurrency !== 0 || !(result.deferred > 0)) return false;
+    if (result.deferredReasons?.length !== result.deferred || !result.deferredReasons.every(
+      row => row.reason === 'gemini-credential-concurrency-saturated'
+    )) return false;
+    // Missing liveness evidence is not proof of a freed credential. Include
+    // inherited processes and pipeline reservations, even non-Gemini stages.
+    if (typeof detachedReviewerDispatchTracker?.liveSpawnEntries !== 'function') return false;
+    return !detachedReviewerDispatchTracker.liveSpawnEntries().some(reviewerDispatchCandidateUsesGemini);
+  };
+
+  return async (reason) => {
+    let result = await drainOnce(reason);
+    // A release from another watcher/runtime may become visible just after the
+    // ordered handoff. Re-probe briefly under the admission mutex; never clear
+    // reservations or relax the normal credential/process admission guards.
+    for (let attempt = 1; reason === 'capacity-freed' && attempt <= 3 && shouldRetry(result); attempt++) {
+      await capacityFreedRetryDelay(2000);
+      logger.log(`[watcher] capacity-freed drain retried: attempt=${attempt}`);
+      result = await drainOnce(reason);
+    }
+    return result;
   };
 }

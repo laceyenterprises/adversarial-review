@@ -270,7 +270,7 @@ import {
   reviewerDispatchWaitPriority,
   reviewerSafetyPassKind,
 } from './watcher-reviewer-pool.mjs';
-import { requestWatcherWake, watcherWakeMatchesSubject } from './watcher-wake.mjs';
+import { watcherWakeMatchesSubject } from './watcher-wake.mjs';
 
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_REVIEWER_MODEL_FALLBACK_ALERT_THRESHOLD = 5;
@@ -736,9 +736,7 @@ export async function processReviewSubject(entry, ctx) {
     isFastMergeSkipEnabled,
     normalizeReviewPopulationRetryConfig,
     shouldDeferReviewForActiveFollowUp,
-    requestWatcherWakeImpl = requestWatcherWake,
     enqueueReviewerDispatchCandidate = candidate => reviewerDispatchCandidates.push(candidate),
-    onReviewerCapacityFreed = null,
     readWatcherDrainState = () => watcherDrain,
     wakePayload = null,
     retainedWatcherWakes = null,
@@ -4042,16 +4040,8 @@ export async function processReviewSubject(entry, ctx) {
             }
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
-            if (reviewerPoolConfig.enabled && reviewerSpawned) {
-              onReviewerCapacityFreed?.();
-              // Direct admission handles queued work. Keep the durable poll
-              // wake as discovery backstop for an empty or invalidated queue.
-              try {
-                requestWatcherWakeImpl({ rootDir: ROOT, reason: 'reviewer-capacity-freed' });
-              } catch (wakeError) {
-                console.warn(`[watcher] reviewer capacity wake failed: ${wakeError?.message || wakeError}`);
-              }
-            }
+            // The detached tracker signals capacity only after this run has
+            // settled and the pool's credential reservation has been released.
           }
         },
         supportsAdmissionSplit: Boolean(admissionSettlementSplitEnabled) && !isPipelineEnabled(domainAdapterSet.domainConfig),

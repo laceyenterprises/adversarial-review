@@ -3620,8 +3620,10 @@ function seatIdleSynthetic(source) {
     .replaceAll("name: 'adversarial-review'", "name: 'review-fixture'");
 }
 
-for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
-  test(`SEATIDLE-01: real poll hands off retained candidates while posted work blocks (${stale})`, () => {
+for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 'unreadable']) {
+  test(stale === 'release-order'
+    ? 'SEATIDLE-02: real poll releases the credential reservation before an immediate handoff'
+    : `SEATIDLE-01: real poll hands off retained candidates while posted work blocks (${stale})`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'seatidle-handoff-'));
     const loaderPath = path.join(tmp, 'loader.mjs');
     const registerPath = path.join(tmp, 'register.mjs');
@@ -3658,7 +3660,15 @@ for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
         `,
       });
       const postedUrl = fileUrl('src', 'posted-review-row.mjs');
+      const routeUrl = fileUrl('src', 'reviewer-route-selection.mjs');
+      const capacityUrl = fileUrl('src', 'reviewer-runtime-support.mjs');
+      const wakeUrl = fileUrl('src', 'watcher-wake.mjs');
       loader = loader.replace('export async function resolve', `
+        if (${JSON.stringify(stale === 'release-order')}) {
+          stubs.set(${JSON.stringify(routeUrl)}, 'fixture:seatidle-route');
+          stubs.set(${JSON.stringify(capacityUrl)}, 'fixture:seatidle-capacity');
+        }
+        stubs.set(${JSON.stringify(wakeUrl)}, 'fixture:seatidle-wake');
         stubs.set(${JSON.stringify(postedUrl)}, 'fixture:seatidle-posted');
         export async function resolve`);
       loader = loader.replace('export async function load(url, context, nextLoad) {', `
@@ -3668,8 +3678,47 @@ for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
             result.source = String(result.source).replace(
               "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
               '({ org: "example", repos: ["example/review-fixture"] })');
+            if (${JSON.stringify(stale === 'release-order')}) {
+              result.source = result.source.replace(
+                'onCapacityFreed: async (',
+                'onCapacityFreed: globalThis.__seatIdleCapacityFreed = async (');
+              result.source = result.source.replace(
+                'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates })',
+                'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, schedule: callback => callback() })');
+              result.source = result.source.replace(
+                'const reviewerMemoryReservationState =',
+                \`const notifyCapacityFreed = reviewerAdmission.capacityFreed;
+                 globalThis.__seatIdleCapacityCounts = [];
+                 reviewerAdmission.capacityFreed = () => {
+                   globalThis.__seatIdleCapacityCounts.push(detachedReviewerDispatchTracker.activeCounts().get('gemini') || 0);
+                   notifyCapacityFreed();
+                 };
+                 const reviewerMemoryReservationState =\`);
+            }
             return result;
           }
+          if (url === 'fixture:seatidle-wake') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            import * as actual from '${wakeUrl}?actual';
+            export * from '${wakeUrl}?actual';
+            export function requestWatcherWake(args) {
+              if (args.reason === 'reviewer-capacity-freed') {
+                globalThis.__seatIdleDurableWakes = (globalThis.__seatIdleDurableWakes || 0) + 1;
+              }
+              return actual.requestWatcherWake(args);
+            }
+          `)} };
+          if (url === 'fixture:seatidle-route') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            import * as actual from '${routeUrl}?actual';
+            import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
+            export * from '${routeUrl}?actual';
+            export function selectReviewerRouteForAttempt(args) {
+              return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini, quotaBlocked: false };
+            }
+          `)} };
+          if (url === 'fixture:seatidle-capacity') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            export * from '${capacityUrl}?actual';
+            export async function resolveGeminiCredentialConcurrencyForDispatchCandidates() { return 1; }
+          `)} };
           if (url === 'fixture:seatidle-posted') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
             export * from ${JSON.stringify(postedUrl + '?actual')};
             export async function runQueuedReviewAdoptionPhase(args) {
@@ -3689,6 +3738,16 @@ for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
       writeFileSync(registerPath, buildRegisterSource(loaderPath));
       let runner = buildRunnerSource({
         prePollSetup: `
+          ${stale === 'release-order' ? `
+            await globalThis.__seatIdleCapacityFreed();
+            await globalThis.__seatIdleCapacityFreed({});
+            await globalThis.__seatIdleCapacityFreed({ candidate: null });
+            assert.deepEqual(globalThis.__seatIdleCapacityCounts, [0, 0, 0],
+              'missing candidate metadata still wakes retained admission');
+            assert.equal(globalThis.__seatIdleDurableWakes || 0, 0,
+              'missing admission outcomes do not request discovery');
+            globalThis.__seatIdleCapacityCounts.length = 0;
+          ` : ''}
           globalThis.__seatIdleLiveState = pr => {
             if (!globalThis.__seatIdleStale || pr !== 202) return null;
             if (globalThis.__seatIdleStale === 'unreadable') throw new Error('synthetic unavailable state');
@@ -3716,11 +3775,18 @@ for (const stale of ['none', 'head-moved', 'closed', 'merged', 'unreadable']) {
         afterFirstPoll: `
           assert.equal(pollFinished, false);
           assert.deepEqual(starts(), [201]);
-          globalThis.__seatIdleStale = ${JSON.stringify(stale === 'none' ? null : stale)};
+          globalThis.__seatIdleStale = ${JSON.stringify(['none', 'release-order'].includes(stale) ? null : stale)};
           globalThis.__seatIdleReturns.get(201)();
-          await waitForStart(${stale === 'none' ? 202 : 203});
+          await waitForStart(${['none', 'release-order'].includes(stale) ? 202 : 203});
           assert.equal(pollFinished, false, 'next spawn precedes the end of posted-review work');
-          assert.deepEqual(starts(), ${JSON.stringify(stale === 'none' ? [201, 202] : [201, 203])});
+          assert.equal(globalThis.__seatIdleDurableWakes, 1,
+            'only the finished reviewer requests discovery; pre-spawn refusals do not repoll');
+          assert.deepEqual(starts(), ${JSON.stringify(['none', 'release-order'].includes(stale) ? [201, 202] : [201, 203])});
+          ${stale === 'release-order' ? `
+            assert.ok(globalThis.__seatIdleCapacityCounts.length > 0);
+            assert.ok(globalThis.__seatIdleCapacityCounts.every(count => count === 0),
+              'every capacity-freed signal follows credential reservation release');
+          ` : ''}
           releasePoll(); await runningPoll;
           for (let turn = 0; turn < 5; turn++) {
             for (const resolve of globalThis.__seatIdleReturns.values()) resolve();

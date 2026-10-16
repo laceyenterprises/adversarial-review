@@ -95,10 +95,22 @@ eligible. Deferred candidates stay queued even if the drain throws.
 
 The per-head dispatch lease is released by the candidate's unconditional
 `finally`, including after a queued freshness-read failure refunds its SQLite
-claim. The detached dispatch tracker also signals freed capacity when a
-candidate returns before spawning, allowing the next waiting candidate to
-proceed without another discovery poll. Capacity and live spawn guards still
-apply to every admission wave.
+claim. The detached dispatch tracker owns the capacity-freed signal: the
+reviewer admission settles, the pool releases its credential count, and the
+tracker removes the dispatch reservation before either direct admission or the durable
+discovery wake runs. Scheduler timing is not a release barrier. This also
+covers candidates that return before spawning, allowing the next waiting
+candidate to proceed without another discovery poll. Pre-spawn refusals wake
+only the retained queue, without requesting another discovery poll. Capacity
+and live spawn guards still apply to every admission wave.
+
+If a capacity-freed wave starts nothing and every candidate is deferred for
+Gemini credential saturation, it retries up to three times, two seconds apart,
+only while no live Gemini reviewer or pipeline reservation is observed. Each
+retry re-probes capacity through the same guarded drain and logs
+`capacity-freed drain retried: attempt=<n>`. Persistent saturation falls back
+to polling; a live reviewer, unavailable credentials, or other deferral does
+not trigger this retry.
 
 ### Reviewer run-state ledger
 

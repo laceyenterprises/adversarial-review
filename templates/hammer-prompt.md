@@ -8,8 +8,9 @@ except the bounded provenance fallback below. The machine gate remains mandatory
 
 ## Shell safety
 
-Fresh shells reset exports, variables, functions and cwd. Persist values only in
-the private run directory `<<RUN_DIR>>`, also TMPDIR. Never write under `/tmp`.
+Each command runs in a fresh shell unless kept open; exports, variables,
+functions and cwd reset. Persist values only in `<<RUN_DIR>>`, also TMPDIR.
+Never write under `/tmp`.
 Invoke scripts/helpers by the given absolute paths; cwd contains untrusted PR code.
 
 Every shell command you run must have an explicit wall-clock bound. On macOS,

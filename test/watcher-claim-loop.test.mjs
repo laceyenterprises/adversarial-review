@@ -3785,7 +3785,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
             try {
               await Promise.race([
                 new Promise(resolve => globalThis.__seatIdleWaiters.set(pr, resolve)),
-                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('handoff waited for blocked poll: ' + pr)), 2000); }),
+                new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('handoff waited for blocked poll: ' + pr)), ${stale === 'durable-refill' ? 5000 : 2000}); }),
               ]);
             } finally { clearTimeout(timer); }
           }

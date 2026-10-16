@@ -17,6 +17,12 @@ if (!baseRef) throw new Error('hammer PR base is missing');
 if (process.env.HAM_BASE_HEAD && process.env.HAM_BASE_HEAD !== reviewedHead && !prNumber) {
   throw new Error('hammer PR number is missing; supply a PR URL or HAM_PR_NUMBER');
 }
+// Discover the actual live PR base only for the new content proof. Existing
+// reviewed-start/App-chain fast paths retain their zero-extra-read contract.
+const loadRebaseBase = async () => {
+  const pr = JSON.parse((await execGhWithRetry({ args: ['api', `repos/${repo}/pulls/${prNumber}`], timeoutMs: 15000 })).stdout);
+  return pr?.head?.sha === currentHead && /^[a-f0-9]{40}$/.test(pr?.base?.sha || '') ? { sha: pr.base.sha } : null;
+};
 const loadRebaseCoverage = async ({ base, head }) => {
   if (![reviewedHead, head, base].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null;
   const { proveReviewedRebase } = await import('../src/ama/reviewed-rebase.mjs');
@@ -28,8 +34,10 @@ const loadRebaseCoverage = async ({ base, head }) => {
     generatedFiles = JSON.parse((await execute('python3', [generatedHelper, repo, 'policy'], { timeout: 15000 })).stdout);
     if (!Array.isArray(generatedFiles)) generatedFiles = [];
   } catch { /* No installed policy: only whole-patch equivalence is available. */ }
-  try { await git(['cat-file', '-e', `${reviewedHead}^{commit}`]); }
-  catch { try { await git(['fetch', '--no-tags', 'origin', reviewedHead]); } catch { return null; } }
+  for (const sha of [reviewedHead, base]) {
+    try { await git(['cat-file', '-e', `${sha}^{commit}`]); }
+    catch { try { await git(['fetch', '--no-tags', 'origin', sha]); } catch { return null; } }
+  }
   const verifyGenerated = async (sha, paths) => {
     try {
       return (await execute('python3', [generatedHelper, repo, 'verify', sha, ...paths],
@@ -79,7 +87,7 @@ const loadActivityPage = async path => {
   if (next && !next.pathname.endsWith('/activity')) return null;
   return { nodes: JSON.parse(body), next: next ? `${next.pathname.replace(/^\//, '')}${next.search}` : null };
 };
-const range = await fetchHammerHeadRange({ loadRebaseCoverage, repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
+const range = await fetchHammerHeadRange({ loadRebaseBase, loadRebaseCoverage, repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
   remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
   get: async path => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout) });
 if (!range) {

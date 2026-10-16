@@ -251,7 +251,9 @@ export async function fetchHammerHeadRange(options) {
   if ((options.git || (hammerBaseHead && options.loadRebaseCoverage
     && /^[a-f0-9]{40}$/.test(reviewedHead) && /^[a-f0-9]{40}$/.test(target))) && reviewedHead && target && reviewedHead !== target) {
     try {
-      const base = await get(`repos/${repo}/commits/${encodeURIComponent(options.baseRef || 'main')}`);
+      const base = options.loadRebaseBase ? await options.loadRebaseBase()
+        : await get(`repos/${repo}/commits/${encodeURIComponent(options.baseRef || 'main')}`);
+      if (!base?.sha) return null;
       const coverage = options.loadRebaseCoverage
         ? await options.loadRebaseCoverage({ head: target, base: base.sha })
         : await proveReviewedRebase({ ...options, head: target, base: base.sha });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +24,7 @@ for (const mode of ['valid', 'forged', 'mutated-source']) {
     git(installed, 'init', '-q'); git(installed, 'remote', 'add', 'origin', 'git@example.invalid:fixture/repo.git');
     const shadow = join(root, 'python/cwp_dispatch');
     mkdirSync(shadow, { recursive: true });
-    writeFileSync(join(shadow, '__init__.py'), 'raise RuntimeError("worker policy must not load")\n');
+    writeFileSync(join(shadow, '__init__.py'), `from pathlib import Path\nPath(${JSON.stringify(join(root, 'shadow-loaded'))}).touch()\nraise RuntimeError("worker policy must not load")\n`);
     writeFileSync(join(pkg, '__init__.py'), '');
     // A synthetic installed policy supplies a deterministic merged-source generator.
     writeFileSync(join(pkg, 'generated_conflicts.py'), `from pathlib import Path
@@ -52,5 +52,8 @@ def regenerate_conflicts(root, paths, trusted_root):
     assert.equal(readFileSync(join(source, 'generated.txt'), 'utf8'), mode !== 'forged' ? 'MERGED INPUT\n' : 'forged payload\n');
     assert.equal(git(source, 'status', '--porcelain'), '');
     assert.throws(() => execFileSync('python3', [installedHelper, 'fixture/other', 'policy'], { cwd: source, env, stdio: 'pipe' }));
+    rmSync(pkg, { recursive: true });
+    assert.throws(() => execFileSync('python3', [installedHelper, 'fixture/repo', 'policy'], { cwd: source, env, stdio: 'pipe' }));
+    assert.equal(existsSync(join(root, 'shadow-loaded')), false, 'missing installed policy must not execute a worker package');
   });
 }

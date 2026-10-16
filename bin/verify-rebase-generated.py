@@ -22,7 +22,11 @@ def main():
     # Resolve policy from this deployed helper's installation, never inherited
     # PYTHONPATH or the worker checkout's replacement cwp_dispatch package.
     trusted_root = Path(__file__).resolve().parents[3]
-    sys.path.insert(0, str(trusted_root / "modules/worker-pool/lib/python"))
+    library = trusted_root / "modules/worker-pool/lib/python"
+    module = library / "cwp_dispatch/generated_conflicts.py"
+    if not module.is_file() or not module.resolve().is_relative_to(trusted_root):
+        raise ValueError("No installed generated-file policy")
+    sys.path.insert(0, str(library))
     from cwp_dispatch import generated_conflicts as policy
 
     if not Path(policy.__file__).resolve().is_relative_to(trusted_root):

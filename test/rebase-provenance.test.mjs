@@ -25,7 +25,7 @@ function fixture(t, { generated = false, changed = false } = {}) {
   write('feature.txt', changed ? 'unreviewed change\n' : 'reviewed feature\n');
   const head = commit(`Replayed\n\nWorker-Class: hammer\nReviewed-Head: ${fork}\nClosed-By: hammer (adversarial-pipe-mode)\nWorker-Class: codex`);
   write('repair.txt', 'hammer remediation\n'); const currentHead = commit(`Hammer fix\n\nWorker-Class: hammer\nWorker-Ticket: HAM\nReviewed-Head: ${reviewedHead}\nClosed-By: hammer (adversarial-pipe-mode)`);
-  return { options: { repo: 'fixture/repo', reviewedHead, currentHead, hammerBaseHead: head,
+  return { base, options: { repo: 'fixture/repo', reviewedHead, currentHead, hammerBaseHead: head,
     git: async args => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }),
     generatedFiles: generated ? ['generated.txt'] : [],
     verifyGenerated: async sha => run('show', `${sha}:generated.txt`) === 'regenerated merged output',
@@ -65,4 +65,11 @@ test('REBASEPROV-01 unverified generated output fails closed', async t => {
   const { options } = fixture(t, { generated: true });
   options.verifyGenerated = async () => false;
   assert.equal(await fetchHammerHeadRange(options), null);
+});
+
+test('REBASEPROV-01 coverage uses the live PR base even when it has no main ref', async t => {
+  const { base, options } = fixture(t, { generated: true });
+  options.loadRebaseBase = async () => ({ sha: base });
+  options.get = async () => { throw new Error('No main branch or API ancestry proof'); };
+  assert.equal((await fetchHammerHeadRange(options))?.proof, 'reviewed-rebase-patch-equivalence');
 });

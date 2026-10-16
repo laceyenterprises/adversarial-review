@@ -233,3 +233,20 @@ test('HAMCLOSE-07 head-context CLI uses branch activity after existing proofs de
     actor: 'synthetic-remediator[bot]', time: '2026-01-01T00:00:00Z' }]);
   assert.equal(f.calls().length, 4);
 });
+
+test('REBASEPROV-01 content proof discovers the actual PR base and refuses a moved head', async () => {
+  const source = readFileSync(cli, 'utf8');
+  const loader = source.slice(source.indexOf('const loadRebaseBase ='), source.indexOf('const loadRebaseCoverage ='));
+  const current = 'c'.repeat(40), base = 'b'.repeat(40);
+  for (const [head, baseSha, expected] of [[current, base, base], ['d'.repeat(40), base, null], [current, '', null]]) {
+    const load = runInNewContext(`${loader}\nloadRebaseBase`, {
+      repo: 'fixture/repo', prNumber: 42, currentHead: current,
+      execGhWithRetry: async ({ args }) => {
+        assert.deepEqual(Array.from(args), ['api', 'repos/fixture/repo/pulls/42']);
+        return { stdout: JSON.stringify({ head: { sha: head }, base: { ref: 'release', sha: baseSha } }) };
+      },
+    });
+    const value = await load();
+    assert.equal(value?.sha ?? null, expected);
+  }
+});

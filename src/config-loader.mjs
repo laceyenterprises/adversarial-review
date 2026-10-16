@@ -1007,6 +1007,7 @@ function schemaV1() {
             __strict: true,
             __keys: {
               port: { __type: TYPE_INT, __default: 4093, __min: 1024, __max: 65535 },
+              audit_context: { __type: TYPE_STRING, __default: '', __nullable: false },
               primary_url: { __type: TYPE_STRING, __default: '', __nullable: false },
               standby_url: { __type: TYPE_STRING, __default: '', __nullable: false },
               watchdog_status_url: { __type: TYPE_STRING, __default: '', __nullable: false },
@@ -3979,6 +3980,10 @@ export const ENV_ALIASES = {
   },
   'oauth_broker.claude_code_corp_bridge.port': {
     canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_PORT',
+    aliases: [],
+  },
+  'oauth_broker.claude_code_corp_bridge.audit_context': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_AUDIT_CONTEXT',
     aliases: [],
   },
   'oauth_broker.claude_code_corp_bridge.primary_url': {

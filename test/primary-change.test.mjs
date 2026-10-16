@@ -263,7 +263,7 @@ test('PRIMARYRENAME-01: valid later rename proof resolves earlier failures and i
     assert.equal(records.length, 1);
     const record = JSON.parse(readFileSync(join(dir, records[0]), 'utf8'));
     assert.equal(record.history.renameProofReadFailed, undefined);
-    assert.equal(record.key[7], 'primary-rename-v2');
+    assert.equal(record.key[7], 'guard-reversal-v1');
     assert.deepEqual(await fetchPrimaryChange(args), evidence);
     assert.equal(commitReads, 2, 'approved history must not repeat commit reads');
   }

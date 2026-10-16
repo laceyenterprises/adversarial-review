@@ -1603,6 +1603,73 @@ error, the dedicated helper exits non-zero, and the hammer records
 probes again each closer pass and pages once per head if evidence stays unreadable.
 Missing evidence never authorizes a reversal.
 
+**Required guard authority (GUARDREVERT-01).** A required repository check may
+authorize returning only the paths it explicitly forbids in pull requests to
+the live base. `src/ama/guard-reversal.mjs` independently reads the branch's
+required check contexts (including app binding), the latest failed check run
+on the protected author head, its output/annotations naming the path, and the
+latest successful run of the same check/app on the repaired head. An absent
+path in a complete base-to-head comparison proves restoration; a base move
+additionally needs an unchanged path between the merge base and the live base.
+Only readable added/modified text files qualify; partial repairs, renames,
+gitlinks, optional checks and unnamed paths retain ordinary preservation rules.
+Unavailable or incomplete evidence grants no waiver. A guard must publish an
+explicit path-specific prohibition in its summary, text or annotations; its
+name or a generic failed CI run is insufficient. A matching annotation path
+binds each title/message statement independently, including after sentence
+punctuation; annotations on other paths and check summaries must explicitly
+name the prohibited path in the same statement. Rejection phrasing accepts PR
+context before or after that path's prohibition.
+
+The audit's `trace.primaryChange.guardReversals`, daemon terminal-attempt
+`guardReversals` and the hammer's live `githubGate.guardReversals` record
+`Reversal-Authorized-By: guard:<check name>`,
+the path list, failing/passing run IDs and exact head SHAs. This live evidence
+is collected outside the immutable history cache, so a required-context or
+check rerun change cannot reuse stale authority. The history cache version
+also advances to collect the base identity needed by old cached refusals.
+
+`guardRepairReviewCoverage` carries the approval across this pure CI repair
+only when every other file's reviewed diff is identical. The rebase variant
+requires a diverged reviewed-to-primary history, advancement from the reviewed
+merge base to the current merge base, and identical remaining patches modulo
+hunk-coordinate shifts. Coverage snapshots retain every distinct authoritative
+review commit, so later comments from the same reviewer family do not erase an
+earlier approval head. Any additional content change needs exact-head review.
+HAM App validation, current-head CI, mergeability, lease and other safety gates
+remain independently required by their existing execution paths.
+
+**Deterministic refusal memory (GUARDREVERT-01).** The existing hammer stop
+store now identifies structured terminal refusals by repository, PR, head,
+sorted predicate reasons and canonical full missing evidence. A new attempt
+number or reordered reason list cannot renew the same dispatch. All closer
+routes consult it before eligibility/route branching. It pages once through
+`ama_closer.hammer_stop_hold`, with the exact evidence and one unblock action.
+A changed head, review evidence or external check status clears the refusal;
+base/mergeability and explicit operator-hold release retain their existing
+release semantics. A fresh primary-change probe also releases a missing-authority
+hold when authority becomes verifiable or the missing evidence changes. An
+unchanged refusal survives watcher restart and later audit deferrals; a distinct refusal has a distinct
+page generation. Transient reads retain their bounded retry and page grace.
+
+GUARDREVERT-01 sibling audit (sentinel trap 227):
+
+| Authority or closer path | Disposition |
+|---|---|
+| Blocking finding citations; strict-policy non-blocking citations; original and rebased/superseded review snapshots | Retained identity, ancestry, kind, File/Lines and per-region verification. Guard authority is a separate whole-path proof. |
+| First HAM parent; tagged and legacy HAM provenance; recorded-launch/builder-boundary provenance | Retained baseline selection. A guard trailer cannot choose a different author head. |
+| Identical rename/blob preservation and test-region exemption | Retained. Neither grants guard authority to production paths or gitlinks. |
+| Operator approval, PR stated intent and operator rationale | Retained. None waives the primary-change predicate or substitutes for a guard run. |
+| HAM App head validation, completed-remediation chains, fleet signatures, pure-rebase coverage, non-reviewable/trailer-only deltas and closer-only stale coverage | Retained existing head-coverage contracts; they still run the shared primary-change check. Added only the proven pure guard-repair coverage. |
+| `closer-head-recovery.mjs` and exact-review recovery for missing finding authority | Retained recovery. Verified guard repairs no longer emit the primary/stale refusal that would ask for an unnecessary review. Other content still needs exact-head review. |
+| `ama-check`, terminal HAM validation, daemon pre-/in-lease gates and hammer in-lease gate | All consume shared primary-change authority. Added guard proof to the live hammer audit output. |
+| Ordinary findings/CI repair, pending-CI mechanical closure, daemon-decline fallback, stale-closer resume and terminal-unmerged grace | Common pre-route deterministic-refusal fence; existing retry/lease limits retained after release. |
+| Review-cycle-cap and CI-blocked final-owner routes; orphan/ownerless recovery and repair redrive | Same pre-route fence, including routes that previously bypassed the stop hold. The orphan repair prompt also names verified guard authority alongside finding authority. |
+| Inline watcher dispatch and background closure queue | Both invoke the same fenced closer entry point. `skipMergeAgent` prevents legacy fallback from taking over an unchanged refusal. |
+| Failed/cancelled/succeeded launch reconciliation, terminal no-merge remerge branches and retry-cap redrive | Reconcile existing ownership first; no new hammer bypasses the fence. Confirmed merges remain terminal. |
+| Prelaunch admission retry, priority-flag compatibility retry and provisioning recovery | Retained bounded retries: these prove no hammer execution and are not predicate refusals. |
+| Legacy merge-agent operator fallback and hosts with AMA disabled | Retained explicit existing routing. No new authority, automatic retry or cancel identity was added to `follow-up-merge-agent.mjs`. |
+
 Both merge paths use `src/ama/primary-change.mjs`. The protected baseline is the
 actual first parent of the first hammer commit still present in current PR
 history. A launch without a commit anchors nothing; builder and remediation
@@ -1611,7 +1678,7 @@ worker pushes before that commit belong to the protected author change. A login 
 identify hammer commits independently of login. A hammer-authored `Reviewed-Head` trailer cannot select an older author
 head. Both primary and final diffs are compared against the current PR base,
 using the same merge base so rebased upstream changes are excluded. Hammer closure detection
-uses the terminal commit trailer block. Reversal authorization additionally
+uses the terminal commit trailer block. Finding-based reversal authorization additionally
 uses `hamCommitIdentityMatches` with the trusted HAM login set
 (`hamAuditCommentAuthorMatches`): reject any linked non-HAM author or committer;
 otherwise accept a linked HAM author, or an unlinked author with a linked HAM

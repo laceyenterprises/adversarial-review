@@ -36,6 +36,8 @@ function runCli(t, plan, argv = ['fixture/repo', '1208', head]) {
   }
   const root = mkdtempSync(join(tmpdir(), 'primary-change-context-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Keep the extensionless CommonJS fixture independent of TMPDIR's package scope.
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }));
   const callsFile = join(root, 'calls.json');
   writeFileSync(callsFile, '[]');
   // A PATH-local gh fixture makes the real CLI and retry helper run offline.
@@ -67,7 +69,7 @@ process.stdout.write(entry.raw ?? JSON.stringify(data));
     encoding: 'utf8', timeout: 15_000,
     // This deliberately minimal environment does not inherit the runner's
     // state isolation. Bind the metered CLI's shared state to this fixture too.
-    env: { PATH: root + ':/usr/bin:/bin', HOME: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root,
+    env: { PATH: root + ':/usr/bin:/bin', HOME: root, TMPDIR: root, GH_CONFIG_DIR: root, HAM_ROOT_DIR: root,
       GHO_RATE_LIMIT_SHARED_STATE_PATH: join(root, 'rate-limit-state.json') },
   });
   assert.ifError(result.error);
@@ -83,7 +85,7 @@ test('primary-change CLI recovers TLS and HTTP 502 reads and emits complete evid
     { path: primaryPath, error: 'gh: Bad Gateway (HTTP 502)' },
     { path: primaryPath, data: compare },
   ]);
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(result.stderr, '');
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.ciCost.ok, true);

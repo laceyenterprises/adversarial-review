@@ -356,6 +356,7 @@ console.log(JSON.stringify({
   primaryChangeReason: primaryChange?.reason || primaryIntent?.detail || null,
   // REVERSALREBASE-01: the closing status names the one missing piece.
   primaryChangeMissingEvidence: primaryIntent?.missingEvidence || null,
+  guardReversals: primaryIntent?.guardReversals || [],
   state,
   open,
   headMatches,

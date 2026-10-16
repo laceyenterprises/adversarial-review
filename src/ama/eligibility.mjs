@@ -1,6 +1,6 @@
 import { exactHammerValidation, hammerRangeMatches } from './hammer-head-validation.mjs';
 import { operatorLabelGateFailures } from './operator-label-gates.mjs';
-import { checkPrimaryChange } from './primary-change.mjs';
+import { checkPrimaryChange, guardRepairReviewCoverage } from './primary-change.mjs';
 import { HAMMER_WITHDRAWN_RESOLUTION, resolveHammerAdjudication } from './hammer-adjudication.mjs';
 /**
  * AMA-02 — Adversarial Merge Authority eligibility predicate.
@@ -1057,12 +1057,15 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const closerAuthoredStaleOk = closerAuthoredStale?.eligible === true
     && Boolean(reviewedHead) && closerAuthoredStale.reviewedHead === reviewedHead
     && Boolean(currentHead) && closerAuthoredStale.currentHead === currentHead;
+  const guardRepairCoverage = guardRepairReviewCoverage(options?.primaryChange
+    || options?.hamTerminalRemediationGroundTruth?.commit?.primaryChange, reviewedHead, currentHead);
   const headMatchOk =
     operatorOverride
     || (reviewedHead && reviewedHead === currentHead)
     || hamTerminalRemediation.ok === true
     || rebaseReviewCoverage.ok
     || nonReviewableHeadDelta.ok
+    || guardRepairCoverage
     || closerAuthoredStaleOk;
   if (!headMatchOk) reasons.push('stale-review-head');
 
@@ -1483,6 +1486,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       rebaseReviewCoverage,
       nonReviewableHeadDelta,
       closerAuthoredStale: closerAuthoredStaleOk,
+      guardRepairCoverage,
     },
     remediation: { pending: remediationPending, known: remediationStateKnown },
     config: { enabled: amaEnabled },

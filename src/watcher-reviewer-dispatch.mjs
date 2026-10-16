@@ -32,6 +32,7 @@ export function createReviewerDispatchDrain({
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
       const eligible = candidates.filter(candidate => !candidate.admissionBlocked?.());
       const orderedCandidates = await prepareSpillover(eligible, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
+      await Promise.all(orderedCandidates.slice(0, reviewerPoolConfig.maxConcurrent).map(candidate => candidate.prepareAdmission?.()));
       const drainResult = await runQueue(orderedCandidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
@@ -48,6 +49,10 @@ export function createReviewerDispatchDrain({
         },
         logger,
       });
+      // Prepare the next bounded wave while the current reviewers use their
+      // seats. This continuation owns no reviewer capacity and is observed.
+      void Promise.allSettled(reviewerDispatchCandidates.filter(candidate => !candidate.admissionBlocked?.()).slice(0, reviewerPoolConfig.maxConcurrent)
+        .map(candidate => candidate.prepareAdmission?.()));
       if (drainResult.deferred > 0) {
         logger.log(
           `[watcher] reviewer dispatch drain yielded after one launch wave: ` +

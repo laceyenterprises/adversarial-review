@@ -1,4 +1,4 @@
-import { reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
+import { createReviewerPreflight, reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
 import { reviewerCredentialKey } from './claude-account-routing.mjs';
 import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './reviewer-timeout-budget.mjs';
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
@@ -3082,6 +3082,43 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
+      const preflight = createReviewerPreflight();
+      let preflightConsumed = false;
+      let preparation = null;
+      const preflightInputs = () => {
+        const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
+        const completedRemediationRounds = Math.max(0, Number(ledger.completedRoundsForPR) || 0);
+        const passKind = reviewerSafetyPassKind({ current, hasPriorPostedReview: dispatchHasPriorPostedReview,
+          hasPriorCompletedReview: Boolean(stmtHasCompletedReview.get(repoPath, prNumber)), completedRemediationRounds });
+        return { passKind };
+      };
+      const preflightTasks = () => ({
+        freshness: () => fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync }),
+        dedup: () => resolveAlreadyReviewedHeadDedup({ repoPath, prNumber,
+          headSha: subject?.headSha || null,
+          reviewerLogins: amaAuthoritativeReviewerLoginsForModel(route.reviewerModel),
+          fetchReviewsForHeadImpl: fetchReviewsForHeadForDedup, logger: console }),
+        triage: () => operatorSurface.syncTriageStatus(
+          subjectRefWithLinearTicket(subject.ref, linearTicketId, subject.labels), 'in-review'),
+        drafts: () => reconcilePendingDraftsBeforeSpawn({ repoPath, prNumber,
+          botTokenEnv: route.botTokenEnv, currentHeadSha: subject?.headSha || null,
+          respawnAgeSeconds: resolvePendingDraftRespawnAgeSeconds(), now: new Date() }),
+        hcp: () => getHcpHealthzForTick(),
+        ci: () => guardRereviewCiBeforeReviewer({ rootDir: ROOT, repo: repoPath, prNumber,
+          passKind: preflightInputs().passKind, reviewerHeadSha: subject?.headSha || null,
+          execFileImpl: execFileAsync, env: process.env, log: console, cfg: domainAdapterSet?.domainConfig }),
+        fatigue: () => preflightInputs().passKind === 'rereview'
+          ? computeVocabularyFatigueFindingForPR({ repoPath, prNumber }) : null,
+        closer: () => preflightInputs().passKind === 'rereview'
+          ? getHeadCloserCommitSuppressionWithBoundedRetry({ repoPath, prNumber,
+            headSha: subject?.headSha || null, logger: console }) : null,
+      });
+      const readPreflight = name => preflight[preflightConsumed ? 'take' : 'read'](
+        `${route.reviewerModel}:${route.botTokenEnv}:${name}`, async () => {
+          const startedAt = Date.now();
+          try { return await preflightTasks()[name](); }
+          finally { console.log(`[watcher] reviewer preflight timing repo=${repoPath} pr=${prNumber} step=${name} elapsed_ms=${Date.now() - startedAt}`); }
+        });
       const dispatchCandidate = {
         repoPath,
         prNumber,
@@ -3129,12 +3166,38 @@ export async function processReviewSubject(entry, ctx) {
           if (depthSpillReserved) return;
           await applyWorkerFallback(waitPressure || firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) || null);
           this.syncDepthSpillRoute(waitPressure?.reason || 'queue-depth-pressure');
+          await this.prepareAdmission();
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
         admissionBlocked: () => reviewerHandoffPending(repoPath, prNumber),
+        prepareAdmission() {
+          if (preparation) return preparation;
+          preparation = (async () => {
+            if (reviewerHandoffPending(repoPath, prNumber)) return;
+            // Refresh live state each wave; reuse the expensive probes only
+            // within their short TTL. A launch consumes the prepared snapshot.
+            // Do not reconcile drafts or update triage for a closed, moved or
+            // already-reviewed subject. run() retains the authoritative refusal.
+            const [dedup, freshness] = await Promise.allSettled([readPreflight('dedup'), readPreflight('freshness')]);
+            if (dedup.status === 'rejected' || freshness.status === 'rejected'
+              || dedup.value.alreadyReviewed || freshness.value.state !== 'open'
+              || freshness.value.mergedAt
+              || (freshness.value.headRefOid && freshness.value.headRefOid !== subject?.headSha)) return;
+            // Existing run() handlers consume failures before claim/spawn.
+            await Promise.allSettled(Object.keys(preflightTasks())
+              .filter(name => !['freshness', 'dedup'].includes(name)).map(readPreflight));
+            // Fetch live state last, so slow reconciliation cannot age the
+            // freshness snapshot before the pool consumes it.
+            preflight.invalidate(`${route.reviewerModel}:${route.botTokenEnv}:freshness`);
+            await Promise.allSettled([readPreflight('freshness')]);
+          })().finally(() => { preparation = null; });
+          return preparation;
+        },
         async run() {
+          preflightConsumed = true;
           if (reviewerHandoffPending(repoPath, prNumber)) {
-            this.retainWakeForCapacity(); this.refundDepthSpill();
+            this.retainWakeForCapacity();
+            this.refundDepthSpill();
             return { dispatched: false, reason: 'inline-final-hammer-pending' };
           }
           if (readWatcherDrainState().active) {
@@ -3199,14 +3262,7 @@ export async function processReviewSubject(entry, ctx) {
             // per-review commit_id === head). This composes WITH — never replaces
             // — attestation consumption, and runs before any claim/spawn so a
             // duplicate consumes no attempt budget and no re-review ceiling.
-            const reviewedHeadDedup = await resolveAlreadyReviewedHeadDedup({
-              repoPath,
-              prNumber,
-              headSha: subject?.headSha || null,
-              reviewerLogins: amaAuthoritativeReviewerLoginsForModel(route.reviewerModel),
-              fetchReviewsForHeadImpl: fetchReviewsForHeadForDedup,
-              logger: console,
-            });
+            const reviewedHeadDedup = await readPreflight('dedup');
             if (reviewedHeadDedup.alreadyReviewed) {
               console.log(buildDuplicateReviewSkipAudit({
                 repoPath,
@@ -3252,7 +3308,6 @@ export async function processReviewSubject(entry, ctx) {
               return { dispatched: false, reason: 'memory-admission-deferred' };
             }
 
-            const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
             const attemptAt = new Date().toISOString();
             let reviewerSessionUuid = randomUUID();
             // After ARA-06's operator-surface carve, the per-PR loop iterates
@@ -3458,9 +3513,9 @@ export async function processReviewSubject(entry, ctx) {
             // the next PR's spawn in the serial loop. Re-fetch state directly
             // from GitHub right before the spawn and skip if no longer open.
             try {
-              const freshPR = await fetchPullRequestHeadAndState(repoPath, prNumber, {
-                execFileImpl: execFileAsync,
-              });
+              const freshPR = afterClaim
+                ? await fetchPullRequestHeadAndState(repoPath, prNumber, { execFileImpl: execFileAsync })
+                : await readPreflight('freshness');
               if (freshPR.mergedAt) {
                 console.log(
                   `[watcher] PR ${repoPath}#${prNumber} was merged since tick-start snapshot — marking row + skipping reviewer spawn`
@@ -3520,18 +3575,8 @@ export async function processReviewSubject(entry, ctx) {
                 err?.message || err
               );
             }
-            await operatorSurface.syncTriageStatus(
-              subjectRefWithLinearTicket(subject.ref, linearTicketId, subject.labels),
-              'in-review'
-            );
-            const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({
-              repoPath,
-              prNumber,
-              botTokenEnv: route.botTokenEnv,
-              currentHeadSha: reviewerHeadSha,
-              respawnAgeSeconds,
-              now: new Date(attemptAt),
-            });
+            await readPreflight('triage');
+            const preSpawnReconciliation = await readPreflight('drafts');
             if (preSpawnReconciliation.skipSpawn) {
               console.log(
                 `[watcher] Skipping reviewer spawn for ${repoPath}#${prNumber}: ` +
@@ -3586,17 +3631,7 @@ export async function processReviewSubject(entry, ctx) {
               passKind,
               fallbackReviewAttempts: current?.review_attempts || 0,
             });
-            const ciAdmission = await guardRereviewCiBeforeReviewer({
-              rootDir: ROOT,
-              repo: repoPath,
-              prNumber,
-              passKind,
-              reviewerHeadSha,
-              execFileImpl: execFileAsync,
-              env: process.env,
-              log: console,
-              cfg: domainAdapterSet?.domainConfig,
-            });
+            const ciAdmission = await readPreflight('ci');
             if (!ciAdmission.proceed) {
               if (depthSpillReserved) {
                 firstPassSpilloverController?.refundSpill?.({
@@ -3654,12 +3689,7 @@ export async function processReviewSubject(entry, ctx) {
               );
               return { dispatched: false, reason: ciAdmission.reason };
             }
-            const vocabularyFatigueFinding = passKind === 'rereview'
-              ? await computeVocabularyFatigueFindingForPR({
-                repoPath,
-                prNumber,
-              })
-              : null;
+            const vocabularyFatigueFinding = await readPreflight('fatigue');
             if (vocabularyFatigueFinding) {
               console.log(
                 `[watcher] vocabulary fatigue ${repoPath}#${prNumber}: ` +
@@ -3675,7 +3705,7 @@ export async function processReviewSubject(entry, ctx) {
               statements: ctx.statements,
               attemptAt,
               maxRemediationRounds,
-              getHcpHealthzForTick,
+              getHcpHealthzForTick: () => readPreflight('hcp'),
             });
             if (!hcpPrecheck.proceed) {
               this.retainWakeForCapacity();
@@ -3709,12 +3739,7 @@ export async function processReviewSubject(entry, ctx) {
               const orphanHeadReview = isOrphanHeadReviewRequested(current, reviewerHeadSha);
               const handoffReviewBypass = hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
                 prNumber, headSha: reviewerHeadSha, row: current });
-              const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
-                repoPath,
-                prNumber,
-                headSha: reviewerHeadSha,
-                logger: console,
-              });
+              const closerHead = await readPreflight('closer');
               if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +

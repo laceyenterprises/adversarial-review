@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reviewerHandoffPending, startReviewerHandoff, waitForReviewerHandoff } from '../src/reviewer-admission-lifecycle.mjs';
+import { createReviewerPreflight, reviewerHandoffPending, startReviewerHandoff, waitForReviewerHandoff } from '../src/reviewer-admission-lifecycle.mjs';
 
 test('inline hammer fences only its PR until completion, including failure', async () => {
   for (const fails of [false, true]) {
@@ -25,3 +25,14 @@ test('inline hammer fences only its PR until completion, including failure', asy
   }
 });
 
+test('preparation refreshes expired evidence outside admission; launch consumes a stable snapshot', async () => {
+  let now = 0, probes = 0;
+  const prepared = createReviewerPreflight({ now: () => now, ttlMs: 100 });
+  const probe = async () => ++probes;
+  assert.equal(await prepared.read('synthetic-head', probe), 1);
+  now = 101;
+  assert.equal(await prepared.read('synthetic-head', probe), 2);
+  now = 1000;
+  assert.equal(await prepared.take('synthetic-head', probe), 2, 'launch never repeats a prepared probe');
+  assert.equal(await prepared.read('new-head', probe), 3, 'changed inputs cannot reuse old evidence');
+});

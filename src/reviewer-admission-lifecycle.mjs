@@ -20,3 +20,22 @@ export function startReviewerHandoff(repo, pr, run) {
   return promise;
 }
 
+// Preparation owns no claim, memory reservation, credential probe or seat.
+// Expired snapshots refresh outside the pool; a launch consumes one snapshot.
+export function createReviewerPreflight({ now = Date.now, ttlMs = 10_000 } = {}) {
+  const cache = new Map();
+  return {
+    take(key, run) { return cache.get(key)?.promise ?? this.read(key, run); },
+    invalidate(key) { cache.delete(key); },
+    read(key, run) {
+      let entry = cache.get(key);
+      if (!entry || (entry.endedAt !== null && now() - entry.endedAt >= ttlMs)) {
+        entry = { endedAt: null };
+        entry.promise = Promise.resolve().then(run).finally(() => { entry.endedAt = now(); });
+        entry.promise.catch(() => {});
+        cache.set(key, entry);
+      }
+      return entry.promise;
+    },
+  };
+}

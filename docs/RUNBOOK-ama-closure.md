@@ -3198,7 +3198,8 @@ Commit counts and patch positions must match one-to-one, including empty commits
 and commits whose only changes are registered generated outputs.
 On success the HAM audit records the reviewed SHA as its base edge, allowing
 the daemon to reconstruct the exact-head App attestation after the worker exits.
-The proof is bounded to 256 commits per series. Missing objects, nonlinear
+The proof is bounded to 256 commits per series; parent topology is checked in
+one bulk Git invocation per series. Missing objects, nonlinear
 history, unknown policy and failed generator verification fail closed to the
 existing exact-head review handoff. A fleet force-push actor cannot substitute
 for a failed content proof on a diverged starting head.
@@ -3216,13 +3217,14 @@ Otherwise it discovers the nearest ancestor with the installed policy. In both
 cases the installed root's origin must match the repository under validation,
 and inherited `PYTHONPATH` cannot supply policy. Missing commit objects are
 fetched with three bounded attempts, retrying transport failures after 500ms
-and 1000ms; permanent failures refuse proof immediately.
+and 1000ms; permanent failures refuse proof immediately. DNS resolution, connect and
+SSH/TLS handshake drops are transport failures; authorization failures are not.
 The audit-base resolver reads the runtime `HAM_RUN_DIR/range.json`, with the
 rendered dispatch directory as its fallback.
 Required checks, the exact-head lease/CAS and primary-change checks still apply.
 
 Conflicting duplicate identity trailers confer no direct hammer provenance,
-regardless of order. Identical repeated values remain valid. A replayed commit
+regardless of order. Identical repeated identity values remain valid, including case variations. A replayed commit
 with both `Worker-Class: hammer` and `Worker-Class: codex` therefore requires
 independent content coverage rather than first-value or last-value selection.
 
@@ -3232,6 +3234,8 @@ a launch. Only `HAM` or the matching `AMA-PR-<N>` ticket confirms hammer identit
 status cannot become a hammer attempt or `failed-without-merge` outcome.
 Previously misclassified launches with authoritative foreign-ticket evidence
 are retired and their matching series/target/lifetime charge is refunded once.
+Legacy records without `reviewedSha` use their head (or lease identity head) as
+the series key; the refund still requires a matching ledger charge.
 A launch receipt with unreadable ticket evidence retains its active lease
 and launch IDs for reconciliation; absence of evidence cannot release ownership
 or trigger another spawn. It receives a conservative attempt charge, refunded

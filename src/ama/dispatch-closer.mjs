@@ -1583,7 +1583,8 @@ function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, head
 function retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIdentity = identity, record, launchRequestId, now, logger }) {
   if (record?.launchRequestId !== launchRequestId) return false;
   refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
-    jobKey: record.reviewedSha, headSha: record.headSha, launchRequestId, now, foreignLaunch: true,
+    jobKey: record.reviewedSha || record.headSha || identity.headSha, headSha: record.headSha || identity.headSha,
+    launchRequestId, now, foreignLaunch: true,
   });
   updateAmaCloserDispatchRecord(rootDir, identity, current => current?.launchRequestId === launchRequestId ? {
     ...current, state: 'no-dispatch', reason: 'non-hammer-launch-not-adopted', launchRequestId: null, dispatchId: null,

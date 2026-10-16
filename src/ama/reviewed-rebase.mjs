@@ -7,12 +7,11 @@ export async function proveReviewedRebase({ reviewedHead, head, base, git, gener
     const onto = (await git(['merge-base', head, base])).trim();
     if (!fork || !onto) return null;
     const list = async (tip, bottom) => {
-      const shas = (await git(['rev-list', '--reverse', '--topo-order', `--max-count=${LIMIT + 1}`, `${bottom}..${tip}`])).trim().split(/\s+/).filter(Boolean);
-      if (shas.length > LIMIT) throw new Error('rebase-proof-limit');
-      for (const sha of shas) {
-        if ((await git(['rev-list', '--parents', '-n', '1', sha])).trim().split(/\s+/).length !== 2) throw new Error('nonlinear-rebase');
-      }
-      return shas;
+      const commits = (await git(['rev-list', '--parents', '--reverse', '--topo-order', `--max-count=${LIMIT + 1}`, `${bottom}..${tip}`]))
+        .trim().split(/\r?\n/).filter(Boolean).map(line => line.trim().split(/\s+/));
+      if (commits.length > LIMIT) throw new Error('rebase-proof-limit');
+      if (commits.some(commit => commit.length !== 2)) throw new Error('nonlinear-rebase');
+      return commits.map(([sha]) => sha);
     };
     if (generatedFiles.some(path => typeof path !== 'string' || !path || path.startsWith('/')
       || path.split('/').some(part => !part || part === '.' || part === '..') || /[\0\r\n]/.test(path))) return null;

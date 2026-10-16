@@ -15,8 +15,11 @@ const exec = promisify(execFile);
 const cli = fileURLToPath(new URL('../bin/hammer-head-context.mjs', import.meta.url));
 const template = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
 
+for (const failureMessage of ['connection reset', 'fatal: unable to access: Could not resolve host: github.com',
+  'ssh: Could not resolve hostname github.com', 'fatal: unable to access: Failed to connect to github.com port 443',
+  'kex_exchange_identification: Connection closed by remote host', 'SSL handshake failed']) {
 for (const failures of [0, 1, 2, 3, 'permanent']) {
-test(`REBASEPROV-01 coverage fetch retries=${failures} before proving replay patches`, async () => {
+test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) before proving replay patches`, async () => {
   const reviewedHead = 'a'.repeat(40), base = 'b'.repeat(40), head = 'c'.repeat(40), fork = 'd'.repeat(40);
   const present = new Set([reviewedHead, base]);
   const fetched = [];
@@ -45,15 +48,17 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} before proving replay pat
       if (verb === 'fetch') {
         attempts++;
         if (failures === 'permanent') throw new Error('permission denied');
-        if (attempts <= failures) throw new Error('connection reset');
+        if (attempts <= failures) throw new Error(failureMessage);
         present.add(rest.at(-1)); fetched.push(rest.at(-1)); return { stdout: '' };
       }
       if (verb === 'merge-base') {
         assert.ok(present.has(rest[0]), 'proof must have the starting head locally');
         return { stdout: rest[0] === reviewedHead ? fork : base };
       }
-      if (verb === 'rev-list') return { stdout: rest.includes('--parents')
-        ? `${rest.at(-1)} ${base}` : rest.at(-1).split('..')[1] };
+      if (verb === 'rev-list') {
+        assert.ok(rest.includes('--parents'));
+        return { stdout: `${rest.at(-1).split('..')[1]} ${base}` };
+      }
       if (verb === 'diff') return { stdout: 'identical reviewed patch' };
       assert.fail(`Unexpected git command: ${args.join(' ')}`);
     },
@@ -67,6 +72,7 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} before proving replay pat
   assert.equal(attempts, failures === 'permanent' ? 1 : Math.min(failures + 1, 3));
   assert.deepEqual(delays, failures === 'permanent' ? [] : [500, 1000].slice(0, failures));
 });
+}
 }
 
 test('timeline loader omits absent and invalid cursors and forwards a valid cursor', async () => {

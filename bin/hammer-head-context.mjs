@@ -28,6 +28,9 @@ const loadRebaseCoverage = async ({ base, head }) => {
   const { proveReviewedRebase } = await import('../src/ama/reviewed-rebase.mjs');
   const execute = promisify(execFile);
   const git = async args => (await execute('git', args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+  const transientGitError = error => isTransientGhError(error)
+    || /could not resolve (?:host|hostname)|failed to connect|connection (?:refused|closed|timed out)|(?:TLS|SSL).*handshake|remote end hung up unexpectedly|early EOF|HTTP\/2 stream.*(?:closed|reset)/i
+      .test(String(error.stderr || error.message || ''));
   const generatedHelper = fileURLToPath(new URL('./verify-rebase-generated.py', import.meta.url));
   const trustedRootArgs = process.env.HAM_HQ_ROOT ? ['--trusted-root', process.env.HAM_HQ_ROOT] : [];
   let generatedFiles = [];
@@ -41,7 +44,7 @@ const loadRebaseCoverage = async ({ base, head }) => {
       for (let attempt = 0; ; attempt++) {
         try { await git(['fetch', '--no-tags', 'origin', sha]); break; }
         catch (error) {
-          if (attempt === 2 || !isTransientGhError(error)) return null;
+          if (attempt === 2 || !transientGitError(error)) return null;
           await new Promise(resolve => setTimeout(resolve, 500 * 2 ** attempt));
         }
       }

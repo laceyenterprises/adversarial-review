@@ -3630,14 +3630,15 @@ for (const status of ['running', 'succeeded']) {
   });
 }
 
+for (const reviewedSha of [REVIEWED_HEAD, null, undefined]) {
 for (const status of ['running', 'succeeded']) {
-  test(`REBASEPROV-01 previously adopted ${status} conflict owner is retired and refunded once`, async t => {
+  test(`REBASEPROV-01 previously adopted ${status} conflict owner with reviewedSha=${reviewedSha} is retired and refunded once`, async t => {
     const root = mkdtempSync(join(tmpdir(), 'foreign-closer-refund-'));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
     recordHammerRetryDispatch(root, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD });
     updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, workerClass: 'hammer',
-      reviewedSha: REVIEWED_HEAD, state: 'dispatched', launchRequestId: 'foreign-launch', retryCount: 1,
+      reviewedSha, state: 'dispatched', launchRequestId: 'foreign-launch', retryCount: 1,
       lastObservedStatus: 'running', dispatchedAt: '2026-07-06T12:00:00Z' }));
     acquireAmaCloserLease({ rootDir: root, ...identity, now: '2026-07-06T12:00:00Z' });
     updateAmaCloserLease({ rootDir: root, ...identity, status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
@@ -3657,6 +3658,7 @@ for (const status of ['running', 'succeeded']) {
     assert.equal(ledger.attemptCount, 0);
     assert.equal(ledger.lifetimeAttemptCount, 0);
   });
+}
 }
 
 test('REBASEPROV-01 ambiguous dispatch cannot charge a conflict owner', async t => {

@@ -185,3 +185,28 @@ for (const changed of [false, true]) {
     });
   }
 }
+
+for (const shape of ['linear', 'merge', 'root', 'over-limit']) {
+  test(`REBASEPROV-01 bulk topology ${shape} preserves the proof bounds`, async () => {
+    const topologyCalls = [];
+    const count = shape === 'over-limit' ? 257 : 256;
+    const proof = await proveReviewedRebase({ reviewedHead: 'reviewed', head: 'replay', base: 'base',
+      git: async args => {
+        if (args[0] === 'merge-base') return 'base';
+        if (args[0] === 'rev-list') {
+          topologyCalls.push(args);
+          assert.ok(args.includes('--parents'));
+          assert.ok(args.includes('--max-count=257'));
+          assert.ok(!args.includes('-n'), 'topology must not spawn per commit');
+          const tip = args.at(-1).split('..')[1];
+          return Array.from({ length: count }, (_, i) =>
+            `${tip}${i}${i === 0 && shape === 'root' ? '' : ' parent'}${i === 0 && shape === 'merge' ? ' other-parent' : ''}`).join('\n');
+        }
+        if (args[0] === 'diff') return 'same patch';
+        assert.fail(`Unexpected command: ${args}`);
+      } });
+    assert.equal(Boolean(proof), shape === 'linear');
+    assert.equal(topologyCalls.length, shape === 'linear' ? 2 : 1);
+    if (proof) assert.equal(proof.reviewedCommits.length, 256);
+  });
+}

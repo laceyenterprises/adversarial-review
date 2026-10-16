@@ -4995,7 +4995,7 @@ export async function maybeDispatchAmaCloser({
   }
   let prefetchedLaunchRequestProbe = earlyLaunchRequestProbe && earlyLaunchRequestProbe.launchRequestId === existingRecord?.launchRequestId
     ? earlyLaunchRequestProbe.probe : null;
-  if (existingRecord?.launchRequestId && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
+  if (existingRecord?.launchRequestId) {
     prefetchedLaunchRequestProbe ||= await Promise.resolve().then(() => readLaunchRequestStatusImpl({
       launchRequestId: existingRecord.launchRequestId, rootDir, hqRoot,
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
@@ -7123,7 +7123,7 @@ export async function maybeDispatchAmaCloser({
   const dispatchEnv = { ...withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs),
     TMPDIR: scratchDir };
   const refuseForeignLaunch = async payload => {
-    if (!isHammerWorkerClass(workerClass) || !payload.launchRequestId) return null;
+    if (!payload.launchRequestId) return null;
     const probe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
       launchRequestId: payload.launchRequestId, rootDir, hqRoot,
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,

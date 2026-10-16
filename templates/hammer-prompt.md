@@ -518,7 +518,9 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    prove the active hammer exact-head validation, a trustworthy starting base through the range proof, PR audit
    comment from the entitled hammer identity, successful
    live-head checks, and non-waived gates, and it must record
-   `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
+   `ham_terminal_remediation_validated`.
+   The range helper also recomputes reviewed patch equivalence for a separate conflict-owner rebase; conflicting identity trailers never establish that coverage. Generated exceptions require the deployed registry and verified regeneration from merged sources. Any failed proof retains the exact-head review handoff.
+   For the narrow strict-non-blocking lane,
    where the only HAM-waived reasons are `non-blocking-findings-present` or
    `non-blocking-findings-unknown` plus the accompanying
    `verdict-not-settled-success`, an active HAM session is sufficient only when

@@ -5,6 +5,7 @@ branch-supplied registry, change the working checkout, or write deploy state.
 Missing installation/policy/generator evidence refuses the generated exception.
 """
 
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -60,6 +61,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="rebase-generated-") as directory:
         root = Path(directory)
         stream = io.BytesIO(blobs)
+        source_digests = {}
         for path, mode, oid in files:
             object_id, kind, size = stream.readline().split()
             if object_id != oid or kind != b"blob":
@@ -73,6 +75,8 @@ def main():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             target.chmod(0o755 if mode == b"100755" else 0o644)
+            if path not in paths:
+                source_digests[path] = hashlib.sha256(content).digest()
         expected = {}
         for path in paths:
             target = root / path
@@ -80,8 +84,18 @@ def main():
                 raise ValueError("Generated output must be a regular file")
             expected[path] = target.read_bytes()
         git("init", "-q", cwd=root)
-        if not policy.regenerate_conflicts(root, paths, trusted_root=trusted_root):
-            raise ValueError("Unregistered output")
+        # execFile's timeout must also terminate any generator process group.
+        with policy.termination_cleanup():
+            if not policy.regenerate_conflicts(root, paths, trusted_root=trusted_root):
+                raise ValueError("Unregistered output")
+        for path, digest in source_digests.items():
+            source = root / path
+            if (
+                source.is_symlink()
+                or not source.is_file()
+                or hashlib.sha256(source.read_bytes()).digest() != digest
+            ):
+                raise ValueError("Generator changed merged sources")
         for path, content in expected.items():
             if (root / path).read_bytes() != content:
                 raise ValueError("Generated output differs from merged sources")

@@ -3185,3 +3185,53 @@ shared two-worker reader by default. Tests and embedded runtimes may use
 `src/reviewer-token-ledger-lookup.mjs` to own an isolated accounting queue;
 its limit must be a positive integer. Queue capacity is released on worker close,
 including reader failure and timeout, before the next queued lookup starts.
+
+### REBASEPROV-01: conflict-owner rebases and hammer accounting
+
+Before publishing a HAM validation audit, `bin/hammer-head-context.mjs` can prove
+that the hammer's starting head is a replay of the reviewed series on the live
+base. `src/ama/reviewed-rebase.mjs` compares the ordered, complete binary patches
+of linear commit series, excluding base history. Whitespace, modes, renames,
+binary content, missing patches and intermediate source edits remain significant.
+On success the HAM audit records the reviewed SHA as its base edge, allowing
+the daemon to reconstruct the exact-head App attestation after the worker exits.
+The proof is bounded to 256 commits per series. Missing objects, nonlinear
+history, unknown policy and failed generator verification fail closed to the
+existing exact-head review handoff. A fleet force-push actor cannot substitute
+for a failed content proof on a diverged starting head.
+
+Generated exceptions come only from the deployed GENCONFLICT committed-file
+registry for the matching repository. Outputs rewritten relative to the replay
+base must match regeneration from each replayed commit's merged sources, using
+the registry's trusted-code checks. Verification copies raw Git blobs into a
+temporary directory; it does not execute a branch-supplied registry or alter the
+worker checkout. Unsupported trees and unavailable generators refuse coverage.
+Without an installed registry, whole-patch equivalence remains available.
+Required checks, the exact-head lease/CAS and primary-change checks still apply.
+
+Conflicting duplicate identity trailers confer no direct hammer provenance,
+regardless of order. Identical repeated values remain valid. A replayed commit
+with both `Worker-Class: hammer` and `Worker-Class: codex` therefore requires
+independent content coverage rather than first-value or last-value selection.
+
+The closer validates dispatch ticket evidence before recording or charging a
+hammer launch. Only `HAM` or the matching `AMA-PR-<N>` ticket qualifies; a
+`CONFLICT-PR-<N>-REBASE` launch is a separate owner. Its running or completed
+status cannot become a hammer attempt or `failed-without-merge` outcome.
+Previously misclassified launches with authoritative foreign-ticket evidence
+are retired and their matching series/target/lifetime charge is refunded once.
+Unreadable new launch identity is deferred without a hammer charge.
+
+Agent-os follow-up: the conflict owner must preserve the original trailer block
+on every replayed commit. Do not append a second `Worker-Class` identity or
+replace historical `Reviewed-Head` with an unearned claim. Record a separate
+rebase receipt binding repository, PR, reviewed SHA, pre/post-rebase SHAs, onto
+base SHA, registry version, regenerated paths and patch-equivalence evidence.
+The closer should independently verify that receipt; the receipt alone must
+never grant review or merge authority. This repository recomputes coverage and
+does not require that agent-os follow-up to preserve source-content safety.
+
+After deployment, SRE confirms that the watcher restarted. On the next PR
+rebased by a conflict owner after its final review, confirm that the hammer
+merges it without a provenance-proof refusal or an operator hand-merge, and
+that the conflict owner's completion consumes no hammer attempt.

@@ -1044,6 +1044,8 @@ const reviewerHeadDispatchLease = createHeadDispatchLease();
 // Discovery and settlement share candidates and memory reservations across polls.
 const reviewerDispatchCandidates = [];
 const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates });
+// Startup settlements intentionally defer durable refill to initial discovery:
+// each repo needs its poll-built policy, runtime and adapter context first.
 const reviewerRefillContexts = new Map();
 attachDurableReviewerRefill({ db, contexts: reviewerRefillContexts, admission: reviewerAdmission,
   processSubject: processReviewSubject,

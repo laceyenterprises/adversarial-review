@@ -8,6 +8,7 @@ const stateColumns = [
   'reviewer', 'labels_json', 'rereview_requested_at', 'rereview_reason', 'failure_message',
 ];
 const state = row => JSON.stringify(stateColumns.map(column => row?.[column] ?? null));
+const isPending = row => row?.pr_state === 'open' && ['pending', 'pending-upstream'].includes(row.review_status);
 
 export function createDurableReviewerRefill({ db, createCandidate, scope = () => null, limit = 50 }) {
   // Include admitted attempts that rearm pending after an obsolete-head result.
@@ -31,13 +32,21 @@ export function createDurableReviewerRefill({ db, createCandidate, scope = () =>
     onSettled(candidate) {
       const row = readRow.get(candidate.repoPath, candidate.prNumber);
       const key = `${candidate.repoPath}#${candidate.prNumber}`;
-      if (!row || row.pr_state !== 'open' || !['pending', 'pending-upstream'].includes(row.review_status)) {
+      if (!isPending(row)) {
         settled.delete(key);
       } else if (!candidate.subject?.headSha || row.revision_ref === candidate.subject.headSha) {
         settled.set(key, state(row));
       }
     },
     refill(queued) {
+      // Closed/deleted/completed rows no longer reach candidate settlement.
+      // Drop their snapshots before serializing the exclusion list for SQLite.
+      for (const key of settled.keys()) {
+        const separator = key.lastIndexOf('#');
+        if (!isPending(readRow.get(key.slice(0, separator), Number(key.slice(separator + 1))))) {
+          settled.delete(key);
+        }
+      }
       const snapshots = JSON.stringify(Object.fromEntries(settled));
       const keys = scope();
       const allowed = keys === null ? null : JSON.stringify(keys);

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
-import { createDurableReviewerCandidate, createDurableReviewerRefill } from '../src/watcher-reviewer-refill.mjs';
+import { attachDurableReviewerRefill, createDurableReviewerCandidate, createDurableReviewerRefill } from '../src/watcher-reviewer-refill.mjs';
 
 function fixture(t, limit = 50) {
   const db = new Database(':memory:');
@@ -42,6 +42,28 @@ test('durable refill excludes held, closed, claimed and unrequested posted rows'
   f.add(7, { review_status: 'pending-upstream' });
   assert.deepEqual(f.refill([]).map(c => c.prNumber), [6, 7]);
 });
+
+for (const transition of [
+  "UPDATE reviewed_prs SET pr_state = 'closed' WHERE pr_number = 1",
+  "UPDATE reviewed_prs SET pr_state = 'merged' WHERE pr_number = 1",
+  "UPDATE reviewed_prs SET review_status = 'posted' WHERE pr_number = 1",
+  'DELETE FROM reviewed_prs WHERE pr_number = 1',
+]) {
+  test(`refill forgets inactive settled rows without another settlement: ${transition}`, t => {
+    const f = fixture(t);
+    f.add(1);
+    f.add(2, { review_status: 'pending-upstream' });
+    for (const prNumber of [1, 2]) f.onSettled({ repoPath: 'example/fixture', prNumber });
+    assert.deepEqual(f.refill([]), []);
+    f.db.prepare(transition).run();
+    assert.deepEqual(f.refill([]), []);
+    // Restore the exact refused state. Admission now proves its old snapshot
+    // was discarded, while the still-pending row remains suppressed.
+    f.db.prepare('DELETE FROM reviewed_prs WHERE pr_number = 1').run();
+    f.add(1);
+    assert.deepEqual(f.refill([]).map(c => c.prNumber), [1]);
+  });
+}
 
 function candidateFixture(overrides = {}) {
   const row = { repo: 'example/fixture', pr_number: 1, reviewer: 'gemini', revision_ref: 'head-a' };
@@ -117,4 +139,22 @@ test('refill scopes the database page before its bound, excluding rows without a
   const scoped = createDurableReviewerRefill({ db: f.db, limit: 2,
     scope: () => ['code-pr:example/fixture'], createCandidate: row => ({ prNumber: row.pr_number }) });
   assert.deepEqual(scoped.refill([]).map(c => c.prNumber), [3]);
+});
+
+test('startup refill defers durable work until discovery registers its repo context', t => {
+  const f = fixture(t);
+  f.add(1);
+  const contexts = new Map();
+  let refill;
+  attachDurableReviewerRefill({ db: f.db, contexts,
+    admission: { setRefill: impl => { refill = impl; }, enqueue() {} },
+    processSubject() { assert.fail('refill must defer discovery until admission'); },
+    readScope: () => ({ repos: ['example/fixture'], domains: ['code-pr'], primaryDomainId: 'code-pr' }),
+  });
+  assert.deepEqual(refill([]), []);
+  contexts.set('code-pr:example/fixture', {
+    subjectAdapter: { fetchState() { assert.fail('refill must defer API work until admission'); } },
+    context: { domainId: 'code-pr', hasPriorPostedReview: () => false },
+  });
+  assert.deepEqual(refill([]).map(c => c.prNumber), [1]);
 });

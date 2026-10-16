@@ -516,3 +516,42 @@ test('reviewWithClaude with the proxy disabled keeps the direct handoff and its 
     await upstream.close();
   }
 });
+
+test('corporate reviewer spawn, proactive renewal and rejection renewal keep the corporate provider through broker failover', async () => {
+  const upstream = await startFakeUpstream();
+  const requests = [];
+  let grant = 'grant-a';
+  let proxy;
+  try {
+    const auth = await prepareClaudeOAuthEnv({
+      model: 'synthetic-review-model',
+      sourceEnv: { CLAUDE_BROKER_PROVIDER: 'claude-code-corp', OAUTH_BROKER_SHARED_SECRET: 'synthetic-secret',
+        OAUTH_BROKER_URL: 'http://127.0.0.1:4099', OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4097' },
+      nowMs: FIXTURE_NOW_MS,
+      logger: quietLogger,
+      // Exercise the real mint helper: no provider or credential I/O occurs.
+      fetchImpl: async url => {
+        requests.push(new URL(url));
+        assert.equal(new URL(url).searchParams.get('provider'), 'claude-code-corp');
+        assert.equal(new URL(url).searchParams.get('model'), 'synthetic-review-model');
+        if (new URL(url).port === '4099') return new Response('{}', { status: 403 });
+        return new Response(JSON.stringify({ access_token: grant, provider: 'claude-code-corp', expires_at: '2026-09-28T20:54:30Z' }));
+      },
+    });
+    assert.equal(auth.provider, 'claude-code-corp');
+    await auth.remint(); // proactive re-read uses the identical binding
+    proxy = await startClaudeReviewerTokenProxyForAuth({ auth, logger: quietLogger, startImpl: options => startClaudeReviewerTokenProxy({
+      ...options, upstream: upstream.url, now: () => FIXTURE_NOW_MS, remintCooldownMs: 0,
+    }) });
+    assert.equal((await post(proxy.baseUrl)).status, 200);
+    upstream.rotate('grant-a', 'grant-b');
+    grant = 'grant-b';
+    assert.equal((await post(proxy.baseUrl)).status, 200);
+    assert.equal(proxy.stats().rejectionsRecovered, 1);
+    assert.ok(requests.length >= 6);
+    assert.ok(requests.every(url => url.searchParams.get('provider') === 'claude-code-corp'));
+  } finally {
+    await proxy?.close();
+    await upstream.close();
+  }
+});

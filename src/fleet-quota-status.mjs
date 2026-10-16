@@ -22,10 +22,15 @@ export const QUOTA_HARNESS_PROVIDER = Object.freeze({
   hammer: 'openai',
   'hammer-corp': 'openai',
   'hammer-claude': 'anthropic',
+  'hammer-claude-corp': 'anthropic',
   'codex-corp': 'openai',
   'remediator-codex': 'openai',
   'remediator-codex-corp': 'openai',
   'remediator-claude': 'anthropic',
+  'remediator-claude-corp': 'anthropic',
+  'claude-reviewer': 'anthropic',
+  'claude-reviewer-corp': 'anthropic',
+  'claude-code-corp': 'anthropic',
   claude: 'anthropic',
   'claude-code': 'anthropic',
   gemini: 'google',
@@ -145,8 +150,15 @@ function normalizeModelRows(raw) {
     }));
 }
 
+export function parseHqFleetQuotaSnapshot(stdout) {
+  return extractJsonObject(stdout, 'hq fleet quota status');
+}
+
 export function parseHqFleetQuotaStatus(stdout) {
-  const payload = extractJsonObject(stdout, 'hq fleet quota status');
+  return quotaStatusesFromSnapshot(parseHqFleetQuotaSnapshot(stdout));
+}
+
+export function quotaStatusesFromSnapshot(payload) {
   const providerStatuses = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
   return providerStatuses.map((entry) => ({
     provider: String(entry?.provider || '').trim().toLowerCase(),

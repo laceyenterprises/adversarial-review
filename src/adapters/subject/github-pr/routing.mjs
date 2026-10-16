@@ -141,7 +141,7 @@ function getReviewerRouteTable({
 
 function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
   const raw = String(builderClassInput || '').trim().toLowerCase();
-  const builderClass = ({ 'codex-corp': 'codex', 'remediator-codex': 'codex', 'remediator-codex-corp': 'codex', 'remediator-claude': 'claude-code' })[raw] || raw;
+  const builderClass = ({ 'codex-corp': 'codex', 'remediator-codex': 'codex', 'remediator-codex-corp': 'codex', 'remediator-claude': 'claude-code', 'claude-code-corp': 'claude-code', 'remediator-claude-corp': 'claude-code' })[raw] || raw;
   return Object.prototype.hasOwnProperty.call(routeTable || {}, builderClass)
     ? builderClass
     : null;
@@ -153,6 +153,9 @@ function normalizeReviewerModel(reviewerInput) {
   switch (reviewer) {
     case 'claude':
     case 'claude-code':
+    case 'claude-code-corp':
+    case 'claude-reviewer':
+    case 'claude-reviewer-corp':
       return 'claude';
     case 'codex':
     case 'codex-corp':
@@ -193,10 +196,10 @@ function isCrossModelReviewWaived(builderClassInput, reviewerInput) {
   return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] === reviewerModel;
 }
 
-// The child refuses this family pairing even for an explicit last resort.
+// Both accounts of each native builder family keep the same refusal, even for an explicit last resort.
 export const CODEX_BUILDER_REVIEW_REFUSAL = 'Codex-family reviewer cannot review a Codex-family builder';
 export function reviewerRefusesBuilder(builderClass, reviewerModel) {
-  return normalizeReviewerModel(reviewerModel) === 'codex'
+  return ['codex', 'claude'].includes(normalizeReviewerModel(reviewerModel))
     && isCrossModelReviewWaived(builderClass, reviewerModel);
 }
 

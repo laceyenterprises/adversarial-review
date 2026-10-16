@@ -147,71 +147,22 @@ test('AFH-04: hard-grounded codex-reviewer routes to gemini too (hard OR soft)',
   assert.equal(route.afhReviewerFallback.primaryState, 'exhausted');
 });
 
-// ── 2. codex AND gemini grounded → claude-reviewer, LAST RESORT ────────────
-
-test('AFH-04: codex + gemini both grounded routes to claude-reviewer (last resort)', () => {
-  const args = {
-    builderClass: 'claude-code',
-    baseRoute: effectiveRouteFor('claude-code', 'always-on'),
-    grounding: CODEX_AND_GEMINI_GROUNDED(),
-    geminiReviewerMode: 'always-on',
-  };
-  const decision = afhReviewerFallbackDecision(args);
-  const route = applyAfhReviewerFallback(args);
-  assert.equal(route.reviewerModel, 'claude');
-  assert.equal(route.botTokenEnv, 'GH_CLAUDE_REVIEWER_TOKEN');
-  assert.equal(route.afhReviewerFallback.toReviewerModel, 'claude');
-  assert.equal(route.afhReviewerFallback.lastResort, true, 'claude reviewing a claude-built PR is flagged');
-  // always-on already selected gemini, so gemini IS the grounded primary here;
-  // the cross-model codex primary is the candidate that was tried and rejected
-  // before claude became reachable.
-  assert.equal(route.afhReviewerFallback.fromReviewerModel, 'gemini');
-  assert.equal(route.afhReviewerFallback.primaryProvider, 'google');
-  const skipped = route.afhReviewerFallback.considered.filter((entry) => !entry.selected);
-  assert.ok(
-    skipped.some((entry) => entry.reviewerModel === 'codex' && /grounded/.test(entry.reason)),
-    'the cross-model primary was tried first and recorded as grounded'
-  );
-
-  // …and from a `fallback`-mode deployment, where codex is the live primary,
-  // gemini itself appears in the rejected-candidate audit.
-  const fromCodex = applyAfhReviewerFallback({
-    builderClass: 'claude-code',
-    baseRoute: effectiveRouteFor('claude-code', 'fallback'),
-    grounding: CODEX_AND_GEMINI_GROUNDED(),
-    geminiReviewerMode: 'fallback',
+// Claude accounts share one family, including during a provider outage.
+for (const mode of ['always-on', 'fallback', 'off']) {
+  test(`Claude builds hold when other reviewers are unavailable (${mode})`, () => {
+    const args = {
+      builderClass: 'claude-code', baseRoute: effectiveRouteFor('claude-code', mode),
+      grounding: CODEX_AND_GEMINI_GROUNDED(), geminiReviewerMode: mode,
+    };
+    const decision = afhReviewerFallbackDecision(args);
+    const route = applyAfhReviewerFallback(args);
+    assert.equal(decision.applied, false);
+    assert.equal(route.quotaBlocked, true);
+    assert.notEqual(route.reviewerModel, 'claude');
+    assert.ok(decision.considered.some(entry => entry.reviewerModel === 'claude'
+      && entry.reason === 'claude-builder-integrity-guard'));
   });
-  assert.equal(fromCodex.reviewerModel, 'claude');
-  assert.equal(fromCodex.afhReviewerFallback.fromReviewerModel, 'codex');
-  assert.equal(fromCodex.afhReviewerFallback.lastResort, true);
-  assert.ok(
-    fromCodex.afhReviewerFallback.considered.some(
-      (entry) => entry.reviewerModel === 'gemini' && !entry.selected && /grounded/.test(entry.reason)
-    ),
-    'gemini was tried and rejected before claude was reachable'
-  );
-  assert.match(describeAfhReviewerFallback(decision), /LAST RESORT/);
-  assert.match(describeAfhReviewerFallback(decision), /gemini -> claude/);
-});
-
-test('AFH-04: gemini disabled (mode=off) makes claude the last resort for a grounded codex', () => {
-  // `reviewer.gemini.mode: off` means the operator has told us gemini is not a
-  // usable reviewer — routing a fallback into it would orphan the PR.
-  const route = applyAfhReviewerFallback({
-    builderClass: 'claude-code',
-    baseRoute: effectiveRouteFor('claude-code', 'off'),
-    grounding: CODEX_SOFT_GROUNDED(),
-    geminiReviewerMode: 'off',
-  });
-  assert.equal(route.reviewerModel, 'claude');
-  assert.equal(route.afhReviewerFallback.lastResort, true);
-  assert.ok(
-    route.afhReviewerFallback.considered.some(
-      (entry) => entry.reviewerModel === 'gemini' && entry.reason === 'gemini-reviewer-mode-off'
-    ),
-    'the audit records WHY gemini was skipped'
-  );
-});
+}
 
 // ── DIVERSITY ASSERTION ────────────────────────────────────────────────────
 

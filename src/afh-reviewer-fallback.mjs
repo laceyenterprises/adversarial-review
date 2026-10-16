@@ -1,3 +1,4 @@
+import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 // AFH-04 — reviewer ordered fallback: codex-reviewer → gemini-reviewer →
 // claude-reviewer (LAST RESORT).
 //
@@ -62,7 +63,8 @@ import { fileURLToPath } from 'node:url';
 import {
   isGroundedProviderState,
   harnessCapFromStatuses,
-  parseHqFleetQuotaStatus,
+  parseHqFleetQuotaSnapshot,
+  quotaStatusesFromSnapshot,
 } from './fleet-quota-status.mjs';
 import {
   GEMINI_REVIEWABLE_BUILDER_CLASSES,
@@ -282,8 +284,9 @@ export function applyClaudeReviewerRuntimeGrounding(grounding, runtimeStatus = n
  * Throws only on unparseable input; `readAfhReviewerGrounding` is the fail-open
  * wrapper every production caller should use.
  */
-export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null } = {}) {
-  const rows = parseHqFleetQuotaStatus(stdout);
+export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null, claudeModel = null } = {}) {
+  const payload = parseHqFleetQuotaSnapshot(stdout);
+  const rows = quotaStatusesFromSnapshot(payload);
   if (!rows.length) return unavailableGrounding('no-provider-statuses');
   const providers = {};
   let verdictPresent = false;
@@ -319,6 +322,9 @@ export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null } = {
     error: null,
     verdictPresent,
     providers: Object.freeze(providers),
+    claudeAccountSelection: selectClaudeAccountLaneFromSnapshot(payload, {
+      workerClass: 'claude-reviewer', model: claudeModel, statuses: rows,
+    }),
   });
 }
 
@@ -462,6 +468,7 @@ export async function readAfhReviewerGrounding({
   if (!snapshot) {
     try {
       snapshot = afhGroundingSnapshotFromStdout(stdout, {
+        claudeModel: resolveRemediationModel('claude-reviewer', { env, fallbackModel: null }).resolvedModel,
         codexModel: resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel,
       });
     } catch (err) {
@@ -561,6 +568,12 @@ export function createAfhReviewerGroundingCache({
         ) {
           snapshot = Object.freeze({
             ...entry.lastGood.snapshot,
+            // Legacy routes keep their stale-if-error behavior. A managed
+            // account must not turn cached evidence into fresh headroom.
+            ...(entry.lastGood.snapshot.claudeAccountSelection ? {
+              claudeAccountSelection: { ...entry.lastGood.snapshot.claudeAccountSelection,
+                hold: true, reason: 'claude-account-evidence-unknown' },
+            } : {}),
             staleIfError: Object.freeze({
               reason: snapshot?.reason || 'fleet-quota-status-unavailable',
               error: snapshot?.error || null,
@@ -646,6 +659,15 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
       ...base, state: status.state, source: status.source, known: true,
       hardGrounded: !status.available, grounded: !status.available, poolGrounded: !status.available,
     };
+  }
+  if (model === 'claude' && grounding?.claudeAccountSelection) {
+    const account = grounding.claudeAccountSelection;
+    const key = account.authPath === 'oauth-corp' ? 'anthropic/oauth-corp' : 'anthropic';
+    const entry = grounding.providers?.[key] || base;
+    return { ...base, ...entry, known: true,
+      grounded: account.hold === true && account.reason !== 'claude-account-evidence-unknown',
+      accountHold: account.hold === true,
+      brokerProvider: account.provider || null, source: 'fleet-quota-status' };
   }
   if (model === 'claude' && grounding?.localRuntimeGrounding?.claude?.available === false) {
     const runtimeStatus = grounding.localRuntimeGrounding.claude;
@@ -832,7 +854,7 @@ export function afhReviewerFallbackDecision({
       }
     }
     if (reviewerRefusesBuilder(normalizedBuilder, candidate)) {
-      considered.push({ reviewerModel: candidate, selected: false, reason: 'codex-builder-integrity-guard' });
+      considered.push({ reviewerModel: candidate, selected: false, reason: `${normalizeReviewerModel(candidate)}-builder-integrity-guard` });
       continue;
     }
     const candidateRoute = REVIEWER_ROUTE_BY_MODEL[candidate];

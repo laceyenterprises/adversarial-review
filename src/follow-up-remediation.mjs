@@ -3376,7 +3376,10 @@ async function consumeNextFollowUpJob({
     // Gemini HQ dispatch is broker-backed: the worker-pool adapter seeds
     // OAuth at dispatch time, so the local ~/.gemini gate applies only to
     // the direct CLI path.
-    if (!(hqDispatchEnabled && workerClass === 'gemini')) {
+    if (workerClass === 'remediator-claude-corp' && !hqDispatchEnabled) {
+      throw new Error('corporate Claude remediation requires account-bound HQ dispatch');
+    }
+    if (!(hqDispatchEnabled && ['gemini', 'remediator-claude-corp'].includes(workerClass))) {
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
     }
 

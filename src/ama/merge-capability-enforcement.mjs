@@ -23,6 +23,7 @@ const MERGE_CAPABLE_TOKEN_CLASSES = new Set([
   'hammer',
   'hammer-corp',
   'hammer-claude',
+  'hammer-claude-corp',
   'the-hammer',
   'github-app-merge-agent',
   'lacey-merge-agent',

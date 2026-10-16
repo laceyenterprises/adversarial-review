@@ -229,6 +229,8 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
   const identity = { repo, prNumber: 1, headSha: head };
   const user = userInfo().username;
   let now = at(0), failing = true, launches = 0, probes = 0;
+  // Keep observation time and the simulated recovery passes on the same clock.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(now) });
   let observedRecord;
   const closer = () => maybeDispatchAmaCloser({
     reviewState: { verdict: 'approved', headSha: head, riskClass: 'low', remediationPending: false,
@@ -282,6 +284,7 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
   const gate = createNoProgressLaneGate({ rootDir: args.rootDir, hqRoot: args.rootDir,
     readReviewRow: () => ({ reviewer_head_sha: head }), now: () => now, logger });
   now = at(5 * 60_000);
+  t.mock.timers.setTime(Date.parse(now));
   failing = false;
   let result;
   await runPostedReviewHandlersFairly({ handlers: [{ repoPath: repo, prNumber: 1, headSha: head,

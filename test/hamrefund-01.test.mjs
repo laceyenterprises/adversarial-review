@@ -247,7 +247,10 @@ test('HAMREFUND-01: three deaths retain lifetime charges; cadence and both pages
   const alerts = [];
   const rows = { [DEAD_LRQ]: { status: 'failed', failure_class: 'worker_killed', failure_detail: 'SIGTERM' } };
   let now = Date.parse('2026-10-10T23:07:00Z');
+  // Terminal observations use the wall clock independently of dispatchedAt.
+  t.mock.timers.enable({ apis: ['Date'], now });
   const tick = async (at, nextLaunch) => {
+    t.mock.timers.setTime(at);
     const deps = closerDeps({ launchRows: rows, alerts, nextLaunch });
     const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { dispatchedAt: new Date(at).toISOString() }), ...deps });
     return { result, deps };

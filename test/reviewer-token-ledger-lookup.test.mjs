@@ -49,3 +49,17 @@ for (const [action, expected, timeoutMs] of [
 ]) test(`worker ${action} settles accounting without an orphan`, async () => {
   await assert.rejects(readReviewerEvidenceInWorker({ action }, { workerUrl, timeoutMs }), expected);
 });
+
+
+test('successful evidence exits naturally without racing a process-group signal', async () => {
+  let groupSignals = 0;
+  const result = await readReviewerEvidenceInWorker({ action: 'reply' }, { workerUrl,
+    killProcessGroup() { groupSignals++; throw Object.assign(new Error('synthetic refused signal'), { code: 'EPERM' }); } });
+  assert.deepEqual(result, { input: 7 });
+  assert.equal(groupSignals, 0);
+});
+
+test('a refused group signal still reaps a timed-out reader and reports the timeout', async () => {
+  await assert.rejects(readReviewerEvidenceInWorker({ action: 'timeout' }, { workerUrl, timeoutMs: 100,
+    killProcessGroup() { throw Object.assign(new Error('synthetic refused signal'), { code: 'EPERM' }); } }), /timed out/);
+});

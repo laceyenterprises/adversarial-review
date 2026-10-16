@@ -20,48 +20,54 @@ export async function readReviewerEvidenceInWorker(args, {
   workerUrl = new URL('./reviewer-token-ledger-worker.mjs', import.meta.url),
   timeoutMs = 180_000,
   onReady = () => {},
+  killProcessGroup = (pid, signal) => process.kill(pid, signal),
 } = {}) {
   await acquireWorker();
-  try { return await runLookup(args, { workerUrl, timeoutMs, onReady }); }
+  try { return await runLookup(args, { workerUrl, timeoutMs, onReady, killProcessGroup }); }
   finally { releaseWorker(); }
 }
 
-function runLookup(args, { workerUrl, timeoutMs, onReady }) {
+function runLookup(args, { workerUrl, timeoutMs, onReady, killProcessGroup }) {
   return new Promise((resolve, reject) => {
     const worker = fork(workerUrl, [], {
       execArgv: [], serialization: 'advanced', detached: process.platform !== 'win32',
       stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     });
-    const closed = new Promise(done => worker.once('close', done));
-    let settled = false;
-    const timer = setTimeout(() => finish(new Error('reviewer token ledger worker timed out')), timeoutMs);
-    async function finish(error, usage) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
+    let received = false, stopping = false, usage, failure = null;
+    const timer = setTimeout(() => stop(new Error('reviewer token ledger worker timed out')), timeoutMs);
+    function stop(error) {
+      failure ||= error;
+      if (stopping) return;
+      stopping = true;
+      if (worker.exitCode !== null || worker.signalCode !== null) return;
       try {
-        if (process.platform !== 'win32' && worker.pid) process.kill(-worker.pid, 'SIGKILL');
+        if (process.platform !== 'win32' && worker.pid) killProcessGroup(-worker.pid, 'SIGKILL');
         else worker.kill('SIGKILL');
       } catch (killError) {
-        if (killError.code !== 'ESRCH') error ||= killError;
+        // The group may already have exited. If group signalling is refused,
+        // still reap our direct child; never turn a completed reply into a kill.
+        if (killError.code !== 'ESRCH') worker.kill('SIGKILL');
       }
-      await closed;
-      if (error) reject(error);
-      else resolve(usage);
     }
     worker.on('message', result => {
       if (result?.kind === 'ready') {
-        try { onReady(); } catch (error) { void finish(error); }
+        try { onReady(); } catch (error) { stop(error); }
         return;
       }
-      if (result?.ok === true) void finish(null, result.usage);
-      else void finish(Object.assign(new Error(result?.error || 'reviewer token ledger worker failed'), { code: result?.code }));
+      received = true;
+      if (result?.ok === true) usage = result.usage;
+      else failure ||= Object.assign(new Error(result?.error || 'reviewer token ledger worker failed'), { code: result?.code });
+      // The reader exits after flushing its reply. Keep the timeout armed
+      // until close, but do not signal a successful, naturally exiting group.
     });
-    worker.once('error', error => { void finish(error); });
+    worker.on('error', stop);
     worker.once('close', code => {
-      if (!settled) void finish(new Error(`reviewer token ledger worker exited without evidence (code=${code})`));
+      clearTimeout(timer);
+      if (failure) reject(failure);
+      else if (!received) reject(new Error(`reviewer token ledger worker exited without evidence (code=${code})`));
+      else resolve(usage);
     });
-    try { worker.send(args, error => { if (error) void finish(error); }); }
-    catch (error) { void finish(error); }
+    try { worker.send(args, error => { if (error) stop(error); }); }
+    catch (error) { stop(error); }
   });
 }

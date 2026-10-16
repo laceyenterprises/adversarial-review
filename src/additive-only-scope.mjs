@@ -53,9 +53,9 @@ function additiveOnlyPathAllowed(pathname) {
 }
 
 // A build pack cannot be additive-only without this carve-out. AGENTS.md requires
-// build packs to ship a post-merge-actions YAML (already allowlisted), and every
-// such YAML hardcodes production-host values -- at minimum `user: airlock`. The
-// OSS-readiness enforced gate REFUSES the push unless those hardcodes are
+// build packs to ship a post-merge-actions YAML (already allowlisted), which can
+// contain deployment-specific values. The OSS-readiness gate refuses the push
+// unless those hardcodes are
 // registered in the registry below, which is not allowlisted. So shipping an
 // allowlisted file forces touching a non-allowlisted one, and no build pack could
 // ever satisfy the label the reviewer itself applies.
@@ -121,20 +121,19 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort();
 }
 
-function initialCommitWindow(commits = []) {
+// Commit dates describe authorship, not PR membership at creation. Only a
+// captured opening head can establish the boundary; rebased-away heads are unknown.
+function initialCommitWindow(commits = [], openingHeadSha = null) {
   const normalized = commits
-    .map((commit, index) => ({
-      ...commit,
-      sha: normalizeSha(commit?.sha),
-      index,
-    }))
+    .map((commit) => ({ ...commit, sha: normalizeSha(commit?.sha) }))
     .filter((commit) => commit.sha);
-  if (normalized.length === 0) return { initialCommits: [], laterCommits: [], initialHeadSha: null };
-
+  const index = openingHeadSha
+    ? normalized.findIndex((commit) => commit.sha === openingHeadSha)
+    : -1;
+  if (index < 0) return { laterCommits: [], initialHeadSha: null };
   return {
-    initialCommits: [normalized[0]],
-    laterCommits: normalized.slice(1),
-    initialHeadSha: normalized[0].sha,
+    laterCommits: normalized.slice(index + 1),
+    initialHeadSha: openingHeadSha,
   };
 }
 
@@ -236,14 +235,6 @@ function fileViolatesAdditiveOnly(file, { prForcedByPostMergeAction = false } = 
   return !additiveOnlyPathAllowed(pathname);
 }
 
-function collectFilesForCommits(commits = [], filesByCommit = {}) {
-  const files = [];
-  for (const commit of commits) {
-    files.push(...commitFileEntry(filesByCommit, commit).files);
-  }
-  return files;
-}
-
 function collectFinalFilesForCommits(commits = [], filesByCommit = {}) {
   const filesByPath = new Map();
   for (const commit of commits) {
@@ -266,10 +257,6 @@ function collectFinalFilesForCommits(commits = [], filesByCommit = {}) {
   // The values are the latest commit file objects for paths still present in
   // the PR, not cumulative net-diff objects across the whole PR.
   return [...filesByPath.values()];
-}
-
-function commitsHaveTruncatedFileCoverage(commits = [], filesByCommit = {}) {
-  return commits.some((commit) => commitFileEntry(filesByCommit, commit).truncated);
 }
 
 function buildScopeViolationFinding({
@@ -371,6 +358,42 @@ async function fetchCommitFiles({ owner, repoName, sha, execFileImpl, logger = c
   return { files, truncated: true };
 }
 
+// The repository activity stream retains the immutable opened payload, including
+// both base and head SHAs. Its bounded/possibly delayed history may omit it; that
+// is unknown opening intent, never permission to guess from the first commit.
+// https://docs.github.com/en/rest/activity/events#list-repository-events
+async function fetchOpeningDiff({ owner, repoName, prNumber, pr, commits, execFileImpl, logger }) {
+  try {
+    for (let page = 1; page <= 3; page += 1) {
+      const events = await ghJson(`repos/${owner}/${repoName}/events?per_page=100&page=${page}`, { execFileImpl });
+      if (!Array.isArray(events)) break;
+      const opened = events.find((event) => event?.type === 'PullRequestEvent' &&
+        event?.payload?.action === 'opened' && event?.payload?.number === Number(prNumber) &&
+        pr?.id != null && event?.payload?.pull_request?.id === pr.id);
+      if (opened) {
+        const head = normalizeSha(opened.payload.pull_request.head?.sha);
+        const base = normalizeSha(opened.payload.pull_request.base?.sha);
+        if (!head || !base || !commits.some((commit) => commit?.sha === head)) break;
+        const comparison = await ghJson(
+          `repos/${owner}/${repoName}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?per_page=1`,
+          { execFileImpl },
+        );
+        // Compare returns the net opening diff, not the union of commit files.
+        // GitHub caps that file list at 300; exactly 300 is inconclusive too.
+        if (!Array.isArray(comparison?.files)) break;
+        return {
+          openingHeadSha: head,
+          openingFiles: { files: comparison.files, truncated: comparison.files.length >= 300 },
+        };
+      }
+      if (events.length < 100) break;
+    }
+  } catch (err) {
+    logger?.warn?.(`[additive-only-scope] opening diff unavailable; not deriving class: ${err?.message || err}`);
+  }
+  return { openingHeadSha: null, openingFiles: null };
+}
+
 async function fetchAdditiveOnlyScopeSnapshot({
   repo,
   prNumber,
@@ -386,6 +409,9 @@ async function fetchAdditiveOnlyScopeSnapshot({
     fetchPagedGh(repo, `repos/${owner}/${repoName}/issues/${prNumber}/timeline`, { execFileImpl }),
   ]);
 
+  const opening = hasLabel(labels, ADDITIVE_ONLY_LABEL)
+    ? { openingHeadSha: null, openingFiles: null }
+    : await fetchOpeningDiff({ owner, repoName, prNumber, pr, commits, execFileImpl, logger });
   const filesByCommit = {};
   await mapWithConcurrency(commits, MAX_CONCURRENT_COMMIT_FILE_FETCHES, async (commit) => {
     const sha = normalizeSha(commit?.sha);
@@ -396,6 +422,7 @@ async function fetchAdditiveOnlyScopeSnapshot({
   return {
     repo,
     prNumber,
+    ...opening,
     prCreatedAt: pr?.created_at || null,
     prAuthor: pr?.user?.login || pr?.author?.login || null,
     currentHeadSha: pr?.head?.sha || null,
@@ -426,28 +453,10 @@ async function backfillAdditiveOnlyLabel({ repo, prNumber, execFileImpl = execFi
   }
 }
 
-// Backfill is a BRAND, and a brand outlives the evidence that produced it.
-//
-// The label is not advisory once written. `commitsToScan` below widens from
-// `laterCommits` to the WHOLE commit list the moment `labeledAdditiveOnly` is
-// true, and `additiveOnly` short-circuits on the label without consulting
-// derivation at all. So a backfilled label is self-proving: the next evaluation
-// no longer asks whether the class still derives, it just enforces. Nothing the
-// PR subsequently does -- rebase, squash, drop the offending commit -- can clear
-// it, because the initial commit is now in scope too.
-//
-// That is survivable only while the brand is applied to PRs that are actually in
-// scope. Applying it to a PR the SAME evaluation has just found violating (or has
-// failed to read conclusively, or has waved through on an operator override it
-// did not scan) hands that PR a contract it has already been proven unable to
-// meet, permanently. agent-os#5879, #5883 and #5906 each stopped dead this way on
-// 2026-08-25 and each needed a manual `operator-approved: scope-expand`.
-//
-// So: derive freely, enforce freely -- but only brand on a completed, clean scan.
-// Enforcement does not weaken. Derivation re-runs against live PR state every
-// tick, which is what CRG-07N's "bind the decision to the current reviewed head"
-// asked for in the first place; the finding re-emits for as long as the condition
-// holds, and correctly stops when it no longer does.
+// Derive freely, enforce freely, but brand only on a completed, clean scan.
+// An explicit label widens enforcement to every commit and remains authoritative.
+// Unlabeled derivation re-runs each pass; a withdrawn class must not retain a
+// prior scope finding or prevent ordinary review/remediation.
 function evaluateAdditiveOnlyScope({
   repo,
   prNumber,
@@ -457,6 +466,8 @@ function evaluateAdditiveOnlyScope({
   commits = [],
   filesByCommit = {},
   timeline = [],
+  openingHeadSha = null,
+  openingFiles = null,
 } = {}) {
   const labeledAdditiveOnly = hasLabel(labels, ADDITIVE_ONLY_LABEL);
   const overrideActive = hasLabel(labels, SCOPE_EXPAND_LABEL) &&
@@ -467,10 +478,10 @@ function evaluateAdditiveOnlyScope({
       prAuthor,
     });
 
-  const { initialCommits, laterCommits, initialHeadSha } = initialCommitWindow(commits);
-  const initialCoverageTruncated = commitsHaveTruncatedFileCoverage(initialCommits, filesByCommit);
-  const initialFiles = collectFilesForCommits(initialCommits, filesByCommit);
-  const derivedAdditiveOnly = !initialCoverageTruncated && changedFilesWithinAdditiveOnlyAllowlist(initialFiles);
+  const { laterCommits, initialHeadSha } = initialCommitWindow(commits, openingHeadSha);
+  const derivedAdditiveOnly = Boolean(initialHeadSha && openingFiles &&
+    openingFiles.truncated === false && Array.isArray(openingFiles.files) &&
+    changedFilesWithinAdditiveOnlyAllowlist(openingFiles.files));
   const additiveOnly = labeledAdditiveOnly || derivedAdditiveOnly;
 
   if (!additiveOnly) {

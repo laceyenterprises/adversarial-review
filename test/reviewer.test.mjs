@@ -1,3 +1,4 @@
+import { appendScopeViolationFinding, evaluateAdditiveOnlyScope } from '../src/additive-only-scope.mjs';
 import { ReviewerPromptTooLargeError } from '../src/reviewer-outcomes.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -2033,6 +2034,29 @@ test('scope-violation finding suppresses automated remediation handoff', () => {
 
   assert.deepEqual(result, { queued: false, reason: 'scope-violation' });
   assert.equal(created.length, 0);
+});
+
+test('withdrawn derived scope finding permits the next normal remediation handoff', () => {
+  const reviewText = '## Summary\nFix the implementation.\n\n## Verdict\nRequest changes';
+  const previous = queueWithFakes(appendScopeViolationFinding(reviewText, {
+    kind: 'scope-violation', violating_files: ['src/feature.mjs'],
+  }));
+  assert.equal(previous.result.reason, 'scope-violation');
+  assert.equal(previous.created.length, 0);
+  const next = evaluateAdditiveOnlyScope({
+    repo: 'example/sample-repo', prNumber: 57, labels: [],
+    currentHeadSha: 'implementation', openingHeadSha: 'implementation',
+    openingFiles: { files: [{ filename: 'projects/sample/SCOPE.md' }, { filename: 'src/feature.mjs' }], truncated: false },
+    commits: [{ sha: 'survey' }, { sha: 'implementation' }],
+    filesByCommit: { survey: [{ filename: 'projects/sample/SCOPE.md' }], implementation: [{ filename: 'src/feature.mjs' }] },
+  });
+  assert.equal(next.finding, null);
+  const current = queueWithFakes(appendScopeViolationFinding(reviewText, next.finding), {
+    repo: 'example/sample-repo', prNumber: 57, scopeViolationFinding: next.finding,
+  });
+  assert.equal(current.result.queued, true);
+  assert.equal(current.created.length, 1);
+  assert.equal(current.created[0].reviewBody, reviewText);
 });
 
 test('follow-up handoff refuses to queue when baseBranch is unknown', () => {

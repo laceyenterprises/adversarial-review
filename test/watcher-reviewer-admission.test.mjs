@@ -201,7 +201,7 @@ function durableFixture(t, f, createCandidate = row => f.candidate(row.pr_number
   ensureReviewStateSchema(db);
   t.after(() => db.close());
   const refill = createDurableReviewerRefill({ db, createCandidate });
-  f.admission.setRefill(refill.refill, refill.onRefused);
+  f.admission.setRefill(refill.refill, refill.onSettled);
   const insert = db.prepare(`INSERT INTO reviewed_prs
     (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, revision_ref)
     VALUES ('example/review-fixture', ?, '2026-01-01', 'gemini', 'open', 'pending', ?)`);
@@ -258,4 +258,22 @@ test('SEATIDLE-04: an empty durable backlog is a logged no-op without repeated s
   assert.deepEqual(f.admission.candidates, []);
   assert.deepEqual(f.scheduled, []);
   assert.deepEqual(f.logs, ['[watcher] reviewer admission refill: candidates=0 admitted=0 idle_ms=1']);
+});
+
+
+test('SEATIDLE-04: an admitted attempt rearmed on its unchanged discovery head cannot spin through refill', async t => {
+  const f = fixture(t);
+  const d = durableFixture(t, f);
+  d.insert(201);
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, [201]);
+  // A stale-head result may leave pending intact; a cached discovery snapshot
+  // cannot authorize another attempt until discovery observes a state edge.
+  f.completions[0].resolve(); await flush(); await f.schedulerTick();
+  assert.deepEqual(f.starts, [201]);
+  d.db.prepare("UPDATE reviewed_prs SET rereview_requested_at = '2026-01-02' WHERE pr_number = 201").run();
+  f.admission.capacityFreed(); await f.schedulerTick();
+  assert.deepEqual(f.starts, [201, 201]);
+  for (const completion of f.completions) completion.resolve();
+  await flush();
 });

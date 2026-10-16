@@ -1055,7 +1055,7 @@ const durableReviewerRefill = createDurableReviewerRefill({
     });
   },
 });
-reviewerAdmission.setRefill(durableReviewerRefill.refill, durableReviewerRefill.onRefused);
+reviewerAdmission.setRefill(durableReviewerRefill.refill, durableReviewerRefill.onSettled);
 const reviewerMemoryReservationState = { reservedMb: 0 };
 const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
   onCapacityFreed: async ({ candidate } = {}) => {

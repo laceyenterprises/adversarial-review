@@ -6,7 +6,7 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   let capacityEvent = null;
   const postedByModel = new Map();
   let refill = null;
-  let onRefused = null;
+  let onSettled = null;
   const identity = candidate => `${candidate.repoPath}#${candidate.prNumber}`;
 
   function enqueue(candidate) {
@@ -34,14 +34,22 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     };
     const run = candidate.run;
     candidate.run = async function () {
+      let settlementObserved = false;
+      const observeSettlement = () => {
+        if (settlementObserved) return;
+        try { onSettled?.(candidate); settlementObserved = true; }
+        catch (error) { logger.error?.('[watcher] reviewer settlement snapshot failed:', error?.message || error); }
+      };
+      const release = this.admissionReleaseCapacity;
+      if (release) this.admissionReleaseCapacity = (...args) => {
+        observeSettlement();
+        return release(...args);
+      };
       try {
         return await run.call(this);
       } finally {
-        if (!admitted) {
-          try { onRefused?.(candidate); }
-          catch (error) { logger.error?.('[watcher] reviewer refusal snapshot failed:', error?.message || error); }
-          resolveAdmission({ dispatched: false, at: now() });
-        }
+        observeSettlement();
+        if (!admitted) resolveAdmission({ dispatched: false, at: now() });
       }
     };
     const key = identity(candidate);
@@ -104,6 +112,6 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   return {
     candidates, enqueue, drain, capacityFreed,
     setDrain(impl) { drainImpl = impl; },
-    setRefill(impl, refused) { refill = impl; onRefused = refused; },
+    setRefill(impl, settled) { refill = impl; onSettled = settled; },
   };
 }

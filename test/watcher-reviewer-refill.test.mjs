@@ -25,7 +25,7 @@ function fixture(t, limit = 50) {
 test('durable refill bounds reads, advances past refused rows and wraps without GitHub work', t => {
   const f = fixture(t, 2);
   for (let pr = 1; pr <= 5; pr++) f.add(pr);
-  f.onRefused({ repoPath: 'example/fixture', prNumber: 1 });
+  f.onSettled({ repoPath: 'example/fixture', prNumber: 1 });
   assert.deepEqual(f.refill([]).map(c => c.prNumber), [2]);
   assert.deepEqual(f.refill([]).map(c => c.prNumber), [3, 4]);
   assert.deepEqual(f.refill([]).map(c => c.prNumber), [5]);
@@ -90,4 +90,12 @@ test('durable candidate requeues a changed credential route instead of using the
   assert.equal((await f.candidate.run()).reason, 'durable-refill-route-changed');
   assert.equal(f.counts().runs, 0);
   assert.equal(f.enqueued[0].reviewerModel, 'codex');
+});
+
+
+test('settling an obsolete candidate does not suppress an already observed newer head', t => {
+  const f = fixture(t);
+  f.add(1, { revision_ref: 'head-b' });
+  f.onSettled({ repoPath: 'example/fixture', prNumber: 1, subject: { headSha: 'head-a' } });
+  assert.deepEqual(f.refill([]).map(c => c.prNumber), [1]);
 });

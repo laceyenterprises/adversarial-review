@@ -10,7 +10,10 @@ const state = row => JSON.stringify([
 ]);
 
 export function createDurableReviewerRefill({ db, createCandidate, limit = 50 }) {
-  const refused = new Map();
+  // Include admitted attempts that rearm pending after an obsolete-head result.
+  // Reusing their discovery cache cannot discover a new head; the poll remains
+  // the backstop for that state edge rather than spinning another review.
+  const settled = new Map();
   let cursor = 0;
   const readRow = db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?');
   const readRows = db.prepare(`SELECT * FROM reviewed_prs
@@ -19,10 +22,13 @@ export function createDurableReviewerRefill({ db, createCandidate, limit = 50 })
       AND NOT ${operatorHeldSql()} AND id > ?
     ORDER BY id LIMIT ?`);
   return {
-    onRefused(candidate) {
+    onSettled(candidate) {
       const row = readRow.get(candidate.repoPath, candidate.prNumber);
-      if (row && (!candidate.subject?.headSha || row.revision_ref === candidate.subject.headSha)) {
-        refused.set(identity(row), state(row));
+      const key = `${candidate.repoPath}#${candidate.prNumber}`;
+      if (!row || row.pr_state !== 'open' || !['pending', 'pending-upstream'].includes(row.review_status)) {
+        settled.delete(key);
+      } else if (!candidate.subject?.headSha || row.revision_ref === candidate.subject.headSha) {
+        settled.set(key, state(row));
       }
     },
     refill(queued) {
@@ -32,8 +38,8 @@ export function createDurableReviewerRefill({ db, createCandidate, limit = 50 })
       const present = new Set(queued.map(candidate => `${candidate.repoPath}#${candidate.prNumber}`));
       return rows.flatMap(row => {
         const key = identity(row);
-        if (present.has(key) || refused.get(key) === state(row)) return [];
-        refused.delete(key);
+        if (present.has(key) || settled.get(key) === state(row)) return [];
+        settled.delete(key);
         const candidate = createCandidate(row);
         return candidate ? [candidate] : [];
       });

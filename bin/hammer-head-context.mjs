@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { execGhWithRetry } from '../src/gh-cli.mjs';
 import { fetchHammerHeadRange, readCompletedRemediationRounds } from '../src/ama/hammer-head-validation.mjs';
 const [repo, reviewedHead, currentHead, baseArg, prUrl] = process.argv.slice(2);
@@ -55,7 +58,28 @@ const loadActivityPage = async path => {
   if (next && !next.pathname.endsWith('/activity')) return null;
   return { nodes: JSON.parse(body), next: next ? `${next.pathname.replace(/^\//, '')}${next.search}` : null };
 };
-const range = await fetchHammerHeadRange({ repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
+const loadRebaseCoverage = async ({ base, head }) => {
+  if (![reviewedHead, head, base].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null;
+  const { proveReviewedRebase } = await import('../src/ama/reviewed-rebase.mjs');
+  const execute = promisify(execFile);
+  const git = async args => (await execute('git', args, { timeout: 15000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+  const generatedHelper = fileURLToPath(new URL('./verify-rebase-generated.py', import.meta.url));
+  let generatedFiles = [];
+  try {
+    generatedFiles = JSON.parse((await execute('python3', [generatedHelper, repo, 'policy'], { timeout: 15000 })).stdout);
+    if (!Array.isArray(generatedFiles)) generatedFiles = [];
+  } catch { /* No installed policy: only whole-patch equivalence is available. */ }
+  try { await git(['cat-file', '-e', `${reviewedHead}^{commit}`]); }
+  catch { try { await git(['fetch', '--no-tags', 'origin', reviewedHead]); } catch { return null; } }
+  const verifyGenerated = async (sha, paths) => {
+    try {
+      return (await execute('python3', [generatedHelper, repo, 'verify', sha, ...paths],
+        { timeout: 60000, maxBuffer: 1024 * 1024 })).stdout.trim() === 'verified';
+    } catch { return false; }
+  };
+  return proveReviewedRebase({ reviewedHead, head, base, git, generatedFiles, verifyGenerated });
+};
+const range = await fetchHammerHeadRange({ loadRebaseCoverage, repo, reviewedHead, currentHead, baseRef, loadComments, loadTimelinePage, loadActivityPage, prNumber, hammerBaseHead: process.env.HAM_BASE_HEAD,
   remediationRounds: await readCompletedRemediationRounds(process.env.HAM_ROOT_DIR, repo, prNumber),
   get: async path => JSON.parse((await execGhWithRetry({ args: ['api', path], timeoutMs: 15000 })).stdout) });
 if (!range) {

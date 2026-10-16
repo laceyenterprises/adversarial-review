@@ -394,6 +394,13 @@ hammer still goes through `maybeDispatchAmaCloser`, the same closer lease,
 dispatch record, retry cap, prompt, and merge-under-lease contract. Only the
 posted-review watcher phase's wait behavior changes.
 
+For each confirmed final-round hammer launch, the watcher emits structured event
+`ama.final_review_to_hammer_launch` with PR/head identity, `postedAt`,
+`launchConfirmedAt`, `latencyMs`, and `launchRequestId`. Confirmation is the
+successful dispatch acknowledgement; the duration includes time spent waiting
+for the lane, queue, restart recovery, and dispatch. It does not measure worker
+boot time. Missing or invalid posted timestamps do not fabricate latency.
+
 The control is `watcher.ama_hammer_dispatch_mode`, with env override
 `AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE` and legacy alias
 `ADVERSARIAL_AMA_HAMMER_DISPATCH_MODE`:

@@ -2339,6 +2339,24 @@ async function dispatchAmaClosureFor({
     dispatchContext,
     logger,
   };
+  const logHammerLaunchLatency = (launchResult) => {
+    if (!reviewCycleExhausted || launchResult?.dispatched !== true) return;
+    const postedMs = Date.parse(reviewStateRow?.posted_at || '');
+    const confirmedMs = now();
+    if (!Number.isFinite(postedMs) || !Number.isFinite(confirmedMs) || confirmedMs < postedMs) return;
+    // Measure at the successful hq dispatch acknowledgement, not submission.
+    // A background result is logged here when it settles, never again when the
+    // next tick consumes it. Telemetry cannot change dispatch authority.
+    try {
+      logger?.log?.(JSON.stringify({
+        event: 'ama.final_review_to_hammer_launch', repo: repoPath, prNumber,
+        headSha: dispatchContext.targetRemediationSha, reviewedHeadSha: reviewState.headSha,
+        postedAt: reviewStateRow.posted_at, launchConfirmedAt: new Date(confirmedMs).toISOString(),
+        latencyMs: confirmedMs - postedMs,
+        launchRequestId: launchResult.launchRequestId || launchResult.dispatchId || null,
+      }));
+    } catch { /* A telemetry sink failure must not turn a successful launch into a refusal. */ }
+  };
   throwIfAborted(signal);
   // HAMASYNC-01: in background mode a PR@head alternates between submitting a
   // closer run and applying that run's settled outcome. The outcome goes through
@@ -2441,6 +2459,7 @@ async function dispatchAmaClosureFor({
             operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
         },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
+          if (ok) logHammerLaunchLatency(settledResult);
           logger?.log?.(
             `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +
               (ok
@@ -2501,6 +2520,7 @@ async function dispatchAmaClosureFor({
       const stopTracking = trackCoexistenceOperation(operationTracker, 'ama-hammer-dispatch');
       try {
         result = await maybeDispatchAmaCloserImpl({ ...closerArgs, signal });
+        logHammerLaunchLatency(result);
       } finally {
         stopTracking();
       }

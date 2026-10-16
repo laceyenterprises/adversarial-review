@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
+import { createNoProgressLaneGate, handlePostedReviewRow, runQueuedReviewAdoptionPhase } from '../src/posted-review-row.mjs';
 
 const headSha = 'a'.repeat(40);
 const handler = { repoPath: 'example/project', prNumber: 42, headSha };
@@ -178,6 +178,88 @@ test('HAMLANE-01 intent is saved before running, head-bound, and removed even wh
     assert.equal(queue.takeSettled(key).result.dispatched, true);
     assert.equal(background.readPendingAmaHammerDispatch(rootDir, identity), null);
   } finally {
+    await queue.drain();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+
+for (const mode of ['inline', 'background']) {
+  test(`HAMLANE-01 ${mode} logs final posted review to confirmed hammer launch latency`, async () => {
+    const { rootDir } = fixture();
+    const queue = background.createAmaHammerBackgroundQueue();
+    const events = [];
+    const reviewBody = '## Summary\nA fixture issue remains.\n\n## Verdict\nRequest changes\n\n## Blocking Issues\n\n- Repair the fixture.\n\n## Non-blocking Issues\n\n- None.';
+    const postedAt = '2026-10-16T12:00:00Z';
+    let clockMs = Date.parse(postedAt) + 5 * 60_000;
+    try {
+      const args = { rootDir, repoPath: handler.repoPath, prNumber: handler.prNumber,
+        currentRevisionRef: headSha, labelNames: [], dispatchJob: { remediationStopCode: 'max-rounds-reached' },
+        reviewStateRow: { repo: handler.repoPath, pr_number: handler.prNumber, pr_state: 'open',
+          review_status: 'posted', last_verdict: 'Request changes', risk_class: 'low', remediation_pending: 0,
+          reviewer: 'codex', reviewer_login: 'fixture-reviewer', reviewer_head_sha: headSha,
+          review_body: reviewBody, posted_at: postedAt },
+        candidate: { headSha, riskClass: 'low', prAuthor: 'fixture-builder', prState: 'open',
+          mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', isDraft: false,
+          statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' }],
+          branchProtection: { requiredContexts: ['fixture/adversarial-gate', 'ci/test'] } },
+        logger: { ...logger, log: text => { try { events.push(JSON.parse(text)); } catch {} } },
+        loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+        resolveAmaHammerDispatchModeImpl: () => mode, amaHammerBackgroundQueueImpl: () => queue,
+        fetchCurrentPrStateImpl: async () => ({ state: 'OPEN', headSha, isDraft: false, mergeable: 'MERGEABLE' }),
+        fetchLatestHeadReviewBodiesImpl: async () => [reviewBody],
+        resolveReviewCycleExhaustionImpl: () => ({ reviewCycleExhausted: true }),
+        maybeDispatchAmaCloserImpl: async () => {
+          clockMs += 2 * 60_000;
+          return { dispatched: true, launchRequestId: 'lrq_fixture' };
+        }, now: () => clockMs,
+      };
+      await maybeDispatchAmaClosureFor(args);
+      await queue.drain();
+      if (mode === 'background') await maybeDispatchAmaClosureFor(args);
+      const latency = events.filter(event => event.event === 'ama.final_review_to_hammer_launch');
+      assert.equal(latency.length, 1, 'settled outcome consumption must not log a second launch');
+      assert.equal(latency[0].latencyMs, 7 * 60_000, 'include dispatch time as well as lane/queue wait');
+      assert.equal(latency[0].postedAt, postedAt);
+      assert.equal(latency[0].headSha, headSha);
+      assert.equal(latency[0].launchRequestId, 'lrq_fixture');
+    } finally {
+      await queue.drain();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('HAMLANE-01 first adoption after restart prioritizes pending intent through the normal handler', async () => {
+  const { rootDir, gate } = fixture();
+  const queue = background.createAmaHammerBackgroundQueue();
+  const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+  let release;
+  const order = [];
+  const noop = async () => ({ attempted: 0, checked: 0 });
+  try {
+    queue.submit({ key: background.amaHammerBackgroundKey(identity),
+      pendingDispatch: { rootDir, ...identity }, run: () => new Promise(resolve => { release = resolve; }) });
+    recordNoProgressLaneRun(rootDir, identity, { headSha,
+      progressClass: 'operator-decision-required', fingerprint: 'old-final-gate', logger });
+    await runQueuedReviewAdoptionPhase({ rootDir, logger,
+      noProgressLaneGate: gate,
+      postedReviewHandlers: [
+        { repoPath: handler.repoPath, prNumber: 43, headSha, run: async () => { order.push('ordinary'); } },
+        { ...handler, run: async () => { order.push('recovered'); return pending; } },
+      ],
+      drainReviewerDispatchCandidates: async () => ({ dispatched: 0, deferred: 0 }),
+      retryPendingMergeAgentLifecycleCleanupsImpl: noop, syncPRLifecycleImpl: noop,
+      retryPendingCloserCancelsImpl: noop, retryPendingDagAutowalkOnMergeImpl: noop,
+      retryPendingTriageSyncsImpl: noop, retryPendingMergeCloseoutsImpl: noop,
+      retryPendingRetriggerAckCommentsImpl: noop, reportStalledRetriggerOutcomesImpl: noop,
+      retryPendingRetriggerReviewAckCommentsImpl: noop,
+      sweepRereviewWakeQueueImpl: () => ({ scanned: 0 }), rereviewWakeBacklogImpl: () => ({ pending: 0 }),
+    });
+    assert.deepEqual(order, ['recovered', 'ordinary']);
+  } finally {
+    release?.({ dispatched: false });
     await queue.drain();
     rmSync(rootDir, { recursive: true, force: true });
   }

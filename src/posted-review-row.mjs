@@ -682,7 +682,9 @@ export async function handlePostedReviewRow({
         `[watcher] AMA hammer dispatched for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
       );
-      return { handled: true, outcome: 'ama-dispatched', gateDecision: gateProjection?.decision || null };
+      return { handled: true, outcome: 'ama-dispatched',
+        ...(gateProjection?.decision?.operatorDecisionRequired === true ? { hammerRouteActive: true } : {}),
+        gateDecision: gateProjection?.decision || null };
     }
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;

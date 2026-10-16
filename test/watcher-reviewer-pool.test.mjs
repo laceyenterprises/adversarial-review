@@ -2113,3 +2113,26 @@ test('SEATIDLE-03: asynchronous preparation cannot change route past a full cred
   assert.equal(result.maxObservedConcurrency, 0);
   assert.equal(result.deferred, 1);
 });
+
+
+test('SEATIDLE-03: saturation hooks obey a candidate-specific credential cap after preparation changes route', async () => {
+  let preparations = 0, saturationProbes = 0, started = false;
+  const task = { repoPath: 'example/review-fixture', prNumber: 201, reviewerModel: 'codex',
+    geminiCredentialConcurrency: 1,
+    async prepareAdmission() {
+      assert.ok(++preparations <= 2, 'a saturated candidate must defer instead of looping through preflight');
+      this.reviewerModel = 'gemini';
+    },
+    async prepareForGeminiSaturation() { saturationProbes++; },
+    async run() { started = true; } };
+  const result = await runBoundedReviewerDispatchQueue([task], {
+    maxConcurrent: 3, geminiCredentialConcurrency: 2,
+    activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]),
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  assert.equal(started, false);
+  assert.equal(saturationProbes, 1);
+  assert.equal(preparations, 1);
+  assert.equal(result.deferred, 1);
+  assert.equal(result.maxObservedConcurrency, 0);
+});

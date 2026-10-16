@@ -1418,7 +1418,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       && (entry = nextStartableEntry()) !== null
     ) {
       if (isGeminiCandidate(entry.candidate)
-        && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiConcurrencyLimit
+        && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiLimitForCandidate(entry.candidate)
         && !saturationPrepared.has(entry.candidate)) {
         saturationPrepared.add(entry.candidate);
         await entry.candidate.prepareForGeminiSaturation();

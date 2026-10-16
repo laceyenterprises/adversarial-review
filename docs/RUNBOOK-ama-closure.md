@@ -1308,10 +1308,15 @@ uses (`src/hammer-owner-route.mjs`).
   FIFO review queue, logging `ci-blocked released: head <sha> green` once.
   This includes head changes while a hammer is running. The parked SHA and
   the former five-minute recheck backoff cannot delay release. Red, pending,
-  unknown and racing-head CI remain unclaimable; confirmed head changes update
-  the parking head and hammer ownership continues to reconcile every poll.
+  unknown and racing-head CI remain unclaimable. A response without the
+  current head's SHA updates only the probe timestamp and retries next poll,
+  without releasing, rebinding or reconciling hammer ownership. Confirmed head
+  changes update the parking head before hammer reconciliation.
   Reviewer admission revalidates CI again when it claims the queued head.
-  Same-PR active remediation still prevents new hammer launches and retries.
+  Active follow-up deferral is evaluated before hammer reconciliation while
+  parked. A green head still enters FIFO; the normal admission path defers
+  reviewer dispatch until active remediation settles. Closer-head suppression
+  applies to reviewer dispatch, so it cannot hide a hammer's own reconciliation.
   Automatic failed-CI admission never requeues a stopped `no-progress`
   hand-off; explicit operator remediation retriggers remain available.
 - The closer admits the red, unreviewed head as a final-hammer close and adds a

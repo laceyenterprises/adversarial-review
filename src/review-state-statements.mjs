@@ -67,10 +67,13 @@ export const MARK_REREVIEW_CI_BLOCKED_SQL = `UPDATE reviewed_prs
       AND review_status = 'reviewing'`;
 
 export const MARK_REREVIEW_CI_BLOCKED_RECHECK_SQL = `UPDATE reviewed_prs
-      SET last_attempted_at = ?
+      SET last_attempted_at = ?,
+          reviewer_head_sha = COALESCE(?, reviewer_head_sha),
+          revision_ref = COALESCE(?, revision_ref)
     WHERE repo = ?
       AND pr_number = ?
-      AND review_status = '${REREVIEW_CI_BLOCKED_STATUS}'`;
+      AND review_status = '${REREVIEW_CI_BLOCKED_STATUS}'
+      AND reviewer_head_sha IS ?`;
 
 // TOKDZ-01: the claim for a `token-refresh-pending` row. A refusal is a hold,
 // not an attempt, so -- unlike the infra auto-recovery claim below -- this CAS

@@ -162,6 +162,7 @@ export async function load(url, context, nextLoad) {
         export * from ${JSON.stringify(ciRegressionActualUrl)};
         export async function inspectRemediationCiRegression() {
           globalThis.__ciInspections = (globalThis.__ciInspections || 0) + 1;
+          if (globalThis.__ciGateOverride) return globalThis.__ciGateOverride;
           return { state: globalThis.__ciGreen ? 'green' : 'failed', conclusion: globalThis.__ciGreen ? 'SUCCESS' : 'FAILURE', headSha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : (globalThis.__ciNonHamPushed ? 'non-ham-head-164' : 'timeout-head-164'), totalExternalChecks: 3,
             failedChecks: globalThis.__ciGreen ? [] : [{ name: 'repo-guards', state: 'FAILURE', workflowName: 'repo-guards', detailsUrl: null }],
             pendingChecks: [] };
@@ -266,6 +267,9 @@ function buildRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
+
+import { mkdirSync, renameSync } from 'node:fs';
+import path from 'node:path';
 
 const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
 const db = globalThis.__timeoutHandoffDb;
@@ -381,12 +385,30 @@ if (process.env.FIXTURE_CI_RELEASE) {
     globalThis.__ciGreen = !['red', 'moved-red'].includes(process.env.FIXTURE_CI_RELEASE);
     globalThis.__ciNonHamPushed = ['moved', 'moved-red'].includes(process.env.FIXTURE_CI_RELEASE);
     globalThis.__ciHammerPushed = process.env.FIXTURE_CI_RELEASE === 'hammer';
+    if (['stale-red', 'stale-green', 'missing-head'].includes(process.env.FIXTURE_CI_RELEASE)) {
+      globalThis.__ciNonHamPushed = true;
+      globalThis.__ciGateOverride = {
+        state: process.env.FIXTURE_CI_RELEASE === 'stale-green' ? 'green' : 'failed',
+        headSha: process.env.FIXTURE_CI_RELEASE === 'missing-head' ? null : 'timeout-head-164',
+        failedChecks: [{ name: 'old-head-failure', state: 'FAILURE' }],
+      };
+    }
     await pollOnce(octokit);
   }
   ciSnapshots.push(snapshot());
   globalThis.__ciParkedProbes = globalThis.__ciInspections;
   globalThis.__ciReleaseSpawns = globalThis.__timeoutHandoffReviewerSpawns.length;
   if (['moved', 'same', 'already-green'].includes(process.env.FIXTURE_CI_RELEASE)) await pollOnce(octokit);
+  if (globalThis.__ciGateOverride) {
+    assert.equal(globalThis.__ciBlockedCloserCalls.length, 1, 'unconfirmed CI must not reconcile the hammer');
+    assert.equal(snapshot().reviewer_head_sha, 'timeout-head-164', 'unconfirmed CI must not rebind the parking head');
+    globalThis.__ciGateOverride = null;
+    globalThis.__ciGreen = false;
+    await pollOnce(octokit);
+    assert.equal(globalThis.__ciInspections, 3, 'unconfirmed CI retries next poll');
+    assert.equal(snapshot().reviewer_head_sha, 'non-ham-head-164');
+    assert.equal(globalThis.__ciBlockedCloserCalls.length, 2, 'confirmed head resumes hammer reconciliation');
+  }
 }
 
 if (capScenario === 'paused' || capScenario === 'ham') {
@@ -409,8 +431,24 @@ if (process.env.FIXTURE_CI_PRE_PUSH) {
 }
 if (process.env.FIXTURE_CI_RETRIGGER) {
   assert.equal(globalThis.__ciRetriggerOutcome, 'bumped-and-requeued');
+  // Simulate the operator's pending job being claimed before its worker pushes.
+  // A pending job on an older head is terminal; an in-progress worker still owns it.
+  const { findLatestFollowUpJob } = await import(${JSON.stringify(fileUrl('src', 'operator-retrigger-helpers.mjs') + '?actual')});
+  const { getFollowUpJobDir, writeFollowUpJob } = await import(${JSON.stringify(fileUrl('src', 'follow-up-jobs.mjs') + '?actual')});
+  const latest = findLatestFollowUpJob(process.env.FIXTURE_JOB_ROOT, { repo: 'laceyenterprises/adversarial-review', prNumber: 164 });
+  const activeDir = getFollowUpJobDir(process.env.FIXTURE_JOB_ROOT, 'inProgress');
+  mkdirSync(activeDir, { recursive: true });
+  writeFollowUpJob(latest.jobPath, { ...latest.job, status: 'in_progress', claimedAt: new Date().toISOString() });
+  renameSync(latest.jobPath, path.join(activeDir, path.basename(latest.jobPath)));
   globalThis.__ciNonHamPushed = true;
   await pollOnce(octokit);
+  if (process.env.FIXTURE_CI_ACTIVE_GREEN) {
+    globalThis.__ciGreen = true;
+    await pollOnce(octokit);
+    assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'pending');
+    await pollOnce(octokit);
+    assert.equal(globalThis.__timeoutHandoffReviewerSpawns.length, 0, 'active worker still defers reviewer admission after green release');
+  }
 }
 
 if (process.env.FIXTURE_CI_MULTI_TICK) {
@@ -866,7 +904,7 @@ for (const decision of ['retry', 'no-merge', 'cap']) {
   });
 }
 
-for (const transition of ['non-ham', 'retrigger']) {
+for (const transition of ['non-ham', 'retrigger', 'retrigger-green']) {
   test(`CI-blocked real gate ownership survives pre-push ${transition}`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-pre-push-'));
     try {
@@ -881,21 +919,22 @@ for (const transition of ['non-ham', 'retrigger']) {
         env: { ...process.env, GITHUB_TOKEN: 'fixture-token', AGENT_OS_HQ_BIN: '/usr/bin/false',
           ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false', FIXTURE_AMA_ENABLED: '1', FIXTURE_AMA_REASON: 'dispatched',
           FIXTURE_CI_BLOCKED: '1', FIXTURE_JOB_ROOT: tmp,
-          ...(transition === 'retrigger' ? { FIXTURE_CI_RETRIGGER: '1' } : { FIXTURE_CI_PRE_PUSH: transition }) },
+          ...(transition.startsWith('retrigger') ? { FIXTURE_CI_RETRIGGER: '1',
+            ...(transition === 'retrigger-green' ? { FIXTURE_CI_ACTIVE_GREEN: '1' } : {}) } : { FIXTURE_CI_PRE_PUSH: transition }) },
       });
       const output = `${result.stdout || ''}${result.stderr || ''}`;
       assert.equal(result.status, 0, output);
       const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
       assert.ok(line, output);
       const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
-      assert.equal(summary.reviewStatus, 'ci-blocked', output);
+      assert.equal(summary.reviewStatus, transition === 'retrigger-green' ? 'pending' : 'ci-blocked', output);
       assert.equal(summary.reviewerSpawns.length, 0, output);
       assert.equal(summary.dispatches.length, 0, output);
       assert.equal(summary.ciInspections, transition === 'retrigger' ? 2 : 3, 'ownership does not prevent CI probes');
-      if (transition === 'retrigger') {
+      if (transition.startsWith('retrigger')) {
         assert.equal(summary.ciRetriggerOutcome, 'bumped-and-requeued', output);
-        assert.deepEqual(summary.ciGateOwnership, [true, true], output);
-        assert.deepEqual(summary.ciRemediationDeferrals, ['not-eligible', 'not-eligible'], output);
+        assert.deepEqual(summary.ciRemediationDeferrals, [], output);
+        assert.equal((output.match(/Deferring CI-blocked hammer/g) || []).length, 2, output);
         assert.equal(summary.ciBlockedCloserCalls.length, 0, 'no new hammer or retry while remediation owns the PR');
       } else {
         assert.deepEqual(summary.ciSnapshots, [
@@ -914,7 +953,7 @@ for (const transition of ['non-ham', 'retrigger']) {
 
 // CIBLOCKSTALE-01: a parked row probes current-head CI on every poll,
 // including while the hammer owns the branch and the prior head remains red.
-for (const transition of ['moved', 'red', 'same', 'hammer', 'moved-red', 'already-green']) {
+for (const transition of ['moved', 'red', 'same', 'hammer', 'moved-red', 'already-green', 'stale-red', 'stale-green', 'missing-head']) {
   test(`CI-blocked current-head poll releases only green CI: ${transition}`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-release-'));
     try {
@@ -938,7 +977,12 @@ for (const transition of ['moved', 'red', 'same', 'hammer', 'moved-red', 'alread
       assert.equal(summary.ciParkedProbes, transition === 'already-green' ? 1 : 2, 'every parked poll must inspect CI despite hammer ownership or backoff');
       assert.equal(summary.ciSnapshots[0].review_status, transition === 'already-green' ? 'pending' : 'ci-blocked');
       const row = summary.ciSnapshots[1];
-      if (transition === 'red' || transition === 'moved-red') {
+      if (['stale-red', 'stale-green', 'missing-head'].includes(transition)) {
+        assert.equal(row.review_status, 'ci-blocked');
+        assert.equal(row.reviewer_head_sha, 'timeout-head-164');
+        assert.doesNotMatch(output, /ci-blocked released:/);
+        assert.equal(summary.ciInspections, 3);
+      } else if (transition === 'red' || transition === 'moved-red') {
         assert.equal(row.review_status, 'ci-blocked');
         assert.equal(row.reviewer_head_sha, transition === 'red' ? 'timeout-head-164' : 'non-ham-head-164');
         assert.doesNotMatch(output, /ci-blocked released:/);

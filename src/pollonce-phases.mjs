@@ -177,6 +177,7 @@ import {
   stmtMarkMerged,
   stmtMarkMergedPendingReviewSkipped,
   stmtMarkRereviewCiBlocked,
+  stmtMarkRereviewCiBlockedRecheck,
   stmtMarkReviewCycleCapPaused,
   stmtMarkReviewPopulationRetryAttemptStarted,
   stmtMarkReviewerCommandFailedRecoveredPosted,
@@ -1677,16 +1678,28 @@ export async function processReviewSubject(entry, ctx) {
         // Red/pending heads remain unclaimable. Rebind a moved head only when
         // the CI response confirms the discovery snapshot, so old-head CI can
         // neither release nor pin the row. Unknown/racing responses retry next poll.
-        db.prepare(`UPDATE reviewed_prs SET last_attempted_at = ?,
-            reviewer_head_sha = COALESCE(?, reviewer_head_sha),
-            revision_ref = COALESCE(?, revision_ref)
-          WHERE repo = ? AND pr_number = ? AND review_status = ?
-            AND reviewer_head_sha IS ?`).run(
+        const recheck = stmtMarkRereviewCiBlockedRecheck.run(
           new Date().toISOString(), checkedCurrentHead ? currentHeadSha : null,
           checkedCurrentHead ? pendingRevisionRef : null,
-          repoPath, prNumber, REREVIEW_CI_BLOCKED_STATUS, ciBlockedRow.reviewer_head_sha,
+          repoPath, prNumber, ciBlockedRow.reviewer_head_sha,
         );
         ciBlockedRow = stmtGetReviewRow.get(repoPath, prNumber);
+        if (!checkedCurrentHead || recheck.changes !== 1) {
+          await projectGateStatusSafe(ciBlockedRow);
+          return;
+        }
+        const activeFollowUp = shouldDeferReviewForActiveFollowUp({
+          rootDir: ROOT, repo: repoPath, prNumber, currentRevisionRef: pendingRevisionRef,
+        });
+        if (activeFollowUp.defer) {
+          console.log(
+            `[watcher] Deferring CI-blocked hammer for ${repoPath}#${prNumber}: active follow-up job` +
+              (activeFollowUp.jobId ? ` ${activeFollowUp.jobId}` : '') +
+              ` is ${activeFollowUp.latestJobStatus}`
+          );
+          await projectGateStatusSafe(ciBlockedRow);
+          return;
+        }
         const hammerRoute = await maybeRouteCiBlockedToHammer({
           ciAdmission: { hammerOwner: true, reason: 'ci-blocked-owner-reconcile', ciGate },
           rootDir: ROOT, db, repoPath, prNumber, existing: ciBlockedRow,

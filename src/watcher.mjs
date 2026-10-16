@@ -1047,7 +1047,7 @@ const detachedReviewerDispatchTracker = createDetachedReviewerDispatchTracker({
   onCapacityFreed: async ({ candidate } = {}) => {
     // The tracker has removed the completed dispatch's credential reservation.
     // Both direct admission and the durable discovery wake follow that release.
-    reviewerAdmission.capacityFreed();
+    reviewerAdmission.capacityFreed({ candidate });
     try {
       // Refusals should hand capacity to the retained queue without causing a
       // discovery loop. Preserve the durable wake only for an admitted spawn.
@@ -1204,7 +1204,7 @@ async function pollOnceWithinBudget(
       10,
     ) || 0,
   ) || undefined;
-  const admissionSettlementSplitEnabled = ['1', 'true', 'yes', 'on'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
+  const admissionSettlementSplitEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '').trim().toLowerCase());
   console.log(`[watcher] reviewer admission settlement split ${admissionSettlementSplitEnabled ? 'enabled' : 'disabled'} (ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT=${process.env.ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT ?? '<unset>'})`);
   const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const { retainedWatcherWakes, priorityDiscoveryPending } = createWatcherDispatchPriority({ rootDir: ROOT, db });

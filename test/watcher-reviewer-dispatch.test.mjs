@@ -199,3 +199,43 @@ for (const scenario of ['live', 'pipeline', 'unknown', 'poll', 'zero', 'other-re
     assert.equal(queue.length, 1);
   });
 }
+
+test('SEATIDLE-03: next preflight completes while busy and admission consumes it without repeating the work', async () => {
+  let releaseFirst, prepared = false, probes = 0, active = 0, maxActive = 0;
+  const firstDone = new Promise(resolve => { releaseFirst = resolve; });
+  const starts = [];
+  const first = candidate(201, async () => { active++; maxActive = Math.max(maxActive, active);
+    starts.push(201); await firstDone; active--; });
+  const next = candidate(202, async () => {
+    assert.equal(prepared, true, 'admission must consume a completed preflight');
+    active++; maxActive = Math.max(maxActive, active); starts.push(202); active--;
+    assert.equal(probes, 1, 'spawn must not repeat the preflight probes');
+  });
+  let preparation;
+  next.prepareAdmission = () => preparation ??= Promise.resolve().then(() => { probes++; prepared = true; });
+  const queue = [first, next];
+  const drain = createReviewerDispatchDrain(options(queue, {
+    reviewerPoolConfig: { enabled: true, maxConcurrent: 1 },
+  }));
+  await drain('poll');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prepared, true, 'next preflight runs before the busy seat frees');
+  assert.deepEqual(starts, [201]);
+  releaseFirst(); await new Promise(resolve => setImmediate(resolve));
+  await drain('capacity-freed');
+  assert.deepEqual(starts, [201, 202]);
+  assert.equal(probes, 1);
+  assert.equal(maxActive, 1);
+});
+
+test('SEATIDLE-03: an inline hammer defers its PR without blocking another PR seat', async () => {
+  const starts = [];
+  const blocked = candidate(201, async () => starts.push(201));
+  blocked.admissionBlocked = () => true;
+  blocked.prepareAdmission = () => { throw new Error('blocked PR must not stall the admission mutex'); };
+  const next = candidate(202, async () => starts.push(202));
+  const queue = [blocked, next];
+  await createReviewerDispatchDrain(options(queue))('capacity-freed');
+  assert.deepEqual(starts, [202]);
+  assert.deepEqual(queue, [blocked]);
+});

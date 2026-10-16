@@ -2073,3 +2073,66 @@ test('CASCADECAP-01 timeout retries cannot reserve a first-pass seat ahead of wa
     singleWave: true, singleWaveSettleGraceMs: 0, logger: { log() {}, warn() {} } });
   assert.equal(claimed[0], 2, 'the free identity seat goes to waiting re-review work');
 });
+
+
+test('SEATIDLE-03: every selected candidate prepares before reservation even after a wave of refusals', async () => {
+  const prepared = [], started = [], reservations = new Set();
+  const tasks = Array.from({ length: 5 }, (_unused, index) => ({
+    repoPath: 'example/review-fixture', prNumber: 201 + index, reviewerModel: 'gemini',
+    async prepareAdmission() {
+      assert.equal(reservations.has(this.prNumber), false, 'preflight precedes the reservation observer');
+      prepared.push(this.prNumber);
+    },
+    async run() {
+      assert.ok(prepared.includes(this.prNumber), 'even a candidate beyond the warm wave must already be prepared');
+      started.push(this.prNumber);
+      return index < 4 ? { dispatched: false, reason: 'synthetic-pre-spawn-refusal' } : { dispatched: true };
+    },
+  }));
+  const result = await runBoundedReviewerDispatchQueue(tasks, { maxConcurrent: 1, geminiCredentialConcurrency: 1,
+    onCandidateStarted: ({ candidate }) => reservations.add(candidate.prNumber),
+    logger: { log() {}, warn() {}, error() {} } });
+  assert.deepEqual(prepared, [201, 202, 203, 204, 205]);
+  assert.deepEqual(started, prepared);
+  assert.equal(result.dispatched, 1);
+  assert.equal(result.maxObservedConcurrency, 1);
+});
+
+test('SEATIDLE-03: asynchronous preparation cannot change route past a full credential limit', async () => {
+  let started = false;
+  const task = { repoPath: 'example/review-fixture', prNumber: 201, reviewerModel: 'codex',
+    async prepareAdmission() { this.reviewerModel = 'gemini'; },
+    async run() { started = true; } };
+  const result = await runBoundedReviewerDispatchQueue([task], {
+    maxConcurrent: 2, geminiCredentialConcurrency: 1,
+    activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]),
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  assert.equal(started, false);
+  assert.equal(result.dispatched, 0);
+  assert.equal(result.maxObservedConcurrency, 0);
+  assert.equal(result.deferred, 1);
+});
+
+
+test('SEATIDLE-03: saturation hooks obey a candidate-specific credential cap after preparation changes route', async () => {
+  let preparations = 0, saturationProbes = 0, started = false;
+  const task = { repoPath: 'example/review-fixture', prNumber: 201, reviewerModel: 'codex',
+    geminiCredentialConcurrency: 1,
+    async prepareAdmission() {
+      assert.ok(++preparations <= 2, 'a saturated candidate must defer instead of looping through preflight');
+      this.reviewerModel = 'gemini';
+    },
+    async prepareForGeminiSaturation() { saturationProbes++; },
+    async run() { started = true; } };
+  const result = await runBoundedReviewerDispatchQueue([task], {
+    maxConcurrent: 3, geminiCredentialConcurrency: 2,
+    activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]),
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  assert.equal(started, false);
+  assert.equal(saturationProbes, 1);
+  assert.equal(preparations, 1);
+  assert.equal(result.deferred, 1);
+  assert.equal(result.maxObservedConcurrency, 0);
+});

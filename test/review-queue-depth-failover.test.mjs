@@ -936,7 +936,8 @@ test('pollonce-phases keeps rereview safety independent from queue-depth admissi
   const src = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   assert.match(src, /depthPassKind \?\?= reviewerDispatchPassKind\(/);
   assert.match(src, /const passKind = reviewerSafetyPassKind\(\{[\s\S]*?hasPriorCompletedReview: Boolean\(stmtHasCompletedReview\.get\(repoPath, prNumber\)\)/);
-  assert.match(src, /if \(passKind === 'rereview'\) \{[\s\S]*?getHeadCloserCommitSuppressionWithBoundedRetry\(/);
+  assert.match(src, /closer: \(\) => preflightInputs\(\)\.passKind === 'rereview'[\s\S]*?getHeadCloserCommitSuppressionWithBoundedRetry\(/);
+  assert.match(src, /if \(passKind === 'rereview'\) \{[\s\S]*?const closerHead = await readPreflight\('closer'\)/);
 });
 
 test('CI-red reservations are refunded so spill slots reach later admissible PRs', () => {

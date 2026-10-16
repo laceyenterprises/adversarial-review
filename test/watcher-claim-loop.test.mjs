@@ -21,6 +21,8 @@ function fixtureEnv(overrides = {}) {
     ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: '',
     AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '6',
     ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS: '60000',
+    // Legacy synchronous assertions explicitly exercise the rollback mode.
+    ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT: 'false',
     ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false',
     WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
     ...overrides,
@@ -3620,8 +3622,10 @@ function seatIdleSynthetic(source) {
     .replaceAll("name: 'adversarial-review'", "name: 'review-fixture'");
 }
 
-for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 'unreadable']) {
-  test(stale === 'release-order'
+for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 'unreadable', 'slow-settlement']) {
+  test(stale === 'slow-settlement'
+    ? 'SEATIDLE-03: default admission hands off before slow runtime accounting finishes'
+    : stale === 'release-order'
     ? 'SEATIDLE-02: real poll releases the credential reservation before an immediate handoff'
     : `SEATIDLE-01: real poll hands off retained candidates while posted work blocks (${stale})`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'seatidle-handoff-'));
@@ -3673,6 +3677,12 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
         export async function resolve`);
       loader = loader.replace('export async function load(url, context, nextLoad) {', `
         export async function load(url, context, nextLoad) {
+          if (${JSON.stringify(stale === 'slow-settlement')} && url === ${JSON.stringify(fileUrl('src', 'reviewer-spawn-settle.mjs'))}) {
+            const result = await nextLoad(url, context);
+            result.source = String(result.source).replace('if (result.stdoutTail)',
+              'if (prNumber === 201) { globalThis.__seatIdleSettlementEntered = true; await globalThis.__seatIdleSettlementGate; globalThis.__seatIdleSettlementDone = true; } if (result.stdoutTail)');
+            return result;
+          }
           if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
             const result = await nextLoad(url, context);
             result.source = String(result.source).replace(
@@ -3755,6 +3765,8 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
               mergedAt: globalThis.__seatIdleStale === 'merged' ? '2026-10-15T01:00:00Z' : null,
               headRefOid: 'moved-head', labels: [] };
           };
+          let releaseSettlement;
+          globalThis.__seatIdleSettlementGate = new Promise(resolve => { releaseSettlement = resolve; });
           let enterPoll, releasePoll;
           const pollEntered = new Promise(resolve => { enterPoll = resolve; });
           globalThis.__seatIdlePollEntered = enterPoll;
@@ -3775,18 +3787,24 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
         afterFirstPoll: `
           assert.equal(pollFinished, false);
           assert.deepEqual(starts(), [201]);
-          globalThis.__seatIdleStale = ${JSON.stringify(['none', 'release-order'].includes(stale) ? null : stale)};
+          globalThis.__seatIdleStale = ${JSON.stringify(['none', 'release-order', 'slow-settlement'].includes(stale) ? null : stale)};
           globalThis.__seatIdleReturns.get(201)();
-          await waitForStart(${['none', 'release-order'].includes(stale) ? 202 : 203});
+          await waitForStart(${['none', 'release-order', 'slow-settlement'].includes(stale) ? 202 : 203});
           assert.equal(pollFinished, false, 'next spawn precedes the end of posted-review work');
           assert.equal(globalThis.__seatIdleDurableWakes, 1,
             'only the finished reviewer requests discovery; pre-spawn refusals do not repoll');
-          assert.deepEqual(starts(), ${JSON.stringify(['none', 'release-order'].includes(stale) ? [201, 202] : [201, 203])});
+          assert.deepEqual(starts(), ${JSON.stringify(['none', 'release-order', 'slow-settlement'].includes(stale) ? [201, 202] : [201, 203])});
           ${stale === 'release-order' ? `
             assert.ok(globalThis.__seatIdleCapacityCounts.length > 0);
             assert.ok(globalThis.__seatIdleCapacityCounts.every(count => count === 0),
               'every capacity-freed signal follows credential reservation release');
           ` : ''}
+          ${stale === 'slow-settlement' ? `
+            assert.equal(globalThis.__seatIdleSettlementEntered, true);
+            assert.equal(Boolean(globalThis.__seatIdleSettlementDone), false,
+              'the next reviewer starts while the prior accounting is blocked');
+          ` : ''}
+          releaseSettlement();
           releasePoll(); await runningPoll;
           for (let turn = 0; turn < 5; turn++) {
             for (const resolve of globalThis.__seatIdleReturns.values()) resolve();
@@ -3805,6 +3823,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
           env: fixtureEnv({ ...installGhFixture(tmp),
             AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '1',
             ADVERSARIAL_REVIEWER_DISPATCH_SINGLE_WAVE_SETTLE_GRACE_MS: '1',
+            ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT: stale === 'slow-settlement' ? '' : 'false',
           }),
         });
       assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);

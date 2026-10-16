@@ -243,6 +243,8 @@ test('GEMINIQUOTA-01: no-reset checkout failure falls back in the same pass and 
     const capture = newCapture();
     const models = [];
     const settled = [];
+    const postedAt = '2026-01-02T03:04:05.000Z';
+    const postLookups = [];
     const args = {
       ...spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false', ADVERSARIAL_REVIEW_STATE_DIR: rootDir }, capture }),
       rootDir,
@@ -251,6 +253,10 @@ test('GEMINIQUOTA-01: no-reset checkout failure falls back in the same pass and 
       reviewerModel: 'gemini',
       builderTag: 'codex',
       geminiQuotaFallbackRoute: { reviewerModel: 'claude-code', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' },
+      readDurablePostedAtImpl: lookup => {
+        postLookups.push(lookup);
+        return lookup.reviewerModel === 'claude-code' ? postedAt : null;
+      },
       onPostOperationSettled: result => settled.push(result),
       reviewerRuntimeAdapterOverride: {
         async spawnReviewer({ model }) {
@@ -266,6 +272,9 @@ test('GEMINIQUOTA-01: no-reset checkout failure falls back in the same pass and 
     assert.equal(settled.length, 1);
     assert.equal(settled[0].ok, true);
     assert.equal(settled[0].effectiveReviewerModel, 'claude-code');
+    assert.equal(settled[0].durablePostedAt, Date.parse(postedAt));
+    assert.equal(postLookups[0].reviewerModel, 'claude-code');
+    assert.equal(postLookups[0].attemptNumber, 2);
     const db = openReviewStateDb(rootDir);
     try {
       const passes = db.prepare('SELECT attempt_number, reviewer_model, status, metadata_json FROM reviewer_passes ORDER BY attempt_number').all();

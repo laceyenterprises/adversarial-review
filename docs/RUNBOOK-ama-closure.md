@@ -3113,3 +3113,70 @@ window. The old table is retained but no longer read. See the wait data model
 for schema and recovery details.
 Replay coverage uses invented histories and an offline transport that rejects
 unrecognized paths.
+
+### Reviewer seat handoff (SEATIDLE-03)
+
+Non-pipeline reviews enable admission/settlement splitting by default. The
+watcher commits the post success or failure before releasing admission. The
+runtime and its identity lease have ended at this boundary; process reservations
+are removed before token accounting. Token-ledger lookup/retries, token artifact
+writing, and reviewer-pass completion continue outside the seat. The evidence
+reader can call `queryPostgresRows` / `spawnSync(psql)` (30-second subprocess
+timeout) and traverse transcripts synchronously, so it runs on a separate reader
+process. At most two accounting reader processes run concurrently; each active lookup has
+a bounded lifetime. A blocked ledger therefore cannot block the watcher's event
+loop after capacity release. A failed durable
+row write retains the seat through the fallback settlement path. Exceptions
+before release still reach the pool's thrown-failure circuit breaker.
+
+The inline final-hammer handoff starts at the post callback under a separate
+in-process PR fence. Discovery skips that PR while its handoff runs, and queued
+candidates for it remain deferred. Other PRs can use the credential immediately.
+The durable posted row remains the recovery handle after a watcher restart; all
+existing current-head, closer lease, and merge-eligibility checks still apply.
+Sequential pipeline domains retain their full-pass reservations.
+
+The shared dispatch drain prepares a bounded next wave while reviewers are
+busy. Preparation holds no claim or credential reservation. Completed maintenance
+is keyed by route and retained for that discovery snapshot, so a multi-minute
+review cannot expire it and repeat slow work at handoff. Rediscovery replaces
+the candidate and its cache. Mutable CI evidence uses a short TTL; live PR state
+and exact-head dedup refresh last on each admission wave before capacity is
+reserved. The admitted run
+consumes those results; the existing head lease, durable claim CAS, memory and
+credential gates still run. Route spillover prepares the new route before the
+pool rechecks capacity. Preparation errors retain the existing refusal behavior.
+
+`reviewer seat handoff: model=... post_to_spawn_ms=...` measures from the exact
+review attempt's captured durable post timestamp (`reviewer_passes.body_captured_at`)
+to the next process-start callback on that model lane. It survives an empty handoff and a
+later poll admission. Missing post evidence or an adapter without a process-start
+callback produces no invented process gap. The older
+`reviewer admission on capacity-freed ... idle_ms=...` measures only release to
+runtime admission, so it excludes both the post-to-release interval and adapter
+startup before the process callback. These logs describe
+model lanes, not individual identities in a multi-identity pool; use the single
+seat deployment for the acceptance comparison.
+
+`reviewer settlement timing` logs split token-ledger lookup (including retry
+attempts), token/artifact/pass completion, durable row settlement, and the inline
+final-hammer handoff. `reviewer preflight timing` logs individual preparation
+probes. Use these to attribute the observed settlement delay after deployment;
+static inspection alone cannot identify which external call consumed its time.
+
+After deployment, SRE confirms the watcher restarted. With a backlog on a single
+seat, measure the post-to-spawn median over a few hours; the target is under
+15 seconds. Cross-check adjacent `reviewer_passes.ended_at` / `started_at` values
+as a separate execution-gap signal (they do not share the durable-post origin).
+No host environment edit is required when
+`ADVERSARIAL_REVIEW_ADMISSION_SETTLEMENT_SPLIT` is unset. Explicit `0`, `false`,
+`no`, or `off` retain legacy settlement inside admission as an operator rollback.
+No CI runner, trigger, or gate is added.
+
+The durable post lookup uses the effective reviewer model, including fallback
+routes, to match the persisted reviewer pass. Token-ledger evidence uses a
+shared two-worker reader by default. Tests and embedded runtimes may use
+`createReviewerEvidenceReader({ maxConcurrent })` from
+`src/reviewer-token-ledger-lookup.mjs` to own an isolated accounting queue;
+its limit must be a positive integer. Queue capacity is released on worker close,
+including reader failure and timeout, before the next queued lookup starts.

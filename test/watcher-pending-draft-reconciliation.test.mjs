@@ -177,13 +177,13 @@ test('watcher app-token reconciliation derives bot login and never probes /user'
   assert.equal(event.cleared, 1);
 });
 
-test('watcher runs pending-draft reconciliation after claim and freshness re-check', () => {
+test('watcher consumes prepared draft reconciliation after claim and freshness re-check', () => {
   const source = readFileSync(POLLONCE_PHASES_SOURCE, 'utf8');
   const claimIndex = source.indexOf(': stmtMarkAttemptStarted.run(');
   const infraClaimIndex = source.indexOf('? stmtMarkInfraAutoRecoveryAttemptStarted.run(');
   const freshnessIndex = source.indexOf('Freshness re-check (2026-05-18)');
   const staleHeadIndex = source.indexOf('releasing claim and skipping stale reviewer spawn');
-  const reconcileIndex = source.indexOf('const preSpawnReconciliation = await reconcilePendingDraftsBeforeSpawn({');
+  const reconcileIndex = source.indexOf("const preSpawnReconciliation = await readPreflight('drafts')");
   const releaseIndex = source.indexOf(
     'stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);',
     reconcileIndex
@@ -194,7 +194,7 @@ test('watcher runs pending-draft reconciliation after claim and freshness re-che
   assert.ok(infraClaimIndex < claimIndex, 'infra-recovery claim should be checked before the generic claim');
   assert.ok(freshnessIndex > claimIndex, 'freshness re-check should happen after claim');
   assert.ok(staleHeadIndex > freshnessIndex, 'stale-head release should happen inside the freshness re-check');
-  assert.ok(reconcileIndex > staleHeadIndex, 'pending-draft reconciliation should only run after stale-head release has a chance to skip');
+  assert.ok(reconcileIndex > staleHeadIndex, 'draft reconciliation is consumed only after stale-head release has a chance to skip');
   assert.ok(reconcileIndex > freshnessIndex, 'reconciliation should happen after freshness re-check');
   assert.ok(releaseIndex > reconcileIndex, 'skip-spawn path should release the claim');
 });
@@ -221,7 +221,7 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   // phase module and the phase → adoption ordering from watcher.mjs.
   const source = readFileSync(POLLONCE_PHASES_SOURCE, 'utf8');
   const guardIndex = source.indexOf("let skipReviewerSpawnReason = null;");
-  const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
+  const closerProbeIndex = source.indexOf("const closerHead = await readPreflight('closer')", guardIndex);
   const closerSuppressedUnlessOperatorIndex = source.indexOf(
     "if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview) {",
     guardIndex
@@ -246,7 +246,7 @@ test('watcher terminal rereview skip releases claim and falls through to close p
     operatorRetriggerIndex > guardIndex && operatorRetriggerIndex < closerProbeIndex,
     'explicit operator retrigger should be resolved before terminal closer-head suppression'
   );
-  assert.ok(closerProbeIndex > guardIndex, 'closer-head probe should use bounded retry wrapper');
+  assert.ok(closerProbeIndex > guardIndex, 'closer-head evidence should be consumed inside the rereview guard');
   assert.ok(closerSuppressedIndex > closerProbeIndex, 'terminal closer-head check should follow the probe');
   assert.equal(
     closerSuppressedIndex,

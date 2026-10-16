@@ -169,3 +169,25 @@ test('SEATIDLE-01: discovery queues a newer head while the previous head still o
   assert.equal(f.counts().maxActive, 1);
   f.completions[1].resolve(); await flush();
 });
+
+test('SEATIDLE-03: gap measures the durable post through settlement and a later poll spawn', async () => {
+  let now = 10_000;
+  const logs = [], scheduled = [];
+  const admission = createReviewerAdmissionQueue({ now: () => now,
+    logger: { ...quiet, log: line => logs.push(line) }, schedule: callback => scheduled.push(callback) });
+  // The post predates runtime exit and the capacity-freed signal by 40 seconds.
+  now = 50_000;
+  admission.capacityFreed({ candidate: { reviewerModel: 'gemini', durablePostedAt: 10_000 } });
+  scheduled.shift()();
+  await flush(); // no backlog yet: preserve the post origin through an empty handoff
+  now = 60_000;
+  const next = { repoPath: 'example/review-fixture', prNumber: 202, reviewerModel: 'gemini',
+    async run() {
+      this.markAdmissionStarted();
+      now = 65_000; // the adapter takes another five seconds to create its process
+      this.markReviewerSpawned?.();
+    } };
+  admission.enqueue(next);
+  await next.run();
+  assert.deepEqual(logs, ['[watcher] reviewer seat handoff: model=gemini post_to_spawn_ms=55000']);
+});

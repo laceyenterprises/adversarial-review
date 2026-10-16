@@ -115,7 +115,14 @@ function clearPendingDispatch(entry) {
 export function clearPendingAmaHammerDispatch(rootDir, identity, { logger = console } = {}) {
   const current = readPendingAmaHammerDispatch(rootDir, identity, { logger });
   if (!current) return;
-  clearPendingDispatch({ pendingDispatch: { ...current, rootDir } });
+  rmSync(pendingDispatchPath(rootDir, identity), { force: true });
+}
+
+// Only confirmed PR termination retires intent regardless of its recorded head.
+// Normal launch/hold cleanup above must stay head-bound; queue callbacks must
+// additionally check attemptId before removing a potentially replaced intent.
+export function clearPendingAmaHammerDispatchForTerminalPr(rootDir, identity) {
+  rmSync(pendingDispatchPath(rootDir, identity), { force: true });
 }
 
 /**

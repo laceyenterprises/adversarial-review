@@ -158,18 +158,82 @@ test('HAMLANE-01 the posted-review handler exposes hammer ownership despite the 
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });
 
-async function handleClosureResult(rootDir, amaClosureResult, outcome = 'ama-pending') {
+async function handleClosureResult(rootDir, amaClosureResult, outcome = 'ama-pending', {
+  gateDecision = finalGate, candidate = { merged: false, prState: 'open' },
+} = {}) {
   const row = { review_status: 'posted', pr_state: 'open', reviewer_head_sha: headSha };
   return handlePostedReviewRow({ rootDir, repoPath: handler.repoPath,
     prNumber: handler.prNumber, existing: row, currentRevisionRef: headSha, labelNames: [], logger,
-    projectGateStatusSafe: async () => ({ decision: finalGate }),
-    fetchMergeAgentCandidateImpl: async () => ({ merged: false, prState: 'open' }),
+    projectGateStatusSafe: async () => ({ decision: gateDecision }),
+    fetchMergeAgentCandidateImpl: async () => candidate,
     buildMergeAgentDispatchJobImpl: () => ({}),
     latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
     reviewBodyHasScopeViolationFindingImpl: () => false, currentReviewRowReader: () => row,
     resolveMergeAgentCoexistenceForWatcherImpl: async () => ({ outcome, amaClosureResult }),
   });
 }
+
+for (const terminalReason of ['closed', 'merged']) {
+  for (const operatorSkip of [false, true]) {
+    test(`HAMLANE-01 ${terminalReason} PR retires superseded-head intent; operator skip=${operatorSkip}`, async () => {
+      const { rootDir } = fixture();
+      const queue = background.createAmaHammerBackgroundQueue({ maxConcurrent: 1 });
+      const stale = { repo: handler.repoPath, prNumber: handler.prNumber, headSha: 'b'.repeat(40) };
+      const other = { ...stale, prNumber: handler.prNumber + 1 };
+      let release;
+      try {
+        // Hold the only slot so both persisted intents model abandoned queued work.
+        queue.submit({ key: 'fixture-blocker', run: () => new Promise(resolve => { release = resolve; }) });
+        for (const identity of [stale, other]) {
+          queue.submit({ key: background.amaHammerBackgroundKey(identity),
+            pendingDispatch: { rootDir, ...identity }, run: async () => ({}) });
+        }
+        assert.ok(background.readPendingAmaHammerDispatch(rootDir, stale));
+        const value = await handleClosureResult(rootDir, {}, 'pr-terminal', {
+          gateDecision: operatorSkip ? { reason: 'operator-skip-label' } : finalGate,
+          candidate: { merged: terminalReason === 'merged', prState: terminalReason },
+        });
+        assert.equal(value.prTerminal, true);
+        assert.equal(background.readPendingAmaHammerDispatch(rootDir, stale), null);
+        assert.ok(background.readPendingAmaHammerDispatch(rootDir, other), 'other PR intent is preserved');
+        // Terminal cleanup is also harmless when the intent has already gone.
+        await handleClosureResult(rootDir, {}, 'pr-terminal');
+      } finally {
+        release?.({});
+        await queue.drain();
+        rmSync(rootDir, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test('HAMLANE-01 an old queue callback preserves a replacement intent at the same head', async () => {
+  const { rootDir } = fixture();
+  const oldQueue = background.createAmaHammerBackgroundQueue();
+  const newQueue = background.createAmaHammerBackgroundQueue();
+  const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+  const key = background.amaHammerBackgroundKey(identity);
+  let releaseOld, releaseNew;
+  try {
+    oldQueue.submit({ key, pendingDispatch: { rootDir, ...identity },
+      run: () => new Promise(resolve => { releaseOld = resolve; }) });
+    const oldIntent = background.readPendingAmaHammerDispatch(rootDir, identity);
+    newQueue.submit({ key, pendingDispatch: { rootDir, ...identity },
+      run: () => new Promise(resolve => { releaseNew = resolve; }) });
+    const replacement = background.readPendingAmaHammerDispatch(rootDir, identity);
+    assert.notEqual(replacement.attemptId, oldIntent.attemptId);
+    releaseOld({});
+    await oldQueue.drain();
+    assert.deepEqual(background.readPendingAmaHammerDispatch(rootDir, identity), replacement);
+    background.clearPendingAmaHammerDispatch(rootDir, identity);
+    assert.equal(background.readPendingAmaHammerDispatch(rootDir, identity), null);
+  } finally {
+    releaseOld?.({});
+    releaseNew?.({});
+    await Promise.all([oldQueue.drain(), newQueue.drain()]);
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
 
 for (const amaClosureResult of [
   ...['hammer-lifetime-dispatch-ceiling', 'hammer-retry-cap-exceeded', 'pr-is-draft', 'hard-stop-label']

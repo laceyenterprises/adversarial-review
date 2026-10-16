@@ -30,6 +30,10 @@ retains its record until settlement. Cleanup checks `attemptId` so a late callba
 cannot remove a replacement intent. A crash leaves intent for the next process;
 there is no expiry that could silently discard interrupted work. Records for a
 different head are ignored, and the next submission for that PR replaces them.
+When posted-review reconciliation confirms `pr-terminal` (closed or merged), it
+removes the PR's intent regardless of head, including abandoned superseded-head
+records. The terminal `operator-skip-label` path performs the same cleanup.
+Other PRs' intents and the closer's lease/launch records are untouched.
 Submission fails if persistence fails; read and cleanup errors are logged.
 
 This store authorizes a prompt retry only. It cannot authorize a launch or merge.

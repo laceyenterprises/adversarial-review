@@ -396,6 +396,8 @@ normal scheduling pass while their intent remains. Confirmed dispatch or an
 existing `ama-closer-launch-in-progress` retires that head's interrupted intent:
 the closer ledger and lease own subsequent reconciliation. An operator/safety
 hold also retires intent before recording operator-blocked cadence.
+Confirmed `pr-terminal` reconciliation removes the PR's intent even when it
+belongs to a superseded head, so closed or merged PRs leave no abandoned intent.
 
 This is a v1 bug-fix/operational mitigation under the freeze above, not a new
 merge authority lane. The MSM decision tree is unchanged: a PR that needs the
@@ -409,6 +411,9 @@ For each confirmed final-round hammer launch, the watcher emits structured event
 successful dispatch acknowledgement; the duration includes time spent waiting
 for the lane, queue, restart recovery, and dispatch. It does not measure worker
 boot time. Missing or invalid posted timestamps do not fabricate latency.
+The event always includes `headSha`: the target remediation SHA, falling back to
+the review-state head, then the dispatch context's reviewed SHA, or `null` when
+none is available.
 
 The control is `watcher.ama_hammer_dispatch_mode`, with env override
 `AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE` and legacy alias

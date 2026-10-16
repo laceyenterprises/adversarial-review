@@ -2350,7 +2350,8 @@ async function dispatchAmaClosureFor({
     try {
       logger?.log?.(JSON.stringify({
         event: 'ama.final_review_to_hammer_launch', repo: repoPath, prNumber,
-        headSha: dispatchContext.targetRemediationSha, reviewedHeadSha: reviewState.headSha,
+        headSha: dispatchContext.targetRemediationSha || reviewState?.headSha || dispatchContext.reviewedSha || null,
+        reviewedHeadSha: reviewState.headSha,
         postedAt: reviewStateRow.posted_at, launchConfirmedAt: new Date(confirmedMs).toISOString(),
         latencyMs: confirmedMs - postedMs,
         launchRequestId: launchResult.launchRequestId || launchResult.dispatchId || null,

@@ -27,7 +27,11 @@ import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestrat
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
-import { clearPendingAmaHammerDispatch, readPendingAmaHammerDispatch } from './ama-hammer-background-dispatch.mjs';
+import {
+  clearPendingAmaHammerDispatch,
+  clearPendingAmaHammerDispatchForTerminalPr,
+  readPendingAmaHammerDispatch,
+} from './ama-hammer-background-dispatch.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
 import {
   HAMMER_EVIDENCE_FAILURES,
@@ -335,6 +339,13 @@ export async function handlePostedReviewRow({
   logger = console,
 } = {}) {
   const stepKey = `${repoPath}#${prNumber}`;
+  const retireTerminalHammerIntent = () => {
+    try {
+      clearPendingAmaHammerDispatchForTerminalPr(rootDir, { repo: repoPath, prNumber });
+    } catch (error) {
+      logger?.warn?.(`[watcher] pending hammer terminal cleanup failed: ${error.message}`);
+    }
+  };
   const rereadPostedReviewRow = (stage, { allowPending = false } = {}) => {
     let currentRow;
     try {
@@ -555,6 +566,7 @@ export async function handlePostedReviewRow({
     if (gateDecision?.reason === 'operator-skip-label') {
       const terminalReason = liveCandidateTerminalReason(candidate);
       if (terminalReason) {
+        retireTerminalHammerIntent();
         logger.log(
           `[watcher] AMA/merge-agent skipped for ${repoPath}#${prNumber}: PR already ` +
           `${terminalReason} under operator-skip-label — dropping ownership`
@@ -673,6 +685,7 @@ export async function handlePostedReviewRow({
       }
     }
     if (coexistenceDecision.outcome === 'pr-terminal') {
+      retireTerminalHammerIntent();
       // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership instead of retaining
       // it and re-evaluating (and re-failing the daemon merge) every tick.

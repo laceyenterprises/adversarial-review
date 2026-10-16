@@ -9,7 +9,7 @@
       "schemaSurface": "src/ama-hammer-background-dispatch.mjs",
       "relatedSchemaSurfaces": ["src/posted-review-row.mjs", "src/ama-closure-orchestration.mjs"],
       "owner": "watcher background hammer recovery",
-      "retirement": "queue settlement/cancellation, operator or safety hold, confirmed dispatch, or reconciliation of an existing active launch; matching head and attempt only"
+      "retirement": "queue settlement/cancellation checks head and attempt; operator/safety holds, confirmed dispatch and active-launch reconciliation check head; confirmed pr-terminal reconciliation removes any head's intent for the PR"
     },
     {
       "id": "github-rate-limit-state",

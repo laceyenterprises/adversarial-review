@@ -2,6 +2,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { lstatSync, opendirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { writeFileAtomic } from '../atomic-write.mjs';
 import { readLatestWorkerRunStatusFromLedger } from '../session-ledger-read-adapter.mjs';
 import {
   amaCloserDispatchDir, cleanupHammerScratchDir, isTerminalHammerScratchRecord,
@@ -10,9 +11,31 @@ import {
 export const HAMMER_SCRATCH_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const execFileAsync = promisify(execFile);
-// Retain partial indexing across passes; unchanged historical JSON is not read
-// again. Every pass still proves a complete, current metadata census.
+// The disk checkpoint retains partial indexing across watcher restarts. Neither
+// cache authorizes deletion without a complete, current metadata census.
 const recordIndexes = new Map();
+
+function readRecordIndex(path, directory) {
+  try {
+    if (!lstatSync(path).isFile()) return new Map();
+    const saved = JSON.parse(readFileSync(path, 'utf8'));
+    if (saved.schemaVersion !== 1 || !Array.isArray(saved.entries)) return new Map();
+    const index = new Map();
+    for (const entry of saved.entries) {
+      if (!Array.isArray(entry) || entry.length !== 2) return new Map();
+      const [name, cached] = entry;
+      if (typeof name !== 'string' || !name.endsWith('.json') || /[/\\]/.test(name)
+        || typeof cached?.version !== 'string' || !cached.record
+        || typeof cached.record !== 'object' || Array.isArray(cached.record)) return new Map();
+      index.set(name, { ...cached, path: join(directory, name) });
+    }
+    return index;
+  } catch {
+    // A missing, truncated or unreadable checkpoint is a cold start, never
+    // evidence that an owner is absent. Source records must still be indexed.
+    return new Map();
+  }
+}
 
 export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl = execFileAsync,
   platform = process.platform }) {
@@ -36,13 +59,15 @@ export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl =
   return results.map(result => result.value.stdout).join('\n');
 }
 
-function readRecords(rootDir, deadline, maxRecordReads) {
+function readRecords(rootDir, deadline, maxRecordReads, logger) {
   const directory = amaCloserDispatchDir(rootDir);
+  const checkpoint = join(rootDir, 'data', 'follow-up-jobs', 'hammer-scratch-record-index.json');
   let index = recordIndexes.get(directory);
-  if (!index) { index = new Map(); recordIndexes.set(directory, index); }
+  if (!index) { index = readRecordIndex(checkpoint, directory); recordIndexes.set(directory, index); }
   const records = [];
   const seen = new Set();
   let reads = 0;
+  let dirty = false;
   const fingerprint = stat => [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
   let dir;
   try { dir = opendirSync(amaCloserDispatchDir(rootDir)); }
@@ -73,12 +98,28 @@ function readRecords(rootDir, deadline, maxRecordReads) {
         }
         cached = { version, path, record };
         index.set(entry.name, cached);
+        dirty = true;
       }
       seen.add(entry.name);
       records.push(cached);
     }
-  } finally { dir.closeSync(); }
-  for (const name of index.keys()) if (!seen.has(name)) index.delete(name);
+    for (const name of index.keys()) {
+      if (!seen.has(name)) { index.delete(name); dirty = true; }
+    }
+  } finally {
+    dir.closeSync();
+    // Checkpoint even a deferred census. Atomic replacement leaves either the
+    // previous valid checkpoint or this pass's progress after a restart.
+    if (dirty) {
+      try {
+        writeFileAtomic(checkpoint, JSON.stringify({ schemaVersion: 1,
+          entries: [...index].map(([name, { version, record }]) => [name, { version, record }]),
+        }), { mode: 0o600 });
+      } catch (error) {
+        logger.warn?.(`hammer scratch index checkpoint deferred: ${error.message}`);
+      }
+    }
+  }
   return records;
 }
 
@@ -148,7 +189,9 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   try {
     const parentStat = lstatSync(promptDir);
     if (!parentStat.isDirectory()) return removed;
-    const records = readRecords(rootDir, deadline, settings.maxRecordReads ?? 1024);
+    // The deadline bounds production scans; a count cap must not stretch a
+    // small retained history over hours. Tests may force partial checkpoints.
+    const records = readRecords(rootDir, deadline, settings.maxRecordReads ?? Infinity, logger);
     dir = opendirSync(promptDir);
     let entry;
     while (removed.length < (settings.maxRemovals ?? 64)

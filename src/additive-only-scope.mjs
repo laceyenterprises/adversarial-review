@@ -548,7 +548,14 @@ function evaluateAdditiveOnlyScope({
     labeledAdditiveOnly,
     initialHeadSha,
     finding: null,
-    backfillNeeded: derivedAdditiveOnly && !labeledAdditiveOnly,
+    // A net opening diff can hide a reverted historical violation or a huge
+    // commit. Do not brand a clean derived PR if the label's wider scan would
+    // immediately produce a finding on the next pass.
+    backfillNeeded: derivedAdditiveOnly && !labeledAdditiveOnly && commits.every((commit) => {
+      const entry = commitFileEntry(filesByCommit, commit);
+      return !entry.truncated && entry.files.every((file) =>
+        !fileViolatesAdditiveOnly(file, { prForcedByPostMergeAction: prForced }));
+    }),
   };
 }
 

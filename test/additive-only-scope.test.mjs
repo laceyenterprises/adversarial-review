@@ -386,11 +386,11 @@ test('snapshot retains enforcement for code pushed after a doc-only opening', as
   assert.equal(result.backfillNeeded, false);
 });
 
-test('net opening diff can exclude a file reverted before opening', async () => {
+test('clean net opening diff does not brand a PR that the wider labeled scan would flag', async () => {
   const { result } = await acquire({ events: [openedEvent()], openingFiles: [{ filename: 'projects/sample/SCOPE.md' }] });
   assert.equal(result.derivedAdditiveOnly, true);
   assert.equal(result.finding, null);
-  assert.equal(result.backfillNeeded, true);
+  assert.equal(result.backfillNeeded, false);
 });
 
 test('opening event lookup paginates and ignores other PRs and later actions', async () => {
@@ -448,4 +448,19 @@ test('opening lookup is bounded when the opening event has left the activity win
   assert.equal(result.additiveOnly, false);
   assert.equal(calls.filter((endpoint) => endpoint.includes('/events?')).length, 3);
   assert.equal(calls.some((endpoint) => endpoint.includes('/compare/')), false);
+});
+
+
+test('net opening evidence derives freely but never brands unreadable opening history', () => {
+  const result = evaluate({
+    openingHeadSha: 'later',
+    openingFiles: { files: [{ filename: 'projects/sample/SCOPE.md' }], truncated: false },
+    filesByCommit: {
+      initial: { files: [{ filename: 'projects/sample/SCOPE.md' }], truncated: true },
+      later: [{ filename: 'projects/sample/PLAN.md' }],
+    },
+  });
+  assert.equal(result.derivedAdditiveOnly, true);
+  assert.equal(result.finding, null);
+  assert.equal(result.backfillNeeded, false);
 });

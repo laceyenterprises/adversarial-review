@@ -3662,11 +3662,13 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
       const postedUrl = fileUrl('src', 'posted-review-row.mjs');
       const routeUrl = fileUrl('src', 'reviewer-route-selection.mjs');
       const capacityUrl = fileUrl('src', 'reviewer-runtime-support.mjs');
+      const wakeUrl = fileUrl('src', 'watcher-wake.mjs');
       loader = loader.replace('export async function resolve', `
         if (${JSON.stringify(stale === 'release-order')}) {
           stubs.set(${JSON.stringify(routeUrl)}, 'fixture:seatidle-route');
           stubs.set(${JSON.stringify(capacityUrl)}, 'fixture:seatidle-capacity');
         }
+        stubs.set(${JSON.stringify(wakeUrl)}, 'fixture:seatidle-wake');
         stubs.set(${JSON.stringify(postedUrl)}, 'fixture:seatidle-posted');
         export async function resolve`);
       loader = loader.replace('export async function load(url, context, nextLoad) {', `
@@ -3692,6 +3694,16 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
             }
             return result;
           }
+          if (url === 'fixture:seatidle-wake') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+            import * as actual from '${wakeUrl}?actual';
+            export * from '${wakeUrl}?actual';
+            export function requestWatcherWake(args) {
+              if (args.reason === 'reviewer-capacity-freed') {
+                globalThis.__seatIdleDurableWakes = (globalThis.__seatIdleDurableWakes || 0) + 1;
+              }
+              return actual.requestWatcherWake(args);
+            }
+          `)} };
           if (url === 'fixture:seatidle-route') return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
             import * as actual from '${routeUrl}?actual';
             import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
@@ -3754,6 +3766,8 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
           globalThis.__seatIdleReturns.get(201)();
           await waitForStart(${['none', 'release-order'].includes(stale) ? 202 : 203});
           assert.equal(pollFinished, false, 'next spawn precedes the end of posted-review work');
+          assert.equal(globalThis.__seatIdleDurableWakes, 1,
+            'only the finished reviewer requests discovery; pre-spawn refusals do not repoll');
           assert.deepEqual(starts(), ${JSON.stringify(['none', 'release-order'].includes(stale) ? [201, 202] : [201, 203])});
           ${stale === 'release-order' ? `
             assert.ok(globalThis.__seatIdleCapacityCounts.length > 0);

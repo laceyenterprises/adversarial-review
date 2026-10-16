@@ -649,16 +649,13 @@ HEAD_BRANCH=$(ham_pr --json headRefName --jq '.headRefName')
 ham_bounded_git_sync "$BASE_BRANCH" "$HEAD_BRANCH"
 git checkout "$HEAD_BRANCH"
 if ! git rebase "origin/$BASE_BRANCH"; then
-  # For EACH conflicted file: open it, resolve the conflict markers using your
-  # judgment so BOTH sides' intent is preserved (never blindly take one side or
-  # delete the other's changes), then stage it.
-  #   git status --porcelain | grep '^UU'   # list conflicted files
-  #   <edit each file to resolve <<<<<<< / ======= / >>>>>>> markers>
-  #   git add <resolved files> && git rebase --continue
-  # Repeat until `git rebase` reports it is complete. If a conflict is genuinely
-  # unsafe to resolve (a semantic conflict you cannot correctly settle), run
-  # `git rebase --abort`, emit ONE hard-blocker report, and stop.
-  :
+  # Merge and stage hand-written sources first, preserving both sides' intent.
+  # Leave registered generated outputs to the shared GENCONFLICT-01 resolver;
+  # never choose one side of STATE-MACHINES.md or hand-edit its conflict markers.
+  # The helper regenerates from merged sources, stages the outputs, and continues
+  # per commit. If any source conflict remains, or generation fails, it aborts
+  # and removes this worktree. Stop and report the emitted reason on failure.
+  hq generated-conflicts resolve --worktree "$PWD" || exit 1
 fi
 # SUBSYNC-01: the rebase moved gitlinks but not submodule checkouts.
 # This block can run in a fresh shell, so default the cap here: an unset cap makes

@@ -2370,6 +2370,7 @@ async function dispatchAmaClosureFor({
       let mergeabilityElapsedMs = 0;
       const submission = backgroundQueue.submit({
         key: backgroundKey,
+        pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: dispatchContext.targetRemediationSha },
         // Detached from this step's deadline on purpose: the whole point is that
         // the posted-review phase stops waiting. `hq dispatch` stays bounded by the
         // closer's own dispatch timeout (resolveAmaDispatchTimeoutMs). The

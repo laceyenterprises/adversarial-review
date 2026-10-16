@@ -27,6 +27,7 @@ import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestrat
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
+import { readPendingAmaHammerDispatch } from './ama-hammer-background-dispatch.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
 import {
   HAMMER_EVIDENCE_FAILURES,
@@ -899,7 +900,12 @@ export function createNoProgressLaneGate({
     evaluate(handler) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
-      let decision = evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
+      // Consult durable intent BEFORE the lane: an interrupted background call
+      // must reach normal live-head/lease/retry/dedup guards on the first tick.
+      const pending = readPendingAmaHammerDispatch(rootDir, { ...identity, headSha: handler.headSha }, { logger });
+      let decision = pending
+        ? { lane: 'active', due: true, reason: 'hammer-dispatch-recovery', backoffTicks: 0 }
+        : evaluateNoProgressLane(ledger, { headSha: handler.headSha || null });
       const observedAt = now();
       let reviewedSha = null;
       try {
@@ -1221,6 +1227,13 @@ export async function runQueuedReviewAdoptionPhase({
   // stale terminal rows are cleaned before any per-PR hammer path can wait.
   await promoteStarvedNoProgressLaneLedgers(rootDir, { logger });
 
+  const pendingHammerTargets = postedReviewHandlers.filter((handler) => readPendingAmaHammerDispatch(
+    rootDir, { repo: handler.repoPath, prNumber: handler.prNumber, headSha: handler.headSha }, { logger },
+  ));
+  for (const handler of pendingHammerTargets) {
+    logger?.log?.(`[watcher] recovering pending AMA hammer dispatch for ${handler.repoPath}#${handler.prNumber}@${handler.headSha} through normal guards`);
+  }
+
   await runPostedReviewHandlersFairlyImpl({
     handlers: postedReviewHandlers,
     state: postedReviewFairness,
@@ -1228,7 +1241,7 @@ export async function runQueuedReviewAdoptionPhase({
     handlerTimeoutMs: postedReviewHandlerTimeoutMs,
     minimumHandlerStartBudgetMs,
     laneGate: noProgressLaneGate,
-    priorityTargets: postedReviewPriorityTargets,
+    priorityTargets: [...postedReviewPriorityTargets, ...pendingHammerTargets],
     logger,
   });
 

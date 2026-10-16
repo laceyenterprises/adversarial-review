@@ -2,6 +2,15 @@
   "version": 1,
   "entries": [
     {
+      "id": "ama-hammer-background",
+      "title": "Pending Background Hammer Dispatches",
+      "path": "docs/data-model/ama-hammer-background.md",
+      "store": "data/ama-hammer-background/",
+      "schemaSurface": "src/ama-hammer-background-dispatch.mjs",
+      "relatedSchemaSurfaces": ["src/posted-review-row.mjs", "src/ama-closure-orchestration.mjs"],
+      "owner": "watcher background hammer recovery"
+    },
+    {
       "id": "github-rate-limit-state",
       "title": "GitHub Rate Limit State",
       "path": "docs/data-model/github-rate-limit-state.md",

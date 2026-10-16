@@ -45,6 +45,7 @@ Required fields:
 | `fingerprint` | string or null | Stable review-state fingerprint used to detect progress. |
 | `decisionFingerprint` | string or null | Stable handler-decision fingerprint for the current head. This is carried forward across silent walks so the next usable decision can detect decision-only changes without treating missing handler output as a new baseline. |
 | `decisionResets` | number | Count of decision-only resets already honored for the current head. A new head resets this to `0`; repeated decision changes are capped by the watcher so the lane cannot reset forever on decision churn. |
+| `hammerRouteActive` | boolean, optional | Final-review hammer ownership keeps this head active regardless of unchanged review state. A subsequent operator hold clears it. |
 | `progressClass` | string | `self-resolving` or `operator-decision-required`. |
 | `noProgressTicks` | number | Consecutive walked ticks with the same fingerprint. |
 | `skippedTicks` | number | Deferred ticks counted toward the current backoff window. |

@@ -1,4 +1,8 @@
 import { effectiveCloserCap, warnCloserFloor } from './ama/closure-capacity.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { writeFileAtomic } from './atomic-write.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
 //
@@ -16,9 +20,9 @@ import { effectiveCloserCap, warnCloserFloor } from './ama/closure-capacity.mjs'
 // `maybeDispatchAmaCloser` writes its dispatch record (`state: dispatching`) and
 // acquires the per-PR closer lease before it calls `hq dispatch`, and on the next
 // tick `findActiveAmaCloserLaunch` / the lease check return
-// `ama-closer-launch-in-progress` without re-dispatching. This module adds only
+// `ama-closer-launch-in-progress` without re-dispatching. This module adds
 // what the phase can no longer provide once it stops awaiting: one in-flight
-// dispatch per PR, a global concurrency bound, and settle logging.
+// dispatch per PR, a global concurrency bound, durable retry intent, and settle logging.
 //
 // It also hands each run's outcome back to the phase. A run can end in a
 // terminal rejection from the closer's own gates (retry cap, ineligibility) that
@@ -67,6 +71,44 @@ export function amaHammerBackgroundKey({ repo, prNumber, headSha }) {
   return `${repo}#${prNumber}@${String(headSha || '').trim() || 'unknown-head'}`;
 }
 
+function pendingDispatchPath(rootDir, { repo, prNumber }) {
+  const key = createHash('sha256').update(`${repo}#${prNumber}`).digest('hex');
+  return join(rootDir, 'data', 'ama-hammer-background', `${key}.json`);
+}
+
+// This is a retry intent, never launch authority. The first adoption phase
+// after a restart rebuilds the normal handler with fresh state and config.
+export function readPendingAmaHammerDispatch(rootDir, identity, { logger = console } = {}) {
+  try {
+    const doc = JSON.parse(readFileSync(pendingDispatchPath(rootDir, identity), 'utf8'));
+    if (doc.repo !== identity.repo || doc.prNumber !== identity.prNumber
+      || doc.headSha !== identity.headSha) return null;
+    if (!doc.attemptId || !Number.isFinite(Date.parse(doc.startedAt))) {
+      throw new Error('invalid pending hammer dispatch');
+    }
+    return doc;
+  } catch (error) {
+    if (error.code !== 'ENOENT') logger?.warn?.(`[watcher] pending hammer dispatch read failed: ${error.message}`);
+    return null;
+  }
+}
+
+function persistPendingDispatch(identity, nowMs) {
+  if (!identity) return null;
+  const { rootDir, repo, prNumber, headSha } = identity;
+  const doc = { repo, prNumber, headSha, startedAt: new Date(nowMs).toISOString(), attemptId: randomUUID() };
+  writeFileAtomic(pendingDispatchPath(rootDir, identity), `${JSON.stringify(doc)}\n`);
+  return { ...doc, rootDir };
+}
+
+function clearPendingDispatch(entry) {
+  const intent = entry.pendingDispatch;
+  if (!intent) return;
+  // A late callback from a superseded process/run cannot erase its replacement.
+  const current = readPendingAmaHammerDispatch(intent.rootDir, intent);
+  if (current?.attemptId === intent.attemptId) rmSync(pendingDispatchPath(intent.rootDir, intent), { force: true });
+}
+
 /**
  * A bounded background runner. One entry per key (PR@head), with at most one
  * running entry per PR; at most `maxConcurrent` runs overall. Eligible waiters
@@ -80,6 +122,7 @@ export function createAmaHammerBackgroundQueue({
   nowMs = () => Date.now(),
   settledTtlMs = DEFAULT_AMA_HAMMER_SETTLED_TTL_MS,
   settledMaxEntries = DEFAULT_AMA_HAMMER_SETTLED_MAX_ENTRIES,
+  logger = console,
 } = {}) {
   const limit = () => effectiveCloserCap(entries.size, maxConcurrent, ceiling);
   const entries = new Map();
@@ -117,6 +160,7 @@ export function createAmaHammerBackgroundQueue({
     entry.controller.abort();
     settled.delete(key);
     if (entry.state === 'queued') {
+      clearPendingDispatch(entry);
       waiting.splice(waiting.indexOf(entry), 1);
       entries.delete(key);
     }
@@ -159,7 +203,9 @@ export function createAmaHammerBackgroundQueue({
         running -= 1;
         runningPrKeys.delete(entry.prKey);
         entries.delete(entry.key);
-        launchWaiting();
+        try { clearPendingDispatch(entry); }
+        catch (error) { logger?.warn?.(`[watcher] pending hammer dispatch cleanup failed: ${error.message}`); }
+        finally { launchWaiting(); }
       })
       // A settle logger is caller-supplied and can throw. The outcome was
       // already retained above; consume that final rejection so a background
@@ -173,7 +219,7 @@ export function createAmaHammerBackgroundQueue({
     /**
      * @returns {{state: 'started'|'queued'|'in-flight', key: string, queuedAtMs: number}}
      */
-    submit({ key, run, onSettled = null }) {
+    submit({ key, run, onSettled = null, pendingDispatch = null }) {
       discardOlderHeads(key);
       for (const oldKey of settled.keys()) {
         if (prKey(oldKey) === prKey(key) && oldKey !== key) settled.delete(oldKey);
@@ -189,6 +235,9 @@ export function createAmaHammerBackgroundQueue({
         };
       }
       const entry = { key, prKey: prKey(key), run, onSettled, state: 'queued', queuedAtMs: nowMs(), promise: null, controller: new AbortController() };
+      // Persist before invoking any run, including a synchronous launch. Failure
+      // to save refuses submission rather than launching untracked work.
+      entry.pendingDispatch = persistPendingDispatch(pendingDispatch, entry.queuedAtMs);
       entries.set(key, entry);
       if (running < limit() && !runningPrKeys.has(entry.prKey)) {
         launch(entry);

@@ -378,6 +378,16 @@ provenance still key off the configured logical class). It emits a loud
 
 ### 2b. HAMASYNC-01 background hammer dispatch
 
+HAMLANE-01 keeps final-review hammer ownership in the active lane even when the
+NOT CONVERGED gate requests an operator decision. A genuine safety or operator
+hold still uses the operator-blocked cadence and alert path.
+
+Background submissions persist [retry intent](data-model/ama-hammer-background.md)
+before launch. On the first adoption phase after a watcher restart, matching-head
+intents bypass lane backoff and receive handler priority. The normal closer
+rechecks all live guards and deduplicates any launch that already succeeded.
+
+
 This is a v1 bug-fix/operational mitigation under the freeze above, not a new
 merge authority lane. The MSM decision tree is unchanged: a PR that needs the
 hammer still goes through `maybeDispatchAmaCloser`, the same closer lease,

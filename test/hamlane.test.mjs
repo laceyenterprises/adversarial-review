@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
+import { createNoProgressLaneGate, handlePostedReviewRow } from '../src/posted-review-row.mjs';
 
 const headSha = 'a'.repeat(40);
 const handler = { repoPath: 'example/project', prNumber: 42, headSha };
@@ -45,4 +45,140 @@ test('HAMLANE-01 a real operator hold replaces hammer urgency and keeps its cade
       assert.equal(gate.evaluate(handler).run, true);
     }
   } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+// Two queues model process lifetimes; unresolved work in the first is lost on restart.
+// The durable closer fixture stands in for its normal lease and launch dedup.
+import * as background from '../src/ama-hammer-background-dispatch.mjs';
+import { recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
+import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+
+function closerFixture(rootDir, onLaunch) {
+  const requiredGate = 'fixture/adversarial-gate';
+  return {
+    reviewState: { verdict: 'request changes', headSha, riskClass: 'low', remediationPending: false,
+      reviewCycleExhausted: true, blockingFindingState: 'known', blockingFindingCount: 1,
+      nonBlockingFindingState: 'known', nonBlockingFindingCount: 0, prAuthor: 'fixture-builder' },
+    prMetadata: { prNumber: handler.prNumber, headSha, isOpen: true, isDraft: false,
+      mergeableState: 'MERGEABLE', labels: [], author: 'fixture-builder',
+      statusCheckRollup: [{ __typename: 'CheckRun', name: requiredGate, conclusion: 'SUCCESS' }],
+      branchProtection: { requiredContexts: [requiredGate] } },
+    cfg: { enabled: true, workerClass: 'hammer', mergeMethod: 'squash',
+      eligibility: { riskClasses: ['low'], highRiskRequiresTwoKey: false }, branchProtection: { required: true } },
+    options: { env: { ADV_GATE_STATUS_CONTEXT: requiredGate } },
+    dispatchContext: { rootDir, repo: handler.repoPath, prUrl: 'https://github.com/example/project/pull/42',
+      riskClass: 'low', reviewedSha: headSha, requiredGateContext: requiredGate, reviewedBy: 'fixture-reviewer', reviewer: 'codex',
+      parentSession: 'session:fixture:watcher', hqPath: join(rootDir, 'hq-fixture'), hqRoot: join(rootDir, 'hq'),
+      hqOwnerUser: 'fixture-owner', currentUser: 'fixture-owner', dispatchedAt: '2026-10-16T12:01:00Z',
+      livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true, headRefName: 'fixture/work' }) },
+    readPullRequestStateImpl: () => null,
+    execFileImpl: async (_cmd, args) => { if (args.includes('--worker-class')) onLaunch(); return { stdout: JSON.stringify({ dispatchId: 'lrq_fixture', launchRequestId: 'lrq_fixture' }), stderr: '' }; },
+    readTemplateImpl: () => 'fixture hammer prompt', writeFileImpl: () => {},
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running' } }),
+    resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    processKillImpl: () => { throw Object.assign(new Error('fixture process exited'), { code: 'ESRCH' }); },
+    logger,
+  };
+}
+
+
+for (const launchedBeforeRestart of [false, true]) {
+  test(`HAMLANE-01 startup retries interrupted background dispatch once; already launched=${launchedBeforeRestart}`, async () => {
+    const { rootDir, gate } = fixture();
+    const key = background.amaHammerBackgroundKey({ repo: handler.repoPath,
+      prNumber: handler.prNumber, headSha });
+    const pendingDispatch = { rootDir, repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+    let release;
+    const first = background.createAmaHammerBackgroundQueue();
+    const second = background.createAmaHammerBackgroundQueue();
+    let launches = launchedBeforeRestart ? 1 : 0;
+    let attempts = 0;
+    const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+    try {
+      updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+        state: launchedBeforeRestart ? 'dispatched' : 'dispatching',
+        lastAttemptedAt: '2026-10-16T12:00:00Z',
+        launchRequestId: launchedBeforeRestart ? 'lrq_existing' : null,
+        dispatchId: launchedBeforeRestart ? 'lrq_existing' : null,
+        lastObservedStatus: launchedBeforeRestart ? 'running' : null, lastError: null }));
+      acquireAmaCloserLease({ rootDir, ...identity, watcherPid: 424242, now: '2026-10-16T12:00:00Z' });
+      if (launchedBeforeRestart) updateAmaCloserLease({ rootDir, ...identity,
+        status: 'dispatched', lrqId: 'lrq_existing', now: '2026-10-16T12:00:00Z' });
+      first.submit({ key, pendingDispatch, run: () => new Promise(resolve => { release = resolve; }) });
+      // Reproduce a restart before the old handler recorded its active lane.
+      recordNoProgressLaneRun(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber }, {
+        headSha, fingerprint: 'final-review', progressClass: 'operator-decision-required', logger });
+      assert.equal(gate.evaluate(handler).run, true, 'pending intent must beat the old operator backoff on the first tick');
+      const dispatch = () => second.submit({ key, pendingDispatch, run: async () => {
+        attempts++;
+        return maybeDispatchAmaCloser(closerFixture(rootDir, () => { launches++; }));
+      } });
+      dispatch();
+      dispatch();
+      await second.drain();
+      assert.equal(attempts, 1);
+      const settled = second.takeSettled(key);
+      assert.equal(launches, 1, JSON.stringify(settled) + (settled?.error?.message || ''));
+      assert.equal(settled.ok, true);
+      assert.equal(settled.result.dispatched, !launchedBeforeRestart);
+      assert.equal(background.readPendingAmaHammerDispatch(rootDir, pendingDispatch), null);
+    } finally {
+      release?.({ dispatched: false });
+      await first.drain();
+      await second.drain();
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('HAMLANE-01 the posted-review handler exposes hammer ownership despite the final gate operator flag', async () => {
+  const { rootDir, gate } = fixture();
+  const row = { review_status: 'posted', pr_state: 'open', reviewer_head_sha: headSha };
+  try {
+    for (const needsOperator of [false, true]) {
+      const value = await handlePostedReviewRow({ rootDir, repoPath: handler.repoPath,
+        prNumber: handler.prNumber, existing: row, currentRevisionRef: headSha, labelNames: [], logger,
+        projectGateStatusSafe: async () => ({ decision: finalGate }),
+        fetchMergeAgentCandidateImpl: async () => ({ merged: false, prState: 'open' }),
+        buildMergeAgentDispatchJobImpl: () => ({}),
+        latestFollowUpJobFinder: () => null, latestPostedReviewBodyFinder: () => null,
+        reviewBodyHasScopeViolationFindingImpl: () => false, currentReviewRowReader: () => row,
+        resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+          outcome: needsOperator ? 'await-operator' : 'ama-pending',
+          amaClosureResult: { reason: needsOperator ? 'hammer-stop-awaiting-input-change' : 'ama-closer-dispatch-backgrounded',
+            needsOperator, skipMergeAgent: true } }),
+      });
+      assert.equal(value.hammerRouteActive === true, !needsOperator);
+      await gate.record(handler, { value });
+      assert.equal(gate.evaluate(handler).run, !needsOperator);
+    }
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('HAMLANE-01 intent is saved before running, head-bound, and removed even when settle logging throws', async () => {
+  const { rootDir, gate } = fixture();
+  const queue = background.createAmaHammerBackgroundQueue();
+  const identity = { repo: handler.repoPath, prNumber: handler.prNumber, headSha };
+  const key = background.amaHammerBackgroundKey(identity);
+  try {
+    queue.submit({ key, pendingDispatch: { rootDir, ...identity }, run: async () => {
+      const intent = background.readPendingAmaHammerDispatch(rootDir, identity);
+      assert.equal(intent.headSha, headSha);
+      assert.ok(Number.isFinite(Date.parse(intent.startedAt)));
+      recordNoProgressLaneRun(rootDir, identity, { headSha: 'b'.repeat(40),
+        progressClass: 'operator-decision-required', logger });
+      assert.equal(gate.evaluate({ ...handler, headSha: 'b'.repeat(40) }).run, false,
+        'old-head intent cannot accelerate a new head');
+      return { dispatched: true };
+    }, onSettled: () => { throw new Error('fixture logger unavailable'); } });
+    await queue.drain();
+    assert.equal(queue.takeSettled(key).result.dispatched, true);
+    assert.equal(background.readPendingAmaHammerDispatch(rootDir, identity), null);
+  } finally {
+    await queue.drain();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

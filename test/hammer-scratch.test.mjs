@@ -342,3 +342,15 @@ test('HAMTMP-02: sibling remediation and fallback merge prompts invoke deployed 
   }
   assert.doesNotMatch(prompt, /node bin\//);
 });
+
+
+test('GENCONFLICT-01: merge-agent leased rebase uses the same generated-conflict helper', () => {
+  const prompt = buildMergeAgentPrompt({
+    repo: 'fixture/repo', prNumber: 42, branch: 'feature', baseBranch: 'main',
+    headSha: head, strictRemediation: true,
+  }, { trigger: FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER });
+  // The normal merge path emits this shell only when a merge is authorized.
+  assert.match(prompt, /hq generated-conflicts rebase --worktree "\$PWD" --onto "\$VALIDATION_BASE"/);
+  assert.doesNotMatch(prompt, /\ngit rebase "\$VALIDATION_BASE"/);
+  assert.match(prompt, /Failure aborts the rebase and removes this worktree/);
+});

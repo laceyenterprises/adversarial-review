@@ -713,3 +713,14 @@ test('LABELGATE-01: hammer can restore review-flagged guarded changes before def
   assert.match(section, /make that repair and validate the\nnew head normally/);
   assert.match(section, /If the remaining refusal requires an operator override, stop/);
 });
+
+
+test('GENCONFLICT-01: hammer regenerates committed generated conflicts after source merges', () => {
+  const block = HAMMER_PROMPT.slice(HAMMER_PROMPT.indexOf('## Resolving merge conflicts'));
+  const helperAt = block.indexOf('hq generated-conflicts resolve --worktree "$PWD" || exit 1');
+  assert.ok(helperAt > block.indexOf('if ! git rebase "origin/$BASE_BRANCH"; then'));
+  assert.ok(helperAt < block.indexOf('git submodule update --recursive'));
+  assert.match(block, /Merge and stage hand-written sources first/);
+  assert.match(block, /aborts\s+# and removes this worktree/);
+  assert.doesNotMatch(block, /git add <resolved files> && git rebase --continue/);
+});

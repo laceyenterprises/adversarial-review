@@ -4842,7 +4842,7 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('exit 70'));
   assert.ok(prompt.includes('git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"'));
   assert.ok(prompt.includes('VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")'));
-  assert.ok(prompt.includes('git rebase "$VALIDATION_BASE"'));
+  assert.ok(prompt.includes('hq generated-conflicts rebase --worktree "$PWD" --onto "$VALIDATION_BASE"'));
   assert.ok(prompt.includes('Run the project validation required for this PR here'));
   assert.ok(prompt.includes('CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")'));
   assert.ok(prompt.includes('git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"'));

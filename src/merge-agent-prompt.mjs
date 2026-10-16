@@ -320,7 +320,9 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('# If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.');
         lines.push('git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"');
         lines.push('VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")');
-        lines.push('git rebase "$VALIDATION_BASE"');
+        lines.push('# GENCONFLICT-01: registered committed outputs are regenerated per replayed commit.');
+        lines.push('# Failure aborts the rebase and removes this worktree; stop on nonzero status.');
+        lines.push('hq generated-conflicts rebase --worktree "$PWD" --onto "$VALIDATION_BASE"');
         lines.push('# Run the project validation required for this PR here, against the rebased head.');
         lines.push('git fetch --prune origin "$MERGE_BASE"');
         lines.push('CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")');

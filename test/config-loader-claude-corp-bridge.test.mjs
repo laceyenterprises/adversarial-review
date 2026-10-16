@@ -38,11 +38,13 @@ test('canonical overrides and legacy aliases match Python', () => fixture((topPa
   const cfg = loadConfig({ topPath, env: {
     AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_PORT: '4094',
     AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_PRIMARY_URL: 'http://host.docker.internal:4094/accounts/claude-code-corp',
+    AGENT_OS_OAUTH_BROKER_CLAUDE_CODE_CORP_BRIDGE_STANDBY_URL: 'http://127.0.0.1:4094/accounts/claude-code-corp',
     OAUTH_BROKER_WATCHDOG_CLAUDE_CODE_CORP_STATUS_URL: 'http://127.0.0.1:4094/accounts/claude-code-corp/statusz',
     CLAUDE_CODE_CORP_BRIDGE_SECRET_MIRROR_SRC: '/private/var/db/synthetic/bearer-secret',
   } });
   assert.equal(cfg.get(`${prefix}.port`), 4094);
   assert.equal(cfg.get(`${prefix}.primary_url`), 'http://host.docker.internal:4094/accounts/claude-code-corp');
+  assert.equal(cfg.get(`${prefix}.standby_url`), 'http://127.0.0.1:4094/accounts/claude-code-corp');
   assert.equal(cfg.get(`${prefix}.watchdog_status_url`), 'http://127.0.0.1:4094/accounts/claude-code-corp/statusz');
   assert.equal(cfg.get(`${prefix}.secret_mirror_source`), '/private/var/db/synthetic/bearer-secret');
 }));

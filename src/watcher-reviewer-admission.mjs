@@ -7,6 +7,7 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   const identity = candidate => `${candidate.repoPath}#${candidate.prNumber}`;
 
   function enqueue(candidate) {
+    candidate.onAdmissionReady = capacityFreed;
     // Resolve admission at the actual spawn boundary, independently of the
     // review's long-lived completion promise. Refusals resolve on return.
     let admitted = false;

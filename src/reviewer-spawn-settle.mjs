@@ -587,7 +587,7 @@ async function spawnReviewer(args) {
             fallbackReviewAttempts: args.reviewDbAttemptNumber ?? args.reviewAttemptNumber ?? 0,
           }),
         } : {}),
-        onReviewerRuntimeStarted: () => { runtimeStarted = true; },
+        onReviewerRuntimeStarted: () => { runtimeStarted = true; args.onReviewerRuntimeStarted?.(); },
       });
     } finally {
       if (gate.probe && !runtimeStarted) {
@@ -692,6 +692,7 @@ async function spawnReviewerOnceWithAccount({
   fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
   freshnessCheckSleepImpl = sleepMs,
   onPostOperationSettled = null,
+  readDurablePostedAtImpl = ({ repo, prNumber, reviewerHeadSha, reviewerModel, attemptNumber, passKind }) => db.prepare(`SELECT body_captured_at FROM reviewer_passes WHERE repo = ? AND pr_number = ? AND head_sha = ? AND reviewer_model = ? AND attempt_number = ? AND pass_kind = ? AND gh_comment_id IS NOT NULL`).get(repo, prNumber, reviewerHeadSha, reviewerModel, attemptNumber, passKind)?.body_captured_at,
   agyReviewerIdentityPool = getAgyReviewerIdentityPool(),
 }) {
   if (reviewerRefusesBuilder(builderTag, reviewerModel)) {
@@ -966,6 +967,19 @@ async function spawnReviewerOnceWithAccount({
         result = resultWithGitHubPostFailure(result, err);
       }
     }
+    if (result.ok) {
+      try {
+        const postedAt = readDurablePostedAtImpl({ repo, prNumber, reviewerHeadSha, reviewerModel,
+          attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0, passKind });
+        if (postedAt) result.durablePostedAt = Date.parse(postedAt);
+      } catch (error) {
+        console.warn(`[watcher] durable post timestamp unavailable for ${repo}#${prNumber}: ${error.message}`);
+      }
+    }
+    // The runtime (including its identity lease) has finished. Accounting below
+    // must not keep a dead process counted by the next admission drain.
+    activeReviewerSpawns.delete(reviewerSpawnToken);
+    deleteSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, reviewerSpawnToken);
     // RPL-02 admission/settlement split. The callback synchronously commits the
     // reviewed_prs transition before the pool releases scarce reviewer
     // capacity. postGitHubReviewWithCapture has already completed its bounded
@@ -983,6 +997,7 @@ async function spawnReviewerOnceWithAccount({
     }
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
+    const settlementStartedAt = Date.now();
     try {
       const endedAt = new Date().toISOString();
       // Read the reviewer token-usage evidence and persist the artifact in an
@@ -1006,6 +1021,7 @@ async function spawnReviewerOnceWithAccount({
       try {
         let rawTokenUsage = result.tokenUsage || null;
         if (!rawTokenUsage?.workerRunId || !rawTokenUsage?.rateLimits?.length || !rawTokenUsage?.model) {
+          const ledgerStartedAt = Date.now();
           const ledgerLookup = await readReviewerLedgerEvidenceWithRetry({
             readImpl: readBestReviewerEvidenceTokenUsageImpl,
             sleepImpl: ledgerLookupSleepImpl,
@@ -1026,6 +1042,7 @@ async function spawnReviewerOnceWithAccount({
               rootDir,
             },
           });
+          console.log(`[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-ledger-lookup elapsed_ms=${Date.now() - ledgerStartedAt} attempts=${ledgerLookup.attempts}`);
           const ledgerTokenUsage = ledgerLookup.usage;
           if (ledgerLookup.lastError && ledgerLookup.lastError !== 'worker-run-not-yet-visible') {
             console.warn(
@@ -1110,6 +1127,7 @@ async function spawnReviewerOnceWithAccount({
         // counts) the run_id is already valid — discarding it would lose WCW
         // attribution for no reason. If the read itself threw, it stays null.
       }
+      const passCompletionStartedAt = Date.now();
       await withSqliteBusyRetry(() => completeReviewerPassImpl(rootDir, {
         repo,
         prNumber,
@@ -1136,12 +1154,14 @@ async function spawnReviewerOnceWithAccount({
           reviewerTokenUsageArtifact,
         },
       }), { label: `reviewer-pass-settle:${repo}#${prNumber}`, log: console });
+      console.log(`[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=pass-completion elapsed_ms=${Date.now() - passCompletionStartedAt}`);
     } catch (err) {
       console.warn(
         `[watcher] reviewer_pass_token_update_failed repo=${repo} pr=${prNumber} ` +
         `session=${reviewerSessionUuid}: ${err?.message || err}`
       );
     }
+    console.log(`[watcher] reviewer settlement timing repo=${repo} pr=${prNumber} step=token-artifacts-pass-completion elapsed_ms=${Date.now() - settlementStartedAt}`);
     return result;
   } catch (err) {
     try {
@@ -1322,7 +1342,8 @@ function settleReviewerAttempt({
 }) {
   reviewerModel = result.effectiveReviewerModel || reviewerModel;
   if (result.ok) {
-    const postedAt = new Date().toISOString();
+    const postedAt = Number.isFinite(result.durablePostedAt)
+      ? new Date(result.durablePostedAt).toISOString() : new Date().toISOString();
     let recoveredOutage = null;
     try {
       recoveredOutage = reviewerModel ? clearReviewerCredentialOutage(rootDir, reviewerCredentialKey(reviewerModel, result.claudeBrokerProvider)) : null;

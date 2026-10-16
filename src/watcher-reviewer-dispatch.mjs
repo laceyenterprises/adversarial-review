@@ -30,7 +30,8 @@ export function createReviewerDispatchDrain({
       // Unknown broker capacity uses the pool's conservative single-Gemini cap.
       const geminiCredentialConcurrency =
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
-      const orderedCandidates = await prepareSpillover(candidates, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
+      const eligible = candidates.filter(candidate => !candidate.admissionBlocked?.());
+      const orderedCandidates = await prepareSpillover(eligible, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
       const drainResult = await runQueue(orderedCandidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,

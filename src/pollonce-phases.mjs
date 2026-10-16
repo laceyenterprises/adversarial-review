@@ -1,3 +1,4 @@
+import { reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
 import { reviewerCredentialKey } from './claude-account-routing.mjs';
 import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './reviewer-timeout-budget.mjs';
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
@@ -747,6 +748,8 @@ export async function processReviewSubject(entry, ctx) {
     findArgusJobImpl = findArgusJob,
     maybeAutoAdjudicateDependencyBotArgusJobImpl = maybeAutoAdjudicateDependencyBotArgusJob,
   } = ctx;
+  // Keep discovery moving; the posted row remains the durable retry handle.
+  if (reviewerHandoffPending(repoPath, prNumber)) return;
 
       const wakeIdentity = { repoPath, prNumber, headSha: subject.headSha };
       retainedWatcherWakes?.observe({ ...wakeIdentity, terminal: subject.terminal });
@@ -1604,7 +1607,9 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       if (existing?.review_status === 'posted') {
-        const runPostedReviewHandler = () => handlePostedReviewRow({
+        const runPostedReviewHandler = async () => {
+          await waitForReviewerHandoff(repoPath, prNumber);
+          return handlePostedReviewRow({
           rootDir: ROOT,
           repoPath,
           prNumber,
@@ -1618,6 +1623,7 @@ export async function processReviewSubject(entry, ctx) {
           domainId,
           branchProtectionCache: mergeAgentCandidateBranchProtectionCache,
         });
+        };
         postedReviewHandlers.push({
           repoPath,
           prNumber,
@@ -3125,7 +3131,12 @@ export async function processReviewSubject(entry, ctx) {
           this.syncDepthSpillRoute(waitPressure?.reason || 'queue-depth-pressure');
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
         },
+        admissionBlocked: () => reviewerHandoffPending(repoPath, prNumber),
         async run() {
+          if (reviewerHandoffPending(repoPath, prNumber)) {
+            this.retainWakeForCapacity(); this.refundDepthSpill();
+            return { dispatched: false, reason: 'inline-final-hammer-pending' };
+          }
           if (readWatcherDrainState().active) {
             this.retainWakeForCapacity();
             this.refundDepthSpill();
@@ -3893,7 +3904,9 @@ export async function processReviewSubject(entry, ctx) {
                 domainId,
                 afhReviewerFallback: route.afhReviewerFallback || null,
                 reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
+                onReviewerRuntimeStarted: () => dispatchCandidate.markAdmissionStarted?.(),
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
+                  dispatchCandidate.markAdmissionStarted?.();
                   reviewerProcessStarted = true;
                   retainedWatcherWakes?.drop(wakeIdentity);
                   healthProbe?.recordSpawn?.(healthTick, {
@@ -3913,9 +3926,28 @@ export async function processReviewSubject(entry, ctx) {
                 },
               };
               let reviewRowSettled = false;
+              let handoffPromise = null;
+              const handoff = result => {
+                if (handoffPromise) return handoffPromise;
+                handoffPromise = startReviewerHandoff(repoPath, prNumber, async () => {
+                  const startedAt = Date.now();
+                  try {
+                    return await maybeInlineFinalHammerAfterReview({ rootDir: ROOT, repoPath, prNumber,
+                      result, passKind, completedRemediationRounds, maxRemediationRounds,
+                      subjectRef: subject.ref, currentRevisionRef: subject.ref.revisionRef,
+                      labelNames: prLabelNames, projectGateStatusSafe, execFileImpl: execFileAsync,
+                      operatorSurface, logger: console, handlePostedReviewRowImpl: handlePostedReviewRow });
+                  } finally {
+                    console.log(`[watcher] reviewer settlement timing repo=${repoPath} pr=${prNumber} step=inline-final-hammer elapsed_ms=${Date.now() - startedAt}`);
+                  }
+                });
+                void handoffPromise.finally(() => dispatchCandidate.onAdmissionReady?.()).catch(() => {});
+                return handoffPromise;
+              };
               const pipelineEnabled = isPipelineEnabled(domainAdapterSet.domainConfig);
               if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
                 if (reviewRowSettled) return;
+                const rowSettlementStartedAt = Date.now();
                 settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,
@@ -3928,7 +3960,12 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerModel: postedResult.effectiveReviewerModel || route.reviewerModel,
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
+                console.log(`[watcher] reviewer settlement timing repo=${repoPath} pr=${prNumber} step=durable-row-settlement elapsed_ms=${Date.now() - rowSettlementStartedAt}`);
                 reviewRowSettled = true;
+                dispatchCandidate.durablePostedAt = postedResult.durablePostedAt;
+                handoff(postedResult);
+                releaseReviewerReservation();
+                releaseAdmissionCapacity?.({ dispatched: true });
               };
               // ARC-13: when the domain enables the sequential review pipeline
               // (default OFF), drive the two-stage pipeline instead of a single
@@ -3941,7 +3978,6 @@ export async function processReviewSubject(entry, ctx) {
                   + `wait_threshold_exceeded=${waitThresholdExceeded}`);
               }
               reviewerSpawned = true;
-              dispatchCandidate.markAdmissionStarted?.();
               if (depthSpillReserved) {
                 firstPassSpilloverController?.commitSpill?.({ repo: repoPath, prNumber });
                 depthSpillReserved = false;
@@ -4000,23 +4036,7 @@ export async function processReviewSubject(entry, ctx) {
                 });
               }
               try {
-                await maybeInlineFinalHammerAfterReview({
-                  rootDir: ROOT,
-                  repoPath,
-                  prNumber,
-                  result,
-                  passKind,
-                  completedRemediationRounds,
-                  maxRemediationRounds,
-                  subjectRef: subject.ref,
-                  currentRevisionRef: subject.ref.revisionRef,
-                  labelNames: prLabelNames,
-                  projectGateStatusSafe,
-                  execFileImpl: execFileAsync,
-                  operatorSurface,
-                  logger: console,
-                  handlePostedReviewRowImpl: handlePostedReviewRow,
-                });
+                await handoff(result);
               } finally {
                 releaseAdmissionCapacity?.({ dispatched: true });
               }

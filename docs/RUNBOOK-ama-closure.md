@@ -2041,6 +2041,17 @@ Operator recovery for a declined PR is unchanged: `retrigger-review
 
 ### Strict non-blocking remediation — throughput note
 
+`REVIEWGUARD-01` reads generated-path prohibitions from the live PR base
+configuration. Before publication, the reviewer drops cards whose entire remedy
+is an explicit edit to those paths; if no blocking findings remain, a
+`Request changes` verdict line becomes `Comment only`, including when followed
+by explanatory notes. For already-posted non-blocking findings, the hammer's
+`bin/guard-forbidden-paths.mjs` helper emits policy resolutions and audit details
+in strict mode. Unknown policies and mixed remedies remain unresolved. Cards
+containing code fences are retained conservatively, while clean neighbouring
+cards can still be filtered or resolved. Policy resolutions do not waive any
+merge safety gate; follow the helper's audit instructions in the hammer prompt.
+
 `roles.adversarial.merge_authority.strict_non_blocking_remediation` is **on by
 default**. Because adversarial reviewers almost always emit at least one
 non-blocking polish suggestion, this means the common `Comment only` /

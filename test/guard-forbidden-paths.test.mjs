@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadGuardForbiddenPaths, guardOnlyRemedy, filterGuardForbiddenFindings } from '../src/guard-forbidden-paths.mjs';
+import { loadGuardForbiddenPaths, guardOnlyRemedy, filterGuardForbiddenFindings, resolveGuardForbiddenNonBlocking } from '../src/guard-forbidden-paths.mjs';
 import { parseBlockingFindingsSection, parseNonBlockingFindingsSection } from '../src/kernel/review-findings.mjs';
+import { extractReviewVerdict } from '../src/kernel/verdict.mjs';
 
 const GUARDS = [{ check: 'Reject generated catalog edits', path: 'docs/CATALOG.md' }];
 const CARD = '- **Missing generated catalog**\n  - **File:** `docs/CATALOG.md`\n  - **Problem:** The added document is absent from the generated catalog.\n  - **Recommended fix:** Commit the regenerated `docs/CATALOG.md`.';
@@ -111,4 +112,53 @@ test('retaining an ordinary blocking finding preserves Request changes', () => {
   const filtered = filterGuardForbiddenFindings(blocking, GUARDS, { log: {} });
   assert.deepEqual(parseBlockingFindingsSection(filtered).map(finding => finding.title), ['Broken guide']);
   assert.match(filtered, /Request changes/);
+});
+
+test('empty blocking findings normalize a verdict with trailing notes in LF and CRLF reviews', () => {
+  for (const newline of ['\n', '\r\n']) {
+    const body = REVIEW.replace('## Blocking issues\n- None.', `## Blocking issues\n${CARD}`)
+      .replace('Comment only', 'Request changes\n\nPlease address the catalog regeneration before merge.')
+      .replaceAll('\n', newline);
+    const filtered = filterGuardForbiddenFindings(body, GUARDS, { log: {} });
+    assert.deepEqual(parseBlockingFindingsSection(filtered), []);
+    assert.deepEqual(parseNonBlockingFindingsSection(filtered), []);
+    assert.equal(extractReviewVerdict(filtered), 'Comment only');
+    assert.equal(filterGuardForbiddenFindings(filtered, GUARDS, { log: {} }), filtered);
+  }
+});
+
+test('fenced cards do not disable filtering or policy resolution of clean neighbouring cards', () => {
+  for (const marker of ['```', '~~~', '````']) {
+    for (const snippet of ['example()', '### Quoted heading\n- Title: Quoted legacy title',
+      CARD.replace('Missing generated catalog', 'Quoted finding'), '```\n~~~\nexample()']) {
+      // Use a longer fence for the snippet containing shorter/mismatched fences.
+      if (snippet.startsWith('```') && marker !== '````') continue;
+      const fenced = CARD.replace('Missing generated catalog', 'Fenced finding')
+        .replace('The added document is absent from the generated catalog.',
+          `The added document is absent from the generated catalog.\n    ${marker}markdown\n${snippet}\n    ${marker}`);
+      for (const cards of [fenced + '\n' + CARD, CARD + '\n' + fenced]) {
+        const body = REVIEW.replace(CARD, cards);
+        const filtered = filterGuardForbiddenFindings(body, GUARDS, { log: {} });
+        assert.deepEqual(parseNonBlockingFindingsSection(filtered), parseNonBlockingFindingsSection(REVIEW.replace(CARD, fenced)));
+        assert.ok(filtered.includes(fenced));
+        const policy = resolveGuardForbiddenNonBlocking(body, GUARDS);
+        assert.deepEqual(policy.resolved.map(finding => finding.title), ['Missing generated catalog']);
+        assert.deepEqual(policy.remaining, parseNonBlockingFindingsSection(REVIEW.replace(CARD, fenced)));
+        assert.ok(policy.resolved.every(finding => finding.blocking === false));
+        const blocking = body.replace('## Blocking issues\n- None.\n\n## Non-blocking issues', '## Blocking issues')
+          .replace('Comment only', 'Request changes');
+        const filteredBlocking = filterGuardForbiddenFindings(blocking, GUARDS, { log: {} });
+        assert.ok(filteredBlocking.includes(fenced));
+        assert.ok(!filteredBlocking.includes('- **Missing generated catalog**'));
+        assert.equal(extractReviewVerdict(filteredBlocking), 'Request changes');
+      }
+    }
+  }
+});
+
+test('an unclosed code fence cannot expose a later card for policy resolution', () => {
+  const fenced = CARD + '\n    ```markdown\n' + CARD;
+  const body = REVIEW.replace(CARD, fenced);
+  assert.equal(filterGuardForbiddenFindings(body, GUARDS, { log: {} }), body);
+  assert.deepEqual(resolveGuardForbiddenNonBlocking(body, GUARDS).resolved, []);
 });

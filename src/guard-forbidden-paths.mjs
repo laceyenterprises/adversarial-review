@@ -99,14 +99,21 @@ export function guardOnlyRemedy(finding, guards = []) {
 
 function findingBlocks(section) {
   const lines = section.split('\n');
-  if (lines.some(line => /^\s*(?:```|~~~)/.test(line))) return null;
-  const h3 = lines.some(line => /^###\s+/.test(line));
-  const hasLegacyTitles = lines.some(line => /^-[ \t]+Title[ \t]*:/i.test(line));
+  let fence = null;
+  const outsideFence = lines.map(line => {
+    const marker = /^\s*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (!marker) return !fence;
+    if (!fence) fence = marker;
+    else if (marker[0] === fence[0] && marker.length >= fence.length) fence = null;
+    return false;
+  });
+  const h3 = lines.some((line, index) => outsideFence[index] && /^###\s+/.test(line));
+  const hasLegacyTitles = lines.some((line, index) => outsideFence[index] && /^-[ \t]+Title[ \t]*:/i.test(line));
   const boundary = h3 ? /^###\s+/ : hasLegacyTitles ? /^-[ \t]+Title[ \t]*:/i
     : /^(?:-\s+\*\*(?!(?:Category|File|Lines|Problem|Why it matters|Recommended fix)(?::\*\*|\*\*\s*:))|-[ \t]+File[ \t]*:)/i;
   const blocks = [];
-  for (const line of lines) {
-    if (boundary.test(line)) blocks.push([]);
+  for (const [index, line] of lines.entries()) {
+    if (outsideFence[index] && boundary.test(line)) blocks.push([]);
     if (blocks.length) blocks.at(-1).push(line);
     else if (line.trim()) return null;
   }
@@ -135,6 +142,9 @@ function transformSections(text, transform) {
 }
 
 function completeCard(block) {
+  // The kernel field parser does not distinguish quoted fields in code fences.
+  // Retain this card conservatively without disabling its unfenced neighbours.
+  if (block.some(line => /^\s*(?:`{3,}|~{3,})/.test(line))) return false;
   let fieldIndent = 0;
   const seen = new Set();
   for (const line of block.slice(1)) {
@@ -158,8 +168,10 @@ export function filterGuardForbiddenFindings(reviewText, guards = [], { log = co
     if (!/^##[ \t]+(?:Blocking|Non[- \t]+blocking)[ \t]+Issues?[ \t]*\r?\n?$/i.test(heading)) return whole;
     const blocks = findingBlocks(section);
     if (!blocks?.length) return whole;
+    const parse = /^##[ \t]+Blocking[ \t]+/i.test(heading)
+      ? parseBlockingFindingsSection : parseNonBlockingFindingsSection;
     const kept = blocks.filter(block => {
-      const parsed = parseBlockingFindingsSection(`## Blocking issues\n${block.join('\n')}`);
+      const parsed = parse(`${heading}${block.join('\n')}`);
       if (!completeCard(block) || parsed?.length !== 1 || !guardOnlyRemedy(parsed[0], guards)) return true;
       dropped.push(parsed[0].title || parsed[0].file);
       return false;
@@ -176,7 +188,7 @@ export function filterGuardForbiddenFindings(reviewText, guards = [], { log = co
   const blocking = parseBlockingFindingsSection(result);
   if (blocking?.length === 0) {
     result = transformSections(result, (heading, section) => (
-      /^##[ \t]+Verdict[ \t]*\r?\n?$/i.test(heading) && /^\s*Request changes\s*$/i.test(section)
+      /^##[ \t]+Verdict[ \t]*\r?\n?$/i.test(heading) && /^\s*Request changes[ \t]*\r?(?:\n|$)/i.test(section)
         ? heading + '\nComment only\n\n' : heading + section
     ));
   }
@@ -193,9 +205,15 @@ export function resolveGuardForbiddenNonBlocking(reviewText, guards = [], { stri
     return heading + body;
   });
   const blocks = rawSection === undefined ? null : findingBlocks(rawSection);
-  const complete = blocks && nonBlocking && blocks.length === nonBlocking.length
-    ? blocks.map(block => completeCard(block) && parseNonBlockingFindingsSection(`## Non-blocking issues\n${block.join('\n')}`)?.length === 1)
+  // Quoted cards can create multiple kernel entries inside one fenced block.
+  // Leave all of those slots unresolved so later clean cards keep their index.
+  let complete = blocks && nonBlocking
+    ? blocks.flatMap(block => {
+      const parsed = parseNonBlockingFindingsSection(`## Non-blocking issues\n${block.join('\n')}`) || [];
+      return parsed.map(() => completeCard(block) && parsed.length === 1);
+    })
     : [];
+  if (complete.length !== nonBlocking?.length) complete = [];
   const remaining = [];
   for (const [index, finding] of (nonBlocking || []).entries()) {
     const matched = strictNonBlockingRemediation && complete[index] && guardOnlyRemedy(finding, guards);

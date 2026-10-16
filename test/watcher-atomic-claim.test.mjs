@@ -655,14 +655,13 @@ test('CI-blocked rereview park clears the claim and remains non-claimable', () =
   );
 });
 
-test('CI-blocked rereview recheck records a bounded probe timestamp', () => {
+test('CI-blocked rereview recheck binds only confirmed heads and refuses stale rows', () => {
   const db = setupDb();
   seedReviewRow(db, { reviewStatus: REREVIEW_CI_BLOCKED_STATUS, reviewerHeadSha: 'head-red' });
 
   const updated = prepareMarkRereviewCiBlockedRecheck(db).run(
     '2026-05-02T18:15:00.000Z',
-    REPO,
-    PR
+    null, null, REPO, PR, 'head-red'
   );
 
   assert.equal(updated.changes, 1);
@@ -670,17 +669,25 @@ test('CI-blocked rereview recheck records a bounded probe timestamp', () => {
   assert.equal(row.review_status, REREVIEW_CI_BLOCKED_STATUS);
   assert.equal(row.last_attempted_at, '2026-05-02T18:15:00.000Z');
 
+  assert.equal(row.reviewer_head_sha, 'head-red', 'unconfirmed CI preserves the parking head');
+  const recheck = prepareMarkRereviewCiBlockedRecheck(db);
+  assert.equal(recheck.run('2026-05-02T18:16:00.000Z', 'head-new', 'head-new', REPO, PR, 'head-red').changes, 1);
+  row = readRow(db);
+  assert.equal(row.reviewer_head_sha, 'head-new');
+  assert.equal(row.revision_ref, 'head-new');
+  assert.equal(recheck.run('2026-05-02T18:17:00.000Z', 'head-stale', 'head-stale', REPO, PR, 'head-red').changes, 0);
+  assert.deepEqual(readRow(db), row, 'a racing head rebind cannot overwrite the newer row');
+
   db.prepare("UPDATE reviewed_prs SET review_status = 'pending' WHERE repo = ? AND pr_number = ?").run(REPO, PR);
-  const refused = prepareMarkRereviewCiBlockedRecheck(db).run(
+  const refused = recheck.run(
     '2026-05-02T18:20:00.000Z',
-    REPO,
-    PR
+    'head-new', 'head-new', REPO, PR, 'head-new'
   );
   row = readRow(db);
 
   assert.equal(refused.changes, 0);
   assert.equal(row.review_status, 'pending');
-  assert.equal(row.last_attempted_at, '2026-05-02T18:15:00.000Z');
+  assert.equal(row.last_attempted_at, '2026-05-02T18:16:00.000Z');
 });
 
 test('atomic claim simulates a real two-process race — only one wins', () => {

@@ -826,12 +826,14 @@ test('the admission lane drains wakes before it decides anything about the PR', 
   assert.ok(drain < spawnDecision, 'the drain must run before the reviewer spawn decision');
 });
 
-test('the CI-transition producer only fires once the row is actually re-armed', () => {
+test('CI-blocked release returns to FIFO without a priority wake', () => {
   const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
-  assert.match(source, /const requestCiTransitionRereviewWake = \(\{[^}]*armed[^}]*\}\) => \{\s*\n\s*if \(!armed\) return null;/);
-  assert.equal(source.split('requestCiTransitionRereviewWake({').length - 1, 2);
-  assert.ok(source.includes("detail: 'ci-green-on-parked-head'"));
-  assert.ok(source.includes("detail: 'ci-blocked-head-moved'"));
+  const release = source.indexOf('ci-blocked released: head');
+  const nextBranch = source.indexOf('// Red/pending heads remain unclaimable.', release);
+  const releaseBranch = source.slice(release, nextBranch);
+  assert.ok(release > 0 && nextBranch > release);
+  assert.ok(releaseBranch.includes('return;'));
+  assert.ok(!releaseBranch.includes('requestRereviewWake'));
 });
 
 // ── settle CAS + record naming ───────────────────────────────────────────────

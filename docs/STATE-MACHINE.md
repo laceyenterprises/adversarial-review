@@ -76,7 +76,7 @@ data/reviews.db
 | `pending` | eligible for watcher review / re-review |
 | `pending-upstream` | transient upstream/provider failure; parked behind the file-backed cascade backoff window, reclaimable by the normal claim once it expires (does not burn `review_attempts`) |
 | `reviewing` | reviewer subprocess in flight; durable claim before spawn |
-| `ci-blocked` | rereview admission found failed external CI on the current PR head and no remediation job is left to requeue (no follow-up job, or its rounds are spent). Not claimable by reviewer dispatch; the hammer owns the head meanwhile (CIBLOCKHAM-01); the watcher reconciles hammer ownership every tick before reviewer suppression, CI backoff or follow-up deferral. HAM pushes and dispatched/pending closure outcomes retain the parked row, including before the first hammer push. Pending or in-progress same-PR remediation prevents new hammer launches and retries regardless of head. A non-HAM head change or green CI on the original head re-arms admission only after closure ownership is released without a final outcome. Explicit remediation/operator re-review resets still go through `requestReviewRereview`. Same-head CI probes are backoff-gated so parked rows cannot make the watcher poll GitHub on every tick |
+| `ci-blocked` | Re-review admission found failed external CI with no remediation job left. Every poll inspects external CI on the current PR head before hammer ownership or follow-up deferral. Confirmed green current-head CI releases through `requestReviewRereview` to the normal FIFO queue for that head and logs `ci-blocked released: head <sha> green`; normal admission still defers reviewers for active remediation. Red, pending, unknown or racing CI cannot admit a reviewer; a confirmed moved head replaces the stale parking head. Unconfirmed heads retry next poll without hammer reconciliation or head rebinding. Otherwise, active follow-up deferral precedes hammer reconciliation; closer-head suppression only gates reviewer dispatch. |
 | `posted` | review posted successfully |
 | `failed` | review attempt failed; eligible same-head retries use normal dispatch gates; a new head archives the failure and re-arms the row before admission |
 | `failed-orphan` | watcher restarted while a `reviewing` row was in flight and safe automatic recovery could not be proven — sticky unless a matching posted GitHub review is found; manual recovery uses `npm run reconcile-posted-orphans` for posted-review backfill or `npm run retrigger-review` after operator verification |
@@ -195,7 +195,7 @@ new PR
             │
             ├─ rereview admission sees failed external CI and no follow-up job
             │    └─ ci-blocked
-            │         ├─ ownership released + non-HAM head advances or original-head CI turns green (no final hammer outcome) ── pending
+            │         ├─ confirmed current-head external CI turns green ── pending (normal FIFO admission)
             │         └─ remediation/operator reset ───────── pending
             │
             ├─ lease-released same-head terminal failure exhausts retry cap

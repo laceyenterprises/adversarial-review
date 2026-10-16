@@ -46,6 +46,7 @@ function buildLoaderSource() {
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
     [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
+    [fileUrl('src', 'hcp-health.mjs')]: 'fixture:hcp-health',
     [fileUrl('src', 'ama', 'dispatch-closer.mjs')]: 'fixture:ama-dispatch-closer',
     [fileUrl('src', 'config-loader.mjs')]: 'fixture:config-loader',
     [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
@@ -63,6 +64,19 @@ if (process.env.FIXTURE_CI_MULTI_TICK || process.env.FIXTURE_CI_PRE_PUSH) {
 if (process.env.FIXTURE_CI_BLOCKED === '1') {
   stubs.set(${JSON.stringify(ciRegressionUrl)}, 'fixture:remediation-ci-regression');
 }
+if (process.env.FIXTURE_CI_EDGE === 'wake') {
+  stubs.set(${JSON.stringify(fileUrl('src', 'rereview-wake.mjs'))}, 'fixture:ci-wake');
+}
+if (process.env.FIXTURE_CI_EDGE === 'missing-head') {
+  stubs.set(${JSON.stringify(fileUrl('src', 'review-state-db.mjs'))}, 'fixture:ci-row');
+}
+if (process.env.FIXTURE_CI_EDGE === 'empty-route') {
+  stubs.set(${JSON.stringify(fileUrl('src', 'ci-blocked-hammer.mjs'))}, 'fixture:ci-route');
+}
+if (process.env.FIXTURE_CI_RELEASE) {
+  stubs.set(${JSON.stringify(fileUrl('src', 'reviewer-route-selection.mjs'))}, 'fixture:ci-reviewer-routing');
+}
+
 
 export async function resolve(specifier, context, nextResolve) {
   if (context.parentURL?.startsWith('fixture:') && !specifier.startsWith('.') && !specifier.startsWith('/') && !specifier.includes(':')) {
@@ -75,6 +89,50 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url === 'fixture:ci-wake') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'rereview-wake.mjs')}?actual';
+      export function consumeRereviewWakes({ repo, prNumber }) {
+        // A wake updates durable state without mutating the caller's snapshot.
+        globalThis.__timeoutHandoffDb.prepare(
+          "UPDATE reviewed_prs SET review_status = 'pending' WHERE repo = ? AND pr_number = ?"
+        ).run(repo, prNumber);
+      }
+    `)} };
+  }
+  if (url === 'fixture:ci-row') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'review-state-db.mjs')}?actual';
+      import { stmtGetReviewRow as actual } from '${fileUrl('src', 'review-state-db.mjs')}?actual';
+      export const stmtGetReviewRow = { get(...args) {
+        const row = actual.get(...args);
+        if (row?.reviewer_head_sha === null) delete row.reviewer_head_sha;
+        return row;
+      } };
+    `)} };
+  }
+  if (url === 'fixture:ci-route') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'ci-blocked-hammer.mjs')}?actual';
+      export async function maybeRouteCiBlockedToHammer() {
+        globalThis.__ciEmptyRoutes = (globalThis.__ciEmptyRoutes || 0) + 1;
+        return undefined;
+      }
+    `)} };
+  }
+  if (url === 'fixture:ci-reviewer-routing') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      import * as actual from '${fileUrl('src', 'reviewer-route-selection.mjs')}?actual';
+      export * from '${fileUrl('src', 'reviewer-route-selection.mjs')}?actual';
+      export function selectReviewerRouteForAttempt(options) {
+        if (options.currentRow?.review_status === 'ci-blocked') {
+          throw new Error('parked CI reconciliation must precede reviewer quota admission');
+        }
+        return actual.selectReviewerRouteForAttempt(options);
+      }
+    `)} };
+  }
+
   if (url === 'fixture:adversarial-gate-status' && process.env.FIXTURE_CI_BLOCKED === '1') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
       export * from ${JSON.stringify(fileUrl('src', 'adversarial-gate-status.mjs') + '?actual')};
@@ -84,7 +142,7 @@ export async function load(url, context, nextLoad) {
         (globalThis.__ciGateOwnership ||= []).push(snapshot.settledReview?.remediationPending);
         return snapshot;
       }
-      export async function projectAdversarialGateStatus() { return { decision: { state: 'pending' } }; }
+      export async function projectAdversarialGateStatus() { globalThis.__ciProjections = (globalThis.__ciProjections || 0) + 1; return { decision: { state: 'pending' } }; }
     `)} };
   }
 
@@ -145,6 +203,7 @@ export async function load(url, context, nextLoad) {
         export * from ${JSON.stringify(ciRegressionActualUrl)};
         export async function inspectRemediationCiRegression() {
           globalThis.__ciInspections = (globalThis.__ciInspections || 0) + 1;
+          if (globalThis.__ciGateOverride) return globalThis.__ciGateOverride;
           return { state: globalThis.__ciGreen ? 'green' : 'failed', conclusion: globalThis.__ciGreen ? 'SUCCESS' : 'FAILURE', headSha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : (globalThis.__ciNonHamPushed ? 'non-ham-head-164' : 'timeout-head-164'), totalExternalChecks: 3,
             failedChecks: globalThis.__ciGreen ? [] : [{ name: 'repo-guards', state: 'FAILURE', workflowName: 'repo-guards', detailsUrl: null }],
             pendingChecks: [] };
@@ -203,6 +262,7 @@ export async function load(url, context, nextLoad) {
   }
 
   const simpleStubs = {
+    'fixture:hcp-health': "export async function checkHcpHealthz() { return { ready: true, reason: 'fixture' }; }",
     'fixture:ci-hammer-alert': "export * from '${fileUrl('src', 'alert-delivery.mjs')}?actual'; export async function deliverAlert(text, options) { (globalThis.__ciHammerPages ||= []).push(options); return { status: 'queued' }; }",
     'fixture:operator-surface': "globalThis.__timeoutHandoffOperatorWrites = []; export function createCompositeOperatorSurface() { return { extractLinearTicketId() { return null; }, syncTriageStatus: async (...args) => globalThis.__timeoutHandoffOperatorWrites.push(args), observeOperatorApproved: async () => null, observeMergeAgentOverride: async () => process.env.FIXTURE_MERGE_AGENT_REQUESTED === '1' ? { applied: true, observedRevisionRef: 'timeout-head-164', actor: process.env.FIXTURE_MERGE_AGENT_ACTOR || 'operator-bot', eventId: 'evt-merge-agent-requested', observedAt: process.env.FIXTURE_MERGE_AGENT_CREATED_AT || '2026-05-27T04:00:01.000Z' } : null, observeLabelControl: async () => process.env.FIXTURE_CI_RETRIGGER ? { applied: true, actor: 'VirtualPaul', eventId: 'evt-retrigger', observedAt: new Date().toISOString() } : null }; }",
     'fixture:reviewer-runtime': "globalThis.__timeoutHandoffReviewerSpawns = []; export function createReviewerRuntimeAdapterForDomain() { return { spawnReviewer: async (payload) => { globalThis.__timeoutHandoffReviewerSpawns.push(payload); return { ok: true, stdout: '', stderr: '' }; }, cancel: async () => {}, reattach: async () => ({}) }; } export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); } export function loadDomainConfig() { return {}; } export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }",
@@ -221,7 +281,7 @@ export async function load(url, context, nextLoad) {
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed-title path'); }",
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
-    'fixture:github-api': "export * from '${fileUrl('src', 'github-api.mjs')}?actual'; export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'timeout-head-164', labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
+    'fixture:github-api': "export * from '${fileUrl('src', 'github-api.mjs')}?actual'; export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : (globalThis.__ciNonHamPushed ? 'non-ham-head-164' : 'timeout-head-164'), labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:ama-dispatch-closer': "export * from '${fileUrl('src', 'ama', 'dispatch-closer.mjs')}?actual'; import { maybeDispatchAmaCloser as actual } from '${fileUrl('src', 'ama', 'dispatch-closer.mjs')}?actual'; import { primaryChangeFixture } from '${fileUrl('test', 'helpers', 'primary-change.mjs')}'; export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { if (args?.reviewState?.remediationPending === true) { const result = await actual({ ...args, fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha), execFileImpl: async () => { throw new Error('remediation owner must prevent external dispatch'); } }); if (result.dispatched) throw new Error('competing hammer launched'); (globalThis.__ciRemediationDeferrals ||= []).push(result.reason); return result; } if (args?.dispatchContext?.ciBlockedHammerOwner === true) (globalThis.__ciBlockedCloserCalls ||= []).push({ reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, failedChecks: (args?.dispatchContext?.ciFailedChecks || []).map((check) => check.name) }); (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); if ((process.env.FIXTURE_CI_MULTI_TICK || process.env.FIXTURE_CI_PRE_PUSH) && args?.dispatchContext?.ciBlockedHammerOwner === true) { const tick = globalThis.__ciBlockedCloserCalls.length; if (tick === 2 && process.env.FIXTURE_CI_PRE_PUSH) return { dispatched: false, skipMergeAgent: true, launchRequestId: 'lrq_first_hammer', reason: 'existing-dispatch-unknown', workerClass: 'hammer' }; if (tick === 3 && process.env.FIXTURE_CI_MULTI_TICK !== 'retry') return { dispatched: false, skipMergeAgent: true, needsOperator: true, reason: process.env.FIXTURE_CI_MULTI_TICK === 'cap' ? 'hammer-retry-cap-exhausted' : 'ci-blocked-hammer-final-no-merge' }; return { dispatched: true, launchRequestId: tick < 3 ? 'lrq_first_hammer' : 'lrq_retry_hammer', reason: tick === 2 ? 'already-dispatched' : 'dispatched', workerClass: 'hammer' }; } const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
     'fixture:config-loader': "export * from '${fileUrl('src', 'config-loader.mjs')}?actual'; export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; }, getOrchestrationMode() { return process.env.FIXTURE_ORCHESTRATION_MODE || 'native'; } }; } export function getConfig() { return undefined; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {} export function loadConfigRuntime() { return buildConfig(); }",
@@ -249,6 +309,9 @@ function buildRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
 import assert from 'node:assert/strict';
+
+import { mkdirSync, renameSync } from 'node:fs';
+import path from 'node:path';
 
 const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
 const db = globalThis.__timeoutHandoffDb;
@@ -303,6 +366,9 @@ if (capScenario) {
     null
   );
 }
+if (process.env.FIXTURE_CI_EDGE === 'missing-head') {
+  db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = NULL').run();
+}
 if (process.env.FIXTURE_CI_RETRIGGER) {
   const { createFollowUpJob, markFollowUpJobStopped } = await import(${JSON.stringify(fileUrl('src', 'follow-up-jobs.mjs') + '?actual')});
   const created = createFollowUpJob({ rootDir: process.env.FIXTURE_JOB_ROOT,
@@ -333,12 +399,17 @@ const octokit = {
           state: 'open',
           merged_at: null,
           closed_at: null,
-          head: { sha: 'timeout-head-164' },
+          head: { sha: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : (globalThis.__ciNonHamPushed ? 'non-ham-head-164' : 'timeout-head-164') },
         },
       }),
     },
   },
 };
+
+if (process.env.FIXTURE_CI_RELEASE === 'already-green') {
+  globalThis.__ciGreen = true;
+  globalThis.__ciNonHamPushed = true;
+}
 
 await pollOnce(octokit, {
   healthProbe: {
@@ -350,6 +421,41 @@ await pollOnce(octokit, {
 });
 
 const ciSnapshots = [];
+if (process.env.FIXTURE_CI_RELEASE) {
+  const snapshot = () => db.prepare('SELECT review_status, reviewer_head_sha, revision_ref FROM reviewed_prs').get();
+  ciSnapshots.push(snapshot());
+  if (process.env.FIXTURE_CI_RELEASE !== 'already-green') {
+    // The next poll must probe even inside the former same-head backoff.
+    db.prepare('UPDATE reviewed_prs SET last_attempted_at = ?').run(new Date().toISOString());
+    globalThis.__ciGreen = !['red', 'moved-red'].includes(process.env.FIXTURE_CI_RELEASE);
+    globalThis.__ciNonHamPushed = ['moved', 'moved-red'].includes(process.env.FIXTURE_CI_RELEASE);
+    globalThis.__ciHammerPushed = process.env.FIXTURE_CI_RELEASE === 'hammer';
+    if (['stale-red', 'stale-green', 'missing-head'].includes(process.env.FIXTURE_CI_RELEASE)) {
+      globalThis.__ciNonHamPushed = true;
+      globalThis.__ciGateOverride = {
+        state: process.env.FIXTURE_CI_RELEASE === 'stale-green' ? 'green' : 'failed',
+        headSha: process.env.FIXTURE_CI_RELEASE === 'missing-head' ? null : 'timeout-head-164',
+        failedChecks: [{ name: 'old-head-failure', state: 'FAILURE' }],
+      };
+    }
+    await pollOnce(octokit);
+  }
+  ciSnapshots.push(snapshot());
+  globalThis.__ciParkedProbes = globalThis.__ciInspections;
+  globalThis.__ciReleaseSpawns = globalThis.__timeoutHandoffReviewerSpawns.length;
+  if (['moved', 'same', 'already-green'].includes(process.env.FIXTURE_CI_RELEASE)) await pollOnce(octokit);
+  if (globalThis.__ciGateOverride) {
+    assert.equal(globalThis.__ciBlockedCloserCalls.length, 1, 'unconfirmed CI must not reconcile the hammer');
+    assert.equal(snapshot().reviewer_head_sha, 'timeout-head-164', 'unconfirmed CI must not rebind the parking head');
+    globalThis.__ciGateOverride = null;
+    globalThis.__ciGreen = false;
+    await pollOnce(octokit);
+    assert.equal(globalThis.__ciInspections, 3, 'unconfirmed CI retries next poll');
+    assert.equal(snapshot().reviewer_head_sha, 'non-ham-head-164');
+    assert.equal(globalThis.__ciBlockedCloserCalls.length, 2, 'confirmed head resumes hammer reconciliation');
+  }
+}
+
 if (capScenario === 'paused' || capScenario === 'ham') {
   const snapshot = () => db.prepare('SELECT review_status, review_attempts, failure_message, reviewer_head_sha FROM reviewed_prs WHERE pr_number = 164').get();
   const cappedRow = snapshot();
@@ -370,8 +476,24 @@ if (process.env.FIXTURE_CI_PRE_PUSH) {
 }
 if (process.env.FIXTURE_CI_RETRIGGER) {
   assert.equal(globalThis.__ciRetriggerOutcome, 'bumped-and-requeued');
+  // Simulate the operator's pending job being claimed before its worker pushes.
+  // A pending job on an older head is terminal; an in-progress worker still owns it.
+  const { findLatestFollowUpJob } = await import(${JSON.stringify(fileUrl('src', 'operator-retrigger-helpers.mjs') + '?actual')});
+  const { getFollowUpJobDir, writeFollowUpJob } = await import(${JSON.stringify(fileUrl('src', 'follow-up-jobs.mjs') + '?actual')});
+  const latest = findLatestFollowUpJob(process.env.FIXTURE_JOB_ROOT, { repo: 'laceyenterprises/adversarial-review', prNumber: 164 });
+  const activeDir = getFollowUpJobDir(process.env.FIXTURE_JOB_ROOT, 'inProgress');
+  mkdirSync(activeDir, { recursive: true });
+  writeFollowUpJob(latest.jobPath, { ...latest.job, status: 'in_progress', claimedAt: new Date().toISOString() });
+  renameSync(latest.jobPath, path.join(activeDir, path.basename(latest.jobPath)));
   globalThis.__ciNonHamPushed = true;
   await pollOnce(octokit);
+  if (process.env.FIXTURE_CI_ACTIVE_GREEN) {
+    globalThis.__ciGreen = true;
+    await pollOnce(octokit);
+    assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'pending');
+    await pollOnce(octokit);
+    assert.equal(globalThis.__timeoutHandoffReviewerSpawns.length, 0, 'active worker still defers reviewer admission after green release');
+  }
 }
 
 if (process.env.FIXTURE_CI_MULTI_TICK) {
@@ -399,6 +521,10 @@ console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
   closerCalls: globalThis.__timeoutHandoffCloserCalls || [],
   ciBlockedCloserCalls: globalThis.__ciBlockedCloserCalls || [],
   ciInspections: globalThis.__ciInspections || 0,
+  ciEmptyRoutes: globalThis.__ciEmptyRoutes || 0,
+  ciProjections: globalThis.__ciProjections || 0,
+  ciParkedProbes: globalThis.__ciParkedProbes,
+  ciReleaseSpawns: globalThis.__ciReleaseSpawns,
   ciGateOwnership: globalThis.__ciGateOwnership || [],
   ciRetriggerOutcome: globalThis.__ciRetriggerOutcome,
   ciRemediationDeferrals: globalThis.__ciRemediationDeferrals || [],
@@ -772,12 +898,12 @@ test('watcher pollOnce routes a CI-blocked PR with no remediation job left to th
     assert.ok(summaryLine, output);
     const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
 
-    assert.equal(summary.ciInspections, 0, output);
+    assert.equal(summary.ciInspections, 1, output);
     assert.equal(summary.reviewStatus, 'ci-blocked', 'reviewer admission still requires green external CI');
     assert.equal(summary.reviewerSpawns.length, 0);
     assert.equal(summary.operatorWrites.length, 0);
     assert.equal(summary.dispatches.length, 0, 'the legacy merge-agent lane is not used');
-    assert.deepEqual(summary.ciBlockedCloserCalls, [{ reviewCycleExhausted: true, failedChecks: [] }], output);
+    assert.deepEqual(summary.ciBlockedCloserCalls, [{ reviewCycleExhausted: true, failedChecks: ['repo-guards'] }], output);
     assert.match(output, /^launched lrq=\S+ route=ci-blocked .*passes_without_launch=0$/m);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -805,8 +931,12 @@ for (const decision of ['retry', 'no-merge', 'cap']) {
       const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
       assert.ok(line, output);
       const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
-      assert.deepEqual(summary.ciSnapshots, Array(3).fill({ review_status: 'ci-blocked', reviewer_head_sha: 'timeout-head-164' }), output);
-      assert.equal(summary.ciInspections, 0, 'hammer ownership retains the row without CI probes');
+      assert.deepEqual(summary.ciSnapshots, [
+        { review_status: 'ci-blocked', reviewer_head_sha: 'timeout-head-164' },
+        { review_status: 'ci-blocked', reviewer_head_sha: 'ham-pushed-head-164' },
+        { review_status: 'ci-blocked', reviewer_head_sha: 'ham-pushed-head-164' },
+      ], output);
+      assert.equal(summary.ciInspections, 3, 'each poll probes current-head CI before hammer reconciliation');
       assert.equal(summary.reviewerSpawns.length, 0);
       assert.equal(summary.dispatches.length, 0, 'legacy merge-agent cannot take over');
       assert.equal(summary.ciHammerPages.length, decision === 'retry' ? 0 : 1, output);
@@ -821,7 +951,7 @@ for (const decision of ['retry', 'no-merge', 'cap']) {
   });
 }
 
-for (const transition of ['green', 'non-ham', 'retrigger']) {
+for (const transition of ['non-ham', 'retrigger', 'retrigger-green']) {
   test(`CI-blocked real gate ownership survives pre-push ${transition}`, () => {
     const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-pre-push-'));
     try {
@@ -836,26 +966,122 @@ for (const transition of ['green', 'non-ham', 'retrigger']) {
         env: { ...process.env, GITHUB_TOKEN: 'fixture-token', AGENT_OS_HQ_BIN: '/usr/bin/false',
           ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false', FIXTURE_AMA_ENABLED: '1', FIXTURE_AMA_REASON: 'dispatched',
           FIXTURE_CI_BLOCKED: '1', FIXTURE_JOB_ROOT: tmp,
-          ...(transition === 'retrigger' ? { FIXTURE_CI_RETRIGGER: '1' } : { FIXTURE_CI_PRE_PUSH: transition }) },
+          ...(transition.startsWith('retrigger') ? { FIXTURE_CI_RETRIGGER: '1',
+            ...(transition === 'retrigger-green' ? { FIXTURE_CI_ACTIVE_GREEN: '1' } : {}) } : { FIXTURE_CI_PRE_PUSH: transition }) },
       });
       const output = `${result.stdout || ''}${result.stderr || ''}`;
       assert.equal(result.status, 0, output);
       const line = result.stdout.split(/\r?\n/).find((entry) => entry.startsWith(SUMMARY_MARKER));
       assert.ok(line, output);
       const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
-      assert.equal(summary.reviewStatus, 'ci-blocked', output);
+      assert.equal(summary.reviewStatus, transition === 'retrigger-green' ? 'pending' : 'ci-blocked', output);
       assert.equal(summary.reviewerSpawns.length, 0, output);
       assert.equal(summary.dispatches.length, 0, output);
-      assert.equal(summary.ciInspections, 0, 'ownership prevents CI rearming');
-      if (transition === 'retrigger') {
+      assert.equal(summary.ciInspections, transition === 'retrigger' ? 2 : 3, 'ownership does not prevent CI probes');
+      if (transition.startsWith('retrigger')) {
         assert.equal(summary.ciRetriggerOutcome, 'bumped-and-requeued', output);
-        assert.deepEqual(summary.ciGateOwnership, [true, true], output);
-        assert.deepEqual(summary.ciRemediationDeferrals, ['not-eligible', 'not-eligible'], output);
+        assert.deepEqual(summary.ciRemediationDeferrals, [], output);
+        assert.equal((output.match(/Deferring CI-blocked hammer/g) || []).length, 2, output);
         assert.equal(summary.ciBlockedCloserCalls.length, 0, 'no new hammer or retry while remediation owns the PR');
       } else {
-        assert.deepEqual(summary.ciSnapshots, Array(3).fill({ review_status: 'ci-blocked', reviewer_head_sha: 'timeout-head-164' }), output);
+        assert.deepEqual(summary.ciSnapshots, [
+          { review_status: 'ci-blocked', reviewer_head_sha: 'timeout-head-164' },
+          { review_status: 'ci-blocked', reviewer_head_sha: 'non-ham-head-164' },
+          { review_status: 'ci-blocked', reviewer_head_sha: 'ham-pushed-head-164' },
+        ], output);
         assert.equal(summary.ciBlockedCloserCalls.length, 3, 'unresolved hammer remains reachable until its final decision');
         assert.equal(summary.ciHammerPages.length, 1, output);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
+// CIBLOCKSTALE-01: a parked row probes current-head CI on every poll,
+// including while the hammer owns the branch and the prior head remains red.
+for (const transition of ['moved', 'red', 'same', 'hammer', 'moved-red', 'already-green', 'stale-red', 'stale-green', 'missing-head']) {
+  test(`CI-blocked current-head poll releases only green CI: ${transition}`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-release-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      writeFileSync(loaderPath, buildLoaderSource());
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource());
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, GITHUB_TOKEN: 'fixture-token', AGENT_OS_HQ_BIN: '/usr/bin/false',
+          ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false', FIXTURE_AMA_ENABLED: '1', FIXTURE_AMA_REASON: 'dispatched',
+          FIXTURE_CI_BLOCKED: '1', FIXTURE_JOB_ROOT: tmp, FIXTURE_CI_RELEASE: transition },
+      });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      const line = result.stdout.split(/\r?\n/).find(entry => entry.startsWith(SUMMARY_MARKER));
+      assert.ok(line, output);
+      const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+      assert.equal(summary.ciParkedProbes, transition === 'already-green' ? 1 : 2, 'every parked poll must inspect CI despite hammer ownership or backoff');
+      assert.equal(summary.ciSnapshots[0].review_status, transition === 'already-green' ? 'pending' : 'ci-blocked');
+      const row = summary.ciSnapshots[1];
+      if (['stale-red', 'stale-green', 'missing-head'].includes(transition)) {
+        assert.equal(row.review_status, 'ci-blocked');
+        assert.equal(row.reviewer_head_sha, 'timeout-head-164');
+        assert.doesNotMatch(output, /ci-blocked released:/);
+        assert.equal(summary.ciInspections, 3);
+      } else if (transition === 'red' || transition === 'moved-red') {
+        assert.equal(row.review_status, 'ci-blocked');
+        assert.equal(row.reviewer_head_sha, transition === 'red' ? 'timeout-head-164' : 'non-ham-head-164');
+        assert.doesNotMatch(output, /ci-blocked released:/);
+      } else {
+        const head = ['moved', 'already-green'].includes(transition) ? 'non-ham-head-164'
+          : transition === 'hammer' ? 'ham-pushed-head-164' : 'timeout-head-164';
+        assert.equal(row.review_status, 'pending', output);
+        assert.equal(row.revision_ref, head, 'queue must target the current head');
+        assert.equal((output.match(/ci-blocked released: head /g) || []).length, 1);
+        assert.ok(output.includes(`ci-blocked released: head ${head} green`), output);
+      }
+      assert.equal(summary.ciReleaseSpawns, 0, 'release enters the ordinary queue for the next poll');
+      if (['moved', 'same', 'already-green'].includes(transition)) {
+        assert.equal(summary.reviewerSpawns.length, 1, output);
+        assert.equal(summary.reviewerSpawns[0].subjectContext.reviewerHeadSha,
+          transition === 'same' ? 'timeout-head-164' : 'non-ham-head-164');
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const edge of ['wake', 'missing-head', 'empty-route']) {
+  test(`CI-blocked reconciliation handles durable wake and absent fields: ${edge}`, () => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-ci-edge-'));
+    try {
+      const loaderPath = path.join(tmp, 'loader.mjs');
+      const registerPath = path.join(tmp, 'register.mjs');
+      const runnerPath = path.join(tmp, 'runner.mjs');
+      writeFileSync(loaderPath, buildLoaderSource());
+      writeFileSync(registerPath, buildRegisterSource(loaderPath));
+      writeFileSync(runnerPath, buildRunnerSource());
+      const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, GITHUB_TOKEN: 'fixture-token', AGENT_OS_HQ_BIN: '/usr/bin/false',
+          ADVERSARIAL_AFH_REVIEWER_FALLBACK: 'false', FIXTURE_AMA_ENABLED: '1', FIXTURE_AMA_REASON: 'dispatched',
+          FIXTURE_CI_BLOCKED: '1', FIXTURE_JOB_ROOT: tmp, FIXTURE_CI_EDGE: edge },
+      });
+      const output = `${result.stdout || ''}${result.stderr || ''}`;
+      assert.equal(result.status, 0, output);
+      assert.doesNotMatch(output, /TypeError|SQLite3 can only bind|Error processing/);
+      const line = result.stdout.split(/\r?\n/).find(entry => entry.startsWith(SUMMARY_MARKER));
+      assert.ok(line, output);
+      const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+      assert.equal(summary.reviewStatus, edge === 'wake' ? 'pending' : 'ci-blocked', output);
+      assert.equal(summary.ciInspections, edge === 'wake' ? 0 : 1, output);
+      assert.equal(summary.reviewerSpawns.length, 0, 'no inline reviewer claim');
+      if (edge === 'missing-head') assert.equal(summary.ciBlockedCloserCalls.length, 1, output);
+      if (edge === 'empty-route') {
+        assert.equal(summary.ciEmptyRoutes, 1, output);
+        assert.ok(summary.ciProjections > 0, 'an absent route result still projects the gate');
       }
     } finally {
       rmSync(tmp, { recursive: true, force: true });

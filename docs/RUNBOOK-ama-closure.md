@@ -1302,20 +1302,21 @@ watcher now hands such a PR to this closer with `ciBlockedHammerOwner`
 (`src/ci-blocked-hammer.mjs`), through the hammer-owner route CYCLECAPHAM-01
 uses (`src/hammer-owner-route.mjs`).
 
-- The re-review row stays `ci-blocked`; reviewer admission still requires green
-  CI. Look for `ci-blocked routed <repo>#<pr> to the hammer for final
-  adjudication` in the watcher log, on the park tick and every later poll tick,
-  before CI probe backoff or active follow-up deferral. The 5-minute backoff
-  (`ADVERSARIAL_REREVIEW_CI_BLOCKED_RECHECK_MS`) limits CI probes only. A HAM
-  head retains the parked row across pushes, even with green CI, so process
-  exit, retry and final-decision reconciliation stay reachable before reviewer
-  suppression. Dispatched and pending closure outcomes also retain the row
-  before the hammer's first push, including background launch intent and an
-  unknown worker status. A non-HAM head change or green CI on the original
-  head can re-arm reviewer admission only after closure ownership is released
-  without a final outcome. Pending or in-progress remediation anywhere in the
-  same PR ledger prevents new hammer launches and retries, even when an
-  operator retrigger leaves the row `ci-blocked` or the job names an older head.
+- Every poll probes external CI on the PR's current head, before hammer
+  reconciliation or follow-up deferral (CIBLOCKSTALE-01). A confirmed green
+  current head releases the row through `requestReviewRereview` into the normal
+  FIFO review queue, logging `ci-blocked released: head <sha> green` once.
+  This includes head changes while a hammer is running. The parked SHA and
+  the former five-minute recheck backoff cannot delay release. Red, pending,
+  unknown and racing-head CI remain unclaimable. A response without the
+  current head's SHA updates only the probe timestamp and retries next poll,
+  without releasing, rebinding or reconciling hammer ownership. Confirmed head
+  changes update the parking head before hammer reconciliation.
+  Reviewer admission revalidates CI again when it claims the queued head.
+  Active follow-up deferral is evaluated before hammer reconciliation while
+  parked. A green head still enters FIFO; the normal admission path defers
+  reviewer dispatch until active remediation settles. Closer-head suppression
+  applies to reviewer dispatch, so it cannot hide a hammer's own reconciliation.
   Automatic failed-CI admission never requeues a stopped `no-progress`
   hand-off; explicit operator remediation retriggers remain available.
 - The closer admits the red, unreviewed head as a final-hammer close and adds a

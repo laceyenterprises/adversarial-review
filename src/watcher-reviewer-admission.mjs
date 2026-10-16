@@ -47,9 +47,9 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     if (capacityEvent) return;
     const event = { freedAt: now() };
     capacityEvent = event;
-    // Let the candidate's finally and the detached tracker's finally both
-    // clear their reservations before sampling capacity. Never await this
-    // from candidate.run(): its drain may still own the admission mutex.
+    // Callers have already released capacity. Scheduling coalesces signals;
+    // correctness does not depend on a later event-loop turn. Never await
+    // this from candidate.run(): its drain may still own the admission mutex.
     schedule(() => {
       capacityEvent = null;
       void drain('capacity-freed').then(async result => {

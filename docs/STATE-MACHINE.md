@@ -95,10 +95,13 @@ eligible. Deferred candidates stay queued even if the drain throws.
 
 The per-head dispatch lease is released by the candidate's unconditional
 `finally`, including after a queued freshness-read failure refunds its SQLite
-claim. The detached dispatch tracker also signals freed capacity when a
-candidate returns before spawning, allowing the next waiting candidate to
-proceed without another discovery poll. Capacity and live spawn guards still
-apply to every admission wave.
+claim. The detached dispatch tracker owns the capacity-freed signal: the
+candidate settles, the pool releases its credential count, and the tracker
+removes the dispatch reservation before either direct admission or the durable
+discovery wake runs. Scheduler timing is not a release barrier. This also
+covers candidates that return before spawning, allowing the next waiting
+candidate to proceed without another discovery poll. Capacity and live spawn
+guards still apply to every admission wave.
 
 ### Reviewer run-state ledger
 

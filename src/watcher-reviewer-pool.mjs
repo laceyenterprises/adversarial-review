@@ -1085,6 +1085,8 @@ function createDetachedReviewerDispatchTracker({
       });
       Promise.resolve(promise)
         .finally(() => {
+          // start() has released its credential count before this promise
+          // settles. Remove the cross-drain reservation before waking admission.
           detachedReviewerDispatches.delete(token);
           onCapacityFreed?.();
         })

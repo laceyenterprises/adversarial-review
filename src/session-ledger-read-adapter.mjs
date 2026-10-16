@@ -873,9 +873,12 @@ export function readLaunchRequestStatusFromLedger({
     const detailColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'failure_detail');
     if (!detailColumn.ok) return detailColumn;
     const detailSelect = detailColumn.exists ? 'failure_detail' : 'NULL AS failure_detail';
+    const ticketColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'ticket_ref');
+    if (!ticketColumn.ok) return ticketColumn;
+    const ticketSelect = ticketColumn.exists ? 'ticket_ref' : 'NULL AS ticket_ref';
     queried = querySqliteRows(
       resolution.target,
-      `SELECT launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}
+      `SELECT launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}, ${ticketSelect}
          FROM launch_requests
         WHERE launch_request_id = @launchRequestId
         LIMIT 1`,
@@ -890,7 +893,8 @@ export function readLaunchRequestStatusFromLedger({
           'updated_at', updated_at,
           'terminal_at', terminal_at,
           'failure_class', failure_class,
-          'failure_detail', to_jsonb(launch_requests)->>'failure_detail'
+          'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
+          'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref'
         )
          FROM launch_requests
         WHERE launch_request_id = :'lrq'

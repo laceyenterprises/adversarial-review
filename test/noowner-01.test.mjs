@@ -121,7 +121,7 @@ function closerDeps({ dispatch, alerts = [], status = null } = {}) {
         return { stdout: JSON.stringify(status || { status: 'running' }), stderr: '' };
       }
       if (dispatch) return dispatch(cmd, args);
-      return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
     },
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -973,7 +973,7 @@ test('OWNERPROOF-01 recovery dispatch ignores its freshly acquired pending lease
     const lease = readAmaCloserLease(rootDir, identity);
     assert.equal(lease.status, 'pending');
     assert.equal(lease.watcherPid, process.pid);
-    return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+    return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
   } });
   const result = await maybeDispatchAmaCloser({ ...closerArgs(rootDir, { ...identity,
     reviewedSha: identity.headSha, dispatchContext: { dispatchedAt: new Date().toISOString(),

@@ -124,7 +124,7 @@ function hammerDispatchDeps(overrides = {}) {
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     execFileImpl: async (cmd, args) => {
       execCalls.push({ cmd, args });
-      return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
     },
     readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }),
     readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
@@ -1075,7 +1075,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           return { stdout: '', stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1155,7 +1155,7 @@ test('same-head terminal HAM remediation leaves terminal breadcrumb when merge s
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           throw new Error('worker teardown should not run before merge signal succeeds');
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1242,7 +1242,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           return { stdout: '', stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       attemptDaemonCleanMergeImpl: async ({ liveGate, requiredCheckContexts }) => {
         observedLiveGate = liveGate;
@@ -1317,7 +1317,7 @@ test('same-head terminal HAM remediation records merged audit before nonfatal cl
           err.stderr = 'launchctl teardown failed';
           throw err;
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1377,7 +1377,7 @@ test('same-head terminal HAM remediation parks for operator when structural gate
         if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
           mergeCalls.push(args);
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1433,7 +1433,7 @@ test('same-head terminal HAM remediation parks for operator on head mismatch wit
         if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
           mergeCalls.push(args);
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       fetchPullRequestRollupImpl: async () => ({
         state: 'OPEN',
@@ -1512,7 +1512,7 @@ test('succeeded old-head hammer dispatch ignores stale concurrent-writer error',
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
         launchedArgs = args;
-        return { stdout: JSON.stringify({ dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
       },
     }),
   });
@@ -1614,7 +1614,7 @@ test('stale target-head pending lease on head advance is reclaimed before dispat
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'not-found' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
       },
     }),
   });
@@ -1680,7 +1680,7 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
     }),
   });
@@ -1758,7 +1758,7 @@ test('fresh succeeded current-head hammer without HAM evidence is retried as a f
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
     }),
     // A clean missing signal permits the ordinary bounded exit refund.
@@ -1843,7 +1843,7 @@ test('fresh succeeded current-head hammer trusts live open state over stale merg
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
       readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
       readBuildCompletionProducerEvidenceImpl: () => ({
@@ -1934,7 +1934,7 @@ test('fresh succeeded hammer accepts a producer-realistic merge-commit signal fo
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
       readBuildCompletionSignalForPrImpl: (args) => {
         assert.equal(args.repo, REPO);
@@ -2047,7 +2047,7 @@ test('terminal failed current-head hammer without HAM evidence is redispatched',
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
       },
     }),
   });
@@ -2132,7 +2132,7 @@ test('current-head hammer dispatch ignores old-head audit terminal outcome while
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
         }
-        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
       readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
       readBuildCompletionProducerEvidenceImpl: () => ({
@@ -2259,7 +2259,7 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
         assert.equal(Object.hasOwn(intent, 'reconciledAt'), false);
         updateAmaCloserDispatchRecord(rootDir, intent, current => ({ ...current, terminalLaunchStatus: 'failed', reconciledAt: 'old-cli-write' }));
       }
-      return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+      return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
     },
     readLaunchRequestStatusImpl: async (args) => {
       launchRequestStatusCalls.push(args);
@@ -2277,7 +2277,7 @@ test('AMAGAP-01: unknown dispatch status releases when ledger says LRQ is termin
 
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_retry');
-  assert.equal(launchRequestStatusCalls.length, 1);
+  assert.equal(launchRequestStatusCalls.length, 2);
   assert.equal(launchRequestStatusCalls[0].launchRequestId, 'lrq_terminal_failed');
   const record = readAmaCloserDispatchRecord(rootDir, {
     repo: REPO,
@@ -2973,7 +2973,7 @@ function spawnThenDieDeps(overrides = {}) {
       const err = new Error('worker_killed ~36s into planning');
       // hq already emitted the launch identifiers before the worker died — this is
       // what makes the closer treat it as an ambiguous (spawned) launch.
-      err.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      err.stdout = JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
       err.stderr = 'worker_killed';
       throw err;
     },
@@ -3396,7 +3396,7 @@ for (const scenario of ['risk class changes', 'pending CI turns red', 'pending C
         execFileImpl: async (_cmd, args) => {
           calls.push(args);
           if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: scenario === 'stale park active repair' ? 'running' : 'failed' }), stderr: '' };
-          return { stdout: JSON.stringify({ dispatchId: 'repair_dispatch', launchRequestId: 'repair_launch' }), stderr: '' };
+          return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'repair_dispatch', launchRequestId: 'repair_launch' }), stderr: '' };
         },
         attemptDaemonCleanMergeImpl: async () => { merges++; throw new Error('unsafe daemon merge'); },
       }),
@@ -3610,4 +3610,75 @@ test('LABELGATE-01: a hammer-written refusal without a matching live gate stays 
   await maybeDispatchAmaCloser({ ...args, ...hammerDispatchDeps() });
   assert.equal(readHammerRetryCapLedger(rootDir, identity).attemptCount, 1);
   assert.equal(readAmaCloserDispatchRecord(rootDir, { ...identity, headSha: REVIEWED_HEAD }).unexecutedRefundCount, undefined);
+});
+
+for (const status of ['running', 'succeeded']) {
+  test(`REBASEPROV-01 conflict-rebase ${status} launch is neither adopted nor charged`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'conflict-owner-launch-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const args = hammerDispatchArgs(root);
+    const deps = hammerDispatchDeps({
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status, ticket_ref: 'CONFLICT-PR-42-REBASE' } }),
+    });
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'non-hammer-launch-not-adopted');
+    assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR_NUMBER }), null);
+    const record = readAmaCloserDispatchRecord(root, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+    assert.equal(record?.launchRequestId ?? null, null);
+    assert.notEqual(record?.outcome, 'failed-without-merge');
+  });
+}
+
+for (const status of ['running', 'succeeded']) {
+  test(`REBASEPROV-01 previously adopted ${status} conflict owner is retired and refunded once`, async t => {
+    const root = mkdtempSync(join(tmpdir(), 'foreign-closer-refund-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const identity = { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD };
+    recordHammerRetryDispatch(root, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD });
+    updateAmaCloserDispatchRecord(root, identity, () => ({ ...identity, workerClass: 'hammer',
+      reviewedSha: REVIEWED_HEAD, state: 'dispatched', launchRequestId: 'foreign-launch', retryCount: 1,
+      lastObservedStatus: 'running', dispatchedAt: '2026-07-06T12:00:00Z' }));
+    acquireAmaCloserLease({ rootDir: root, ...identity, now: '2026-07-06T12:00:00Z' });
+    updateAmaCloserLease({ rootDir: root, ...identity, status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+      lrqId: 'foreign-launch', now: '2026-07-06T12:00:00Z' });
+    const deps = hammerDispatchDeps({
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status, ticket_ref: 'CONFLICT-PR-42-REBASE' } }),
+    });
+    await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...deps });
+    let ledger = readHammerRetryCapLedger(root, identity);
+    assert.equal(ledger.attemptCount, 0);
+    assert.equal(ledger.lifetimeAttemptCount, 0);
+    const record = readAmaCloserDispatchRecord(root, identity);
+    assert.equal(record.launchRequestId, null);
+    assert.notEqual(record.outcome, 'failed-without-merge');
+    await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...deps });
+    ledger = readHammerRetryCapLedger(root, identity);
+    assert.equal(ledger.attemptCount, 0);
+    assert.equal(ledger.lifetimeAttemptCount, 0);
+  });
+}
+
+test('REBASEPROV-01 ambiguous dispatch cannot charge a conflict owner', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'foreign-ambiguous-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const deps = hammerDispatchDeps({
+    execFileImpl: async () => { throw Object.assign(new Error('Interrupted after dedup'), {
+      stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: 'foreign-launch' }),
+    }); },
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'running', ticket_ref: 'CONFLICT-PR-42-REBASE' } }),
+  });
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...deps });
+  assert.equal(result.reason, 'non-hammer-launch-not-adopted');
+  assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR_NUMBER }), null);
+});
+test('REBASEPROV-01 unreadable launch identity defers without a hammer charge', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'unverified-launch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const deps = hammerDispatchDeps({
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'unverified-launch' }) }),
+  });
+  const result = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(root), ...deps });
+  assert.equal(result.reason, 'launch-ticket-unverified');
+  assert.equal(readHammerRetryCapLedger(root, { repo: REPO, prNumber: PR_NUMBER }), null);
 });

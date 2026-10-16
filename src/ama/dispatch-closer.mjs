@@ -1,3 +1,4 @@
+import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
 import { filterGitHubBody } from '../github-outbound-body.mjs';
@@ -1579,6 +1580,20 @@ function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, head
  * follow-up callers retain ownership until the request catches up or the
  * existing reclaim timeout expires.
  */
+function retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIdentity = identity, record, launchRequestId, now, logger }) {
+  if (record?.launchRequestId !== launchRequestId) return false;
+  refundUnexecutedHammerDispatch(rootDir, { repo, prNumber }, {
+    jobKey: record.reviewedSha, headSha: record.headSha, launchRequestId, now, foreignLaunch: true,
+  });
+  updateAmaCloserDispatchRecord(rootDir, identity, current => current?.launchRequestId === launchRequestId ? {
+    ...current, state: 'non-hammer-launch', launchRequestId: null, dispatchId: null,
+    unadoptedLaunchRequestId: launchRequestId, outcome: null, lastError: null,
+    retryCount: Math.max(0, Number(current.retryCount || 0) - 1),
+  } : null);
+  finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded', now, logger, repo, prNumber });
+  return true;
+}
+
 export function reconcileAmaCloserLease({
   rootDir, repo, prNumber, now = new Date().toISOString(),
   hqRoot = null, ledgerTarget = null, ledgerDbPath = null, env = process.env,
@@ -1597,6 +1612,11 @@ export function reconcileAmaCloserLease({
       launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env,
     });
     if (!probe?.ok) return false;
+    if (probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) {
+      const identity = { repo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
+      return retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIdentity: { repo, prNumber, headSha: held.headSha },
+        record: readAmaCloserDispatchRecord(rootDir, identity), launchRequestId, now, logger });
+    }
     const status = normalizeWorkerRunStatus(probe.row?.status);
     if (!AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(status)) return false;
     const identity = { repo, prNumber, headSha: held.headSha };
@@ -2147,6 +2167,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       });
       if (!ledgerUnreadable) probes += 1;
       throwIfAborted(options.signal);
+      if (probe?.ok && probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) continue;
       const status = String(probe?.row?.status || '').trim().toLowerCase();
       if (probe?.ok && status) {
         terminalStatus = isTerminalLaunchRequestStatus(status) ? status : null;
@@ -3621,9 +3642,15 @@ function parseAmaCloserDispatchOutput(stdout) {
   return (dispatchId || launchRequestId) ? { dispatchId, launchRequestId } : null;
 }
 
+export function isAmaHammerLaunchTicket(ticket, prNumber) {
+  return isHamWorkerTicket(ticket) && (String(ticket).trim().toUpperCase() === 'HAM'
+    || String(ticket).trim().toUpperCase() === `AMA-PR-${prNumber}`);
+}
+
 function normalizeDispatchIdentifiers(payload) {
   if (!payload || typeof payload !== 'object') return { dispatchId: null, launchRequestId: null };
   return {
+    ticketRef: payload.ticketRef || payload.ticket_ref || payload.ticket || null,
     dispatchId: String(payload.dispatchId || '').trim() || null,
     launchRequestId: String(payload.launchRequestId || payload.lrq || payload.dispatchId || '').trim() || null,
   };
@@ -4968,6 +4995,19 @@ export async function maybeDispatchAmaCloser({
   }
   let prefetchedLaunchRequestProbe = earlyLaunchRequestProbe && earlyLaunchRequestProbe.launchRequestId === existingRecord?.launchRequestId
     ? earlyLaunchRequestProbe.probe : null;
+  if (existingRecord?.launchRequestId && isHammerWorkerClass(existingRecord.workerClass || workerClass)) {
+    prefetchedLaunchRequestProbe ||= await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+      launchRequestId: existingRecord.launchRequestId, rootDir, hqRoot,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
+    })).catch(() => ({ ok: false }));
+    const probe = prefetchedLaunchRequestProbe;
+    if (probe?.ok && probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) {
+      retireForeignCloserLaunch({ rootDir, repo, prNumber, identity: existingDispatchIdentity,
+        record: existingRecord, launchRequestId: existingRecord.launchRequestId,
+        now: dispatchContext.dispatchedAt, logger });
+      return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason: 'non-hammer-launch-not-adopted' });
+    }
+  }
   // HAMREFUND-01: reconcile terminal launches before the stale-lease tombstone
   // path can strand them. A real closing decision and authoritative terminal PR
   // state always win, even when the harness reports a signal/host failure.
@@ -7082,6 +7122,27 @@ export async function maybeDispatchAmaCloser({
   let samePrHammerHolderRetryUsed = false;
   const dispatchEnv = { ...withProvisionTimeoutCappedAtDispatch(process.env, dispatchTimeoutMs),
     TMPDIR: scratchDir };
+  const refuseForeignLaunch = async payload => {
+    if (!isHammerWorkerClass(workerClass) || !payload.launchRequestId) return null;
+    const probe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+      launchRequestId: payload.launchRequestId, rootDir, hqRoot,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
+    })).catch(() => ({ ok: false }));
+    const ticket = probe?.ok && probe.row?.ticket_ref || payload.ticketRef;
+    if (isAmaHammerLaunchTicket(ticket, prNumber)) return null;
+    // Dispatch deduplication can return another owner's launch for this PR.
+    // Never adopt its LRQ, charge its attempt, cancel it, or record its outcome.
+    const reason = ticket ? 'non-hammer-launch-not-adopted' : 'launch-ticket-unverified';
+    retainScratchDir = !ticket;
+    finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded',
+      now: dispatchContext.dispatchedAt, logger, repo, prNumber });
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, current => ({
+      ...(current || {}), state: 'dispatch-deferred-non-hammer', reason,
+      launchRequestId: null, dispatchId: null, retryCount: priorRetryCount,
+      lastError: null, unadoptedLaunchRequestId: payload.launchRequestId,
+    }));
+    return noAmaDispatch({ dispatched: false, skipMergeAgent: true, reason });
+  };
   for (;;) {
     try {
       throwIfAborted(signal);
@@ -7103,11 +7164,15 @@ export async function maybeDispatchAmaCloser({
         killSignal: 'SIGTERM',
         ...(signal ? { signal } : {}),
       });
+      const refused = await refuseForeignLaunch(normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || '')));
+      if (refused) return refused;
       retainScratchDir = true;
       throwIfAborted(signal);
       break;
     } catch (err) {
       const launchEvidence = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
+      const refused = await refuseForeignLaunch(launchEvidence);
+      if (refused) return refused;
       retainScratchDir ||= Boolean(launchEvidence.launchRequestId || launchEvidence.dispatchId);
       throwIfAborted(signal);
       // Older / forked `hq` that predates `--priority`: retry once without the

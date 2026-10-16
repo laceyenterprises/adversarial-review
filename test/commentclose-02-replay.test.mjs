@@ -154,7 +154,7 @@ test('replay #7334: a stale auto-refresh reason no longer parks the proven final
         },
         execFileImpl: async (cmd, argv) => {
           execCalls.push({ cmd, argv });
-          return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer_7334' }), stderr: '' };
+          return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer_7334' }), stderr: '' };
         },
         readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
         writeFileImpl: () => {},

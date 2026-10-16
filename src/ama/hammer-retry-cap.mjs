@@ -532,7 +532,7 @@ export function refundHammerRetryDispatch(rootDir, identity, {
 // HAMREFUND-01: no execution is a separate refund, with no per-series grant.
 // Lifetime charges and suppression remain intact so head churn cannot bypass
 // the PR-wide ceiling. Keep bounded launch history across dispatches/reviews.
-export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, headSha, launchRequestId, now } = {}) {
+export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, headSha, launchRequestId, now, foreignLaunch = false } = {}) {
   const ledger = readHammerRetryCapLedger(rootDir, identity);
   if (!ledger || ledger.__corrupt) return { refunded: false, reason: 'no-ledger' };
   if (normalizeKey(ledger.jobKey) !== normalizeKey(jobKey)) return { refunded: false, reason: 'series-changed' };
@@ -549,6 +549,8 @@ export function refundUnexecutedHammerDispatch(rootDir, identity, { jobKey, head
   writeHammerRetryCapLedger(rootDir, identity, {
     ...ledger,
     attemptCount: down(ledger.attemptCount),
+    // REBASEPROV-01: an unrelated owner was never a hammer firing at all.
+    ...(foreignLaunch ? { lifetimeAttemptCount: down(ledger.lifetimeAttemptCount), lifetimeSuppressed: false } : {}),
     targetAttemptCount: normalizeKey(ledger.targetRemediationSha) === normalizeKey(headSha)
       ? down(ledger.targetAttemptCount) : ledger.targetAttemptCount,
     unexecutedLaunchRequestIds: [...launches, launch].slice(-RETRYABLE_LAUNCH_HISTORY),

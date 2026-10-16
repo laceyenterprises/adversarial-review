@@ -1119,3 +1119,17 @@ test('HAMREFUND-01: PostgreSQL projects failure detail without requiring a new s
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.row.failure_detail, 'SIGTERM');
 });
+
+test('REBASEPROV-01 ledger status projects the actual launch ticket', t => {
+  const root = tempRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dbPath = path.join(root, 'ledger.sqlite');
+  const db = new Database(dbPath);
+  db.exec('CREATE TABLE launch_requests (launch_request_id TEXT, status TEXT, updated_at TEXT, terminal_at TEXT, failure_class TEXT, ticket_ref TEXT)');
+  db.prepare('INSERT INTO launch_requests VALUES (?, ?, NULL, NULL, NULL, ?)').run('foreign-launch', 'succeeded', 'CONFLICT-PR-42-REBASE');
+  db.close();
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'foreign-launch',
+    ledgerTarget: { backend: 'sqlite', path: dbPath }, env: HERMETIC_CONFIG_ENV });
+  assert.equal(result.ok, true);
+  assert.equal(result.row.ticket_ref, 'CONFLICT-PR-42-REBASE');
+});

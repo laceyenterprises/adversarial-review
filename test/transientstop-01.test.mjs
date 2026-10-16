@@ -253,7 +253,7 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
       if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }) };
       if (argv[0] === 'dispatch') {
         launches++;
-        return { stdout: JSON.stringify({ dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-next' }) };
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'fixture-dispatch', launchRequestId: 'fixture-next' }) };
       }
       return { stdout: '{}' };
     },

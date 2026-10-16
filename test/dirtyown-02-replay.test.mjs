@@ -103,7 +103,7 @@ async function replay(rootDir, {
         },
         execFileImpl: async (cmd, argv) => {
           execCalls.push({ cmd, argv });
-          return { stdout: JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
+          return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' }), stderr: '' };
         },
         readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
         writeFileImpl: () => {},

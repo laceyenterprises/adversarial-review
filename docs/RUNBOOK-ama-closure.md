@@ -1470,6 +1470,11 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   external check runs with that name remain inputs. Per-attempt producer
   provenance excludes daemon failures, including daemon attempts on a
   HAM-certified head, so capacity deferral cannot invent a hammer decision.
+  HAMUNKNOWN-02 re-evaluates GitHub-read predicates (`github-gate-not-green`,
+  `pr-mergeability-unknown`) on every pass: fresh green checks and MERGEABLE
+  mergeability on the same open head release with `github-gate-cleared`, even
+  when the recorded baseline was already passing. Findings and primary-change
+  refusals retain their holds; release does not reset retry or lifetime counts.
   Unmarked legacy entries are accepted only in unattributed or hammer-owned
   audit documents; explicit hammer markers override document ownership.
   See the [audit](data-model/ama-audit.md) and
@@ -2909,6 +2914,32 @@ Local Git provenance retains its trailer fallback because it has no GitHub-linke
 identity. Remote commit probes require linked closer identity. This existing
 local trust boundary is tracked by LAC-1848; a trailer alone never grants merge
 authority, and the downstream hammer repeats live gates.
+
+HAMUNKNOWN-02: the hammer merge procedure samples an open, exact-head
+`UNKNOWN` mergeability up to three times with bounded backoff, retaining the
+shared required-check polling cadence (about 60 seconds by default). This
+applies both while waiting for CI and at the final pre-merge refresh. Each
+sample re-evaluates the full GitHub gate; a moved head, closed PR, conflict,
+red check or pending check never authorizes merge. Persistent UNKNOWN records
+`deferred / pr-mergeability-unknown`, marks the merge lease retryable before
+releasing it, and exits without a terminal `failed-without-merge` decision.
+While required CI is pending, exhausting the mergeability sampling budget
+continues polling until CI settles or `HAM_REMOTE_CI_WAIT_SECONDS` expires
+(900 seconds by default); UNKNOWN defers at that deadline or once CI succeeds.
+Red CI ends sampling immediately and retains its ordinary failure outcome.
+Moved heads and closed PRs cannot use the retryable UNKNOWN deferral.
+When UNKNOWN persists through a pending-CI deadline, the audit retains
+`pr-mergeability-unknown` for queue routing and records
+`remoteCiStatus: mergeability-unknown-ci-timeout` plus the last check conclusion
+in `githubGate`; green CI uses `remoteCiStatus: mergeability-unknown`.
+Certified HAM heads resume through the existing bounded deferral queue,
+including its backoff, expiry and lifetime refund bound. Live UNKNOWN alone or
+with pending CI remains a wait in that queue, without a merge or immediate
+operator escalation. Red CI or conflicts still route to bounded repair,
+including red CI alongside UNKNOWN; independent eligibility holds still apply.
+Fresh exact-head
+eligibility and merge gates remain mandatory before daemon merge or a repair
+dispatch.
 
 ## CI-cost mode (CIGUARD-01 / CIGUARDADV-01)
 

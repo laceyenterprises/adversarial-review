@@ -31,6 +31,8 @@ import { readLatestHoldRelease } from '../operator-hold-release.mjs';
 // Once an input changes, the hold releases for that stop and the closer's
 // ordinary gates, lease and per-PR retry cap decide the one re-dispatch. A new
 // no-merge on the same head starts a new hold. The page is sent once per head.
+// HAMUNKNOWN-02 also releases GitHub-read stops when the fresh exact-head gate
+// is already green and MERGEABLE, even if the baseline captured that recovery.
 //
 // REMCONFLICT-01 (SEV1, 2026-10-10): the hold never holds a CONFLICTING PR.
 // Operator: "What am I supposed to do with PRs that have merge conflicts? I
@@ -53,14 +55,15 @@ import { checkPrimaryChange, fetchPrimaryChange } from './primary-change.mjs';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { checkItemState, isAdversarialOwnStatusContext, latestCheckRollupItems } from '../checks-summary.mjs';
-import { isGithubMergeConflict } from '../github-mergeability.mjs';
+import { checkItemState, classifyCheckRollup, isAdversarialOwnStatusContext, latestCheckRollupItems } from '../checks-summary.mjs';
+import { closureGateMergeability, isGithubMergeConflict } from '../github-mergeability.mjs';
 import { readAmaAuditEntry } from './audit.mjs';
 
 export const HAMMER_STOP_HOLD_REASON = 'hammer-stop-awaiting-input-change';
 export const HAMMER_STOP_HOLD_PAGE_EVENT = 'ama_closer.hammer_stop_hold';
 
 export const HAMMER_EVIDENCE_FAILURES = new Set(['primary-change-unknown', 'primary-change-read-failed', 'history-read-failed']);
+export const HAMMER_GITHUB_READ_FAILURES = new Set(['github-gate-not-green', 'pr-mergeability-unknown']);
 export const HAMMER_EVIDENCE_RECHECK_INTERVAL_MS = 5 * 60_000;
 // Two ordinary five-minute polling intervals let a transport fault recover
 // before paging. Start at the first failed probe, not the old hammer timestamp.
@@ -95,10 +98,7 @@ function stable(value) {
 }
 
 function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
-  const reasons = [...new Set([
-    ...(attempt.eligibilityTrace?.reasons || []), ...(attempt.githubGate?.reasons || []),
-    ...(attempt.reasons || []),
-  ])].sort();
+  const reasons = stopReasons(attempt);
   if (!reasons.length && DETERMINISTIC_STOP_REASONS.has(attempt.reason)) reasons.push(attempt.reason);
   if (!reasons.length || reasons.some(reason => /read-failed|unavailable|timeout|pending|mergeability-unknown/.test(reason))) return null;
   const missingEvidence = stable(attempt.missingEvidence || attempt.eligibilityTrace?.trace?.primaryChange?.missingEvidence
@@ -110,6 +110,13 @@ function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
       : reasons.includes('ci-not-green') ? 'Repair the named required check and rerun it on the current head.'
         : `Supply the missing evidence for ${reasons[0]}.`);
   return { key, reasons, missingEvidence, next };
+}
+
+function stopReasons(attempt) {
+  return [...new Set([
+    ...(attempt?.eligibilityTrace?.reasons || []), ...(attempt?.githubGate?.reasons || []),
+    ...(attempt?.reasons || []),
+  ])].sort();
 }
 
 function holdStatePath(rootDir, repo, prNumber) {
@@ -248,6 +255,7 @@ export function readHammerStopForHead({
       stopKey: `${item.fileHead}:${item.attempt?.attemptNumber ?? item.order}:${item.attempt?.startedAt || item.attempt?.timestamp || ''}`,
     })),
     predicate: oneLine(attempt?.reason, 120) || 'reason-not-recorded',
+    reasons: stopReasons(attempt),
     refusal: deterministicRefusal(attempt, { repo, prNumber, headSha }),
     closingStatus: oneLine(attempt?.closingStatus),
     ...(attempt?.historyReadError || attempt?.githubGate?.primaryChangeReason
@@ -333,6 +341,7 @@ export async function evaluateHammerStopHold({
   reviewState = null,
   strictNonBlockingRemediation = true,
   excludeContexts = [],
+  requiredCheckContexts = [],
   deliverAlertImpl = null,
   logger = console,
   now = new Date().toISOString(),
@@ -375,6 +384,22 @@ export async function evaluateHammerStopHold({
     const release = readLatestHoldRelease(rootDir, repo, prNumber, headSha);
     const holdReleased = release && Date.parse(release.released_at) > Date.parse(stop.recordedAt || entry.firstObservedAt);
     const changed = holdReleased ? ['hold-released'] : changedHammerStopInputs(entry.inputs, inputs);
+    // HAMUNKNOWN-02: the first hold snapshot may already have recovered from
+    // the hammer's transient read. Re-evaluate the named gate on this pass's
+    // live metadata instead of waiting forever for another input change.
+    // Structured findings/reversal refusals must retain their own hold.
+    if (HAMMER_GITHUB_READ_FAILURES.has(stop.predicate)
+      && stop.reasons.every(reason => ['ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason))
+      && prMetadata?.headSha === headSha
+      && (prMetadata?.isOpen === true || String(prMetadata?.state || '').toUpperCase() === 'OPEN')
+      && prMetadata?.isOpen !== false
+      && (!prMetadata.state || String(prMetadata.state).toUpperCase() === 'OPEN')
+      && closureGateMergeability({ mergeable: prMetadata.mergeable || prMetadata.mergeableState,
+        mergeStateStatus: prMetadata.mergeStateStatus }) === 'MERGEABLE'
+      && classifyCheckRollup(prMetadata.statusCheckRollup, {
+        requiredContexts: requiredCheckContexts,
+        excludeContexts: new Set(excludeContexts.map(ctx => String(ctx).trim().toLowerCase())),
+      }) === 'SUCCESS') changed.push('github-gate-cleared');
     if (holdReleased || stop.predicate === 'history-read-failed') {
       try {
         refundOperatorHeldHammerStop(rootDir, { repo, prNumber }, stop, { now });

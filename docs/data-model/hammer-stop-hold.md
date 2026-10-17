@@ -31,10 +31,24 @@ One atomically rewritten JSON object per `(repo, PR)` lives at
 | `heads[sha].inputs` | object | Baseline `{ headSha, baseSha, mergeability, checks, review }`. SHA fields are strings or null; mergeability is `MERGEABLE`, `CONFLICTING`, or null. `checks` is a sorted, pipe-joined string of lowercase check identities and normalized latest states. `review` is the canonical review evidence fingerprint described below. |
 | `heads[sha].pagedAt` | ISO timestamp or null | Successful operator alert delivery. Carried forward for the same deterministic refusal, or subsequent legacy stops on the same head. |
 | `heads[sha].releasedAt` | optional ISO timestamp | First observation of changed inputs. A released stop remains released across ticks and restarts. |
-| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01). |
+| `heads[sha].releasedBy` | optional string array | Release dimensions: `head`, `base`, `mergeability`, `checks`, `review`, `conflicting` (REMCONFLICT-01), `primary-change-evidence` (CAPROUTE-01), `hold-released` (HOLDRELEASE-01), `github-gate-cleared` (HAMUNKNOWN-02). |
 | `heads[sha].releasedInputs` | optional inputs object | Inputs at release; used as the next stop's baseline if another hammer stops on this head. |
 
 ## Recovery and retention
+
+HAMUNKNOWN-02 re-evaluates `github-gate-not-green` and
+`pr-mergeability-unknown` stops against each closer pass's fresh PR metadata.
+An open PR on the exact held head with MERGEABLE mergeability and successful
+external checks releases with `github-gate-cleared`, even when the stored
+baseline was already green and MERGEABLE. Canonical `state: OPEN` metadata
+does not require a synthetic `isOpen` flag; an explicit closed state or false
+`isOpen` flag prevents this gate recovery. The shared CI classifier checks
+configured required contexts and excludes only the caller's own status contexts;
+empty, unreadable, red or pending rollups cannot prove recovery. Raw UNKNOWN
+beside CLEAN also cannot prove recovery. Structured reasons containing findings
+or primary-change refusals are not released by this GitHub gate probe.
+Release persists before routing and paging and does not refund hammer attempts;
+normal eligibility, retry caps and the lifetime ceiling still apply.
 
 HOLDRELEASE-01 reads the latest non-cancelled operator release for this exact
 head from [operator_hold_releases](operator-hold-releases.md), only when the

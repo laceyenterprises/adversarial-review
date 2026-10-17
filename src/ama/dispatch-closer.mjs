@@ -170,6 +170,7 @@ import { maybeRearmInfraDeadHammer, unexecutedHammerReason } from './dead-hammer
 import {
   evaluateHammerStopHold,
   HAMMER_EVIDENCE_FAILURES,
+  HAMMER_GITHUB_READ_FAILURES,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from './hammer-stop-hold.mjs';
@@ -4449,7 +4450,8 @@ export async function maybeDispatchAmaCloser({
     // GUARDREVERT-01: an unchanged deterministic terminal decision fences
     // every hammer route, including ownerless recovery and clean eligible
     // closures. Legacy transient evidence stops keep their recovery probes.
-    if (stop?.refusal || (!ownerProofRecovery && HAMMER_EVIDENCE_FAILURES.has(stop?.predicate))) {
+    if (stop?.refusal || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
+      || HAMMER_GITHUB_READ_FAILURES.has(stop?.predicate)))) {
       evidenceStopHold = await evaluateHammerStopHoldImpl({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
         hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
@@ -4458,6 +4460,7 @@ export async function maybeDispatchAmaCloser({
         strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
         fetchPrimaryChangeImpl, execFileImpl, deliverAlertImpl, logger,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+        requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
       });
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
@@ -4601,19 +4604,23 @@ export async function maybeDispatchAmaCloser({
   const queuedParkReason = queuedParkAudit?.status === 'deferred'
     ? queuedParkAudit.attempts?.at(-1)?.reason : null;
   const certifiedContentionPark = verdict.trace?.hamTerminalRemediation?.ok === true
-    && ['merge-lease-timeout', 'required-checks-pending'].includes(queuedParkReason);
+    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown'].includes(queuedParkReason);
   // A validated HAM already covered the original findings retained in trace.
   // Mechanical misses still require repair; certification cannot waive them.
   const parkRouteReasons = eligibleHammerRouteReasons.filter((reason) =>
     !['blocking-findings-present', 'non-blocking-findings-present'].includes(reason));
+  // GitHub's asynchronous mergeability calculation is waitable, including
+  // alongside pending CI. Keep other eligibility misses on the repair/hold path.
+  const parkWaitReasons = verdict.reasons.filter(reason => reason !== 'pr-mergeability-unknown');
   const resumeCertifiedPark = certifiedContentionPark
     && parkRouteReasons.length === 0
-    && (verdict.eligible || isPendingCiMechanicalGateMiss(verdict, verdict.reasons));
+    && (verdict.eligible || parkWaitReasons.length === 0 || isPendingCiMechanicalGateMiss(verdict, parkWaitReasons));
   const parkRepairReasons = (verdict.eligible ? parkRouteReasons : verdict.reasons)
     .filter(reason => !reason.startsWith('operator-label-required:'));
   const repairCertifiedPark = certifiedContentionPark && !resumeCertifiedPark
     && parkRepairReasons.length > 0
-    && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
+    && parkRepairReasons.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason))
+    && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason));
   if (!resumeCertifiedPark && (!verdict.eligible || eligibleHammerRouteReasons.length > 0)) {
     if (!ownerProofRecovery && !verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark) {
       return noAmaDispatch({
@@ -4686,6 +4693,7 @@ export async function maybeDispatchAmaCloser({
         fetchPrimaryChangeImpl,
         execFileImpl,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+        requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         deliverAlertImpl,
         logger,
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
@@ -5001,7 +5009,7 @@ export async function maybeDispatchAmaCloser({
   const parkAttempt = parkAudit?.attempts?.at(-1);
   const parkReason = parkAttempt?.reason;
   const deferredPark = parkAudit?.status === 'deferred'
-    && ['merge-lease-timeout', 'required-checks-pending'].includes(parkReason)
+    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown'].includes(parkReason)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const certifiedPark = resumeCertifiedPark && deferredPark;
   if (!ownerProofRecovery && certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {
@@ -5024,7 +5032,7 @@ export async function maybeDispatchAmaCloser({
     if (expired || backoff) {
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-deferral-backoff',
-        needsOperator: expired });
+        recoveryWait: !expired, needsOperator: expired });
     }
   }
   // HAMBG-02: a lease rekeyed onto the head the recorded hammer pushed is that
@@ -5650,12 +5658,16 @@ export async function maybeDispatchAmaCloser({
           if (expired || backoff) {
             return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
               reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-merge-ready-backoff',
-              needsOperator: expired });
+              recoveryWait: !expired, needsOperator: expired });
           }
         }
         if (certifiedPark && verdict.trace?.ciGreen?.conclusion === 'PENDING') {
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-            reason: 'hammer-merge-ready-checks-pending' });
+            reason: 'hammer-merge-ready-checks-pending', recoveryWait: true });
+        }
+        if (certifiedPark && verdict.reasons.includes('pr-mergeability-unknown')) {
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: 'hammer-merge-ready-mergeability-unknown', recoveryWait: true });
         }
         const mergeHead = certifiedPark ? queuedHead : reviewedSha;
         const reason = certifiedPark ? 'hammer-merge-ready-deferred' : 'current-head-hammer-already-ran-needs-operator';

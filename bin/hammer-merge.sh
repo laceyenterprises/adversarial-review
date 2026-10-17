@@ -18,6 +18,8 @@ HAM_REMOTE_CI_POLL_SECONDS="${HAM_REMOTE_CI_POLL_SECONDS:-30}"
 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3}"
 HAM_MERGE_RETRY_CAP="${HAM_MERGE_RETRY_CAP:-4}"
 HAM_MERGE_BACKOFF_BASE_SECONDS="${HAM_MERGE_BACKOFF_BASE_SECONDS:-2}"
+HAM_MERGEABILITY_RETRY_CAP="${HAM_MERGEABILITY_RETRY_CAP:-3}"
+HAM_MERGEABILITY_BACKOFF_BASE_SECONDS="${HAM_MERGEABILITY_BACKOFF_BASE_SECONDS:-15}"
 HAM_MERGE_TMP_PREFIX="<<RUN_DIR>>/${HAM_MERGE_LEASE_ID:-no-lease}-$$"
 HAM_MERGE_STDOUT=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stdout.XXXXXX") || { ham_release_merge_lease; return 1; }
 HAM_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stderr.XXXXXX") || { ham_release_merge_lease; return 1; }
@@ -372,11 +374,30 @@ NODE
 }
 
 ham_refresh_github_gate() {
+  local unknown_samples=0 unknown_sleep
   HAM_GATE_ATTEMPTS=0
   while [ "$HAM_GATE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
     HAM_GATE_ATTEMPTS=$((HAM_GATE_ATTEMPTS + 1))
     if ham_refresh_github_gate_once; then
-      return 0
+      # HAMUNKNOWN-02: a successful read can still be GitHub recomputing
+      # mergeability. Re-read the whole gate, retaining the shared check cadence
+      # (three samples over about 60s by default). Head/state races stop here.
+      if ! ham_required_gate_mergeability_unknown || ham_required_gate_red || ham_live_head_moved \
+        || ! jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null; then
+        return 0
+      fi
+      unknown_samples=$((unknown_samples + 1))
+      if [ "$unknown_samples" -ge "${HAM_MERGEABILITY_RETRY_CAP:-3}" ]; then
+        return 0
+      fi
+      unknown_sleep=$(( ${HAM_MERGEABILITY_BACKOFF_BASE_SECONDS:-15} * (1 << (unknown_samples - 1)) ))
+      # ham_refresh_github_gate_once calls ham_wait_for_check_poll, which pads
+      # backoffs below HAM_REMOTE_CI_POLL_SECONDS to the shared snapshot cadence
+      # (30s by default), including when HAM_MERGEABILITY_BACKOFF_BASE_SECONDS is lower.
+      echo "HAM mergeability UNKNOWN; re-reading GitHub gate ${unknown_samples}/${HAM_MERGEABILITY_RETRY_CAP:-3} after ${unknown_sleep}s" >&2
+      sleep "$unknown_sleep"
+      HAM_GATE_ATTEMPTS=0
+      continue
     fi
     if [ "$HAM_GATE_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
       return 1
@@ -392,6 +413,20 @@ ham_refresh_github_gate() {
 
 ham_required_gate_ok() {
   jq -e '.ok == true' "$HAM_GATE_JSON" >/dev/null
+}
+
+ham_required_gate_mergeability_unknown() {
+  jq -e '.mergeable == "UNKNOWN" or any(.reasons[]?; . == "pr-mergeability-unknown")' "$HAM_GATE_JSON" >/dev/null
+}
+
+ham_defer_unknown_mergeability() {
+  HAM_REMOTE_CI_STATUS=mergeability-unknown
+  if ! jq -e '.checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null; then
+    HAM_REMOTE_CI_STATUS=mergeability-unknown-ci-timeout
+  fi
+  ham_append_terminal_audit deferred pr-mergeability-unknown || true
+  ham_mark_merge_lease_retryable_abort pr-mergeability-unknown
+  ham_release_merge_lease
 }
 
 ham_required_gate_red() {
@@ -495,6 +530,16 @@ while :; do
     HAM_REMOTE_CI_STATUS=remote-ci-red
     ham_append_terminal_audit failed-without-merge github-gate-red || true
     ham_release_merge_lease
+    return 20
+  fi
+  # Pending checks retain the full CI wait window even when mergeability's
+  # shorter sampling budget is spent. The CI deadline still bounds this wait.
+  if ham_required_gate_mergeability_unknown && ! ham_live_head_moved \
+    && jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null && {
+    jq -e '.checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null \
+      || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]
+  }; then
+    ham_defer_unknown_mergeability
     return 20
   fi
   if [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
@@ -613,6 +658,11 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     return 20
   fi
   if ! ham_required_gate_ok; then
+    if ham_required_gate_mergeability_unknown && ! ham_required_gate_red \
+      && ! ham_live_head_moved && jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null; then
+      ham_defer_unknown_mergeability
+      return 20
+    fi
     echo "HAM hard-blocker: GitHub required gate stopped being green before merge" >&2
     cat "$HAM_GATE_JSON" >&2
     ham_append_terminal_audit failed-without-merge github-gate-not-green || true

@@ -660,6 +660,19 @@ Before routing another hammer, the closer holds an unchanged deterministic
 refusal keyed by head, sorted reasons and full missing evidence, and pages once
 with the unblock action. A changed head, review, check status or verified missing
 authority releases the hold through the existing stop-store path.
+HAMUNKNOWN-02 also releases GitHub-read stops once fresh metadata shows the
+same open head is MERGEABLE with green external checks, even if the hold's
+baseline already captured that state. UNKNOWN at hammer merge time is sampled
+with bounded backoff and then deferred retryably; certified HAM recovery uses
+the existing bounded deferral queue. UNKNOWN alone or with pending CI stays in
+that queue through its backoff and expiry, without an immediate operator page
+or daemon merge. Red CI alongside UNKNOWN still permits bounded CI repair.
+The hammer keeps polling pending CI through its remote-CI deadline even after
+the shorter UNKNOWN sampling budget expires; red CI stops sampling immediately.
+Retryable UNKNOWN deferral requires the same open head. Moved heads and closed
+PRs retain terminal refusals; pending CI at expiry is distinguished in the audit.
+Findings, reversal refusals, current-head
+review authority, dispatch retry caps and the lifetime ceiling remain enforced.
 
 | Path | When | What happens |
 |---|---|---|

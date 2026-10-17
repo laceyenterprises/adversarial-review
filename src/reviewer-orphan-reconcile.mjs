@@ -21,6 +21,7 @@ import {
   stmtListFailedOrphanAutoReclaimCandidates,
   stmtAutoReclaimFailedOrphan,
   stmtMarkPosted,
+  stmtReleaseUnsettledPostedReview,
   stmtMarkReviewerPgid,
 } from './review-state-db.mjs';
 
@@ -292,6 +293,7 @@ export async function autoReclaimFailedOrphans({
     listCandidates: stmtListFailedOrphanAutoReclaimCandidates,
     reclaim: stmtAutoReclaimFailedOrphan,
     markPosted: stmtMarkPosted,
+    releaseUnsettledPostedReview: stmtReleaseUnsettledPostedReview,
   },
   probeSessionImpl = probeReviewerProcessSession,
   findPostedReview = null,
@@ -332,7 +334,15 @@ export async function autoReclaimFailedOrphans({
             postedReview.submitted_at || postedReview.submittedAt || reclaimedAt;
           const markPosted = statements.markPosted?.run;
           if (typeof markPosted === 'function') {
-            const result = markPosted.call(statements.markPosted, postedAt, row.repo, row.pr_number);
+            const reviewedHead = String(postedReview.commit_id || row.reviewer_head_sha || '').trim() || null;
+            const result = markPosted.call(statements.markPosted, postedAt, reviewedHead,
+              row.repo, row.pr_number, row.reviewer_session_uuid ?? null, reviewedHead);
+            if (result.changes !== 1) {
+              const released = statements.releaseUnsettledPostedReview.run(
+                reviewedHead, row.repo, row.pr_number, row.reviewer_session_uuid ?? null);
+              log.warn?.(`[watcher] posted-settlement-claim-mismatch repo=${row.repo} pr=${row.pr_number} `
+                + `released_to_pending=${released.changes === 1} source=failed-orphan-recovery`);
+            }
             log.warn?.(
               `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
               `reason=posted-review-found-reconciled session=${row.reviewer_session_uuid || 'unknown'} ` +

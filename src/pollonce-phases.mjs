@@ -3892,6 +3892,7 @@ export async function processReviewSubject(entry, ctx) {
                 },
               };
               let reviewRowSettled = false;
+              let reviewRowPosted = false;
               let handoffPromise = null;
               const handoff = result => {
                 if (handoffPromise) return handoffPromise;
@@ -3914,7 +3915,7 @@ export async function processReviewSubject(entry, ctx) {
               if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
                 if (reviewRowSettled) return;
                 const rowSettlementStartedAt = Date.now();
-                settleReviewerAttempt({
+                const settlement = settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,
                   prNumber,
@@ -3928,8 +3929,9 @@ export async function processReviewSubject(entry, ctx) {
                 });
                 console.log(`[watcher] reviewer settlement timing repo=${repoPath} pr=${prNumber} step=durable-row-settlement elapsed_ms=${Date.now() - rowSettlementStartedAt}`);
                 reviewRowSettled = true;
+                reviewRowPosted = settlement?.posted !== false;
                 dispatchCandidate.durablePostedAt = postedResult.durablePostedAt;
-                handoff(postedResult);
+                if (reviewRowPosted) handoff(postedResult);
                 releaseReviewerReservation();
                 releaseAdmissionCapacity?.({ dispatched: true });
               };
@@ -3990,7 +3992,7 @@ export async function processReviewSubject(entry, ctx) {
               }
 
               if (!reviewRowSettled) {
-                settleReviewerAttempt({
+                const settlement = settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,
                   prNumber,
@@ -4003,9 +4005,10 @@ export async function processReviewSubject(entry, ctx) {
                   // ARC-18: watcher owns the heartbeat singleton; thread it in.
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
+                reviewRowPosted = settlement?.posted !== false;
               }
               try {
-                await handoff(result);
+                if (reviewRowPosted) await handoff(result);
               } finally {
                 releaseAdmissionCapacity?.({ dispatched: true });
               }

@@ -70,6 +70,13 @@ reset. The request returns `review-in-flight` and can be retried after settlemen
 Lease reconciliation owns abandoned claims. Explicit operator cancellation and
 reset still requires its existing process-exit verification and identity guards.
 
+Successful reviewer settlement atomically matches the dispatched session and
+head and records that reviewed head with `posted`. Missing head evidence or a
+lost claim match releases the affected row to `pending` at its current
+`revision_ref`, with a reason in the watcher log and no attempt or recovery
+budget charge. A replacement session is left intact. No closure handoff runs
+for an unsuccessful row settlement.
+
 Source of truth:
 
 ```text

@@ -2,6 +2,10 @@
 
 The depth lever is disarmed until an operator sets its threshold. The individual
 wait bound operates independently, including when depth is disarmed.
+REVIEWCORPFIRST-01 removes the per-tick spill count from that bound: every
+past-bound PR may spill at its next admission point, limited by the alternate
+reviewer's pool and credential capacity. Age reservations and refunds remain
+accounted, but neither spend nor replenish the depth budget for pre-bound PRs.
 
 ## What it does
 
@@ -74,6 +78,20 @@ Typed corporate reviewer exhaustion persists an account-scoped cooldown before
 capacity is released. Subsequent admissions can use independently verified
 primary capacity until the provider reset (15 minutes when no reset is supplied,
 bounded to seven days). This does not alter Gemini cooldowns or take Argus seats.
+
+Codex reviewer routes follow the same corporate-first policy for direct reviews,
+spills, and every fallback. Unknown or stale corporate quota or broker evidence
+holds; confirmed exhaustion or explicit broker unavailability permits independently
+admitted personal capacity. Typed corporate Codex exhaustion persists its own
+account cooldown before releasing capacity. Codex spawns log
+`codex_account=corporate|primary`, and the selected provider binds quota preflight,
+token minting and renewal. See [Codex account routing](CCX-04-corporate-review-fallback.md).
+
+After deploy, SRE confirms the watcher restarted, observes corporate Codex spawn
+logs while that account has capacity, and checks a long first-pass queue admits
+multiple overdue spills per tick. With an alternate slot free, no PR should wait
+more than about 15 minutes beyond its bound; investigate stale account evidence,
+credential holds and admission refusals when that observation fails.
 
 ## This is a cost lever, not a parallelism knob
 

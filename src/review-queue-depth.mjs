@@ -533,7 +533,7 @@ export function createFirstPassSpilloverController({
     const current = evaluate(passKind);
     const lane = normalizeLane(passKind, report.lanes?.[passKind]);
     reservations.delete(reservationKey);
-    remainingByKind.set(passKind, (remainingByKind.get(passKind) || 0) + 1);
+    if (reservation.depthBudget) remainingByKind.set(passKind, (remainingByKind.get(passKind) || 0) + 1);
     granted -= 1;
     grantedByKind.set(passKind, Math.max(0, (grantedByKind.get(passKind) || 0) - 1));
     const to = String(toWorkerClass || reservation.toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
@@ -577,34 +577,31 @@ export function createFirstPassSpilloverController({
         remaining,
       };
     },
-    // Age pressure shares the lane budget, with one bounded escape slot when
-    // depth is disarmed or below threshold. Refunds restore the same slot.
-    waitPressure(passKind, pressure) {
-      const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
-      const current = evaluate(kind);
-      const budget = Math.max(1, current.spillSlots);
-      return { ...pressure, engaged: pressure.engaged && (grantedByKind.get(kind) || 0) < budget,
-        remaining: Math.max(0, budget - (grantedByKind.get(kind) || 0)) };
+    // Every overdue PR may try the alternate route. The admission pool, not
+    // the depth spend lever, bounds reviewer and credential concurrency.
+    waitPressure(_passKind, pressure) {
+      return { ...pressure };
     },
     /**
-     * Consume one slot and charge the cost ledger. Call ONLY once a depth-driven
-     * fallback has actually been applied to a route.
+     * Reserve an applied spill and charge the cost ledger. Only pre-bound
+     * depth spills consume the per-tick depth budget.
      */
     recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass', waitSeconds = null, reason = 'queue-depth-pressure' } = {}) {
       const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
       const current = evaluate(kind);
-      let remaining = remainingByKind.get(kind) || 0;
-      if (reason === 'review-max-wait') {
-        remaining = Math.max(1, current.spillSlots) - (grantedByKind.get(kind) || 0);
-      } else if (!current.engaged) return false;
-      if (remaining <= 0) return false;
-      remaining -= 1;
-      remainingByKind.set(kind, remaining);
+      const reservationKey = `${repo}#${prNumber}`;
+      if (reservations.has(reservationKey)) return false;
+      const depthBudget = reason !== 'review-max-wait';
+      if (depthBudget) {
+        const remaining = remainingByKind.get(kind) || 0;
+        if (!current.engaged || remaining <= 0) return false;
+        remainingByKind.set(kind, remaining - 1);
+      }
       granted += 1;
       grantedByKind.set(kind, (grantedByKind.get(kind) || 0) + 1);
       const to = String(toWorkerClass || 'unknown').trim().toLowerCase() || 'unknown';
       const lane = normalizeLane(kind, report.lanes?.[kind]);
-      reservations.set(`${repo}#${prNumber}`, { state: 'pending', toWorkerClass: to, passKind: kind });
+      reservations.set(reservationKey, { state: 'pending', toWorkerClass: to, passKind: kind, depthBudget });
       lane.cost.spilloverReviewsTotal = Number(lane.cost.spilloverReviewsTotal || 0) + 1;
       lane.cost.byWorkerClass[to] = Number(lane.cost.byWorkerClass[to] || 0) + 1;
       lane.cost.currentEngagementSpilloverReviews =
@@ -615,7 +612,7 @@ export function createFirstPassSpilloverController({
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
         + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} held: ${heldByKind.get(kind) ?? 'unknown'} threshold=${current.threshold} `
-        + `slot=${grantedByKind.get(kind)}/${reason === 'review-max-wait' ? Math.max(1, current.spillSlots) : current.spillSlots} `
+        + `slot=${grantedByKind.get(kind)}/${reason === 'review-max-wait' ? 'concurrency' : current.spillSlots} `
         + `engagement_spillover_reviews=${lane.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`
       );
@@ -652,7 +649,7 @@ export function createFirstPassSpilloverController({
 /** Prepare every drain, including candidates deferred by an earlier wave.
  * The pool evaluates age before credential admission, even with free Gemini
  * seats. Depth keeps its saturation hook; both share reservation accounting.
- * Repeated drains reuse the controller's unspent/refunded per-tick budget.
+ * Repeated drains reuse the depth budget; age spills retain independent reservations.
  */
 export async function prepareQueueDepthSpillover(candidates, {
   controller, compareCandidates, nowMs = Date.now(), logger = console, env = process.env, now = () => Date.now(),

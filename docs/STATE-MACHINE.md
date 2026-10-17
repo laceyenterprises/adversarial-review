@@ -266,7 +266,11 @@ new PR
   `rereview_requested_at`. Gemini credential saturation compares this durable
   wait against 480 seconds for first-pass or 900 seconds for re-review; a spill
   logs `reason=review-max-wait` (depth-triggered spills retain
-  `reason=queue-depth-pressure`). The existing max-wait environment overrides
+  `reason=queue-depth-pressure`). Every past-bound PR can spill at its next
+  admission point, bounded by alternate reviewer and credential capacity rather
+  than the depth lever's per-tick spill count. Reservations and refunds remain;
+  age spills do not consume or replenish the pre-bound depth budget.
+  The existing max-wait environment overrides
   can set either bound to zero to disable it.
 - `malformed` is intentionally sticky.
 - A reviewer size preflight refusal exits with reserved CLI code 76 and settles

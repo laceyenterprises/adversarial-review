@@ -122,6 +122,8 @@ test('below threshold: reviewer selection is byte-identical to pre-RSP-01', asyn
     assert.deepEqual(withLever, {
       workerClass: 'codex',
       fellBack: false,
+      codexBrokerProvider: 'codex',
+      codexAccountHoldReason: null,
       reason: 'primary-available',
       primaryState: 'ok',
     });
@@ -209,7 +211,7 @@ test('spillover produces a usable route and passes run across multiple classes',
         authorClass,
       });
       assert.equal(applied.applied, true);
-      if (ctl.recordSpill({ fromWorkerClass: decision.from, toWorkerClass: decision.to })) {
+      if (ctl.recordSpill({ repo: 'sample/project', prNumber: spilled.length + 1, fromWorkerClass: decision.from, toWorkerClass: decision.to })) {
         spilled.push(applied.route.reviewerWorkerClass);
       }
     }
@@ -1370,16 +1372,53 @@ for (const reason of ['poll', 'capacity-freed', 'startup']) {
   }
 }
 
-test('age spill budget is bounded per lane and refunds are reusable across admissions', () => {
+test('age spill reservations are independent of the depth budget and refunds remain idempotent', () => {
   const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => null, logger: {} });
   const overdue = { engaged: true, reason: 'review-max-wait', waitSeconds: 481 };
   assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
   assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 1, reason: 'review-max-wait' }), true);
-  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, false);
-  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 2, reason: 'review-max-wait' }), false);
+  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 2, reason: 'review-max-wait' }), true);
   assert.equal(ctl.waitPressure('rereview', overdue).engaged, true);
   assert.equal(ctl.refundSpill({ repo: 'sample/project', prNumber: 1 }), true);
   assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
+  assert.equal(ctl.refundSpill({ repo: 'sample/project', prNumber: 1 }), false);
+  assert.equal(ctl.depthPressure().remaining, 0, 'age refunds cannot create depth slots');
+});
+
+test('REVIEWCORPFIRST-01: five overdue PRs fill two alternate slots in one admission pass', async () => {
+  const { createReviewerDispatchDrain } = await import('../src/watcher-reviewer-dispatch.mjs');
+  const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => 2,
+    readDepthImpl: () => 2, logger: {}, writeFileImpl() {} });
+  assert.equal(ctl.plan().spillSlots, 1, 'depth alone permits one pre-bound spill');
+  const started = [];
+  const queue = Array.from({ length: 5 }, (_, i) => ({
+    repoPath: 'sample/project', prNumber: i + 1, reviewerModel: 'gemini', depthPassKind: 'first-pass',
+    current: { head_wait_started_at: new Date(Date.now() - 600_000).toISOString() },
+    async reevaluateDepthSpill(pressure) {
+      if (ctl.recordSpill({ repo: this.repoPath, prNumber: this.prNumber, reason: pressure.reason })) {
+        this.reviewerModel = 'codex';
+      }
+    },
+    refundDepthSpill() {
+      if (ctl.refundSpill({ repo: this.repoPath, prNumber: this.prNumber })) this.reviewerModel = 'gemini';
+    },
+    async run() { started.push(this.prNumber); ctl.commitSpill({ repo: this.repoPath, prNumber: this.prNumber }); return { dispatched: true }; },
+  }));
+  const drain = createReviewerDispatchDrain({
+    reviewerPoolConfig: { enabled: true, maxConcurrent: 3 }, reviewerDispatchCandidates: queue,
+    firstPassSpilloverController: ctl,
+    detachedReviewerDispatchTracker: { activeCounts: () => new Map([['gemini', 1], ['__total__', 1]]), track() {} },
+    readWatcherDrainState: () => ({ active: false }),
+    resolveGeminiCredentialConcurrencyForDispatchCandidates: async () => 1,
+    singleWaveSettleGraceMs: 0, logger: { log() {}, warn() {} },
+  });
+  const result = await drain('synthetic admission');
+  assert.equal(result.dispatched, 2);
+  assert.equal(result.deferred, 3);
+  assert.deepEqual(started, [1, 2]);
+  assert.equal(ctl.granted(), 2);
+  assert.equal(queue.length, 3);
 });
 
 test('review depth includes requested rereviews and excludes held, draft and refused work', async () => {
@@ -1445,4 +1484,19 @@ test('a full overall pool does not spend quota probes preparing age spills it ca
   });
   assert.equal(probes, 0);
   assert.equal(result.deferred, 1);
+});
+
+
+test('age reservations neither spend nor refund pre-bound depth slots', () => {
+  const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => 2,
+    readDepthImpl: () => 2, logger: {}, writeFileImpl() {} });
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 1, reason: 'review-max-wait' }), true);
+  assert.equal(ctl.depthPressure().remaining, 1);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 2 }), true);
+  assert.equal(ctl.depthPressure().remaining, 0);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 3 }), false);
+  assert.equal(ctl.refundSpill({ repo: 'sample/project', prNumber: 1 }), true);
+  assert.equal(ctl.depthPressure().remaining, 0);
+  assert.equal(ctl.refundSpill({ repo: 'sample/project', prNumber: 2 }), true);
+  assert.equal(ctl.depthPressure().remaining, 1);
 });

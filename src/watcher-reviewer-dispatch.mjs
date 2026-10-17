@@ -1,3 +1,4 @@
+import { withAdmissionReadCache } from './watcher-admission-read-cache.mjs';
 import { prepareQueueDepthSpillover } from './review-queue-depth.mjs';
 import { compareReviewerDispatchCandidates, reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from './watcher-reviewer-pool.mjs';
 
@@ -92,14 +93,14 @@ export function createReviewerDispatchDrain({
   };
 
   return async (reason) => {
-    let result = await drainOnce(reason);
+    let result = await withAdmissionReadCache(() => drainOnce(reason));
     // A release from another watcher/runtime may become visible just after the
     // ordered handoff. Re-probe briefly under the admission mutex; never clear
     // reservations or relax the normal credential/process admission guards.
     for (let attempt = 1; reason === 'capacity-freed' && attempt <= 3 && shouldRetry(result); attempt++) {
       await capacityFreedRetryDelay(2000);
       logger.log(`[watcher] capacity-freed drain retried: attempt=${attempt}`);
-      result = await drainOnce(reason);
+      result = await withAdmissionReadCache(() => drainOnce(reason));
     }
     return result;
   };

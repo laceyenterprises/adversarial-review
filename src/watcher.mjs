@@ -1,3 +1,4 @@
+import { createWatcherLatencyMonitor } from './watcher-latency.mjs';
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
 import { sweepPrimaryChangeStore } from './ama/primary-change-store.mjs';
@@ -1182,8 +1183,10 @@ async function refreshOrgRepos(octokit) {
  * failures are logged and ignored so a mistaken callback cannot suppress
  * operator sync or reviewer spawn.
  */
+let watcherLatencyMonitor;
 async function pollOnce(octokit, options = {}) {
-  return withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options));
+  watcherLatencyMonitor ??= createWatcherLatencyMonitor();
+  return watcherLatencyMonitor.poll(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)));
 }
 
 async function pollOnceWithinBudget(

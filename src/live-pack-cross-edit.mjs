@@ -37,7 +37,7 @@ import { parseGhApiArrayPages } from './reviewer-diff-fetch.mjs';
 import { parseDiffFiles } from './reviewer-util.mjs';
 import {
   LIVE_DAG_RUN_STATES,
-  readActiveDagRunsForPlan,
+  readActiveDagRunsForPlanAsync,
 } from './session-ledger-read-adapter.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 import { normalizeActorLogin } from './untrusted-pr-gate.mjs';
@@ -288,7 +288,7 @@ async function evaluateGateStampExemption({
 }
 
 function defaultReadActiveDagRuns({ planId, states }) {
-  return readActiveDagRunsForPlan({ planId, states });
+  return readActiveDagRunsForPlanAsync({ planId, states });
 }
 
 // Liveness of one pack. `live` is true for a conclusive non-terminal run;

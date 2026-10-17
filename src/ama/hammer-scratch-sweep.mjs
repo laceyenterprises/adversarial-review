@@ -1,11 +1,11 @@
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { lstatSync, opendirSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 import { withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
-import { readLatestWorkerRunStatusFromLedger, readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
+import { readLatestWorkerRunStatusFromLedgerAsync, readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import {
   amaCloserDispatchDir, cleanupHammerScratchDir, isTerminalHammerScratchRecord,
@@ -168,14 +168,20 @@ async function hasLiveWorker(record, options, deadline) {
 }
 
 function ledgerReadArgs(record, options, deadline) {
-  const spawnSyncFn = options.spawnSyncImpl || spawnSync;
   return {
     launchRequestId: record.launchRequestId, rootDir: options.rootDir,
     hqRoot: record.hqRoot || options.hqRoot, env: options.env,
     ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
-    spawnSyncImpl: (command, args, spawnOptions) => spawnSyncFn(command, args, {
+    timeoutMs: Math.max(1, deadline - Date.now()),
+    spawnSyncImpl: options.spawnSyncImpl ? (command, args, spawnOptions) => options.spawnSyncImpl(command, args, {
       ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
-    }),
+    }) : undefined,
+    // Retain the existing explicit fixture seam, while production uses async
+    // psql and keeps the sweep deadline on each child.
+    spawnAsyncImpl: options.spawnAsyncImpl || (options.spawnSyncImpl
+      ? async (command, args, spawnOptions) => options.spawnSyncImpl(command, args, {
+        ...spawnOptions, timeout: Math.max(1, Math.min(spawnOptions.timeout || 10_000, deadline - Date.now())),
+      }) : undefined),
   };
 }
 
@@ -220,8 +226,8 @@ async function isTerminalOwner(record, options, deadline) {
 export async function sweepHammerScratchDirs(rootDir, options = {}) {
   const settings = {
     rootDir, env: process.env, processKillImpl: process.kill,
-    readWorkerStatusImpl: readLatestWorkerRunStatusFromLedger,
-    readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedger,
+    readWorkerStatusImpl: readLatestWorkerRunStatusFromLedgerAsync,
+    readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync,
     readPullRequestStateImpl: readScratchPullRequestState,
     readProcessSnapshotImpl: readHammerScratchProcessSnapshot,
     ...options,

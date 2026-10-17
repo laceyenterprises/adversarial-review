@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { normalizeBuilderClass } from './adapters/subject/github-pr/routing.mjs';
-import { readPrBuilderProvenance } from './session-ledger-read-adapter.mjs';
+import { readPrBuilderProvenance, readPrBuilderProvenanceAsync } from './session-ledger-read-adapter.mjs';
 
 export function reconcileBuilderClass(subject, provenance) {
   const actual = provenance?.ok && normalizeBuilderClass(provenance.actualHarness);
@@ -36,6 +36,10 @@ export function resolveBuilderProvenanceRouting(subject, {
   } catch {
     provenance = { ok: false, reason: 'ledger-read-failed', deferClaim: true };
   }
+  return finishBuilderProvenanceRouting(subject, provenance, { repo, prNumber, rootDir });
+}
+
+function finishBuilderProvenanceRouting(subject, provenance, { repo, prNumber, rootDir }) {
   const result = reconcileBuilderClass(subject, provenance);
   if (result.finding && rootDir) {
     const audit = { repo, prNumber, headSha: subject.headSha, ...result.finding };
@@ -50,4 +54,13 @@ export function resolveBuilderProvenanceRouting(subject, {
     console.warn(`[builder-routing] ${JSON.stringify(audit)}`);
   }
   return result;
+}
+
+export async function resolveBuilderProvenanceRoutingAsync(subject, {
+  repo, prNumber, rootDir, readProvenance = readPrBuilderProvenanceAsync,
+} = {}) {
+  let provenance;
+  try { provenance = await readProvenance({ repo, prNumber, headSha: subject.headSha, rootDir }); }
+  catch { provenance = { ok: false, reason: 'ledger-read-failed', deferClaim: true }; }
+  return finishBuilderProvenanceRouting(subject, provenance, { repo, prNumber, rootDir });
 }

@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { readdir, readFile as readFileAsync, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
-import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
+import { readBuildCompletionSignalForPrAsync } from './session-ledger-read-adapter.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -151,7 +151,7 @@ export async function resolveDaemonWorkerIdentityForPr({
   rootDir,
   env = process.env,
   ledgerTarget = null,
-  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPrAsync,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   consumeHeadAttestations = null,
   logger = console,
@@ -228,7 +228,7 @@ export async function resolveDaemonWorkerIdentityForPr({
     }));
   }
   // The daemon-clean-merge resolves the worker identity of a PR it is about to
-  // merge (pre-merge). readBuildCompletionSignalForPr defaults signalKind to
+  // merge (pre-merge). readBuildCompletionSignalForPrAsync defaults signalKind to
   // 'merged', but the 'merged' signal is only recorded AFTER a PR merges — an
   // open PR only has the 'pr_opened' signal (2026-07-11 #565: #3473/#3476/#3478
   // all had a 'pr_opened' row but zero 'merged' rows).

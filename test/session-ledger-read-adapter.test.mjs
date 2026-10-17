@@ -902,7 +902,7 @@ test('queryPostgresRows enforces readOnly without variables and preserves the un
     const source = readFileSync(sourceUrl, 'utf8').replace(
       "'./config-loader.mjs'",
       JSON.stringify(new URL('./config-loader.mjs', sourceUrl).href),
-    );
+    ).replace("'./watcher-latency.mjs'", JSON.stringify(new URL('./watcher-latency.mjs', sourceUrl).href));
     const modulePath = path.join(root, 'adapter.mjs');
     writeFileSync(modulePath, `${source}\nexport { queryPostgresRows };\n`);
     const { queryPostgresRows } = await import(pathToFileURL(modulePath).href);

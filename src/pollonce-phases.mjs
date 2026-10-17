@@ -36,7 +36,7 @@ import { recoverWithheldFinalRoundHead, withheldHeadRecoveryCandidates } from '.
 import { parkExhaustedReview } from './review-retry-exhaustion.mjs';
 import { createLabelControlObservationCache, observeOperatorLabelWakes } from './operator-label-wake.mjs';
 import { randomUUID } from 'node:crypto';
-import { resolveBuilderProvenanceRouting } from './builder-provenance-routing.mjs';
+import { resolveBuilderProvenanceRoutingAsync } from './builder-provenance-routing.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
   OPERATOR_APPROVED_LABEL,
@@ -1712,7 +1712,7 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       if (domainId === 'code-pr') {
-        const reconciled = resolveBuilderProvenanceRouting(subject, {
+        const reconciled = await resolveBuilderProvenanceRoutingAsync(subject, {
           repo: repoPath, prNumber, rootDir: ROOT,
           ...(ctx.readBuilderProvenance ? { readProvenance: ctx.readBuilderProvenance } : {}),
         });

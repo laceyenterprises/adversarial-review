@@ -1,3 +1,4 @@
+import { observeSynchronousChild } from './watcher-latency.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
@@ -803,12 +804,12 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, asOwner = null, execFileImpl, 
     : ['dispatch', 'status', lrq];
   let result;
   try {
-    result = spawnSync(hqPath, args, {
+    result = observeSynchronousChild('hq', () => spawnSync(hqPath, args, {
       env: { ...env },
       timeout: 5_000,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    }));
   } catch {
     return null;
   }
@@ -2436,19 +2437,15 @@ async function dispatchMergeAgentForPR({
       //     probe failure falls through to refusal-count-only
       //     classification (the OSS-safe behavior).
       const hqRootForAudit = resolveHqRoot(runtimeEnv);
-      const stuckDetail = describeStaleDispatch(latestRecordedDispatch, {
+      let stuckDetail = describeStaleDispatch(latestRecordedDispatch, {
         hqRoot: hqRootForAudit || null,
         now: Date.parse(String(now)) || Date.now(),
-        dispatchStateProbe: hqPath && _isValidLrqId(latestRecordedDispatch?.launchRequestId)
-          ? (lrqArg) => _probeDispatchStatusViaHq({
-              hqPath,
-              lrq: lrqArg,
-              asOwner: statusProbeAsOwner,
-              execFileImpl,
-              env: runtimeEnv,
-            })
-          : null,
       });
+      if (stuckDetail && hqPath && _isValidLrqId(latestRecordedDispatch?.launchRequestId)) {
+        const statusProbe = await probeDispatchStatusViaHq({ hqPath, lrq: latestRecordedDispatch.launchRequestId,
+          asOwner: statusProbeAsOwner, execFileImpl, env: runtimeEnv });
+        if (_NON_STUCK_DISPATCH_STATUSES.has(statusProbe?.status)) stuckDetail = null;
+      }
       if (stuckDetail) {
         mergeAgentLifecycleLog(logger, 'merge_agent.stuck_pre_spawn', {
           repo,

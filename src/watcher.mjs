@@ -10,7 +10,7 @@ import { createHammerScratchSweepTicker } from './ama/hammer-scratch-sweep.mjs';
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
@@ -113,6 +113,7 @@ import {
 import { createReviewerDispatchDrain } from './watcher-reviewer-dispatch.mjs';
 import { createReviewerAdmissionQueue } from './watcher-reviewer-admission.mjs';
 import { attachDurableReviewerRefill } from './watcher-reviewer-refill.mjs';
+import { readWatcherDrainMarker } from './watcher-drain-state.mjs';
 import { createWatcherReviewerQuotaPollFactory } from './watcher-reviewer-quota.mjs';
 import { domainPipelineGeminiSeatCount } from './reviewer-spawn-settle.mjs';
 import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
@@ -807,53 +808,7 @@ function readWatcherDrainState({
   now = new Date(),
   drainMaxMs = resolveWatcherDrainMaxMs(),
 } = {}) {
-  let raw;
-  let markerMtimeMs;
-  try {
-    raw = readFileSync(drainFile, 'utf8');
-    markerMtimeMs = statSync(drainFile).mtimeMs;
-  } catch (err) {
-    if (err?.code === 'ENOENT') {
-      return { active: false };
-    }
-    return {
-      active: true,
-      reason: `unreadable drain marker at ${drainFile}: ${err?.message || err}`,
-    };
-  }
-
-  const nowMs = now.getTime();
-  const maxExpiresAt = markerMtimeMs + drainMaxMs;
-  let payload;
-  try {
-    payload = JSON.parse(raw);
-  } catch (err) {
-    if (nowMs >= maxExpiresAt) {
-      return { active: false, expired: true };
-    }
-    return {
-      active: true,
-      reason: `invalid drain marker at ${drainFile}: ${err?.message || err}`,
-    };
-  }
-
-  const parsedExpiresAt = payload?.expiresAt ? Date.parse(payload.expiresAt) : NaN;
-  const hasValidExpiresAt = Number.isFinite(parsedExpiresAt);
-  const effectiveExpiresAt = hasValidExpiresAt
-    ? Math.min(parsedExpiresAt, maxExpiresAt)
-    : maxExpiresAt;
-  if (nowMs >= effectiveExpiresAt) {
-    return { active: false, expired: true };
-  }
-
-  return {
-    active: true,
-    reason: hasValidExpiresAt
-      ? String(payload?.reason || 'watcher drain active')
-      : `drain marker missing/invalid expiresAt at ${drainFile}`,
-    requestedBy: payload?.requestedBy ? String(payload.requestedBy) : null,
-    expiresAt: hasValidExpiresAt ? String(payload.expiresAt) : null,
-  };
+  return readWatcherDrainMarker({ drainFile, now, drainMaxMs });
 }
 
 // ── Inode-orphan recovery ───────────────────────────────────────────────────

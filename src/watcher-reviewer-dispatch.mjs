@@ -82,6 +82,7 @@ export function createReviewerDispatchDrain({
           logger.log?.(`[watcher] review-wait-decision repo=${candidate.repoPath} pr=${candidate.prNumber} `
             + `admission=${JSON.stringify(reason)} pass_kind=${candidate.depthPassKind || 'first-pass'} `
             + `wait_seconds=${pressure.waitSeconds} decision=${decision} reviewer=${candidate.reviewerModel} `
+            + `reason=${candidate.spillDecisionReason || decision} `
             + `claude_account=${account?.provider === 'claude-code-corp' ? 'corporate'
               : candidate.reviewerModel === 'claude' ? 'primary' : 'none'}`);
         }

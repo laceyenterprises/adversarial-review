@@ -1349,6 +1349,7 @@ for (const reason of ['poll', 'capacity-freed', 'startup']) {
         async reevaluateDepthSpill(pressure) {
           assert.equal(pressure.reason, 'review-max-wait');
           this.reviewerModel = 'claude';
+          this.claudeAccountSelection = { provider: 'claude-code-corp' };
         },
         async run() { return { dispatched: true }; },
       };
@@ -1363,7 +1364,7 @@ for (const reason of ['poll', 'capacity-freed', 'startup']) {
       assert.equal((await drain(reason)).dispatched, 1);
       assert.equal(candidate.reviewerModel, 'claude');
       assert.equal(logs.filter(line => line.includes('review-wait-decision')).length, 1);
-      assert.match(logs.find(line => line.includes('review-wait-decision')), /decision=spilled.*reviewer=claude/);
+      assert.match(logs.find(line => line.includes('review-wait-decision')), /decision=spilled.*reviewer=claude.*claude_account=corporate/);
     });
   }
 }

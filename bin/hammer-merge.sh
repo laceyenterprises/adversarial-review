@@ -391,6 +391,9 @@ ham_refresh_github_gate() {
         return 0
       fi
       unknown_sleep=$(( ${HAM_MERGEABILITY_BACKOFF_BASE_SECONDS:-15} * (1 << (unknown_samples - 1)) ))
+      # ham_refresh_github_gate_once calls ham_wait_for_check_poll, which pads
+      # backoffs below HAM_REMOTE_CI_POLL_SECONDS to the shared snapshot cadence
+      # (30s by default), including when HAM_MERGEABILITY_BACKOFF_BASE_SECONDS is lower.
       echo "HAM mergeability UNKNOWN; re-reading GitHub gate ${unknown_samples}/${HAM_MERGEABILITY_RETRY_CAP:-3} after ${unknown_sleep}s" >&2
       sleep "$unknown_sleep"
       HAM_GATE_ATTEMPTS=0

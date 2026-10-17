@@ -1164,6 +1164,7 @@ test('SCRATCHRACE-01: PostgreSQL retry query follows metadata.retryOf transitive
       if (queries === 1) return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq', status: 'failed' }) };
       assert.match(options.input, /WITH RECURSIVE retry_chain/);
       assert.match(options.input, /child.metadata_json::jsonb->>'retryOf'/);
+      assert.match(options.input, /CASE WHEN child.metadata_json IS JSON OBJECT\s+THEN child.metadata_json::jsonb/);
       assert.match(options.input, /UNION\s+SELECT child/);
       assert.ok(args.includes('lrq=synthetic-lrq'));
       return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-retry', status: 'requested' }) };
@@ -1172,4 +1173,19 @@ test('SCRATCHRACE-01: PostgreSQL retry query follows metadata.retryOf transitive
   assert.equal(queries, 2);
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.retryChain[0].status, 'requested');
+});
+
+test('SCRATCHRACE-01: a failed retry traversal retains the successfully observed PostgreSQL status', () => {
+  let queries = 0;
+  const row = { launch_request_id: 'synthetic-lrq', status: 'failed' };
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq',
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV,
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/synthetic' },
+    spawnSyncImpl: () => ++queries === 1 ? { status: 0, stdout: JSON.stringify(row) }
+      : { status: 1, stderr: 'synthetic retry query unavailable' },
+  });
+  assert.equal(queries, 2);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.row, row);
+  assert.equal(result.retryChainUnreadable, true);
 });

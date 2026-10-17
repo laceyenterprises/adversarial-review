@@ -851,6 +851,8 @@ function* readLatestWorkerRunStatusFromLedgerSteps({
   return { ok: true, row, target: queried.target };
 }
 
+// With includeRetryChain, a traversal failure preserves the base status and
+// sets retryChainUnreadable. Ownership-changing callers must check that flag.
 export function readLaunchRequestStatusFromLedger(args) { return runLedgerStepsSync(readLaunchRequestStatusFromLedgerSteps(args)); }
 export function readLaunchRequestStatusFromLedgerAsync(args = {}) { return runLedgerStepsAsync(readLaunchRequestStatusFromLedgerSteps(args), args); }
 
@@ -928,12 +930,13 @@ function* readLaunchRequestStatusFromLedgerSteps({
     };
   }
   if (!includeRetryChain) return { ok: true, row, target: queried.target };
+  const unreadableRetryChain = () => ({ ok: true, row, retryChainUnreadable: true, target: queried.target });
   // Follow dispatcher-owned retries in one recursive query. UNION deduplicates IDs,
   // so even corrupt cyclic retry metadata cannot make the traversal unbounded.
   let retries;
   if (resolution.target.backend === 'sqlite') {
     const metadataColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'metadata_json');
-    if (!metadataColumn.ok) return metadataColumn;
+    if (!metadataColumn.ok) return unreadableRetryChain();
     if (!metadataColumn.exists) return { ok: true, row, retryChain: [], target: queried.target };
     retries = querySqliteRows(resolution.target, `
       WITH RECURSIVE retry_chain(launch_request_id) AS (
@@ -941,7 +944,8 @@ function* readLaunchRequestStatusFromLedgerSteps({
         UNION
         SELECT child.launch_request_id FROM launch_requests child
         JOIN retry_chain parent
-          ON json_extract(child.metadata_json, '$.retryOf') = parent.launch_request_id
+          ON CASE WHEN json_valid(child.metadata_json)
+            THEN json_extract(child.metadata_json, '$.retryOf') END = parent.launch_request_id
       )
       SELECT launch_request_id, status FROM launch_requests
       WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
@@ -953,14 +957,15 @@ function* readLaunchRequestStatusFromLedgerSteps({
         UNION
         SELECT child.launch_request_id FROM launch_requests child
         JOIN retry_chain parent
-          ON child.metadata_json::jsonb->>'retryOf' = parent.launch_request_id
+          ON CASE WHEN child.metadata_json IS JSON OBJECT
+            THEN child.metadata_json::jsonb->>'retryOf' END = parent.launch_request_id
       )
       SELECT json_build_object('launch_request_id', launch_request_id, 'status', status)
       FROM launch_requests
       WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
         AND launch_request_id != :'lrq'`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]] });
   }
-  if (!retries.ok) return retries;
+  if (!retries.ok) return unreadableRetryChain();
   return { ok: true, row, retryChain: retries.rows, target: queried.target };
 }
 

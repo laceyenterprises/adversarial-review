@@ -448,6 +448,17 @@ test('HAMTMP-05: a running launch protects starting scratch until the ledger is 
   assert.equal((await sweepHammerScratchDirs(f.root, f.options)).length, 1);
 });
 
+test('SCRATCHRACE-01: incomplete retry traversal preserves terminal-owner scratch', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path);
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' }, retryChainUnreadable: true }),
+    readPullRequestStateImpl: () => assert.fail('incomplete retry evidence cannot authorize cleanup'),
+  }), []);
+  assert.equal(existsSync(path), true);
+});
+
 test('HAMTMP-05: unreadable launch ledger blocks reclaim and reports deferral', async t => {
   const f = fixture(t);
   const path = f.scratch();

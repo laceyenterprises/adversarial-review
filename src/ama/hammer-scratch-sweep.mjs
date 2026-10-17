@@ -213,6 +213,7 @@ async function isTerminalOwner(record, options, deadline) {
       throw new Error('unreadable launch ledger');
     }
     if (probe?.ok) {
+      if (probe.retryChainUnreadable) return false;
       // Explicit live or unknown ledger state outranks stale record/PR state.
       return isTerminalLaunchRequestStatus(probe.row?.status);
     }

@@ -1662,7 +1662,7 @@ function* reconcileAmaCloserLeaseSteps({
     const probe = withLiveLaunchRetry(statusProbe ?? (yield readLaunchRequestStatusImpl({
       launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env, includeRetryChain: true,
     })));
-    if (!probe?.ok) return false;
+    if (!probe?.ok || probe.retryChainUnreadable) return false;
     // Async evidence can outlive the owner we started probing. Revalidate
     // before even the foreign-launch retirement branch mutates ownership.
     const ownerAfterProbe = readAmaCloserLease(rootDir, { repo, prNumber, headSha: held.headSha });
@@ -2209,19 +2209,31 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     let probe;
     if (record.launchRequestId) {
       throwIfAborted(options.signal);
-      if (Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000)) ledgerUnreadable = true;
-      probe = ledgerUnreadable ? { ok: false, reason: 'scan-ledger-unreadable' } : withLiveLaunchRetry(await readStatus({
+      const budgetExpired = Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
+      if (budgetExpired && !observedTerminal) ledgerUnreadable = true;
+      probe = ledgerUnreadable || budgetExpired ? { ok: false, reason: 'scan-ledger-unreadable' } : withLiveLaunchRetry(await readStatus({
         includeRetryChain: true,
         launchRequestId: record.launchRequestId,
         rootDir, hqRoot: options.hqRoot,
         ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
         env: options.env || process.env,
       }));
-      if (!ledgerUnreadable) probes += 1;
+      if (!ledgerUnreadable && !budgetExpired && !observedTerminal) probes += 1;
       throwIfAborted(options.signal);
       if (probe?.ok && probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) continue;
       const status = String(probe?.row?.status || '').trim().toLowerCase();
-      if (probe?.ok && status) {
+      // A historical terminal observation can only be overridden by a live
+      // descendant. Missing/unreadable probes cannot poison other reservations.
+      if (probe?.retryChainUnreadable) {
+        if (!observedTerminal) {
+          counts.unreadable += 1;
+          active.push({ ...record, prNumber, dispatchPath, holdsCapacity: true });
+        }
+        continue;
+      }
+      if (observedTerminal) {
+        if (!probe?.ok) continue;
+      } else if (probe?.ok && status) {
         terminalStatus = isTerminalLaunchRequestStatus(status) ? status : null;
         if (terminalStatus && !observedTerminal) counts.terminal += 1;
       } else if (probe?.reason === 'missing-launch-request-row') {
@@ -4405,10 +4417,12 @@ export async function maybeDispatchAmaCloser(args) {
     const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
       readLaunchRequestStatusImpl: async request => withLiveLaunchRetry(await readStatus({ ...request, includeRetryChain: true })),
       cleanupScratchImpl: (record, logger) => {
-        if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
+        if (record?.repo !== targetRepo || Number(record?.prNumber) !== Number(args.prMetadata?.prNumber)) {
+          cleanupHammerScratchDir(record, logger);
+        } else if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
       },
     });
-    preservePredecessor = result.reason === 'dispatch-retry-live';
+    preservePredecessor = result.reason === 'dispatch-retry-live' || result.preservePredecessorArtifacts === true;
     admissionCompleted = true;
     return result;
   } finally {
@@ -4492,6 +4506,8 @@ async function maybeDispatchAmaCloserAttempt({
         ledgerDbPath: dispatchContext.ledgerDbPath, env,
       })).catch(() => ({ ok: false }));
       earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
+      if (statusProbe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
+        skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
       if (statusProbe?.liveRetryLaunchRequestId) return noAmaDispatch({ dispatched: false,
         skipMergeAgent: true, inFlight: true, reason: 'dispatch-retry-live',
         launchRequestId: held.lease.lrqId, liveRetryLaunchRequestId: statusProbe.liveRetryLaunchRequestId });
@@ -5149,6 +5165,8 @@ async function maybeDispatchAmaCloserAttempt({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
     })).catch(() => ({ ok: false }));
     const probe = prefetchedLaunchRequestProbe;
+    if (probe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
+      skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
     if (probe?.liveRetryLaunchRequestId) return noAmaDispatch({ dispatched: false,
       skipMergeAgent: true, inFlight: true, reason: 'dispatch-retry-live',
       launchRequestId: existingRecord.launchRequestId, liveRetryLaunchRequestId: probe.liveRetryLaunchRequestId });
@@ -7381,21 +7399,41 @@ async function maybeDispatchAmaCloserAttempt({
       throwIfAborted(signal);
       break;
     } catch (err) {
-      if (/uq_worker_runs_live_logical_job/i.test(formatHqDispatchError(err))) {
-        // The fleet retry won admission after our snapshot. Restore its original
-        // ownership and artifacts without charging a failed closer attempt.
-        const previous = existingRecord || {};
-        updateDispatchRecord(rootDir, targetDispatchIdentity, () => ({
-          ...previous, repo, prNumber, headSha: targetRemediationSha, reviewedSha,
+      const liveClaimRefusal = /uq_worker_runs_live_logical_job/i.test(formatHqDispatchError(err));
+      const retryProbe = liveClaimRefusal && existingRecord?.launchRequestId
+        ? withLiveLaunchRetry(await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+          launchRequestId: existingRecord.launchRequestId, includeRetryChain: true, rootDir, hqRoot,
+          ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
+        })).catch(() => ({ ok: false }))) : null;
+      const retryChainUnknown = liveClaimRefusal && existingRecord?.launchRequestId
+        && (!retryProbe?.ok || retryProbe.retryChainUnreadable);
+      if (retryProbe?.ok && retryProbe.liveRetryLaunchRequestId) {
+        // Only a proven descendant owns these artifacts. Keep its original head
+        // identity even if this admission was targeting a newer remediation head.
+        const previous = existingRecord;
+        updateDispatchRecord(rootDir, existingDispatchIdentity, () => ({
+          ...previous,
           state: 'dispatched', reason: 'dispatch-retry-live', lastObservedStatus: 'requested',
           lastObservedAt: dispatchContext.dispatchedAt, lastError: formatHqDispatchError(err),
           retryCount: priorRetryCount, outcome: null, terminalOutcome: null, terminalLaunchStatus: null,
           scratchDir: previous.scratchDir || null, promptPath: previous.promptPath || null,
           launchRequestId: previous.launchRequestId || null, dispatchId: previous.dispatchId || null,
+          liveRetryLaunchRequestId: retryProbe.liveRetryLaunchRequestId,
         }));
-        promoteLaunchedLease({ launchRequestId: previous.launchRequestId || previous.dispatchId });
+        if (existingDispatchIdentity.headSha === targetDispatchIdentity.headSha) {
+          promoteLaunchedLease({ launchRequestId: previous.launchRequestId });
+        } else {
+          updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({
+            ...current, state: 'no-dispatch', reason: 'dispatch-retry-live',
+            retryOwnerHeadSha: existingDispatchIdentity.headSha,
+            launchRequestId: null, dispatchId: null, scratchDir: null, promptPath: null,
+            lastObservedStatus: null, lastObservedAt: null, retryCount: priorRetryCount,
+          }));
+          deleteAmaCloserLease(rootDir, leaseIdentity);
+        }
         return noAmaDispatch({ dispatched: false, skipMergeAgent: true, inFlight: true,
           reason: 'dispatch-retry-live', launchRequestId: previous.launchRequestId || null,
+          liveRetryLaunchRequestId: retryProbe.liveRetryLaunchRequestId,
           promptPath: previous.promptPath || null });
       }
       const launchEvidence = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
@@ -7454,7 +7492,7 @@ async function maybeDispatchAmaCloserAttempt({
       // `dispatch-retry-exhausted`. Otherwise a transient rate-limit storm
       // permanently grounds the closer for a PR even after the limit resets,
       // which is exactly the cascade observed in the macOS-upgrade incident.
-      const transientFailure = !ambiguousLaunch
+      const transientFailure = !liveClaimRefusal && !ambiguousLaunch
         && !configurationRefusal
         && !branchHolderBlocked
         // A live provision-slot holder is competing work, not proof this
@@ -7510,6 +7548,15 @@ async function maybeDispatchAmaCloserAttempt({
       });
       const branchHolderBlockExhausted = branchHolderBlocked
         && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
+      if (retryChainUnknown) {
+        // Charge the refusal, but preserve the ancestor's identity/artifacts for
+        // the next probe. Incomplete evidence is not a dispatched worker claim.
+        updateDispatchRecord(rootDir, existingDispatchIdentity, () => ({
+          ...existingRecord, state: 'dispatch-failed', reason: 'dispatch-retry-chain-unreadable',
+          retryCount: priorRetryCount + 1, lastError: dispatchError,
+          lastObservedStatus: 'unknown', terminalLaunchStatus: null,
+        }));
+      }
       // A worker DID spawn (hq emitted an lrq/dispatchId) even though the launch
       // call surfaced as an error — the classic `worker_killed`-shortly-after-spawn
       // shape. Count it against the per-PR firing ceiling so a hammer that spawns
@@ -7561,7 +7608,8 @@ async function maybeDispatchAmaCloserAttempt({
         // closer (not merge-agent) re-dispatches once the throttle/broker
         // clears, since the budget was preserved above and re-dispatch is
         // guaranteed to be retry-eligible on the next tick.
-        skipMergeAgent: Boolean(configurationRefusal) || branchHolderBlocked || ambiguousLaunch || transientFailure,
+        skipMergeAgent: Boolean(configurationRefusal) || Boolean(retryChainUnknown) || branchHolderBlocked || ambiguousLaunch || transientFailure,
+        ...(retryChainUnknown ? { preservePredecessorArtifacts: true } : {}),
         reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : ambiguousLaunch ? 'dispatch-response-ambiguous' : (
           branchHolderBlocked ? (
             branchHolderBlockExhausted

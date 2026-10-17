@@ -18,6 +18,10 @@ export function launchRetryFixture(root, retryStatus = 'requested') {
     ['synthetic-terminal-sibling', 'canceled', 'synthetic-lrq'],
     ['synthetic-unrelated', 'running', null],
   ]) insert.run(id, status, 'HAM', JSON.stringify({ retryOf }));
+  // Historical/imported ledger rows may not contain valid JSON. They must not
+  // break retry traversal for an unrelated hammer.
+  insert.run('synthetic-malformed', 'failed', 'HAM', '{broken');
+  insert.run('synthetic-empty', 'failed', 'HAM', '');
   db.close();
   return { backend: 'sqlite', path };
 }

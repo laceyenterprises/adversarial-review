@@ -405,7 +405,7 @@ function seedIssue1178AfterFirstHammer(rootDir) {
   recordHammerRetryDispatch(rootDir, identity, { jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now: '2026-09-29T03:30:42Z' });
 }
 
-test('#1178: a hammer that exited without closing is re-armed at once, refunded, not held for 30 minutes', async (t) => {
+test('FINALCLOSE-01 a final hammer that exited without closing retries at once and stays charged', async (t) => {
   _resetHammerRetryCapAlertDebounceForTests();
   const rootDir = mkdtempSync(join(tmpdir(), 'hambg02-1178-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -433,78 +433,43 @@ test('#1178: a hammer that exited without closing is re-armed at once, refunded,
   assert.equal(lease.lrqId, LRQ_SECOND, 'the exited hammer\'s lease was released and re-acquired for the re-arm');
 
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
-  assert.equal(ledger.retryable, 1);
-  assert.deepEqual(ledger.retryableLaunchRequestIds, [LRQ_FIRST]);
-  assert.equal(ledger.attemptCount, 1, 'the exit was refunded; only the re-arm is charged');
+  assert.equal(ledger.retryable, undefined);
+  assert.equal(ledger.retryableLaunchRequestIds, undefined);
+  assert.equal(ledger.attemptCount, 2, 'both final-hammer launches stay charged');
   assert.equal(ledger.lifetimeAttemptCount, 2);
 });
 
-test('#1178: the re-armed hammer is the one observed next, and the retry budget stays bounded', async (t) => {
+test('FINALCLOSE-01 the re-armed final hammer is observed next and the second exit exhausts its cap', async t => {
   _resetHammerRetryCapAlertDebounceForTests();
-  const rootDir = mkdtempSync(join(tmpdir(), 'hambg02-1178-chain-'));
+  const rootDir = mkdtempSync(join(tmpdir(), 'finalclose-exit-chain-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   seedIssue1178AfterFirstHammer(rootDir);
   const alerts = [];
-
   const rearmed = await maybeDispatchAmaCloser({
     ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T03:44:43Z' }),
     ...closerDeps({ nextLaunch: LRQ_SECOND, alerts }),
   });
   assert.equal(rearmed.launchRequestId, LRQ_SECOND);
-  const firstRecordAfterRearm = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
-
-  // The second hammer exits the same way. Before HAMBG-02 the closer kept
-  // reading the reviewed-head record, re-observed LRQ_FIRST, and every tick
-  // died on `refusing to reuse terminal reviewer_passes row`.
-  const secondDeps = {
-    ...closerDeps({ nextLaunch: LRQ_THIRD, alerts }),
-    // Proven missing merged evidence permits bounded exit-without-close retry.
-    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
-  };
-  const again = await maybeDispatchAmaCloser({
-    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T04:05:00Z' }),
-    ...secondDeps,
-  });
-  assert.deepEqual(secondDeps.statusProbes, [LRQ_SECOND]);
-  assert.equal(again.dispatched, true, JSON.stringify(again));
-  assert.equal(again.launchRequestId, LRQ_THIRD);
-  assert.deepEqual(
-    readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }),
-    firstRecordAfterRearm,
-    'the first hammer is reconciled once, not on every tick',
-  );
-  let ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
-  assert.equal(ledger.retryable, 1, 'the budget refunds one exit per series');
-  assert.equal(ledger.attemptCount, 2);
-
-  // The third exit meets the normal cap: suppressed, and the operator is paged.
-  const thirdDeps = {
-    ...closerDeps({ nextLaunch: 'lrq_unexpected', alerts }),
-    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
-  };
+  const firstRecord = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  const deps = closerDeps({ nextLaunch: 'lrq_unexpected', alerts });
   const capped = await maybeDispatchAmaCloser({
-    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T04:10:00Z' }),
-    ...thirdDeps,
+    ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T04:05:00Z' }), ...deps,
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { repo: REPO, signal_kind: 'merged' } }),
   });
-  assert.deepEqual(thirdDeps.statusProbes, [LRQ_THIRD]);
-  assert.equal(capped.dispatched, false);
+  assert.deepEqual(deps.statusProbes, [LRQ_SECOND]);
   assert.equal(capped.reason, 'hammer-retry-cap-exhausted');
-  assert.equal(capped.needsOperator, true);
-  assert.equal(thirdDeps.launches.length, 0);
+  assert.equal(deps.launches.length, 0);
   assert.equal(alerts.length, 1);
-  const thirdRecord = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: PUSHED_HEAD });
-  assert.equal(thirdRecord.launchRequestId, LRQ_THIRD);
-  assert.equal(thirdRecord.outcome, HAMMER_EXITED_WITHOUT_CLOSE);
-  ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
-  assert.equal(ledger.suppressed, true);
-
-  // Observing the same exited launch again must not throw.
+  assert.deepEqual(readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }), firstRecord);
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger.attemptCount, 2);
+  assert.equal(ledger.retryable, undefined);
   const repeat = await maybeDispatchAmaCloser({
     ...closerArgs(rootDir, { dispatchedAt: '2026-09-29T04:12:00Z' }),
     ...closerDeps({ nextLaunch: 'lrq_unexpected', alerts }),
   });
-  assert.equal(repeat.dispatched, false);
   assert.equal(repeat.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(alerts.length, 1);
 });
 
 test('#7341: a launch recorded on the dispatch-time head is observed and its rekeyed lease released', async (t) => {

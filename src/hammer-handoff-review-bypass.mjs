@@ -1,9 +1,11 @@
 import { DELIVERED_REVIEW_SQL } from './reviewer-pass-posted-review-sql.mjs';
 import { readAmaCloserLease } from './ama/closer-lease.mjs';
-import { isOrphanHeadReviewRequested } from './orphan-head-review-requested.mjs';
 
 export function hammerHandoffReviewBypass({ db, rootDir, repo, prNumber, headSha, row }) {
-  if (!isOrphanHeadReviewRequested(row, headSha)) return false;
+  // FINALCLOSE-01: the durable exact-head transfer is the authority. A bounded
+  // orphan request may have been consumed before transfer or interrupted; the
+  // ordinary head-refresh request must be able to finish that same handoff.
+  if (!headSha || row?.revision_ref !== headSha || !row?.rereview_requested_at) return false;
   const lease = readAmaCloserLease(rootDir, { repo, prNumber, headSha });
   if (lease?.status !== 'handed-to-review') return false;
   // The handoff authorizes one attempt after transfer, never an unbounded

@@ -44,7 +44,8 @@ const loadRebaseCoverage = async ({ base, head }) => {
       for (let attempt = 0; ; attempt++) {
         try { await git(['fetch', '--no-tags', 'origin', sha]); break; }
         catch (error) {
-          if (attempt === 2 || !transientGitError(error)) return null;
+          if (!transientGitError(error)) return null;
+          if (attempt === 2) throw Object.assign(error, { hammerHistoryReadFailed: true });
           await new Promise(resolve => setTimeout(resolve, 500 * 2 ** attempt));
         }
       }

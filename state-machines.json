@@ -241,7 +241,7 @@
     }
   ],
   "sourceProjectionSha256": {
-    "src/pollonce-phases.mjs": "f5d71e055b557e533c5a6ec1dfd3430965e0597c5d877fed2e6b81943d4070cb",
+    "src/pollonce-phases.mjs": "2a24246a41501e681f16c2e30aefdfda3c123382799721285417a2a0379b2778",
     "src/review-statuses.mjs": "e5b4f877397ccae443c0ea47babdad7c83d71b6f474a31ad92130b88382f6a7b",
     "src/adapters/reviewer-runtime/acpx/index.mjs": "6debe24b7efd8a3ddf08b7e7c1dc2be5b09d2956fa7e4e2f25d9663d7490e658",
     "src/adapters/reviewer-runtime/agent-os-hq/index.mjs": "a83781bddccbb314e837659c5319f7c7fd99cbe42b545f55a214079f2e58a8f1",
@@ -251,7 +251,7 @@
     "src/ama-closure-orchestration.mjs": "4ce897fd6013b48155500abd4a4701398c73e793cecea2ee005ad42b1fd0355e",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "6d534642617f73532d21917da6e34dba64dc6efb2fd724de39e24032bd9c70da",
+    "src/ama/dispatch-closer.mjs": "81a5fa898be8b26fae2ddab5d6fd0d0a3cdaf2b3f59b845e0508012101c85069",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
     "src/follow-up-remediation.mjs": "e7040add9e27706ced329c6412f2a9dfbc1db7080e640e1de65fef97b6da9f0b",

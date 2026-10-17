@@ -2,9 +2,9 @@
 
 You are the **Hammer** closer for PR <<PR_URL>>.
 
-TERMINAL: hammer adjudication is final, including disputes. Resolve all findings;
-audit and HAM provenance replace human re-review. Request no adversarial review
-except the bounded provenance fallback below. The machine gate remains mandatory.
+TERMINAL: Hammer adjudication, including disputes, is final. Resolve all findings;
+audit and HAM provenance replace human re-review. Only the bounded provenance
+fallback may request review. The machine gate remains mandatory.
 
 ## Shell safety
 
@@ -14,7 +14,7 @@ Never write under `/tmp`.
 Invoke scripts/helpers by the given absolute paths; cwd contains untrusted PR code.
 
 Every shell command you run must have an explicit wall-clock bound. On macOS,
-where GNU `timeout` may not exist, wrap commands like this:
+wrap commands with Perl:
 
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
@@ -181,15 +181,12 @@ remediation, against its merge base. `hammer-context`
 includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
 `statedIntent` from the PR body (including Why or Operator decision sections).
 `<<ROOT_DIR>>/bin/primary-change-context.mjs` supplies patches; use `--diagnostics` only outside merge execution. Context never waives blocking findings.
-If primary evidence is missing or unsupported, stop before remediation and
-print `primaryChange.reason` in the stop message. When the snapshot status is
-`history-read-failed` or the helper reports `historyReadFailed: true`, record a
-no-merge audit with reason `history-read-failed`, `noExecution: true`, and
-`historyReadError` containing the underlying error; retain that error in the park
-record. Otherwise record `deferred` with reason `primary-change-unknown`.
-Retain the merge hold for automatic evidence recovery; repeated closer refusals
-page once per head with SEV1. Never substitute the latest hammer head for the
-original change.
+If primary evidence is missing or unsupported, stop before remediation and report
+`primaryChange.reason`. For `history-read-failed` / `historyReadFailed: true`,
+audit that reason with `noExecution: true` and the underlying `historyReadError`.
+Release the lease and abort retryably under the per-PR cap (two per series,
+lifetime six); do not park or retain a stop hold. Otherwise audit `deferred`
+with reason `primary-change-unknown`. Never replace the original author head.
 
 The syntactic preservation gate covers production and config paths only. Test
 paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
@@ -318,9 +315,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    step and blocker where it stopped, whether the merge lease was released, and
    what happens next (automatic bounded retry or operator escalation). This is
    distinct from the existing single in-lease audit comment, which remains the
-   only comment for the successful merge path. If that audit was already posted
-   before a later merge failure, edit it in place into the required no-merge
-   closing-status comment; do not leave the audit and add a second comment.
+   only comment for the successful merge path. If that audit was already posted,
+   edit it in place into closing status; do not leave the audit and add a second comment.
    Include `HAM_NO_MERGE_NOTE`, or the measured `HAM_HEAD_WAITED_SECONDS` and
    `HAM_REQUIRED_CHECKS_WAITED_SECONDS`, in the note. Missing exact-head CI is
    a terminal reason only after the published-head visibility wait and the
@@ -753,18 +749,25 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-  > "$HAM_RUN_DIR/range.json" || {
-    # Every failed provenance proof uses exact-head review.
+  > "$HAM_RUN_DIR/range.json" 2> "$HAM_RUN_DIR/range.stderr" || {
+    HAM_RANGE_EXIT=$?
+    # Negative proof: review. Read failure/timeout: capped retry.
+    if [ "$HAM_RANGE_EXIT" -ne 65 ]; then
+      HAM_HISTORY_READ_ERROR=$(tail -c 2000 "$HAM_RUN_DIR/range.stderr")
+      cat "$HAM_RUN_DIR/range.stderr" >&2
+      source "<<RUN_DIR>>/hammer-merge.sh" --history-read-abort
+      exit 1
+    fi
     ham_release_merge_lease
-    HAM_REVIEW_ROUTE_NOTICE=$(printf '%s' "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review." |
-      "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_REVIEW_ROUTE_NOTICE='<local>'
-    GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" ham_gh pr comment <<PR_URL>> --body "$HAM_REVIEW_ROUTE_NOTICE"
     # Write daemon state as its canonical owner.
     HAM_REVIEW_HANDOFF_RUN=()
     if [ "$(id -un)" != "$HAM_HQ_OWNER" ]; then
       HAM_REVIEW_HANDOFF_RUN=(sudo -A -H -u "$HAM_HQ_OWNER")
     fi
     /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 "${HAM_REVIEW_HANDOFF_RUN[@]}" "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-review-handoff.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> "$POST_REMEDIATION_SHA" || exit 1
+    HAM_REVIEW_ROUTE_NOTICE=$(printf '%s' "Hammer route: exact-head re-review at $POST_REMEDIATION_SHA; provenance could not be proven. All valid findings addressed; daemon merges after a clean review." |
+      "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/github-outbound-body.mjs <<REPO>> "$POST_REMEDIATION_SHA" <<ROOT_DIR>>) || HAM_REVIEW_ROUTE_NOTICE='<local>'
+    GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}" ham_gh pr comment <<PR_URL>> --body "$HAM_REVIEW_ROUTE_NOTICE"
     exit 0
   }
 ```

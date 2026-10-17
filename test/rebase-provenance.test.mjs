@@ -65,6 +65,7 @@ test('REBASEPROV-01 unreviewed source resolution fails closed', async t => {
 test('REBASEPROV-01 unverified generated output fails closed', async t => {
   const { options } = fixture(t, { generated: true });
   options.verifyGenerated = async () => false;
+  options.get = async () => ({ status: 'diverged' });
   assert.equal(await fetchHammerHeadRange(options), null);
 });
 

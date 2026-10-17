@@ -193,3 +193,28 @@ test('CLI and daemon share tagged history; a used builder boundary must match an
   await storedPrimaryChange({ ...bound, builderHead: 'd'.repeat(40) }, async () => { reads++; return evidence(bound); });
   assert.equal(reads, 1);
 });
+
+
+test('FINALCLOSE-01 worker computes fresh history without accessing a foreign-owned daemon cache', async t => {
+  const { fetchPrimaryChange } = await import('../src/ama/primary-change.mjs');
+  const args = fixture(t), original = fs.lstatSync;
+  mockFs(t, 'lstatSync', (path, ...options) => {
+    const stat = original(path, ...options);
+    if (path === args.rootDir) stat.uid = process.geteuid() + 1;
+    return stat;
+  });
+  let reads = 0;
+  const get = Object.assign(async path => {
+    reads++;
+    if (path.endsWith('/pulls/1')) return { head: { sha: args.headSha }, base: { sha: args.baseSha } };
+    assert.ok(path.includes('/compare/'));
+    return { total_commits: 1, commits: [{ sha: args.headSha, commit: { message: 'builder' } }] };
+  }, { persistPrimaryChange: true, metadata: async () => assert.fail('cache preflight must not run') });
+  for (let i = 0; i < 2; i++) {
+    const result = await fetchPrimaryChange({ ...args, get }, { fetchCiCostImpl: async () => ({ ok: true }) });
+    assert.equal(result.hasHammerCommits, false);
+    assert.equal(result.historyReadFailed, undefined);
+  }
+  assert.equal(reads, 4, 'each lease evaluation independently reads live history');
+  assert.equal(existsSync(join(args.rootDir, 'data', 'primary-change-history')), false);
+});

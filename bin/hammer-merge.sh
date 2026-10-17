@@ -60,6 +60,7 @@ ham_append_terminal_audit() {
     --argjson requiredChecksWaitedSeconds "${HAM_REQUIRED_CHECKS_WAITED_SECONDS:-0}" \
     --arg outcome "$ham_audit_outcome" \
     --arg reason "$ham_audit_reason" \
+    --arg historyReadError "${HAM_HISTORY_READ_ERROR:-}" \
     --arg reviewedHead "<<REVIEWED_SHA>>" \
     --arg validatedHead "$POST_REMEDIATION_SHA" \
     --arg mergeMethod "<<MERGE_METHOD>>" \
@@ -97,6 +98,7 @@ ham_append_terminal_audit() {
       mergeCommitSha: $mergeCommit,
       mergedAt: $mergedAt,
       reason: $reason,
+      historyReadError: $historyReadError,
       resumeOwed: ($reason == "required-checks-pending"),
       resumeHead: (if $reason == "required-checks-pending" then $validatedHead else null end),
       eligibilityTrace: $eligibilityTrace,
@@ -120,6 +122,15 @@ ham_append_terminal_audit() {
   fi
   return "$ham_audit_append_exit"
 }
+
+# FINALCLOSE-01: context/provenance reads can fail before merge admission.
+if [ "${1:-}" = --history-read-abort ]; then
+  ham_append_terminal_audit failed-without-merge history-read-failed || true
+  rm -f "$HAM_MERGE_STDOUT" "$HAM_MERGE_STDERR" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" "$HAM_POST_MERGE_STDERR"
+  ham_mark_merge_lease_retryable_abort history-read-failed
+  ham_release_merge_lease
+  return 1
+fi
 
 # ama-check exits zero for both eligible and ineligible verdicts. Require its
 # exact-head decision and the successful in-lease audit publish independently.
@@ -1026,4 +1037,4 @@ fi
 HAM_PHASE_OUTCOME=merged
 return 0
 }
-ham_merge_phase
+ham_merge_phase "$@"

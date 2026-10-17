@@ -188,7 +188,7 @@ for (const [name, rounds, target, diverged, proven] of [
   ['legacy missing result', [['reviewed', null]], 'head', false, false],
 ]) {
   test(`HAMCLOSE-05: ${name}`, async () => {
-    const range = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed',
+    const read = () => fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed',
       currentHead: target, hammerBaseHead: target,
       remediationRounds: rounds.map(([startHeadSha, resultingHeadSha, state = 'completed']) => ({ startHeadSha, resultingHeadSha, state })),
       get: async path => {
@@ -197,12 +197,14 @@ for (const [name, rounds, target, diverged, proven] of [
           : diverged && path.endsWith('round1...head') ? 'diverged' : 'ahead' };
       },
     });
+    if (diverged === 'unreadable') return assert.rejects(read(), { hammerHistoryReadFailed: true });
+    const range = await read();
     assert.equal(Boolean(range), proven);
     if (proven) assert.equal(range.proof, 'completed-remediation-round-chain');
   });
 }
 
-for (const status of ['diverged', 'identical', 'error']) {
+for (const status of ['diverged', 'identical']) {
   test(`immutable ${status} remediation edges are evaluated once across passes`, async () => {
     const calls = [];
     const rounds = [['middle', 'head'], ['reviewed', 'bad'], ['reviewed', 'middle'], ['reviewed', 'bad']]
@@ -286,7 +288,7 @@ for (const pages of [10, 11]) {
 for (const mode of ['throw', 'malformed', 'pagination', 'ahead', 'mixed']) {
   test(`HAMCLOSE-06: ${mode} timeline`, async () => {
     const calls = [];
-    const result = await fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
+    const read = () => fetchHammerHeadRange({ repo: 'fixture/repo', reviewedHead: 'reviewed', currentHead: 'head',
       hammerBaseHead: 'head', env: {}, remediationRounds: (mode === 'mixed'
         ? [['reviewed', 'middle'], ['middle', 'head']] : [['reviewed', 'head']])
         .map(([startHeadSha, resultingHeadSha]) => ({ state: 'completed', startHeadSha, resultingHeadSha })),
@@ -298,7 +300,9 @@ for (const mode of ['throw', 'malformed', 'pagination', 'ahead', 'mixed']) {
         if (mode === 'pagination' && cursor === null) return timelinePage([], true, 'second');
         return timelinePage([forcePush(mode === 'mixed' ? 'middle' : 'reviewed', 'head')]);
       } });
-    if (['throw', 'malformed'].includes(mode)) assert.equal(result, null);
+    if (mode === 'throw') return assert.rejects(read(), { hammerHistoryReadFailed: true });
+    const result = await read();
+    if (mode === 'malformed') assert.equal(result, null);
     else assert.deepEqual(result.linkKinds, mode === 'mixed' ? ['ahead', 'fleet-force-push'] : [mode === 'ahead' ? 'ahead' : 'fleet-force-push']);
     assert.deepEqual(calls, mode === 'ahead' ? [] : mode === 'pagination' ? [null, 'second'] : [null]);
   });
@@ -374,8 +378,11 @@ for (const [name, events] of [
     assert.equal(await fetchHammerHeadRange(activityOptions(events, { hammerBaseHead: 'base' })), null);
   });
 }
-test('HAMCLOSE-07 activity errors and truncated history never escape or prove', async () => {
-  for (const loadActivityPage of [async () => { throw new Error('synthetic API failure'); },
+test('FINALCLOSE-01 activity read failures retry; truncated history cannot prove ancestry', async () => {
+  await assert.rejects(fetchHammerHeadRange(activityOptions([], { loadActivityPage: async () => {
+    throw new Error('synthetic API failure');
+  } })), { hammerHistoryReadFailed: true });
+  for (const loadActivityPage of [
     async () => ({ nodes: [activity('reviewed', 'head')], next: 'another-page' }),
     async () => ({ nodes: [activity('other', 'head')], next: null })]) {
     assert.equal(await fetchHammerHeadRange(activityOptions([], { loadActivityPage })), null);
@@ -461,6 +468,6 @@ test('activity settles concurrent lookups and refuses a failed lookup', async ()
     if (path.endsWith('/commits/head')) { await new Promise(resolve => setImmediate(resolve)); settled = true; }
     return originalGet(path);
   };
-  assert.equal(await fetchHammerHeadRange(options), null);
+  await assert.rejects(fetchHammerHeadRange(options), { hammerHistoryReadFailed: true });
   assert.equal(settled, true);
 });

@@ -13,6 +13,7 @@
 // merge predicate are unchanged. The operator is paged only for the two
 // route-ending outcomes: the hammer's final no-merge decision, or an exhausted
 // hammer retry cap.
+import { observeClosureWait } from './ama/closure-wait.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
@@ -65,6 +66,7 @@ function hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reas
 }
 
 async function pageHammerOwnerOutcome({
+  rootDir,
   route,
   repoPath,
   prNumber,
@@ -75,12 +77,14 @@ async function pageHammerOwnerOutcome({
   logger,
 }) {
   const reason = amaClosureResult?.reason || outcome;
+  if (amaClosureResult?.alertEmitted === true) return { paged: true, alreadyPaged: true };
   try {
     // The outbox identity is stable per repo#pr@head, so a repeat tick re-uses
     // the queued or delivered page instead of paging again.
-    const delivery = await deliverAlertImpl(
-      hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reason }),
-      {
+    const delivery = await observeClosureWait({ rootDir, repo: repoPath, prNumber, headSha,
+      reason: hammerOwnerPageText({ route, repoPath, prNumber, headSha, outcome, reason }),
+      waitClass: 'final-round', immediate: true,
+      pageImpl: text => deliverAlertImpl(text, {
         event: HAMMER_OWNER_ROUTES[route].pageEvent,
         payload: {
           severity: 'SEV1',
@@ -92,9 +96,9 @@ async function pageHammerOwnerOutcome({
           route,
           launchRequestId: amaClosureResult?.launchRequestId || null,
         },
-      },
-    );
-    return { paged: true, delivery };
+      }),
+    });
+    return { paged: true, delivery, alreadyPaged: !delivery.notify };
   } catch (err) {
     logger?.error?.(
       `[watcher] ${route} hammer page failed for ${repoPath}#${prNumber}: ${err?.message || err}`
@@ -163,7 +167,7 @@ export async function routeToHammerOwner({
     if (finalOutcome) {
       const headSha = candidate?.headSha || currentRevisionRef || subjectRef?.revisionRef || null;
       const page = await pageHammerOwnerOutcome({
-        route, repoPath, prNumber, headSha, outcome: finalOutcome, amaClosureResult, deliverAlertImpl, logger,
+        rootDir, route, repoPath, prNumber, headSha, outcome: finalOutcome, amaClosureResult, deliverAlertImpl, logger,
       });
       logger?.warn?.(
         `[watcher] ${route} hammer route ended for ${repoPath}#${prNumber}: ${finalOutcome} ` +

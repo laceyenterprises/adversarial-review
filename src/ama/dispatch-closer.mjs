@@ -812,6 +812,7 @@ async function suppressHammerRetryCapExhaustion({
   existingRecord,
   alertAlreadyEmitted,
   gateReasons = [],
+  finalRound = false,
   hammerStop = null,
   deliverAlertImpl,
   logger,
@@ -879,7 +880,12 @@ async function suppressHammerRetryCapExhaustion({
       + 'PR not closing — operator intervention required; further hammer dispatch '
       + 'suppressed to protect quota.';
     try {
-      await deliverAlertImpl(text, {
+      const deliver = finalRound || existingRecord?.dispatchReason === 'exhausted-final-hammer'
+        ? async (text, options) => observeClosureWait({ rootDir, repo, prNumber, headSha,
+          reason: text, now: Date.parse(now) || Date.now(), waitClass: 'final-round', immediate: true,
+          pageImpl: message => deliverAlertImpl(message, options) })
+        : deliverAlertImpl;
+      await deliver(text, {
         event: eventName,
         payload: {
           repo,
@@ -3834,6 +3840,7 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
     dispatched: false,
     skipMergeAgent: true,
     reason: `existing-dispatch-${status || 'unknown'}`,
+    closerProgressAt: existingRecord.dispatchedAt || existingRecord.lastAttemptedAt || null,
     workerClass: existingRecord.workerClass || workerClass,
     dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
     launchRequestId: existingRecord.launchRequestId || null,
@@ -4428,6 +4435,7 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  let finalHammerRetryReason = null;
   let reconciledDispatchedLease = null;
   let earlyLaunchRequestProbe = null;
   const reconciliationRoot = dispatchContext?.rootDir;
@@ -4552,6 +4560,7 @@ export async function maybeDispatchAmaCloser({
     eligibilityOptions.closerAuthoredStale = dispatchContext.closerAuthoredStale;
   }
   if (
+    dispatchContext?.finalRoundDispatchOnly !== true &&
     dispatchContext?.allowStaleReviewHeadHammerResume === true &&
     !eligibilityOptions.hamTerminalRemediation &&
     !eligibilityOptions.hamTerminalRemediationGroundTruth &&
@@ -4787,7 +4796,12 @@ export async function maybeDispatchAmaCloser({
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
     const ciBlockedReasonsCovered = ciBlockedFailureAdmit && routeReasons.every((reason) =>
       ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green'].includes(reason));
-    const autoHammer = ciBlockedReasonsCovered || (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
+    const finalRoundDispatchAdmit = dispatchContext?.finalRoundDispatchOnly === true
+      && reviewState?.remediationPending !== true
+      && routeReasons.every(reason => ['stale-review-head', 'verdict-not-settled-success',
+        'blocking-findings-present', 'blocking-findings-unknown', 'non-blocking-findings-present',
+        'non-blocking-findings-unknown', 'ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason));
+    const autoHammer = finalRoundDispatchAdmit || ciBlockedReasonsCovered || (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -5415,7 +5429,19 @@ export async function maybeDispatchAmaCloser({
     });
     throwIfAborted(signal);
     let status = statusProbe?.status || null;
+    // FINALCLOSE-01: worker status can remain `starting` after a reboot while
+    // the launch ledger is terminal. Process success alone is not merge proof;
+    // feed it through the live PR/audit reconciliation below.
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) && prefetchedLaunchRequestProbe?.ok
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
+      const terminalStatus = amaCloserStatusFromTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row.status);
+      status = AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(terminalStatus)
+        ? 'unknown' : terminalStatus;
+    }
     existingDispatchStatus = status;
+    const finalRoundLaunchEnded = dispatchContext?.dispatchReason === 'exhausted-final-hammer'
+      && prefetchedLaunchRequestProbe?.ok
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status);
     if (isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
         status, (typeof now === 'function' ? now() : now) || new Date().toISOString());
@@ -5560,7 +5586,7 @@ export async function maybeDispatchAmaCloser({
         && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
         // Preserve the terminal-success hold below before HAMBG-02 can infer
         // an exit without close from an OPEN PR whose merge may be queued.
-        && !(mergedSignalUnknown && !existingDispatchHeadAdvanced
+        && !(mergedSignalUnknown && !existingDispatchHeadAdvanced && !finalRoundLaunchEnded
           && terminalSuccessHoldLease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
           && !isReclaimableDispatchedAmaCloserLease(terminalSuccessHoldLease, {
             now: dispatchContext.dispatchedAt,
@@ -5615,6 +5641,7 @@ export async function maybeDispatchAmaCloser({
           hammerEndedWithoutMerge = true;
           const noMergeOutcome = hammerOutcome.outcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
+          finalHammerRetryReason = noMergeOutcome;
           status = 'failed';
           existingDispatchStatus = status;
           // Releasing this lease is what releases the single-flight: the PR's
@@ -5637,7 +5664,10 @@ export async function maybeDispatchAmaCloser({
           }));
           // An exit without a close never ran its close, so its re-arm is
           // refunded (bounded) instead of spending the series' real retry.
-          const retryRefund = exitedWithoutClose && isHammerWorkerClass(existingRecord.workerClass || workerClass)
+          const retryRefund = exitedWithoutClose
+            && existingRecord.dispatchReason !== 'exhausted-final-hammer'
+            && dispatchContext.dispatchReason !== 'exhausted-final-hammer'
+            && isHammerWorkerClass(existingRecord.workerClass || workerClass)
             ? refundExitedHammerDispatchBestEffort({
               rootDir,
               repo,
@@ -6468,7 +6498,8 @@ export async function maybeDispatchAmaCloser({
   }
 
   if (verdict.eligible && eligibleHammerRouteReasons.length === 0
-    && dispatchContext?.forceHammerAfterDaemonFailure !== true && !ownerProofRecovery) {
+    && dispatchContext?.forceHammerAfterDaemonFailure !== true
+    && dispatchContext?.finalRoundDispatchOnly !== true && !ownerProofRecovery) {
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
@@ -6624,7 +6655,13 @@ export async function maybeDispatchAmaCloser({
           : hammerTargetCapExhausted
           ? hammerRetryCapDecision.targetAlertAlreadyEmitted
           : hammerRetryCapDecision.seriesAlertAlreadyEmitted,
-        gateReasons: dispatchContext?.daemonFailureReasons || [],
+        finalRound: dispatchContext?.dispatchReason === 'exhausted-final-hammer',
+        gateReasons: [...(dispatchContext?.daemonFailureReasons || []),
+          ...(finalHammerRetryReason ? [finalHammerRetryReason] : []),
+          ...(existingRecord?.lastError ? [existingRecord.lastError]
+            : (existingRecord?.dispatchReason === 'exhausted-final-hammer'
+              || dispatchContext?.dispatchReason === 'exhausted-final-hammer')
+              ? [existingRecord?.outcome || 'terminal-launch-without-merge'] : [])],
         hammerStop: hammerStopRelease?.hammerStop || readHammerStopForHead({
           hqRoot, repo, prNumber, headSha: targetRemediationSha, reviewedSha, logger,
         }),

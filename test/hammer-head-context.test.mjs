@@ -63,9 +63,11 @@ test(`REBASEPROV-01 coverage fetch retries=${failures} (${failureMessage}) befor
       assert.fail(`Unexpected git command: ${args.join(' ')}`);
     },
   });
-  const result = await load({ base, head });
-  if (failures === 3 || failures === 'permanent') assert.equal(result, null);
-  else {
+  let result;
+  if (failures === 3) await assert.rejects(load({ base, head }), { hammerHistoryReadFailed: true });
+  else result = await load({ base, head });
+  if (failures === 'permanent') assert.equal(result, null);
+  else if (failures !== 3) {
     assert.equal(result?.proof, 'reviewed-rebase-patch-equivalence');
     assert.deepEqual(fetched, [head]);
   }
@@ -99,6 +101,8 @@ test('timeline loader omits absent and invalid cursors and forwards a valid curs
 function fixture(t, scenario) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-head-context-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  // The extensionless gh executable must not inherit TMPDIR's package type.
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
   const callsFile = join(root, 'calls.json');
   writeFileSync(callsFile, '[]');
   writeFileSync(join(root, 'gh'), `#!${process.execPath}
@@ -134,6 +138,10 @@ if (scenario === 'activity' && args[1] === 'repos/fixture/repo/pulls/1') {
 } else if (args[1] === 'repos/fixture/repo/issues/1/comments?per_page=100&page=1') {
   process.stdout.write(JSON.stringify([{ user: { login: 'the-hammer-lacey[bot]' },
     body: 'HAM-Base-Head: reviewed\\nHAM-Validated-Head: earlier' }]));
+} else if (args[1] === '--include') {
+  process.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n[]');
+} else if (args[1] === 'repos/fixture/repo/pulls/1' && !args.includes('--jq')) {
+  process.stdout.write(JSON.stringify({ head: { ref: 'repair', repo: { full_name: 'fixture/repo' } } }));
 } else if (args[1] === 'repos/fixture/repo/pulls/1') {
   if (args.join(' ') !== 'api repos/fixture/repo/pulls/1 --jq .base.ref') fail('unexpected PR call');
   process.stdout.write('release\\n');
@@ -180,7 +188,7 @@ for (const [scenario, count] of [['exhaust', 3], ['permanent', 1], ['malformed',
 test('head context distinguishes spoofed fleet ancestry from read failures', async t => {
   const f = fixture(t, 'spoof');
   await assert.rejects(f.run(), error => error.code === 65 && !error.stdout);
-  assert.equal(f.calls().length, 5);
+  assert.equal(f.calls().length, 6);
 });
 
 

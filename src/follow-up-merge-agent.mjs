@@ -1,3 +1,4 @@
+import { observeSynchronousChild } from './watcher-latency.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
 import { hasCommentOnlyFinalRoundPush } from './comment-only-final-round.mjs';
@@ -803,12 +804,12 @@ function _probeDispatchStatusViaHq({ hqPath, lrq, asOwner = null, execFileImpl, 
     : ['dispatch', 'status', lrq];
   let result;
   try {
-    result = spawnSync(hqPath, args, {
+    result = observeSynchronousChild('hq', () => spawnSync(hqPath, args, {
       env: { ...env },
       timeout: 5_000,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    }));
   } catch {
     return null;
   }

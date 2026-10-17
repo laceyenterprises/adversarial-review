@@ -1,3 +1,4 @@
+import { observeSynchronousChild } from './watcher-latency.mjs';
 // The only gh execution seam. GH_DEBUG captures headers even for high-level
 // commands (and every page of --paginate) without changing stdout or exit codes.
 // HTTP transcripts, which may contain bodies and credentials, never leave here.
@@ -173,6 +174,10 @@ function finishSync(result, { failed = false, resource = 'core', env, credential
 }
 
 function meteredExecFileSync(execFileImpl, command, args, options = {}) {
+  return observeSynchronousChild(command, () => executeFileSync(execFileImpl, command, args, options));
+}
+
+function executeFileSync(execFileImpl, command, args, options = {}) {
   if (command !== 'gh') return execFileImpl(command, args, options);
   const activeOptions = debugOptions(options);
   const { env } = activeOptions;

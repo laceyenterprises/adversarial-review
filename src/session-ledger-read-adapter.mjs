@@ -1,3 +1,4 @@
+import { observeSynchronousChild } from './watcher-latency.mjs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -694,21 +695,21 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
         : jsonSql;
       const script = `${statement}\n`;
       args.push(...spawnConfig.args, '-t', '-A');
-      result = spawnSyncImpl('psql', args, {
+      result = observeSynchronousChild('psql', () => spawnSyncImpl('psql', args, {
         encoding: 'utf8',
         env: spawnConfig.env,
         timeout: PSQL_TIMEOUT_MS,
         killSignal: PSQL_TIMEOUT_SIGNAL,
         input: script,
-      });
+      }));
     } else {
       args.push(...spawnConfig.args, '-t', '-A', '-c', jsonSql);
-      result = spawnSyncImpl('psql', args, {
+      result = observeSynchronousChild('psql', () => spawnSyncImpl('psql', args, {
         encoding: 'utf8',
         env: spawnConfig.env,
         timeout: PSQL_TIMEOUT_MS,
         killSignal: PSQL_TIMEOUT_SIGNAL,
-      });
+      }));
     }
     const failure = describePostgresSpawnFailure(result);
     if (failure) return { ...failure, target };

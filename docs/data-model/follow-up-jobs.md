@@ -5,6 +5,29 @@
 **Source of truth:** `src/follow-up-jobs.mjs`, `src/review-mode-selection.mjs`, `src/follow-up-remediation.mjs`, `src/follow-up-retrigger-review-label.mjs`, `src/remediation-quota-hold.mjs`, `src/remediation-claimed-requeue.mjs`, `src/remediation-worker-class-fallback.mjs`, `src/remediation-round-accounting.mjs`, `src/remediation-infrastructure-refund.mjs`, `src/github-auth-recovery.mjs`, `src/remediation-published-head.mjs`
 **Runtime surface:** `src/comment-only-final-round.mjs`, `src/comment-only-final-round-completion.mjs`, `src/ama-closure-orchestration.mjs`, `src/adapters/comms/github-pr-comments/comment-delivery.mjs`
 
+## Refused remediation publication (REMLABEL-01)
+
+`bin/remediation-publish.mjs` validates the candidate against a freshly fetched
+base before pushing under the prior remote-head lease. An empty PR diff or
+restoration of every originally changed file refuses publication, preserving
+the previous head. The publisher writes `<replyPath>.publication-failure.json`
+beside the round's existing reply artifact:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `code` | string | `remediation-empties-pr-diff` for the preservation refusal; other publication errors retain their code. |
+| `message` | string | Diagnostic reason. Reconcile uses its own fixed public message. |
+| `previousHead` | string | Original reviewed head, matched to the job's `revisionRef` before reconciliation trusts the refusal. |
+| `refusedAt` | ISO timestamp | Refusal observation time. |
+
+Once the worker exits, a matching preservation refusal precedes lifecycle
+completion, reply validation, no-progress handling and published-head recovery.
+The job moves to `failed/` with `failure.code: remediation-empties-pr-diff`, an
+owed failure comment, and a failed worker; no re-review is requested. A sidecar
+for another reviewed head cannot fail this round. Its retention follows the
+existing reply-artifact storage; no separate sweeper or new CI gate is added.
+
+
 ## Missing retrigger-review label-event observations
 
 `tryRetriggerReviewFromLabel` in `src/follow-up-retrigger-review-label.mjs`

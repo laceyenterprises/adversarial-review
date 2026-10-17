@@ -28,6 +28,17 @@ window. Timer ticks, handler entry and heartbeat persistence do not count.
 After a full threshold without progress, the configured consecutive checks
 (default three) trigger one reviewer-preserving exit with code 75.
 
+WATCHERHB-01 also persists advancing poll progress to the canonical heartbeat
+when at least 60 seconds have elapsed since its last write attempt. Ordinary
+heartbeat writes reset that interval; failed attempts are throttled too. Each
+`poll-progress` event refreshes `updated_at` and `last_poll_progress_at` through
+the same ownership guard and atomic writer. `last_poll_at` continues to record
+the poll start. There is no periodic refresh without completed work, and the
+in-process watchdog thresholds and poll deadline are unchanged.
+Debounced review writes capture current heartbeat state when they run, preserving
+progress counters and timestamps advanced after the review was queued. Review
+metadata is retained, and `last_review_at` still records the review marker time.
+
 Restart history and the loop-page debounce are persisted in the existing
 canonical heartbeat, using its ownership guard and atomic writer. A second
 watchdog restart within one hour emits
@@ -47,6 +58,11 @@ After deployment, the SRE session verifies:
    the launchd run count stays flat.
 3. While pull requests are mergeable, the review lane merges at least once per
    hour.
+4. During a poll longer than 40 minutes that continues making progress, the
+   heartbeat file's `updated_at` stays under about two minutes old.
+5. With companion WATCHDOGFRESH-01 deployed, launchd `runs` stays flat over
+   six hours. That companion makes external liveness use the newest of
+   `last_poll_at`, `updated_at` and `last_poll_progress_at`.
 
 The offline regression tests use fake clocks, synthetic identities, injected
 heartbeat storage and injected alert/exit functions. They do not read or change

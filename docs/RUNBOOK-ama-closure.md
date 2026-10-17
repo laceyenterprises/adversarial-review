@@ -2910,6 +2910,15 @@ identity. Remote commit probes require linked closer identity. This existing
 local trust boundary is tracked by LAC-1848; a trailer alone never grants merge
 authority, and the downstream hammer repeats live gates.
 
+HAMUNKNOWN-02: the hammer merge procedure samples an open, exact-head
+`UNKNOWN` mergeability up to three times with bounded backoff, retaining the
+shared required-check polling cadence (about 60 seconds by default). This
+applies both while waiting for CI and at the final pre-merge refresh. Each
+sample re-evaluates the full GitHub gate; a moved head, closed PR, conflict,
+red check or pending check never authorizes merge. Persistent UNKNOWN records
+`deferred / pr-mergeability-unknown`, marks the merge lease retryable before
+releasing it, and exits without a terminal `failed-without-merge` decision.
+
 ## CI-cost mode (CIGUARD-01 / CIGUARDADV-01)
 
 CIGUARDADV-01 records the 2026-10-06 operator decision, "Cost guard advisory

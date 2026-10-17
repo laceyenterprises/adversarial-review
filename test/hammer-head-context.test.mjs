@@ -101,6 +101,8 @@ test('timeline loader omits absent and invalid cursors and forwards a valid curs
 function fixture(t, scenario) {
   const root = mkdtempSync(join(tmpdir(), 'hammer-head-context-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  // The extensionless gh executable must not inherit TMPDIR's package type.
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
   const callsFile = join(root, 'calls.json');
   writeFileSync(callsFile, '[]');
   writeFileSync(join(root, 'gh'), `#!${process.execPath}

@@ -100,6 +100,13 @@ exempt from merge-action receipts; its audit records the refusal.
 The hammer itself never uses historical
 terminal stops as admission input after the closer releases a hold.
 
+The pre-merge stacked-base check records `outcome: deferred` with
+`reason: stacked-base-merged` or `stacked-base-read-failed` and releases the
+merge lease. A merged-parent hold must not create a `failed-without-merge`
+stop: retargeting can restore eligibility without changing the PR head.
+The hammer reads the CLI's last non-empty output line as the reason, preserving
+the merged-parent classification when preceding persistence diagnostics exist.
+
 `resumeOwed` / `resumeHead` have no runtime consumer. The watcher independently
 proves the closer-only ancestry from the reviewed head on each tick and reads
 live exact-head CI. Pending-only checks hold without charging automated recovery;

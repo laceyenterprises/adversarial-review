@@ -842,8 +842,9 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
   fi
   # A parent PR can merge while this hammer waits on CI. Recheck on every click.
   if ! HAM_STACKED_BASE_REASON=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/stacked-base-check.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> 2>&1); then
-    case "$HAM_STACKED_BASE_REASON" in
-      stacked-base-merged) ham_append_terminal_audit failed-without-merge stacked-base-merged || true ;;
+    # The CLI emits its reason last; preceding diagnostics must not change it.
+    case "$(printf '%s\n' "$HAM_STACKED_BASE_REASON" | awk 'NF { reason=$0 } END { print reason }')" in
+      stacked-base-merged) ham_append_terminal_audit deferred stacked-base-merged || true ;;
       *) ham_append_terminal_audit deferred stacked-base-read-failed || true ;;
     esac
     printf '%s\n' "$HAM_STACKED_BASE_REASON" >&2

@@ -3338,6 +3338,10 @@ already-merged PR in the same repository records `stacked-base-merged` and posts
 one retarget comment per PR. The operator or builder must rebase onto the
 default branch and retarget the PR; the pipeline does neither automatically.
 The daemon and hammer recheck before merging, including after CI waits.
+Both record `deferred` for a stacked-base hold and release the merge lease,
+allowing a later attempt on the same head after rebase/retarget recovery.
+The hammer classifies the CLI's last non-empty output line so preceding
+persistence warnings cannot turn `stacked-base-merged` into a read failure.
 Unreadable base/history evidence holds with `stacked-base-read-failed` and
 retries without claiming that a parent was merged. Fork branches with the same
 name and closed-but-unmerged PRs do not establish a merged parent.

@@ -127,27 +127,34 @@ test('remediation stops before spawning on a merged parent branch', async t => {
 });
 
 
-test('hammer rechecks after CI waits and releases its lease without clicking merge', () => {
-  const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
-  const start = source.indexOf('  # A parent PR can merge while this hammer waits on CI.');
-  const end = source.indexOf('  HAM_MERGE_EXECUTED_AT=', start);
-  assert.ok(start > 0 && end > start, 'live check must precede the actual merge click');
-  const fragment = source.slice(start, end).replace(/<<[A-Z_]+>>/g, 'synthetic');
-  const result = spawnSync('bash', ['-c', `
+for (const [name, output, reason] of [
+  ['merged parent', 'stacked-base-merged', 'stacked-base-merged'],
+  ['merged parent with persistence warning', 'Stacked base hold persistence failed: read-only filesystem\nstacked-base-merged\n\n', 'stacked-base-merged'],
+  ['read failure with diagnostic', 'Warning: could not check stacked-base-merged\nstacked-base-read-failed', 'stacked-base-read-failed'],
+  ['unclassified failure', 'Unexpected subprocess failure', 'stacked-base-read-failed'],
+]) {
+  test(`hammer rechecks after CI waits and defers ${name} without clicking merge`, () => {
+    const source = readFileSync(new URL('../bin/hammer-merge.sh', import.meta.url), 'utf8');
+    const start = source.indexOf('  # A parent PR can merge while this hammer waits on CI.');
+    const end = source.indexOf('  HAM_MERGE_EXECUTED_AT=', start);
+    assert.ok(start > 0 && end > start, 'live check must precede the actual merge click');
+    const fragment = source.slice(start, end).replace(/<<[A-Z_]+>>/g, 'synthetic');
+    const result = spawnSync('bash', ['-c', `
     HAM_NODE_BIN=refuse_base
-    refuse_base() { echo stacked-base-merged; return 20; }
+    refuse_base() { printf '%s\n' "$STACKED_BASE_OUTPUT" >&2; return 20; }
     ham_append_terminal_audit() { echo "audit:$*"; }
     ham_release_merge_lease() { echo lease-released; }
     attempt_merge() { ${fragment}
  echo merge-clicked; }
     attempt_merge
-  `], { encoding: 'utf8', timeout: 5_000 });
-  assert.ifError(result.error);
-  assert.equal(result.status, 20);
-  assert.match(result.stdout, /audit:failed-without-merge stacked-base-merged/);
-  assert.match(result.stdout, /lease-released/);
-  assert.doesNotMatch(result.stdout, /merge-clicked/);
-});
+    `], { encoding: 'utf8', timeout: 5_000, env: { ...process.env, STACKED_BASE_OUTPUT: output } });
+    assert.ifError(result.error);
+    assert.equal(result.status, 20);
+    assert.equal(result.stdout, `audit:deferred ${reason}\nlease-released\n`);
+    assert.equal(result.stderr, `${output.trimEnd()}\n`);
+    assert.doesNotMatch(result.stdout, /merge-clicked/);
+  });
+}
 
 
 test('merged-parent search follows pagination and bounds unreadable history', async t => {

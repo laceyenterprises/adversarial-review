@@ -296,8 +296,8 @@ export function primaryReviewerQuotaCappedForRow(row, { nowMs = null, expectedRe
 }
 
 export function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
-  if (route?.reviewerModel === 'codex' && route.codexBrokerProvider === 'codex-corp') {
-    return row?.codex_broker_provider !== 'codex-corp';
+  if (route?.reviewerModel === 'codex' && route.codexBrokerProvider && !route.codexAccountHold) {
+    return (row?.codex_broker_provider || 'codex') !== route.codexBrokerProvider;
   }
   if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
     return false;
@@ -458,8 +458,8 @@ export function selectReviewerRouteForAttempt({
       reviewerModel: baseRoute?.reviewerModel || null,
     });
   // A primary-account quota failure does not exhaust the corporate account.
-  if (baseRoute.codexBrokerProvider === 'codex-corp'
-    && currentRow?.codex_broker_provider !== 'codex-corp'
+  if (baseRoute.reviewerModel === 'codex' && baseRoute.codexBrokerProvider && !baseRoute.codexAccountHold
+    && (currentRow?.codex_broker_provider || 'codex') !== baseRoute.codexBrokerProvider
     && execFailureSignal.failureClass === 'quota-exhausted') return { ...baseRoute };
   if (tokenHoldExhausted || (
     execThreshold > 0 &&
@@ -479,7 +479,7 @@ export function selectReviewerRouteForAttempt({
         provider: fallbackGrounding.provider,
         state: fallbackGrounding.state,
       });
-      if (fallbackGrounding.grounded) continue;
+      if (fallbackGrounding.grounded || fallbackGrounding.accountHold) continue;
       const fallbackRoute = reviewerRouteForModel(candidateModel);
       return {
         ...baseRoute,
@@ -534,7 +534,7 @@ export function selectReviewerRouteForAttempt({
   // authoritatively grounded (hard or AFH-02 soft) — that trades a slow reviewer
   // for one that cannot spawn at all. No signal → unchanged behavior.
   const fallbackGrounding = reviewerModelGrounding(afhGrounding, fallbackModel);
-  if (fallbackGrounding.grounded) {
+  if (fallbackGrounding.grounded || fallbackGrounding.accountHold) {
     return {
       ...baseRoute,
       afhTimeoutFallbackSkipped: {

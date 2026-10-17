@@ -1,3 +1,6 @@
+import { resolveRemediationModel } from './adapters/agent-runtime/local/remediation.mjs';
+import { selectCodexReviewerAccount } from './codex-account-routing.mjs';
+import { parseHqFleetQuotaSnapshot } from './fleet-quota-status.mjs';
 import { selectClaudeAccountLane } from './claude-account-routing.mjs';
 import { readReviewerGeminiPoolAvailability } from './agy-reviewer-identities.mjs';
 import { promisify } from 'node:util';
@@ -314,7 +317,8 @@ export function applyReviewerWorkerClassFallbackToRoute({
 } = {}) {
   if (!decision?.fellBack) return {
     applied: false,
-    route: route?.reviewerModel === 'claude' && decision?.claudeAccountSelection
+    route: route?.reviewerModel === 'codex' && decision?.codexBrokerProvider
+      ? { ...route, codexBrokerProvider: decision.codexBrokerProvider } : route?.reviewerModel === 'claude' && decision?.claudeAccountSelection
       ? { ...route, claudeAccountSelection: decision.claudeAccountSelection } : route,
     reason: 'no-fallback',
   };
@@ -341,6 +345,7 @@ export function applyReviewerWorkerClassFallbackToRoute({
       ...target,
       workerClass: undefined,
       reviewerWorkerClass: workerClass,
+      ...(reviewerModel === 'codex' ? { codexBrokerProvider: decision.codexBrokerProvider || 'codex' } : {}),
       ...(decision.claudeAccountSelection ? { claudeAccountSelection: decision.claudeAccountSelection } : {}),
       reviewWorkerClassFallback: {
         fromWorkerClass: decision.from,
@@ -400,6 +405,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   fallbackWorkerClasses,
   depthPressure = null,
   blockedClaudeWorkerClasses = [],
+  blockedCodexCorporate = false,
   burstPressure = null,
   env = process.env,
   hqPath = resolveHqPath(env),
@@ -495,9 +501,15 @@ export async function resolveReviewerWorkerClassWithFallback({
     pool: agyReviewerIdentityPool, adapter: reviewerRuntimeAdapter,
   });
   let claudeAccountSelection;
+  let codexAccountSelection;
   const accountFields = (harness) => reviewerModelForWorkerClass(harness) === 'claude' && claudeAccountSelection
-    ? { claudeAccountSelection } : {};
+    ? { claudeAccountSelection } : reviewerModelForWorkerClass(harness) === 'codex'
+      ? { codexBrokerProvider: codexAccountSelection?.provider, codexAccountHoldReason: codexAccountSelection?.hold ? codexAccountSelection.reason : null } : {};
   const availability = (harness) => {
+    if (reviewerModelForWorkerClass(harness) === 'codex') {
+      return { available: codexAccountSelection?.hold === false, state: codexAccountSelection?.hold
+        ? codexAccountSelection.reason === 'no-ready-codex-account' ? 'exhausted' : codexAccountSelection.reason : 'ok' };
+    }
     if (reviewerModelForWorkerClass(harness) === 'claude') {
       if (claudeAccountSelection && !claudeAccountSelection.hold) return { available: true, state: 'ok' };
       // A legacy quota projection may still prove the assigned provider is
@@ -512,6 +524,10 @@ export async function resolveReviewerWorkerClassWithFallback({
   };
   let primaryAvail;
   try {
+    codexAccountSelection = selectCodexReviewerAccount(parseHqFleetQuotaSnapshot(stdout), {
+      model: resolveRemediationModel('codex-reviewer', { env, fallbackModel: null }).resolvedModel,
+      corporateExhausted: blockedCodexCorporate,
+    });
     claudeAccountSelection = selectClaudeAccountLane(stdout, {
       workerClass: 'claude-reviewer', blockedWorkerClasses: blockedClaudeWorkerClasses,
     });

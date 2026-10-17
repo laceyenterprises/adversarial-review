@@ -1,0 +1,107 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
+import { afhGroundingSnapshotFromStdout, applyAfhReviewerFallback, createAfhReviewerGroundingCache, reviewerModelGrounding } from '../src/afh-reviewer-fallback.mjs';
+import { resolveReviewerWorkerClassWithFallback, applyReviewerWorkerClassFallbackToRoute } from '../src/review-worker-class-fallback.mjs';
+import { REVIEWER_ROUTE_BY_MODEL } from '../src/adapters/subject/github-pr/routing.mjs';
+
+const groundingFor = fixture => afhGroundingSnapshotFromStdout(JSON.stringify(fixture));
+const direct = fixture => applyAfhReviewerFallback({ builderClass: 'claude-code',
+  baseRoute: REVIEWER_ROUTE_BY_MODEL.codex, grounding: groundingFor(fixture), geminiReviewerMode: 'off' });
+const spill = fixture => resolveReviewerWorkerClassWithFallback({ primary: 'gemini', authorClass: 'claude-code',
+  fallbackWorkerClasses: ['codex'], depthPressure: { engaged: true, reason: 'review-max-wait', waitSeconds: 481 },
+  env: { GH_CODEX_REVIEWER_TOKEN: 'synthetic-token' },
+  execFileImpl: async () => ({ stdout: JSON.stringify(fixture) }) });
+
+test('REVIEWCORPFIRST-01: Codex spill selects corporate while personal still has capacity', async () => {
+  const fixture = codexAccountFixture();
+  const decision = await spill(fixture);
+  assert.equal(decision.workerClass, 'codex');
+  const applied = applyReviewerWorkerClassFallbackToRoute({ route: REVIEWER_ROUTE_BY_MODEL.gemini,
+    decision, authorClass: 'claude-code', reviewerRouteByModel: REVIEWER_ROUTE_BY_MODEL });
+  assert.equal(applied.route.codexBrokerProvider, 'codex-corp');
+  assert.equal(direct(fixture).codexBrokerProvider, 'codex-corp');
+});
+
+for (const [label, options] of [['capped', { corp: 'exhausted' }], ['not ready', { corpReady: false }]]) {
+  test(`REVIEWCORPFIRST-01: personal Codex is selected only when corporate is ${label}`, async () => {
+    const fixture = codexAccountFixture(options);
+    assert.equal(reviewerModelGrounding(groundingFor(fixture), 'codex').brokerProvider, 'codex');
+    assert.equal((await spill(fixture)).codexBrokerProvider, 'codex');
+  });
+}
+
+for (const evidence of ['stale', 'unknown', 'missing', 'cached-stale']) {
+  test(`REVIEWCORPFIRST-01: ${evidence} corporate evidence holds with healthy personal capacity`, async () => {
+    const fixture = codexAccountFixture();
+    if (evidence === 'missing') delete fixture.brokerAuth.provider_states['codex-corp'];
+    else if (evidence === 'cached-stale') fixture.providerStatuses[1].cachedEvidenceStale = true;
+    else fixture.reserveFloors['openai-oauth-corp'].weeklyMeasurement.status = evidence;
+    const status = reviewerModelGrounding(groundingFor(fixture), 'codex');
+    assert.equal(status.accountHold, true);
+    assert.equal(status.grounded, false, 'unknown evidence cannot trigger a model switch');
+    assert.equal((await spill(fixture)).fellBack, false);
+  });
+}
+
+test('REVIEWCORPFIRST-01: a failed quota refresh holds cached corporate admission', async () => {
+  let now = 0;
+  const get = createAfhReviewerGroundingCache({ nowFn: () => now, ttlMs: 1, logger: {},
+    readImpl: async () => now === 0 ? groundingFor(codexAccountFixture()) : { available: false, reason: 'synthetic-read-failure' } });
+  assert.equal(reviewerModelGrounding(await get(), 'codex').brokerProvider, 'codex-corp');
+  now = 2;
+  assert.equal(reviewerModelGrounding(await get(), 'codex').accountHold, true);
+});
+
+for (const [label, mutate] of [
+  ['measured zero', f => { f.reserveFloors['openai-oauth-corp'].weeklyMeasurement.percentRemaining = 0; }],
+  ['model cap', f => { f.providerStatuses[1].models = [{ model: 'synthetic-model', state: 'exhausted' }]; }],
+  ['soft grounding', f => { f.providerStatuses[1].afhGrounding = { grounded: true }; }],
+]) test(`corporate ${label} permits independently admitted personal capacity`, async () => {
+  const { selectCodexReviewerAccount } = await import('../src/codex-account-routing.mjs');
+  const fixture = codexAccountFixture();
+  mutate(fixture);
+  assert.equal(selectCodexReviewerAccount(fixture, { model: 'synthetic-model' }).provider, 'codex');
+  fixture.brokerAuth.provider_states.codex.ready = false;
+  assert.equal(selectCodexReviewerAccount(fixture, { model: 'synthetic-model' }).hold, true);
+});
+
+test('corporate reserve flags alone retain corporate Codex', () => {
+  const fixture = codexAccountFixture();
+  Object.assign(fixture.reserveFloors['openai-oauth-corp'], { active: true, nearCap: true, paused: true });
+  assert.equal(direct(fixture).codexBrokerProvider, 'codex-corp');
+});
+
+test('typed corporate Codex exhaustion persists before settlement and permits personal selection', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnReviewer } = await import('../src/reviewer-spawn-settle.mjs');
+  const { selectCodexReviewerAccount, readCorporateCodexQuotaCooldown } = await import('../src/codex-account-routing.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'codex-review-account-'));
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => logs.push(args.join(' '));
+  try {
+    const result = await spawnReviewer({ rootDir: root, repo: 'sample/project', prNumber: 1,
+      reviewerModel: 'codex', builderTag: 'claude-code', codexBrokerProvider: 'codex-corp',
+      quotaCheckEnv: {}, readReviewerQuotaDecisionImpl: async args => {
+        assert.equal(args.codexBrokerProvider, 'codex-corp');
+        return { available: true, state: 'ok' };
+      },
+      reviewerRuntimeAdapterOverride: { async spawnReviewer(request) {
+        assert.equal(request.subjectContext.codexBrokerProvider, 'codex-corp');
+        return { ok: false, failureClass: 'quota-exhausted', error: 'synthetic quota exhausted' };
+      } },
+      onPostOperationSettled() { assert.ok(readCorporateCodexQuotaCooldown(root, { env: {} })); },
+      beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
+      readBestReviewerEvidenceTokenUsageImpl: async () => null, ledgerLookupSleepImpl: async () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.ok(logs.some(line => /Spawning reviewer.*codex_account=corporate/.test(line)));
+    const hold = readCorporateCodexQuotaCooldown(root, { env: {} });
+    assert.ok(hold);
+    assert.equal(readCorporateCodexQuotaCooldown(root, { env: {}, nowMs: Date.parse(hold.resetAt) }), null);
+    assert.equal(selectCodexReviewerAccount(codexAccountFixture(), { corporateExhausted: true }).provider, 'codex');
+  } finally { console.log = originalLog; rmSync(root, { recursive: true, force: true }); }
+});

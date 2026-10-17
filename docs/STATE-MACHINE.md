@@ -173,10 +173,14 @@ not trigger this retry.
 
 The delivery row also retains `codex_broker_provider` (`codex`, `codex-corp`,
 or `NULL` for non-Codex/legacy rows). The watcher writes it after winning the
-claim, guarded by that session UUID, before dispatch. A corporate quota failure
-cannot bypass its own local quota hold or repeated-execution fallback merely
-because fleet quota evidence has not caught up; primary quota failures can
-still move to the corporate account. Review-cycle resets clear attribution.
+claim, guarded by that session UUID, before dispatch. Corporate Codex is preferred
+on every route. Unknown or stale corporate evidence holds; confirmed corporate
+exhaustion or broker unavailability permits independently admitted personal
+capacity. A typed corporate quota failure persists an account cooldown before
+capacity is released, so stale fleet admission cannot repeatedly select that
+exhausted account. Quota holds can be bypassed only when changing accounts;
+repeated failures on the selected account retain bounded model fallback.
+Review-cycle resets clear attribution.
 
 The SQLite `reviewing` row is the durable delivery claim. The reviewer runtime
 also writes a per-session JSON record in `data/reviewer-runs/` so a restarted

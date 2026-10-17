@@ -40,7 +40,9 @@ HAMUNKNOWN-02 re-evaluates `github-gate-not-green` and
 `pr-mergeability-unknown` stops against each closer pass's fresh PR metadata.
 An open PR on the exact held head with MERGEABLE mergeability and successful
 external checks releases with `github-gate-cleared`, even when the stored
-baseline was already green and MERGEABLE. The shared CI classifier checks
+baseline was already green and MERGEABLE. Canonical `state: OPEN` metadata
+does not require a synthetic `isOpen` flag; an explicit closed state or false
+`isOpen` flag prevents this gate recovery. The shared CI classifier checks
 configured required contexts and excludes only the caller's own status contexts;
 empty, unreadable, red or pending rollups cannot prove recovery. Raw UNKNOWN
 beside CLEAN also cannot prove recovery. Structured reasons containing findings

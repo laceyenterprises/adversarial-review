@@ -114,8 +114,8 @@ function deterministicRefusal(attempt, { repo, prNumber, headSha }) {
 
 function stopReasons(attempt) {
   return [...new Set([
-    ...(attempt.eligibilityTrace?.reasons || []), ...(attempt.githubGate?.reasons || []),
-    ...(attempt.reasons || []),
+    ...(attempt?.eligibilityTrace?.reasons || []), ...(attempt?.githubGate?.reasons || []),
+    ...(attempt?.reasons || []),
   ])].sort();
 }
 
@@ -390,7 +390,9 @@ export async function evaluateHammerStopHold({
     // Structured findings/reversal refusals must retain their own hold.
     if (HAMMER_GITHUB_READ_FAILURES.has(stop.predicate)
       && stop.reasons.every(reason => ['ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason))
-      && prMetadata?.headSha === headSha && prMetadata?.isOpen === true
+      && prMetadata?.headSha === headSha
+      && (prMetadata?.isOpen === true || String(prMetadata?.state || '').toUpperCase() === 'OPEN')
+      && prMetadata?.isOpen !== false
       && (!prMetadata.state || String(prMetadata.state).toUpperCase() === 'OPEN')
       && closureGateMergeability({ mergeable: prMetadata.mergeable || prMetadata.mergeableState,
         mergeStateStatus: prMetadata.mergeStateStatus }) === 'MERGEABLE'

@@ -818,6 +818,8 @@ Certified HAM contention parks retain bounded deferral recovery while GitHub
 mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expiry
 remain authoritative; recovery waits for green CI and resolved mergeability
 before a daemon merge, and red CI still routes to bounded repair.
+Retryable UNKNOWN deferral requires an open PR at the validated head; moved
+heads and closed PRs retain their terminal refusal.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
 README equivalence; mutation tests alter both a state and a CAS edge in source.
 

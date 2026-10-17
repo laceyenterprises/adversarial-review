@@ -669,6 +669,8 @@ that queue through its backoff and expiry, without an immediate operator page
 or daemon merge. Red CI alongside UNKNOWN still permits bounded CI repair.
 The hammer keeps polling pending CI through its remote-CI deadline even after
 the shorter UNKNOWN sampling budget expires; red CI stops sampling immediately.
+Retryable UNKNOWN deferral requires the same open head. Moved heads and closed
+PRs retain terminal refusals; pending CI at expiry is distinguished in the audit.
 Findings, reversal refusals, current-head
 review authority, dispatch retry caps and the lifetime ceiling remain enforced.
 

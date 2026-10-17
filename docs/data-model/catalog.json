@@ -155,6 +155,7 @@
       "messageRewriteFields": ["closingKeywordRewrites", "attempts[].closingKeywordRewrites"],
       "waitEvidenceFields": { "attempts[].waitNote": "string", "attempts[].headWaitedSeconds": "non-negative integer seconds; 0 means not started", "attempts[].requiredChecksWaitedSeconds": "non-negative integer seconds; 0 means not started" },
       "pendingCiResumeFields": ["attempts[].resumeOwed", "attempts[].resumeHead"],
+      "unknownMergeabilityEvidence": { "reason": "pr-mergeability-unknown", "remoteCiStatus": ["mergeability-unknown", "mergeability-unknown-ci-timeout"], "checksConclusion": "attempts[].githubGate.checksConclusion" },
       "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
       "leaseTimeoutEvidence": { "waited_s": "number or null when duration evidence is absent", "configured_s": "number" },
       "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },

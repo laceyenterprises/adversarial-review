@@ -2927,6 +2927,11 @@ While required CI is pending, exhausting the mergeability sampling budget
 continues polling until CI settles or `HAM_REMOTE_CI_WAIT_SECONDS` expires
 (900 seconds by default); UNKNOWN defers at that deadline or once CI succeeds.
 Red CI ends sampling immediately and retains its ordinary failure outcome.
+Moved heads and closed PRs cannot use the retryable UNKNOWN deferral.
+When UNKNOWN persists through a pending-CI deadline, the audit retains
+`pr-mergeability-unknown` for queue routing and records
+`remoteCiStatus: mergeability-unknown-ci-timeout` plus the last check conclusion
+in `githubGate`; green CI uses `remoteCiStatus: mergeability-unknown`.
 Certified HAM heads resume through the existing bounded deferral queue,
 including its backoff, expiry and lifetime refund bound. Live UNKNOWN alone or
 with pending CI remains a wait in that queue, without a merge or immediate

@@ -421,6 +421,9 @@ ham_required_gate_mergeability_unknown() {
 
 ham_defer_unknown_mergeability() {
   HAM_REMOTE_CI_STATUS=mergeability-unknown
+  if ! jq -e '.checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null; then
+    HAM_REMOTE_CI_STATUS=mergeability-unknown-ci-timeout
+  fi
   ham_append_terminal_audit deferred pr-mergeability-unknown || true
   ham_mark_merge_lease_retryable_abort pr-mergeability-unknown
   ham_release_merge_lease
@@ -531,7 +534,8 @@ while :; do
   fi
   # Pending checks retain the full CI wait window even when mergeability's
   # shorter sampling budget is spent. The CI deadline still bounds this wait.
-  if ham_required_gate_mergeability_unknown && {
+  if ham_required_gate_mergeability_unknown && ! ham_live_head_moved \
+    && jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null && {
     jq -e '.checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null \
       || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]
   }; then
@@ -654,7 +658,8 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     return 20
   fi
   if ! ham_required_gate_ok; then
-    if ham_required_gate_mergeability_unknown && ! ham_required_gate_red; then
+    if ham_required_gate_mergeability_unknown && ! ham_required_gate_red \
+      && ! ham_live_head_moved && jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null; then
       ham_defer_unknown_mergeability
       return 20
     fi

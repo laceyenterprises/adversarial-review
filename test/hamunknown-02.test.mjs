@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
-import { evaluateHammerStopHold, hammerStopInputs, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
+import { evaluateHammerStopHold, hammerStopInputs, readHammerStopForHead, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
 
 const head = 'a'.repeat(40);
 const green = { ok: true, state: 'OPEN', headMatches: true, expectedHead: head, liveHead: head,
@@ -22,7 +22,7 @@ function runMerge(t, gates) {
   writeFileSync(join(dir, 'gates.json'), JSON.stringify(gates));
   writeFileSync(join(dir, 'verdict.json'), JSON.stringify({ eligible: true,
     trace: { headMatch: { current: head }, branchProtection: { required: true } } }));
-  const nodeStub = join(dir, 'fixture-node');
+  const nodeStub = join(dir, 'fixture-node.cjs');
   writeFileSync(nodeStub, `#!${process.execPath}
 const fs = require('node:fs');
 const dir = process.env.TMPDIR;
@@ -64,7 +64,7 @@ if (args[0] === '--input-type=module') {
 HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture
 POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head}
 HAM_VERDICT_FILE="$TMPDIR/verdict.json" HAM_VERDICT_READY_FILE="$TMPDIR/verdict.json"
-HAM_NODE_BIN="$TMPDIR/fixture-node"
+HAM_NODE_BIN="$TMPDIR/fixture-node.cjs"
 ham_release_merge_lease() { echo "release:$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON" >> "$TMPDIR/release"; HAM_MERGE_LEASE_HELD=0; }
 ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
 ham_mark_merge_lease_retryable_abort() { HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$1"; }
@@ -76,6 +76,7 @@ exit "$?"
     PATH: process.env.PATH, TMPDIR: dir, AGENT_OS_ROOT: dir, HAM_PYTHON_BIN: pythonStub,
   } });
   assert.equal(result.error, undefined);
+  assert.ok(existsSync(join(dir, 'events')), result.stderr);
   const events = readFileSync(join(dir, 'events'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   return { ...result, events, release: readFileSync(join(dir, 'release'), 'utf8') };
 }
@@ -102,6 +103,7 @@ for (const phase of ['final', 'preflight']) {
     assert.ok(samples.at(-1).at - samples[phase === 'final' ? 1 : 0].at <= 60);
     assert.ok(!result.events.some(event => event.merge));
     assert.ok(result.events.some(event => event.outcome === 'deferred' && event.attempt.reason === 'pr-mergeability-unknown'));
+    assert.ok(result.events.some(event => event.outcome === 'deferred' && event.attempt.remoteCiStatus === 'mergeability-unknown'));
     assert.ok(!result.events.some(event => event.outcome === 'failed-without-merge'));
     assert.match(result.release, /release:pr-mergeability-unknown/);
   });
@@ -131,9 +133,26 @@ test('HAMUNKNOWN-02: pending CI with persistent UNKNOWN waits for the CI deadlin
   const samples = result.events.filter(event => event.gate);
   const waited = samples.at(-1).at - samples[0].at;
   assert.ok(waited >= 900 && waited <= 960, `bounded CI wait: ${waited}s`);
-  assert.ok(result.events.some(event => event.outcome === 'deferred' && event.attempt.reason === 'pr-mergeability-unknown'));
+  const deferred = result.events.find(event => event.outcome === 'deferred');
+  assert.equal(deferred.attempt.reason, 'pr-mergeability-unknown');
+  assert.equal(deferred.attempt.remoteCiStatus, 'mergeability-unknown-ci-timeout');
+  assert.equal(deferred.attempt.githubGate.checksConclusion, 'PENDING');
   assert.ok(!result.events.some(event => event.merge || event.outcome === 'failed-without-merge'));
 });
+
+for (const [name, gate, reason] of [
+  ['moved head', { ...unknown, headMatches: false, liveHead: 'c'.repeat(40), reasons: ['stale-head', 'pr-mergeability-unknown'] }, 'live-head-moved-before-merge'],
+  ['closed PR', { ...unknown, state: 'CLOSED' }, 'github-gate-not-green'],
+]) {
+  test(`HAMUNKNOWN-02: final UNKNOWN with ${name} terminates without retryable deferral`, t => {
+    const result = runMerge(t, [green, gate]);
+    assert.equal(result.status, 20, result.stderr);
+    assert.equal(result.events.filter(event => event.gate).length, 2);
+    assert.ok(result.events.some(event => event.attempt?.reason === reason));
+    assert.ok(!result.events.some(event => event.merge || event.outcome === 'deferred'));
+    assert.doesNotMatch(result.release, /release:pr-mergeability-unknown/);
+  });
+}
 
 for (const [name, gate] of [
   ['red CI', { ...green, ok: false, checksConclusion: 'FAILURE', reasons: ['ci-not-green'] }],
@@ -188,6 +207,24 @@ test('HAMUNKNOWN-02: existing GitHub gate hold with already-green recorded and f
   assert.equal((await evaluateHammerStopHold(args)).action, 'release', 'release survives restart');
 });
 
+test('HAMUNKNOWN-02: canonical OPEN metadata releases without a synthetic isOpen field', async t => {
+  const { args } = heldFixture(t, { metadata: { isOpen: undefined } });
+  delete args.prMetadata.isOpen;
+  const result = await evaluateHammerStopHold(args);
+  assert.equal(result.action, 'release');
+  assert.deepEqual(result.changed, ['github-gate-cleared']);
+});
+
+test('HAMUNKNOWN-02: empty and nullish audit attempts are ignored without crashing', () => {
+  const args = { hqRoot: '/synthetic', repo: 'fixture/repo', prNumber: 1, headSha: head };
+  assert.equal(readHammerStopForHead({ ...args, readAuditImpl: () => ({ attempts: [] }) }), null);
+  assert.equal(readHammerStopForHead({ ...args, readAuditImpl: () => ({ attempts: [null, undefined] }) }), null);
+  const stop = { head, outcome: 'failed-without-merge', reason: 'github-gate-not-green', path: 'hammer' };
+  assert.deepEqual(readHammerStopForHead({ ...args,
+    readAuditImpl: () => ({ attempts: [null, stop, undefined] }),
+  }).reasons, []);
+});
+
 for (const reasons of [[], ['ci-not-green'], ['pr-not-mergeable']]) {
   test(`HAMUNKNOWN-02: green GitHub gate releases legacy or deterministic gate-only stop ${JSON.stringify(reasons)}`, async t => {
     const { args } = heldFixture(t, { reasons });
@@ -207,6 +244,9 @@ for (const [name, metadata, extra] of [
   ['missing required context', {}, { requiredCheckContexts: ['unit', 'integration'] }],
   ['moved head', { headSha: 'c'.repeat(40) }],
   ['closed', { isOpen: false, state: 'CLOSED' }],
+  ['canonical closed', { isOpen: undefined, state: 'CLOSED' }],
+  ['contradictory open flag', { isOpen: true, state: 'CLOSED' }],
+  ['contradictory closed flag', { isOpen: false, state: 'OPEN' }],
 ]) {
   test(`HAMUNKNOWN-02: unchanged ${name} cannot clear a GitHub gate hold`, async t => {
     const { args } = heldFixture(t, { metadata });

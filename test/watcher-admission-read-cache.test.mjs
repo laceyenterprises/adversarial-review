@@ -5,6 +5,20 @@ import { readAdmissionChecks, withAdmissionReadCache } from '../src/watcher-admi
 const args = ['pr', 'view', '1', '--repo', 'example/review-fixture', '--json', 'headRefOid,statusCheckRollup'];
 const executor = () => {};
 
+test('WATCHERLAG-01: equivalent JSON flag syntax and field ordering share check evidence', async () => {
+  let calls = 0;
+  await withAdmissionReadCache(async () => {
+    const requests = [args,
+      [...args.slice(0, -2), '--json', 'statusCheckRollup,headRefOid'],
+      [...args.slice(0, -2), '--json=headRefOid,statusCheckRollup'],
+      [...args.slice(0, -2), '--json=statusCheckRollup,headRefOid'],
+    ];
+    const results = await Promise.all(requests.map(request => readAdmissionChecks(executor, 'gh', request, {}, async () => ++calls)));
+    assert.deepEqual(results, [1, 1, 1, 1]);
+    assert.equal(calls, 1);
+  });
+});
+
 test('WATCHERLAG-01: one drain shares identical concurrent check reads, the next drain refreshes', async () => {
   let calls = 0;
   const run = async () => ({ value: ++calls });
@@ -36,13 +50,15 @@ test('WATCHERLAG-01: spawn-boundary freshness, labels, dedup and mutations alway
   await withAdmissionReadCache(async () => {
     for (const request of [
       ['pr', 'view', '1', '--json', 'headRefOid,state,isDraft,labels'],
+      ['pr', 'view', '1', '--json=statusCheckRollup,headRefOid,labels'],
+      ['pr', 'view', '1', '--json', 'headRefOid,statusCheckRollup', '--json=labels'],
       ['api', 'repos/example/review-fixture/pulls/1/reviews'],
       ['pr', 'edit', '1', '--add-label', 'synthetic-label'],
     ]) {
       for (let repeat = 0; repeat < 2; repeat++) await readAdmissionChecks(executor, 'gh', request, {}, async () => ++calls);
     }
   });
-  assert.equal(calls, 6);
+  assert.equal(calls, 10);
 });
 
 test('WATCHERLAG-01: the production drain and metered executor share check reads without sharing freshness', async t => {

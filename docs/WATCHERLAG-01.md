@@ -41,9 +41,11 @@ holds, drafts, head dedup and spawn-boundary freshness checks remain in force.
 No config keys or CI gates are added.
 
 A drain shares identical read-only check-rollup requests for up to ten seconds,
-with separate executor and credential identities. Errors are evicted. PR state,
-labels, review dedup, requests with cancellation signals, and mutations always
-bypass that cache. Each new drain starts a fresh cache. Existing poll-scoped
+with separate executor and credential identities. Errors are evicted.
+Equivalent `--json` and `--json=` requests share evidence regardless of the two
+check fields' order; requests for additional fields continue to bypass the cache.
+PR state, labels, review dedup, requests with cancellation signals, and mutations
+always bypass that cache. Each new drain starts a fresh cache. Existing poll-scoped
 quota and HCP probes are reused.
 
 Each poll emits `poll latency summary` with event-loop p50/p99 milliseconds and
@@ -51,8 +53,10 @@ per-command child counts, spawn-readiness p50/p99 and child wall p50/p99 for gh,
 git, hq and psql. Spawn readiness includes native spawn time and the wait until
 Node delivers the spawn event. Wall time ends at close, including stdio drain;
 it is not pure subprocess CPU time. Counts distinguish starts and completions,
-so a child spanning polls completes in a later summary. Synchronous CLI probes
-have wall samples only. No argv, environment, credentials or full binary paths
+so a child spanning polls completes in a later summary. Active child identities
+and their start timestamps survive histogram resets; `in_flight` reports the
+number still running per command, including polls with no new starts or closes.
+Synchronous CLI probes have wall samples only. No argv, environment, credentials or full binary paths
 are emitted. Existing `idle_ms` handoff logs remain.
 
 The regression harness runs concurrent posted handlers with 180 seconds of fake

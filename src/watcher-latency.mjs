@@ -20,6 +20,8 @@ export function observeSynchronousChild(command, run) {
 
 export function createWatcherLatencyMonitor({ logger = console, histogram = monitorEventLoopDelay({ resolution: 20 }) } = {}) {
   const children = new Map();
+  // Active identities outlive a poll's histogram samples.
+  const inFlight = new Map();
   const bucket = command => {
     const name = basename(String(command || ''));
     if (!commands.has(name)) return null;
@@ -41,8 +43,16 @@ export function createWatcherLatencyMonitor({ logger = console, histogram = moni
     },
     summary() {
       const summary = { event: 'watcher-poll-latency', event_loop: milliseconds(histogram), children: {} };
+      const activeCounts = new Map();
+      for (const child of inFlight.keys()) {
+        const name = basename(String(child.spawnfile || ''));
+        if (!commands.has(name)) continue;
+        bucket(name);
+        activeCounts.set(name, (activeCounts.get(name) || 0) + 1);
+      }
       for (const [command, entry] of children) {
         summary.children[command] = { count: entry.count, completed: entry.completed,
+          in_flight: activeCounts.get(command) || 0,
           spawn: milliseconds(entry.spawn), wall: milliseconds(entry.wall) };
       }
       logger.log(`[watcher] poll latency summary ${JSON.stringify(summary)}`);
@@ -52,28 +62,31 @@ export function createWatcherLatencyMonitor({ logger = console, histogram = moni
     },
     stop() {
       channel('child_process').unsubscribe(onChild);
+      inFlight.clear();
       histogram.disable();
       if (activeObserver === observer) activeObserver = null;
     },
   };
   function onChild({ process: child }) {
-    const started = performance.now();
+    const state = { started: performance.now(), spawned: false };
+    inFlight.set(child, state);
     // The channel fires at construction, before spawnfile is assigned. The
     // spawn event measures time to spawn readiness, including event-loop delay.
-    let spawned = false;
     child.once('spawn', () => {
-      spawned = true;
+      if (!inFlight.has(child)) return;
+      state.spawned = true;
       const entry = bucket(child.spawnfile);
       if (!entry) return;
       entry.count++;
-      record(entry.spawn, performance.now() - started);
+      record(entry.spawn, performance.now() - state.started);
     });
     child.once('close', () => {
+      if (!inFlight.delete(child)) return;
       const entry = bucket(child.spawnfile);
       if (!entry) return;
-      if (!spawned) entry.count++;
+      if (!state.spawned) entry.count++;
       entry.completed++;
-      record(entry.wall, performance.now() - started);
+      record(entry.wall, performance.now() - state.started);
     });
   }
   channel('child_process').subscribe(onChild);

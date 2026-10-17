@@ -11,13 +11,18 @@ export async function withAdmissionReadCache(run) {
 
 export function readAdmissionChecks(exec, command, args, options, run, { now = Date.now } = {}) {
   const cache = scope.getStore();
+  const jsonFlags = args.flatMap((arg, index) => arg === '--json' || arg.startsWith('--json=') ? [index] : []);
+  const jsonIndex = jsonFlags[0];
+  const inlineJson = jsonIndex !== undefined && args[jsonIndex].startsWith('--json=');
+  const fields = (inlineJson ? args[jsonIndex].slice('--json='.length) : args[jsonIndex + 1] || '').split(',').sort();
   const eligible = command === 'gh' && args[0] === 'pr' && args[1] === 'view'
-    && args[args.indexOf('--json') + 1] === 'headRefOid,statusCheckRollup';
+    && jsonFlags.length === 1 && fields.join(',') === 'headRefOid,statusCheckRollup';
   if (!cache?.open || !eligible || options.signal) return run();
   // Executor + credential + host identity prevent cross-adapter/account reuse.
   // Tokens stay private in this ephemeral key and are never logged or persisted.
   const env = options.env || process.env;
-  const key = JSON.stringify([args, env.GH_TOKEN, env.GITHUB_TOKEN, env.GH_HOST, env.GH_CONFIG_DIR, env.GHO_RATE_LIMIT_SHARED_STATE_PATH, options.timeout, options.maxBuffer]);
+  const normalizedArgs = [...args.slice(0, jsonIndex), '--json', fields.join(','), ...args.slice(jsonIndex + (inlineJson ? 1 : 2))];
+  const key = JSON.stringify([normalizedArgs, env.GH_TOKEN, env.GITHUB_TOKEN, env.GH_HOST, env.GH_CONFIG_DIR, env.GHO_RATE_LIMIT_SHARED_STATE_PATH, options.timeout, options.maxBuffer]);
   let entries = cache.executors.get(exec);
   if (!entries) { entries = new Map(); cache.executors.set(exec, entries); }
   let entry = entries.get(key);

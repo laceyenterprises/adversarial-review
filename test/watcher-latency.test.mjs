@@ -36,11 +36,35 @@ test('WATCHERLAG-01: a child spanning polls reports completion in its completion
   const child = new EventEmitter();
   channel('child_process').publish({ process: child });
   child.spawnfile = 'hq'; child.emit('spawn');
-  assert.equal(monitor.summary().children.hq.count, 1);
+  const first = monitor.summary().children.hq;
+  assert.equal(first.count, 1);
+  assert.equal(first.in_flight, 1);
+  const pending = monitor.summary().children.hq;
+  assert.equal(pending.count, 0);
+  assert.equal(pending.completed, 0);
+  assert.equal(pending.in_flight, 1);
+  assert.equal(pending.spawn.p99_ms, 0);
   child.emit('close');
   const next = monitor.summary().children.hq;
   assert.equal(next.count, 0);
   assert.equal(next.completed, 1);
+  assert.equal(next.in_flight, 0);
+  assert.ok(next.wall.p99_ms > 0);
+  assert.deepEqual(monitor.summary().children, {});
+});
+
+test('WATCHERLAG-01: children awaiting spawn and failed spawns survive summary boundaries', t => {
+  const { monitor } = fixture(t);
+  const child = new EventEmitter();
+  channel('child_process').publish({ process: child });
+  child.spawnfile = 'git';
+  assert.equal(monitor.summary().children.git.in_flight, 1);
+  child.emit('close');
+  const completed = monitor.summary().children.git;
+  assert.equal(completed.count, 1);
+  assert.equal(completed.completed, 1);
+  assert.equal(completed.in_flight, 0);
+  assert.equal(completed.spawn.p99_ms, 0);
 });
 
 test('WATCHERLAG-01: every poll emits a lag summary, including early return and error', async t => {

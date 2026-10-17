@@ -25,7 +25,7 @@ prompt references as well as the plan's spec lock.
 
 All incident identities are deliberately omitted from this public account.
 
-## Repair and remaining integration
+## Repair and direct-merge integration
 
 REMLABEL-01 classifies blocking review findings with the shared operator-label
 registry. Operator-only reviews hold follow-up and terminal-hammer dispatch,
@@ -45,18 +45,19 @@ reads to the base SHA, checks current labels, and refuses changed inputs. Two
 synthetic live official-record bumps are both refused; an existing waiver and
 finished-pack controls pass. It does not add a CI job or apply labels.
 
-The direct script caller is outside this repository. Completing the consistency
-fix requires an authorized companion change in `agent-os`:
+The companion `agent-os` repair calls this checker from
+`scripts/build-pack-official-record-bump.sh` immediately before its exact-head
+admin merge. A refusal leaves the PR open with its changes intact. Missing
+checker code, unreadable results, malformed results and head mismatches also
+refuse merge. The checker runs from the installed source checkout, rather than
+the PR-controlled scratch checkout. Existing no-PR and already-merged paths
+keep their behavior. `scripts/build-pack-official-record-bump.test.sh` covers
+these paths with offline transports; its live-pack refusal regression was run
+against the unfixed caller and failed because admin merge was invoked.
 
-- `scripts/build-pack-official-record-bump.sh`: call the shared live-pack check
-  immediately before the direct admin merge and hold on refusal.
-- `scripts/build-pack-official-record-bump.test.sh`: add offline tests proving
-  the merge call is absent on refusal and remains exact-head on success.
-
-Run the existing
-`modules/worker-pool/test/test-build-pack-official-record-bump-warning.sh`
-slice as well; its already-landed/no-PR validation path must remain intact.
-No superproject gitlink change is needed.
+Deploy this repository's checker before the companion caller, through normal
+main-catchup and overlay float. Until the checker is installed, the repaired
+caller fails closed. No superproject gitlink change is needed.
 
 ## Acceptance and SRE follow-through
 
@@ -70,9 +71,13 @@ rejects competing heads, and the publisher refreshes a stale base.
 
 Validation recorded in this worker:
 
-- All 20 focused REMLABEL-01 regressions passed.
-- The gate-status, closer-dispatch and initial operator-finding slice passed
-  all 206 tests; the final operator-finding slice also passed all six tests.
+- The final focused gate-status, closer-dispatch and REMLABEL-01 slice passed
+  all 222 tests, including all 20 focused REMLABEL-01 regressions. Another
+  43 existing live-pack and operator-wake tests passed.
+- The companion official-record shell suite passed, including six direct-merge
+  preflight cases. The existing warning/idempotency slice and the ShellCheck
+  gate also passed. All transports and merge receipts in these tests are local
+  fixtures; no live state or operator labels were changed.
 - `npm run lint` passed with zero errors (147 warnings).
 - `npm run typecheck:contracts` and the offline byte-equivalence walkthrough
   passed. `git diff --check` passed.
@@ -80,8 +85,10 @@ Validation recorded in this worker:
   module also hit bounded attempts of 180 and 120 seconds. These runs did not
   complete; they are not evidence of a green whole-repository suite.
 - `test/watcher-claim-loop.test.mjs` hit both its 180-second bound and an
-  isolated 300-second bound. No completed per-test results were reported;
-  claim-loop validation remains unverified. No baseline attribution is claimed.
+  isolated 300-second bound. A final 180-second retry also timed out, with
+  `kill EPERM` during runner cleanup. No completed per-test results were
+  reported; claim-loop validation remains unverified. No baseline attribution
+  is claimed.
 
 After both repairs merge and deploy, the SRE session verifies:
 

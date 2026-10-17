@@ -33,7 +33,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { describeStaleDispatch } from '../src/follow-up-merge-agent.mjs';
+import { describeStaleDispatch, dispatchMergeAgentForPR, recordMergeAgentDispatch } from '../src/follow-up-merge-agent.mjs';
 
 const NOW = Date.parse('2026-05-18T03:30:00Z');
 const LRQ = 'lrq_fb1a7760-4378-4f34-b731-4a1033bec5dd';
@@ -184,4 +184,49 @@ test('round2: describeStaleDispatch returns launchRequestId on stuckDetail', () 
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }
+});
+
+test('stale dispatch recovery awaits the async live probe and suppresses historical refusals', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'stale-dispatch-probe-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const lrq = 'lrq_fb1a7760-4378-4f34-b731-4a1033bec5dd';
+  const job = {
+    repo: 'example/review-fixture', prNumber: 481, headSha: 'head-481',
+    branch: 'codex/dpa-01', baseBranch: 'main', prState: 'open',
+    lastVerdict: 'Comment only', mergeable: 'MERGEABLE', checksConclusion: 'SUCCESS',
+    blockingFindingCount: 0, blockingFindingState: 'known',
+    latestFollowUpJobStatus: 'completed', remediationCurrentRound: 1, remediationMaxRounds: 1,
+    labels: [{ name: 'merge-agent-dispatched' }],
+  };
+  recordMergeAgentDispatch(rootDir, job, {
+    launchRequestId: lrq, trigger: 'merge-agent-requested',
+    dispatchedAt: '2026-05-18T02:00:00Z',
+  });
+  const auditDir = path.join(rootDir, 'dispatch', 'audit', '2026-05-18');
+  mkdirSync(auditDir, { recursive: true });
+  writeFileSync(path.join(auditDir, `${lrq}.jsonl`), Array.from({ length: 5 }, () => JSON.stringify({
+    createdAt: '2026-05-18T03:00:00Z', decision: 'refuse_admit_memory_pressure',
+    structuredReasons: [{ reasonCode: 'memory_pressure' }],
+  })).join('\n') + '\n');
+  let probes = 0;
+  let yielded = false;
+  const result = await dispatchMergeAgentForPR({
+    rootDir, ...job, hqPath: '/fixture/hq', now: '2026-05-18T03:30:00Z',
+    env: { AGENT_OS_CONFIG_PATH: '/dev/null', HQ_ROOT: rootDir, HQ_BIN: '/fixture/hq' },
+    logger: { log() {}, warn() {}, error() {} },
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    execFileImpl: async (command, args, options) => {
+      assert.equal(command, '/fixture/hq');
+      assert.deepEqual(args.slice(0, 3), ['dispatch', 'status', lrq]);
+      assert.equal(options.timeout, 5000);
+      probes++;
+      if (probes === 1) return { stdout: '{"status":"blocked"}' };
+      await new Promise(resolve => setImmediate(() => { yielded = true; resolve(); }));
+      return { stdout: '{"status":"running"}' };
+    },
+  });
+  assert.equal(probes, 2, 'the stale refusal branch must issue its own live probe');
+  assert.equal(yielded, true);
+  assert.equal(result.decision, 'skip-already-dispatched');
+  assert.equal(result.stuckDetail, null);
 });

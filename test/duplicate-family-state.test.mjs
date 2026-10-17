@@ -1098,6 +1098,76 @@ test('watcher census aborts transient provenance failures without deactivating a
   }
 });
 
+test('watcher census classifies the same head snapshot it prefetched across async reads', async () => {
+  const db = memoryDb();
+  try {
+    const entries = [subject(481), subject(482, { headSha: null })];
+    const reads = [];
+    const result = await runDuplicateFamilyCensusForWatcher({
+      db, subjectEntries: entries, repoPath: REPO, env: {},
+      log: { log() {}, error() {} },
+      readBuildCompletionSignalForPrImpl: async ({ prNumber, headSha }) => {
+        reads.push([prNumber, headSha]);
+        await new Promise(resolve => setImmediate(resolve));
+        // Discovery can replace a caller-owned head while provenance yields.
+        entries[0].subject.headSha = 'moved-head';
+        return { ok: true, row: { ticket_id: 'DPA-01', spec_ref: 'spec@1' } };
+      },
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.families.length, 1);
+    assert.deepEqual(reads, [[481, 'head-481'], [482, null]]);
+    assert.deepEqual(result.families[0].candidates.map(candidate => candidate.headSha), ['head-481', null]);
+  } finally { db.close(); }
+});
+
+test('watcher census prefetches head-independent provenance only after a pinned miss', async () => {
+  const db = memoryDb();
+  try {
+    const reads = [];
+    const result = await runDuplicateFamilyCensusForWatcher({
+      db, subjectEntries: [subject(481), subject(482)], repoPath: REPO, env: {},
+      log: { log() {}, error() {} },
+      readBuildCompletionSignalForPrImpl: async ({ prNumber, headSha }) => {
+        reads.push([prNumber, headSha]);
+        return headSha ? { ok: false, reason: 'missing-build-completion-signal' }
+          : { ok: true, row: { ticket_id: 'DPA-01', spec_ref: 'spec@1' } };
+      },
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.families.length, 1);
+    assert.deepEqual(reads, [[481, 'head-481'], [481, null], [482, 'head-482'], [482, null]]);
+    assert.ok(result.families[0].candidates.every(candidate => candidate.workIdentity.provenance.resolvedBy === 'pr-opened-head-independent'));
+  } finally { db.close(); }
+});
+
+for (const useAsync of [false, true]) {
+  test(`watcher census uses the injected ${useAsync ? 'async' : 'sync'} subprocess seam`, async () => {
+    const db = memoryDb();
+    try {
+      let calls = 0;
+      const spawn = (command, argv, options) => {
+        calls++;
+        assert.equal(command, 'psql');
+        assert.ok(argv.includes('postgres://ledger.example/agent_os_ledger'));
+        assert.ok(options.timeout <= 1500);
+        return { status: 0, stdout: JSON.stringify({ ticket_id: 'DPA-01', spec_ref: 'spec@1' }), stderr: '' };
+      };
+      const result = await runDuplicateFamilyCensusForWatcher({
+        db, subjectEntries: [subject(481), subject(482)], repoPath: REPO,
+        env: { AGENT_OS_CONFIG_PATH: '/dev/null', AGENT_OS_SESSION_LEDGER_DSN: 'postgres://ledger.example/agent_os_ledger',
+          AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'on' },
+        log: { log() {}, error() {} },
+        spawnSyncImpl: useAsync ? () => { throw new Error('async seam must take precedence'); } : spawn,
+        ...(useAsync ? { spawnAsyncImpl: async (...args) => spawn(...args) } : {}),
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.families.length, 1);
+      assert.equal(calls, 2);
+    } finally { db.close(); }
+  });
+}
+
 test('PR-wide suppression remains label-driven while head movement stales operator overrides', () => {
   const suppressed = detectDuplicateFamiliesForRepo([
     subject(501, { labels: ['not-a-duplicate-stack'], headSha: 'old-head' }),

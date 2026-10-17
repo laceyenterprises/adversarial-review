@@ -24,8 +24,16 @@ Watcher ledger readers now share the synchronous readers' SQL and validation
 through the same generator steps, but await execFile completion and retry timers.
 Synchronous CLI consumers retain their API. Closure lease reconciliation shares
 the same decision code in both modes and rechecks ownership after external reads.
-The census prefetches evidence asynchronously once per PR/head and passes a
-snapshot into its synchronous classifiers. Async closure also uses async gh/hq
+The census copies discovery entries before its first provenance await, then
+prefetches evidence asynchronously once per PR/head and passes that same head
+snapshot into its synchronous classifiers. A pinned miss also prefetches the
+head-independent fallback; successful pinned reads need no fallback. Content
+verification rejects a moved live head without rewriting the discovery head.
+Missing snapshot evidence aborts the tick through the census error boundary,
+preserving existing families and holds. Fixture callers may inject
+`spawnAsyncImpl`; an explicitly supplied `spawnSyncImpl` is adapted when no
+async executor is supplied. Production retains the asynchronous child default.
+Async closure also uses async gh/hq
 probes. Existing process-lifetime admission, durable refill, credential limits,
 holds, drafts, head dedup and spawn-boundary freshness checks remain in force.
 No config keys or CI gates are added.

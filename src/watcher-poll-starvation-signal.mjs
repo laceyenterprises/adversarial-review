@@ -125,6 +125,9 @@ export function createPollStarvationHandler({
             },
           },
         ))
+        // Production delivery resolves once the page is durably queued. Only
+        // then debounce it, so an enqueue failure is retried after respawn.
+        .then(() => { if (loopDurations) getHeartbeat?.()?.markStarvationRestartLoopPaged?.(); })
         .catch((err) => {
           logger?.error?.(`[watcher] poll-starvation alert delivery failed: ${err?.message || err}`);
         });

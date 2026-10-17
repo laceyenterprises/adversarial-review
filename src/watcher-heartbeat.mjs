@@ -221,9 +221,14 @@ function createWatcherHeartbeat({
     const alreadyPaged = recent.length > 0 && watchdogRestartState.loop_paged === true;
     const restarts = [...recent, { at_ms: atMs, in_flight_ms: inFlightMs, no_progress_ms: noProgressMs }].slice(-64);
     const restartLoop = restarts.length >= 2;
-    watchdogRestartState = { restarts, loop_paged: alreadyPaged || restartLoop };
+    watchdogRestartState = { restarts, loop_paged: alreadyPaged };
     persist('poll-starvation-restart');
     return { restartLoop, shouldPage: !restartLoop || !alreadyPaged, restarts };
+  }
+
+  function markStarvationRestartLoopPaged() {
+    watchdogRestartState = { ...watchdogRestartState, loop_paged: true };
+    persist('poll-starvation-loop-paged');
   }
 
   function markPoll(extra = {}) {
@@ -285,7 +290,7 @@ function createWatcherHeartbeat({
     await reviewPersistChain;
   }
 
-  return { filePath, recordStarvationRestart, markPoll, markPollProgress, markPollCompleted, markReview, markSpawnDecision, persist, snapshot, flush };
+  return { filePath, recordStarvationRestart, markStarvationRestartLoopPaged, markPoll, markPollProgress, markPollCompleted, markReview, markSpawnDecision, persist, snapshot, flush };
 }
 
 function createWatcherStallWatchdog({

@@ -5,7 +5,7 @@ import { createPollStarvationHandler, createPollStarvationRestartRequester } fro
 
 const minute = 60_000;
 const logger = { error() {}, warn() {} };
-function fixture() {
+function fixture({ failLoopOnce = false } = {}) {
   let stored = '{}';
   const alerts = [], exits = [];
   return { alerts, exits,
@@ -16,7 +16,13 @@ function fixture() {
         now: () => new Date(atMs), logger });
       heartbeat.persist('startup');
       const handler = createPollStarvationHandler({ getHeartbeat: () => heartbeat,
-        deliverAlertFn: async (text, meta) => { alerts.push({ text, ...meta }); },
+        deliverAlertFn: async (text, meta) => {
+          if (failLoopOnce && meta.event.endsWith('restart_loop')) {
+            failLoopOnce = false;
+            throw new Error('synthetic enqueue failure');
+          }
+          alerts.push({ text, ...meta });
+        },
         requestRestartFn: createPollStarvationRestartRequester({
           exitAfterReviewerCleanup: exit => exits.push(exit), exitCode: 75 }), logger });
       handler({ inFlightMs, noProgressMs: inFlightMs, starvationMs: 15 * minute,
@@ -66,4 +72,16 @@ test('queued review heartbeat writes cannot erase restart history', async () => 
   const state = second.recordStarvationRestart({ inFlightMs: 25 * minute });
   assert.equal(state.restartLoop, true);
   assert.deepEqual(state.restarts.map(entry => entry.in_flight_ms), [20 * minute, 25 * minute]);
+});
+
+
+test('failed loop-page enqueue remains retryable across a respawn', async () => {
+  const h = fixture({ failLoopOnce: true });
+  await h.restart(20 * minute, 20 * minute);
+  await h.restart(45 * minute, 25 * minute);
+  assert.equal(h.alerts.filter(alert => alert.event.endsWith('restart_loop')).length, 0);
+  await h.restart(65 * minute, 20 * minute);
+  await h.restart(85 * minute, 20 * minute);
+  assert.equal(h.alerts.filter(alert => alert.event.endsWith('restart_loop')).length, 1);
+  assert.equal(h.exits.length, 4, 'enqueue failures must not suppress hung-poll recovery');
 });

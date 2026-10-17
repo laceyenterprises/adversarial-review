@@ -27,8 +27,9 @@ canonical heartbeat, using its ownership guard and atomic writer. A second
 watchdog restart within one hour emits
 `adversarial_review.poll_starvation_restart_loop` with both poll durations.
 Further restarts in the same episode continue recovery without repeating the
-page. A quiet hour rearms paging. Failed reporting is logged and does not
-prevent recovery. This guard records only starvation-triggered restarts;
+page once it has been durably queued. A quiet hour rearms paging. Failed
+page enqueue stays retryable across respawn; reporting failures are logged and
+do not prevent recovery. This guard records only starvation-triggered restarts;
 ordinary deployments and idle-stall/deadline exits do not count.
 
 After deployment, the SRE session verifies:

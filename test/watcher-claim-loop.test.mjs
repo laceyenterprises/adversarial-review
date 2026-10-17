@@ -3757,7 +3757,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
                 'onCapacityFreed: async (',
                 'onCapacityFreed: globalThis.__seatIdleCapacityFreed = async (');
               result.source = result.source.replace(
-                'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates })',
+                'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, startedAt: Date.now() - Math.floor(process.uptime() * 1000) })',
                 'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, schedule: callback => callback() })');
               result.source = result.source.replace(
                 'const reviewerMemoryReservationState =',
@@ -4065,5 +4065,91 @@ test('STARTADMIT-01: startup admits durable pending work before discovery and de
       });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
     assert.match(result.stdout, /watcher first reviewer spawn: startup_to_spawn_ms=\d+/);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+for (const failed of [false, true]) test(`STARTADMIT-01: real poll shares one quota snapshot across candidates (failed=${failed})`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'poll-quota-'));
+  const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+  try {
+    let loader = buildLoaderSource();
+    loader = loader.replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(fileUrl('src', 'posted-review-row.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace('export async function runQueuedReviewAdoptionPhase(',
+            'async function runQueuedReviewAdoptionPhaseActual(');
+          result.source += ${JSON.stringify(`
+            export async function runQueuedReviewAdoptionPhase(args) {
+              globalThis.__quotaPostedSnapshot = await globalThis.__quotaContext.execFileAsync(
+                'hq', ['fleet', 'quota', 'status', '--json']);
+              return runQueuedReviewAdoptionPhaseActual(args);
+            }
+          `)};
+          return result;
+        }
+        if ([${JSON.stringify(fileUrl('src', 'watcher.mjs'))}, ${JSON.stringify(fileUrl('src', 'afh-reviewer-fallback.mjs'))}].includes(url)) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source)
+            .replace('const execFileAsync = promisify(execFile);', 'const execFileAsync = (...args) => globalThis.__quotaExec(...args);')
+            .replace("JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+              '({ org: "example", repos: ["example/review-fixture"] })')
+            .replace('const reviewContext = {', 'const reviewContext = globalThis.__quotaContext = {')
+            .replace('await processReviewSubject(subjectEntry, { ...reviewContext });',
+              'await processReviewSubject(subjectEntry, { ...reviewContext }); globalThis.__advanceQuotaClock();');
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, seatIdleSynthetic(loader));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, seatIdleSynthetic(buildRunnerSource({
+      prePollSetup: `
+        const { promisify } = await import('node:util');
+        const { execFile } = await import('node:child_process');
+        const actualExec = promisify(execFile);
+        let quotaReads = 0, failQuota = false, clockOffset = 0;
+        const realNow = Date.now;
+        Date.now = () => realNow() + clockOffset;
+        globalThis.__advanceQuotaClock = () => { clockOffset += 61_000; };
+        globalThis.__quotaExec = async (command, args, options) => {
+          if (args.join(' ') !== 'fleet quota status --json') return actualExec(command, args, options);
+          quotaReads++;
+          if (failQuota) throw new Error('synthetic quota failure');
+          return { stdout: JSON.stringify({ providerStatuses: ['openai', 'anthropic', 'google'].map(provider => ({
+            provider, authPath: 'oauth', state: 'ok', afhGrounding: { grounded: false },
+          })) }) };
+        };
+      `,
+      afterFirstPoll: `
+        assert.ok(JSON.parse(globalThis.__quotaPostedSnapshot.stdout).providerStatuses.every(row => row.state === 'ok'),
+          'the posted-review phase receives the shared quota snapshot');
+        ${failed ? `
+          const readsBeforeFailure = quotaReads;
+          db.prepare('DELETE FROM reviewed_prs').run();
+          failQuota = true;
+          await pollOnce(octokit, pollOptions);
+          assert.equal(quotaReads, readsBeforeFailure + 1, 'a failed read must be shared for the whole second poll');
+          await globalThis.__quotaContext.execFileAsync('hq', ['fleet', 'quota', 'status', '--json']);
+          assert.equal(quotaReads, readsBeforeFailure + 1, 'posted handlers reuse the same last good quota snapshot');
+        ` : `
+          assert.equal(quotaReads, 1, 'N candidates must share one read despite more than one TTL elapsing');
+          await globalThis.__quotaContext.execFileAsync('hq', ['fleet', 'quota', 'status', '--json']);
+          assert.equal(quotaReads, 1, 'posted-review handlers receive the same quota executor');
+        `}
+      `,
+    })));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: fixtureEnv({ ...installGhFixture(tmp), ADVERSARIAL_AFH_REVIEWER_FALLBACK: '',
+          ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'codex,claude-code',
+          ADVERSARIAL_AFH_CLAUDE_RUNTIME_PROBE: 'false' }),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.match(result.stdout, /quota-status reads per poll: poll=1 reads=1/);
+    if (failed) {
+      assert.match(result.stderr, /afh-reviewer-grounding stale-if-error/);
+      assert.match(result.stdout, /quota-status reads per poll: poll=2 reads=1/);
+    }
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });

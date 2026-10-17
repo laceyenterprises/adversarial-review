@@ -442,6 +442,8 @@ export async function readAfhReviewerGrounding({
   retryDelaysMs = AFH_FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   claudeRuntimeProbeImpl = null,
+  includeFleetQuotaStatus = false,
+  fleetQuotaExecFileImpl = execFileImpl,
   claudeRuntimeProbeUid = null,
   claudeRuntimeProbeTimeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
@@ -457,7 +459,7 @@ export async function readAfhReviewerGrounding({
     stdout = await readFleetQuotaStatusStdoutWithRetry({
       resolvedHqPath,
       hqCwd,
-      execFileImpl,
+      execFileImpl: fleetQuotaExecFileImpl,
       env,
       timeoutMs,
       retryDelaysMs,
@@ -476,6 +478,10 @@ export async function readAfhReviewerGrounding({
     } catch (err) {
       snapshot = unavailableGrounding('fleet-quota-status-unreadable', err);
     }
+  }
+  if (includeFleetQuotaStatus) {
+    snapshot = Object.freeze({ ...snapshot, fleetQuotaStatus: Object.freeze(snapshot.available
+      ? { stdout } : { error: true, errorMessage: snapshot.error || snapshot.reason }) });
   }
   const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
   const probeImpl = runtimeProbeUid === null
@@ -531,7 +537,7 @@ export function createAfhReviewerGroundingCache({
     return entry;
   }
 
-  const getAfhReviewerGrounding = async function getAfhReviewerGrounding({ claudeRuntimeProbeUid = null } = {}) {
+  const getAfhReviewerGrounding = async function getAfhReviewerGrounding({ claudeRuntimeProbeUid = null, readOptions = {} } = {}) {
     const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
     const probeKey = runtimeProbeUid === null
       ? AFH_QUOTA_ONLY_CACHE_KEY
@@ -552,6 +558,7 @@ export function createAfhReviewerGroundingCache({
         let snapshot;
         try {
           snapshot = await readImpl({
+            ...readOptions,
             env,
             hqPath,
             ...(runtimeProbeUid === null ? {} : { claudeRuntimeProbeUid: runtimeProbeUid }),

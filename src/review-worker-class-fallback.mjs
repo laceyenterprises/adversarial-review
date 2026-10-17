@@ -372,6 +372,7 @@ export function applyReviewerWorkerClassFallbackToRoute({
  * @param {Object=} args.logger — warning/error sink for fail-open degradation.
  * @param {Function=} args.sleepImpl — DI for bounded retry sleeps.
  * @param {number[]=} args.retryDelaysMs — transient retry delays.
+ * @param {Object=} args.fleetQuotaStatus — immutable poll result (including stale-if-error evidence).
  * @param {Map=} args.fleetQuotaStatusCache — short-lived stdout cache.
  * @param {number=} args.fleetQuotaStatusCacheTtlMs — cache TTL.
  * @param {Function=} args.nowMs — DI for cache timestamps.
@@ -406,6 +407,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   logger = console,
   sleepImpl = sleep,
   retryDelaysMs = FLEET_QUOTA_STATUS_RETRY_DELAYS_MS,
+  fleetQuotaStatus = null,
   fleetQuotaStatusCache = fleetQuotaStatusCacheFor(execFileImpl),
   fleetQuotaStatusCacheTtlMs = FLEET_QUOTA_STATUS_CACHE_TTL_MS,
   agyReviewerIdentityPool = undefined,
@@ -472,7 +474,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     return { ...base, ...depthFields, reason: 'no-available-fallback' };
   }
 
-  const quotaStatus = await readFleetQuotaStatusWithRetry({
+  const quotaStatus = fleetQuotaStatus || await readFleetQuotaStatusWithRetry({
     env,
     hqPath,
     execFileImpl,
@@ -480,7 +482,8 @@ export async function resolveReviewerWorkerClassWithFallback({
     sleepImpl,
     retryDelaysMs: Array.isArray(retryDelaysMs) ? retryDelaysMs : [],
     cache: fleetQuotaStatusCache,
-    cacheTtlMs: Number.isFinite(fleetQuotaStatusCacheTtlMs) ? fleetQuotaStatusCacheTtlMs : 0,
+    cacheTtlMs: fleetQuotaStatusCacheTtlMs === Infinity || Number.isFinite(fleetQuotaStatusCacheTtlMs)
+      ? fleetQuotaStatusCacheTtlMs : 0,
     nowMs,
   });
   if (quotaStatus.error) {

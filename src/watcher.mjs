@@ -113,6 +113,7 @@ import {
 import { createReviewerDispatchDrain } from './watcher-reviewer-dispatch.mjs';
 import { createReviewerAdmissionQueue } from './watcher-reviewer-admission.mjs';
 import { attachDurableReviewerRefill } from './watcher-reviewer-refill.mjs';
+import { createWatcherReviewerQuotaPollFactory } from './watcher-reviewer-quota.mjs';
 import { domainPipelineGeminiSeatCount } from './reviewer-spawn-settle.mjs';
 import { createWatcherDiscoveryBatchDrain, createWatcherDispatchPriority, reconcileWatcherPriorityDiscoveryPending } from './watcher-dispatch-priority.mjs';
 import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
@@ -1044,9 +1045,10 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 const reviewerHeadDispatchLease = createHeadDispatchLease();
 // Discovery and settlement share candidates and memory reservations across polls.
 const reviewerDispatchCandidates = [];
-const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, startedAt: Date.now() - process.uptime() * 1000 });
+const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, startedAt: Date.now() - Math.floor(process.uptime() * 1000) });
 // Startup and settlement reuse the same policy, runtime and adapter contexts.
 let startupReviewerAdmissionPending = true;
+const beginReviewerQuotaPoll = createWatcherReviewerQuotaPollFactory();
 const reviewerRefillContexts = new Map();
 attachDurableReviewerRefill({ db, contexts: reviewerRefillContexts, admission: reviewerAdmission,
   processSubject: processReviewSubject,
@@ -1224,7 +1226,7 @@ async function pollOnceWithinBudget(
   const firstPassSpilloverController = createFirstPassSpilloverController({ rootDir: ROOT, readHeld: countHeldOpenPrs, readDepth: countOpenPrsAwaitingReview, readRereviewDepth: countOpenPrsAwaitingReview, logger: console }); // RSP-01/RSPREREVIEW-01: disarmed unless CFG arms it
   const postedReviewHandlers = [];
   const mergeAgentCandidateBranchProtectionCache = new Map();
-  const postReviewMaintenanceHandlers = [], reviewerTickCaches = { fleetQuotaStatus: new Map() };
+  const postReviewMaintenanceHandlers = [], reviewerTickCaches = { fleetQuotaStatus: new Map() }, reviewerQuotaPoll = beginReviewerQuotaPoll(execFileAsync);
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
     logger: console,
     memoryPressureConfig: reviewerMemoryPressureConfig,
@@ -1323,6 +1325,7 @@ async function pollOnceWithinBudget(
       reviewerBurstController, postedReviewHandlers,
       mergeAgentCandidateBranchProtectionCache,
       reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
+      getAfhReviewerGroundingForTick: reviewerQuotaPoll.getGrounding,
       reviewerMemoryReservationState,
       reviewerMemoryAdmissionSampleForTick,
       getRoutingTierReadinessForTick,
@@ -1337,7 +1340,7 @@ async function pollOnceWithinBudget(
       activeMergeAgentPRs,
       currentRepoPRs,
       ROOT,
-      execFileAsync,
+      execFileAsync: reviewerQuotaPoll.execFile,
       WATCHER_PRIMARY_DOMAIN_ID,
       reviewerHeadDispatchLease,
       INFRA_AUTO_RECOVER_CAP,
@@ -1583,6 +1586,7 @@ async function pollOnceWithinBudget(
     postedReviewPriorityTargets: wakePayloadForPoll() || [],
   });
   } finally {
+    reviewerQuotaPoll.logReads();
     try {
       await healthProbe?.finishTick?.(healthTick, {
         // Only waiting PRs need inherited-spawn reconciliation. In particular,

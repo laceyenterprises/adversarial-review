@@ -239,10 +239,13 @@ recovery already returns review to `agy` on its own.
 - **Entitlement + quota.** A fallback class is only selected if its GitHub
   reviewer bot token is present *and* its provider has quota. Spilling onto a
   class that cannot boot converts a slow queue into a stalled one.
-- **Quota freshness is bounded.** Within one watcher tick, reviewer worker-class
-  fallback shares `hq fleet quota status --json` results for 60 seconds. That
-  includes fail-open probe errors, which are reused only for that same bounded
-  window and emit `review-worker-class-fallback-fail-open` per affected PR.
+- **One reviewer quota read per poll.** AFH grounding and worker-class fallback
+  share one `hq fleet quota status --json` result throughout discovery,
+  admission and posted-review handling, even when a poll exceeds 60 seconds.
+  The next poll refreshes it. A failed refresh reuses AFH's last good evidence
+  only within its existing ten-minute stale-if-error bound; managed account
+  evidence remains held when stale. With no usable snapshot, routing keeps its
+  existing fail-open behavior for the whole poll.
 - **The quota trigger is unchanged.** A quota-grounded primary still fails over
   at any depth, and does not consume the depth budget. The two triggers compose.
 - **The pool ceiling is untouched.** More concurrent `gemini` reviewers contend
@@ -250,3 +253,22 @@ recovery already returns review to `agy` on its own.
   to raise.
 
 Discovery defers the posted-review SQL lookup until an engaged depth lane needs classification or the subject reaches pool admission. Early held/skipped subjects with no engaged depth lever do not pay that query cost.
+
+
+## Startup and quota observability (STARTADMIT-01)
+
+After repository scope is refreshed, the first poll prepares domain/repo policy
+contexts and refills durable pending rows before per-subject discovery. This
+uses the same bounded refill and admission drain as capacity-freed handoffs.
+Live subject checks, operator holds, draft checks, credential limits, claim CAS,
+same-head deduplication and spawn-boundary freshness still apply. A route change
+must acquire the new route's reservation before spawning.
+
+`watcher first reviewer spawn: startup_to_spawn_ms=<milliseconds>` records the
+first actual runtime spawn since watcher process start. Each poll logs
+`quota-status reads per poll: poll=<sequence> reads=<count>`; an idle poll can
+report zero. Refusals do not count as reviewer spawns.
+
+After deployment, the SRE session confirms that the watcher restarted. With a
+normal backlog, confirm the first spawn occurs within about a minute and the
+posted-review phase stops logging `budget insufficient` under a normal queue.

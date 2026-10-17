@@ -29,7 +29,7 @@ import {
 // import. An operator will point `--root` at a LIVE deployed tree, and a
 // diagnostic reporter must not migrate a database a running watcher owns. Hence
 // the leaf import plus our own read-only handle below.
-import { SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW } from '../src/review-state-statements.mjs';
+import { SQL_COUNT_OPEN_AWAITING_REVIEW } from '../src/review-state-statements.mjs';
 
 const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -51,7 +51,7 @@ function main() {
   const db = new Database(join(root, 'data', 'reviews.db'), { readonly: true });
   try {
     held = Number(db.prepare(SQL_COUNT_HELD_OPEN_PRS).get()?.n || 0);
-    depth = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n ?? 0);
+    depth = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_REVIEW).get()?.n ?? 0);
   } finally {
     db.close();
   }

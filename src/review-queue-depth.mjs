@@ -50,52 +50,11 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 
 // ── The unit ─────────────────────────────────────────────────────────────────
-// "Queue depth" is stated precisely, because an operator sets a threshold in it:
-//
-//   depth = OPEN PRs THAT HAVE NEVER RECEIVED A FIRST-PASS REVIEW.
-//
-// This is NOT a new number. It is exactly `countOpenPrsAwaitingFirstPassReview`
-// in `review-state-db.mjs` — the same count the review-stall pager already
-// reports — injected here as `readDepth`. Defining a second, subtly different
-// "queue depth" beside it would give the operator two numbers that disagree
-// during exactly the incident where both get read. Its predicate, verbatim from
-// that module:
-//   - `pr_state = 'open'` — merged/closed PRs are not waiting for anything.
-//   - NO completed `reviewer_passes` row with `pass_kind IN ('first-pass',
-//     'rereview')` and a non-empty `gh_comment_id` — that is GitHub-artifact
-//     evidence that a review really landed, deliberately chosen over
-//     `reviewed_prs.posted_at`/`review_status` because those are maskable by a
-//     stale success claim and are reset on re-entry.
-//   - `review_status NOT IN ('malformed','unroutable-bot-author',
-//     'argus-security-queued')` — work the dispatch loop explicitly refuses. It
-//     will never get a first pass, so more reviewers cannot drain it.
-//
-// SAY WHAT ELSE IT COUNTS, AND WHAT IT DOES NOT:
-//   - It DOES count a PR whose FIRST pass is in flight (`review_status =
-//     'reviewing'` with no delivered pass yet) — that PR still has no review. So
-//     the count cannot fall below the number of FIRST-PASS reviewers currently
-//     in flight. A threshold at or under the first-pass pool ceiling (default 6,
-//     max 12) could therefore be satisfied by a saturated-but-healthy pipeline
-//     and pin the lever on; set it meaningfully ABOVE the pool ceiling, which is
-//     also where arrivals genuinely exceed what one class absorbs.
-//   - It does NOT count re-review churn at all. A PR that already has a
-//     delivered pass is excluded even while a re-review is in flight for it.
-//     That is the intended scope: the ticket is about first-pass throughput, and
-//     re-review is not what the operator asked to parallelize. Observed on this
-//     host 2026-09-06: 9 open PRs, 6 reviewers in flight, depth = 0 — every open
-//     PR had already been first-passed, so the backlog was re-review, not
-//     first-pass, and the lever correctly would not engage at any threshold.
-//
-// One-tick lag, by design: a PR discovered seconds ago gets its `reviewed_prs`
-// row created later in the same tick that routes it, so it joins the count on
-// the next tick. PRs sit in this queue for tens of minutes (measured p90
-// time-to-merge 282 min), so one tick is immaterial to a depth threshold.
+// Both lanes measure the whole actionable queue but retain separate thresholds
+// and per-tick budgets. The historical first-pass pager count stays separate.
 export const FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT =
-  'open PRs that have never received a first-pass review '
-  + '(review-state-db.countOpenPrsAwaitingFirstPassReview: pr_state open, no reviewer_passes row '
-  + "with pass_kind IN ('first-pass','rereview'), status completed, and a gh_comment_id, "
-  + 'excluding malformed/unroutable-bot/argus-queued; '
-  + 'INCLUDES first passes currently in flight)';
+  'open PRs awaiting a review pass (first pass or requested re-review; '
+  + 'excluding held, draft, malformed, Argus-only and already-admitted rows)';
 
 export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.first_pass_review_queue_depth_failover_threshold';
@@ -446,6 +405,7 @@ export function createFirstPassSpilloverController({
   writeFileImpl = writeFileAtomic,
 } = {}) {
   const plans = new Map();
+  const depths = new Map();
   const heldByKind = new Map();
   const remainingByKind = new Map();
   const grantedByKind = new Map();
@@ -493,7 +453,8 @@ export function createFirstPassSpilloverController({
     }
     // Disarmed is the overwhelmingly common case; do not pay a SQL count for it.
     const depthReader = kind === 'rereview' ? readRereviewDepth : readDepth;
-    const depth = threshold === null ? null : readDepthImpl(depthReader, { logger });
+    if (threshold !== null && !depths.has(depthReader)) depths.set(depthReader, readDepthImpl(depthReader, { logger }));
+    const depth = threshold === null ? null : depths.get(depthReader);
     const plan = firstPassSpilloverPlan({ depth, threshold });
     let held = null;
     if (threshold !== null && typeof readHeld === 'function') {

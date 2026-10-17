@@ -27,6 +27,7 @@ import {
   UPDATE_REVIEW_ROUTING_SQL,
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW,
   SQL_COUNT_OPEN_AWAITING_REREVIEW,
+  SQL_COUNT_OPEN_AWAITING_REVIEW,
   SQL_HAS_COMPLETED_REVIEW_FOR_PR,
   SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR,
   prepareFinalizePendingTerminalFailure,
@@ -532,6 +533,10 @@ export function countOpenPrsAwaitingRereview(handle = db) {
     : handle.prepare(SQL_COUNT_OPEN_AWAITING_REREVIEW);
   const n = stmt.get()?.n;
   return Number.isFinite(n) ? n : 0;
+}
+
+export function countOpenPrsAwaitingReview(handle = db) {
+  return Number(handle.prepare(SQL_COUNT_OPEN_AWAITING_REVIEW).get()?.n || 0);
 }
 
 // RPL-07 — observed reviewer spend inside an active burst-lease window, in

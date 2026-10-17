@@ -756,6 +756,13 @@ export async function processReviewSubject(entry, ctx) {
         }
         return false;
       };
+      // Drafts are intentional waits. Persist discovery evidence so they do
+      // not inflate either spill lane, including a PR converted back to draft.
+      const draft = subject.isDraft ?? subject.draft;
+      if (typeof draft === 'boolean') db.prepare(
+        'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ?'
+      ).run(Number(draft), repoPath, prNumber);
+      if (draft === true) return;
       const prTitle = subject.title || '';
       const effectiveDomainId = domainId || entry.domainId || subject.domainId || WATCHER_PRIMARY_DOMAIN_ID || 'code-pr';
       const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);

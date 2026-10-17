@@ -1,4 +1,4 @@
-# RUNBOOK — queue-depth failover for first-pass review (RSP-01)
+# RUNBOOK — review queue failover (RSP-01 / REVIEWSPILL-01)
 
 A **break-glass lever**. It is disarmed on every host until an operator arms it,
 and arming it is one config value.
@@ -91,15 +91,8 @@ this stays a lever rather than becoming the default path.
 Re-reviews use the parallel key
 `watcher.rereview_queue_depth_failover_threshold` and canonical env
 `AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD`. When absent it
-inherits the first-pass threshold; `0` disables only re-review spillover. Its
-depth is open PRs with a completed, posted reviewer pass (`pass_kind` in
-`first-pass` or `rereview`) and a durable `rereview_requested_at` wake (or
-cleared `posted_at` after a head refresh) still awaiting admission. Only
-`pending` rows without a completed posted pass on the current head count.
-Rows already in `reviewing`, failed, awaiting an artifact, posted, or paused by
-the review-cycle cap do not count. When the re-review threshold inherits the
-first-pass threshold, the watcher logs that the lanes can spend separate spill
-slots.
+inherits the first-pass threshold; `0` disables only re-review spillover. Both lanes measure the same actionable queue, with separate thresholds and
+spill budgets. A requested re-review contributes pressure to both lanes.
 
 Both queue-depth lanes exclude open PRs carrying `no-merge-hold`,
 `do-not-merge`, or `merge-agent-skip`, matching enforced merge-action holds.
@@ -117,33 +110,33 @@ the env override after proving that lane healthy.
 
 ### The unit: what "queue depth" counts
 
-Depth is **open PRs that have never received a first-pass review**, read from the
-existing `countOpenPrsAwaitingFirstPassReview` in `review-state-db.mjs` — the
-same number the review-stall pager already reports. Defining a second, slightly
-different "queue depth" beside it would give you two numbers that disagree during
-exactly the incident where you read both. Its predicate:
+Depth counts open PRs awaiting admission for either a first pass or a requested
+re-review (`pending` or `pending-upstream`). It excludes drafts, operator holds,
+malformed and Argus-only rows, and reviews already running. Genuine posted-pass
+evidence distinguishes the two populations; a posted review on the current head
+excludes a requested re-review. The first-pass stall pager retains its existing
+undelivered-review count. The CLI and both spill lanes use
+`countOpenPrsAwaitingReview` / `SQL_COUNT_OPEN_AWAITING_REVIEW`.
 
-- `pr_state = 'open'` (merged/closed PRs are not waiting for anything), **and**
-- no completed `reviewer_passes` row with `pass_kind IN ('first-pass',
-  'rereview')` and a non-empty `gh_comment_id` — GitHub-artifact evidence that a
-  review really landed, deliberately preferred over `reviewed_prs.posted_at` /
-  `review_status`, which are maskable by a stale success claim and are reset on
-  re-entry, **and**
-- `review_status NOT IN ('malformed', 'unroutable-bot-author',
-  'argus-security-queued')` — work the dispatch loop explicitly refuses and no
-  number of reviewers can drain.
+Draft evidence is persisted from subject discovery in `reviewed_prs.is_draft`.
+No new configuration key is needed.
 
-Two things worth stating explicitly, because they decide what threshold to pick:
+### Individual wait bound
 
-- **It counts first passes that are currently in flight.** A PR being reviewed
-  right now has still never received a review. So the count cannot fall below the
-  number of *first-pass* reviewers in flight, and a threshold at or under the
-  first-pass pool ceiling (default 6, max 12) could be satisfied by a
-  saturated-but-healthy pipeline and pin the lever on. Set it meaningfully
-  **above** the pool ceiling.
-- **It does not mix re-review churn into first-pass depth.** Re-reviews have a
-  separate depth and budget, so a saturated re-review lane can spill without
-  consuming the slots reserved for PRs still awaiting their first review.
+At every shared drain (poll and capacity-freed, also used by startup polling),
+a Gemini-primary candidate past 480 seconds for a first pass or 900 seconds for
+a re-review is evaluated for cross-model spill even when Gemini seats are free.
+The existing `ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS` and
+`ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS` overrides apply; zero disables
+the corresponding age trigger. The current head's durable wait marker wins over
+historical discovery timestamps.
+
+Age pressure shares each lane's per-tick budget and reservation/refund accounting.
+When depth grants no slots, age permits one escape slot per lane per tick.
+Argus keeps its seats; PR reviews spill to independent reviewer capacity.
+Pipeline candidates that still require Gemini retain their seat requirements.
+`review-wait-decision` records one decision per overdue candidate per drain,
+including the reviewer/account or the blocking reason.
 
 ## Arming it
 

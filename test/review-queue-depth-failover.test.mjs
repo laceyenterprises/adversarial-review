@@ -896,8 +896,8 @@ test('an uncaptured completed pass still keeps rereview safety gates armed', asy
 
 test('watcher.mjs builds the per-tick controller from both production depth counters', () => {
   const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
-  assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingFirstPassReview/);
-  assert.match(src, /readRereviewDepth: countOpenPrsAwaitingRereview/);
+  assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingReview/);
+  assert.match(src, /readRereviewDepth: countOpenPrsAwaitingReview/);
   assert.match(src, /^\s*firstPassSpilloverController,$/m, 'controller must be threaded into the per-PR ctx');
 });
 
@@ -1378,4 +1378,31 @@ test('age spill budget is bounded per lane and refunds are reusable across admis
   assert.equal(ctl.waitPressure('rereview', overdue).engaged, true);
   assert.equal(ctl.refundSpill({ repo: 'sample/project', prNumber: 1 }), true);
   assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
+});
+
+test('review depth includes requested rereviews and excludes held, draft and refused work', async () => {
+  const { ensureReviewStateSchema, openReviewStateDb } = await import('../src/review-state.mjs');
+  const { countOpenPrsAwaitingReview } = await import('../src/review-state-db.mjs');
+  const root = tempRoot('reviewspill-depth-');
+  const db = openReviewStateDb(root);
+  try {
+    ensureReviewStateSchema(db);
+    for (let number = 1; number <= 8; number++) {
+      db.prepare("INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,revision_ref) VALUES('sample/project',?,'2026-10-01T00:00:00Z','gemini','pending','new-head')").run(number);
+    }
+    // Only the first pass and requested re-review are actionable work.
+    db.prepare("INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,reviewer_model,pass_kind,started_at,status,gh_comment_id,head_sha) VALUES('sample/project',2,1,'gemini','gemini','first-pass','2026-10-01T00:00:00Z','completed','synthetic-review','old-head')").run();
+    db.prepare("UPDATE reviewed_prs SET rereview_requested_at='2026-10-01T00:01:00Z' WHERE pr_number=2").run();
+    db.prepare("UPDATE reviewed_prs SET labels_json='[\"no-merge-hold\"]' WHERE pr_number=3").run();
+    db.prepare("UPDATE reviewed_prs SET is_draft=1 WHERE pr_number=4").run();
+    for (const [number, status] of [[5,'malformed'],[6,'argus-security-queued'],[7,'reviewing'],[8,'failed']]) {
+      db.prepare('UPDATE reviewed_prs SET review_status=? WHERE pr_number=?').run(status,number);
+    }
+    assert.equal(countOpenPrsAwaitingReview(db), 2);
+    const ctl = createFirstPassSpilloverController({ readDepth: () => countOpenPrsAwaitingReview(db),
+      readRereviewDepth: () => countOpenPrsAwaitingReview(db), resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2, logger: {} });
+    assert.equal(ctl.depthPressure('first-pass').engaged, true);
+    assert.equal(ctl.depthPressure('rereview').engaged, true);
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });

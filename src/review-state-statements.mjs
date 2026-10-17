@@ -519,6 +519,14 @@ export const SQL_COUNT_OPEN_AWAITING_REREVIEW =
   "    AND reviewer_passes.gh_comment_id <> ''" +
   ")";
 
+// REVIEWSPILL-01: both spill lanes see the whole actionable review queue.
+// The first-pass pager retains its historical undelivered-review population.
+export const SQL_COUNT_OPEN_AWAITING_REVIEW =
+  `SELECT COUNT(*) AS n FROM reviewed_prs WHERE is_draft = 0 ` +
+  "AND review_status IN ('pending', 'pending-upstream') AND (repo, pr_number) IN (" +
+  SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW.replace('COUNT(*) AS n', 'repo, pr_number') +
+  ' UNION ' + SQL_COUNT_OPEN_AWAITING_REREVIEW.replace('COUNT(*) AS n', 'repo, pr_number') + ')';
+
 // RPL-07 — observed reviewer spend inside a burst-lease window, in
 // `BURST_SPEND_UNIT` (see `reviewer-burst-lease.mjs`): summed
 // `reviewer_passes.token_cost_usd` for passes STARTED at or after the lease

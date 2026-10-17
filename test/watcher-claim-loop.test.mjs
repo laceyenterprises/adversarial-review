@@ -4012,17 +4012,21 @@ for (const age of [600, 901]) {
   });
 }
 
-test('STARTADMIT-01: startup admits before discovery without duplicate dispatch or maintenance records', () => {
+for (const startupState of ['open', 'drain', 'closed', 'merged']) test(`STARTADMIT-01: startup admission follows recovery and drain guards (${startupState})`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'startup-admission-'));
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
   try {
     let loader = buildLoaderSource({ subject101Overrides: { labels: ['risk:medium', 'merge-agent-dispatched'] }, discoveryHookSource: `
+      if (['closed', 'merged'].includes(process.env.FIXTURE_STARTUP_STATE)) subjects[0].terminal = true;
       globalThis.__startupDiscoverySawSpawn = globalThis.__watcherClaimLoopReviewerSpawns.some(
         spawn => spawn.subjectContext.prNumber === 101);
     `, reviewerRuntimeSource: `
       globalThis.__watcherClaimLoopReviewerSpawns = [];
       export function createReviewerRuntimeAdapterForDomain() { return {
         spawnReviewer: async payload => {
+          if (globalThis.__startupRecoveryPhases?.slice(-3).join(',') !== 'lifecycle,sessions,passes') {
+            throw new Error('startup reviewer spawned before lifecycle/session/pass recovery');
+          }
           globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
           payload.onReviewerPgid?.({ pgid: 123456, spawnedAt: new Date().toISOString() });
           return { ok: true, stdout: '', stderr: '' };
@@ -4032,6 +4036,8 @@ test('STARTADMIT-01: startup admits before discovery without duplicate dispatch 
       export function loadDomainConfig() { return {}; }
       export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
     ` });
+    loader = loader.replace("return { state: 'open', mergedAt: null, closedAt: null, headRefOid, labels: [] };",
+      "return { state: process.env.FIXTURE_STARTUP_STATE === 'merged' ? 'MERGED' : process.env.FIXTURE_STARTUP_STATE === 'closed' ? 'closed' : 'open', mergedAt: process.env.FIXTURE_STARTUP_STATE === 'merged' ? '2026-05-15T12:01:00Z' : null, closedAt: process.env.FIXTURE_STARTUP_STATE === 'closed' ? '2026-05-15T12:01:00Z' : null, headRefOid, labels: [] };");
     loader = loader
       .replace('export function scanStuckMergeAgentDispatches() { return []; }',
         'export function scanStuckMergeAgentDispatches(args) { (globalThis.__startupStuckScanInputs ||= []).push(args); return []; }')
@@ -4043,7 +4049,14 @@ test('STARTADMIT-01: startup admits before discovery without duplicate dispatch 
           const result = await nextLoad(url, context);
           result.source = String(result.source).replace(
             "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
-            '({ org: "example", repos: ["example/review-fixture"] })');
+            '({ org: "example", repos: ["example/review-fixture"] })')
+            .replace("join(ROOT, 'data', 'watcher-drain.json')", ${JSON.stringify(JSON.stringify(path.join(tmp, 'drain.json')))})
+            .replace('await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);',
+              "await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID); (globalThis.__startupRecoveryPhases ||= []).push('lifecycle');")
+            .replace('if (reattach.skipped > 0)', "globalThis.__startupRecoveryPhases.push('sessions'); if (reattach.skipped > 0)")
+            .replace('if (passReaper.reaped > 0)', "globalThis.__startupRecoveryPhases.push('passes'); if (passReaper.reaped > 0)")
+            .replace("await drainReviewerDispatchCandidates('startup durable pending');",
+              "globalThis.__startupDrainCalls = (globalThis.__startupDrainCalls || 0) + 1; await drainReviewerDispatchCandidates('startup durable pending');");
           return result;
         }
     `);
@@ -4051,34 +4064,55 @@ test('STARTADMIT-01: startup admits before discovery without duplicate dispatch 
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, seatIdleSynthetic(buildRunnerSource({
       prePollSetup: `
+        const { writeFileSync, rmSync } = await import('node:fs');
+        const startupState = process.env.FIXTURE_STARTUP_STATE;
+        const drainFile = ${JSON.stringify(path.join(tmp, 'drain.json'))};
+        if (startupState === 'drain') writeFileSync(drainFile, JSON.stringify({
+          reason: 'fixture maintenance', expiresAt: new Date(Date.now() + 60000).toISOString(),
+        }));
         db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
           review_status, revision_ref, labels_json)
           VALUES ('example/review-fixture', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
             'pending', 'sha-happy-101', '[]')\`).run();
       `,
       afterFirstPoll: `
-        assert.equal(globalThis.__startupDiscoverySawSpawn, true,
-          'a durable pending reviewer must spawn before discovery completes');
-        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
-        assert.equal(claims.filter(c => c.prNumber === 101).length, 1, 'rediscovery must keep same-head dedup');
-        assert.equal(globalThis.__startupStuckScanInputs.length, 1);
-        const scan = globalThis.__startupStuckScanInputs[0];
-        assert.deepEqual(scan.activePRs.map(pr => pr.prNumber), [101],
-          'startup refill must not duplicate stuck-scan records');
-        assert.deepEqual(scan.currentPRs.map(pr => pr.prNumber), [101],
-          'startup refill must not duplicate current-head records');
-        assert.equal(globalThis.__startupPhantomInputs.length, 1);
-        assert.deepEqual(globalThis.__startupPhantomInputs[0].currentPRs.map(pr => pr.prNumber), [101],
-          'phantom reconciliation must inspect each discovered PR once');
+        assert.deepEqual(globalThis.__startupRecoveryPhases, ['lifecycle', 'sessions', 'passes']);
+        if (startupState === 'drain') {
+          assert.equal(globalThis.__startupDrainCalls || 0, 0, 'active drain must skip startup refill');
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0);
+          assert.equal(claims.filter(c => c.prNumber === 101).length, 0);
+          rmSync(drainFile);
+          await pollOnce(octokit, pollOptions);
+          assert.equal(globalThis.__startupDrainCalls, 1, 'startup refill remains armed until drain clears');
+        }
+        if (['closed', 'merged'].includes(startupState)) {
+          assert.equal(db.prepare('SELECT pr_state FROM reviewed_prs WHERE pr_number = 101').get().pr_state, startupState);
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0, 'terminal PRs must not spawn from stale durable rows');
+          assert.equal(claims.filter(c => c.prNumber === 101).length, 0);
+        } else {
+          assert.equal(globalThis.__startupDiscoverySawSpawn, true,
+            'a durable pending reviewer must spawn before discovery completes');
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
+          assert.equal(claims.filter(c => c.prNumber === 101).length, 1, 'rediscovery must keep same-head dedup');
+          assert.equal(globalThis.__startupStuckScanInputs.length, startupState === 'drain' ? 2 : 1);
+          const scan = globalThis.__startupStuckScanInputs.at(-1);
+          assert.deepEqual(scan.activePRs.map(pr => pr.prNumber), [101],
+            'startup refill must not duplicate stuck-scan records');
+          assert.deepEqual(scan.currentPRs.map(pr => pr.prNumber), [101],
+            'startup refill must not duplicate current-head records');
+          assert.equal(globalThis.__startupPhantomInputs.length, startupState === 'drain' ? 2 : 1);
+          assert.deepEqual(globalThis.__startupPhantomInputs.at(-1).currentPRs.map(pr => pr.prNumber), [101],
+            'phantom reconciliation must inspect each discovered PR once');
+        }
       `,
     })));
     const result = spawnSync(process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
         cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
-        env: fixtureEnv({ ...installGhFixture(tmp) }),
+        env: fixtureEnv({ ...installGhFixture(tmp), FIXTURE_STARTUP_STATE: startupState }),
       });
     assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
-    assert.match(result.stdout, /watcher first reviewer spawn: startup_to_spawn_ms=\d+/);
+    if (['open', 'drain'].includes(startupState)) assert.match(result.stdout, /watcher first reviewer spawn: startup_to_spawn_ms=\d+/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 

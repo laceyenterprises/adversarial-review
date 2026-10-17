@@ -39,7 +39,7 @@ export function createWatcherReviewerQuotaPollFactory(options = {}) {
         const snapshot = await (firstGrounding || getGrounding());
         const status = snapshot.fleetQuotaStatus;
         if (status?.error) throw new Error(status.errorMessage);
-        if (typeof status?.stdout === 'string') return { stdout: status.stdout };
+        if (typeof status?.stdout === 'string') return { stdout: status.stdout, stderr: '' };
         // AFH rollback leaves the worker-class fallback reader in charge.
         return execQuotaOnce(command, args, execOptions);
       },

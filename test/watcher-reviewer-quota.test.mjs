@@ -58,7 +58,7 @@ test('STARTADMIT-01: a failed poll pins the last good snapshot for every candida
   assert.ok(stale.staleIfError);
   assert.equal(stale.providers, good.providers);
   assert.equal(stale.fleetQuotaStatus.stdout, stdout);
-  assert.deepEqual(await poll.execFile('hq', ['fleet', 'quota', 'status', '--json']), { stdout },
+  assert.deepEqual(await poll.execFile('hq', ['fleet', 'quota', 'status', '--json']), { stdout, stderr: '' },
     'posted handlers receive the same stale-if-error quota evidence');
   assert.equal(stale.claudeAccountSelection, null, 'legacy quota evidence stays account-agnostic');
   assert.equal((await fallback(stale)).workerClass, 'codex');

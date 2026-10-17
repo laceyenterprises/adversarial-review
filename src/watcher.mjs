@@ -1098,7 +1098,6 @@ function createWatcherOperatorSurface() {
   });
 }
 
-
 // ── Org repo discovery ───────────────────────────────────────────────────────
 
 let activeRepos = config.repos ?? [];
@@ -1364,11 +1363,6 @@ async function pollOnceWithinBudget(
     };
     reviewerRefillContexts.set(`${domainId}:${repoPath}`, { subjectAdapter, context: reviewContext });
   }
-  if (startupReviewerAdmissionPending) {
-    await drainReviewerDispatchCandidates('startup durable pending');
-    startupReviewerAdmissionPending = false;
-  }
-
     await retryPendingMergeAgentLifecycleCleanups();
     // Lifecycle sync is the health surface's authoritative "is this PR still
     // open?" mirror. It must refresh before the per-PR discovery/retry sweep:
@@ -1433,6 +1427,12 @@ async function pollOnceWithinBudget(
         (watcherDrain.expiresAt ? ` expires_at=${watcherDrain.expiresAt}` : '') +
         ` reason="${watcherDrain.reason}"`
     );
+  }
+  // Startup refill must observe lifecycle/session recovery before claiming rows.
+  // Keep it pending during drain mode so the first resumed poll still refills.
+  if (startupReviewerAdmissionPending && !watcherDrain.active) {
+    await drainReviewerDispatchCandidates('startup durable pending');
+    startupReviewerAdmissionPending = false;
   }
   // ARGUSDRAIN-01: start Argus security reviews in the background (never awaited).
   startArgusSecurityDrainForWatcherTick({ rootDir: ROOT, watcherDrainActive: watcherDrain.active, logger: console });

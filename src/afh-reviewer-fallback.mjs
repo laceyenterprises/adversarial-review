@@ -479,10 +479,12 @@ export async function readAfhReviewerGrounding({
       snapshot = unavailableGrounding('fleet-quota-status-unreadable', err);
     }
   }
-  if (includeFleetQuotaStatus) {
-    snapshot = Object.freeze({ ...snapshot, fleetQuotaStatus: Object.freeze(snapshot.available
-      ? { stdout } : { error: true, errorMessage: snapshot.error || snapshot.reason }) });
-  }
+  // Capture quota-only evidence before runtime probing, then attach it to the
+  // terminal snapshot so every probe outcome retains the same fleet result.
+  const fleetQuotaStatus = includeFleetQuotaStatus ? Object.freeze(snapshot.available
+    ? { stdout } : { error: true, errorMessage: snapshot.error || snapshot.reason }) : null;
+  const finalizeSnapshot = result => fleetQuotaStatus
+    ? Object.freeze({ ...result, fleetQuotaStatus }) : result;
   const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
   const probeImpl = runtimeProbeUid === null
     ? null
@@ -491,7 +493,7 @@ export async function readAfhReviewerGrounding({
       : shouldAutoProbeClaudeRuntime({ execFileImpl, env, uid: runtimeProbeUid })
         ? probeClaudeReviewerRuntime
         : null;
-  if (!probeImpl) return snapshot;
+  if (!probeImpl) return finalizeSnapshot(snapshot);
   try {
     const runtimeStatus = await probeImpl({
       execFileImpl,
@@ -502,13 +504,13 @@ export async function readAfhReviewerGrounding({
       retryDelaysMs: claudeRuntimeProbeRetryDelaysMs,
       sleepImpl,
     });
-    return applyClaudeReviewerRuntimeGrounding(snapshot, runtimeStatus);
+    return finalizeSnapshot(applyClaudeReviewerRuntimeGrounding(snapshot, runtimeStatus));
   } catch (err) {
-    return applyClaudeReviewerRuntimeGrounding(snapshot, {
+    return finalizeSnapshot(applyClaudeReviewerRuntimeGrounding(snapshot, {
       available: false,
       reason: 'claude-runtime-probe-error',
       error: reviewerRuntimeProbeErrorText(err),
-    });
+    }));
   }
 }
 

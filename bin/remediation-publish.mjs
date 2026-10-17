@@ -14,7 +14,7 @@ try {
     branch: values.branch, expectedRemoteSha: values['expected-remote-sha'] || values['previous-head'] });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
-  const failure = { code: error.code || 'remediation-publication-unproven', message: error.message,
+  const failure = { code: String(error.code || '').startsWith('remediation-') ? error.code : 'remediation-publication-unproven', message: error.message,
     previousHead: values['previous-head'], refusedAt: new Date().toISOString() };
   if (values['failure-path']) writeFileAtomic(values['failure-path'], JSON.stringify(failure));
   process.stderr.write(`${failure.code}: ${failure.message}\n`);

@@ -1277,7 +1277,9 @@ with the label name, and shares the once-per-head paging receipt. Mixed reviews
 remediate only ordinary findings; guarded changes remain in place and are
 reported as blockers. Remediators never apply labels or revert those changes to
 satisfy a label gate. A fresh review must observe a waiver before the finding
-clears. Independent CI classification and current-head authority still apply.
+clears. Independent CI classification and current-head authority still apply. Before
+resuming remediation after deployment, drain workers launched with older prompts;
+only newly composed prompts use the guarded remediation publisher.
 
 The next closer pass releases the hold when live CI no longer classifies as
 label-only, without deleting historical receipts. A deferred hammer audit with

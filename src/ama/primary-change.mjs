@@ -714,14 +714,19 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
   };
   // Bounded history reads omit signature payloads. Hydrate verification only
   // for web-flow provenance, binding it to the immutable commit in every proof.
-  const readCommit = async path => {
-    let commit = await read(path);
-    if (commit.committer?.login === 'web-flow' && get.commitVerification) {
-      const verification = await get.commitVerification(path);
-      if (verification.sha !== commit.sha) throw new Error('commit verification SHA mismatch');
-      commit = { ...commit, commit: { ...commit.commit, verification: verification.verification } };
-    }
-    return commit;
+  // Share successes and failures across proof scans without mutating raw reads.
+  const commits = new Map();
+  const readCommit = path => {
+    if (!commits.has(path)) commits.set(path, read(path).then(async commit => {
+      if (commit.committer?.login === 'web-flow' && get.commitVerification) {
+        const verification = await get.commitVerification(path);
+        if (verification.sha !== commit.sha) throw Object.assign(new Error('commit verification SHA mismatch'),
+          { code: 'COMMIT_VERIFICATION_SHA_MISMATCH' });
+        return { ...commit, commit: { ...commit.commit, verification: verification.verification } };
+      }
+      return commit;
+    }));
+    return commits.get(path);
   };
   const metadata = path => get.metadata ? get.metadata(path) : read(path);
   const unknown = (reason, extra = {}) => ({ headSha, hasHammerCommits: null, reason, ...extra });
@@ -917,7 +922,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         } catch (error) {
           if (error?.primaryChangeReadFailed === true || error?.authOutage === true
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
-          reject('unverifiable');
+          reject(error?.code === 'COMMIT_VERIFICATION_SHA_MISMATCH' ? 'commit-provenance' : 'unverifiable');
           // A stale/deleted citation refuses only this waiver, never the whole
           // protected author diff. Later candidates can still be evaluated.
         }

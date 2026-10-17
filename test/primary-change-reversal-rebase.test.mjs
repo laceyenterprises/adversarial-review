@@ -63,6 +63,8 @@ test('HAM reversal hydrates exact-commit verification from the bounded history r
     } else {
       assert.equal(result.reason, 'primary-change-reverted', scenario);
       assert.equal(evidence.reversalAuthorizations, undefined, scenario);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason,
+        scenario === 'unreadable' ? 'unverifiable' : 'commit-provenance', scenario);
     }
   }
 });
@@ -71,7 +73,7 @@ test('historical reversal snapshots hydrate their own web-flow verification', as
   const later = review({ node_id: 'PRR_later', commit_id: sha('f'), state: 'COMMENTED',
     body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
   const { transport } = await collect({ originalRecorded: true, reviews: [review(), later] });
-  for (const originalVerified of [true, false]) {
+  for (const scenario of ['valid', 'invalid', 'wrong-sha', 'unreadable']) {
     const get = async path => {
       const response = await transport(path);
       if (!path.endsWith(`/commits/${sha('d')}`)) return response;
@@ -80,11 +82,19 @@ test('historical reversal snapshots hydrate their own web-flow verification', as
     };
     get.commitVerification = async path => {
       assert.equal(path, `repos/fixture/repo/commits/${sha('d')}`);
-      return { sha: sha('d'), verification: { verified: originalVerified, reason: 'valid' } };
+      if (scenario === 'unreadable') throw new Error('verification unavailable');
+      return { sha: scenario === 'wrong-sha' ? head : sha('d'),
+        verification: { verified: scenario !== 'invalid', reason: 'valid' } };
     };
     const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head, get },
       { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
-    assert.equal(checkPrimaryChange(evidence, head).ok, originalVerified);
+    assert.equal(checkPrimaryChange(evidence, head).ok, scenario === 'valid', scenario);
+    if (scenario !== 'valid') {
+      assert.equal(evidence.reversalAuthorizations, undefined, scenario);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason,
+        scenario === 'wrong-sha' ? 'commit-provenance' : scenario === 'unreadable' ? 'unverifiable'
+          : 'original-reversal-not-proven-before-supersession', scenario);
+    }
   }
 });
 

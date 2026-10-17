@@ -127,6 +127,39 @@ test('PRIMARYRENAME-01: web-flow verification is added only to rename proof, nev
   assert.equal((await fixture.args.get(path)).commit.verification, undefined);
 });
 
+test('PRIMARYRENAME-01: multi-file scans share verification success and failure only within an evaluation', async t => {
+  const fixture = primaryRenameRepository(t, { committer: 'web-flow', verification: { verified: true, reason: 'valid' } });
+  for (const scenario of ['valid', 'wrong-sha', 'unreadable']) {
+    let verificationReads = 0;
+    const get = async path => {
+      const response = await fixture.args.get(path);
+      if (!response.files?.length) return response;
+      // Two absent primary files are renamed by the same candidate commit.
+      return { ...response, files: [...response.files, ...response.files.map(file => ({ ...file,
+        filename: `second-${file.filename}`,
+        ...(file.previous_filename ? { previous_filename: `second-${file.previous_filename}` } : {}) }))] };
+    };
+    get.commitVerification = async path => {
+      verificationReads++;
+      if (scenario === 'unreadable') throw new Error('verification unavailable');
+      const verification = await fixture.args.get.commitVerification(path);
+      return { ...verification, ...(scenario === 'wrong-sha' ? { sha: 'f'.repeat(40) } : {}) };
+    };
+    for (let evaluation = 1; evaluation <= 2; evaluation++) {
+      const evidence = await fetchPrimaryChange({ ...fixture.args, get });
+      assert.equal(verificationReads, evaluation, scenario);
+      assert.equal(checkPrimaryChange(evidence, fixture.args.headSha).ok, scenario === 'valid', scenario);
+      if (scenario === 'valid') {
+        assert.equal(evidence.renameProofs.length, 2);
+        assert.equal(evidence.renameProofs[0].commit, evidence.renameProofs[1].commit);
+      } else {
+        assert.equal(evidence.renameProofs, undefined, scenario);
+        assert.equal(evidence.renameProofReadFailed, true, scenario);
+      }
+    }
+  }
+});
+
 test('PRIMARYRENAME-01: restoring a modified path to base is not absence, even with its old blob at a new path', async t => {
   const fixture = primaryRenameRepository(t, { modified: true, restored: true });
   const evidence = await fetchPrimaryChange(fixture.args);

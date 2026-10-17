@@ -1,3 +1,4 @@
+import { fleetStatusWithCodexAccountEvidence } from './codex-account-fixture.mjs';
 export function claudeAccountFixture({ corp = 'ok', primary = 'ok', corpNearCap = false,
   primaryNearCap = false, corpReady = true, primaryReady = true } = {}) {
   const policy = nearCap => ({ active: false, paused: false, nearCap,
@@ -24,5 +25,5 @@ export function fleetStatusWithClaudeAccountEvidence(rows) {
     ...rows,
     { provider: 'anthropic', authPath: 'oauth-corp', state: 'exhausted' },
   ];
-  return fixture;
+  return fleetStatusWithCodexAccountEvidence(fixture);
 }

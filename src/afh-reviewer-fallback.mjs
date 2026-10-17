@@ -1,3 +1,4 @@
+import { selectCodexReviewerAccount } from './codex-account-routing.mjs';
 import { selectClaudeAccountLaneFromSnapshot } from './claude-account-routing.mjs';
 // AFH-04 — reviewer ordered fallback: codex-reviewer → gemini-reviewer →
 // claude-reviewer (LAST RESORT).
@@ -322,6 +323,9 @@ export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null, clau
     error: null,
     verdictPresent,
     providers: Object.freeze(providers),
+    codexAccountSnapshot: payload,
+    codexAccountModel: codexModel,
+    codexAccountSelection: selectCodexReviewerAccount(payload, { model: codexModel, statuses: rows }),
     claudeAccountSnapshot: payload,
     claudeAccountModel: claudeModel,
     claudeAccountSelection: selectClaudeAccountLaneFromSnapshot(payload, {
@@ -448,7 +452,10 @@ export async function readAfhReviewerGrounding({
   claudeRuntimeProbeTimeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
 } = {}) {
-  if (afhReviewerFallbackDisabled(env)) {
+  const routingDisabled = afhReviewerFallbackDisabled(env);
+  // Standalone AFH rollback remains a no-I/O operation. Watcher callers also
+  // request shared quota evidence, which account admission still needs.
+  if (routingDisabled && !includeFleetQuotaStatus) {
     return unavailableGrounding('afh-reviewer-fallback-disabled');
   }
   const resolvedHqPath = hqPath || resolveHqPath(env);
@@ -485,8 +492,13 @@ export async function readAfhReviewerGrounding({
   // terminal snapshot so every probe outcome retains the same fleet result.
   const fleetQuotaStatus = includeFleetQuotaStatus ? Object.freeze(snapshot.available
     ? { stdout } : { error: true, cause: quotaError, errorMessage: snapshot.error || snapshot.reason }) : null;
-  const finalizeSnapshot = result => fleetQuotaStatus
-    ? Object.freeze({ ...result, fleetQuotaStatus }) : result;
+  const finalizeSnapshot = result => Object.freeze({ ...result,
+    ...(routingDisabled ? { reason: 'afh-reviewer-fallback-disabled',
+      // Account-only reads must not widen Claude's existing rollback path.
+      claudeAccountSnapshot: null, claudeAccountSelection: null, claudeAccountModel: null,
+    } : {}),
+    ...(fleetQuotaStatus ? { fleetQuotaStatus } : {}),
+  });
   const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
   const probeImpl = runtimeProbeUid === null
     ? null
@@ -495,7 +507,7 @@ export async function readAfhReviewerGrounding({
       : shouldAutoProbeClaudeRuntime({ execFileImpl, env, uid: runtimeProbeUid })
         ? probeClaudeReviewerRuntime
         : null;
-  if (!probeImpl) return finalizeSnapshot(snapshot);
+  if (routingDisabled || !probeImpl) return finalizeSnapshot(snapshot);
   try {
     const runtimeStatus = await probeImpl({
       execFileImpl,
@@ -593,6 +605,9 @@ export function createAfhReviewerGroundingCache({
               claudeAccountSelection: { ...entry.lastGood.snapshot.claudeAccountSelection,
                 hold: true, reason: 'claude-account-evidence-unknown' },
             } : {}),
+            ...(entry.lastGood.snapshot.codexAccountSelection ? {
+              codexAccountSelection: { hold: true, reason: 'codex-account-evidence-unknown' },
+            } : {}),
             staleIfError: Object.freeze({
               reason: snapshot?.reason || 'fleet-quota-status-unavailable',
               error: snapshot?.error || null,
@@ -679,6 +694,16 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
       hardGrounded: !status.available, grounded: !status.available, poolGrounded: !status.available,
     };
   }
+  if (model === 'codex' && grounding?.codexAccountSelection) {
+    const account = grounding.staleIfError
+      ? { hold: true, reason: 'codex-account-evidence-unknown' } : grounding.codexAccountSelection;
+    const key = account.provider === 'codex-corp' ? 'openai/oauth-corp' : 'openai';
+    const entry = grounding.providers?.[key] || base;
+    return { ...base, ...entry, known: true,
+      grounded: account.hold === true && account.reason !== 'codex-account-evidence-unknown',
+      accountHold: account.hold === true,
+      brokerProvider: account.provider || null, source: 'fleet-quota-status' };
+  }
   if (model === 'claude' && grounding?.claudeAccountSelection) {
     const account = grounding.claudeAccountSelection;
     const key = account.authPath === 'oauth-corp' ? 'anthropic/oauth-corp' : 'anthropic';
@@ -714,14 +739,8 @@ export function reviewerModelGrounding(grounding, reviewerModel) {
     };
   }
   if (!grounding?.available || !provider) return base;
-  let entry = grounding.providers?.[provider];
-  let brokerProvider = model === 'codex' ? 'codex' : null;
-  const corp = grounding.providers?.['openai/oauth-corp'];
-  if (model === 'codex' && (entry?.hardGrounded || entry?.softGrounded)
-    && corp?.admitting && !corp.hardGrounded && !corp.softGrounded) {
-    entry = corp;
-    brokerProvider = 'codex-corp';
-  }
+  const entry = grounding.providers?.[provider];
+  const brokerProvider = model === 'codex' ? 'codex' : null;
   if (!entry) return { ...base, state: 'missing-provider-status' };
   return {
     ...base,
@@ -824,11 +843,13 @@ export function afhReviewerFallbackDecision({
   });
 
   if (!baseRoute || baseRoute.configBroken) return notApplied('no-route');
-  if (grounding?.reason === 'afh-reviewer-fallback-disabled') {
-    return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled');
-  }
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
+  if (grounding?.reason === 'afh-reviewer-fallback-disabled') {
+    return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled', {
+      primary: currentModel === 'codex' ? reviewerModelGrounding(grounding, currentModel) : null,
+    });
+  }
   // An explicit operator reviewer pin outranks the AFH degradation path, exactly
   // as it outranks the gemini default layer. The grounded-pin case is logged by
   // the caller so the operator can see why reviews stopped.
@@ -883,7 +904,7 @@ export function afhReviewerFallbackDecision({
     }
     const status = reviewerModelGrounding(grounding, candidate);
     if (status.accountHold) {
-      considered.push({ reviewerModel: candidate, selected: false, reason: 'claude-account-hold' });
+      considered.push({ reviewerModel: candidate, selected: false, reason: `${normalizeReviewerModel(candidate)}-account-hold` });
       continue;
     }
     if (status.grounded) {
@@ -917,7 +938,12 @@ export function afhReviewerFallbackDecision({
 export function applyAfhReviewerFallbackDecision(baseRoute, decision) {
   if (!baseRoute) return baseRoute;
   if (!decision?.applied) {
-    if (decision?.primary?.brokerProvider === 'codex-corp') return { ...baseRoute, codexBrokerProvider: 'codex-corp' };
+    if (decision?.primary?.model === 'codex' && decision.primary.accountHold) return { ...baseRoute,
+      codexAccountHold: true, quotaBlocked: true, quotaGrounding: { reviewer: 'codex',
+        state: 'codex-account-unavailable', reason: decision.reason, source: 'fleet-quota-status' } };
+    if (decision?.primary?.model === 'codex' && decision.primary.accountHold === false && !decision.primary.grounded && decision.primary.brokerProvider) {
+      return { ...baseRoute, codexBrokerProvider: decision.primary.brokerProvider, codexAccountHold: false };
+    }
     if (decision?.primary?.grounded) {
       return {
         ...baseRoute, quotaBlocked: true,

@@ -1,3 +1,4 @@
+import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
 // QUOTAPAUSE-01: the dispatch daemon mirrors a per-credential quota pause onto
 // that credential's operator suspension, the same status file `hq fleet quota
 // suspend` writes. These tests feed the exact row the daemon writes and prove the
@@ -38,7 +39,7 @@ function pauseSuspension(provider) {
 const OK = (provider) => ({ provider, authPath: 'oauth', state: 'ok', source: 'probe' });
 
 function fleetStatusStub(rows) {
-  const stdout = JSON.stringify({ providerStatuses: rows });
+  const stdout = JSON.stringify(fleetStatusWithCodexAccountEvidence({ providerStatuses: rows }));
   return async () => ({ stdout, stderr: '' });
 }
 

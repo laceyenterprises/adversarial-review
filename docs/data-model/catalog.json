@@ -82,6 +82,15 @@
       "owner": "Claude reviewer account routing"
     },
     {
+      "id": "codex-corporate-quota-cooldown",
+      "title": "Corporate Codex Quota Cooldown",
+      "path": "docs/data-model/codex-corporate-quota-cooldown.md",
+      "store": "data/codex-corporate-quota-cooldown.json",
+      "schemaSurface": "src/codex-account-routing.mjs",
+      "relatedSchemaSurfaces": ["src/pollonce-phases.mjs", "src/reviewer-spawn-settle.mjs"],
+      "owner": "Codex reviewer account routing"
+    },
+    {
       "id": "gemini-quota-cooldown",
       "title": "Gemini Quota Cooldown",
       "path": "docs/data-model/gemini-quota-cooldown.md",

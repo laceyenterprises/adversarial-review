@@ -173,10 +173,14 @@ not trigger this retry.
 
 The delivery row also retains `codex_broker_provider` (`codex`, `codex-corp`,
 or `NULL` for non-Codex/legacy rows). The watcher writes it after winning the
-claim, guarded by that session UUID, before dispatch. A corporate quota failure
-cannot bypass its own local quota hold or repeated-execution fallback merely
-because fleet quota evidence has not caught up; primary quota failures can
-still move to the corporate account. Review-cycle resets clear attribution.
+claim, guarded by that session UUID, before dispatch. Corporate Codex is preferred
+on every route. Unknown or stale corporate evidence holds; confirmed corporate
+exhaustion or broker unavailability permits independently admitted personal
+capacity. A typed corporate quota failure persists an account cooldown before
+capacity is released, so stale fleet admission cannot repeatedly select that
+exhausted account. Quota holds can be bypassed only when changing accounts;
+repeated failures on the selected account retain bounded model fallback.
+Review-cycle resets clear attribution.
 
 The SQLite `reviewing` row is the durable delivery claim. The reviewer runtime
 also writes a per-session JSON record in `data/reviewer-runs/` so a restarted
@@ -262,7 +266,11 @@ new PR
   `rereview_requested_at`. Gemini credential saturation compares this durable
   wait against 480 seconds for first-pass or 900 seconds for re-review; a spill
   logs `reason=review-max-wait` (depth-triggered spills retain
-  `reason=queue-depth-pressure`). The existing max-wait environment overrides
+  `reason=queue-depth-pressure`). Every past-bound PR can spill at its next
+  admission point, bounded by alternate reviewer and credential capacity rather
+  than the depth lever's per-tick spill count. Reservations and refunds remain;
+  age spills do not consume or replenish the pre-bound depth budget.
+  The existing max-wait environment overrides
   can set either bound to zero to disable it.
 - `malformed` is intentionally sticky.
 - A reviewer size preflight refusal exits with reserved CLI code 76 and settles

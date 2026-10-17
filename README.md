@@ -209,6 +209,15 @@ Gemini's Google quota check. Both Claude accounts resolve the governed model fro
 the canonical `claude-reviewer` role; the selected broker provider binds token
 mints and renewals to the account.
 
+Codex reviewer routes also prefer corporate capacity, including spills and all
+fallbacks. Fresh measured quota and a serving broker admit the selected account;
+corporate exhaustion or explicit broker unavailability permits independently
+admitted personal capacity. Unknown or stale corporate evidence holds. Typed
+corporate quota exhaustion records a bounded account cooldown before releasing
+capacity. Every Codex spawn logs `codex_account=corporate|primary`; the claimed
+account also selects quota preflight and broker token minting/renewal. See
+[account routing](docs/CCX-04-corporate-review-fallback.md).
+
 **2. The reviewer prompt is adversarial, not consultative.** The standard
 reviewer prompt explicitly tells the model: *"You did NOT write this code.
 Your job is to find problems. Do NOT summarize. Do NOT praise."* Full

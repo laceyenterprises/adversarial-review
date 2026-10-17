@@ -322,3 +322,22 @@ test('reviewer exec fallback fails closed when no healthy alternative is availab
   assert.equal(route.reviewerModelFallbackSkipped.reason, 'no-healthy-alternative');
   assert.equal(route.reviewerModelFallbackSkipped.attempted.length >= 1, true);
 });
+
+for (const kind of ['execution', 'timeout']) test(`${kind} fallback clears inherited Codex attribution on a Claude route`, () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewer-provider-attribution-'));
+  try {
+    if (kind === 'timeout') recordCascadeFailure(rootDir, { repo: 'sample/project', prNumber: 1,
+      failureClass: 'reviewer-timeout', reviewerModel: 'codex', failedAt: new Date().toISOString() });
+    const route = selectReviewerRouteForAttempt({
+      rootDir, repoPath: 'sample/project', prNumber: 1,
+      subject: { builderClass: 'gemini' }, headSha: 'head-1',
+      baseRoute: { reviewerModel: 'codex', codexBrokerProvider: 'codex-corp' },
+      currentRow: { review_status: 'failed', reviewer: 'codex', reviewer_head_sha: 'head-1',
+        codex_broker_provider: 'codex-corp', failure_message: '[quota-exhausted] synthetic exhaustion', infra_auto_recover_attempts: 1 },
+      env: kind === 'timeout' ? { AGENT_OS_REVIEWER_EXEC_FALLBACK_THRESHOLD: '0',
+        ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD: '1', ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL: 'claude' } : {},
+    });
+    assert.equal(route.reviewerModel, 'claude');
+    assert.equal(route.codexBrokerProvider, null);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});

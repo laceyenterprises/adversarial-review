@@ -1,3 +1,4 @@
+import { codexReviewerAccountForGrounding, readCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { createReviewerPreflight, reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
 import { reviewerCredentialKey, selectClaudeAccountLaneFromSnapshot, readCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
 import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './reviewer-timeout-budget.mjs';
@@ -1918,6 +1919,13 @@ export async function processReviewSubject(entry, ctx) {
           );
         }
       }
+      const blockedCodexCorporate = () => Boolean(readCorporateCodexQuotaCooldown(ROOT));
+      const refreshCodexAccount = () => codexReviewerAccountForGrounding(afhGrounding, {
+        corporateExhausted: blockedCodexCorporate(),
+      });
+      if (afhGrounding?.codexAccountSelection) afhGrounding = {
+        ...afhGrounding, codexAccountSelection: refreshCodexAccount(),
+      };
       const blockedClaudeWorkerClasses = () => readCorporateClaudeQuotaCooldown(ROOT)
         ? ['claude-reviewer-corp'] : [];
       const refreshClaudeAccount = (selection = afhGrounding?.claudeAccountSelection) => {
@@ -2021,6 +2029,7 @@ export async function processReviewSubject(entry, ctx) {
             : reviewWorkerClassFallback(process.env),
           depthPressure,
           blockedClaudeWorkerClasses: blockedClaudeWorkerClasses(),
+          blockedCodexCorporate: blockedCodexCorporate(),
           // Discovery must leave an engaged depth lane on its preferred route
           // until the pool checks saturation. Spending burst here would bypass
           // that check and charge the wrong lever before depth can run.
@@ -2060,7 +2069,7 @@ export async function processReviewSubject(entry, ctx) {
         }
 
         // Account admission also applies when Claude remains the primary route.
-        if (!rwfDecision.fellBack && route.reviewerModel === 'claude') {
+        if (!rwfDecision.fellBack && ['claude', 'codex'].includes(route.reviewerModel)) {
           route = applyReviewerWorkerClassFallbackToRoute({ route, decision: rwfDecision }).route;
         }
         if (rwfDecision.fellBack) {
@@ -3149,6 +3158,15 @@ export async function processReviewSubject(entry, ctx) {
             this.refundDepthSpill();
             return { dispatched: false, reason: 'watcher-drain-active' };
           }
+          if (route.reviewerModel === 'codex') {
+            const account = refreshCodexAccount();
+            if (account.hold) {
+              this.refundDepthSpill('codex-account-hold');
+              this.retainWakeForCapacity();
+              return { dispatched: false, reason: account.reason };
+            }
+            route = { ...route, codexBrokerProvider: account.provider };
+          }
           if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
             this.refundDepthSpill('quota-blocked');
             this.retainWakeForCapacity();
@@ -3394,6 +3412,17 @@ export async function processReviewSubject(entry, ctx) {
                 `[watcher] Lost claim race on ${repoPath}#${prNumber} — another watcher is handling this PR (or its row is now in a non-claimable state). Skipping.`
               );
               return { dispatched: false, reason: 'claim-race-lost' };
+            }
+            if (route.reviewerModel === 'codex') {
+              const account = refreshCodexAccount();
+              if (account.hold) {
+                if (preClaimRow) releaseUnexecutedReviewClaim();
+                else stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                this.refundDepthSpill('codex-account-hold');
+                this.retainWakeForCapacity();
+                return { dispatched: false, reason: account.reason };
+              }
+              route = { ...route, codexBrokerProvider: account.provider };
             }
             // Stamp account attribution for every successful claim, including
             // new PRs and infra retries, before any reviewer can fail.
@@ -3826,6 +3855,9 @@ export async function processReviewSubject(entry, ctx) {
                   || completedRemediationRounds > 0,
               });
               dispatchCandidate.spawnClaudeAccountSelection = selectedClaudeAccount;
+              // A previous dispatch may have capped corporate quota since the tick's snapshot.
+              // Share the refreshed account with both fallback selection stages.
+              afhGrounding = { ...afhGrounding, codexAccountSelection: refreshCodexAccount() };
               const spawnReviewerArgs = {
                 claudeAccountSelection: selectedClaudeAccount || null,
                 repo: repoPath,

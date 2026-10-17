@@ -1,3 +1,4 @@
+import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
@@ -30,7 +31,7 @@ const probe = (statuses) => async () => ({ stdout: stdout(statuses) });
 const route = (builderClass) => routeSubject({ builderClass }, { env: {}, topPath: '/dev/null', geminiReviewerMode: 'off' });
 function reviewer(statuses, builderClass = 'claude-code', codexModel = null) {
   return applyAfhReviewerFallback({ builderClass, baseRoute: route(builderClass),
-    grounding: afhGroundingSnapshotFromStdout(stdout(statuses), { codexModel }), geminiReviewerMode: 'off' });
+    grounding: afhGroundingSnapshotFromStdout(JSON.stringify(fleetStatusWithCodexAccountEvidence({ providerStatuses: statuses })), { codexModel }), geminiReviewerMode: 'off' });
 }
 
 test('CCX-04 claimed account persists across failure and corporate quota does not bypass local safeguards', () => {
@@ -50,7 +51,7 @@ test('CCX-04 claimed account persists across failure and corporate quota does no
     assert.equal(failed.codex_broker_provider, 'codex-corp');
     // AFH still reports corporate admission while local failure says exhausted.
     const baseRoute = reviewer(rows());
-    const grounding = afhGroundingSnapshotFromStdout(stdout(rows()));
+    const grounding = afhGroundingSnapshotFromStdout(JSON.stringify(fleetStatusWithCodexAccountEvidence({ providerStatuses: rows() })));
     const select = (currentRow, env = {}) => selectReviewerRouteForAttempt({
       subject: { builderClass: 'claude-code' }, baseRoute, rootDir, repoPath: 'fixture/repo', prNumber: 1,
       currentRow, headSha: 'head', env, afhGrounding: grounding,
@@ -120,8 +121,8 @@ test('CCX-04 missing corporate row never borrows primary evidence; recovery auto
   assert.equal(harnessCapFromStatuses(parsed, { harness: 'codex' }).available, true);
   assert.equal(harnessCapFromStatuses(parsed, { harness: 'codex-corp' }).capped, true);
   assert.equal(harnessCapFromStatuses(parsed.slice(1), { harness: 'codex-corp' }).available, false);
-  assert.equal(reviewer(statuses).codexBrokerProvider, undefined);
-  assert.equal(reviewerModelGrounding(afhGroundingSnapshotFromStdout(stdout(statuses)), 'codex').brokerProvider, 'codex');
+  assert.equal(reviewer(statuses).codexBrokerProvider, 'codex');
+  assert.equal(reviewerModelGrounding(afhGroundingSnapshotFromStdout(JSON.stringify(fleetStatusWithCodexAccountEvidence({ providerStatuses: statuses }))), 'codex').brokerProvider, 'codex');
 });
 
 test('CCX-04 reviewer screens the routed model on each account', () => {

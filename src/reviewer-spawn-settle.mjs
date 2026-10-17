@@ -1,3 +1,4 @@
+import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { readReviewerEvidenceInWorker } from './reviewer-token-ledger-lookup.mjs';
 import { openReviewStateDb } from './review-state.mjs';
 import { reviewerCredentialKey, recordCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
@@ -231,7 +232,7 @@ async function readReviewerQuotaDecision({
         ? resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel
         : null,
     });
-    return { available: !cap.capped, capped: cap.capped, state: cap.state, provider };
+    return { available: !cap.capped, capped: cap.capped, state: cap.state, resetAt: cap.resetAt, provider };
   } catch {
     return {
       available: true,
@@ -730,17 +731,24 @@ async function spawnReviewerOnceWithAccount({
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`
     + (normalizeReviewerModel(reviewerModel) === 'claude'
-      ? ` claude_account=${claudeAccountSelection?.provider === 'claude-code-corp' ? 'corporate' : 'primary'}` : ''));
+      ? ` claude_account=${claudeAccountSelection?.provider === 'claude-code-corp' ? 'corporate' : 'primary'}`
+      : normalizeReviewerModel(reviewerModel) === 'codex'
+        ? ` codex_account=${codexBrokerProvider === 'codex-corp' ? 'corporate' : 'primary'}` : ''));
 
   let quotaDecision;
   const claudeBrokerProvider = claudeAccountSelection?.provider || 'claude-code';
   try {
-    quotaDecision = await readReviewerQuotaDecisionImpl({
-      reviewerModel,
-      codexBrokerProvider,
-      claudeBrokerProvider,
-      env: quotaCheckEnv,
-    });
+    const corporateCodexCooldown = normalizeReviewerModel(reviewerModel) === 'codex'
+      && codexBrokerProvider === 'codex-corp'
+      && readCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv });
+    quotaDecision = corporateCodexCooldown
+      ? { available: false, capped: true, state: 'corporate-quota-cooldown', provider: 'openai', resetAt: corporateCodexCooldown.resetAt }
+      : await readReviewerQuotaDecisionImpl({
+        reviewerModel,
+        codexBrokerProvider,
+        claudeBrokerProvider,
+        env: quotaCheckEnv,
+      });
     if (normalizeReviewerModel(reviewerModel) === 'gemini' && quotaDecision.state !== 'disabled') {
       const poolAvailability = await readReviewerGeminiPoolAvailability({
         pool: agyReviewerIdentityPool, adapter: activeReviewerRuntimeAdapter,
@@ -758,6 +766,11 @@ async function spawnReviewerOnceWithAccount({
     quotaDecision = { available: false, capped: true, state: claudeAccountSelection.reason, provider: 'anthropic' };
   }
   if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
+    if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp'
+      && quotaDecision.state !== 'corporate-quota-cooldown') {
+      try { recordCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv, resetAt: quotaDecision.resetAt }); }
+      catch (error) { console.warn(`[watcher] corporate Codex quota cooldown persistence failed: ${error.message}`); }
+    }
     const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
     const startedAt = new Date().toISOString();
     const metadata = {
@@ -909,6 +922,12 @@ async function spawnReviewerOnceWithAccount({
         forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
         onReviewerPgid,
       });
+      if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp'
+        && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+        try { recordCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv,
+          resetAt: resolveQuotaResetIso([runtimeResult.error, runtimeResult.stderr, runtimeResult.stderrTail].filter(Boolean).join('\n')) }); }
+        catch (error) { console.warn(`[watcher] corporate Codex quota cooldown persistence failed: ${error.message}`); }
+      }
       if (normalizeReviewerModel(reviewerModel) === 'claude' && claudeBrokerProvider === 'claude-code-corp'
         && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
         try { recordCorporateClaudeQuotaCooldown(rootDir, { env: quotaCheckEnv,

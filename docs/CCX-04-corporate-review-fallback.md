@@ -17,8 +17,16 @@ to another writer family retain REMFALLBACK-01's next-round-reviewer screening.
 Both local and pool dispatch retain the remediator's entitlement and harness
 commit/push identity. Neither lane falls back to the `codex-corp` builder class.
 
-The watcher selects the corporate broker provider before its existing model
-fallbacks when primary Codex is capped and corporate Codex is admitting.
+REVIEWCORPFIRST-01: the watcher selects corporate Codex first for direct reviews,
+worker-class spills, and provider/execution/timeout fallbacks. Corporate admission
+requires fresh measured quota, an uncapped governed reviewer model, and a broker
+that is ready and can serve. Reserve flags alone never switch accounts. Personal
+Codex is eligible only after corporate exhaustion or explicit broker unavailability,
+and requires its own quota and broker evidence. Stale or unknown corporate evidence
+holds instead of spending personal quota. Legacy AFH projections retain their
+provider classification; final watcher admission still requires account evidence.
+Every Codex spawn logs `codex_account=corporate|primary`. Disabling the AFH model
+hop retains the watcher’s shared quota read and account admission.
 `CODEX_BROKER_PROVIDER` reaches the reviewer child and every per-worker auth-sync
 request. Corporate auth starts empty, requires a successful corporate broker
 mint, and fails closed instead of copying or falling back to primary tokens.
@@ -34,8 +42,17 @@ After winning the existing single-claim CAS, the watcher stamps
 `reviewed_prs.codex_broker_provider` under the claimed session before dispatch.
 The account is retained on failure: primary quota exhaustion may bypass the
 local hold and execution fallback to try corporate Codex, but a corporate
-quota failure uses the normal local hold and bounded model-fallback threshold
-even while the fleet snapshot still reports corporate admission. Legacy rows
+quota failure records an account-local cooldown before capacity is released,
+allowing independently admitted personal capacity while fleet evidence catches up.
+Spawn preflight checks that cooldown before consulting fleet quota, preserving its
+original reset time and leaving the cooldown file untouched on repeated refusals.
+New exhaustion reports preserve any later active reset instead of shortening it
+with a shorter provider reset or the fallback hold.
+Before dispatch, both fallback selection stages share a refreshed account
+selection so an in-tick cooldown cannot reuse
+the original corporate admission snapshot.
+If that account cannot admit, normal local holds and bounded model fallback remain.
+Legacy rows
 without account attribution retain the primary-account interpretation.
 
 `codex-corp` normalizes to the Codex family. Codex-family reviewers never review

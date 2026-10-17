@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 
 import {
   BRANCH_NOT_PROTECTED_STDERR,
@@ -24,7 +25,7 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 
-test('FINALCLOSE-01 publish transfers only a completed negative proof to exact-head review', () => {
+test('FINALCLOSE-01 publish transfers only a completed negative proof to exact-head review', t => {
   assert.match(HAMMER_TEMPLATE, /HAM_COMMIT_PUBLICATION_ONLY=1/);
   assert.match(HAMMER_TEMPLATE, /tree IDs/);
   const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
@@ -33,19 +34,51 @@ test('FINALCLOSE-01 publish transfers only a completed negative proof to exact-h
   assert.match(block, /hammer-head-context\.mjs/);
   assert.match(block, /--pr <<PR_URL>>/);
   assert.match(block, RANGE_PROBE);
-  for (const exitCode of [65]) {
+  for (const exitCode of [1, 65, 124]) {
+    const dir = mkdtempSync(join(tmpdir(), 'hammer-provenance-abort-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    mkdirSync(join(dir, 'bin'));
+    const runDir = join(dir, 'run');
+    mkdirSync(runDir);
+    const captured = join(dir, 'attempt.json');
+    writeFileSync(join(dir, 'bin', 'ama-audit.mjs'), `import {readFileSync,writeFileSync} from 'node:fs';
+      const args=process.argv.slice(2); writeFileSync(${JSON.stringify(captured)},readFileSync(args[args.indexOf('--attempt-json')+1]));`);
+    writeFileSync(join(dir, 'bin', 'merge-action-receipt.mjs'), '');
+    writeFileSync(join(runDir, 'range.stderr'), 'synthetic provenance read failure\n');
+    writeFileSync(join(runDir, 'hammer-merge.sh'), renderHammerProcedure('hammer-merge', {
+      ROOT_DIR: dir, HQ_ROOT: dir, RUN_DIR: runDir, REPO: 'fixture/repo', PR_NUMBER: '42',
+      REVIEWED_SHA: 'b'.repeat(40), TARGET_REMEDIATION_SHA: 'a'.repeat(40),
+      PR_URL: 'https://github.com/fixture/repo/pull/42', REVIEWER: 'synthetic-reviewer',
+      RISK_CLASS: 'low', MERGE_METHOD: 'squash',
+    }));
     const script = block.replace(RANGE_PROBE, `(exit ${exitCode})`)
       .replace(/[^\n]*ham_gh pr comment[^\n]+/g, 'echo re-review')
       .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review')
       .replaceAll('<<ROOT_DIR>>', '"$HAM_TEST_ROOT"')
+      .replaceAll('<<RUN_DIR>>', runDir)
       .replaceAll('<<REPO>>', 'fixture/repo');
-    const result = spawnSync('bash', ['-c', `ham_release_merge_lease() { :; }\n${script}`],
+    const result = spawnSync('bash', ['-c', `
+      ham_release_merge_lease() { echo released; }
+      ham_mark_merge_lease_retryable_abort() { echo "retryable:$1"; }
+      ${script}`],
       { encoding: 'utf8', timeout: 5000,
-        env: { ...process.env, HAM_NODE_BIN: process.execPath, HAM_TEST_ROOT: REPO_ROOT } });
+        env: { ...process.env, HAM_NODE_BIN: process.execPath, HAM_TEST_ROOT: REPO_ROOT,
+          HAM_RUN_DIR: runDir, HAM_MERGE_LEASE_HELD: '1', HAM_MERGE_LEASE_ID: 'fixture',
+          HAM_VERDICT_FILE: join(dir, 'absent-verdict.json'), POST_REMEDIATION_SHA: 'a'.repeat(40) } });
     assert.ifError(result.error);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stderr, '');
-    assert.match(result.stdout, /re-review/);
+    if (exitCode === 65) {
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, '');
+      assert.match(result.stdout, /released\nre-review/);
+    } else {
+      assert.equal(result.status, 1, result.stderr);
+      assert.equal(result.stderr, 'synthetic provenance read failure\n');
+      assert.match(result.stdout, /retryable:history-read-failed\nreleased/);
+      assert.doesNotMatch(result.stdout, /re-review/);
+      const attempt = JSON.parse(readFileSync(captured, 'utf8'));
+      assert.equal(attempt.reason, 'history-read-failed');
+      assert.equal(attempt.historyReadError, 'synthetic provenance read failure');
+    }
   }
 });
 

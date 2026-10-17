@@ -359,6 +359,16 @@ export async function evaluateHammerStopHold({
   }
   const stop = readHammerStopForHead({ hqRoot, repo, prNumber, headSha, reviewedSha, readAuditImpl, logger });
   if (!stop) return { action: 'none' };
+  // FINALCLOSE-01: transport evidence cannot become an input-change hold. The
+  // launched hammer owns a fresh read; ordinary series/lifetime caps own retries.
+  if (stop.predicate === 'history-read-failed' && !stop.refusal) {
+    const changed = ['history-read-retry'];
+    writeHoldState(rootDir, repo, prNumber, { ...state, currentHead: headSha,
+      heads: { ...state.heads, [headSha]: { stopKey: stop.stopKey, releasedAt: now,
+        releasedBy: changed, paged: false } } });
+    return { action: 'release', hammerStop: stop, changed };
+  }
+
   const inputs = hammerStopInputs(prMetadata, { excludeContexts, reviewState });
   const prior = state.heads[headSha];
   const sameRefusal = stop.refusal && prior?.refusal?.key === stop.refusal.key;

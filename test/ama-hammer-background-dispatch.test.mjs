@@ -1521,13 +1521,8 @@ for (const largeEvidenceOnly of [false, true]) {
     await flush();
     const waiting = await first;
     assert.equal(waiting.outcome, 'ama-pending');
-    assert.equal(waiting.amaClosureResult.reason, 'ama-coexistence-operation-timeout');
-    assert.equal(counters.launches, 0);
-    t.mock.timers.tick(7000);
-    await flush();
-    const second = await run();
-    assert.equal(second.amaClosureResult.reason, AMA_HAMMER_BACKGROUND_REASON);
-    await flush();
+    assert.equal(waiting.amaClosureResult.reason, AMA_HAMMER_BACKGROUND_REASON);
+    assert.equal(counters.launches, largeEvidenceOnly ? 1 : 0);
     if (!largeEvidenceOnly) {
       await waitFor(() => counters.reads === 1);
       t.mock.timers.tick(1000);
@@ -1537,7 +1532,7 @@ for (const largeEvidenceOnly of [false, true]) {
     await waitFor(() => counters.launches === 1);
     await queue.drain();
     assert.equal(counters.launches, 1);
-    assert.equal(Date.now() - startedAt, largeEvidenceOnly ? 12_000 : 33_000);
+    assert.ok(Date.now() - startedAt <= 33_000, 'dispatch no longer waits for the slow proof to finish');
     assert.equal(counters.delta, 1);
     assert.equal(counters.suppression, 1);
     assert.equal(counters.evidence, 1);

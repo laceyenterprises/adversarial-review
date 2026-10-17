@@ -30,6 +30,11 @@ function assertStoreOwner(rootDir, path = null) {
   }
 }
 
+export function primaryChangeStoreOwned(rootDir) {
+  try { assertStoreOwner(rootDir); return true; }
+  catch { return false; } // No store reads or writes by this caller.
+}
+
 export function primaryChangeReadStatus({ rootDir, repo, prNumber, headSha }) {
   const entry = [...running.values()].find(item => item.args.rootDir === rootDir
     && item.args.repo === repo && Number(item.args.prNumber) === Number(prNumber) && item.args.headSha === headSha);

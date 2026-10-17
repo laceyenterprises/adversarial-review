@@ -1,7 +1,13 @@
+import { isTransientGhError } from '../gh-cli.mjs';
 import { proveReviewedRebase } from './reviewed-rebase.mjs';
 import { opendir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HAM_AUDIT_COMMENT_AUTHOR_LOGINS, hamAuditCommentAuthorMatches } from './ham-provenance.mjs';
+
+function rethrowReadFailure(error) {
+  if (error?.hammerHistoryReadFailed || error?.primaryChangeReadFailed || isTransientGhError(error)
+    || error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
+}
 
 const login = identity => String(typeof identity === 'object' ? identity?.login || '' : identity || '').toLowerCase().replace(/\[bot\]$/, '');
 // Existing fleet App identities, shared by builders, remediators and conflict rebases.
@@ -99,7 +105,7 @@ async function readForcePushEvents(loadTimelinePage) {
       if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) return null;
       cursors.add(cursor);
     }
-  } catch { return null; }
+  } catch (error) { rethrowReadFailure(error); return null; }
   return null;
 }
 
@@ -148,7 +154,7 @@ async function remediationChain(rounds, reviewedHead, target, repo, get, loadTim
           kind = 'fleet-force-push';
         } else if (comparison?.status !== 'ahead') continue;
         trusted.set(head, [...trusted.get(base), { head, kind }]);
-      } catch { continue; }
+      } catch (error) { rethrowReadFailure(error); continue; }
       changed = true;
     }
     if (trusted.get(target)?.length > 0) return trusted.get(target);
@@ -241,6 +247,15 @@ async function resolveFleetLogins(env) {
 
 // An additive fallback only: preserve every existing proof and refusal first.
 export async function fetchHammerHeadRange(options) {
+  options = { ...options };
+  for (const key of ['get', 'loadComments', 'loadTimelinePage', 'loadActivityPage', 'loadRebaseBase']) {
+    const read = options[key];
+    if (read) options[key] = async (...args) => {
+      try { return await read(...args); }
+      catch (cause) { throw Object.assign(new Error(`history read failed: ${cause.message}`, { cause }),
+        { hammerHistoryReadFailed: true }); }
+    };
+  }
   const existing = await fetchExistingHammerHeadRange(options);
   if (existing) return existing;
   const { repo, reviewedHead, currentHead, hammerBaseHead, get, loadActivityPage,
@@ -264,7 +279,7 @@ export async function fetchHammerHeadRange(options) {
       // by a fleet actor alone: conflict ownership is not review authority.
       const comparison = await get(`repos/${repo}/compare/${reviewedHead}...${target}`);
       if (!['ahead', 'identical'].includes(comparison?.status)) return null;
-    } catch { return null; /* Missing objects or policy cannot authorize a rebased starting base. */ }
+    } catch (error) { rethrowReadFailure(error); return null; }
   }
   if (!reviewedHead || !target || reviewedHead === target || !loadActivityPage || !prNumber) return null;
   try {
@@ -315,6 +330,7 @@ export async function fetchHammerHeadRange(options) {
       for (let offset = 0; offset < steps.length; offset += 4) {
         const batch = steps.slice(offset, offset + 4);
         const commits = await Promise.allSettled(batch.map(async step => get(`repos/${headRepo}/commits/${step.after}`)));
+        for (const result of commits) if (result.status === 'rejected') rethrowReadFailure(result.reason);
         if (commits.some((result, index) => result.status !== 'fulfilled'
           || result.value?.sha !== batch[index].after
           || !fleetCommitIdentityMatches(result.value, fleetLogins))) return null;
@@ -322,6 +338,6 @@ export async function fetchHammerHeadRange(options) {
       return { verified: true, reviewedHead, currentHead, baseSha: reviewedHead,
         commits: steps.map(step => step.after), proof: 'branch-activity', steps };
     }
-  } catch { /* Unreadable activity contributes no new proof. */ }
+  } catch (error) { rethrowReadFailure(error); /* Unreadable structure contributes no proof. */ }
   return null;
 }

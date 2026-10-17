@@ -6,7 +6,17 @@ import { join } from 'node:path';
 import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerRetryDispatch, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
 import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
-
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
+import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
+import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { evaluateHammerStopHold } from '../src/ama/hammer-stop-hold.mjs';
+import { fetchHammerHeadRange } from '../src/ama/hammer-head-validation.mjs';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
 const repo = 'fixture/repo', prNumber = 41, headSha = 'a'.repeat(40);
 const started = '2026-01-01T00:00:00Z', observed = '2026-01-01T00:10:00Z';
 function fixture(t, { charged = 1, ledgerStatus = 'succeeded', reportedStatus = 'starting' } = {}) {
@@ -76,9 +86,6 @@ test('FINALCLOSE-01 terminal launches exhaust the cap and page once with the las
   assert.match(f.pages[0], /terminal-launch-without-merge|hammer-exited-without-close/);
 });
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
-import { observeClosureWait } from '../src/ama/closure-wait.mjs';
 
 const reviewed = 'b'.repeat(40);
 const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- **Cleanup**\n  - **Problem:** redundant branch\n## Verdict\nComment only';
@@ -141,30 +148,98 @@ test('FINALCLOSE-01 final-round wait pages once at thirty minutes despite changi
   assert.match(pages[0], /history-read-failed/);
 });
 
-import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
-import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
-for (const requestedHead of [headSha, 'c'.repeat(40)]) {
-  test(`FINALCLOSE-01 interrupted handoff admits only its exact head: ${requestedHead === headSha}`, async t => {
+for (const handoffHead of [headSha, 'c'.repeat(40)]) {
+  test(`FINALCLOSE-01 interrupted handoff admits only its exact final-round head: ${handoffHead === headSha}`, async t => {
     const rootDir = finalRound(t);
     const db = openReviewStateDb(rootDir);
     ensureReviewStateSchema(db);
     db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
       reviewer_head_sha,revision_ref) VALUES (?,?,'2026-01-01T00:00:00Z','claude','open','posted',?,?)`)
       .run(repo, prNumber, reviewed, reviewed);
-    const identity = { rootDir, repo, prNumber, headSha };
+    const identity = { rootDir, repo, prNumber, headSha: handoffHead };
     acquireAmaCloserLease(identity);
     await handoffHammerReview({ ...identity, requestBoundedReviewImpl: async () => null });
-    if (requestedHead !== headSha) {
-      // The same completed final round has a different push: an older handoff
-      // cannot authorize that head merely because the PR number matches.
-      const file = join(rootDir, 'data', 'follow-up-jobs', 'completed', 'fixture__repo-pr-41-final.json');
-      const job = JSON.parse((await import('node:fs')).readFileSync(file));
-      job.completion.workerPushedHeadSha = requestedHead;
-      writeFileSync(file, JSON.stringify(job));
-    }
     const result = requestReviewRereview({ rootDir, repo, prNumber, db,
-      targetRevisionRef: requestedHead, reason: 'auto-refresh: PR head moved' });
-    assert.equal(result.triggered, requestedHead === headSha);
-    if (requestedHead !== headSha) assert.equal(result.reason, 'comment-only-final-round-completed');
+      targetRevisionRef: headSha, reason: 'auto-refresh: PR head moved' });
+    assert.equal(result.triggered, handoffHead === headSha);
+    if (handoffHead !== headSha) assert.equal(result.reason, 'comment-only-final-round-completed');
   });
 }
+
+test('FINALCLOSE-01 a history-read-failed final hammer retries under the existing series cap', async t => {
+  const f = fixture(t, { ledgerStatus: 'failed', reportedStatus: 'failed' });
+  writeAmaAuditEntry({ hqRoot: f.args.dispatchContext.hqRoot, repo, prNumber, headSha,
+    now: observed, attempt: { outcome: 'failed-without-merge', head: headSha,
+      reason: 'history-read-failed', path: 'hammer', noExecution: true, launchRequestId: 'lrq_finished', historyReadError: 'synthetic API timeout' } });
+  f.args.fetchPrimaryChangeImpl = async () => ({ headSha, historyReadFailed: true });
+  const result = await maybeDispatchAmaCloser(f.args);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(f.launches.length, 1);
+  assert.equal(readHammerRetryCapLedger(f.rootDir, { repo, prNumber }).attemptCount, 2);
+});
+
+test('FINALCLOSE-01 transient history failure releases without an evidence read or a stop-hold page', async t => {
+  const rootDir = finalRound(t);
+  const result = await evaluateHammerStopHold({ rootDir, hqRoot: rootDir, repo, prNumber, headSha,
+    prMetadata: { headSha }, now: observed,
+    readAuditImpl: () => ({ attempts: [{ head: headSha, path: 'hammer', outcome: 'failed-without-merge',
+      reason: 'history-read-failed', startedAt: started }] }),
+    fetchPrimaryChangeImpl: async () => assert.fail('a transient read must be retried by the capped hammer'),
+    deliverAlertImpl: async () => assert.fail('the shared final-round/cap page owns escalation') });
+  assert.equal(result.action, 'release');
+});
+
+
+test('FINALCLOSE-01 starting-head chain transport failure is distinguishable from a negative provenance proof', async () => {
+  const args = { repo, reviewedHead: reviewed, currentHead: headSha, hammerBaseHead: headSha,
+    remediationRounds: [{ state: 'completed', startHeadSha: reviewed, resultingHeadSha: headSha }],
+    get: async () => { throw new Error('synthetic API timeout'); } };
+  await assert.rejects(fetchHammerHeadRange(args), error => error.hammerHistoryReadFailed === true
+    && /synthetic API timeout/.test(error.message));
+  assert.equal(await fetchHammerHeadRange({ ...args, get: async () => ({ status: 'behind' }) }), null);
+});
+
+test('FINALCLOSE-01 provenance read abort writes its terminal audit and releases the lease without attempting merge', t => {
+  const rootDir = finalRound(t), bin = join(rootDir, 'bin'), runDir = join(rootDir, 'run');
+  mkdirSync(bin); mkdirSync(runDir);
+  const captured = join(rootDir, 'captured.json');
+  writeFileSync(join(bin, 'ama-audit.mjs'), `import {readFileSync,writeFileSync} from 'node:fs';
+    const args=process.argv.slice(2); writeFileSync(${JSON.stringify(captured)},readFileSync(args[args.indexOf('--attempt-json')+1]));`);
+  writeFileSync(join(bin, 'merge-action-receipt.mjs'), '');
+  const procedure = join(rootDir, 'merge.sh');
+  writeFileSync(procedure, renderHammerProcedure('hammer-merge', { ROOT_DIR: rootDir, HQ_ROOT: rootDir,
+    RUN_DIR: runDir, REPO: repo, PR_NUMBER: String(prNumber), REVIEWED_SHA: reviewed,
+    TARGET_REMEDIATION_SHA: headSha, PR_URL: `https://github.com/${repo}/pull/${prNumber}`,
+    REVIEWER: 'synthetic-reviewer', RISK_CLASS: 'low', MERGE_METHOD: 'squash' }));
+  const result = spawnSync('bash', ['-c', `
+    HAM_MERGE_LEASE_HELD=1 HAM_MERGE_LEASE_ID=fixture HAM_NODE_BIN="$1"
+    HAM_VERDICT_FILE="$2/absent.json" POST_REMEDIATION_SHA="$3"
+    HAM_HISTORY_READ_ERROR='synthetic compare API timeout'
+    ham_release_merge_lease() { echo released; }
+    ham_mark_merge_lease_retryable_abort() { echo "retryable:$1"; }
+    source "$4" --history-read-abort
+  `, 'fixture', process.execPath, runDir, headSha, procedure], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /retryable:history-read-failed\nreleased/);
+  const attempt = JSON.parse(readFileSync(captured));
+  assert.equal(attempt.reason, 'history-read-failed');
+  assert.equal(attempt.historyReadError, 'synthetic compare API timeout');
+});
+
+test('FINALCLOSE-01 dispatch-only closer admits a stale final head and does not resolve merge evidence', async t => {
+  const f = fixture(t), rootDir = finalRound(t);
+  f.args.dispatchContext = { ...f.args.dispatchContext, rootDir, reviewedSha: reviewed,
+    dispatchRecordHeadSha: reviewed, finalRoundDispatchOnly: true, allowStaleReviewHeadHammerResume: true };
+  f.args.reviewState.headSha = reviewed;
+  f.args.prMetadata.mergeableState = 'UNKNOWN';
+  f.args.resolveHamTerminalRemediationEvidenceImpl = async () => assert.fail('dispatch-only cannot use a merge certificate');
+  assert.equal((await maybeDispatchAmaCloser(f.args)).dispatched, true);
+  assert.equal(f.launches.length, 1);
+});
+
+test('FINALCLOSE-01 first observation thirty minutes after the final push pages immediately', async t => {
+  const rootDir = finalRound(t), pages = [];
+  await observeClosureWait({ rootDir, repo, prNumber, headSha, now: 1800000,
+    startedAt: 0, waitClass: 'final-round', reason: 'coexistence-timeout', pageImpl: async text => pages.push(text) });
+  assert.equal(pages.length, 1);
+});

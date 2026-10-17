@@ -850,7 +850,8 @@ export async function maybeDispatchAmaClosureFor({
       await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
         reason: result?.reasons?.join(', ') || result?.reason || 'closure-pending',
         progress: result?.dispatched === true, now: options.now ? options.now() : Date.now(),
-        env: options.env || process.env, waitClass: 'final-round' });
+        env: options.env || process.env, waitClass: 'final-round',
+        ...(result?.hammerStop?.paged ? { immediate: true, pageImpl: async () => {} } : {}) });
     } catch (error) { options.logger?.warn?.(`[watcher] final-round wait observation failed: ${error.message}`); }
   }
   if (result && closureOwnerSink.value) result = { ...result,
@@ -999,6 +1000,7 @@ async function dispatchAmaClosureFor({
   // Mirrors evaluateRoundBudgetForReview's budget resolution. Fail-safe: any
   // error leaves the signal false (AMA keeps its normal strict gates).
   let reviewCycleExhausted = false;
+  let finalRoundCompletedAt = null;
   let completedRemediationRoundsForPR = null;
   let completedRereviewRoundsForPR = null;
   let completedRemediationRevisionRefsForPR = [];
@@ -1034,6 +1036,8 @@ async function dispatchAmaClosureFor({
     } else {
       const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
       ledgerRiskClass = remLedger?.latestRiskClass || null;
+      finalRoundCompletedAt = (remLedger.completedRoundTimestamps || [])
+        .map(entry => Date.parse(entry.terminalAt)).filter(Number.isFinite).sort((a, b) => b - a)[0] || null;
       const rbResolution = resolveRoundBudgetForJob(
         { riskClass: remLedger.latestRiskClass },
         { rootDir },
@@ -1097,12 +1101,20 @@ async function dispatchAmaClosureFor({
 
   const finalHead = candidate?.headSha || currentRevisionRef || null;
   const finalPush = commentOnlyFinalRoundPushedHeads.find(entry => entry.workerPushedHeadSha === finalHead);
-  if ((reviewCycleExhausted || finalPush) && cfg.autonomousMergeExecutionEnabled !== false && finalRoundSink) {
+  // Final-round ownership survives a later hammer push. This is dispatch
+  // admission only; neither the historical verdict nor the new head is merge authority.
+  const finalRoundKnown = commentOnlyFinalRoundRevisionRefs.length > 0;
+  if ((reviewCycleExhausted || finalPush || finalRoundKnown) && cfg.autonomousMergeExecutionEnabled !== false && finalRoundSink) {
     finalRoundSink.value = { rootDir, repo: repoPath, prNumber, headSha: finalHead,
-      startedAt: Date.parse(finalPush?.completedAt || reviewStateRow?.posted_at || '') };
+      startedAt: Date.parse(finalPush?.completedAt || '') || finalRoundCompletedAt
+        || Date.parse(reviewStateRow?.posted_at || '') };
   }
+  const observeWait = args => observeClosureWaitImpl({
+    ...(finalRoundSink?.value ? { waitClass: 'final-round', startedAt: finalRoundSink.value.startedAt } : {}),
+    ...args,
+  });
   if (finalRoundDispatchOnly) {
-    if ((!reviewCycleExhausted && !finalPush) || !finalHead || probeCloserAuthoredStale
+    if ((!reviewCycleExhausted && !finalPush && !finalRoundKnown) || !finalHead || probeCloserAuthoredStale
       || cfg.autonomousMergeExecutionEnabled === false) throw finalRoundDispatchOnly;
     const snapshot = await buildAdversarialGateSnapshot(rootDir, { repo: repoPath, prNumber,
       reviewRow: reviewStateRow, headSha: reviewStateRow?.reviewer_head_sha || finalHead,
@@ -1135,9 +1147,10 @@ async function dispatchAmaClosureFor({
         parentSession: env.HQ_PARENT_SESSION || 'session:watcher',
         dispatchedAt: new Date(now()).toISOString(), orchestrationMode }, logger,
     };
-    const run = async signal => {
+    const run = async (signal, background = false) => {
       throwIfAborted(signal);
-      return maybeDispatchAmaCloserImpl({ ...args, signal });
+      return maybeDispatchAmaCloserImpl({ ...args, signal,
+        ...(background ? { operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] } : {}) });
     };
     let result;
     if (resolveAmaHammerDispatchModeImpl({ cfg: loadedConfig, logger }) === 'background') {
@@ -1150,12 +1163,20 @@ async function dispatchAmaClosureFor({
       } else {
         queue.submit({ key, pendingDispatch: { rootDir, repo: repoPath, prNumber, headSha: finalHead },
           run: async signal => {
-            const live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger });
+            let live;
+            for (let attempt = 0; ; attempt++) {
+              throwIfAborted(signal);
+              try { live = await fetchCurrentPrStateImpl({ repo: repoPath, prNumber, logger }); break; }
+              catch (error) {
+                if (attempt >= 2 || !isOrphanRecoveryWait(error)) throw error;
+                await abortableSleep((attempt + 1) * 1000, signal);
+              }
+            }
             if (live?.state !== 'OPEN' || live.headSha !== finalHead || live.isDraft) {
               return { dispatched: false, skipMergeAgent: true, reason: 'final-round-live-head-changed' };
             }
-            args.prMetadata.labels = live.labels;
-            return run(signal);
+            // Keep the observed label gates; the closer and hammer refresh them before execution.
+            return run(signal, true);
           } });
         result = { dispatched: false, skipMergeAgent: true, reason: AMA_HAMMER_BACKGROUND_REASON };
       }
@@ -1661,7 +1682,7 @@ async function dispatchAmaClosureFor({
 
   if (handoffLease?.status === 'handed-to-review' && closureOwner.owner === 'review') {
     // A later proof appearing cannot steal an explicitly transferred review.
-    const boundedWait = await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber,
+    const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reason: `handed-to-review:${currentPrHeadSha}`, env });
     return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
       reason: 'handed-to-review', retryAfterMs: boundedWait.retryAfterMs, boundedWait,
@@ -1675,7 +1696,7 @@ async function dispatchAmaClosureFor({
     const ownership = flight ? await probeClosureOwnershipImpl({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha, labels: labelNames || [], signal, timeoutMs: 5000, logger }) : null;
     if (!flight || ownership?.owned !== false || ownership?.uncertain === true) {
-      const boundedWait = await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber,
+      const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
         headSha: currentPrHeadSha, reason: closureOwner.reason, env });
       return withAmaDispatchMetadata({ dispatched: false, skipMergeAgent: true, recoveryWait: true,
         reason: closureOwner.reason, retryAfterMs: boundedWait.retryAfterMs,
@@ -2086,7 +2107,7 @@ async function dispatchAmaClosureFor({
     const missingEvidence = daemonCleanMerge.eligibilityTrace?.trace?.primaryChange?.missingEvidence
       || checkPrimaryChange(daemonCleanMerge.liveGate?.primaryChange, currentPrHeadSha, { strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false }).missingEvidence;
     try {
-      await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber,
+      await observeWait({ rootDir, repo: repoPath, prNumber,
         headSha: currentPrHeadSha, immediate: true, env,
         reason: `primary-change-needs-operator: ${missingEvidence?.path || 'unknown file'}: ${missingEvidence?.summary || daemonCleanMerge.reasons?.join(', ')}` });
     } catch (error) {
@@ -2184,7 +2205,7 @@ async function dispatchAmaClosureFor({
       // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
       // so the watcher returns without dispatching anything.
       const boundedWait = daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.DEFERRED
-        ? await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+        ? await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
           reason: daemonCleanMerge.reason, env }) : null;
       return withAmaDispatchMetadata(
         {
@@ -2371,7 +2392,7 @@ async function dispatchAmaClosureFor({
     dispatchRecordHeadSha: closerOnlyHeadDelta ? currentPrHeadSha : reviewState.headSha,
     closerOnlyHeadDelta,
     closerAuthoredStale,
-    dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
+    dispatchReason: reviewCycleExhausted || commentOnlyFinalRoundProven ? 'exhausted-final-hammer' : null,
     reviewCycleCapReached,
     reviewCycleCap: reviewCycleCapReached ? dispatchJob?.reviewCycleCap ?? null : null,
     reviewCycleHistory: reviewCycleCapReached && Array.isArray(dispatchJob?.reviewCycleHistory)
@@ -2658,7 +2679,7 @@ async function dispatchAmaClosureFor({
 
   if (result?.needsOperator && result?.reason === 'primary-change-repair-required') {
     try {
-      await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      await observeWait({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
         immediate: true, env, reason: `${result.reason}: ${result.missingEvidence?.path || 'unknown file'}: ${result.missingEvidence?.summary || result.reasons?.join(', ')}` });
     } catch (error) { logger?.warn?.(`[watcher] primary-change page delivery failed: ${error.message}`); }
     if (closureOwnerSink) closureOwnerSink.value = { owner: 'page', reason: result.reason };
@@ -2686,7 +2707,7 @@ async function dispatchAmaClosureFor({
   }
   if (!result?.dispatched && !result?.needsOperator && !result?.boundedWait
     && (isDaemonNotTakenTransientRead(daemonCleanMerge) || daemonCleanMerge?.ciMergePathPending === true)) {
-    const boundedWait = await observeClosureWaitImpl({ rootDir, repo: repoPath, prNumber,
+    const boundedWait = await observeWait({ rootDir, repo: repoPath, prNumber,
       headSha: currentPrHeadSha, reason: daemonCleanMerge.reasons?.join(',') || 'pending-required-checks', env });
     result = { ...result, recoveryWait: true, boundedWait, retryAfterMs: boundedWait.retryAfterMs,
       ...(boundedWait.exhausted ? { needsOperator: true } : {}) };

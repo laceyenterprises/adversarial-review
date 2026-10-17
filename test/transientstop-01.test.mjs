@@ -38,40 +38,19 @@ function fixture(t, predicate = 'history-read-failed') {
   return { args, pages };
 }
 
-test('TRANSIENTSTOP-01: persistent failed probes page once at ten minutes, including after restart', async t => {
+test('FINALCLOSE-01: history read failures release immediately without their old stop-hold page', async t => {
   const { args, pages } = fixture(t);
-  for (const ms of [0, 5 * 60_000, HISTORY_READ_FAILURE_PAGE_GRACE_MS - 1]) {
-    const result = await evaluateHammerStopHold({ ...args, now: at(ms) });
-    assert.equal(result.action, 'hold');
-    assert.equal(result.hammerStop.paged, false);
+  for (const ms of [0, 5 * 60_000, HISTORY_READ_FAILURE_PAGE_GRACE_MS, 15 * 60_000]) {
+    const result = await evaluateHammerStopHold({ ...args, now: at(ms),
+      fetchPrimaryChangeImpl: async () => assert.fail('the capped hammer owns fresh evidence') });
+    assert.equal(result.action, 'release');
+    assert.deepEqual(result.changed, ['history-read-retry']);
     assert.equal(pages.length, 0);
-  }
-  _resetHammerStopHoldPageDebounceForTests();
-  for (const ms of [HISTORY_READ_FAILURE_PAGE_GRACE_MS, 15 * 60_000]) {
-    const result = await evaluateHammerStopHold({ ...args, now: at(ms) });
-    assert.equal(result.hammerStop.paged, true);
-    assert.equal(pages.length, 1);
     _resetHammerStopHoldPageDebounceForTests();
   }
 });
 
-test('TRANSIENTSTOP-01: successful evidence at the page deadline releases without sending a page', async t => {
-  const { args, pages } = fixture(t);
-  await evaluateHammerStopHold({ ...args, now: at(0) });
-  const result = await evaluateHammerStopHold({ ...args, now: at(HISTORY_READ_FAILURE_PAGE_GRACE_MS),
-    fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: false }) });
-  assert.equal(result.action, 'release');
-  assert.deepEqual(result.changed, ['primary-change-evidence']);
-  assert.equal(pages.length, 0);
-});
-
-test('TRANSIENTSTOP-01: thrown probes get the same grace; other stop predicates still page immediately', async t => {
-  const { args, pages } = fixture(t);
-  const failed = { ...args, fetchPrimaryChangeImpl: async () => { throw new Error('synthetic connection failure'); } };
-  await evaluateHammerStopHold({ ...failed, now: at(0) });
-  assert.equal(pages.length, 0);
-  await evaluateHammerStopHold({ ...failed, now: at(HISTORY_READ_FAILURE_PAGE_GRACE_MS) });
-  assert.equal(pages.length, 1);
+test('FINALCLOSE-01: deterministic and other evidence stop predicates keep their holds', async t => {
   for (const predicate of ['ci-not-green', 'primary-change-unknown', 'primary-change-read-failed']) {
     const other = fixture(t, predicate);
     assert.equal((await evaluateHammerStopHold({ ...other.args, now: at(0) })).action, 'hold');
@@ -129,14 +108,14 @@ test('TRANSIENTSTOP-01: rapid ticks, wake priority and the idle floor respect ev
   assert.equal(gate.evaluate({ ...handler, headSha: 'b'.repeat(40) }).run, true);
 });
 
-test('TRANSIENTSTOP-01: paged and released historical stops use ordinary backoff', async t => {
+test('FINALCLOSE-01: released historical transport stops use ordinary backoff', async t => {
   for (const release of [false, true]) {
     const { args, pages } = fixture(t);
     stopAudit(args.rootDir, 'history-read-failed');
     await evaluateHammerStopHold({ ...args, readAuditImpl: undefined, now: at(0) });
     await evaluateHammerStopHold({ ...args, readAuditImpl: undefined, now: at(600_000),
       ...(release ? { fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: false }) } : {}) });
-    assert.equal(pages.length, release ? 0 : 1);
+    assert.equal(pages.length, 0);
     const identity = { repo, prNumber: 1 };
     for (let i = 0; i < 20; i++) recordNoProgressLaneRun(args.rootDir, identity, {
       headSha: head, fingerprint: 'unchanged-review', now: at(600_000), logger });
@@ -224,8 +203,8 @@ test('TRANSIENTSTOP-01: explicit null run anchor admits an evidence walk despite
 });
 
 for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass releases and dispatches without a review event (omit timestamp=${omitTimestamp})`, async t => {
-  const { args, pages } = fixture(t);
-  stopAudit(args.rootDir, 'history-read-failed');
+  const { args, pages } = fixture(t, 'primary-change-read-failed');
+  stopAudit(args.rootDir, 'primary-change-read-failed');
   const identity = { repo, prNumber: 1, headSha: head };
   const user = userInfo().username;
   let now = at(0), failing = true, launches = 0, probes = 0;
@@ -250,7 +229,7 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
       hqOwnerUser: user, currentUser: user, hqPath: 'fixture-hq',
       closerTokenRollupPollDelaysMs: [], livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: head, headBranchExists: true }) },
     fetchPrimaryChangeImpl: async () => { probes++; return failing
-      ? { headSha: head, historyReadFailed: true } : primaryChangeFixture(head); },
+      ? { headSha: head, readFailed: true } : primaryChangeFixture(head); },
     execFileImpl: async (_cmd, argv) => {
       if (argv[0] === 'dispatch' && argv[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }) };
       if (argv[0] === 'dispatch') {
@@ -277,7 +256,7 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
     workerClass: 'hammer', state: 'dispatched', launchRequestId: 'fixture-prior',
     reviewedSha: head, lastObservedStatus: 'running', dispatchedAt: at(0), lastAttemptedAt: at(0) }));
   assert.equal((await closer()).reason, 'hammer-stop-awaiting-input-change');
-  assert.equal(pages.length, 0);
+  assert.equal(pages.length, 1);
   for (let i = 0; i < 20; i++) recordNoProgressLaneRun(args.rootDir, identity, {
     headSha: head, fingerprint: 'unchanged-review', now: at(0), logger,
   });
@@ -296,5 +275,5 @@ for (const omitTimestamp of [false, true]) test(`TRANSIENTSTOP-01: next pass rel
   assert.ok(Number.isFinite(Date.parse(observedRecord.lastObservedAt)), 'terminal observation has a usable timestamp');
   if (!omitTimestamp) assert.equal(observedRecord.lastObservedAt, now);
   assert.ok(probes >= 2);
-  assert.equal(pages.length, 0);
+  assert.equal(pages.length, 1);
 });

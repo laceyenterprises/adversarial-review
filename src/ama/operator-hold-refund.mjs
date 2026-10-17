@@ -5,7 +5,7 @@ import { writeFileAtomic } from '../atomic-write.mjs';
 import { OPERATOR_HOLD_LABELS } from '../operator-hold-labels.mjs';
 import { hammerRetryCapFilePath, readHammerRetryCapLedger } from './hammer-retry-cap.mjs';
 
-const HOLD_ONLY_REASONS = new Set(['history-read-failed', 'operator-skip-label', 'skip-operator-skip',
+const HOLD_ONLY_REASONS = new Set(['operator-skip-label', 'skip-operator-skip',
   ...OPERATOR_HOLD_LABELS.map(label => `label-${label}`)]);
 
 export function refundOperatorHeldHammerStop(rootDir, identity, stop, { now = new Date().toISOString() } = {}) {

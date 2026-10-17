@@ -1,6 +1,6 @@
 import { readCompletedRemediationRounds, exactHammerValidation } from './hammer-head-validation.mjs';
 import { createHash } from 'node:crypto';
-import { storedPrimaryChange } from './primary-change-store.mjs';
+import { storedPrimaryChange, primaryChangeStoreOwned } from './primary-change-store.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { fetchCiCost, checkCiCost } from './ci-cost.mjs';
 import { fetchGuardReversals, verifiedGuardReversals } from './guard-reversal.mjs';
@@ -1047,7 +1047,7 @@ async function describeRevertedRegions(args, evidence, refusal) {
 // Keep history failures distinct and retain the existing terminal-state handling.
 export async function fetchPrimaryChange(args, { fetchCiCostImpl = fetchCiCost } = {}) {
   let history;
-  if (args.get.persistPrimaryChange) {
+  if (args.get.persistPrimaryChange && primaryChangeStoreOwned(primaryChangeRoot(args))) {
     try {
       const pr = await args.get(`repos/${args.repo}/pulls/${args.prNumber}`);
       if (pr.head?.sha !== args.headSha || !SHA.test(pr.base?.sha || '')) {

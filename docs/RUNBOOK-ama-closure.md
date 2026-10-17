@@ -1494,13 +1494,13 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   runs once per pass while unreleased. An unknown or unreadable answer retains
   the hold; a computable answer persists `releasedBy: ['primary-change-evidence']`
   and lets ordinary gates decide closure, even if that answer refuses merge.
-  TRANSIENTSTOP-01 includes `history-read-failed` and gives unresolved, unpaged
-  evidence stops a five-minute posted-review cadence instead of deeper lane
-  backoff. The durable lane `lastRunAt` anchors it across skips and restarts;
-  wake priority and the idle starvation floor respect the interval. Paged or
-  released stops return to ordinary backoff. Only `history-read-failed` delays
-  its page for ten minutes from the hold's `firstObservedAt`; a successful probe
-  at that deadline releases without paging. Other predicates page immediately.
+  TRANSIENTSTOP-01 gives unresolved, unpaged evidence stops a five-minute
+  posted-review cadence instead of deeper lane backoff. The durable lane
+  `lastRunAt` anchors it across skips and restarts; wake priority and the idle
+  starvation floor respect the interval. FINALCLOSE-01 releases
+  `history-read-failed` immediately for capped retry rather than installing an
+  evidence hold or a separate ten-minute page. Other predicates retain their
+  holds and page rules. Released stops return to ordinary backoff.
   Other observed input changes and merge conflicts also release the hold.
   Hammer-owner routes retain their final no-merge decision for non-evidence
   stops on the live head; an older head's no-merge does not terminate ownership
@@ -1695,9 +1695,10 @@ supplied it. Each child output
 is explicitly bounded at 25 MiB and exceeding that limit is a named read error.
 Any failed history read returns `historyReadFailed: true` with the underlying
 error, the dedicated helper exits non-zero, and the hammer records
-`history-read-failed` in its stop and park evidence. Preflight stops carry
-`noExecution: true`: the existing evidence hold refunds their charged launches,
-probes again each closer pass and pages once per head if evidence stays unreadable.
+`history-read-failed` and its underlying error in a retryable terminal audit.
+Preflight stops may carry `noExecution: true`, but these read failures remain
+charged to the hammer retry cap. They do not retain an input-change hold;
+cap exhaustion and thirty-minute final-round stalls share one page receipt.
 Missing evidence never authorizes a reversal.
 
 **Required guard authority (GUARDREVERT-01).** A required repository check may
@@ -3378,3 +3379,44 @@ retries without claiming that a parent was merged. Fork branches with the same
 name and closed-but-unmerged PRs do not establish a merged parent.
 Local hold-store failures preserve the hold and defer comment delivery; initial
 persistence failures log a warning for filesystem recovery.
+
+## Final-round closeout recovery (FINALCLOSE-01)
+
+A final-round coexistence read timeout retries dispatch admission on the same
+tick using the local round ledger. This route dispatches a hammer and cannot
+merge from the watcher: it supplies no merge certificate and leaves head,
+checks, mergeability, provenance and operator gates to the hammer under its
+lease. Ordinary non-final heads retain the timeout refusal. Background dispatch
+retains the per-PR queue and checks the live head before launch.
+
+The exact-head `handed-to-review` transfer authorizes one review even if an
+earlier bounded request was consumed or interrupted. An ordinary head-refresh
+request can complete that transfer. A delivered review or an attempt after the
+transfer consumes the exception; another head cannot inherit it. The hammer
+records the transfer before advertising its exact-head route comment.
+
+Worker history collection computes fresh evidence when the daemon history cache
+belongs to another OS identity. It never reads or writes that foreign cache.
+API/compare failures remain read failures; an incomplete or untrusted ancestry
+proof remains a negative proof. Only the latter takes the exact-head review
+route. A read failure records `history-read-failed`, releases the merge lease as
+a retryable abort, and does not install an input-change stop hold or refund the
+charged attempt. Deterministic refusals and other stop holds retain their rules.
+
+Terminal launch evidence takes precedence over stale active worker status.
+An open same-head PR without a terminal closing decision retries through the
+existing cap: two charged dispatches per series, lifetime six. A final hammer
+that exited without closing remains charged. A durable per-head final-round
+wait records the latest blocker and pages after thirty minutes without a new
+launch; successful launch progress restarts the clock. Cap exhaustion uses the
+same page receipt, so subsequent observations do not page again. Paging does
+not grant merge authority or suppress remaining retry budget.
+
+After deploy, SRE owns these checks:
+
+1. Confirm the watcher restarted after deployment.
+2. Verify the next final-round PR closes through a hammer, or pages once naming
+   its head and blocker, within about thirty minutes under normal load and load
+   above eighty.
+3. Over the following day, confirm no operator hand merge was needed because
+   final-round closure stalled.

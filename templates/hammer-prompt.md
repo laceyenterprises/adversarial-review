@@ -185,10 +185,10 @@ If primary evidence is missing or unsupported, stop before remediation and
 print `primaryChange.reason` in the stop message. When the snapshot status is
 `history-read-failed` or the helper reports `historyReadFailed: true`, record a
 no-merge audit with reason `history-read-failed`, `noExecution: true`, and
-`historyReadError` containing the underlying error; retain that error in the park
-record. Otherwise record `deferred` with reason `primary-change-unknown`.
-Retain the merge hold for automatic evidence recovery; repeated closer refusals
-page once per head with SEV1. Never substitute the latest hammer head for the
+`historyReadError` containing the underlying error. Release the lease and end as a
+retryable abort; the closer retries under the per-PR cap (two per series, lifetime
+six), then pages once. Do not park or retain a stop hold for a read failure.
+Otherwise record `deferred` with reason `primary-change-unknown`. Never substitute the latest hammer head for the
 original change.
 
 The syntactic preservation gate covers production and config paths only. Test
@@ -753,8 +753,16 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
 ```bash
 /usr/bin/perl -e 'alarm shift; exec @ARGV' 90 "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/hammer-head-context.mjs \
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
-  > "$HAM_RUN_DIR/range.json" || {
-    # Every failed provenance proof uses exact-head review.
+  > "$HAM_RUN_DIR/range.json" 2> "$HAM_RUN_DIR/range.stderr" || {
+    HAM_RANGE_EXIT=$?
+    # Only a completed negative proof (65) transfers to review. An API read,
+    # process timeout or interruption aborts retryably under the hammer cap.
+    if [ "$HAM_RANGE_EXIT" -ne 65 ]; then
+      HAM_HISTORY_READ_ERROR=$(tail -c 2000 "$HAM_RUN_DIR/range.stderr")
+      cat "$HAM_RUN_DIR/range.stderr" >&2
+      source "<<RUN_DIR>>/hammer-merge.sh" --history-read-abort
+      exit 1
+    fi
     ham_release_merge_lease
     # Write daemon state as its canonical owner.
     HAM_REVIEW_HANDOFF_RUN=()

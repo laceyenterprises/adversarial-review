@@ -812,6 +812,7 @@ async function suppressHammerRetryCapExhaustion({
   existingRecord,
   alertAlreadyEmitted,
   gateReasons = [],
+  finalRound = false,
   hammerStop = null,
   deliverAlertImpl,
   logger,
@@ -879,7 +880,7 @@ async function suppressHammerRetryCapExhaustion({
       + 'PR not closing — operator intervention required; further hammer dispatch '
       + 'suppressed to protect quota.';
     try {
-      const deliver = existingRecord?.dispatchReason === 'exhausted-final-hammer'
+      const deliver = finalRound || existingRecord?.dispatchReason === 'exhausted-final-hammer'
         ? async (text, options) => observeClosureWait({ rootDir, repo, prNumber, headSha,
           reason: text, now: Date.parse(now) || Date.now(), waitClass: 'final-round', immediate: true,
           pageImpl: message => deliverAlertImpl(message, options) })
@@ -5661,6 +5662,7 @@ export async function maybeDispatchAmaCloser({
           // refunded (bounded) instead of spending the series' real retry.
           const retryRefund = exitedWithoutClose
             && existingRecord.dispatchReason !== 'exhausted-final-hammer'
+            && dispatchContext.dispatchReason !== 'exhausted-final-hammer'
             && isHammerWorkerClass(existingRecord.workerClass || workerClass)
             ? refundExitedHammerDispatchBestEffort({
               rootDir,
@@ -6649,10 +6651,12 @@ export async function maybeDispatchAmaCloser({
           : hammerTargetCapExhausted
           ? hammerRetryCapDecision.targetAlertAlreadyEmitted
           : hammerRetryCapDecision.seriesAlertAlreadyEmitted,
+        finalRound: dispatchContext?.dispatchReason === 'exhausted-final-hammer',
         gateReasons: [...(dispatchContext?.daemonFailureReasons || []),
           ...(finalHammerRetryReason ? [finalHammerRetryReason] : []),
           ...(existingRecord?.lastError ? [existingRecord.lastError]
-            : existingRecord?.dispatchReason === 'exhausted-final-hammer'
+            : (existingRecord?.dispatchReason === 'exhausted-final-hammer'
+              || dispatchContext?.dispatchReason === 'exhausted-final-hammer')
               ? [existingRecord.outcome || 'terminal-launch-without-merge'] : [])],
         hammerStop: hammerStopRelease?.hammerStop || readHammerStopForHead({
           hqRoot, repo, prNumber, headSha: targetRemediationSha, reviewedSha, logger,

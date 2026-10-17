@@ -564,11 +564,6 @@ test('(d) the existing hammer retry cap bounds CI-blocked attempts per head, the
     ...closerDeps({ nextLaunch: LRQ_SECOND }),
   });
   assert.equal(second.dispatched, true, JSON.stringify(second));
-  const third = await maybeDispatchAmaCloser({
-    ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T17:40:00Z' }),
-    ...closerDeps({ nextLaunch: LRQ_THIRD }),
-  });
-  assert.equal(third.dispatched, true, JSON.stringify(third));
 
   const cappedDeps = closerDeps({ nextLaunch: 'lrq_unexpected' });
   const capped = await maybeDispatchAmaCloser({
@@ -593,10 +588,8 @@ test('(d) the existing hammer retry cap bounds CI-blocked attempts per head, the
     ...handOffDeps({ alerts: pages, coexistence: () => ({ outcome: 'await-operator', amaClosureResult: capped }) }),
   });
   assert.equal(routed.outcome, 'hammer-cap-exhausted');
-  assert.equal(pages.length, 1);
-  assert.equal(pages[0].event, CI_BLOCKED_HAMMER_PAGE_EVENT);
-  assert.equal(pages[0].payload.outcome, 'hammer-cap-exhausted');
-  assert.equal(pages[0].payload.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(pages.length, 0, 'the closer already sent the shared cap page');
+  assert.equal(routed.page.alreadyPaged, true);
 });
 
 test('dispatched, in-flight and waiting CI-blocked outcomes are not operator pages', async (t) => {

@@ -507,6 +507,7 @@ export async function resolveReviewerWorkerClassWithFallback({
       ? { codexBrokerProvider: codexAccountSelection?.provider, codexAccountHoldReason: codexAccountSelection?.hold ? codexAccountSelection.reason : null } : {};
   const availability = (harness) => {
     if (reviewerModelForWorkerClass(harness) === 'codex') {
+      if (!codexAccountSelection) return { available: false, state: 'unreadable' };
       return { available: codexAccountSelection?.hold === false, state: codexAccountSelection?.hold
         ? codexAccountSelection.reason === 'no-ready-codex-account' ? 'exhausted' : codexAccountSelection.reason : 'ok' };
     }

@@ -484,7 +484,7 @@ export function selectReviewerRouteForAttempt({
       return {
         ...baseRoute,
         reviewerModel: fallbackRoute.reviewerModel,
-        codexBrokerProvider: fallbackGrounding.brokerProvider || 'codex',
+        codexBrokerProvider: fallbackRoute.reviewerModel === 'codex' ? fallbackGrounding.brokerProvider || 'codex' : null,
         quotaBlocked: false,
         botTokenEnv: fallbackRoute.botTokenEnv,
         reviewerModelFallback: {
@@ -549,7 +549,7 @@ export function selectReviewerRouteForAttempt({
   return {
     ...baseRoute,
     reviewerModel: fallbackRoute.reviewerModel,
-    codexBrokerProvider: fallbackGrounding.brokerProvider || 'codex',
+    codexBrokerProvider: fallbackRoute.reviewerModel === 'codex' ? fallbackGrounding.brokerProvider || 'codex' : null,
     quotaBlocked: false,
     botTokenEnv: fallbackRoute.botTokenEnv,
     timeoutFallback: {

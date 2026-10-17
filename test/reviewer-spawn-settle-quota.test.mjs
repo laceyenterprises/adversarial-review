@@ -1,3 +1,4 @@
+import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from '../src/codex-account-routing.mjs';
 import { reviewerCredentialKey } from '../src/claude-account-routing.mjs';
 import { afhGroundingSnapshotFromStdout } from '../src/afh-reviewer-fallback.mjs';
 import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
@@ -113,7 +114,7 @@ for (const [state, expectedSpawns] of [['ok', 1], ['exhausted', 0]]) {
     await withStatusFile('exhausted', async (statusDir) => {
       await writeFile(join(statusDir, 'google-oauth.status.json'), JSON.stringify({ state, authPath: 'oauth' }));
       const capture = newCapture();
-      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir }, capture });
+      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir, ADVERSARIAL_REVIEW_STATE_DIR: statusDir }, capture });
       args.reviewerModel = 'gemini';
       args.botTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
       args.claudeAccountSelection = { provider: 'claude-code-corp', hold: false };
@@ -189,7 +190,7 @@ for (const [primary, corp, expectedSpawns] of [['exhausted', 'ok', 1], ['ok', 'e
         await writeFile(join(statusDir, `openai-${authPath}.status.json`), JSON.stringify({ state, authPath }));
       }
       const capture = newCapture();
-      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir }, capture });
+      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir, ADVERSARIAL_REVIEW_STATE_DIR: statusDir }, capture });
       args.reviewerModel = 'codex';
       args.codexBrokerProvider = 'codex-corp';
       args.botTokenEnv = 'GH_CODEX_REVIEWER_TOKEN';
@@ -213,7 +214,7 @@ for (const evidence of [
     try {
       await writeFile(join(statusDir, 'openai-oauth-corp.status.json'), JSON.stringify({ state: 'unknown', authPath: 'oauth-corp', ...evidence }));
       const capture = newCapture();
-      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir }, capture });
+      const args = spawnArgs({ env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir, ADVERSARIAL_REVIEW_STATE_DIR: statusDir }, capture });
       args.reviewerModel = 'codex';
       args.codexBrokerProvider = 'codex-corp';
       args.botTokenEnv = 'GH_CODEX_REVIEWER_TOKEN';
@@ -800,5 +801,34 @@ test('corporate credential failures and recovery neither pause nor clear primary
     assert.equal(readReviewerCredentialOutage(rootDir, corp), null);
     assert.equal(readReviewerCredentialOutage(rootDir, 'claude-code').distinctPrCount, 1);
     assert.deepEqual(rearmed, ['[outage-transient:reviewer-credential:claude-code-corp]%']);
+  } finally { await rm(rootDir, { recursive: true, force: true }); }
+});
+
+for (const [reviewerModel, provider, active, expectedSpawns] of [
+  ['codex', 'codex-corp', true, 0],
+  ['codex', 'codex', true, 1],
+  ['gemini', 'codex-corp', true, 1],
+  ['codex', 'codex-corp', false, 1],
+]) test(`corporate cooldown preflight isolates ${reviewerModel}/${provider} active=${active}`, async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'codex-cooldown-preflight-'));
+  const env = { ADVERSARIAL_REVIEW_STATE_DIR: rootDir };
+  const resetAt = new Date(Date.now() + 3600000).toISOString();
+  try {
+    if (active) recordCorporateCodexQuotaCooldown(rootDir, { env, resetAt });
+    else await writeFile(join(rootDir, 'codex-corporate-quota-cooldown.json'), JSON.stringify({ resetAt: '2000-01-01T00:00:00Z' }));
+    let quotaReads = 0;
+    const capture = newCapture();
+    const result = await spawnReviewer({
+      ...spawnArgs({ env, capture }), rootDir, reviewerModel, codexBrokerProvider: provider,
+      readReviewerQuotaDecisionImpl: async () => { quotaReads += 1; return { available: true, state: 'ok' }; },
+    });
+    assert.equal(capture.spawnCalls, expectedSpawns);
+    assert.equal(quotaReads, expectedSpawns, 'active corporate cooldown must precede even a stale healthy quota probe');
+    if (!expectedSpawns) {
+      assert.equal(result.failureClass, 'quota-exhausted');
+      assert.equal(result.quotaState, 'corporate-quota-cooldown');
+      assert.equal(capture.completed[0].metadata.quotaState, 'corporate-quota-cooldown');
+    } else assert.equal(result.ok, true);
+    if (active) assert.equal(readCorporateCodexQuotaCooldown(rootDir, { env }).resetAt, resetAt, 'refusal must not extend the cooldown');
   } finally { await rm(rootDir, { recursive: true, force: true }); }
 });

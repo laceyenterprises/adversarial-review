@@ -1,4 +1,4 @@
-import { recordCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
+import { readCorporateCodexQuotaCooldown, recordCorporateCodexQuotaCooldown } from './codex-account-routing.mjs';
 import { readReviewerEvidenceInWorker } from './reviewer-token-ledger-lookup.mjs';
 import { openReviewStateDb } from './review-state.mjs';
 import { reviewerCredentialKey, recordCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
@@ -738,12 +738,17 @@ async function spawnReviewerOnceWithAccount({
   let quotaDecision;
   const claudeBrokerProvider = claudeAccountSelection?.provider || 'claude-code';
   try {
-    quotaDecision = await readReviewerQuotaDecisionImpl({
-      reviewerModel,
-      codexBrokerProvider,
-      claudeBrokerProvider,
-      env: quotaCheckEnv,
-    });
+    const corporateCodexCooldown = normalizeReviewerModel(reviewerModel) === 'codex'
+      && codexBrokerProvider === 'codex-corp'
+      && readCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv });
+    quotaDecision = corporateCodexCooldown
+      ? { available: false, capped: true, state: 'corporate-quota-cooldown', provider: 'openai', resetAt: corporateCodexCooldown.resetAt }
+      : await readReviewerQuotaDecisionImpl({
+        reviewerModel,
+        codexBrokerProvider,
+        claudeBrokerProvider,
+        env: quotaCheckEnv,
+      });
     if (normalizeReviewerModel(reviewerModel) === 'gemini' && quotaDecision.state !== 'disabled') {
       const poolAvailability = await readReviewerGeminiPoolAvailability({
         pool: agyReviewerIdentityPool, adapter: activeReviewerRuntimeAdapter,

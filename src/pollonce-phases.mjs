@@ -3855,6 +3855,9 @@ export async function processReviewSubject(entry, ctx) {
                   || completedRemediationRounds > 0,
               });
               dispatchCandidate.spawnClaudeAccountSelection = selectedClaudeAccount;
+              // A previous dispatch may have capped corporate quota since the tick's snapshot.
+              // Share the refreshed account with both fallback selection stages.
+              afhGrounding = { ...afhGrounding, codexAccountSelection: refreshCodexAccount() };
               const spawnReviewerArgs = {
                 claudeAccountSelection: selectedClaudeAccount || null,
                 repo: repoPath,
@@ -3868,7 +3871,7 @@ export async function processReviewSubject(entry, ctx) {
                       builderClass: baseRoute.builderClass, baseRoute, mode: 'off',
                       primaryReviewerQuotaCapped: false, routeTable: baseRoute.routeTable,
                     }),
-                    grounding: { ...afhGrounding, codexAccountSelection: refreshCodexAccount() }, geminiReviewerMode: 'off', routeTable: baseRoute.routeTable,
+                    grounding: afhGrounding, geminiReviewerMode: 'off', routeTable: baseRoute.routeTable,
                   }).route,
                   rootDir: ROOT, repoPath, prNumber, currentRow: existing,
                   headSha: reviewerHeadSha, afhGrounding, emitCacheEvent,

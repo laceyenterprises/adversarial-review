@@ -4229,3 +4229,71 @@ for (const failed of [false, true]) test(`STARTADMIT-01: real poll shares one qu
     }
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+test('retry fallback refreshes corporate Codex cooldown recorded after initial route selection', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-codex-cooldown-'));
+  try {
+    const loaderPath = path.join(tmp, 'loader.mjs');
+    const registerPath = path.join(tmp, 'register.mjs');
+    const runnerPath = path.join(tmp, 'runner.mjs');
+    const routeUrl = fileUrl('src', 'reviewer-route-selection.mjs');
+    const routeSource = `
+      import * as actual from '${routeUrl}?actual';
+      import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
+      import { recordCorporateCodexQuotaCooldown } from '${fileUrl('src', 'codex-account-routing.mjs')}';
+      export * from '${routeUrl}?actual';
+      const selected = new Set();
+      export function selectReviewerRouteForAttempt(args) {
+        if (!selected.has(args.prNumber)) {
+          selected.add(args.prNumber);
+          // Simulate another review exhausting corporate quota while this candidate waits.
+          recordCorporateCodexQuotaCooldown(args.rootDir);
+          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini };
+        }
+        if (args.afhGrounding?.codexAccountSelection?.provider !== 'codex') {
+          throw new Error('retry fallback received stale corporate account grounding');
+        }
+        // Exercise execution fallback with the caller's current account grounding.
+        return actual.selectReviewerRouteForAttempt({ ...args, baseRoute: REVIEWER_ROUTE_BY_MODEL.gemini,
+          currentRow: { review_status: 'failed', reviewer: 'gemini', reviewer_head_sha: args.headSha,
+            failure_message: '[quota-exhausted] synthetic exhaustion', infra_auto_recover_attempts: 1 } });
+      }
+    `;
+    const runtimeSource = `
+      globalThis.__watcherClaimLoopReviewerSpawns = [];
+      export function createReviewerRuntimeAdapterForDomain() { return {
+        async spawnReviewer(payload) {
+          globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+          return payload.model === 'gemini' ? { ok: false, failureClass: 'quota-exhausted' }
+            : { ok: true, stdout: '', stderr: '' };
+        }, cancel: async () => {}, reattach: async () => ({})
+      }; }
+      export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+      export function loadDomainConfig() { return {}; }
+      export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+    `;
+    const loader = buildLoaderSource({ reviewerRuntimeSource: runtimeSource, discoveryHookSource: 'return [subjects[0].ref];' })
+      .replaceAll("builderClass: 'codex'", "builderClass: 'claude-code'")
+      .replaceAll('[codex]', '[claude-code]')
+      .replace('  return nextLoad(url, context);', `
+        if (url === ${JSON.stringify(routeUrl)}) return { format: 'module', shortCircuit: true, source: ${JSON.stringify(routeSource)} };
+        return nextLoad(url, context);
+      `);
+    writeFileSync(loaderPath, loader);
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+    const result = spawnSync(process.execPath, ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+      cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+      env: fixtureEnv({ ...installGhFixture(tmp), ADVERSARIAL_REVIEW_STATE_DIR: tmp }),
+    });
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const line = result.stdout.split(/\r?\n/).find(entry => entry.startsWith(SUMMARY_MARKER));
+    assert.ok(line, output);
+    const summary = JSON.parse(line.slice(SUMMARY_MARKER.length));
+    const codexSpawns = summary.reviewerSpawns.filter(spawn => spawn.model === 'codex');
+    assert.equal(codexSpawns.length, 1, output);
+    assert.equal(summary.rows['101'].review_status, 'posted', output);
+    assert.ok(codexSpawns.every(spawn => spawn.subjectContext.codexBrokerProvider === 'codex'), output);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

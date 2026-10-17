@@ -4409,15 +4409,17 @@ export async function resolveHamTerminalRemediationEvidence({
 export async function maybeDispatchAmaCloser(args) {
   const pendingCleanup = new Map();
   const targetRepo = args.dispatchContext?.repo || args.prMetadata?.repo || args.repo;
+  const targetPrNumber = args.dispatchContext?.prNumber ?? args.prMetadata?.prNumber ?? args.prNumber;
   const dispatchContext = args.dispatchContext && { ...args.dispatchContext, repo: targetRepo };
   let admissionCompleted = false;
   let preservePredecessor = false;
   try {
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
+      prMetadata: { ...args.prMetadata, prNumber: targetPrNumber },
       readLaunchRequestStatusImpl: async request => withLiveLaunchRetry(await readStatus({ ...request, includeRetryChain: true })),
       cleanupScratchImpl: (record, logger) => {
-        if (record?.repo !== targetRepo || Number(record?.prNumber) !== Number(args.prMetadata?.prNumber)) {
+        if (record?.repo !== targetRepo || Number(record?.prNumber) !== Number(targetPrNumber)) {
           cleanupHammerScratchDir(record, logger);
         } else if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
       },
@@ -4429,7 +4431,7 @@ export async function maybeDispatchAmaCloser(args) {
     // Interrupted admission cannot prove that predecessor ownership ended.
     for (const { record, logger } of admissionCompleted ? pendingCleanup.values() : []) {
       const predecessor = record.repo === targetRepo
-        && Number(record.prNumber) === Number(args.prMetadata?.prNumber);
+        && Number(record.prNumber) === Number(targetPrNumber);
       if (!preservePredecessor || !predecessor) cleanupHammerScratchDir(record, logger);
     }
   }
@@ -5056,10 +5058,22 @@ async function maybeDispatchAmaCloserAttempt({
     listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber }),
     { reviewedSha, reviewedHeadSha: dispatchRecordHeadSha, reviewedHeadRecord },
   );
-  const existingDispatchIdentity = newerLaunchRecord
+  let existingDispatchIdentity = newerLaunchRecord
     ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
     : reviewedHeadDispatchIdentity;
   let existingRecord = ownerProofRecovery || reviewHandoffFindings ? null : newerLaunchRecord || reviewedHeadRecord;
+  // Advanced-head refusals retain a pointer, never the ancestor's launch IDs.
+  // Resolve ownership before liveness, cleanup and refusal probes use the record.
+  const retryOwnerHeads = new Set([existingDispatchIdentity.headSha]);
+  while (existingRecord && !existingRecord.launchRequestId && existingRecord.retryOwnerHeadSha
+    && !retryOwnerHeads.has(existingRecord.retryOwnerHeadSha)) {
+    const identity = { repo, prNumber, headSha: existingRecord.retryOwnerHeadSha };
+    retryOwnerHeads.add(identity.headSha);
+    const owner = readAmaCloserDispatchRecord(rootDir, identity);
+    if (!owner) break;
+    existingRecord = owner;
+    existingDispatchIdentity = identity;
+  }
   if (existingRecord && !existingRecord.launchRequestId && !existingRecord.dispatchId) {
     const refusal = dispatchConfigurationRefusal(existingRecord.lastError);
     if (refusal) {

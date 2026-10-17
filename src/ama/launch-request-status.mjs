@@ -21,6 +21,6 @@ export function isTerminalLaunchRequestStatus(status) {
 export function withLiveLaunchRetry(probe) {
   if (probe?.liveRetryLaunchRequestId) return probe;
   const live = probe?.ok && probe.retryChain?.find(row => !isTerminalLaunchRequestStatus(row.status));
-  return live ? { ...probe, row: { ...live, ticket_ref: probe.row?.ticket_ref },
+  return live ? { ...probe, row: { ...live, ticket_ref: live.ticket_ref ?? probe.row?.ticket_ref },
     liveRetryLaunchRequestId: live.launch_request_id } : probe;
 }

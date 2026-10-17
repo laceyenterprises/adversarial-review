@@ -23,6 +23,8 @@ never change. If admission targeted a different head, that target is left as
 `no-dispatch`, reason `dispatch-retry-live`, with `retryOwnerHeadSha` pointing
 to the original record and null launch IDs, scratch and prompt. The target's
 pending lease is removed rather than assigning another head's LRQ to it.
+Later admissions follow `retryOwnerHeadSha` to the original owner before any
+liveness or claim-refusal probe; pointer cycles terminate without inventing a launch.
 A same-head restore promotes the pending lease with the ancestor LRQ.
 
 An unproven refusal, including one without a predecessor LRQ, follows the charged
@@ -40,7 +42,8 @@ decision; terminal chains and non-retry failures clean up normally. Interrupted
 admission retains that PR's deferred artifacts. Terminal scratch for other PRs
 is cleaned immediately by capacity reconciliation, even if admission later aborts.
 Admission and cleanup use the same repository identity (`dispatchContext.repo`,
-then `prMetadata.repo`, then top-level `repo`). Unlaunched attempts remove their
+then `prMetadata.repo`, then top-level `repo`) and PR number (`dispatchContext.prNumber`,
+then `prMetadata.prNumber`, then top-level `prNumber`). Unlaunched attempts remove their
 own unique prompt and scratch; launched prompts remain retained evidence. The
 scratch sweep applies the same launch-chain rule over terminal owner records.
 Historical terminal records are probed only to discover live descendants;

@@ -119,7 +119,9 @@ descendant restores `dispatched` ownership, reason `dispatch-retry-live`, and
 `liveRetryLaunchRequestId`, without charging a failed attempt or deleting the
 previous artifacts. Restore the record at its original head; a different target
 head stays `no-dispatch` with `retryOwnerHeadSha` and no launch/artifact ownership,
-and its pending lease is removed. Without chain proof (or without a predecessor
+and its pending lease is removed. Later admission resolves that pointer before
+probing liveness or a claim refusal, preserving the original owner's identity.
+Without chain proof (or without a predecessor
 LRQ), use charged dispatch failure and existing capped, paged recovery. An
 unreadable refusal-time probe also charges a failure, but keeps the predecessor's LRQ and
 artifacts in `dispatch-failed` on its original identity and suppresses fallback
@@ -130,7 +132,13 @@ or re-dispatch. Historical terminal observations survive missing/unreadable
 probes without degrading reconciliation of other records. All-terminal chains
 and ordinary non-retry failures retain their existing cleanup behavior.
 Admission and predecessor matching resolve the repository from `dispatchContext.repo`,
-then `prMetadata.repo`, then the top-level `repo`. Interrupted admission (including
+then `prMetadata.repo`, then the top-level `repo`. PR number resolution uses
+`dispatchContext.prNumber`, then `prMetadata.prNumber`, then top-level `prNumber`
+for both admission and cleanup. Descendants are ordered by latest update and
+launch ID, and promoted live rows retain their status metadata. PostgreSQL reads
+one timeout-bounded, read-only snapshot and parses metadata in the adapter;
+this supports pre-16 servers and missing metadata columns without casting malformed
+historical text in SQL. SQLite retains its recursive query. Interrupted admission (including
 shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later
 completed pass. Capacity reconciliation cleans other PRs' terminal scratch
 immediately, including when the current admission subsequently aborts. A refused

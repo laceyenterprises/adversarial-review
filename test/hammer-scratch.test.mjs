@@ -503,7 +503,7 @@ test('SCRATCHRACE-01: a terminal retry chain still removes predecessor scratch',
   assert.equal(existsSync(scratchDir), false);
 });
 
-for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head']) {
+for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number']) {
   test(`SCRATCHRACE-01: a live logical-job refusal preserves predecessor artifacts with ${repoSource} repository`, async t => {
     const root = fixture(t);
     const args = dispatchArgs(root);
@@ -518,6 +518,12 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
     let attemptedPrompt;
     let unlaunchedScratch;
     const retryArgs = { ...args, dispatchContext: { ...args.dispatchContext, ledgerTarget } };
+    if (repoSource.endsWith('pr-number')) {
+      retryArgs.prMetadata = { ...args.prMetadata };
+      delete retryArgs.prMetadata.prNumber;
+      if (repoSource === 'context-pr-number') retryArgs.dispatchContext.prNumber = 42;
+      else retryArgs.prNumber = 42;
+    }
     const targetHead = repoSource === 'advanced-head' ? 'c'.repeat(40) : head;
     if (repoSource === 'advanced-head') {
       retryArgs.prMetadata = { ...args.prMetadata, headSha: targetHead };
@@ -575,6 +581,19 @@ for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-hea
       assert.equal(targetRecord.launchRequestId, null);
       assert.equal(targetRecord.scratchDir, null);
       assert.equal(readAmaCloserLease(root, targetIdentity), null);
+      // The next admission reads the target's pointer rather than inheriting
+      // launch ownership or spending an attempt on another claim refusal.
+      const next = await maybeDispatchAmaCloser({ ...retryArgs,
+        reviewState: { ...retryArgs.reviewState, headSha: targetHead },
+        dispatchContext: { ...retryArgs.dispatchContext, reviewedSha: targetHead,
+          dispatchRecordHeadSha: targetHead },
+        readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync,
+        execFileImpl: async () => assert.fail('the predecessor retry already owns this admission'),
+      });
+      assert.equal(next.reason, 'dispatch-retry-live');
+      assert.equal(next.launchRequestId, previous.launchRequestId);
+      assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
+      assert.equal(JSON.parse(readFileSync(path)).retryCount, previous.retryCount);
     }
     assert.equal(existsSync(attemptedPrompt), false);
     assert.equal(existsSync(unlaunchedScratch), false);

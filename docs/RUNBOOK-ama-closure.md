@@ -96,7 +96,7 @@ outside this commit-message protection.
 
 ## 1. Prerequisites
 
-### Hammer scratch lifetime (HAMTMP-03 / HAMTMP-04 / SCRATCHCENSUS-01)
+### Hammer scratch lifetime (HAMTMP-03 / HAMTMP-04 / SCRATCHCENSUS-01 / SCRATCHCENSUS-02)
 
 Each closer run owns one private `hammer-scratch-*` directory beneath
 `data/follow-up-jobs/ama-closer-prompts`. Recording a terminal outcome removes
@@ -123,9 +123,15 @@ are safeguards for extended `scanBudgetMs` callers or scheduling/filesystem
 delays, not expected stages of every production pass. If the first census ages
 out during final path and ownership checks, the sweep reads its second census
 and repeats all checks for that candidate, including owner and live-worker
-validation. Before each deletion, the candidate's lexical and real paths and
-its owner identifiers are checked against the current census. The existing
-owner, worker and directory identity checks still apply.
+validation. The census keeps process command lines and environments (`ps`)
+separate from open-file and working-directory names (`lsof`). Before each
+deletion, the candidate's lexical and real paths are checked against both
+sources; an open-file name must equal one of those paths or begin with that
+path followed by `/`. Launch-request and worker IDs are checked only against
+`ps`. An unrelated process holding an audit file named after a launch or worker
+does not keep terminal scratch alive. A process retaining an ID in its arguments
+or environment, TMPDIR in scratch, or a cwd or open file inside scratch still
+protects it. The existing owner, worker and directory identity checks still apply.
 
 `ama_closer.scratch_process_census` records duration, UTF-8 byte counts for each
 command and whether the census was readable. Census contents and subprocess
@@ -136,6 +142,20 @@ candidates; completed deletions are retained. The same progress event reports
 the removal cap or an expired second census. Remaining candidates count the
 unprocessed directory list, including any current candidate interrupted by the
 budget; directories created after enumeration wait for the next pass.
+
+Every pass also emits one `ama_closer.scratch_sweep_summary`, including empty,
+paused and deferred passes. Its `kept` object counts the first applicable
+protection for each evaluated candidate: `too-young` for a directory or nested
+file younger than the idle bound, `non-terminal` for a nonterminal or changed
+owner, `live-owner` for live or unreadable worker evidence,
+`process-references-path` for a path in `ps` or a matching `lsof` path, and
+`process-references-id` for an owner ID in `ps`. Age is checked before ownership,
+then ownership before process paths and IDs, so a candidate contributes at most
+one reason. The summary includes `removed`, `remainingCandidates` and
+`completed`; `deferredCandidates` counts evaluated candidates that could not be
+removed because final filesystem identity checks or cleanup failed. Census
+contents, owner IDs and open-file names are absent from the summary.
+
 A metadata-validated index reuses unchanged historical dispatch records. Partial
 progress is atomically checkpointed to
 `data/follow-up-jobs/hammer-scratch-record-index.json`, including on a deferred
@@ -163,8 +183,9 @@ Tests may inject a timestamp or clock function through `maybeDispatchAmaCloser`'
 `now` option. Scratch ledger probes honor the sweep's `spawnSyncImpl` option
 while retaining the scan deadline on each subprocess call.
 
-After deployment, SRE confirms that the watcher restarted. Within two sweep
-intervals, the total `hammer-scratch-*` size should fall below 1 GB and no
+After deployment, SRE confirms that the watcher restarted. Within a few sweeps,
+`removed` should be above zero and the total `hammer-scratch-*` size should
+fall below 1 GB, except directories with a live process inside them. No
 directory older than the maximum age should remain unless a live process holds
 it. Verify that no `deferred: unreadable process census` lines appear while
 `ps` and `lsof` work, then check that size remains roughly flat over a day of

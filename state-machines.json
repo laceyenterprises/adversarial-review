@@ -97,7 +97,9 @@
         {"id": "follow-up-job.10","from": "in_progress","to": "pending","trigger": "transient retry","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.11","from": "completed","to": "pending","trigger": "next round","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.12","from": "failed","to": "pending","trigger": "explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
-        {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger","codeSource": "src/follow-up-jobs.mjs"}
+        {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
+        {"id": "follow-up-job.14","from": "in_progress","to": "stopped","trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget","codeSource": "src/follow-up-remediation.mjs"},
+        {"id": "follow-up-job.15","from": "in_progress","to": "pending","trigger": "base evidence unreadable: budget-neutral delayed recheck","codeSource": "src/follow-up-remediation.mjs"}
       ]
     },
     {
@@ -209,6 +211,7 @@
         {"name": "dispatch-blocked-branch-holder","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Attempt cap exists but no elapsed-time exit if polling/holder release stops."},
         {"name": "dispatch-branch-holder-block-exhausted","terminal": true},
         {"name": "dispatch-failed","terminal": true},
+        {"name": "dispatch-configuration-refused","terminal": true},
         {"name": "no-dispatch","terminal": true},
         {"name": "completed","terminal": true}
       ],
@@ -229,7 +232,11 @@
         {"id": "hammer-dispatch.14","from": "dispatch-failed","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.15","from": "no-dispatch","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.16","from": "dispatched","to": "no-dispatch","trigger": "foreign ticket retires mistaken ownership and charge","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.17","from": "launch-terminal","to": "no-dispatch","trigger": "foreign ticket corrects terminal launch attribution","codeSource": "src/ama/dispatch-closer.mjs"}
+        {"id": "hammer-dispatch.17","from": "launch-terminal","to": "no-dispatch","trigger": "foreign ticket corrects terminal launch attribution","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.18","from": "dispatching","to": "dispatch-configuration-refused","trigger": "repo_unregistered: release pending lease and page repository once","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.19","from": "dispatch-deferred-transient","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.20","from": "dispatch-failed","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.21","from": "dispatch-configuration-refused","to": "dispatching","trigger": "normal backoff due; re-probe dispatch; admission clears blocker","codeSource": "src/ama/dispatch-closer.mjs"}
       ]
     }
   ],
@@ -244,10 +251,10 @@
     "src/ama-closure-orchestration.mjs": "4ce897fd6013b48155500abd4a4701398c73e793cecea2ee005ad42b1fd0355e",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "4fc5bff1f7acb594187b73734a24b0c7facd8617835e3f911a50d4212d079c64",
+    "src/ama/dispatch-closer.mjs": "6d534642617f73532d21917da6e34dba64dc6efb2fd724de39e24032bd9c70da",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
-    "src/follow-up-remediation.mjs": "72fd1e08d90e008d394f452232d888ae25725d37d92a25fab4a0dd22617520e2",
+    "src/follow-up-remediation.mjs": "e7040add9e27706ced329c6412f2a9dfbc1db7080e640e1de65fef97b6da9f0b",
     "src/orphan-post-reconcile.mjs": "53fb34ad540b5f4a7290b548a3f52519f742a2ca0aba527ab79fa81681a1a220",
     "src/posted-review-row.mjs": "8edfebcef0cbc9849a97bab961b327c8735a8318e8a2690b7145a6627f6aff4d",
     "src/review-state-db.mjs": "00643b25fe87659240688c37dbdf738d0b839eaaac22274378592d2ea4ef4dfd",

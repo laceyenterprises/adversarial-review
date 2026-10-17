@@ -1,3 +1,4 @@
+import { guardStackedBase } from './ama/stacked-base.mjs';
 import { DEFAULT_REMEDIATION_WORKER_CLASS, defaultRemediatorWorkerClassFromEnv, resolveRoleRegistryRemediator, pickRemediationWorkerClass, resolveReconcileWorkerClass } from './remediation-worker-routing.mjs';
 import { completeLiveWorkerPublishedHead, completeKnownWorkerPublish, findWorkerPublishedHead, buildRereviewResult } from './remediation-published-head.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
@@ -3116,6 +3117,7 @@ async function consumeNextFollowUpJob({
   resolveRemediationWorkerClassImpl = null,
   mintClaudeCodeRemediationTokenImpl = null,
   conflictedBaseGateImpl = null,
+  guardStackedBaseImpl = guardStackedBase,
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   log = console,
@@ -3309,6 +3311,23 @@ async function consumeNextFollowUpJob({
       execFileImpl,
     });
     claimed.job = branchReadyJob.job;
+    const baseHold = await guardStackedBaseImpl({ rootDir, repo: claimed.job.repo,
+      prNumber: claimed.job.prNumber, execFileImpl });
+    if (baseHold?.reason === 'stacked-base-read-failed') {
+      const requeued = requeueClaimedFollowUpJobBeforeSpawn({ rootDir, jobPath: claimed.jobPath,
+        requeuedAt: now() });
+      requeued.job.remediationPlan.retryAfter = new Date(Date.parse(now()) + baseHold.retryAfterMs).toISOString();
+      writeFollowUpJob(requeued.jobPath, requeued.job);
+      delayedPendingPaths?.add?.(requeued.jobPath);
+      return { consumed: false, reason: baseHold.reason, job: requeued.job, jobPath: requeued.jobPath };
+    }
+    if (baseHold) {
+      const stopped = markFollowUpJobStopped({ rootDir, jobPath: claimed.jobPath,
+        stoppedAt: now(), stopCode: baseHold.reason, stopReason: 'Rebase onto the default branch and retarget before remediation.',
+        sourceStatus: 'in_progress', commentDeliveryExemption: 'interrupted-without-reconciled-reply',
+        remediationWorker: { state: 'never-spawned' } });
+      return { consumed: false, reason: baseHold.reason, job: stopped.job, jobPath: stopped.jobPath };
+    }
 
     // Round-budget check first (cheap, short-circuits before any
     // OAuth/work). The pr-merge-orchestration spec's risk-tiered
@@ -3832,6 +3851,7 @@ async function consumeFollowUpJobsUntilCapacity({
   resolveRemediationWorkerClassImpl = null,
   mintClaudeCodeRemediationTokenImpl = null,
   conflictedBaseGateImpl = null,
+  guardStackedBaseImpl = guardStackedBase,
   deliverAlertImpl = deliverAlert,
   healthRouter = null,
   log = console,
@@ -3884,6 +3904,7 @@ async function consumeFollowUpJobsUntilCapacity({
         resolveRemediationWorkerClassImpl,
         mintClaudeCodeRemediationTokenImpl,
         conflictedBaseGateImpl,
+        guardStackedBaseImpl,
         deliverAlertImpl,
         log,
       }),

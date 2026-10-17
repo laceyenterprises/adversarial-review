@@ -3789,6 +3789,7 @@ test('resolveOperatorMergeAccountability requires a head-scoped, attributable, p
 // Inject history evidence so these wiring fixtures remain offline.
 function runDaemonCleanMergeAttempt(args) {
   return runDaemonCleanMergeAttemptReal({
+    guardStackedBaseImpl: async () => null,
     inspectCiBootstrapImpl: async () => ({ mode: null }),
     fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha),
     ...args,

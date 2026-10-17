@@ -1,3 +1,5 @@
+import { guardStackedBase } from './ama/stacked-base.mjs';
+import { fileURLToPath } from 'node:url';
 import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -44,6 +46,7 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined, signal = null,
   branchProtectionCache = null,
+  guardStackedBaseImpl = guardStackedBase,
 } = {}) {
   const { stdout } = await meteredExecFile(execFileImpl,
     'gh',
@@ -59,6 +62,9 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
     { maxBuffer: 5 * 1024 * 1024, ...(signal ? { signal } : {}) }
   );
   const parsed = JSON.parse(String(stdout || '{}'));
+  const stackedBaseHold = String(parsed.state || '').toUpperCase() === 'OPEN' && !parsed.mergedAt
+    ? await guardStackedBaseImpl({ rootDir: rootDir || fileURLToPath(new URL('..', import.meta.url)),
+      repo, prNumber, execFileImpl, signal }) : null;
   const labels = parsed.labels || [];
   const normalizedLabels = normalizeLabelNames(labels);
   const hasOperatorApproved = normalizedLabels.includes(OPERATOR_APPROVED_LABEL);
@@ -111,6 +117,7 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
     repo,
     prNumber,
     branch: parsed.headRefName,
+    ...(stackedBaseHold ? { stackedBaseHold } : {}),
     baseBranch: parsed.baseRefName,
     // NOOWNER-01: a moved base is one of the inputs that releases a hammer stop hold.
     baseSha: parsed.baseRefOid || null,

@@ -265,7 +265,7 @@ test('candidate fetch requires the watcher root and shares its budget with revie
     if (args.includes('POST')) { posts++; return { stdout: '' }; }
     return { stdout: JSON.stringify({ head_sha: headSha, conclusion: 'cancelled', run_attempt: 1 }) };
   };
-  const options = { env: { HQ_ROOT: hqRoot }, execFileImpl, logger: quiet };
+  const options = { guardStackedBaseImpl: async () => null, env: { HQ_ROOT: hqRoot }, execFileImpl, logger: quiet };
   await fetchMergeAgentCandidate(repo, 2, options);
   assert.equal(posts, 0, 'HQ_ROOT never substitutes for watcher root');
   await fetchMergeAgentCandidate(repo, 2, { ...options, rootDir });
@@ -278,7 +278,7 @@ test('candidate fetch requires the watcher root and shares its budget with revie
 test('candidate recovery failures retain existing failed CI classification', async t => {
   const rootDir = fixture(t);
   for (const helper of ['recoverCancelledChecksImpl', 'inspectCiBootstrapImpl']) {
-    const candidate = await fetchMergeAgentCandidate(repo, 2, { rootDir, logger: quiet,
+    const candidate = await fetchMergeAgentCandidate(repo, 2, { guardStackedBaseImpl: async () => null, rootDir, logger: quiet,
       env: {}, execFileImpl: async () => ({ stdout: JSON.stringify({ state: 'OPEN', headRefOid: headSha,
         statusCheckRollup: [{ __typename: 'CheckRun', name: 'ci', conclusion: 'FAILURE' }], labels: [] }) }),
       [helper]: async () => { throw new Error('HTTP 503'); } });

@@ -2,6 +2,24 @@
   "version": 1,
   "entries": [
     {
+      "id": "ama-dispatch-configuration",
+      "title": "AMA Dispatch Configuration Receipts",
+      "path": "docs/data-model/ama-dispatch-configuration.md",
+      "store": "data/ama-dispatch-configuration/",
+      "schemaSurface": "src/ama/dispatch-configuration-refusal.mjs",
+      "timestampSource": "alertedAt uses the dispatch timestamp or current ISO time when absent",
+      "owner": "AMA closer dispatch"
+    },
+    {
+      "id": "stacked-base-holds",
+      "title": "Stacked Base Holds",
+      "path": "docs/data-model/stacked-base-holds.md",
+      "store": "data/stacked-base-holds/",
+      "schemaSurface": "src/ama/stacked-base.mjs",
+      "persistence": "best-effort receipt; filesystem failure preserves the hold result",
+      "owner": "AMA closure and remediation"
+    },
+    {
       "id": "ama-hammer-background",
       "title": "Pending Background Hammer Dispatches",
       "path": "docs/data-model/ama-hammer-background.md",
@@ -140,6 +158,8 @@
       "pendingCiResumeConsumer": "audit-only; watcher independently evaluates closer ancestry and live CI",
       "leaseTimeoutEvidence": { "waited_s": "number or null when duration evidence is absent", "configured_s": "number" },
       "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },
+      "stackedBaseHoldOutcomes": { "stacked-base-merged": "deferred", "stacked-base-read-failed": "deferred" },
+      "daemonAttemptPhases": ["daemon-pre-merge", "daemon-merged", "daemon-deferred", "daemon-failed"],
       "compatibilityFields": ["appendedRecords"]
     },
     {

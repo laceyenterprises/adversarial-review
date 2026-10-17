@@ -56,6 +56,7 @@ const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGN
 
 function hammerDispatchArgs(rootDir, overrides = {}) {
   return {
+    guardStackedBaseImpl: async () => null,
     reviewState: {
       verdict: 'comment-only',
       headSha: REVIEWED_HEAD,
@@ -1011,6 +1012,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   assert.equal(first.dispatched, true);
   const mergeCalls = [];
   const candidate = await fetchMergeAgentCandidate(REPO, PR_NUMBER, {
+    guardStackedBaseImpl: async () => null,
     execFileImpl: async (_cmd, args) => {
       const livePr = { title: 'Fix #7732 regression', body: 'Fix: #7732', headRefOid: REVIEWED_HEAD,
         state: 'OPEN', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [],

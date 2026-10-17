@@ -1,3 +1,4 @@
+import { guardStackedBase } from './ama/stacked-base.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { hammerAttestationChain } from './ama/hammer-head-validation.mjs';
@@ -401,10 +402,12 @@ export async function runDaemonCleanMergeAttempt({
   appendAmaAuditAttemptImpl = appendAmaAuditAttempt,
   clobberGuardNowImpl = () => new Date().toISOString(),
   emitProtectivePredecessorFindingImpl = null,
+  guardStackedBaseImpl = guardStackedBase,
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
   const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
+  if (candidate?.stackedBaseHold) return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, ...candidate.stackedBaseHold };
   if (!base || !validatedHead) {
     return NOT_TAKEN('daemon-inputs-missing');
   }
@@ -1101,6 +1104,8 @@ export async function runDaemonCleanMergeAttempt({
     },
     // Click the button: `gh pr merge --squash --match-head-commit <head>`.
     runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method, body, subject }) => {
+      const baseHold = await guardStackedBaseImpl({ rootDir, repo, prNumber: pr, execFileImpl, signal });
+      if (baseHold) return { exitCode: 1, stderr: baseHold.reason, closureHold: baseHold };
       const methodFlag = method === 'merge' ? '--merge' : '--squash';
       try {
         const { stdout, stderr } = await execGhWithRetryImpl({
@@ -1119,6 +1124,7 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  if (['stacked-base-merged', 'stacked-base-read-failed'].includes(daemonResult?.reason)) return daemonResult;
   const mappedPrimary = mapDaemonPrimaryChangeResult(daemonResult);
   if (mappedPrimary !== daemonResult) return mappedPrimary;
   if (daemonResult?.reason === 'operator-approval-no-longer-current') {

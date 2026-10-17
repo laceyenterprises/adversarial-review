@@ -144,6 +144,7 @@ const gate = (args) => gateRemediationConflictedBase({ ...args, sleepImpl: NO_SL
 async function consumeOnce(rootDir, hqRoot, { prNumber, mergeability, helpText, gateImpl = gate, postCommentImpl, at = '2026-10-10T23:30:00.000Z' }) {
   const calls = [];
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'You are a remediation worker.',
     now: () => at,

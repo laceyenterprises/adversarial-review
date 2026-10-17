@@ -25,7 +25,7 @@ at mode `0640`.
 | `attempts[].outcome` | string | `in_progress`, `deferred`, `superseded`, `succeeded`, or `failed-without-merge`. Other attempt fields carry caller evidence, including `closingStatus` for gate-cap parks. |
 | `attempts[].waited_s` | optional number or null | Merge-lease timeout elapsed seconds from the lease CLI; missing or null duration evidence is recorded as JSON `null` so the deferred audit remains valid. |
 | `attempts[].configured_s` | optional number | Procedure-enforced merge-lease wait budget in seconds for a timeout attempt. |
-| `attempts[].attemptPhase`, `attempts[].path` | optional strings | Per-attempt producer provenance. Daemon phases are `daemon-pre-merge`, `daemon-merged`, and `daemon-failed`; `path` names its closure authority, including `ham-terminal-remediation` for a daemon call on a HAM-certified head. Hammer phases include `hammer-gh-pr-merge`, `hammer-gate-attempt-cap` and `hammer-lease-admission`. Document-level authority alone does not identify the producer of a marked attempt. |
+| `attempts[].attemptPhase`, `attempts[].path` | optional strings | Per-attempt producer provenance. Daemon phases are `daemon-pre-merge`, `daemon-merged`, `daemon-deferred`, and `daemon-failed`; `path` names its closure authority, including `ham-terminal-remediation` for a daemon call on a HAM-certified head. Hammer phases include `hammer-gh-pr-merge`, `hammer-gate-attempt-cap` and `hammer-lease-admission`. Document-level authority alone does not identify the producer of a marked attempt. |
 | `attempts[].guardReversals` | optional array of `{ authorization, paths, failedCheckRun, passingCheckRun, failedHead, passingHead }` | Independently verified required-guard reversal authority from the latest completed in-lease eligibility evaluation. Daemon terminal attempts retain it on both success and failure, including when an independent gate such as CI refuses merge. Omitted when that evaluation returns no verified reversals. `authorization` is `Reversal-Authorized-By: guard:<check name>`; paths, run IDs and exact head SHAs identify the proof. This evidence does not waive other merge gates. |
 | `reconciliation.needsRepair` | boolean | Latest append's repair signal. Present on records auto-created by append. |
 | `reconciliation.lastVerifiedAt` | ISO timestamp | Latest append time. Present on records auto-created by append. |
@@ -99,6 +99,13 @@ and sticky-success guard. Admission has no held-lease merge decision and is
 exempt from merge-action receipts; its audit records the refusal.
 The hammer itself never uses historical
 terminal stops as admission input after the closer releases a hold.
+
+The pre-merge stacked-base check records `outcome: deferred` with
+`reason: stacked-base-merged` or `stacked-base-read-failed` and releases the
+merge lease. A merged-parent hold must not create a `failed-without-merge`
+stop: retargeting can restore eligibility without changing the PR head.
+The hammer reads the CLI's last non-empty output line as the reason, preserving
+the merged-parent classification when preceding persistence diagnostics exist.
 
 `resumeOwed` / `resumeHead` have no runtime consumer. The watcher independently
 proves the closer-only ancestry from the reviewed head on each tick and reads

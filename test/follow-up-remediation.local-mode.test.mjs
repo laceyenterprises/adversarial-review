@@ -96,6 +96,7 @@ test('local-mode consume, prompt build, and reconcile agree on the same reply pa
 
     let capturedEnv;
     const consumed = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'Reply path: ${REPLY_PATH}',
       now: () => '2026-05-04T09:30:00.000Z',

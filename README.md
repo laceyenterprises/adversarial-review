@@ -961,6 +961,8 @@ stateDiagram-v2
     s2 --> s0: follow-up-job.11 next round
     s3 --> s0: follow-up-job.12 explicit retrigger
     s4 --> s0: follow-up-job.13 allowlisted explicit retrigger
+    s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
+    s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]
@@ -1063,30 +1065,36 @@ stateDiagram-v2
     state "dispatch-blocked-branch-holder" as s4
     state "dispatch-branch-holder-block-exhausted" as s5
     state "dispatch-failed" as s6
-    state "no-dispatch" as s7
-    state "completed" as s8
+    state "dispatch-configuration-refused" as s7
+    state "no-dispatch" as s8
+    state "completed" as s9
     [*] --> s0: hammer-dispatch.01 persist launch intent
     s0 --> s1: hammer-dispatch.02 launch result: dispatched
     s0 --> s3: hammer-dispatch.03 launch result: dispatch-deferred-transient
     s0 --> s4: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
     s0 --> s5: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
     s0 --> s6: hammer-dispatch.06 launch result: dispatch-failed
-    s0 --> s7: hammer-dispatch.07 launch result: no-dispatch
-    s0 --> s8: hammer-dispatch.08 launch result: completed
+    s0 --> s8: hammer-dispatch.07 launch result: no-dispatch
+    s0 --> s9: hammer-dispatch.08 launch result: completed
     s1 --> s2: hammer-dispatch.09 terminal launch evidence
     s1 --> s6: hammer-dispatch.10 failed outcome reconciled
     s2 --> s0: hammer-dispatch.11 bounded retry or changed context
     s3 --> s0: hammer-dispatch.12 bounded retry or changed context
     s4 --> s0: hammer-dispatch.13 bounded retry or changed context
     s6 --> s0: hammer-dispatch.14 bounded retry or changed context
-    s7 --> s0: hammer-dispatch.15 bounded retry or changed context
-    s1 --> s7: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
-    s2 --> s7: hammer-dispatch.17 foreign ticket corrects terminal launch attribution
+    s8 --> s0: hammer-dispatch.15 bounded retry or changed context
+    s1 --> s8: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
+    s2 --> s8: hammer-dispatch.17 foreign ticket corrects terminal launch attribution
+    s0 --> s7: hammer-dispatch.18 repo_unregistered: release pending lease and page repository once
+    s3 --> s7: hammer-dispatch.19 reclassify legacy configuration refusal
+    s6 --> s7: hammer-dispatch.20 reclassify legacy configuration refusal
+    s7 --> s0: hammer-dispatch.21 normal backoff due; re-probe dispatch; admission clears blocker
     s2 --> [*]
     s5 --> [*]
     s6 --> [*]
     s7 --> [*]
     s8 --> [*]
+    s9 --> [*]
 ```
 
 <!-- smv:diagrams:end -->

@@ -3313,3 +3313,37 @@ After deployment, SRE confirms that the watcher restarted. On the next PR
 rebased by a conflict owner after its final review, confirm that the hammer
 merges it without a provenance-proof refusal or an operator hand-merge, and
 that the conflict owner's completion consumes no hammer attempt.
+
+### Dispatch configuration refusals (UNREGREPO-01)
+
+`repo_unregistered` is a terminal configuration refusal for the current dispatch,
+not transient capacity pressure. The closer persists
+`dispatch-configuration-refused:repo_unregistered` as its closure blocker and
+pages once per repository, across PRs, heads and watcher restarts. An operator
+registers the repository using `hq repo register https://github.com/<owner>/<repo>.git`
+against the same HQ root as the watcher. Code never registers it automatically.
+The existing pending-lease reclaim backoff controls rechecks; a successful
+dispatch clears the PR blocker. Configuration refusals release the pending
+lease and consume no hammer launch credit. The repository page receipt remains
+as a deduplication record; failed delivery retries on later observations.
+When dispatch time is absent, the receipt uses the current timestamp so restart
+deduplication still applies.
+Other dispatch failures retain their existing classifications.
+
+### Merged stacked base (UNREGREPO-01)
+
+Before remediation or closure, the live base is compared with the repository's
+live default branch. A non-default base that is the head branch of an
+already-merged PR in the same repository records `stacked-base-merged` and posts
+one retarget comment per PR. The operator or builder must rebase onto the
+default branch and retarget the PR; the pipeline does neither automatically.
+The daemon and hammer recheck before merging, including after CI waits.
+Both record `deferred` for a stacked-base hold and release the merge lease,
+allowing a later attempt on the same head after rebase/retarget recovery.
+The hammer classifies the CLI's last non-empty output line so preceding
+persistence warnings cannot turn `stacked-base-merged` into a read failure.
+Unreadable base/history evidence holds with `stacked-base-read-failed` and
+retries without claiming that a parent was merged. Fork branches with the same
+name and closed-but-unmerged PRs do not establish a merged parent.
+Local hold-store failures preserve the hold and defer comment delivery; initial
+persistence failures log a warning for filesystem recovery.

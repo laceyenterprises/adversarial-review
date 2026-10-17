@@ -28,6 +28,8 @@ function shellSingleQuote(value) {
 
 function buildMergeAgentPrompt(job, { trigger = null } = {}) {
   const mergeLeaseHelper = shellSingleQuote(fileURLToPath(new URL('../bin/merge-lease.mjs', import.meta.url)));
+  const stackedBaseChecker = shellSingleQuote(fileURLToPath(new URL('../bin/stacked-base-check.mjs', import.meta.url)));
+  const stackedBaseRoot = shellSingleQuote(fileURLToPath(new URL('..', import.meta.url)));
   const ciCostChecker = shellSingleQuote(fileURLToPath(new URL('../bin/ci-cost-check.mjs', import.meta.url)));
   const mergeRepoLiteral = shellSingleQuote(job.repo);
   const mergeBaseLiteral = shellSingleQuote(job.baseBranch);
@@ -41,6 +43,7 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     '',
     '- If `state` is `"MERGED"` (operator-merged ahead of you) OR `state` is `"CLOSED"` (operator abandoned the PR): **abort this session immediately**. Do not check out the branch, do not run remediation, do not push commits, do not call `hq` adjudicate. Exit cleanly with a short stdout note like `merge-agent abort: PR state=<X> at session start; no work performed`.',
     '- If `state` is `"OPEN"`: proceed normally with the dispatch below.',
+    `Before remediation and immediately before every merge, run \`node ${stackedBaseChecker} ${stackedBaseRoot} ${mergeRepoLiteral} ${mergePrLiteral}\`. On refusal stop: stacked-base-merged requires a rebase onto the default branch and a retarget; stacked-base-read-failed requires a later retry. Never retarget or force-push automatically.`,
     '',
     'Rationale: the watcher applies the `merge-agent-dispatched` label when it dispatches you and removes it on cancel-on-merge. If you started before the watcher could cancel you (the cancel path is best-effort), this preamble is the second line of defense against wasting budget on a closed PR.',
     '',

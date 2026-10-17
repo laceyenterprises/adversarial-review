@@ -394,7 +394,7 @@ function timeoutMsForFleetQuotaStatusAttempt(timeoutMs, attemptIndex) {
   return Math.max(1, Math.ceil(parsed * AFH_FLEET_QUOTA_STATUS_RETRY_TIMEOUT_FRACTION));
 }
 
-async function readFleetQuotaStatusStdoutWithRetry({
+export async function readFleetQuotaStatusStdoutWithRetry({
   resolvedHqPath,
   hqCwd,
   execFileImpl,
@@ -455,6 +455,7 @@ export async function readAfhReviewerGrounding({
   const hqCwd = resolveHqCwd(env);
   let snapshot = null;
   let stdout;
+  let quotaError;
   try {
     stdout = await readFleetQuotaStatusStdoutWithRetry({
       resolvedHqPath,
@@ -467,6 +468,7 @@ export async function readAfhReviewerGrounding({
     });
   } catch (err) {
     // Missing binary, non-zero exit, and the execFile timeout kill all land here.
+    quotaError = err;
     snapshot = unavailableGrounding('fleet-quota-status-unavailable', err);
   }
   if (!snapshot) {
@@ -482,7 +484,7 @@ export async function readAfhReviewerGrounding({
   // Capture quota-only evidence before runtime probing, then attach it to the
   // terminal snapshot so every probe outcome retains the same fleet result.
   const fleetQuotaStatus = includeFleetQuotaStatus ? Object.freeze(snapshot.available
-    ? { stdout } : { error: true, errorMessage: snapshot.error || snapshot.reason }) : null;
+    ? { stdout } : { error: true, cause: quotaError, errorMessage: snapshot.error || snapshot.reason }) : null;
   const finalizeSnapshot = result => fleetQuotaStatus
     ? Object.freeze({ ...result, fleetQuotaStatus }) : result;
   const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
@@ -579,6 +581,12 @@ export function createAfhReviewerGroundingCache({
         ) {
           snapshot = Object.freeze({
             ...entry.lastGood.snapshot,
+            // Provider routing may reuse the bounded snapshot, but quota
+            // consumers must see this refresh's failure, never stale stdout.
+            ...(entry.lastGood.snapshot.fleetQuotaStatus ? {
+              fleetQuotaStatus: Object.freeze({ ...snapshot?.fleetQuotaStatus,
+                error: true, stale: true, errorMessage: snapshot?.error || snapshot?.reason }),
+            } : {}),
             // Legacy routes keep their stale-if-error behavior. A managed
             // account must not turn cached evidence into fresh headroom.
             ...(entry.lastGood.snapshot.claudeAccountSelection ? {

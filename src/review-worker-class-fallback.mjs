@@ -486,7 +486,7 @@ export async function resolveReviewerWorkerClassWithFallback({
       ? fleetQuotaStatusCacheTtlMs : 0,
     nowMs,
   });
-  if (quotaStatus.error) {
+  if (quotaStatus.error || quotaStatus.stale) {
     return { ...base, reason: 'fleet-quota-status-unavailable', error: quotaStatus.errorMessage };
   }
 

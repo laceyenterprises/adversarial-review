@@ -1,4 +1,4 @@
-import { createAfhReviewerGroundingCache } from './afh-reviewer-fallback.mjs';
+import { createAfhReviewerGroundingCache, readFleetQuotaStatusStdoutWithRetry } from './afh-reviewer-fallback.mjs';
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS } from './review-worker-class-fallback.mjs';
 
 // Retain AFH's bounded stale-if-error evidence across polls, including its
@@ -14,10 +14,13 @@ export function createWatcherReviewerQuotaPollFactory(options = {}) {
     function execQuotaOnce(command, args, execOptions) {
       if (args?.join(' ') !== 'fleet quota status --json') return execFileImpl(command, args, execOptions);
       if (!quotaRead) {
-        reads++;
-        // Keep failures as well as successes for the entire poll. AFH owns the
-        // stale-if-error policy; retries must not multiply expensive children.
-        quotaRead = Promise.resolve().then(() => execFileImpl(command, args, execOptions));
+        // One shared retry sequence, including for AFH rollback. Count actual
+        // subprocess attempts; candidates cannot multiply transient retries.
+        quotaRead = readFleetQuotaStatusStdoutWithRetry({
+          resolvedHqPath: command, hqCwd: execOptions?.cwd, env: execOptions?.env,
+          timeoutMs: execOptions?.timeout, retryDelaysMs: [250], sleepImpl: options.sleepImpl,
+          execFileImpl: (...callArgs) => { reads++; return execFileImpl(...callArgs); },
+        }).then(stdout => ({ stdout, stderr: '' }));
       }
       return quotaRead;
     }
@@ -38,7 +41,9 @@ export function createWatcherReviewerQuotaPollFactory(options = {}) {
         if (args?.join(' ') !== 'fleet quota status --json') return execFileImpl(command, args, execOptions);
         const snapshot = await (firstGrounding || getGrounding());
         const status = snapshot.fleetQuotaStatus;
-        if (status?.error) throw new Error(status.errorMessage);
+        if (status?.error || status?.stale || snapshot.staleIfError) {
+          throw status?.cause || new Error(status?.errorMessage || 'fleet-quota-status-unavailable');
+        }
         if (typeof status?.stdout === 'string') return { stdout: status.stdout, stderr: '' };
         // AFH rollback leaves the worker-class fallback reader in charge.
         return execQuotaOnce(command, args, execOptions);

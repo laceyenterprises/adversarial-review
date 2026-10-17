@@ -4130,7 +4130,10 @@ for (const failed of [false, true]) test(`STARTADMIT-01: real poll shares one qu
           result.source += ${JSON.stringify(`
             export async function runQueuedReviewAdoptionPhase(args) {
               globalThis.__quotaPostedSnapshot = await globalThis.__quotaContext.execFileAsync(
-                'hq', ['fleet', 'quota', 'status', '--json']);
+                'hq', ['fleet', 'quota', 'status', '--json']).catch(error => {
+                  globalThis.__quotaPostedError = error;
+                  return null;
+                });
               return runQueuedReviewAdoptionPhaseActual(args);
             }
           `)};
@@ -4177,8 +4180,11 @@ for (const failed of [false, true]) test(`STARTADMIT-01: real poll shares one qu
           failQuota = true;
           await pollOnce(octokit, pollOptions);
           assert.equal(quotaReads, readsBeforeFailure + 1, 'a failed read must be shared for the whole second poll');
-          await globalThis.__quotaContext.execFileAsync('hq', ['fleet', 'quota', 'status', '--json']);
-          assert.equal(quotaReads, readsBeforeFailure + 1, 'posted handlers reuse the same last good quota snapshot');
+          assert.match(globalThis.__quotaPostedError.message, /synthetic quota failure/,
+            'posted handlers receive the quota failure instead of stale stdout');
+          await assert.rejects(globalThis.__quotaContext.execFileAsync('hq', ['fleet', 'quota', 'status', '--json']),
+            /synthetic quota failure/);
+          assert.equal(quotaReads, readsBeforeFailure + 1, 'posted handlers reuse the same failure without another read');
         ` : `
           assert.equal(quotaReads, 1, 'N candidates must share one read despite more than one TTL elapsing');
           await globalThis.__quotaContext.execFileAsync('hq', ['fleet', 'quota', 'status', '--json']);

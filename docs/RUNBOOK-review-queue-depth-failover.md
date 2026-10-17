@@ -239,13 +239,21 @@ recovery already returns review to `agy` on its own.
 - **Entitlement + quota.** A fallback class is only selected if its GitHub
   reviewer bot token is present *and* its provider has quota. Spilling onto a
   class that cannot boot converts a slow queue into a stalled one.
-- **One reviewer quota read per poll.** AFH grounding and worker-class fallback
+- **One shared reviewer quota read per poll.** AFH grounding and worker-class fallback
   share one `hq fleet quota status --json` result throughout discovery,
   admission and posted-review handling, even when a poll exceeds 60 seconds.
-  The next poll refreshes it. A failed refresh reuses AFH's last good evidence
-  only within its existing ten-minute stale-if-error bound; managed account
-  evidence remains held when stale. With no usable snapshot, routing keeps its
-  existing fail-open behavior for the whole poll.
+  The next poll refreshes it. The shared read retries a transient subprocess
+  failure once after 250 ms, with a quarter of the initial timeout; permanent
+  errors are not retried. A failed refresh can select AFH's last good provider
+  evidence only when it is at most ten minutes old at refresh time. That selection
+  stays pinned for the rest of the poll and for capacity-freed refills using its
+  contexts until the next poll replaces them; ten minutes is not a wall-clock
+  reuse deadline. Managed account evidence remains held throughout stale reuse.
+  Stale snapshots expose quota failure status without stdout to worker-class
+  fallback, and quota exec consumers receive the original subprocess error,
+  including its code, killed flag and stderr. They cannot admit a managed account
+  from cached stdout. With no usable snapshot, routing keeps its existing
+  fail-open behavior for the whole poll.
 - **The quota trigger is unchanged.** A quota-grounded primary still fails over
   at any depth, and does not consume the depth budget. The two triggers compose.
 - **The pool ceiling is untouched.** More concurrent `gemini` reviewers contend
@@ -270,7 +278,8 @@ to those collections when it processes the same PR.
 `watcher first reviewer spawn: startup_to_spawn_ms=<milliseconds>` records the
 first actual runtime spawn since watcher process start. Each poll logs
 `quota-status reads per poll: poll=<sequence> reads=<count>`; an idle poll can
-report zero. Refusals do not count as reviewer spawns.
+report zero. The count includes actual subprocess attempts, so a transient retry
+can report two. Refusals do not count as reviewer spawns.
 
 After deployment, the SRE session confirms that the watcher restarted. With a
 normal backlog, confirm the first spawn occurs within about a minute and the

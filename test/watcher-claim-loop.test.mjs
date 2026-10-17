@@ -4011,3 +4011,59 @@ for (const age of [600, 901]) {
     else assert.match(output, /review-wait-decision .*pr=101 .*pass_kind=rereview/);
   });
 }
+
+test('STARTADMIT-01: startup admits durable pending work before discovery and deduplicates rediscovery', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'startup-admission-'));
+  const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+  try {
+    let loader = buildLoaderSource({ discoveryHookSource: `
+      globalThis.__startupDiscoverySawSpawn = globalThis.__watcherClaimLoopReviewerSpawns.some(
+        spawn => spawn.subjectContext.prNumber === 101);
+    `, reviewerRuntimeSource: `
+      globalThis.__watcherClaimLoopReviewerSpawns = [];
+      export function createReviewerRuntimeAdapterForDomain() { return {
+        spawnReviewer: async payload => {
+          globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+          payload.onReviewerPgid?.({ pgid: 123456, spawnedAt: new Date().toISOString() });
+          return { ok: true, stdout: '', stderr: '' };
+        }, cancel: async () => {}, reattach: async () => ({}),
+      }; }
+      export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+      export function loadDomainConfig() { return {}; }
+      export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+    ` });
+    loader = loader.replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace(
+            "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+            '({ org: "example", repos: ["example/review-fixture"] })');
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, seatIdleSynthetic(loader));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, seatIdleSynthetic(buildRunnerSource({
+      prePollSetup: `
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+          review_status, revision_ref, labels_json)
+          VALUES ('example/review-fixture', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
+            'pending', 'sha-happy-101', '[]')\`).run();
+      `,
+      afterFirstPoll: `
+        assert.equal(globalThis.__startupDiscoverySawSpawn, true,
+          'a durable pending reviewer must spawn before discovery completes');
+        assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
+        assert.equal(claims.filter(c => c.prNumber === 101).length, 1, 'rediscovery must keep same-head dedup');
+      `,
+    })));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: fixtureEnv({ ...installGhFixture(tmp) }),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.match(result.stdout, /watcher first reviewer spawn: startup_to_spawn_ms=\d+/);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

@@ -1,12 +1,13 @@
 // Process-lifetime admission queue. Polling discovers work; settlement hands
 // capacity straight to the same guarded drain without waiting for a poll.
-export function createReviewerAdmissionQueue({ candidates = [], logger = console, now = Date.now, schedule = setImmediate } = {}) {
+export function createReviewerAdmissionQueue({ candidates = [], logger = console, now = Date.now, startedAt = now(), schedule = setImmediate } = {}) {
   let drainImpl = async () => ({ dispatched: 0 });
   let tail = Promise.resolve();
   let capacityEvent = null;
   const postedByModel = new Map();
   let refill = null;
   let onSettled = null;
+  let firstSpawn = true;
   const identity = candidate => `${candidate.repoPath}#${candidate.prNumber}`;
 
   function enqueue(candidate) {
@@ -26,6 +27,10 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
     candidate.markReviewerSpawned = () => {
       if (spawned) return;
       spawned = true;
+      if (firstSpawn) {
+        firstSpawn = false;
+        logger.log?.(`[watcher] watcher first reviewer spawn: startup_to_spawn_ms=${Math.max(0, now() - startedAt)}`);
+      }
       const postedAt = postedByModel.get(candidate.reviewerModel);
       if (Number.isFinite(postedAt)) {
         logger.log?.(`[watcher] reviewer seat handoff: model=${candidate.reviewerModel} post_to_spawn_ms=${Math.max(0, now() - postedAt)}`);
@@ -68,7 +73,7 @@ export function createReviewerAdmissionQueue({ candidates = [], logger = console
   function drain(reason) {
     const result = tail.then(async () => {
       const initial = await drainImpl(reason);
-      if (reason !== 'capacity-freed' || (initial?.dispatched > 0 || initial?.admissions?.length > 0) || !refill) return initial;
+      if (!['capacity-freed', 'startup durable pending'].includes(reason) || (initial?.dispatched > 0 || initial?.admissions?.length > 0) || !refill) return initial;
       // Refill and re-drain share the poll/settlement mutex. Candidate preflight
       // still runs only after the ordinary pool has reserved capacity.
       const found = await refill(candidates);

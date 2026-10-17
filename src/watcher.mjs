@@ -1044,9 +1044,9 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 const reviewerHeadDispatchLease = createHeadDispatchLease();
 // Discovery and settlement share candidates and memory reservations across polls.
 const reviewerDispatchCandidates = [];
-const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates });
-// Startup settlements intentionally defer durable refill to initial discovery:
-// each repo needs its poll-built policy, runtime and adapter context first.
+const reviewerAdmission = createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, startedAt: Date.now() - process.uptime() * 1000 });
+// Startup and settlement reuse the same policy, runtime and adapter contexts.
+let startupReviewerAdmissionPending = true;
 const reviewerRefillContexts = new Map();
 attachDurableReviewerRefill({ db, contexts: reviewerRefillContexts, admission: reviewerAdmission,
   processSubject: processReviewSubject,
@@ -1263,6 +1263,109 @@ async function pollOnceWithinBudget(
     const operatorSurface = createWatcherOperatorSurface();
     await refreshOrgRepos(octokit);
     watcherHeartbeat?.markPollProgress?.();
+    const watcherDrain = readWatcherDrainState();
+  // Build domain/repo policy contexts before discovery so startup can refill
+  // durable pending rows through the ordinary admission and spawn guards.
+  refreshEnabledDomains({ logger: console });
+  const domainAdapterSets = ENABLED_DOMAINS.map((domain) => ({
+    domainId: domain.id,
+    domainConfig: domain.config,
+    reviewerRuntimeAdapter: resolveReviewerRuntimeAdapterForDomainId(domain.id),
+  }));
+  const domainRepoWork = [];
+  for (const domainAdapterSet of domainAdapterSets) {
+    if (!domainAdapterSet.reviewerRuntimeAdapter) {
+      console.warn(
+        `[watcher] domain ${domainAdapterSet.domainId} has no usable reviewer-runtime adapter this tick; skipping`
+      );
+      continue;
+    }
+    const domainRepos = domainAdapterSet.domainConfig.subjectChannel === 'github-pr'
+      ? activeRepos
+      : [];
+    for (const repoPath of domainRepos) {
+      domainRepoWork.push({ domainAdapterSet, repoPath });
+    }
+  }
+
+  reviewerRefillContexts.clear();
+  for (const { domainAdapterSet, repoPath } of domainRepoWork) {
+    const domainId = domainAdapterSet.domainId;
+    const domainReviewerRuntimeAdapter = domainAdapterSet.reviewerRuntimeAdapter;
+    const [owner, repo] = repoPath.split('/');
+    const subjectAdapter = createGitHubPRSubjectAdapter({
+      octokit,
+      repos: [repoPath],
+      rootDir: ROOT,
+      execFileImpl: execFileAsync,
+      recordApiCall,
+      // ARC-19: inject workspace preparation lazily from the composition root.
+      prepareWorkspaceForJobImpl: async (...args) => {
+        const { prepareWorkspaceForJob } = await import('./follow-up-remediation.mjs');
+        return prepareWorkspaceForJob(...args);
+      },
+    });
+
+    const activeMergeAgentPRs = [], currentRepoPRs = [];
+    const reviewContext = {
+      octokit,
+      operatorSurface,
+      healthProbe,
+      healthTick,
+      afterClaim,
+      watcherDrain,
+      reviewerPoolConfig,
+      reviewerMemoryPressureConfig,
+      reviewerDispatchCandidates,
+      enqueueReviewerDispatchCandidate: reviewerAdmission.enqueue,
+      readWatcherDrainState,
+      firstPassSpilloverController,
+      reviewerBurstController, postedReviewHandlers,
+      mergeAgentCandidateBranchProtectionCache,
+      reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
+      reviewerMemoryReservationState,
+      reviewerMemoryAdmissionSampleForTick,
+      getRoutingTierReadinessForTick,
+      getHcpHealthzForTick,
+      reviewerCommandFailedReviewProbe,
+      domainId,
+      domainReviewerRuntimeAdapter,
+      domainAdapterSet,
+      owner,
+      repo,
+      repoPath,
+      activeMergeAgentPRs,
+      currentRepoPRs,
+      ROOT,
+      execFileAsync,
+      WATCHER_PRIMARY_DOMAIN_ID,
+      reviewerHeadDispatchLease,
+      INFRA_AUTO_RECOVER_CAP,
+      REVIEW_UNKNOWN_FAILURE_MAX_RETRIES,
+      QUOTA_EXHAUSTED_BACKOFF_MS,
+      withApiTelemetry,
+      handlePollError,
+      markWatcherReviewHeartbeat,
+      markWatcherSpawnDecision: (extra) => watcherHeartbeat?.markSpawnDecision?.(extra), deliverAlertFn: defaultDeliverAlert,
+      resolveHardReviewCeiling,
+      resolveHardReviewAttemptCeiling,
+      reconcilePendingDraftsBeforeSpawn,
+      resolvePendingDraftRespawnAgeSeconds,
+      isFastMergeSkipEnabled,
+      normalizeReviewPopulationRetryConfig,
+      shouldDeferReviewForActiveFollowUp,
+      wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
+      pipelineGeminiSeats: domainPipelineGeminiSeatCount(domainAdapterSet.domainConfig),
+      supportsAdmissionSplit: admissionSettlementSplitEnabled && !isPipelineEnabled(domainAdapterSet.domainConfig),
+      hasPriorPostedReview: row => Boolean(stmtHasPostedReview.get(row.repo, row.pr_number)),
+    };
+    reviewerRefillContexts.set(`${domainId}:${repoPath}`, { subjectAdapter, context: reviewContext });
+  }
+  if (startupReviewerAdmissionPending) {
+    await drainReviewerDispatchCandidates('startup durable pending');
+    startupReviewerAdmissionPending = false;
+  }
+
     await retryPendingMergeAgentLifecycleCleanups();
     // Lifecycle sync is the health surface's authoritative "is this PR still
     // open?" mirror. It must refresh before the per-PR discovery/retry sweep:
@@ -1320,7 +1423,6 @@ async function pollOnceWithinBudget(
   await runFastMergeClosePathIsolated({ repos: activeRepos });
   watcherHeartbeat?.markPollProgress?.();
 
-  const watcherDrain = readWatcherDrainState();
   if (watcherDrain.active) {
     console.log(
       `[watcher] Review drain active — skipping new review spawns` +
@@ -1332,64 +1434,14 @@ async function pollOnceWithinBudget(
   // ARGUSDRAIN-01: start Argus security reviews in the background (never awaited).
   startArgusSecurityDrainForWatcherTick({ rootDir: ROOT, watcherDrainActive: watcherDrain.active, logger: console });
 
-  // ARC-03: pump every enabled domain through its own adapter set instead of
-  // assuming a single hardcoded `code-pr` domain. Each enabled domain resolves
-  // its own reviewer-runtime adapter (isolated from other domains); the primary
-  // github-pr domain owns the polled repos. Flattening domains × repos into one
-  // work-list keeps the existing per-repo body intact while threading the
-  // domain identity through it. code-pr is the only enabled domain in
-  // production, so this iterates exactly the repos it did before.
-  refreshEnabledDomains({ logger: console });
-  const domainAdapterSets = ENABLED_DOMAINS.map((domain) => ({
-    domainId: domain.id,
-    domainConfig: domain.config,
-    reviewerRuntimeAdapter: resolveReviewerRuntimeAdapterForDomainId(domain.id),
-  }));
-  const domainRepoWork = [];
-  for (const domainAdapterSet of domainAdapterSets) {
-    if (!domainAdapterSet.reviewerRuntimeAdapter) {
-      console.warn(
-        `[watcher] domain ${domainAdapterSet.domainId} has no usable reviewer-runtime adapter this tick; skipping`
-      );
-      continue;
-    }
-    const domainRepos = domainAdapterSet.domainConfig.subjectChannel === 'github-pr'
-      ? activeRepos
-      : [];
-    for (const repoPath of domainRepos) {
-      domainRepoWork.push({ domainAdapterSet, repoPath });
-    }
-  }
-
   const discoveryRepos = new Set(domainRepoWork.map(({ repoPath }) => repoPath));
   for (const identity of priorityDiscoveryPending) {
     if (!discoveryRepos.has(identity.slice(0, identity.lastIndexOf('#')))) priorityDiscoveryPending.delete(identity);
   }
-
   for (const { domainAdapterSet, repoPath } of domainRepoWork) {
-    const domainId = domainAdapterSet.domainId;
-    const domainReviewerRuntimeAdapter = domainAdapterSet.reviewerRuntimeAdapter;
-    const [owner, repo] = repoPath.split('/');
-    const subjectAdapter = createGitHubPRSubjectAdapter({
-      octokit,
-      repos: [repoPath],
-      rootDir: ROOT,
-      execFileImpl: execFileAsync,
-      recordApiCall,
-      // ARC-19: the scheduler is the composition root — it injects the layer-5
-      // remediation-workspace impl behind the layer-4 subject adapter's port so
-      // the adapter never imports the follow-up-remediation orchestration.
-      // Resolved lazily (loaded on first remediation-workspace prep, not on the
-      // poll path) so a stubbed subject adapter never drags the monolith in.
-      prepareWorkspaceForJobImpl: async (...args) => {
-        const { prepareWorkspaceForJob } = await import('./follow-up-remediation.mjs');
-        return prepareWorkspaceForJob(...args);
-      },
-    });
-
+    const { subjectAdapter, context: reviewContext } = reviewerRefillContexts.get(`${domainAdapterSet.domainId}:${repoPath}`);
+    const { activeMergeAgentPRs, currentRepoPRs } = reviewContext;
     let subjectRefs;
-    const activeMergeAgentPRs = [];
-    const currentRepoPRs = [];
     try {
       subjectRefs = await subjectAdapter.discoverSubjects();
       watcherHeartbeat?.markPollProgress?.();
@@ -1436,59 +1488,6 @@ async function pollOnceWithinBudget(
     subjectEntries = orderSubjectEntriesRereviewOldestFirst(subjectEntries, { repoPath, logger: console });
     const duplicateFamilyCensus = await runDuplicateFamilyCensusForWatcher({ db, octokit, subjectEntries, repoPath, rootDir: ROOT, env: process.env });
     await reconcileDuplicateFamilyLabels({ db, octokit, repoPath, logger: console, census: duplicateFamilyCensus, cfg: loadConfigCached({ env: process.env }).getMergeAuthorityConfig() });
-    const reviewContext = {
-      octokit,
-      operatorSurface,
-      healthProbe,
-      healthTick,
-      afterClaim,
-      watcherDrain,
-      reviewerPoolConfig,
-      reviewerMemoryPressureConfig,
-      reviewerDispatchCandidates,
-      enqueueReviewerDispatchCandidate: reviewerAdmission.enqueue,
-      readWatcherDrainState,
-      firstPassSpilloverController,
-      reviewerBurstController, postedReviewHandlers,
-      mergeAgentCandidateBranchProtectionCache,
-      reviewerFleetQuotaStatusCache: reviewerTickCaches.fleetQuotaStatus,
-      reviewerMemoryReservationState,
-      reviewerMemoryAdmissionSampleForTick,
-      getRoutingTierReadinessForTick,
-      getHcpHealthzForTick,
-      reviewerCommandFailedReviewProbe,
-      domainId,
-      domainReviewerRuntimeAdapter,
-      domainAdapterSet,
-      owner,
-      repo,
-      repoPath,
-      activeMergeAgentPRs,
-      currentRepoPRs,
-      ROOT,
-      execFileAsync,
-      WATCHER_PRIMARY_DOMAIN_ID,
-      reviewerHeadDispatchLease,
-      INFRA_AUTO_RECOVER_CAP,
-      REVIEW_UNKNOWN_FAILURE_MAX_RETRIES,
-      QUOTA_EXHAUSTED_BACKOFF_MS,
-      withApiTelemetry,
-      handlePollError,
-      markWatcherReviewHeartbeat,
-      markWatcherSpawnDecision: (extra) => watcherHeartbeat?.markSpawnDecision?.(extra), deliverAlertFn: defaultDeliverAlert,
-      resolveHardReviewCeiling,
-      resolveHardReviewAttemptCeiling,
-      reconcilePendingDraftsBeforeSpawn,
-      resolvePendingDraftRespawnAgeSeconds,
-      isFastMergeSkipEnabled,
-      normalizeReviewPopulationRetryConfig,
-      shouldDeferReviewForActiveFollowUp,
-      wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
-      pipelineGeminiSeats: domainPipelineGeminiSeatCount(domainAdapterSet.domainConfig),
-      supportsAdmissionSplit: admissionSettlementSplitEnabled && !isPipelineEnabled(domainAdapterSet.domainConfig),
-      hasPriorPostedReview: row => Boolean(stmtHasPostedReview.get(row.repo, row.pr_number)),
-    };
-    reviewerRefillContexts.set(`${domainId}:${repoPath}`, { subjectAdapter, context: reviewContext });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, { ...reviewContext });
       watcherHeartbeat?.markPollProgress?.();

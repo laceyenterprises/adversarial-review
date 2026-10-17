@@ -1490,6 +1490,26 @@ async function reconcileFollowUpJob({
     workerTerminalEvent,
     workerTerminalReplyPath: paths?.replyPath || null,
   });
+  // A publication refusal wins over reply text, no-progress handling and
+  // published-head recovery. It cannot authorize a re-review or empty close.
+  if (liveness.state !== 'active') {
+    let publicationFailure;
+    try {
+      const checkedPaths = buildReconciliationPaths(rootDir, job);
+      publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
+    } catch { /* No validated refusal artifact for this round. */ }
+    if (publicationFailure?.code === 'remediation-empties-pr-diff'
+      && publicationFailure.previousHead === job.revisionRef) {
+      const failure = { code: 'remediation-empties-pr-diff',
+        message: 'Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.' };
+      const { commentDelivery } = buildReconcileCommentDelivery({ job, worker, action: 'failed', failure, now });
+      const failed = markFollowUpJobFailed({ rootDir, jobPath, failedAt: now(), failureCode: failure.code,
+        error: new Error(failure.message), remediationWorker: { ...worker, state: 'failed', reconciledAt: now() }, commentDelivery });
+      await postReconcileOutcomeCommentSafe({ rootDir, jobPath: failed.jobPath, job: failed.job, worker,
+        action: 'failed', failure, postCommentImpl, alreadyTerminal: failed.alreadyTerminal, now, log });
+      return { action: 'failed', reason: failure.code, job: failed.job, jobPath: failed.jobPath };
+    }
+  }
   const lifecycle = await resolveJobPRLifecycleSafe({
     rootDir,
     job,

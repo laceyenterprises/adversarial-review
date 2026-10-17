@@ -207,8 +207,8 @@ export async function holdForOperatorLabels({ rootDir, repo, prNumber, headSha, 
   const reason = gates[0].reason;
   const result = { dispatched: false, skipMergeAgent: true, recoveryWait: true,
     needsOperator: true, reason, operatorLabelGates: gates };
-  // Only the closer pages; concurrent closer observations claim paging with an
-  // exclusive file, then re-read the receipt under the claim. Crash recovery
+  // Follow-up and closer observations share an exclusive paging claim,
+  // then re-read the receipt under that claim. Crash recovery
   // retries after the bounded stale-lock window; failed transport also retries.
   let claimed = false;
   try {

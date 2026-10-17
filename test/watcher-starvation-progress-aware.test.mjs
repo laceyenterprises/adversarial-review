@@ -112,6 +112,7 @@ test('progress RESETS the consecutive-check count rather than merely delaying th
   heartbeat.set({ last_spawn_decision_at: '2026-09-20T05:40:00.000Z' });
   assert.equal(h.wd.checkStarvation(), false, 'progress must reset the series');
   // The series has to start over, so a single further check cannot kill.
+  h.advance(1000); // a full threshold since the most recent progress
   assert.equal(h.wd.checkStarvation(), false, 'post-reset check 1');
   assert.equal(h.wd.checkStarvation(), false, 'post-reset check 2');
   assert.equal(h.wd.checkStarvation(), true, 'post-reset check 3 signals');
@@ -152,4 +153,19 @@ test('the existing poll_counter escape still short-circuits', () => {
   heartbeat.set({ poll_counter: 2 });
   assert.equal(h.wd.checkStarvation(), false);
   assert.equal(h.starvations.length, 0);
+});
+
+
+test('a poll-counter advance resets the window without permanently hiding a later hang', () => {
+  const heartbeat = makeHeartbeat();
+  const h = harness({ heartbeat });
+  h.wd.beginPoll();
+  h.advance(5000);
+  heartbeat.set({ poll_counter: 2 });
+  assert.equal(h.wd.checkStarvation(), false);
+  h.advance(1000);
+  assert.equal(h.wd.checkStarvation(), false);
+  assert.equal(h.wd.checkStarvation(), false);
+  assert.equal(h.wd.checkStarvation(), true);
+  assert.equal(h.starvations.length, 1);
 });

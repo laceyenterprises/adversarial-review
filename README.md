@@ -1116,7 +1116,7 @@ stateDiagram-v2
     s0 --> s7: hammer-dispatch.18 repo_unregistered: release pending lease and page repository once
     s3 --> s7: hammer-dispatch.19 reclassify legacy configuration refusal
     s6 --> s7: hammer-dispatch.20 reclassify legacy configuration refusal
-    s7 --> s0: hammer-dispatch.21 normal backoff due; re-probe dispatch; admission clears blocker
+    s7 --> s0: hammer-dispatch.21 normal backoff due, re-probe dispatch, admission clears blocker
     s2 --> [*]
     s5 --> [*]
     s6 --> [*]

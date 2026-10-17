@@ -320,7 +320,12 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       const current = lstatSync(scratchDir);
       if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
       if (Date.now() - censusStartedAt >= PROCESS_CENSUS_FRESHNESS_MS) {
-        pauseReason = 'census-expired'; break;
+        if (censusReads >= 2) { pauseReason = 'census-expired'; break; }
+        await refreshCensus();
+        // Repeat all candidate checks after yielding for the second census,
+        // including live-worker and owner reads. The two-read cap bounds retries.
+        candidateIndex -= 1;
+        continue;
       }
       if (!parentNow.isDirectory() || !current.isDirectory()
         || parentNow.ino !== parentStat.ino || parentNow.dev !== parentStat.dev

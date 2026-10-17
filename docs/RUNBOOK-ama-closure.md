@@ -116,10 +116,16 @@ Process census time is excluded from that scan budget: parallel `ps` and `lsof`
 commands each have their own fixed 15-second timeout. The census is read once,
 just before the first eligible deletion, and refreshed only if 30 seconds have
 elapsed since that read started. At most two censuses run per pass; if the
-second ages out, remaining candidates wait for another pass. Before each
-deletion, the candidate's lexical and real paths and its owner identifiers are
-checked against the current census. The existing owner, worker and directory
-identity checks still apply.
+second ages out, remaining candidates wait for another pass. With the default
+10-second scan budget and a census completing within its 15-second timeout,
+the pass ends before the 30-second freshness limit; refresh and `census-expired`
+are safeguards for extended `scanBudgetMs` callers or scheduling/filesystem
+delays, not expected stages of every production pass. If the first census ages
+out during final path and ownership checks, the sweep reads its second census
+and repeats all checks for that candidate, including owner and live-worker
+validation. Before each deletion, the candidate's lexical and real paths and
+its owner identifiers are checked against the current census. The existing
+owner, worker and directory identity checks still apply.
 
 `ama_closer.scratch_process_census` records duration, UTF-8 byte counts for each
 command and whether the census was readable. Census contents and subprocess

@@ -187,6 +187,53 @@ for (const refreshedLive of [false, true]) {
   });
 }
 
+for (const afterRefresh of ['idle', 'process', 'worker', 'owner', 'expired']) {
+  test(`SCRATCHCENSUS-01: expiration during final checks refreshes and revalidates the candidate (${afterRefresh})`, async t => {
+    const f = fixture(t);
+    const paths = [f.scratch(), f.scratch()];
+    for (let index = 0; index < paths.length; index += 1) {
+      const owner = f.record(paths[index]);
+      writeFileSync(join(dirname(owner), `synthetic-owner-${index}.json`), readFileSync(owner));
+      rmSync(owner);
+    }
+    let clock = nowMs;
+    let ticking = false;
+    let censusStartedAt;
+    let calls = 0;
+    let completed = false;
+    t.mock.method(Date, 'now', () => ticking ? clock++ : clock);
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 200_000,
+      readWorkerStatusImpl: () => {
+        if (calls === 1 || (calls === 2 && afterRefresh === 'expired')) {
+          // Enter with a fresh census, then cross 30 seconds during final checks.
+          clock = censusStartedAt + 29_997;
+          ticking = true;
+        }
+        return { ok: true, row: { status: calls === 2 && afterRefresh === 'worker' ? 'running' : 'succeeded' } };
+      },
+      readProcessSnapshotImpl: () => {
+        calls += 1;
+        censusStartedAt = clock;
+        ticking = false;
+        if (calls === 2 && afterRefresh === 'owner') {
+          const directory = dirname(amaCloserDispatchFilePath(f.root, identity));
+          for (let index = 0; index < paths.length; index += 1) {
+            writeFileSync(join(directory, `synthetic-owner-${index}.json`), JSON.stringify({ state: 'dispatching' }));
+          }
+        }
+        return calls === 2 && afterRefresh === 'process' ? '123 synthetic-lrq' : '123 synthetic-idle-process';
+      },
+      onSweepComplete: () => { completed = true; },
+    });
+    assert.equal(calls, 2);
+    assert.equal(removed.length, afterRefresh === 'idle' ? 2 : 1);
+    assert.equal(paths.filter(existsSync).length, afterRefresh === 'idle' ? 0 : 1);
+    assert.equal(completed, afterRefresh !== 'expired');
+    const pauses = f.logs.map(line => JSON.parse(line)).filter(row => row.event === 'ama_closer.scratch_sweep_paused');
+    assert.deepEqual(pauses.map(row => [row.reason, row.remainingCandidates]), afterRefresh === 'expired' ? [['census-expired', 1]] : []);
+  });
+}
+
 test('SCRATCHCENSUS-01: successful census measures UTF-8 bytes without exposing process contents', async () => {
   const logs = [];
   const outputs = { ps: '123 synthetic-secret-é', lsof: 'p123\nn/synthetic-secret-λ' };

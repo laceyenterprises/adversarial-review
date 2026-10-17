@@ -75,3 +75,96 @@ test('FINALCLOSE-01 terminal launches exhaust the cap and page once with the las
   assert.equal(f.pages.length, 1);
   assert.match(f.pages[0], /terminal-launch-without-merge|hammer-exited-without-close/);
 });
+
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
+import { observeClosureWait } from '../src/ama/closure-wait.mjs';
+
+const reviewed = 'b'.repeat(40);
+const body = '## Blocking issues\n- None.\n## Non-blocking issues\n- **Cleanup**\n  - **Problem:** redundant branch\n## Verdict\nComment only';
+function finalRound(t) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'finalclose-round-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const dir = join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'fixture__repo-pr-41-final.json'), JSON.stringify({ repo, prNumber,
+    status: 'completed', revisionRef: reviewed, reviewBody: body, riskClass: 'low',
+    finalRound: 'comment-only', reReview: { suppressed: 'comment-only-final-round' },
+    completedAt: started, completion: { workerPushedHeadSha: headSha },
+    remediationPlan: { currentRound: 1, maxRounds: 2 }, remediationWorker: { state: 'completed' } }));
+  return rootDir;
+}
+for (const operation of ['mergeability', 'live-review', 'stale-proof']) {
+  test(`FINALCLOSE-01 final-round ${operation} timeout reaches dispatch on the same tick without merging`, async t => {
+    const rootDir = finalRound(t);
+    const stall = () => new Promise(() => {});
+    let launches = 0, merges = 0;
+    const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+      currentRevisionRef: headSha, labelNames: [], operationTimeoutMs: 10,
+      reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+        reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+      candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+        mergeable: operation === 'mergeability' ? 'UNKNOWN' : 'MERGEABLE',
+        statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      fetchPullRequestMergeabilityImpl: stall,
+      fetchLatestHeadReviewBodiesImpl: operation === 'live-review' ? stall : async () => [body],
+      proveCloserAuthoredStaleHeadImpl: operation === 'stale-proof' ? stall : async () => ({ proven: false }),
+      runDaemonCleanMergeAttemptImpl: async () => { merges++; assert.fail('timeout must never authorize a watcher merge'); },
+      maybeDispatchAmaCloserImpl: async args => {
+        launches++;
+        assert.equal(args.dispatchContext.finalRoundDispatchOnly, true);
+        assert.equal(args.dispatchContext.targetRemediationSha, headSha);
+        assert.equal(args.prMetadata.mergeableState, 'UNKNOWN');
+        return { dispatched: true };
+      },
+      observeClosureWaitImpl: async () => ({}),
+      logger: { log() {}, warn() {} },
+    });
+    assert.equal(result.dispatched, true);
+    assert.equal(launches, 1);
+    assert.equal(merges, 0);
+  });
+}
+
+test('FINALCLOSE-01 final-round wait pages once at thirty minutes despite changing blockers and keeps observing', async t => {
+  const rootDir = finalRound(t), pages = [];
+  for (const [now, reason] of [[0, 'coexistence-timeout'], [1800000, 'history-read-failed'],
+    [1800001, 'launch-ended-without-merge'], [3600000, 'retry-cap-exhausted']]) {
+    const wait = await observeClosureWait({ rootDir, repo, prNumber, headSha, now,
+      startedAt: 0, waitClass: 'final-round', reason, pageImpl: async text => pages.push(text) });
+    assert.equal(wait.exhausted, now >= 1800000);
+  }
+  assert.equal(pages.length, 1);
+  assert.match(pages[0], new RegExp(headSha));
+  assert.match(pages[0], /history-read-failed/);
+});
+
+import { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
+import { handoffHammerReview } from '../bin/hammer-review-handoff.mjs';
+for (const requestedHead of [headSha, 'c'.repeat(40)]) {
+  test(`FINALCLOSE-01 interrupted handoff admits only its exact head: ${requestedHead === headSha}`, async t => {
+    const rootDir = finalRound(t);
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,pr_state,review_status,
+      reviewer_head_sha,revision_ref) VALUES (?,?,'2026-01-01T00:00:00Z','claude','open','posted',?,?)`)
+      .run(repo, prNumber, reviewed, reviewed);
+    const identity = { rootDir, repo, prNumber, headSha };
+    acquireAmaCloserLease(identity);
+    await handoffHammerReview({ ...identity, requestBoundedReviewImpl: async () => null });
+    if (requestedHead !== headSha) {
+      // The same completed final round has a different push: an older handoff
+      // cannot authorize that head merely because the PR number matches.
+      const file = join(rootDir, 'data', 'follow-up-jobs', 'completed', 'fixture__repo-pr-41-final.json');
+      const job = JSON.parse((await import('node:fs')).readFileSync(file));
+      job.completion.workerPushedHeadSha = requestedHead;
+      writeFileSync(file, JSON.stringify(job));
+    }
+    const result = requestReviewRereview({ rootDir, repo, prNumber, db,
+      targetRevisionRef: requestedHead, reason: 'auto-refresh: PR head moved' });
+    assert.equal(result.triggered, requestedHead === headSha);
+    if (requestedHead !== headSha) assert.equal(result.reason, 'comment-only-final-round-completed');
+  });
+}

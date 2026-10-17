@@ -879,7 +879,12 @@ async function suppressHammerRetryCapExhaustion({
       + 'PR not closing — operator intervention required; further hammer dispatch '
       + 'suppressed to protect quota.';
     try {
-      await deliverAlertImpl(text, {
+      const deliver = existingRecord?.dispatchReason === 'exhausted-final-hammer'
+        ? async (text, options) => observeClosureWait({ rootDir, repo, prNumber, headSha,
+          reason: text, now: Date.parse(now) || Date.now(), waitClass: 'final-round', immediate: true,
+          pageImpl: message => deliverAlertImpl(message, options) })
+        : deliverAlertImpl;
+      await deliver(text, {
         event: eventName,
         payload: {
           repo,
@@ -4553,6 +4558,7 @@ export async function maybeDispatchAmaCloser({
     eligibilityOptions.closerAuthoredStale = dispatchContext.closerAuthoredStale;
   }
   if (
+    dispatchContext?.finalRoundDispatchOnly !== true &&
     dispatchContext?.allowStaleReviewHeadHammerResume === true &&
     !eligibilityOptions.hamTerminalRemediation &&
     !eligibilityOptions.hamTerminalRemediationGroundTruth &&
@@ -4788,7 +4794,12 @@ export async function maybeDispatchAmaCloser({
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
     const ciBlockedReasonsCovered = ciBlockedFailureAdmit && routeReasons.every((reason) =>
       ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green'].includes(reason));
-    const autoHammer = ciBlockedReasonsCovered || (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
+    const finalRoundDispatchAdmit = dispatchContext?.finalRoundDispatchOnly === true
+      && reviewState?.remediationPending !== true
+      && routeReasons.every(reason => ['stale-review-head', 'verdict-not-settled-success',
+        'blocking-findings-present', 'blocking-findings-unknown', 'non-blocking-findings-present',
+        'non-blocking-findings-unknown', 'ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason));
+    const autoHammer = finalRoundDispatchAdmit || ciBlockedReasonsCovered || (reviewHandoffFindings && isHammerRemediableEligibilityMiss(routeReasons, { reviewHandoff: true })) || ownerProofRecovery || (!pendingCiMechanicalGateMiss && (orphanAdmit || hammerStopRedispatchAdmit)) || (!pendingCiMechanicalGateMiss &&
       (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted || commentOnlyTerminalAdmit || commentOnlyFinalRoundAdmit || automatedRecoveryAdmit)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -5420,8 +5431,10 @@ export async function maybeDispatchAmaCloser({
     // the launch ledger is terminal. Process success alone is not merge proof;
     // feed it through the live PR/audit reconciliation below.
     if (prefetchedLaunchRequestProbe?.ok
-      && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row?.status)) {
-      status = amaCloserStatusFromTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row.status);
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
+      const terminalStatus = amaCloserStatusFromTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row.status);
+      status = AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(terminalStatus)
+        ? 'unknown' : terminalStatus;
     }
     existingDispatchStatus = status;
     if (isTerminalLaunchRequestStatus(status)) {
@@ -6479,7 +6492,8 @@ export async function maybeDispatchAmaCloser({
   }
 
   if (verdict.eligible && eligibleHammerRouteReasons.length === 0
-    && dispatchContext?.forceHammerAfterDaemonFailure !== true && !ownerProofRecovery) {
+    && dispatchContext?.forceHammerAfterDaemonFailure !== true
+    && dispatchContext?.finalRoundDispatchOnly !== true && !ownerProofRecovery) {
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,

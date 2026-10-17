@@ -51,6 +51,10 @@ function buildLoaderSource() {
     [fileUrl('src', 'config-loader.mjs')]: 'fixture:config-loader',
     [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
     [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
+    [fileUrl('src', 'ama-closure-orchestration.mjs')]: 'fixture:closure-orchestration',
+    [fileUrl('src', 'merge-agent-candidate.mjs')]: 'fixture:merge-agent-candidate',
+    [fileUrl('src', 'ama', 'orphan-watchdog.mjs')]: 'fixture:orphan-watchdog',
+    [fileUrl('src', 'ama', 'closure-wait.mjs')]: 'fixture:closure-wait',
   };
 
   return `
@@ -89,6 +93,50 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url === 'fixture:merge-agent-candidate') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'merge-agent-candidate.mjs')}?actual';
+      export { fetchMergeAgentCandidate } from '${fileUrl('src', 'follow-up-merge-agent.mjs')}';
+    `)} };
+  }
+  if (url === 'fixture:closure-orchestration') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'ama-closure-orchestration.mjs')}?actual';
+      import * as actual from '${fileUrl('src', 'ama-closure-orchestration.mjs')}?actual';
+      export function maybeDispatchAmaClosureFor(options) {
+        return actual.maybeDispatchAmaClosureFor({ ...options,
+          rootDir: process.env.FIXTURE_ISOLATED_ROOT,
+          fetchMergedProtectiveDependentsImpl: async () => [],
+          probeClosureOwnershipImpl: async () => ({ owned: false }),
+        });
+      }
+      export function resolveMergeAgentCoexistenceForWatcher(options) {
+        return actual.resolveMergeAgentCoexistenceForWatcher({ ...options,
+          rootDir: process.env.FIXTURE_ISOLATED_ROOT,
+          maybeDispatchAmaClosureForImpl: maybeDispatchAmaClosureFor,
+        });
+      }
+    `)} };
+  }
+  if (url === 'fixture:orphan-watchdog') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'ama', 'orphan-watchdog.mjs')}?actual';
+      import { recoverOrphan as actual } from '${fileUrl('src', 'ama', 'orphan-watchdog.mjs')}?actual';
+      export function recoverOrphan(options) {
+        return actual({ ...options, rootDir: process.env.FIXTURE_ISOLATED_ROOT,
+          hasOwnerImpl: async () => ({ owned: false }) });
+      }
+    `)} };
+  }
+  if (url === 'fixture:closure-wait') {
+    return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
+      export * from '${fileUrl('src', 'ama', 'closure-wait.mjs')}?actual';
+      import { observeClosureWait as actual } from '${fileUrl('src', 'ama', 'closure-wait.mjs')}?actual';
+      export function observeClosureWait(options) {
+        return actual({ ...options, rootDir: process.env.FIXTURE_ISOLATED_ROOT });
+      }
+    `)} };
+  }
   if (url === 'fixture:ci-wake') {
     return { format: 'module', shortCircuit: true, source: ${JSON.stringify(`
       export * from '${fileUrl('src', 'rereview-wake.mjs')}?actual';
@@ -283,7 +331,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:github-api': "export * from '${fileUrl('src', 'github-api.mjs')}?actual'; export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: globalThis.__ciHammerPushed ? 'ham-pushed-head-164' : (globalThis.__ciNonHamPushed ? 'non-ham-head-164' : 'timeout-head-164'), labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
-    'fixture:ama-dispatch-closer': "export * from '${fileUrl('src', 'ama', 'dispatch-closer.mjs')}?actual'; import { maybeDispatchAmaCloser as actual } from '${fileUrl('src', 'ama', 'dispatch-closer.mjs')}?actual'; import { primaryChangeFixture } from '${fileUrl('test', 'helpers', 'primary-change.mjs')}'; export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { if (args?.reviewState?.remediationPending === true) { const result = await actual({ ...args, fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha), execFileImpl: async () => { throw new Error('remediation owner must prevent external dispatch'); } }); if (result.dispatched) throw new Error('competing hammer launched'); (globalThis.__ciRemediationDeferrals ||= []).push(result.reason); return result; } if (args?.dispatchContext?.ciBlockedHammerOwner === true) (globalThis.__ciBlockedCloserCalls ||= []).push({ reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, failedChecks: (args?.dispatchContext?.ciFailedChecks || []).map((check) => check.name) }); (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); if ((process.env.FIXTURE_CI_MULTI_TICK || process.env.FIXTURE_CI_PRE_PUSH) && args?.dispatchContext?.ciBlockedHammerOwner === true) { const tick = globalThis.__ciBlockedCloserCalls.length; if (tick === 2 && process.env.FIXTURE_CI_PRE_PUSH) return { dispatched: false, skipMergeAgent: true, launchRequestId: 'lrq_first_hammer', reason: 'existing-dispatch-unknown', workerClass: 'hammer' }; if (tick === 3 && process.env.FIXTURE_CI_MULTI_TICK !== 'retry') return { dispatched: false, skipMergeAgent: true, needsOperator: true, reason: process.env.FIXTURE_CI_MULTI_TICK === 'cap' ? 'hammer-retry-cap-exhausted' : 'ci-blocked-hammer-final-no-merge' }; return { dispatched: true, launchRequestId: tick < 3 ? 'lrq_first_hammer' : 'lrq_retry_hammer', reason: tick === 2 ? 'already-dispatched' : 'dispatched', workerClass: 'hammer' }; } const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
+    'fixture:ama-dispatch-closer': "export * from '${fileUrl('src', 'ama', 'dispatch-closer.mjs')}?actual'; import { maybeDispatchAmaCloser as actual } from '${fileUrl('src', 'ama', 'dispatch-closer.mjs')}?actual'; import { primaryChangeFixture } from '${fileUrl('test', 'helpers', 'primary-change.mjs')}'; export const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = 0; export const AMA_CLOSER_REDISPATCH_BOUND = 2; export function isAmaCloserLaunchInProgress() { return false; } export function isInterruptedInFlightAmaCloserDispatch() { return false; } export function isTransientHqDispatchError() { return false; } export function readAmaCloserDispatchRecord() { return null; } export function updateAmaCloserDispatchRecord() { return null; } export function namedAmaNoDispatchReason(reason, reasons = []) { if (reason === 'not-eligible') { const why = Array.isArray(reasons) && reasons.length ? String(reasons[0] || '').trim() : ''; return 'not-eligible:' + (why || 'unknown'); } return reason; } export async function maybeDispatchAmaCloser(args) { if (args?.reviewState?.remediationPending === true) { const result = await actual({ ...args, fetchPrimaryChangeImpl: async ({ headSha }) => primaryChangeFixture(headSha), execFileImpl: async () => { throw new Error('remediation owner must prevent external dispatch'); } }); if (result.dispatched) throw new Error('competing hammer launched'); (globalThis.__ciRemediationDeferrals ||= []).push(result.reason); return result; } if (args?.dispatchContext?.ciBlockedHammerOwner === true) (globalThis.__ciBlockedCloserCalls ||= []).push({ reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, failedChecks: (args?.dispatchContext?.ciFailedChecks || []).map((check) => check.name) }); (globalThis.__timeoutHandoffCloserCalls ||= []).push({ reviewCycleCapReached: args?.dispatchContext?.reviewCycleCapReached === true, reviewCycleExhausted: args?.reviewState?.reviewCycleExhausted === true, reviewCycleCap: args?.dispatchContext?.reviewCycleCap ?? null, historyHeads: (args?.dispatchContext?.reviewCycleHistory || []).map((row) => row.head_sha) }); if ((process.env.FIXTURE_CI_MULTI_TICK || process.env.FIXTURE_CI_PRE_PUSH) && args?.dispatchContext?.ciBlockedHammerOwner === true) { const tick = globalThis.__ciBlockedCloserCalls.length; if (tick === 2 && process.env.FIXTURE_CI_PRE_PUSH) return { dispatched: false, skipMergeAgent: true, launchRequestId: 'lrq_first_hammer', reason: 'existing-dispatch-unknown', workerClass: 'hammer' }; if (tick === 3 && process.env.FIXTURE_CI_MULTI_TICK !== 'retry') return { dispatched: false, skipMergeAgent: true, needsOperator: true, alertEmitted: process.env.FIXTURE_CI_MULTI_TICK !== 'no-merge', reason: process.env.FIXTURE_CI_MULTI_TICK === 'cap' ? 'hammer-retry-cap-exhausted' : 'ci-blocked-hammer-final-no-merge' }; return { dispatched: true, launchRequestId: tick < 3 ? 'lrq_first_hammer' : 'lrq_retry_hammer', reason: tick === 2 ? 'already-dispatched' : 'dispatched', workerClass: 'hammer' }; } const reason = process.env.FIXTURE_AMA_REASON || 'not-eligible'; if (reason === 'dispatched') return { dispatched: true, launchRequestId: 'lrq_fixture_hammer', workerClass: 'hammer' }; return { dispatched: false, reason, ...(reason === 'primary-change-repair-required' ? { skipMergeAgent: true, needsOperator: true } : {}), ...(reason === 'not-eligible' ? { reasons: ['risk-class-blocked'] } : {}) }; }",
     'fixture:config-loader': "export * from '${fileUrl('src', 'config-loader.mjs')}?actual'; export class AgentOSConfigError extends Error {} function buildConfig() { return { get() { return undefined; }, getMergeAuthorityConfig() { return { enabled: process.env.FIXTURE_AMA_ENABLED === '1' }; }, getOrchestrationMode() { return process.env.FIXTURE_ORCHESTRATION_MODE || 'native'; } }; } export function getConfig() { return undefined; } export function loadConfig() { return buildConfig(); } export function loadConfigCached() { return buildConfig(); } export function resetConfigCache() {} export function loadConfigRuntime() { return buildConfig(); }",
     'fixture:gh-cli': "export * from '${fileUrl('src', 'gh-cli.mjs')}?actual'; export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
     'fixture:ama-ham-provenance': "export * from '${fileUrl('src', 'ama', 'ham-provenance.mjs')}?actual'; export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function hamCommitIdentityMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseCommitTrailerValues() { return {}; } export function parseRemediatedFindingsTrailer() { return null; } export function isHamWorkerTicket() { return false; }",
@@ -312,7 +360,10 @@ import assert from 'node:assert/strict';
 
 import { mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
+// Every subprocess owns its recovery clocks and page deduplication ledger.
+process.env.FIXTURE_ISOLATED_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
 const db = globalThis.__timeoutHandoffDb;
 assert.ok(db, 'watcher should open the synthetic review-state DB');

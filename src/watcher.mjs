@@ -1219,7 +1219,7 @@ async function pollOnceWithinBudget(
     const operatorSurface = createWatcherOperatorSurface();
     await refreshOrgRepos(octokit);
     watcherHeartbeat?.markPollProgress?.();
-    const watcherDrain = readWatcherDrainState();
+    let watcherDrain = readWatcherDrainState();
   // Build domain/repo policy contexts before discovery so startup can refill
   // durable pending rows through the ordinary admission and spawn guards.
   refreshEnabledDomains({ logger: console });
@@ -1269,7 +1269,7 @@ async function pollOnceWithinBudget(
       healthProbe,
       healthTick,
       afterClaim,
-      watcherDrain,
+      get watcherDrain() { return readWatcherDrainState(); },
       reviewerPoolConfig,
       reviewerMemoryPressureConfig,
       reviewerDispatchCandidates,
@@ -1311,7 +1311,7 @@ async function pollOnceWithinBudget(
       isFastMergeSkipEnabled,
       normalizeReviewPopulationRetryConfig,
       shouldDeferReviewForActiveFollowUp,
-      wakePayload: wakePayloadForPoll(), retainedWatcherWakes, admissionSettlementSplitEnabled,
+      get wakePayload() { return wakePayloadForPoll(); }, retainedWatcherWakes, admissionSettlementSplitEnabled,
       pipelineGeminiSeats: domainPipelineGeminiSeatCount(domainAdapterSet.domainConfig),
       supportsAdmissionSplit: admissionSettlementSplitEnabled && !isPipelineEnabled(domainAdapterSet.domainConfig),
       hasPriorPostedReview: row => Boolean(stmtHasPostedReview.get(row.repo, row.pr_number)),
@@ -1375,6 +1375,7 @@ async function pollOnceWithinBudget(
   await runFastMergeClosePathIsolated({ repos: activeRepos });
   watcherHeartbeat?.markPollProgress?.();
 
+  watcherDrain = readWatcherDrainState();
   if (watcherDrain.active) {
     console.log(
       `[watcher] Review drain active — skipping new review spawns` +

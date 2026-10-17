@@ -271,6 +271,10 @@ uses the same bounded refill and admission drain as capacity-freed handoffs.
 Live subject checks, operator holds, draft checks, credential limits, claim CAS,
 same-head deduplication and spawn-boundary freshness still apply. A route change
 must acquire the new route's reservation before spawning.
+Wake payloads are read when admission or discovery uses a context, after
+lifecycle/session recovery, rather than while constructing it. Drain state is
+re-read after recovery and again at admission, so a drain cleared during
+recovery allows startup refill in that same poll.
 Discovery owns separate per-repository PR collections for stuck-merge-agent
 scans and phantom-handoff reconciliation; durable refill does not add records
 to those collections when it processes the same PR.

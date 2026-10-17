@@ -4012,11 +4012,11 @@ for (const age of [600, 901]) {
   });
 }
 
-for (const startupState of ['open', 'drain', 'closed', 'merged']) test(`STARTADMIT-01: startup admission follows recovery and drain guards (${startupState})`, () => {
+for (const startupState of ['open', 'drain', 'drain-cleared-during-recovery', 'closed', 'merged']) test(`STARTADMIT-01: startup admission follows recovery and drain guards (${startupState})`, () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'startup-admission-'));
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
   try {
-    let loader = buildLoaderSource({ subject101Overrides: { labels: ['risk:medium', 'merge-agent-dispatched'] }, discoveryHookSource: `
+    let loader = buildLoaderSource({ subjectHeads: { '102': null }, subject101Overrides: { labels: ['risk:medium', 'merge-agent-dispatched'] }, discoveryHookSource: `
       if (['closed', 'merged'].includes(process.env.FIXTURE_STARTUP_STATE)) subjects[0].terminal = true;
       globalThis.__startupDiscoverySawSpawn = globalThis.__watcherClaimLoopReviewerSpawns.some(
         spawn => spawn.subjectContext.prNumber === 101);
@@ -4052,7 +4052,7 @@ for (const startupState of ['open', 'drain', 'closed', 'merged']) test(`STARTADM
             '({ org: "example", repos: ["example/review-fixture"] })')
             .replace("join(ROOT, 'data', 'watcher-drain.json')", ${JSON.stringify(JSON.stringify(path.join(tmp, 'drain.json')))})
             .replace('await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);',
-              "await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID); (globalThis.__startupRecoveryPhases ||= []).push('lifecycle');")
+              "await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID); (globalThis.__startupRecoveryPhases ||= []).push('lifecycle'); if (process.env.FIXTURE_STARTUP_STATE === 'drain-cleared-during-recovery') (await import('node:fs')).rmSync(" + ${JSON.stringify(JSON.stringify(path.join(tmp, 'drain.json')))} + ");")
             .replace('if (reattach.skipped > 0)', "globalThis.__startupRecoveryPhases.push('sessions'); if (reattach.skipped > 0)")
             .replace('if (passReaper.reaped > 0)', "globalThis.__startupRecoveryPhases.push('passes'); if (passReaper.reaped > 0)")
             .replace("await drainReviewerDispatchCandidates('startup durable pending');",
@@ -4067,7 +4067,7 @@ for (const startupState of ['open', 'drain', 'closed', 'merged']) test(`STARTADM
         const { writeFileSync, rmSync } = await import('node:fs');
         const startupState = process.env.FIXTURE_STARTUP_STATE;
         const drainFile = ${JSON.stringify(path.join(tmp, 'drain.json'))};
-        if (startupState === 'drain') writeFileSync(drainFile, JSON.stringify({
+        if (startupState.startsWith('drain')) writeFileSync(drainFile, JSON.stringify({
           reason: 'fixture maintenance', expiresAt: new Date(Date.now() + 60000).toISOString(),
         }));
         db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
@@ -4075,8 +4075,17 @@ for (const startupState of ['open', 'drain', 'closed', 'merged']) test(`STARTADM
           VALUES ('example/review-fixture', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
             'pending', 'sha-happy-101', '[]')\`).run();
       `,
+      healthProbeSetup: `
+        pollOptions.consumeWakePayload = () => {
+          assert.deepEqual(globalThis.__startupRecoveryPhases?.slice(-3), ['lifecycle', 'sessions', 'passes'],
+            'quota/refill context construction must not consume wakes before recovery');
+          globalThis.__startupLateWakeRead = true;
+          return { repo: 'example/review-fixture', pr_number: 101, head_sha: 'sha-happy-101' };
+        };
+      `,
       afterFirstPoll: `
         assert.deepEqual(globalThis.__startupRecoveryPhases, ['lifecycle', 'sessions', 'passes']);
+        assert.equal(globalThis.__startupLateWakeRead, true, 'recovered wakes must be consumed in the same poll');
         if (startupState === 'drain') {
           assert.equal(globalThis.__startupDrainCalls || 0, 0, 'active drain must skip startup refill');
           assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0);

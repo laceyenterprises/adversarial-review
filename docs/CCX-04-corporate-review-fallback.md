@@ -45,8 +45,9 @@ local hold and execution fallback to try corporate Codex, but a corporate
 quota failure records an account-local cooldown before capacity is released,
 allowing independently admitted personal capacity while fleet evidence catches up.
 Spawn preflight checks that cooldown before consulting fleet quota, preserving its
-original reset time on repeated refusals. Before dispatch, both fallback selection
-stages share a refreshed account selection so an in-tick cooldown cannot reuse
+original reset time and leaving the cooldown file untouched on repeated refusals.
+Before dispatch, both fallback selection stages share a refreshed account
+selection so an in-tick cooldown cannot reuse
 the original corporate admission snapshot.
 If that account cannot admit, normal local holds and bounded model fallback remain.
 Legacy rows

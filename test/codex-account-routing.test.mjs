@@ -13,6 +13,17 @@ const spill = fixture => resolveReviewerWorkerClassWithFallback({ primary: 'gemi
   env: { GH_CODEX_REVIEWER_TOKEN: 'synthetic-token' },
   execFileImpl: async () => ({ stdout: JSON.stringify(fixture) }) });
 
+test('AFH detects snake_case corporate auth paths without corporate broker evidence', () => {
+  const fixture = codexAccountFixture();
+  fixture.providerStatuses = fixture.providerStatuses.map(({ authPath, ...row }) => ({ ...row, auth_path: authPath }));
+  delete fixture.brokerAuth.provider_states['codex-corp'];
+  const snapshot = groundingFor(fixture);
+  assert.equal(snapshot.providers['openai/oauth-corp'].authPath, 'oauth-corp');
+  assert.deepEqual(snapshot.codexAccountSelection, { hold: true, reason: 'codex-account-evidence-unknown' });
+  assert.equal(reviewerModelGrounding(snapshot, 'codex').accountHold, true);
+  assert.equal(direct(fixture).quotaBlocked, true);
+});
+
 test('REVIEWCORPFIRST-01: Codex spill selects corporate while personal still has capacity', async () => {
   const fixture = codexAccountFixture();
   const decision = await spill(fixture);

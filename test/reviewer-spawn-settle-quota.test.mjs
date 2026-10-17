@@ -4,7 +4,7 @@ import { afhGroundingSnapshotFromStdout } from '../src/afh-reviewer-fallback.mjs
 import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -814,8 +814,12 @@ for (const [reviewerModel, provider, active, expectedSpawns] of [
   const env = { ADVERSARIAL_REVIEW_STATE_DIR: rootDir };
   const resetAt = new Date(Date.now() + 3600000).toISOString();
   try {
-    if (active) recordCorporateCodexQuotaCooldown(rootDir, { env, resetAt });
-    else await writeFile(join(rootDir, 'codex-corporate-quota-cooldown.json'), JSON.stringify({ resetAt: '2000-01-01T00:00:00Z' }));
+    // Distinct formatting makes even a same-reset atomic rewrite observable.
+    const originalCooldown = `${JSON.stringify({ resetAt }, null, 2)}\n`;
+    if (active) {
+      recordCorporateCodexQuotaCooldown(rootDir, { env, resetAt });
+      await writeFile(join(rootDir, 'codex-corporate-quota-cooldown.json'), originalCooldown);
+    } else await writeFile(join(rootDir, 'codex-corporate-quota-cooldown.json'), JSON.stringify({ resetAt: '2000-01-01T00:00:00Z' }));
     let quotaReads = 0;
     const capture = newCapture();
     const result = await spawnReviewer({
@@ -829,6 +833,10 @@ for (const [reviewerModel, provider, active, expectedSpawns] of [
       assert.equal(result.quotaState, 'corporate-quota-cooldown');
       assert.equal(capture.completed[0].metadata.quotaState, 'corporate-quota-cooldown');
     } else assert.equal(result.ok, true);
-    if (active) assert.equal(readCorporateCodexQuotaCooldown(rootDir, { env }).resetAt, resetAt, 'refusal must not extend the cooldown');
+    if (active) {
+      assert.equal(readCorporateCodexQuotaCooldown(rootDir, { env }).resetAt, resetAt, 'refusal must not extend the cooldown');
+      assert.equal(await readFile(join(rootDir, 'codex-corporate-quota-cooldown.json'), 'utf8'), originalCooldown,
+        'preflight must leave an existing cooldown file untouched');
+    }
   } finally { await rm(rootDir, { recursive: true, force: true }); }
 });

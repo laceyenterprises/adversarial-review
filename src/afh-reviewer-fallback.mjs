@@ -906,7 +906,7 @@ export function afhReviewerFallbackDecision({
     }
     const status = reviewerModelGrounding(grounding, candidate);
     if (status.accountHold) {
-      considered.push({ reviewerModel: candidate, selected: false, reason: 'claude-account-hold' });
+      considered.push({ reviewerModel: candidate, selected: false, reason: `${normalizeReviewerModel(candidate)}-account-hold` });
       continue;
     }
     if (status.grounded) {

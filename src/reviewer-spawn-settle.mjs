@@ -766,7 +766,8 @@ async function spawnReviewerOnceWithAccount({
     quotaDecision = { available: false, capped: true, state: claudeAccountSelection.reason, provider: 'anthropic' };
   }
   if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
-    if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp') {
+    if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp'
+      && quotaDecision.state !== 'corporate-quota-cooldown') {
       try { recordCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv, resetAt: quotaDecision.resetAt }); }
       catch (error) { console.warn(`[watcher] corporate Codex quota cooldown persistence failed: ${error.message}`); }
     }

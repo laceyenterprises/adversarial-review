@@ -1339,6 +1339,26 @@ test('failed held count is logged as unknown without disabling depth pressure', 
   assert.ok(logs.some(message => /held: unknown/.test(message)));
 });
 
+test('age and depth spills and refunds preserve the independently measured held count', () => {
+  const logs = [];
+  const ctl = createFirstPassSpilloverController({
+    readDepth: () => 8, readHeld: () => 3,
+    resolveThresholdImpl: () => 2, logger: { warn: message => logs.push(message) },
+  });
+  for (let prNumber = 1; prNumber <= 4; prNumber++) {
+    assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber, reason: 'review-max-wait' }), true);
+  }
+  assert.equal(ctl.depthPressure().remaining, ctl.plan().spillSlots);
+  assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: 5 }), true);
+  assert.equal(ctl.refundSpill({ repo: 'o/r', prNumber: 1 }), true);
+  assert.equal(ctl.refundSpill({ repo: 'o/r', prNumber: 5 }), true);
+  assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: 6 }), true);
+  const spillLogs = logs.filter(message => message.includes('review-queue-depth-spillover repo='));
+  assert.equal(spillLogs.length, 6);
+  assert.ok(spillLogs.every(message => message.includes('held: 3')));
+  assert.equal(ctl.depthPressure().remaining, ctl.plan().spillSlots - 1);
+});
+
 // REVIEWSPILL-01: the shared admission path must evaluate age with free seats.
 for (const reason of ['poll', 'capacity-freed', 'startup']) {
   for (const occupied of [0, 2]) {

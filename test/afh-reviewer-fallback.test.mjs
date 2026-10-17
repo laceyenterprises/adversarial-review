@@ -92,6 +92,24 @@ function groundingFor(spec) {
 }
 
 const ALL_OK = () => groundingFor({ openai: OK, anthropic: OK, google: OK });
+
+for (const [builderClass, heldModel] of [['claude-code', 'codex'], ['codex', 'claude']]) {
+  test(`AFH fallback attributes a held ${heldModel} candidate to its own model`, () => {
+    const grounding = {
+      ...ALL_OK(),
+      providers: { google: { state: 'exhausted', hardGrounded: true } },
+      [`${heldModel}AccountSelection`]: { hold: true, reason: `${heldModel}-account-evidence-unknown` },
+    };
+    const decision = afhReviewerFallbackDecision({
+      builderClass, baseRoute: effectiveRouteFor(builderClass, 'always-on'),
+      grounding, geminiReviewerMode: 'always-on',
+    });
+    assert.deepEqual(decision.considered.find(entry => entry.reviewerModel === heldModel), {
+      reviewerModel: heldModel, selected: false, reason: `${heldModel}-account-hold`,
+    });
+  });
+}
+
 // codex soft-grounded: the hard STATE is still `unknown` (the flapping provider
 // AFH-02 exists to catch), only the soft verdict fires.
 const CODEX_SOFT_GROUNDED = () =>

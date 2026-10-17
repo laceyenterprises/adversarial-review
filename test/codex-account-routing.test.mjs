@@ -13,6 +13,42 @@ const spill = fixture => resolveReviewerWorkerClassWithFallback({ primary: 'gemi
   env: { GH_CODEX_REVIEWER_TOKEN: 'synthetic-token' },
   execFileImpl: async () => ({ stdout: JSON.stringify(fixture) }) });
 
+test('missing all corporate evidence holds AFH and worker spill routing consistently', async () => {
+  const fixture = codexAccountFixture();
+  fixture.providerStatuses = fixture.providerStatuses.filter(row => row.authPath !== 'oauth-corp');
+  delete fixture.reserveFloors['openai-oauth-corp'];
+  delete fixture.brokerAuth.provider_states['codex-corp'];
+  const snapshot = groundingFor(fixture);
+  assert.deepEqual(snapshot.codexAccountSelection, { hold: true, reason: 'codex-account-evidence-unknown' });
+  assert.equal(reviewerModelGrounding(snapshot, 'codex').accountHold, true);
+  assert.equal(direct(fixture).quotaBlocked, true);
+  assert.equal((await spill(fixture)).fellBack, false);
+});
+
+test('repeated corporate quota failures preserve the longest active cooldown', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { recordCorporateCodexQuotaCooldown, readCorporateCodexQuotaCooldown } = await import('../src/codex-account-routing.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'codex-cooldown-repeat-'));
+  const nowMs = Date.parse('2026-10-17T20:00:00Z');
+  const options = { env: {}, nowMs };
+  try {
+    const resetAt = new Date(nowMs + 6 * 60 * 60 * 1000).toISOString();
+    recordCorporateCodexQuotaCooldown(root, { ...options, resetAt });
+    for (const shorter of [null, 'invalid', new Date(nowMs - 1).toISOString(),
+      new Date(nowMs + 60 * 60 * 1000).toISOString()]) {
+      assert.equal(recordCorporateCodexQuotaCooldown(root, { ...options, resetAt: shorter }).resetAt, resetAt);
+      assert.equal(readCorporateCodexQuotaCooldown(root, options).resetAt, resetAt);
+    }
+    const later = new Date(nowMs + 12 * 60 * 60 * 1000).toISOString();
+    assert.equal(recordCorporateCodexQuotaCooldown(root, { ...options, resetAt: later }).resetAt, later);
+    const expiredNow = Date.parse(later) + 1;
+    assert.equal(recordCorporateCodexQuotaCooldown(root, { env: {}, nowMs: expiredNow }).resetAt,
+      new Date(expiredNow + 15 * 60 * 1000).toISOString());
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('AFH detects snake_case corporate auth paths without corporate broker evidence', () => {
   const fixture = codexAccountFixture();
   fixture.providerStatuses = fixture.providerStatuses.map(({ authPath, ...row }) => ({ ...row, auth_path: authPath }));

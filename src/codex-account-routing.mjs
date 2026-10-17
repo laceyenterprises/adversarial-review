@@ -49,7 +49,9 @@ export function readCorporateCodexQuotaCooldown(rootDir, { env = process.env, no
 
 export function recordCorporateCodexQuotaCooldown(rootDir, { resetAt = null, env = process.env, nowMs = Date.now() } = {}) {
   const resetMs = Date.parse(resetAt);
-  const end = Number.isFinite(resetMs) && resetMs > nowMs ? resetMs : nowMs + 15 * 60 * 1000;
+  const existing = readCorporateCodexQuotaCooldown(rootDir, { env, nowMs });
+  const end = Math.max(existing ? Date.parse(existing.resetAt) : 0,
+    Number.isFinite(resetMs) && resetMs > nowMs ? resetMs : nowMs + 15 * 60 * 1000);
   const state = { resetAt: new Date(Math.min(end, nowMs + 7 * 24 * 60 * 60 * 1000)).toISOString() };
   writeFileAtomic(join(resolveAdversarialReviewStateDir(rootDir, env), 'codex-corporate-quota-cooldown.json'), JSON.stringify(state));
   return state;

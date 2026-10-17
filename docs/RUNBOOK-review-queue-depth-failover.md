@@ -49,6 +49,8 @@ wake priority: absent subjects retain it until a live read confirms closure or
 head movement, and failed live reads preserve it for later polls.
 Candidates whose pipeline still requires Gemini seats cannot spill their main
 route, because that would not release Gemini capacity.
+Spill reservations require a repository and a positive PR number; missing or
+invalid coordinates fail before charging capacity or the cost ledger.
 A candidate refused by a later gate, or deferred by pool admission, refunds its
 reservation. A pool deferral uses reason `pool-admission-deferred`, restores the
 preferred route, and can be re-evaluated in a later drain. Spill and refund route

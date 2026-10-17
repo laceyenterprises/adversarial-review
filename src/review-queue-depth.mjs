@@ -587,6 +587,10 @@ export function createFirstPassSpilloverController({
      * depth spills consume the per-tick depth budget.
      */
     recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass', waitSeconds = null, reason = 'queue-depth-pressure' } = {}) {
+      if (typeof repo !== 'string' || !repo.trim()
+        || !/^[1-9][0-9]*$/.test(String(prNumber))) {
+        throw new TypeError('recordSpill requires a repository and a positive PR number');
+      }
       const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
       const current = evaluate(kind);
       const reservationKey = `${repo}#${prNumber}`;

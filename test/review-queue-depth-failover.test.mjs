@@ -102,6 +102,20 @@ function controller({ root, depth, threshold, now = () => new Date('2026-09-06T1
 
 // ── 1. Below threshold: byte-identical to pre-RSP-01 ─────────────────────────
 
+test('spill reservations require coordinates before charging capacity or cost', () => {
+  const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => null, logger: {} });
+  for (const coordinates of [{}, { repo: 'sample/project' }, { prNumber: 1 },
+    { repo: '', prNumber: 1 }, { repo: 'sample/project', prNumber: 0 }]) {
+    assert.throws(() => ctl.recordSpill({ ...coordinates, reason: 'review-max-wait' }),
+      /recordSpill requires a repository and a positive PR number/);
+  }
+  assert.equal(ctl.granted(), 0);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 1, reason: 'review-max-wait' }), true);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 1, reason: 'review-max-wait' }), false);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 2, reason: 'review-max-wait' }), true);
+  assert.equal(ctl.granted(), 2);
+});
+
 test('below threshold: reviewer selection is byte-identical to pre-RSP-01', async () => {
   const args = {
     authorClass: 'gemini',
@@ -466,7 +480,7 @@ test('the engage and disengage transitions are recorded with the depth that caus
       root, depth: 14, threshold: 10, now: () => new Date('2026-09-06T18:00:00.000Z'),
     });
     engaged.plan();
-    engaged.recordSpill({ fromWorkerClass: 'gemini', toWorkerClass: 'codex' });
+    engaged.recordSpill({ repo: 'sample/project', prNumber: 1, fromWorkerClass: 'gemini', toWorkerClass: 'codex' });
 
     let report = JSON.parse(readFileSync(reviewQueueDepthFailoverReportPath(root), 'utf8'));
     assert.equal(report.engaged, true);
@@ -665,7 +679,7 @@ test('17 mixed deferred reviews at threshold 2 grant 8 lane-correct spill slots'
     assert.equal(ctl.plan('first-pass').spillSlots, 4);
     assert.equal(ctl.plan('rereview').spillSlots, 4);
     for (let index = 0; index < 4; index += 1) {
-      assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: index, passKind: 'first-pass' }), true);
+      assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: index + 1, passKind: 'first-pass' }), true);
       assert.equal(ctl.recordSpill({ repo: 'o/r', prNumber: 100 + index, passKind: 'rereview' }), true);
     }
     assert.equal(ctl.granted(), 8);
@@ -948,15 +962,16 @@ test('CI-red reservations are refunded so spill slots reach later admissible PRs
     const ctl = controller({ root, depth: 100, threshold: 10 });
     const spillSlots = ctl.plan().spillSlots;
     for (let index = 0; index < spillSlots; index += 1) {
-      assert.equal(ctl.recordSpill({ prNumber: 6900 + index, toWorkerClass: 'codex' }), true);
+      assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 6900 + index, toWorkerClass: 'codex' }), true);
       assert.equal(ctl.refundSpill({
+        repo: 'sample/project',
         prNumber: 6900 + index,
         toWorkerClass: 'codex',
         reason: 'ci-regression-requeued',
       }), true);
     }
     const admitted = Array.from({ length: spillSlots }, (_, index) =>
-      ctl.recordSpill({ prNumber: 7000 + index, toWorkerClass: 'codex' }));
+      ctl.recordSpill({ repo: 'sample/project', prNumber: 7000 + index, toWorkerClass: 'codex' }));
     assert.deepEqual(admitted, Array(spillSlots).fill(true));
     assert.equal(ctl.depthPressure().engaged, false);
   } finally {

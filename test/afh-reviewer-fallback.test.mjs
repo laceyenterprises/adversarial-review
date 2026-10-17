@@ -42,6 +42,7 @@ import {
 import { applyGeminiReviewerRoute, routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
 import { selectReviewerRouteForAttempt } from '../src/reviewer-route-selection.mjs';
 import { parseHqFleetQuotaStatus } from '../src/fleet-quota-status.mjs';
+import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
 
 const HERMETIC = { env: {}, topPath: '/dev/null' };
 
@@ -65,7 +66,7 @@ const OK = { state: 'ok', grounded: false, reason: 'below_threshold', signals: 0
 // `null` to emit a row with NO `afhGrounding` key at all (the pre-AFH-02 / ledger
 // -read-failure shape).
 function fleetStatusJson(spec) {
-  return JSON.stringify({
+  return JSON.stringify(fleetStatusWithCodexAccountEvidence({
     providerStatuses: Object.entries(spec).map(([provider, entry]) => ({
       provider,
       authPath: 'oauth',
@@ -84,7 +85,7 @@ function fleetStatusJson(spec) {
             },
           }),
     })),
-  });
+  }));
 }
 
 function groundingFor(spec) {
@@ -254,7 +255,9 @@ test('AFH-04: all providers ok keeps the configured primary route untouched', ()
     });
     assert.equal(route.reviewerModel, expected, `${builderClass}/${mode} → ${expected}`);
     assert.equal(route.afhReviewerFallback, undefined, 'no AFH stamp when nothing is grounded');
-    assert.deepEqual(route, baseRoute, 'the configured route object is returned unchanged');
+    assert.deepEqual(route, expected === 'codex'
+      ? { ...baseRoute, codexBrokerProvider: 'codex', codexAccountHold: false }
+      : baseRoute, 'the configured route retains its account attribution');
   }
 });
 
@@ -448,19 +451,19 @@ test('AFH-04: a provider row with NO afhGrounding verdict yields no soft signal'
       grounding,
       geminiReviewerMode: 'fallback',
     }),
-    baseRoute,
+    { ...baseRoute, codexBrokerProvider: 'codex', codexAccountHold: false },
     'missing verdict → configured primary'
   );
 });
 
 test('AFH-04: a hard-exhausted provider still grounds when the afhGrounding key is absent', () => {
   const grounding = afhGroundingSnapshotFromStdout(
-    JSON.stringify({
+    JSON.stringify(fleetStatusWithCodexAccountEvidence({
       providerStatuses: [
         { provider: 'openai', authPath: 'oauth', state: 'exhausted' },
         { provider: 'google', authPath: 'oauth', state: 'ok' },
       ],
-    })
+    }))
   );
   const route = applyAfhReviewerFallback({
     builderClass: 'claude-code',
@@ -1105,7 +1108,9 @@ test('AFH-04: the per-tick cache stale-serves a recent good grounding after a re
   assert.equal(reads, 2, 'the cache attempted to refresh after TTL expiry');
   assert.equal(stale.available, true, 'a recent good quota snapshot is used');
   assert.equal(stale.staleIfError.reason, 'fleet-quota-status-unavailable');
-  assert.equal(reviewerModelGrounding(stale, 'codex').grounded, true);
+  assert.equal(reviewerModelGrounding(stale, 'codex').accountHold, true);
+  assert.equal(reviewerModelGrounding(stale, 'codex').grounded, false,
+    'a stale account snapshot holds without authorizing a model switch');
   assert.match(warnings.at(-1), /stale-if-error/);
 });
 
@@ -1131,7 +1136,7 @@ test('AFH-04: the next attempt returns to the primary once codex un-grounds', ()
   });
   assert.equal(afterRecovery.reviewerModel, 'codex');
   assert.equal(afterRecovery.afhReviewerFallback, undefined);
-  assert.deepEqual(afterRecovery, baseRoute);
+  assert.deepEqual(afterRecovery, { ...baseRoute, codexBrokerProvider: 'codex', codexAccountHold: false });
 });
 
 // ── helpers / attempt-selection integration ────────────────────────────────

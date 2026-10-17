@@ -325,9 +325,7 @@ export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null, clau
     providers: Object.freeze(providers),
     codexAccountSnapshot: payload,
     codexAccountModel: codexModel,
-    codexAccountSelection: rows.some(row => row.provider === 'openai' && row.authPath === 'oauth-corp')
-      || payload?.brokerAuth?.provider_states?.['codex-corp']
-      ? selectCodexReviewerAccount(payload, { model: codexModel, statuses: rows }) : null,
+    codexAccountSelection: selectCodexReviewerAccount(payload, { model: codexModel, statuses: rows }),
     claudeAccountSnapshot: payload,
     claudeAccountModel: claudeModel,
     claudeAccountSelection: selectClaudeAccountLaneFromSnapshot(payload, {

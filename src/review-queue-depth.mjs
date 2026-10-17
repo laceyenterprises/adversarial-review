@@ -16,8 +16,8 @@
 // matter how deep the backlog — and `gemini` is not even a tracked quota harness
 // (`QUOTA_HARNESS_PROVIDER` covers openai/anthropic only), so that path returns
 // `primary-provider-untracked` and does nothing at all. This module supplies the
-// missing trigger: QUEUE DEPTH. REVIEWAGE-02 adds a separate wait bound at
-// credential saturation; disarming depth alone does not disable that bound.
+// missing trigger: QUEUE DEPTH. REVIEWSPILL-01 evaluates the independent
+// wait bound at every admission, including when Gemini seats are free.
 //
 // ── This is a COST lever, not a parallelism tuning knob ──────────────────────
 // `agy` is serialized on purpose: it is cheap, and keeping review on it
@@ -96,7 +96,7 @@ export function reviewQueueDepthFailoverReportPath(rootDir) {
 
 /**
  * Read the queue depth through the injected counter (the composition root
- * supplies `countOpenPrsAwaitingFirstPassReview`; this module stays free of the
+ * supplies `countOpenPrsAwaitingReview`; this module stays free of the
  * singleton review-state DB so it can be unit-tested without opening it).
  *
  * Fails OPEN — returns `null` on a missing or throwing counter. An unreadable

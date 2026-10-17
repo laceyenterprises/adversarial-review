@@ -1,7 +1,7 @@
 # RUNBOOK — review queue failover (RSP-01 / REVIEWSPILL-01)
 
-A **break-glass lever**. It is disarmed on every host until an operator arms it,
-and arming it is one config value.
+The depth lever is disarmed until an operator sets its threshold. The individual
+wait bound operates independently, including when depth is disarmed.
 
 ## What it does
 
@@ -80,7 +80,8 @@ threshold is not "how much parallelism do we want". It is:
 
 Consequences, all enforced in code:
 
-- **Conservative by default.** Unset = disarmed = behaviour identical to before.
+- **Depth is opt-in.** An unset threshold disables depth pressure; age pressure
+  still bounds individual waits.
 - **Graded, not a flood.** Each *full multiple* of the threshold sitting in the
   queue buys exactly **one** concurrent non-primary reviewer
   (`floor(depth / threshold)`). Depth 1.9× the threshold still spends one.
@@ -107,7 +108,8 @@ this stays a lever rather than becoming the default path.
 Re-reviews use the parallel key
 `watcher.rereview_queue_depth_failover_threshold` and canonical env
 `AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD`. When absent it
-inherits the first-pass threshold; `0` disables only re-review spillover. Both lanes measure the same actionable queue, with separate thresholds and
+inherits the first-pass threshold; `0` disables only re-review depth spillover.
+Both lanes measure the same actionable queue, with separate thresholds and
 spill budgets. A requested re-review contributes pressure to both lanes.
 
 Both queue-depth lanes exclude open PRs carrying `no-merge-hold`,
@@ -117,12 +119,10 @@ countable. Engage/disengage and spill logs include `held: N`, read once per
 armed lane plan and reused for that tick. An unreadable held count logs a
 specific warning and `held: unknown` without disabling depth pressure.
 
-The classes it may spill to are the pre-existing
-`ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK` list (default `['codex']`)
-— this ticket did not introduce a second roster. `claude-code` is intentionally
-not the default spillover class because the airlock launchd reviewer path cannot
-bootstrap Claude's audit session reliably; operators can still opt it in with
-the env override after proving that lane healthy.
+Depth uses the existing `ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK`
+list (default `['codex', 'claude-code']`). Age uses the original cross-model
+reviewer replaced by Gemini. Entitlement, quota and writer-diversity checks
+apply to both triggers.
 
 ### The unit: what "queue depth" counts
 

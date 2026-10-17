@@ -68,7 +68,7 @@
         {"id": "review-row.26","from": "reviewing","to": "skipped","trigger": "PR already merged","codeSource": "src/review-state-statements.mjs"},
         {"id": "review-row.27","from": "[*]","to": "fast_merge_skipped","trigger": "authorized bypass","codeSource": "src/review-state-db.mjs"},
         {"id": "review-row.28","from": "fast_merge_skipped","to": "pending","trigger": "authorization withdrawn or head moved","codeSource": "src/fast-merge-processing.mjs"},
-        {"id": "review-row.29","from": "reviewing","to": "pending","trigger": "posted settlement missing head or lost claim match; no charge","codeSource": "src/review-state-statements.mjs"},
+        {"id": "review-row.29","from": "reviewing","to": "pending","trigger": "stale head, missing reviewed head or lost claim match; no charge","codeSource": "src/review-state-statements.mjs"},
         {"id": "review-row.30","from": "posted","to": "pending","trigger": "repair empty reviewed head at matching live revision once; no charge","codeSource": "src/posted-review-head-repair.mjs"},
         {"id": "review-row.31","from": "failed","to": "pending","trigger": "recovered post cannot settle its reviewed head; no charge","codeSource": "src/review-state-statements.mjs"},
         {"id": "review-row.32","from": "failed-orphan","to": "pending","trigger": "recovered post cannot match its claim; no charge","codeSource": "src/review-state-statements.mjs"},

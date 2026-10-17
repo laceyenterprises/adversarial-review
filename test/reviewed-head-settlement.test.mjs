@@ -16,6 +16,8 @@ import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-contex
 import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
 import { reconcileReviewerSessions, reviewerBotLoginAliases } from '../src/reviewer-reattach.mjs';
 import { reconcilePostedFailedOrphans } from '../src/orphan-post-reconcile.mjs';
+import { db as watcherDb } from '../src/review-state-db.mjs';
+import { reviewCyclePrUrl } from '../src/review-cycle-cap.mjs';
 
 const repo = 'example/review-head';
 const head = 'a'.repeat(40);
@@ -41,12 +43,12 @@ function fixture(t) {
   };
   const row = () => statements.getReviewRow.get(repo, 1);
   const logs = [];
-  const settle = (reviewerHeadSha = head) => settleReviewerAttempt({
+  const settle = (reviewerHeadSha = head, result = { ok: true, durablePostedAt: Date.now() }) => settleReviewerAttempt({
     rootDir, repoPath: repo, prNumber: 1, reviewerSessionUuid: session,
-    reviewerHeadSha, result: { ok: true, durablePostedAt: Date.now() },
+    reviewerHeadSha, result,
     statements, log: { warn: message => logs.push(message) },
   });
-  return { rootDir, db, row, logs, settle };
+  return { rootDir, db, row, logs, settle, statements };
 }
 
 test('REVIEWHEAD-01: an orphan re-review during a pre-spawn claim waits until settlement', t => {
@@ -129,6 +131,29 @@ test('REVIEWHEAD-01: an operator reset without exit proof preserves a pre-spawn 
   assert.equal(result.reset, false);
   assert.equal(result.reason, 'review-in-flight');
   assert.deepEqual(row(), before);
+});
+
+test('REVIEWHEAD-01: a new claim after posting cannot discard the completed head cycle count', t => {
+  const { db, settle, statements } = fixture(t);
+  const prUrl = reviewCyclePrUrl({ repo, prNumber: 1 });
+  const clearCycles = () => {
+    for (const table of ['review_cycle_verdicts', 'review_cycle_counters']) {
+      watcherDb.prepare(`DELETE FROM ${table} WHERE pr_url = ?`).run(prUrl);
+    }
+  };
+  clearCycles();
+  t.after(clearCycles);
+  const getRow = statements.getReviewRow;
+  statements.getReviewRow = { get: (...args) => {
+    db.prepare(`UPDATE reviewed_prs SET review_status = 'reviewing',
+      reviewer_session_uuid = 'synthetic-next-session', reviewer_head_sha = ?`).run('b'.repeat(40));
+    return getRow.get(...args);
+  } };
+  settle(head, { ok: true, durablePostedAt: Date.now(), reviewBody:
+    '## Blocking issues\n- **Synthetic blocker**\n  - **File:** src/fixture.mjs\n'
+      + '  - **Lines:** 1\n  - **Problem:** synthetic defect\n\n## Verdict\nRequest changes' });
+  const counted = watcherDb.prepare('SELECT head_sha FROM review_cycle_verdicts WHERE pr_url = ?').all(prUrl);
+  assert.deepEqual(counted, [{ head_sha: head }]);
 });
 
 for (const reviewedHead of [head, null]) {

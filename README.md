@@ -947,7 +947,7 @@ stateDiagram-v2
     s2 --> s10: review-row.26 PR already merged
     [*] --> s11: review-row.27 authorized bypass
     s11 --> s0: review-row.28 authorization withdrawn or head moved
-    s2 --> s0: review-row.29 posted settlement missing head or lost claim match; no charge
+    s2 --> s0: review-row.29 stale head, missing reviewed head or lost claim match; no charge
     s4 --> s0: review-row.30 repair empty reviewed head at matching live revision once; no charge
     s5 --> s0: review-row.31 recovered post cannot settle its reviewed head; no charge
     s6 --> s0: review-row.32 recovered post cannot match its claim; no charge

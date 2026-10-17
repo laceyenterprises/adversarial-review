@@ -1410,7 +1410,9 @@ function settleReviewerAttempt({
         const currentRow = typeof statements.getReviewRow?.get === 'function'
           ? statements.getReviewRow.get(repoPath, prNumber)
           : null;
-        if (currentRow && currentRow.reviewer_head_sha !== reviewedHead) return;
+        if (currentRow && currentRow.reviewer_head_sha !== reviewedHead) {
+          log?.log?.(`[watcher] review-cycle-count retains settled head repo=${repoPath} pr=${prNumber} head=${reviewedHead}`);
+        }
         const { windowHours } = resolveReviewCycleCapConfig({
           loadConfigImpl: loadConfigCached,
           logger: log,

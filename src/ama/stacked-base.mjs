@@ -1,3 +1,4 @@
+import { filterGitHubBody } from '../github-outbound-body.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
@@ -74,7 +75,7 @@ export async function holdStackedBase({ state, rootDir, repo, prNumber, execFile
     if (!comments.flat().some(comment => String(comment.body || '').includes(COMMENT_MARKER))) {
       const body = `${COMMENT_MARKER}\nClosure held: stacked-base-merged. The base branch \`${state.baseBranch}\` belongs to an already-merged PR. Rebase this PR onto the default branch \`${state.defaultBranch}\` and retarget it there before remediation or merge can continue. No automatic retarget or force-push will be performed.`;
       await execGhWithRetry({ execFileImpl, args: ['api', `repos/${repo}/issues/${prNumber}/comments`,
-        '-X', 'POST', '-f', `body=${body}`], timeoutMs: 15_000, retries: 0, signal });
+        '-X', 'POST', '-f', `body=${filterGitHubBody(body, { rootDir })}`], timeoutMs: 15_000, retries: 0, signal });
     }
     writeFileAtomic(path, JSON.stringify({ repo, prNumber, reason, commentedAt: new Date().toISOString() }));
   } catch { /* Hold persists; retry comment delivery on the next observation. */ } finally { if (claimed) { try { unlinkSync(lock); } catch { /* expired claim */ } } }

@@ -1060,7 +1060,7 @@ else if (path.includes('/comments')) console.log('[[]]');
 else if (path.includes('/protection')) console.log('{"strict":false}');
 else if (path.includes('/compare/')) console.log(JSON.stringify({status:'ahead',total_commits:0,commits:[],merge_base_commit:{sha:'${base}'},files:[]}));
 else if (path.includes('/git/trees/')) console.log('{"tree":[],"truncated":false}');
-else if (path.endsWith('/pulls/42')) console.log(JSON.stringify({number:42,title:'Synthetic budget fixture',body:'Synthetic body',state:'open',draft:false,head:{sha:'${head}',ref:'fixture-branch'},base:{sha:'${base}',ref:'main'},mergeable:true,mergeable_state:'clean',labels:[],changed_files:0,merged_at:fs.existsSync(process.env.TMPDIR+'/merged')?'2026-01-01T00:00:00Z':null,merge_commit_sha:'${'c'.repeat(40)}'}));
+else if (path.endsWith('/pulls/42')) console.log(JSON.stringify({number:42,title:'Synthetic budget fixture',body:'Synthetic body',state:'open',draft:false,head:{sha:'${head}',ref:'fixture-branch'},base:{sha:'${base}',ref:'main',repo:{default_branch:'main'}},mergeable:true,mergeable_state:'clean',labels:[],changed_files:0,merged_at:fs.existsSync(process.env.TMPDIR+'/merged')?'2026-01-01T00:00:00Z':null,merge_commit_sha:'${'c'.repeat(40)}'}));
 else { console.error('Unexpected synthetic call: ' + JSON.stringify(args)); process.exit(1); }
 `, { mode: 0o755 });
   const phasePaths = [];
@@ -1090,7 +1090,7 @@ echo COMMON_CLOSE_SUCCEEDED
   assert.equal(readFileSync(join(scratchDir, 'pr-after.json'), 'utf8').includes(head), true);
   t.diagnostic(`GHBUDGET common close: GraphQL=${graphql.length} REST=${rest.length} total=${calls.length}`);
   assert.equal(graphql.length, 2, 'the existing gh pr comment and merge commands use GraphQL');
-  assert.equal(rest.length, 42);
+  assert.equal(rest.length, 43, 'includes the live stacked-base recheck immediately before merge');
 });
 
 test('GHBUDGET-01: REST prompt snapshots preserve review authors and exact commit heads', async () => {

@@ -32,6 +32,7 @@ const expected = {
   'github-adapter-client.mjs': 3,
   'fast-merge-processing.mjs': 1,
   'ama/dispatch-closer.mjs': 1,
+  'ama/stacked-base.mjs': 1,
   'ama/hammer-api-publish.mjs': 1,
   'reviewer.mjs': 1,
   'reviewer-exact-head-post.mjs': 2,

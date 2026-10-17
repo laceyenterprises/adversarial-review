@@ -270,7 +270,7 @@
     "src/reviewer-ci-admission.mjs": "9d25ef0c43880794b16f034bf41dd18700cbfb5f56aefc6bd87374618d3936c7",
     "src/reviewer-reattach.mjs": "c52dcf0ea186716725d5916c0be5de3619cd44e011c5c06bf4999877369ebd39",
     "src/reviewer.mjs": "10b8e5b50611cebbcffabc5e5709ffcbf33ed856f469c2a946ed14d72c775e88",
-    "src/watcher.mjs": "83dd4bee5f570b3fd8114fa7bf6ff9c138b710eb600ced5c987e96595f30076a",
+    "src/watcher.mjs": "ea85b67f96d3c7cfeb1fd7c450ca82ab2a48e22c378bd155539dd88ce5dd713c",
     "src/adapters/reviewer-runtime/fixture-stub/index.mjs": "551075e64dc0fba15d5411f1d79297bedec2d3e17accecc5c496c04dab3e26ad"
   }
 }

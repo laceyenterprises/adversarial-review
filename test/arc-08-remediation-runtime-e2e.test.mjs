@@ -79,6 +79,7 @@ test('router local mode routes consume through the local self-spawn runtime', as
 
     let spawnCalled = false;
     const consumed = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'Reply path: ${REPLY_PATH}',
       now: () => '2026-07-01T09:30:00.000Z',
@@ -166,6 +167,7 @@ test('router os mode routes consume through the os hq-dispatch runtime', async (
     });
 
     const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'You are a remediation worker.',
       now: () => '2026-07-01T10:00:00.000Z',
@@ -264,6 +266,7 @@ test('round-budget exhaustion stops the job before any port dispatch (v1 parity)
     });
 
     const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'noop',
       now: () => '2026-07-01T09:30:00.000Z',

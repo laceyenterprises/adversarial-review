@@ -70,6 +70,7 @@ test('consumeNextFollowUpJob short-circuits to stopped/operator-merged-pr when l
   let cloneFired = false;
 
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     postCommentImpl: async () => ({ posted: true }),
@@ -114,6 +115,7 @@ test('consumeNextFollowUpJob short-circuits to stopped/operator-closed-pr when l
   let spawnFired = false;
 
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     postCommentImpl: async () => ({ posted: true }),
@@ -170,6 +172,7 @@ test('consumeNextFollowUpJob proceeds normally when resolvePRLifecycle returns n
   setupPendingJob(rootDir, { prNumber: 101 });
 
   await expectLifecycleGateAllowedThrough(consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     postCommentImpl: async () => ({ posted: true }),
@@ -188,6 +191,7 @@ test('consumeNextFollowUpJob proceeds normally when live lookup reports open', a
   setupPendingJob(rootDir, { prNumber: 102 });
 
   await expectLifecycleGateAllowedThrough(consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     postCommentImpl: async () => ({ posted: true }),
@@ -240,6 +244,7 @@ test('consumeNextFollowUpJob proceeds normally when resolvePRLifecycle throws (l
   setupPendingJob(rootDir, { prNumber: 103 });
 
   await expectLifecycleGateAllowedThrough(consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     postCommentImpl: async () => ({ posted: true }),
@@ -260,6 +265,7 @@ test('consumeNextFollowUpJob stops stale-drift without posting a PR comment', as
 
   let postCommentFired = false;
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     execFileImpl: async () => ({ stdout: '', stderr: '' }),
@@ -297,6 +303,7 @@ test('consumeNextFollowUpJob stops stale review-head jobs without spawning or po
   let postCommentFired = false;
   let cloneFired = false;
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     execFileImpl: async (command, args) => {
@@ -567,6 +574,7 @@ test('consumeNextFollowUpJob trusts live lookup over a stale mirror that still s
   // simulates `gh pr view` returning MERGED while the mirror still
   // says open.
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     postCommentImpl: async () => ({ posted: true }),
@@ -612,6 +620,7 @@ test('consumeNextFollowUpJob falls back to mirror when live lookup fails', async
   let spawnFired = false;
 
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     promptTemplate: 'unused',
     postCommentImpl: async () => ({ posted: true }),

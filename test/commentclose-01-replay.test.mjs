@@ -107,6 +107,7 @@ test(`replay PR ${pr}: the proven final-round push goes to hammer terminal valid
       assert.equal(args.gateSnapshot.reviewedHeadSha, reviewedHead);
       assert.equal(args.currentPrHeadSha, pushedHead);
       const daemon = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
         ...args,
         candidate: { ...args.candidate, baseBranch: 'main' },
         env: { HQ_ROOT: rootDir },

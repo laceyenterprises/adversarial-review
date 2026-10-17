@@ -27,6 +27,7 @@ const rootDir = process.cwd(), repo = 'fixture/repo', prNumber = 7;
 const quiet = { log() {}, warn() {}, error() {} };
 const refuse = () => { throw new Error('unexpected worker/GitHub/notification boundary'); };
 const drain = { rootDir, promptTemplate: 'synthetic', maxConcurrent: 1, log: quiet, logger: quiet,
+  guardStackedBaseImpl: async () => null,
   quotaHoldRevalidator: () => ({ available: true }), requestWatcherWakeImpl: () => ({ requested: true }),
   execFileImpl: refuse, spawnImpl: refuse, deliverAlertImpl: refuse, postCommentImpl: refuse };
 const gitDir = join(rootDir, 'git'); mkdirSync(gitDir);

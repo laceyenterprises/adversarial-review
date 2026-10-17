@@ -1304,3 +1304,22 @@ test('history read failure parks with its error without a permanent marker or me
   assert.equal(doc.attempts.at(-1).reason, 'history-read-failed');
   assert.equal(doc.attempts.at(-1).historyReadError, detail);
 });
+
+test('UNREGREPO-01: a live stacked-base hold releases the lease and permits a later same-head merge', async () => {
+  for (const reason of ['stacked-base-merged', 'stacked-base-read-failed']) {
+    const h = makeHarness();
+    const held = await attemptDaemonCleanMerge(baseArgs(h, {
+      runMergeImpl: async () => ({ exitCode: 1, stderr: reason,
+        closureHold: { reason, needsOperator: reason === 'stacked-base-merged', retryAfterMs: 60_000 } }),
+    }));
+    assert.equal(held.reason, reason);
+    assert.equal(held.permanent, false, 'retargeting must not leave a permanent merge tombstone');
+    assert.equal(held.skipMergeAgent, true);
+    assert.equal(h.calls.merge, 0);
+    assert.equal(h.calls.release, 1);
+    assert.equal(h.calls.auditAppends.at(-1).attempt.outcome, 'deferred');
+    const resumed = await attemptDaemonCleanMerge(baseArgs(h));
+    assert.equal(resumed.merged, true);
+    assert.equal(h.calls.merge, 1);
+  }
+});

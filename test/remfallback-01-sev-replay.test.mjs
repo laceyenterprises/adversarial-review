@@ -187,6 +187,7 @@ function refusingSpawn() {
 
 async function consumeAt(now, { resolveRemediationWorkerClassImpl, spawnImpl, quotaHoldRevalidator } = {}) {
   return consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     spawnImpl,
     now: () => now,

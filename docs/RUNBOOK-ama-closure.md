@@ -3327,3 +3327,15 @@ dispatch clears the PR blocker. Configuration refusals release the pending
 lease and consume no hammer launch credit. The repository page receipt remains
 as a deduplication record; failed delivery retries on later observations.
 Other dispatch failures retain their existing classifications.
+
+### Merged stacked base (UNREGREPO-01)
+
+Before remediation or closure, the live base is compared with the repository's
+live default branch. A non-default base that is the head branch of an
+already-merged PR in the same repository records `stacked-base-merged` and posts
+one retarget comment per PR. The operator or builder must rebase onto the
+default branch and retarget the PR; the pipeline does neither automatically.
+The daemon and hammer recheck before merging, including after CI waits.
+Unreadable base/history evidence holds with `stacked-base-read-failed` and
+retries without claiming that a parent was merged. Fork branches with the same
+name and closed-but-unmerged PRs do not establish a merged parent.

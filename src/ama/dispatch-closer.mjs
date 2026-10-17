@@ -1,3 +1,4 @@
+import { guardStackedBase } from './stacked-base.mjs';
 import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
 import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
@@ -1967,6 +1968,7 @@ function isReclaimableBranchHolderBlockedAmaCloserRecord(record, { now = null } 
 // No launch request means no worker ever existed for this attempt.
 function prelaunchRefusalKind(record) {
   if (!record || record.launchRequestId || record.dispatchId) return null;
+  if (dispatchConfigurationRefusal(record.lastError)) return null;
   if (record.prelaunchRefusalSlowRetry?.kind === 'non-execution') return 'non-execution';
   if (!String(record.lastError || '').trim()) return null;
   const state = String(record.state || '').trim().toLowerCase();
@@ -2522,7 +2524,7 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
   // Otherwise retry cleanup on repeated observations too: an earlier removal
   // may have failed, or this may be a pre-cleanup terminal record after restart.
   if (next.state !== 'dispatching'
-    && (existing?.state !== 'dispatching' || next.state === 'dispatch-failed')
+    && (existing?.state !== 'dispatching' || ['dispatch-failed', 'dispatch-configuration-refused'].includes(next.state))
     && isTerminalHammerScratchRecord(next)) {
     cleanupHammerScratchDir(next);
   }
@@ -4359,6 +4361,7 @@ export async function maybeDispatchAmaCloser({
   resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
   evaluateHammerStopHoldImpl = evaluateHammerStopHold,
+  guardStackedBaseImpl = guardStackedBase,
   emitProtectivePredecessorFindingImpl = null,
   logGate = dispatchCloserLogGate,
   logger = console,
@@ -4422,6 +4425,12 @@ export async function maybeDispatchAmaCloser({
     })) {
     return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
       inFlight: true, reason: 'closer-lease-held-by-other-process', existingLease: pendingLaunchLease });
+  }
+
+  if (dispatchContext?.baseBranch) {
+    const baseHold = await guardStackedBaseImpl({ rootDir: dispatchContext.rootDir || SUBMODULE_ROOT,
+      repo: dispatchContext.repo, prNumber, execFileImpl, signal });
+    if (baseHold) return noAmaDispatch(baseHold);
   }
 
   const ownerProofRecovery = dispatchContext?.orphanRecovery?.ownerProof === true
@@ -4931,9 +4940,16 @@ export async function maybeDispatchAmaCloser({
     ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
     : reviewedHeadDispatchIdentity;
   let existingRecord = ownerProofRecovery || reviewHandoffFindings ? null : newerLaunchRecord || reviewedHeadRecord;
-  if (existingRecord?.state === 'dispatch-configuration-refused') {
+  if (existingRecord && !existingRecord.launchRequestId && !existingRecord.dispatchId) {
     const refusal = dispatchConfigurationRefusal(existingRecord.lastError);
     if (refusal) {
+      if (existingRecord.state !== 'dispatch-configuration-refused') {
+        existingRecord = updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, current => ({
+          ...current, state: 'dispatch-configuration-refused',
+          closureBlocker: `dispatch-configuration-refused:${refusal}`, lastFailureTransient: false,
+          prelaunchRefusalSlowRetry: null,
+        }));
+      }
       await pageDispatchConfigurationRefusal({ rootDir, repo, refusal, deliverAlertImpl, logger,
         now: dispatchContext.dispatchedAt });
       const age = amaCloserRecordAgeMs(existingRecord, { now: dispatchContext.dispatchedAt });
@@ -5763,6 +5779,8 @@ export async function maybeDispatchAmaCloser({
               });
             },
             runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method, body, subject }) => {
+              const baseHold = await guardStackedBaseImpl({ rootDir, repo: mergeRepo, prNumber: mergePr, execFileImpl, signal });
+              if (baseHold) return { exitCode: 1, stderr: baseHold.reason, closureHold: baseHold };
               const methodFlag = method === 'merge' ? '--merge' : '--squash';
               const args = [
                 'pr',
@@ -6376,6 +6394,7 @@ export async function maybeDispatchAmaCloser({
     && !existingRecordIsReclaimableInterruption
     && !existingRecordIsBranchHolderBlocked
     && !existingRecordIsRevalidatableBranchMissing
+    && existingRecord.state !== 'dispatch-configuration-refused'
   ) {
     // Genuine completed failures are bounded; an interrupted in-flight dispatch
     // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
@@ -7280,6 +7299,7 @@ export async function maybeDispatchAmaCloser({
       // permanently grounds the closer for a PR even after the limit resets,
       // which is exactly the cascade observed in the macOS-upgrade incident.
       const transientFailure = !ambiguousLaunch
+        && !configurationRefusal
         && !branchHolderBlocked
         // A live provision-slot holder is competing work, not proof this
         // exited HQ call launched. Use the refusal path to release our lease

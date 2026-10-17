@@ -929,6 +929,13 @@ async function attemptDaemonCleanMergeInner({
       merged = true;
       break;
     }
+    // A live safety hold prevented the transport from clicking merge. Keep
+    // its reason and re-walkability; it is not a permanent merge rejection.
+    if (['stacked-base-merged', 'stacked-base-read-failed'].includes(mergeRes?.closureHold?.reason)) {
+      terminal = { reason: mergeRes.closureHold.reason, permanent: false,
+        closureHold: mergeRes.closureHold };
+      break;
+    }
     const cls = classifyDaemonMergeError(`${mergeRes?.stderr || ''}\n${mergeRes?.stdout || ''}`);
     if (cls === 'already-merged') {
       merged = true;
@@ -1008,9 +1015,9 @@ async function attemptDaemonCleanMergeInner({
       appendAuditImpl({
         ...auditKeys,
         attempt: {
-          outcome: 'failed-without-merge',
+          outcome: terminal.closureHold ? 'deferred' : 'failed-without-merge',
           path: closureAuthority,
-          attemptPhase: 'daemon-failed',
+          attemptPhase: terminal.closureHold ? 'daemon-deferred' : 'daemon-failed',
           ...(guardReversals.length ? { guardReversals } : {}),
           reason: terminal.reason,
           ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
@@ -1066,6 +1073,8 @@ async function attemptDaemonCleanMergeInner({
   return {
     disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
     reason: terminal.reason,
+    ...(terminal.closureHold ? { needsOperator: terminal.closureHold.needsOperator,
+      skipMergeAgent: true, recoveryWait: true, retryAfterMs: terminal.closureHold.retryAfterMs } : {}),
     ...(terminal.historyReadError ? { historyReadError: terminal.historyReadError } : {}),
     permanent: Boolean(terminal.permanent),
     merged: false,

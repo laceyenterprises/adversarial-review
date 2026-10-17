@@ -205,6 +205,7 @@ test('consumeNextFollowUpJob exports the canonical reply env, pre-creates the HQ
 
     let capturedEnv;
     const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'Reply path: ${REPLY_PATH}',
       now: () => '2026-05-04T09:30:00.000Z',

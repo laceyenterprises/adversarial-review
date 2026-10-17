@@ -124,6 +124,7 @@ test('replay #7334: a stale auto-refresh reason no longer parks the proven final
       assert.equal(args.gateSnapshot.reviewedHeadSha, REVIEWED);
       assert.equal(args.currentPrHeadSha, PUSHED);
       const daemon = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
         ...args,
         candidate: { ...args.candidate, baseBranch: 'main' },
         env: { HQ_ROOT: rootDir },

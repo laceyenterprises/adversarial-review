@@ -840,6 +840,16 @@ EOF_HAM_PROTECTIVE_PREDECESSORS
     ham_release_merge_lease
     return 1
   fi
+  # A parent PR can merge while this hammer waits on CI. Recheck on every click.
+  if ! HAM_STACKED_BASE_REASON=$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/stacked-base-check.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> 2>&1); then
+    case "$HAM_STACKED_BASE_REASON" in
+      stacked-base-merged) ham_append_terminal_audit failed-without-merge stacked-base-merged || true ;;
+      *) ham_append_terminal_audit deferred stacked-base-read-failed || true ;;
+    esac
+    printf '%s\n' "$HAM_STACKED_BASE_REASON" >&2
+    ham_release_merge_lease
+    return 20
+  fi
   HAM_MERGE_EXECUTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   ham_gh pr merge <<PR_URL>> \
     --<<MERGE_METHOD>> \

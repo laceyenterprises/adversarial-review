@@ -2,6 +2,22 @@
   "version": 1,
   "entries": [
     {
+      "id": "ama-dispatch-configuration",
+      "title": "AMA Dispatch Configuration Receipts",
+      "path": "docs/data-model/ama-dispatch-configuration.md",
+      "store": "data/ama-dispatch-configuration/",
+      "schemaSurface": "src/ama/dispatch-configuration-refusal.mjs",
+      "owner": "AMA closer dispatch"
+    },
+    {
+      "id": "stacked-base-holds",
+      "title": "Stacked Base Holds",
+      "path": "docs/data-model/stacked-base-holds.md",
+      "store": "data/stacked-base-holds/",
+      "schemaSurface": "src/ama/stacked-base.mjs",
+      "owner": "AMA closure and remediation"
+    },
+    {
       "id": "ama-hammer-background",
       "title": "Pending Background Hammer Dispatches",
       "path": "docs/data-model/ama-hammer-background.md",

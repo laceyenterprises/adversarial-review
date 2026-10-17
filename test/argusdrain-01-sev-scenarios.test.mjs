@@ -210,6 +210,7 @@ test('SEV replay: the parked #1172 major is reviewed, approved, and merged by th
     logger: quiet,
     now: () => new Date(NOW).toISOString(),
     runDaemonCleanMergeAttemptImpl: (args) => runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       fetchRollupImpl: async () => ({
         headRefOid: HEAD,

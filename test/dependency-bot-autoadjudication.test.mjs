@@ -278,6 +278,7 @@ test('pure adjudicator records dependency type, semver, and manifest inputs', ()
 test('daemon clean merge accepts exact-head dependency auto-adjudication accountability', async () => withRoot(async (rootDir) => {
   let captured = null;
   const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     cfg: { enabled: true, branchProtection: { required: false } },
     repoPath: REPO,

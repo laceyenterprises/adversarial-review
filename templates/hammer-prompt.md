@@ -548,6 +548,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
 Fetch the live PR and final review:
 
 ```bash
+# UNREGREPO-01: hold a stacked PR whose parent branch was already merged.
+"$HAM_NODE_BIN" <<ROOT_DIR>>/bin/stacked-base-check.mjs <<ROOT_DIR>> <<REPO>> <<PR_NUMBER>> || exit 20
 ham_pr --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_RUN_DIR/pr-before.json"
 ```
 

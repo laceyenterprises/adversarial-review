@@ -7,11 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 import {
   amaCloserDispatchFilePath,
-  isGithubRateLimitOrBrokerThrottle,
-  isTransientHqDispatchError,
-  HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
   maybeDispatchAmaCloser,
-  resolveHamTerminalRemediationEvidence,
+  updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -65,7 +62,7 @@ function eligibleInputs(rootDir) {
     reviewedSha: headSha,
     riskClass: 'low',
     requiredGateContext: 'agent-os/adversarial-gate',
-    reviewedBy: 'claude-reviewer-lacey',
+    reviewedBy: 'synthetic-reviewer',
     reviewer: 'claude',
     parentSession: 'session:test:watcher',
     hqProject: 'adversarial-merge-authority',
@@ -126,4 +123,70 @@ test('UNREGREPO-01: unregistered repository pages once and resumes after registr
   const cleared = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
   assert.equal(cleared.closureBlocker, null);
   assert.equal(pages.length, 1);
+});
+
+
+test('successful dispatch clears a persisted configuration blocker after registration', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'registered-repo-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  inputs.dispatchContext.repo = 'example/widget';
+  const identity = { repo: 'example/widget', prNumber: 1234, headSha: inputs.headSha };
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'dispatch-configuration-refused', retryCount: 0,
+    reviewedSha: inputs.headSha, targetRemediationSha: inputs.headSha,
+    lastAttemptedAt: '2026-06-11T18:00:00Z',
+    closureBlocker: 'dispatch-configuration-refused:repo_unregistered',
+    lastError: '[hq] dispatch refused: repo_unregistered',
+  }));
+  assert.match(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8')).closureBlocker, /repo_unregistered/);
+  const result = await maybeDispatchAmaCloser({ ...inputs,
+    execFileImpl: async (cmd, args) => ({ stdout: args[0] === 'dispatch'
+      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) : '{}' }),
+    deliverAlertImpl: async () => {}, writeFileImpl: () => {},
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+  });
+  assert.equal(result.dispatched, true);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.closureBlocker, null);
+});
+
+
+test('repository paging receipt survives process reload and failed delivery retries', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'configuration-page-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const first = await import('../src/ama/dispatch-configuration-refusal.mjs?first-process');
+  let attempts = 0;
+  const options = { rootDir, repo: 'example/widget', refusal: 'repo_unregistered',
+    logger: { warn() {} }, now: '2026-10-16T10:00:00Z',
+    deliverAlertImpl: async () => { if (++attempts === 1) throw new Error('delivery unavailable'); } };
+  await first.pageDispatchConfigurationRefusal(options);
+  await Promise.all([first.pageDispatchConfigurationRefusal(options), first.pageDispatchConfigurationRefusal(options)]);
+  const restarted = await import('../src/ama/dispatch-configuration-refusal.mjs?restarted-process');
+  await restarted.pageDispatchConfigurationRefusal(options);
+  assert.equal(attempts, 2, 'only the failed delivery is retried; persisted success survives a new module process state');
+});
+
+test('legacy transient refusal with an exhausted slow window is reclassified and can resume', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'legacy-configuration-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  inputs.dispatchContext.repo = 'example/widget';
+  const identity = { repo: 'example/widget', prNumber: 1234, headSha: inputs.headSha };
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'dispatch-deferred-transient', retryCount: 20,
+    lastAttemptedAt: '2026-06-10T10:00:00Z', lastError: 'repo_unregistered',
+    prelaunchRefusalSlowRetry: { kind: 'dispatch-refused', startedAt: '2026-06-10T10:00:00Z' },
+  }));
+  let pages = 0;
+  const result = await maybeDispatchAmaCloser({ ...inputs,
+    execFileImpl: async (cmd, args) => ({ stdout: args[0] === 'dispatch'
+      ? JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) : '{}' }),
+    deliverAlertImpl: async () => { pages++; }, writeFileImpl: () => {},
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+  });
+  assert.equal(pages, 1);
+  assert.equal(result.dispatched, true);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.closureBlocker, null);
 });

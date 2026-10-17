@@ -186,3 +186,18 @@ A final live-probe head movement writes `state: no-dispatch`,
 retry budget. Stale context with no reviewed-head binding returns
 `dispatch-head-context-unavailable` after lease reconciliation and evidence-hold
 probing; it does not create a new dispatch record or launch a worker.
+
+## Configuration refusal (UNREGREPO-01)
+
+A dispatch refused with `repo_unregistered`, without launch evidence, stores
+`state: dispatch-configuration-refused`,
+`closureBlocker: dispatch-configuration-refused:repo_unregistered`, and
+`lastFailureTransient: false`. Its retry count is preserved and its pending
+lease is released. Rechecks use the normal pending-lease reclaim interval;
+successful admission sets `closureBlocker: null` and `state: dispatched`.
+Repository-wide paging receipts live in
+[AMA dispatch configuration receipts](ama-dispatch-configuration.md).
+Legacy no-launch records whose last error names `repo_unregistered` are
+reclassified on observation, including records with an exhausted generic slow
+retry window. Only that configuration refusal bypasses generic prelaunch retry
+exhaustion; hammer launch/lifetime caps remain unchanged.

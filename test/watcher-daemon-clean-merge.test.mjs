@@ -1002,6 +1002,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
   let capturedAttemptArgs = null;
   try {
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1106,6 +1107,7 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
     let mergeCalls = 0;
     let leaseReleased = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1376,6 +1378,7 @@ test('daemon clean merge with LHA enforcement blocks missing produced attestatio
     let mergeCalls = 0;
     let leaseCalls = 0;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1454,6 +1457,7 @@ test('daemon clean merge awaits async worker identity reads and preserves zero l
   try {
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1523,6 +1527,7 @@ test('daemon clean merge fail-closes when worker LRQ identity cannot be resolved
     let leaseCalls = 0;
     let mergeCalls = 0;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1591,6 +1596,7 @@ test('daemon clean merge strict mode declines non-blocking findings before ident
     let leaseCalls = 0;
     let mergeCalls = 0;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1671,6 +1677,7 @@ test('daemon clean merge defers when the live PR head moved after the tick snaps
     let identityReads = 0;
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1767,6 +1774,7 @@ test('daemon clean merge resolves worker identity from HQ launch provenance when
     let mergeAttempted = false;
     let capturedIdentity = null;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -1846,6 +1854,7 @@ test('daemon clean merge launch provenance skips missing candidate files without
 
     let capturedIdentity = null;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       cfg: {
         mergeMethod: 'squash',
@@ -2447,6 +2456,7 @@ test('DCA-01: clean PR with real-contract `checks` rollup now MERGES (was parked
   let mergeCalls = 0;
   try {
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...realRollupHelpers({ rootDir, prNumber: 700, head: 'clean-head' }),
       // The authentic fetchPullRequestRollup contract: `checks` + `headRefOid`,
       // NO `statusCheckRollup`, NO `headSha`. Pre-fix this read as zero checks.
@@ -2482,6 +2492,7 @@ test('DCA-01: a check that goes RED between pre-lease and the in-loop re-fetch p
   let fetchCalls = 0;
   try {
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...realRollupHelpers({ rootDir, prNumber: 701, head: 'flip-head' }),
       // Green on the first (pre-lease) fetch, red on the in-loop re-read — the
       // exact production park shape (in-loop `gate-not-eligible`).
@@ -2519,6 +2530,7 @@ test('DCA-01: an empty live rollup with configured workflows never merges', asyn
   let workflowReads = 0;
   try {
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...realRollupHelpers({ rootDir, prNumber: 702, head: 'nocheck-head' }),
       cfg: { ...realRollupHelpers({ rootDir }).cfg, noCiRepositories: ['acme/repo'] },
       fetchRollupImpl: async () => ({
@@ -2695,6 +2707,7 @@ test('Deliverable 1: operator-approved at the current head substitutes for worke
     let seenAuditMetadata = null;
     const logs = [];
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 900, head: 'op-head-900' }),
       logger: { warn() {}, log: (m) => logs.push(String(m)) },
       operatorApprovalEvent: operatorApprovedEventAt('op-head-900'),
@@ -2733,6 +2746,7 @@ test('current-head operator approval routes an older request-changes review to d
     const event = operatorApprovedEventAt(head);
     let mergeArgs = null;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
@@ -2771,6 +2785,7 @@ test('operator override on an attributed worker records approval instead of work
     const logs = [];
     let mergeArgs;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'enforce' },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
@@ -2822,6 +2837,7 @@ test('clean older-head review records approval as the head authority', async () 
     const args = realRollupHelpers({ rootDir, prNumber: 919, head });
     let mergeArgs;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'] },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
@@ -2861,6 +2877,7 @@ test('non-allowlisted actor cannot clear blocking findings in daemon observe mod
     const args = unattributedDaemonArgs({ rootDir, prNumber: 920, head });
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       cfg: { ...args.cfg, operatorLogins: ['VirtualPaul'], operatorLabelActorEnforcement: 'observe' },
       candidate: { ...args.candidate, labels: ['operator-approved'] },
@@ -2890,6 +2907,7 @@ test('revoked operator approval holds the tick instead of dispatching a hammer f
     const event = operatorApprovedEventAt(head);
     const args = unattributedDaemonArgs({ rootDir, prNumber: 902, head });
     const daemonResult = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       candidate: { ...args.candidate, labels: ['operator-approved'] },
       reviewState: {
@@ -2938,6 +2956,7 @@ test('redundant approval removed before the live read leaves a worker-attributed
     const args = realRollupHelpers({ rootDir, prNumber: 917, head });
     let mergeArgs = null;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       candidate: { ...args.candidate, labels: ['operator-approved'] },
       operatorApprovalEvent: event,
@@ -2974,6 +2993,7 @@ test('approval removed in the lease returns the same protective hold to orchestr
     const event = operatorApprovedEventAt(head);
     const args = unattributedDaemonArgs({ rootDir, prNumber: 916, head });
     const daemonResult = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...args,
       candidate: { ...args.candidate, labels: ['operator-approved'] },
       operatorApprovalEvent: event,
@@ -3021,6 +3041,7 @@ test('SEV1: clean stale-head closer commit with unknown worker identity merges u
     let suppressionHead = null;
     const logs = [];
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 910, head: 'closer-clean-head-910', attestedFrom: 'reviewed-clean-head-910' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-clean-head-910',
@@ -3076,6 +3097,7 @@ test('SEV1 regression: operator-approved does not prevent trusted closer commit 
     let suppressionHead = null;
     const logs = [];
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 912, head: 'closer-clean-head-912', attestedFrom: 'reviewed-clean-head-912' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-clean-head-912',
@@ -3128,6 +3150,7 @@ test('SEV1 regression: autonomous closer clean head wins when non-blocking head 
     let seen = null;
     let proofCalls = 0;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 914, head: 'closer-clean-head-914', attestedFrom: 'reviewed-nonblocking-head-914' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-nonblocking-head-914',
@@ -3183,6 +3206,7 @@ test('SEV1 SAFETY: clean stale head that is NOT a terminal closer commit still p
   try {
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 911, head: 'external-clean-head-911' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-clean-head-911',
@@ -3215,6 +3239,7 @@ test('SEV1 SAFETY: unresolved blocking finding never auto-closes via autonomous 
   try {
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 912, head: 'closer-blocking-head-912' }),
       gateSnapshot: {
         reviewedHeadSha: 'reviewed-blocking-head-912',
@@ -3247,6 +3272,7 @@ test('SEV1 rollback: feature flag off disables autonomous closer-commit clean su
   try {
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 913, head: 'closer-clean-head-913', attestedFrom: 'reviewed-clean-head-913' }),
       cfg: {
         mergeMethod: 'squash',
@@ -3285,6 +3311,7 @@ test('Deliverable 1: a STALE operator-approved (applied at an older head) does N
   try {
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 901, head: 'live-head-901' }),
       // Approval pinned to a prior head — no stale-approval carryover is allowed.
       operatorApprovalEvent: operatorApprovedEventAt('OLD-head-901'),
@@ -3308,6 +3335,7 @@ test('Deliverable 1: merge-agent-requested at the current head also substitutes 
     let mergeAttempted = false;
     let seenAuditMetadata = null;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 902, head: 'mar-head-902' }),
       mergeAgentRequestEvent: {
         id: 'evt-mar-1', nodeId: 'evt-mar-1', label: 'merge-agent-requested',
@@ -3333,6 +3361,7 @@ test('Deliverable 1: operator-approved missing audit provenance (no event id) do
   try {
     let mergeAttempted = false;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({ rootDir, prNumber: 903, head: 'prov-head-903' }),
       operatorApprovalEvent: operatorApprovedEventAt('prov-head-903', { id: null, nodeId: null }),
       attemptDaemonCleanMergeImpl: async () => {
@@ -3357,6 +3386,7 @@ test('Deliverable 1 SAFETY: operator approval substitutes for identity ONLY — 
     // real attemptDaemonCleanMerge (not injected) must decline; the merge button
     // is never clicked. Operator approval does not relax the CI gate.
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...unattributedDaemonArgs({
         rootDir, prNumber: 904, head: 'red-head-904',
         checks: [{ name: 'ci', conclusion: 'FAILURE' }],
@@ -4041,6 +4071,7 @@ test('production daemon wiring verifies GitHub configuration twice for no-CI clo
     const paths = [];
     let merges = 0;
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...realRollupHelpers({ rootDir, head: 'no-ci-head' }),
       cfg: { ...realRollupHelpers({ rootDir }).cfg, noCiRepositories: ['acme/repo'],
         branchProtection: { required: true } },
@@ -4073,6 +4104,7 @@ test('production daemon never probes empty rollup without explicit repository op
   const rootDir = tempRoot();
   try {
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...realRollupHelpers({ rootDir, head: 'no-ci-head' }),
       fetchRollupImpl: async () => ({ state: 'OPEN', headRefOid: 'no-ci-head',
         labels: [], checks: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }),
@@ -4091,6 +4123,7 @@ test('production protection-read 403 refuses no-CI and preserves eligibility han
     const warnings = [];
     const helpers = realRollupHelpers({ rootDir, head: 'no-ci-head' });
     const result = await runDaemonCleanMergeAttempt({
+    guardStackedBaseImpl: async () => null,
       ...helpers,
       logger: { log() {}, warn: message => warnings.push(message) },
       cfg: { ...helpers.cfg, noCiRepositories: ['acme/repo'], branchProtection: { required: true } },

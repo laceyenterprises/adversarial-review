@@ -6029,6 +6029,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', { tim
   let resolveEventStart;
   const eventsStarted = new Promise(resolve => { resolveEventStart = resolve; });
   const candidatePromise = fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
+    guardStackedBaseImpl: async () => null,
     env: { GITHUB_TOKEN: 'test-token' },
     execFileImpl: async (_cmd, args) => {
       if (args[0] === 'pr') {
@@ -6160,6 +6161,7 @@ test('fetchMergeAgentCandidate shares one branch-protection read per poll repo/b
     'laceyenterprises/agent-os',
     prNumber,
     {
+      guardStackedBaseImpl: async () => null,
       env: { GITHUB_TOKEN: 'test-token' },
       execFileImpl,
       branchProtectionCache,
@@ -6186,6 +6188,7 @@ test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dis
   const prBody = 'Protects-Against-Unsafe-Merge-Until-PR: #400';
   const calls = [];
   const candidate = await fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
+    guardStackedBaseImpl: async () => null,
     env: { GITHUB_TOKEN: 'test-token' },
     execFileImpl: async (_cmd, args) => {
       calls.push(args);
@@ -6231,6 +6234,7 @@ test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dis
 
 test('fetchMergeAgentCandidate preserves branch protection shape when protection fetch fails', async () => {
   const candidate = await fetchMergeAgentCandidate('invalid-repo-slug', 401, {
+    guardStackedBaseImpl: async () => null,
     env: { PATH: '/usr/bin:/bin' },
     execFileImpl: async (_cmd, args) => {
       if (args[0] === 'pr') {

@@ -234,6 +234,7 @@ test('consumeFollowUpJobsUntilCapacity prefetches quota holds before synchronous
   };
 
   await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     maxConcurrent: 1,
     promptTemplate: 'Remediate PR {{prNumber}}.',
@@ -2254,6 +2255,7 @@ test('workflow changed-file lookup preflight outage requeues instead of spawning
   const spawnCalls = [];
   const logs = [];
   const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     maxConcurrent: 1,
     promptTemplate: 'You are a remediation worker.',
@@ -2323,6 +2325,7 @@ test('workflow merge-agent broker outage requeues instead of spawning or termina
   globalThis.fetch = async () => ({ ok: false, status: 503, async json() { return {}; } });
   try {
     const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       maxConcurrent: 1,
       promptTemplate: 'You are a remediation worker.',
@@ -2391,6 +2394,7 @@ test('workflow-touching remediation without workflow push capability blocks befo
   process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT = 'false';
   try {
     const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       maxConcurrent: 1,
       promptTemplate: 'You are a remediation worker.',
@@ -2465,6 +2469,7 @@ test('workflow push capability alert gives configured-token recovery instead of 
   process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT = 'false';
   try {
     const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       maxConcurrent: 1,
       promptTemplate: 'You are a remediation worker.',
@@ -6181,6 +6186,7 @@ function createPendingRemediationJob(rootDir, overrides = {}) {
 
 function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {
   return {
+    guardStackedBaseImpl: async () => null,
     rootDir,
     now: () => '2026-04-21T10:30:00.000Z',
     promptTemplate: 'You are a remediation worker.',
@@ -6220,6 +6226,7 @@ test('a slow workspace does not hold another remediation spawn at the concurrenc
   const secondSpawned = new Promise(resolve => { secondSpawn = resolve; });
   const defaults = drainerTestOptions(rootDir, spawnCalls);
   const drain = withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
     ...defaults,
     maxConcurrent: 2,
     execFileImpl: async (command, args, options) => {
@@ -6976,6 +6983,7 @@ test('shutdown during workspace preparation returns the claimed job to pending w
   let stopping = false;
   const defaults = drainerTestOptions(rootDir, spawns);
   const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
     ...defaults,
     maxConcurrent: 1,
     shouldStop: () => stopping,
@@ -7053,6 +7061,7 @@ test('consumeNextFollowUpJob keeps a persisted medium maxRounds=2 budget and spa
 
   const spawnCalls = [];
   const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     now: () => '2026-04-21T10:30:00.000Z',
     execFileImpl: async (command, args) => {
@@ -7127,6 +7136,7 @@ test('consumeNextFollowUpJob still spawns when a high-risk job enters round 2 wi
 
   const spawnCalls = [];
   const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     now: () => '2026-04-21T10:31:00.000Z',
     execFileImpl: async (command, args, options = {}) => {
@@ -7206,6 +7216,7 @@ test('consumeNextFollowUpJob persists max-rounds-reached when a critical-risk jo
 
   const spawnCalls = [];
   const result = await withOAuthTestEnv(rootDir, () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     now: () => '2026-04-21T10:31:00.000Z',
     execFileImpl: async () => ({ stdout: '', stderr: '' }),
@@ -7250,6 +7261,7 @@ test('consumeNextFollowUpJob logs a structured deny decision when a remediation 
   });
 
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     now: () => '2026-05-09T01:05:00.000Z',
     promptTemplate: 'You are a remediation worker.',
@@ -7711,6 +7723,7 @@ test('consumeNextFollowUpJob threads claimed jobId through to the spawned worker
     const hqRoot = path.join(rootDir, 'hq');
     await withHqRootEnv(hqRoot, async () => {
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         // The default promptTemplate loader reads <rootDir>/prompts/code-pr/remediator.<stage>.md;
         // we don't provision a prompts dir under the temp rootDir, so pass a literal
@@ -7813,6 +7826,7 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
       let applyOptions = null;
       let gateOptions = null;
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-06-20T10:00:00.000Z',
@@ -7915,6 +7929,7 @@ test('consumeNextFollowUpJob surfaces unfixable oss-readiness baseline bumps wit
       const calls = [];
       await assert.rejects(
         () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
           rootDir,
           promptTemplate: 'You are a remediation worker.',
           now: () => '2026-06-20T10:10:00.000Z',
@@ -8003,6 +8018,7 @@ test('consumeNextFollowUpJob rolls back workspace when oss-readiness apply crash
       const calls = [];
       await assert.rejects(
         () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
           rootDir,
           promptTemplate: 'You are a remediation worker.',
           now: () => '2026-06-20T10:20:00.000Z',
@@ -8081,6 +8097,7 @@ test('consumeNextFollowUpJob skips oss-readiness --apply when the audit did not 
     await withOAuthTestEnv(rootDir, async () => {
       let applyCalls = 0;
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-06-20T10:20:00.000Z',
@@ -8155,6 +8172,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
 
       const commands = [];
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-04-21T10:00:00.000Z',
@@ -8278,6 +8296,7 @@ test('consumeNextFollowUpJob applies and pushes oss-readiness remediation before
       const commands = [];
       let committed = false;
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-04-21T10:00:00.000Z',
@@ -8406,6 +8425,7 @@ test('consumeNextFollowUpJob rolls back local oss-readiness commit when pre-disp
       let committed = false;
       await assert.rejects(
         () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
           rootDir,
           promptTemplate: 'You are a remediation worker.',
           now: () => '2026-04-21T10:00:00.000Z',
@@ -8542,6 +8562,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
 
       const commands = [];
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-06-17T10:00:00.000Z',
@@ -9480,6 +9501,7 @@ test('consumeNextFollowUpJob falls back to the legacy local spawner when HQ disp
     let spawnCalls = 0;
     const commands = [];
     const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
       rootDir,
       promptTemplate: 'You are a remediation worker.',
       now: () => '2026-04-21T10:00:00.000Z',
@@ -9540,6 +9562,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
       let spawnCalls = 0;
       const commands = [];
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-04-21T10:00:00.000Z',
@@ -10076,6 +10099,7 @@ test('consumeNextFollowUpJob keeps native remediation on the bare spawner withou
       let spawnCalls = 0;
       const commands = [];
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-04-21T10:00:00.000Z',
@@ -10132,6 +10156,7 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
     }, async () => {
       const commands = [];
       const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         promptTemplate: 'You are a remediation worker.',
         now: () => '2026-04-21T10:00:00.000Z',
@@ -10550,6 +10575,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
 
     await withAppContractDispatchServer(async () => withHqDispatchEnv(rootDir, async () => {
       const result = await consumeFollowUpJobsUntilCapacity({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         maxConcurrent: 2,
         promptTemplate: 'You are a remediation worker.',
@@ -11277,6 +11303,7 @@ test('consumeNextFollowUpJob requeues a claimed job when remediator override is 
 
     await assert.rejects(
       () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         spawnImpl: () => { throw new Error('worker should not have spawned'); },
         now: () => '2026-04-21T10:00:00.000Z',
@@ -11337,6 +11364,7 @@ test('consumeNextFollowUpJob requeues a claimed job when orchestration_mode is i
   }, async () => {
     await assert.rejects(
       () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         spawnImpl: () => { throw new Error('worker should not have spawned'); },
         now: () => '2026-04-21T10:00:00.000Z',
@@ -11416,6 +11444,7 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
 
     await assert.rejects(
       () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         spawnImpl: () => { throw new Error('worker should not have spawned'); },
         now: () => '2026-04-21T10:00:00.000Z',
@@ -11499,6 +11528,7 @@ test('consumeNextFollowUpJob keeps post-spawn cleanup failures budget-neutral wh
 
     await assert.rejects(
       () => consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
         rootDir,
         spawnImpl: () => ({
           pid: 4321,
@@ -11689,6 +11719,7 @@ test('consumeNextFollowUpJob marks lifecycle-stop for a closed PR with never-spa
 
   const commentCalls = [];
   const result = await consumeNextFollowUpJob({
+    guardStackedBaseImpl: async () => null,
     rootDir,
     now: () => '2026-04-21T10:00:00.000Z',
     promptTemplate: 'Remediation prompt template.',

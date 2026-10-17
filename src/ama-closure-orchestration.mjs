@@ -972,6 +972,8 @@ async function dispatchAmaClosureFor({
     );
   }
 
+  if (candidate?.stackedBaseHold) return withAmaDispatchMetadata(candidate.stackedBaseHold, { amaEnabled: true });
+
   throwIfAborted(signal);
   // AMA "final hammer" signal: the review cycle is EXHAUSTED once the PR has
   // consumed its full remediation round budget. At that point the adversarial
@@ -1984,6 +1986,9 @@ async function dispatchAmaClosureFor({
     },
   );
   throwIfAborted(signal);
+  if (['stacked-base-merged', 'stacked-base-read-failed'].includes(daemonCleanMerge?.reason)) {
+    return withAmaDispatchMetadata({ ...daemonCleanMerge, dispatched: false, skipMergeAgent: true }, { amaEnabled: true });
+  }
   if (!priorDaemonCleanMerge && daemonCleanMerge?.reason === 'not-eligible') {
     try { await observeClosureLag({ rootDir, repo: repoPath, prNumber, headSha: currentPrHeadSha,
       eligible: false, reason: daemonCleanMerge.reason, logger }); }
@@ -2660,6 +2665,10 @@ export async function resolveMergeAgentCoexistenceForWatcher({
       closed: !liveMerged, mergedAt: candidate?.mergedAt, logger }); }
     catch (error) { logger?.warn?.(`AMA closure-lag observation failed: ${error.message}`); }
     return { outcome: 'pr-terminal', terminalReason: liveMerged ? 'merged' : 'closed' };
+  }
+  if (candidate?.stackedBaseHold) {
+    return { outcome: candidate.stackedBaseHold.needsOperator ? 'await-operator' : 'ama-pending',
+      amaClosureResult: candidate.stackedBaseHold };
   }
   let amaClosureResult;
   try {

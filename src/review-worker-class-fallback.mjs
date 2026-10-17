@@ -1,3 +1,4 @@
+import { selectClaudeAccountLane } from './claude-account-routing.mjs';
 import { readReviewerGeminiPoolAvailability } from './agy-reviewer-identities.mjs';
 import { promisify } from 'node:util';
 import { execFile as execFileCb } from 'node:child_process';
@@ -311,7 +312,12 @@ export function applyReviewerWorkerClassFallbackToRoute({
   reviewerRouteByModel,
   authorClass = null,
 } = {}) {
-  if (!decision?.fellBack) return { applied: false, route, reason: 'no-fallback' };
+  if (!decision?.fellBack) return {
+    applied: false,
+    route: route?.reviewerModel === 'claude' && decision?.claudeAccountSelection
+      ? { ...route, claudeAccountSelection: decision.claudeAccountSelection } : route,
+    reason: 'no-fallback',
+  };
   const workerClass = String(decision.workerClass || '').trim().toLowerCase();
   const reviewerModel = reviewerModelForWorkerClass(workerClass);
   const target = reviewerModel ? reviewerRouteByModel?.[reviewerModel] : null;
@@ -335,6 +341,7 @@ export function applyReviewerWorkerClassFallbackToRoute({
       ...target,
       workerClass: undefined,
       reviewerWorkerClass: workerClass,
+      ...(decision.claudeAccountSelection ? { claudeAccountSelection: decision.claudeAccountSelection } : {}),
       reviewWorkerClassFallback: {
         fromWorkerClass: decision.from,
         toWorkerClass: decision.to,
@@ -391,6 +398,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   primary,
   fallbackWorkerClasses,
   depthPressure = null,
+  blockedClaudeWorkerClasses = [],
   burstPressure = null,
   env = process.env,
   hqPath = resolveHqPath(env),
@@ -410,6 +418,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     .map((value) => String(value || '').trim().toLowerCase())
     .filter(Boolean);
   const base = { workerClass: primaryClass, fellBack: false };
+  const primaryIsClaude = reviewerModelForWorkerClass(primaryClass) === 'claude';
 
   // RSP-01 — depth is an ADDITIONAL trigger beside quota, never a replacement.
   // `depthEngaged` only widens what this function is allowed to consider; every
@@ -436,7 +445,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     ? (depthPressure.reason === 'review-max-wait' ? 'review-max-wait' : 'queue-depth-pressure')
     : 'burst-lease-pressure';
 
-  if (!primaryClass || fallbacks.length === 0) {
+  if (!primaryClass || (fallbacks.length === 0 && !primaryIsClaude)) {
     return { ...base, reason: 'no-fallback-configured' };
   }
   // An untracked primary short-circuits the QUOTA trigger because there is no
@@ -459,7 +468,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     (candidate) => violatesWriterDiversity(author, candidate)
       && !reviewerRefusesBuilder(author, reviewerModelForWorkerClass(candidate))
   );
-  if (quotaTrackedFallbacks.length === 0) {
+  if (quotaTrackedFallbacks.length === 0 && !primaryIsClaude) {
     return { ...base, ...depthFields, reason: 'no-available-fallback' };
   }
 
@@ -482,10 +491,29 @@ export async function resolveReviewerWorkerClassWithFallback({
   const geminiAvailability = await readReviewerGeminiPoolAvailability({
     pool: agyReviewerIdentityPool, adapter: reviewerRuntimeAdapter,
   });
-  const availability = (harness) => reviewerModelForWorkerClass(harness) === 'gemini' && geminiAvailability
-    ? geminiAvailability : quotaAvailableFromFleetStatus(stdout, { harness });
+  let claudeAccountSelection;
+  const accountFields = (harness) => reviewerModelForWorkerClass(harness) === 'claude' && claudeAccountSelection
+    ? { claudeAccountSelection } : {};
+  const availability = (harness) => {
+    if (reviewerModelForWorkerClass(harness) === 'claude') {
+      if (claudeAccountSelection && !claudeAccountSelection.hold) return { available: true, state: 'ok' };
+      // A legacy quota projection may still prove the assigned provider is
+      // grounded. Preserve that trigger, but never use it to admit an account.
+      const quota = !claudeAccountSelection || claudeAccountSelection.reason === 'no-ready-claude-account'
+        ? quotaAvailableFromFleetStatus(stdout, { harness }) : null;
+      return { available: false, state: isGroundedProviderState(quota?.state)
+        ? quota.state : claudeAccountSelection?.reason || 'claude-account-unavailable' };
+    }
+    return reviewerModelForWorkerClass(harness) === 'gemini' && geminiAvailability
+      ? geminiAvailability : quotaAvailableFromFleetStatus(stdout, { harness });
+  };
   let primaryAvail;
   try {
+    claudeAccountSelection = selectClaudeAccountLane(stdout, {
+      workerClass: 'claude-reviewer', blockedWorkerClasses: blockedClaudeWorkerClasses,
+    });
+    Object.assign(base, accountFields(primaryClass));
+    if (claudeAccountSelection?.hold) base.claudeAccountHoldReason = claudeAccountSelection.reason;
     // A primary with no tracked provider can only be here under depth pressure
     // (the gate above). It has no quota verdict, so it is treated as ungrounded
     // and the quota trigger simply does not fire for it — depth does.
@@ -508,6 +536,7 @@ export async function resolveReviewerWorkerClassWithFallback({
           if (!availability(candidate).available) continue;
           return {
             workerClass: candidate,
+            ...accountFields(candidate),
             fellBack: true,
             from: primaryClass,
             to: candidate,
@@ -537,6 +566,7 @@ export async function resolveReviewerWorkerClassWithFallback({
       if (candidateAvail.available) {
         return {
           workerClass: candidate,
+          ...accountFields(candidate),
           fellBack: true,
           from: primaryClass,
           to: candidate,
@@ -550,6 +580,7 @@ export async function resolveReviewerWorkerClassWithFallback({
       if (candidateAvail.available) {
         return {
           workerClass: candidate,
+          ...accountFields(candidate),
           fellBack: true,
           from: primaryClass,
           to: candidate,

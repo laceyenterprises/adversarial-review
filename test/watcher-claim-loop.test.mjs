@@ -1,3 +1,4 @@
+import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
@@ -50,7 +51,13 @@ echo "unexpected gh fixture call: $*" >&2
 exit 1
 `);
   chmodSync(ghPath, 0o755);
-  return { PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` };
+  const hqPath = path.join(tmp, 'fixture-quota-hq');
+  writeFileSync(hqPath, `#!/usr/bin/env node
+if (process.argv.slice(2).join(' ') !== 'fleet quota status --json') process.exit(1);
+process.stdout.write(${JSON.stringify(JSON.stringify(claudeAccountFixture()))});
+`);
+  chmodSync(hqPath, 0o755);
+  return { PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`, AGENT_OS_HQ_BIN: hqPath };
 }
 
 function fileUrl(...parts) {
@@ -2268,7 +2275,7 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready' } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2285,8 +2292,8 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
         export * from '${routeUrl}?actual';
         export function selectReviewerRouteForAttempt(args) {
-          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini,
-            timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: 'gemini',
+          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.${primaryClaude ? 'claude' : 'gemini'},
+            timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: '${primaryClaude ? 'claude' : 'gemini'}',
               timeoutFailures: 2, sameModelAsBuilder: false, builderClass: 'codex' } };
         }
       `,
@@ -2296,10 +2303,12 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         export * from '${fallbackUrl}?actual';
         export async function resolveReviewerWorkerClassWithFallback(args) {
           return actual.resolveReviewerWorkerClassWithFallback({ ...args,
-            execFileImpl: async () => ({ stdout: JSON.stringify({ providerStatuses: [
+            execFileImpl: async () => ({ stdout: ${JSON.stringify(JSON.stringify(primaryClaude
+              ? accountEvidence === 'missing' ? {} : claudeAccountFixture({ corpReady: accountEvidence !== 'held', primaryReady: accountEvidence !== 'held' })
+              : lateAccountHold ? claudeAccountFixture() : fleetStatusWithClaudeAccountEvidence([
               { provider: 'google', authPath: 'oauth', state: 'ok' },
-              { provider: 'anthropic', authPath: 'oauth', state: 'ok' }
-            ] }) }) });
+              { provider: 'anthropic', authPath: 'oauth', state: 'ok' },
+            ])))} }) });
         }
       `,
       [depthUrl]: `
@@ -2380,6 +2389,27 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         }
       `;
     }
+    if (lateAccountHold) {
+      const accountUrl = fileUrl('src', 'claude-account-routing.mjs');
+      const gateUrl = fileUrl('src', 'reviewed-head-dispatch-gate.mjs');
+      sources[accountUrl] = `
+        export * from '${accountUrl}?actual';
+        export function readCorporateClaudeQuotaCooldown() {
+          return globalThis.__lateClaudeHold ? { resetAt: '2099-01-01T00:00:00Z' } : null;
+        }
+      `;
+      sources[gateUrl] = `
+        import * as actual from '${gateUrl}?actual';
+        export * from '${gateUrl}?actual';
+        export function createHeadDispatchLease() {
+          const lease = actual.createHeadDispatchLease();
+          return { ...lease, tryAcquire(key) {
+            if (key.includes('#101@')) globalThis.__lateClaudeHold = true;
+            return lease.tryAcquire(key);
+          } };
+        }
+      `;
+    }
     const loader = buildLoaderSource().replace('  return nextLoad(url, context);', `
       const source = new Map(${JSON.stringify(Object.entries(sources))}).get(url);
       if (source) return { format: 'module', shortCircuit: true, source };
@@ -2393,6 +2423,12 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
       // Depth is memoized at discovery; model the already-queued production backlog.
       prePollSetup: `
         db.prepare("INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, 101, ?, 'gemini', 'open', 'pending', 0)").run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00.000Z');
+        if (${rereviewAge !== null}) {
+          db.prepare("INSERT INTO reviewer_passes (repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, ended_at, status, head_sha, gh_comment_id) VALUES (?, 101, 1, 'gemini', 'first-pass', ?, ?, 'completed', 'prior-reviewed-head', 'prior-review')")
+            .run('laceyenterprises/adversarial-review', '2026-05-15T12:00:00Z', '2026-05-15T12:01:00Z');
+          db.prepare("UPDATE reviewed_prs SET rereview_requested_at = ?, head_wait_started_at = ?, revision_ref = 'sha-happy-101' WHERE pr_number = 101")
+            .run(new Date(Date.now() - ${rereviewAge} * 1000).toISOString(), new Date(Date.now() - ${rereviewAge} * 1000).toISOString());
+        }
         if (${stalePriority}) {
           const insert = db.prepare("INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts) VALUES (?, 999, ?, 'gemini', 'open', 'failed', 1)");
           for (const repo of ['laceyenterprises/adversarial-review', 'example/not-polled']) {
@@ -2411,8 +2447,11 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         env: fixtureEnv({ ...installGhFixture(tmp), GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
           GH_CLAUDE_REVIEWER_TOKEN: 'fixture-claude',
           ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code',
+          // These scenarios pin depth/burst behavior independently of age.
+          ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: ageSpill ? '480' : '0',
+          ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS: ageSpill ? '900' : '0',
           AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: depthEngaged ? '1' : '100',
-          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: burst ? '1' : '2' }),
+          AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: burst || lateAccountHold ? '1' : '2' }),
       });
     const output = `${result.stdout || ''}${result.stderr || ''}`;
     assert.equal(result.status, 0, output);
@@ -2421,6 +2460,19 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
     return { summary: JSON.parse(line.slice(SUMMARY_MARKER.length)), output };
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 }
+
+for (const accountEvidence of ['ready', 'missing', 'held']) test(`primary Claude account admission in pollOnce: ${accountEvidence}`, () => {
+  const { summary, output } = runDepthDiscoveryScenario({ primaryClaude: true, depthEngaged: false, accountEvidence });
+  if (accountEvidence === 'ready') {
+    assert.equal(summary.reviewerSpawns.length, 2, output);
+    assert.ok(summary.reviewerSpawns.every(spawn => spawn.subjectContext.claudeBrokerProvider === 'claude-code-corp'), output);
+  } else {
+    assert.equal(summary.reviewerSpawns.length, 0, output);
+    assert.equal(summary.claims.length, 2, output);
+    assert.ok(Object.values(summary.rows).every(row => row.review_status === 'pending'), output);
+    assert.equal(summary.reviewerPassRows.length, 0, output);
+  }
+});
 
 for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota', 'overdue', 'spawn-throw', 'spawn-refusal', 'spawn-started-failure']) test(capacity === 'overdue'
   ? 'WAKESTARVE-01: production discovery admits overdue work before newer wakes'
@@ -2623,15 +2675,15 @@ test('head dispatch lease refusal refunds the production spill and restores its 
 });
 
 
-test('REVIEWAGE-02 production saturation spills an overdue request below depth threshold', () => {
-  const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false });
-  assert.match(output, /review-wait-spill repo=.* pr=102 pass_kind=first-pass wait_seconds=[\d.]+ to=claude-code/);
+test('REVIEWSPILL-01 production admission spills an overdue request before Gemini saturation', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true });
+  assert.match(output, /review-wait-spill repo=.* pr=101 pass_kind=first-pass wait_seconds=[\d.]+ to=claude-code/);
   assert.equal((output.match(/review-wait-spill /g) || []).length, 1);
-  assert.match(output, /review-queue-depth-route repo=.* pr=102 from=gemini to=claude reason=review-max-wait/);
+  assert.match(output, /review-queue-depth-route repo=.* pr=101 from=gemini to=claude reason=review-max-wait/);
   const spill = summary.reviewerSpawns.find(spawn => spawn.subjectContext.reviewerModel === 'claude');
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);
-  assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews || 0, 0);
+  assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 1);
 });
 
 test('CAPROUTE-01: failed capped row with an old revision reaches the hammer before retry admission on every new head', () => {
@@ -3934,3 +3986,24 @@ for (const priorStatus of ['pending', 'failed']) test(`SEATIDLE-01: unreadable q
     assert.doesNotMatch(result.stdout, /dispatch lease already held/);
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
+
+test('REVIEWSPILL-01: a late Claude account hold releases the claim and refunds the sole age slot', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true, lateAccountHold: true });
+  assert.equal(summary.rows['101'].review_status, 'pending', output);
+  assert.equal(summary.reviewerSpawns.length, 1, output);
+  assert.equal(summary.reviewerSpawns[0].subjectContext.prNumber, 102, output);
+  assert.equal(summary.reviewerSpawns[0].subjectContext.reviewerModel, 'claude', output);
+  assert.match(output, /review-queue-depth-spillover-refund .*pr=101/);
+  assert.match(output, /review-wait-spill .*pr=102/);
+  assert.equal(summary.depthDiagnostics.report.engagementSpilloverReviews, 1);
+  assert.equal(summary.depthDiagnostics.report.cost.spilloverReviewsTotal, 1);
+});
+
+for (const age of [600, 901]) {
+  test(`REVIEWSPILL-01: production re-review wait telemetry uses the 900-second bound at ${age}s`, () => {
+    const { output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true, rereviewAge: age });
+    assert.doesNotMatch(output, /review-wait-decision .*pr=101 .*pass_kind=first-pass/);
+    if (age === 600) assert.doesNotMatch(output, /review-wait-decision .*pr=101 /);
+    else assert.match(output, /review-wait-decision .*pr=101 .*pass_kind=rereview/);
+  });
+}

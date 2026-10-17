@@ -322,6 +322,8 @@ export function afhGroundingSnapshotFromStdout(stdout, { codexModel = null, clau
     error: null,
     verdictPresent,
     providers: Object.freeze(providers),
+    claudeAccountSnapshot: payload,
+    claudeAccountModel: claudeModel,
     claudeAccountSelection: selectClaudeAccountLaneFromSnapshot(payload, {
       workerClass: 'claude-reviewer', model: claudeModel, statuses: rows,
     }),

@@ -1,3 +1,4 @@
+import { fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 // RPL-07 — controlled burst reviewer capacity lease.
 //
 // The mandated properties, one test each (see the ticket's Validate section):
@@ -74,7 +75,7 @@ const ENTITLED_ENV = Object.freeze({
 });
 
 function fleetStatusStub(rows) {
-  const stdout = JSON.stringify({ providerStatuses: rows });
+  const stdout = JSON.stringify(fleetStatusWithClaudeAccountEvidence(rows));
   return async () => ({ stdout });
 }
 
@@ -1039,7 +1040,7 @@ test('a transient quota-status failure retries with bounded backoff', () => {
     execFileSyncImpl: () => {
       attempts += 1;
       if (attempts < 3) throw Object.assign(new Error('temporary timeout'), { code: 'ETIMEDOUT' });
-      return JSON.stringify({ providerStatuses: CODEX_OK_CLAUDE_OK });
+      return JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_OK_CLAUDE_OK));
     },
     sleepImpl: (ms) => waits.push(ms),
   });

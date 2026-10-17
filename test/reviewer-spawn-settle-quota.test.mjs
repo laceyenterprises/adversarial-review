@@ -738,7 +738,8 @@ test('AGYCOOLDOWN-01: runtime quota evidence records the identity from its lease
   } finally { await rm(rootDir, { recursive: true, force: true }); }
 });
 
-for (const [options, expectedProvider] of [[{}, 'claude-code-corp'], [{ corpNearCap: true }, 'claude-code'],
+for (const [options, expectedProvider] of [[{}, 'claude-code-corp'], [{ corpNearCap: true }, 'claude-code-corp'],
+  [{ corp: 'exhausted' }, 'claude-code'],
   [{ corpReady: false }, 'claude-code'], [{ corp: 'exhausted', primary: 'exhausted' }, null]]) {
   test(`Claude account decision reaches runtime: ${JSON.stringify(options)}`, async () => {
     const capture = newCapture();

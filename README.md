@@ -200,7 +200,10 @@ Set `ADVERSARIAL_AFH_REVIEWER_FALLBACK=0` to disable the hop entirely.
 When Claude account selection reports a hold, AFH skips Claude as a fallback
 candidate, including when corporate account evidence is unknown or stale. Unknown
 evidence alone does not trigger a switch away from an assigned Claude reviewer;
-its spawn preflight retains the account hold. Reviewer quota preflight uses only
+its spawn preflight retains the account hold. Worker-class fallback requires an
+explicit admitted Claude account, including on legacy quota projections without
+account evidence. A hold discovered at final spawn admission releases the claim
+and refunds any spill reservation before another candidate runs. Reviewer quota preflight uses only
 the selected reviewer's account: a corporate Claude selection cannot change
 Gemini's Google quota check. Both Claude accounts resolve the governed model from
 the canonical `claude-reviewer` role; the selected broker provider binds token
@@ -813,7 +816,9 @@ status. Its initial/final node is an evaluation boundary. Lease removal is not
 permission to merge. Semantic source fingerprints track state writers, guards and terminal sets:
 review the state/edge inventory, update the map and independent graph snapshot,
 then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
-Each object's `codeSources` includes every transition's source file.
+Each object's `codeSources` includes every transition's source file. The draft
+column and shared admission-depth query affect queue eligibility; account holds
+use the existing pre-spawn claim release and do not add lifecycle states.
 Certified HAM contention parks retain bounded deferral recovery while GitHub
 mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expiry
 remain authoritative; recovery waits for green CI and resolved mergeability

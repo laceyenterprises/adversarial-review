@@ -1,5 +1,5 @@
 import { createReviewerPreflight, reviewerHandoffPending, waitForReviewerHandoff, startReviewerHandoff } from './reviewer-admission-lifecycle.mjs';
-import { reviewerCredentialKey } from './claude-account-routing.mjs';
+import { reviewerCredentialKey, selectClaudeAccountLaneFromSnapshot, readCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
 import { reviewerTimeoutBudget, REVIEWER_TIMEOUT_REPEATED_REASON } from './reviewer-timeout-budget.mjs';
 import { createReviewerQuotaBlockLogger } from './reviewer-quota-block-log.mjs';
 import { meteredExecFile } from './metered-gh.mjs';
@@ -789,6 +789,13 @@ export async function processReviewSubject(entry, ctx) {
       ) {
         return;
       }
+      // Drafts are intentional waits. Persist discovery evidence so they do
+      // not inflate either spill lane, including a PR converted back to draft.
+      const draft = subject.isDraft ?? subject.draft;
+      if (typeof draft === 'boolean') db.prepare(
+        'UPDATE reviewed_prs SET is_draft = ? WHERE repo = ? AND pr_number = ?'
+      ).run(Number(draft), repoPath, prNumber);
+      if (draft === true) return;
       // Run before admission refusals so unavailable capacity, credentials,
       // CI, routing, or a retained claim cannot strand the transfer silently.
       const handoffLease = subject.headSha && readAmaCloserLease(ROOT, {
@@ -1904,6 +1911,22 @@ export async function processReviewSubject(entry, ctx) {
           );
         }
       }
+      const blockedClaudeWorkerClasses = () => readCorporateClaudeQuotaCooldown(ROOT)
+        ? ['claude-reviewer-corp'] : [];
+      const refreshClaudeAccount = (selection = afhGrounding?.claudeAccountSelection) => {
+        if (!blockedClaudeWorkerClasses().length) return selection;
+        if (selection?.provider && selection.provider !== 'claude-code-corp') return selection;
+        if (afhGrounding?.staleIfError || !afhGrounding?.claudeAccountSnapshot) {
+          return { ...selection, hold: true, reason: 'claude-account-evidence-unknown' };
+        }
+        return selectClaudeAccountLaneFromSnapshot(afhGrounding.claudeAccountSnapshot, {
+          workerClass: 'claude-reviewer', model: afhGrounding.claudeAccountModel,
+          blockedWorkerClasses: blockedClaudeWorkerClasses(),
+        });
+      };
+      if (afhGrounding?.claudeAccountSelection) afhGrounding = {
+        ...afhGrounding, claudeAccountSelection: refreshClaudeAccount(),
+      };
       const geminiPoolAvailability = await readReviewerGeminiPoolAvailability({
         adapter: domainReviewerRuntimeAdapter || reviewerRuntimeState.adapter,
       });
@@ -1947,6 +1970,7 @@ export async function processReviewSubject(entry, ctx) {
         retainWakeForCapacity();
         return;
       }
+      const getClaudeAccountSelection = () => refreshClaudeAccount(route.claudeAccountSelection || afhGrounding?.claudeAccountSelection);
       let depthSpillReserved = false;
       let dispatchHasPriorPostedReview;
       let depthPassKind;
@@ -1989,6 +2013,7 @@ export async function processReviewSubject(entry, ctx) {
               : route.geminiReviewerSelection?.replacedReviewerModel || (reviewerAuthorClass === 'codex' ? 'claude-code' : 'codex')]
             : reviewWorkerClassFallback(process.env),
           depthPressure,
+          blockedClaudeWorkerClasses: blockedClaudeWorkerClasses(),
           // Discovery must leave an engaged depth lane on its preferred route
           // until the pool checks saturation. Spending burst here would bypass
           // that check and charge the wrong lever before depth can run.
@@ -2026,6 +2051,10 @@ export async function processReviewSubject(entry, ctx) {
           );
         }
 
+        // Account admission also applies when Claude remains the primary route.
+        if (!rwfDecision.fellBack && route.reviewerModel === 'claude') {
+          route = applyReviewerWorkerClassFallbackToRoute({ route, decision: rwfDecision }).route;
+        }
         if (rwfDecision.fellBack) {
           const appliedFallback = applyReviewerWorkerClassFallbackToRoute({
             route,
@@ -2034,6 +2063,7 @@ export async function processReviewSubject(entry, ctx) {
             authorClass: reviewerAuthorClass,
           });
           if (appliedFallback.applied) {
+            const previousRoute = route;
             // Pressure is only a snapshot. Another PR in this poll can consume
             // the last unit before this one commits its fallback route.
             const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
@@ -2058,15 +2088,20 @@ export async function processReviewSubject(entry, ctx) {
                 console.warn(`[watcher] review-wait-spill repo=${repoPath} pr=${prNumber} `
                   + `pass_kind=${getDepthPassKind()} wait_seconds=${depthPressure.waitSeconds} to=${rwfDecision.to}`);
               }
-              if (rwfDecision.reason === 'queue-depth-pressure') {
+              if (['queue-depth-pressure', 'review-max-wait'].includes(rwfDecision.reason)) {
                 depthSpillReserved = firstPassSpilloverController?.recordSpill?.({
                   repo: repoPath,
                   prNumber,
                   fromWorkerClass: rwfDecision.from,
                   toWorkerClass: rwfDecision.to,
                   passKind: getDepthPassKind(),
+                  reason: rwfDecision.reason,
                   waitSeconds: Math.max(0, Date.now() - Date.parse(current?.head_wait_started_at || current?.rereview_requested_at || current?.reviewed_at)) / 1000,
                 }) === true;
+              }
+              if (['queue-depth-pressure', 'review-max-wait'].includes(rwfDecision.reason) && !depthSpillReserved) {
+                route = previousRoute;
+                return { ...rwfDecision, fellBack: false, reason: 'spill-budget-exhausted' };
               }
               console.warn(
                 `[watcher] review-worker-class-fallback repo=${repoPath} pr=${prNumber} ` +
@@ -2088,6 +2123,7 @@ export async function processReviewSubject(entry, ctx) {
           }
         }
 
+        return rwfDecision;
       }
       await applyWorkerFallback();
       if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
@@ -2478,7 +2514,7 @@ export async function processReviewSubject(entry, ctx) {
         });
         return;
       }
-      const credentialOutagePreflight = shouldPauseReviewerModel(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), {
+      const credentialOutagePreflight = shouldPauseReviewerModel(ROOT, reviewerCredentialKey(route.reviewerModel, getClaudeAccountSelection()?.provider), {
         reserve: false,
       });
       if (credentialOutagePreflight.paused) {
@@ -3011,6 +3047,7 @@ export async function processReviewSubject(entry, ctx) {
         repoPath,
         prNumber,
         reviewerModel: route.reviewerModel,
+        get claudeAccountSelection() { return getClaudeAccountSelection(); },
         // CCX-08: the Gemini cap counts added agy identities only for
         // candidates whose runtime can lease one; null means the primary.
         reviewerRuntimeAdapter: domainReviewerRuntimeAdapter || null,
@@ -3034,12 +3071,12 @@ export async function processReviewSubject(entry, ctx) {
         retainWakeForCapacity() {
           if (retainWakeForCapacity()) this.retainedWakePriority = true;
         },
-        refundDepthSpill() {
+        refundDepthSpill(reason = 'pool-admission-deferred') {
           if (!depthSpillReserved) return;
-          firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason: 'pool-admission-deferred' });
+          firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason });
           depthSpillReserved = false;
           route = this.preferredRoute;
-          this.syncDepthSpillRoute('pool-admission-deferred');
+          this.syncDepthSpillRoute(reason);
         },
         syncDepthSpillRoute(reason) {
           const from = this.reviewerModel;
@@ -3052,7 +3089,8 @@ export async function processReviewSubject(entry, ctx) {
         },
         async reevaluateDepthSpill(waitPressure = null) {
           if (depthSpillReserved) return;
-          await applyWorkerFallback(waitPressure || firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) || null);
+          const decision = await applyWorkerFallback(waitPressure || firstPassSpilloverController?.depthPressure?.(getDepthPassKind()) || null);
+          this.spillDecisionReason = decision.claudeAccountHoldReason || decision.reason;
           this.syncDepthSpillRoute(waitPressure?.reason || 'queue-depth-pressure');
           await this.prepareAdmission();
           if (depthSpillReserved) firstPassSpilloverController?.handoffSpill?.({ repo: repoPath, prNumber });
@@ -3094,6 +3132,7 @@ export async function processReviewSubject(entry, ctx) {
             return { dispatched: false, reason: 'watcher-drain-active' };
           }
           if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+            this.refundDepthSpill('quota-blocked');
             this.retainWakeForCapacity();
             return { dispatched: false, reason: 'quota-blocked' };
           }
@@ -3138,6 +3177,7 @@ export async function processReviewSubject(entry, ctx) {
           let reservationReleased = false;
           let reviewerSpawned = false;
           let credentialProbeReservation = null;
+          let credentialProbeKey = null;
           let reviewerProcessStarted = false;
           const releaseReviewerReservation = () => {
             if (!reservation?.admit || reservationReleased) return;
@@ -3725,7 +3765,14 @@ export async function processReviewSubject(entry, ctx) {
               declineFleetSelfRepairRereview(skipReviewerSpawnReason);
               return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
-              const credentialOutageGate = shouldPauseReviewerModel(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider));
+              const selectedClaudeAccount = getClaudeAccountSelection();
+              if (route.reviewerModel === 'claude' && (!selectedClaudeAccount || selectedClaudeAccount.hold)) {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                this.retainWakeForCapacity();
+                return { dispatched: false, reason: selectedClaudeAccount?.reason || 'claude-account-evidence-unknown' };
+              }
+              credentialProbeKey = reviewerCredentialKey(route.reviewerModel, selectedClaudeAccount?.provider);
+              const credentialOutageGate = shouldPauseReviewerModel(ROOT, credentialProbeKey);
               if (credentialOutageGate.probe) credentialProbeReservation = credentialOutageGate;
               if (credentialOutageGate.paused) {
                 stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
@@ -3760,8 +3807,9 @@ export async function processReviewSubject(entry, ctx) {
                   || Boolean(dispatchHasPriorPostedReview || current?.posted_at)
                   || completedRemediationRounds > 0,
               });
+              dispatchCandidate.spawnClaudeAccountSelection = selectedClaudeAccount;
               const spawnReviewerArgs = {
-                claudeAccountSelection: afhGrounding?.claudeAccountSelection || null,
+                claudeAccountSelection: selectedClaudeAccount || null,
                 repo: repoPath,
                 prNumber,
                 reviewerModel: route.reviewerModel,
@@ -3787,7 +3835,7 @@ export async function processReviewSubject(entry, ctx) {
                   reviewerSessionUuid = nextSessionUuid;
                   reviewerProcessStarted = false;
                   if (credentialProbeReservation?.probe) {
-                    releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
+                    releaseReviewerCredentialProbe(ROOT, credentialProbeKey, credentialProbeReservation);
                     credentialProbeReservation = null;
                   }
                 },
@@ -3915,7 +3963,7 @@ export async function processReviewSubject(entry, ctx) {
                 if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
                 if (credentialProbeReservation?.probe && !reviewerProcessStarted) {
                   try {
-                    releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
+                    releaseReviewerCredentialProbe(ROOT, credentialProbeKey, credentialProbeReservation);
                   } catch (releaseError) {
                     console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
                   }
@@ -3931,7 +3979,7 @@ export async function processReviewSubject(entry, ctx) {
               else if (!reviewerProcessStarted) dispatchCandidate.retainWakeForCapacity?.();
               if (!result.ok && credentialProbeReservation?.probe && !reviewerProcessStarted) {
                 try {
-                  releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
+                  releaseReviewerCredentialProbe(ROOT, credentialProbeKey, credentialProbeReservation);
                 } catch (releaseError) {
                   console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
                 }
@@ -3961,20 +4009,12 @@ export async function processReviewSubject(entry, ctx) {
           } finally {
             if (credentialProbeReservation?.probe && !reviewerSpawned) {
               try {
-                releaseReviewerCredentialProbe(ROOT, reviewerCredentialKey(route.reviewerModel, afhGrounding?.claudeAccountSelection?.provider), credentialProbeReservation);
+                releaseReviewerCredentialProbe(ROOT, credentialProbeKey, credentialProbeReservation);
               } catch (releaseError) {
                 console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
               }
             }
-            if (depthSpillReserved) {
-              firstPassSpilloverController?.refundSpill?.({
-                repo: repoPath,
-                prNumber,
-                toWorkerClass: reviewerWorkerClassForRoute(route),
-                reason: 'reviewer-not-spawned',
-              });
-              depthSpillReserved = false;
-            }
+            this.refundDepthSpill('reviewer-not-spawned');
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
             // The detached tracker signals capacity only after this run has

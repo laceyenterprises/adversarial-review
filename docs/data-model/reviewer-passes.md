@@ -38,6 +38,14 @@ an unreviewed moved head still uses the 480-second first-pass bound rather than
 the 900-second re-review bound. `reviewed_at` remains the original discovery
 anchor used by TTM and latency reports.
 
+## Draft accounting
+
+`reviewed_prs.is_draft` is an integer boolean, defaulting to zero, added
+idempotently by schema convergence. Subject discovery refreshes known draft
+state before review admission; a draft does not enter the actionable queue.
+Both depth lanes use the full first-pass plus requested re-review queue, with
+separate budgets. The historical first-pass pager count is unchanged.
+
 ## Claimed reviewer account
 
 The delivery row in `reviewed_prs` has nullable `codex_broker_provider`.

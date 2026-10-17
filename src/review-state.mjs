@@ -199,6 +199,7 @@ function ensureReviewStateSchema(db) {
       reviewed_at       TEXT NOT NULL,
       reviewer          TEXT NOT NULL,
       pr_state          TEXT NOT NULL DEFAULT 'open',
+      is_draft          INTEGER NOT NULL DEFAULT 0,
       merged_at         TEXT,
       closed_at         TEXT,
       linear_ticket     TEXT,
@@ -232,6 +233,7 @@ function ensureReviewStateSchema(db) {
     )
   `);
 
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN pr_state TEXT NOT NULL DEFAULT 'open'`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN merged_at TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN closed_at TEXT`);

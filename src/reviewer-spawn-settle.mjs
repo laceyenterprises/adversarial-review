@@ -1,6 +1,6 @@
 import { readReviewerEvidenceInWorker } from './reviewer-token-ledger-lookup.mjs';
 import { openReviewStateDb } from './review-state.mjs';
-import { reviewerCredentialKey } from './claude-account-routing.mjs';
+import { reviewerCredentialKey, recordCorporateClaudeQuotaCooldown } from './claude-account-routing.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { REVIEWER_BUILD_ID } from './reviewer-timeout-budget.mjs';
 // ARC-18 (cluster 19): the reviewer spawn/settle state machine, extracted
@@ -727,7 +727,9 @@ async function spawnReviewerOnceWithAccount({
   const roundLabel = Number.isFinite(reviewAttemptNumber)
     ? ` attempt=${reviewAttemptNumber}/${1 + Number(maxRemediationRounds || 0)}${finalRound ? ' [FINAL — lenient threshold]' : ''}`
     : '';
-  console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
+  console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`
+    + (normalizeReviewerModel(reviewerModel) === 'claude'
+      ? ` claude_account=${claudeAccountSelection?.provider === 'claude-code-corp' ? 'corporate' : 'primary'}` : ''));
 
   let quotaDecision;
   const claudeBrokerProvider = claudeAccountSelection?.provider || 'claude-code';
@@ -906,6 +908,12 @@ async function spawnReviewerOnceWithAccount({
         forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
         onReviewerPgid,
       });
+      if (normalizeReviewerModel(reviewerModel) === 'claude' && claudeBrokerProvider === 'claude-code-corp'
+        && !runtimeResult.ok && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+        try { recordCorporateClaudeQuotaCooldown(rootDir, { env: quotaCheckEnv,
+          resetAt: resolveQuotaResetIso([runtimeResult.error, runtimeResult.stderr, runtimeResult.stderrTail].filter(Boolean).join('\n')) }); }
+        catch (error) { console.warn(`[watcher] corporate Claude quota cooldown persistence failed: ${error.message}`); }
+      }
       if (normalizeReviewerModel(reviewerModel) === 'gemini' && !runtimeResult.ok
         && runtimeResult.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
         // Persist before releasing the identity or admission capacity so the

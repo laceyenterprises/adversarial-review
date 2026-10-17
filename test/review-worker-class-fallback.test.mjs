@@ -1,3 +1,4 @@
+import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -10,7 +11,7 @@ import {
 } from '../src/review-worker-class-fallback.mjs';
 
 function fleetStatusStub(rows) {
-  const stdout = JSON.stringify({ providerStatuses: rows });
+  const stdout = JSON.stringify(fleetStatusWithClaudeAccountEvidence(rows));
   return async () => ({ stdout });
 }
 
@@ -26,6 +27,25 @@ const GEMINI_EXHAUSTED_CODEX_OK = [
   { provider: 'google', authPath: 'agy', state: 'exhausted' },
   { provider: 'openai', authPath: 'oauth', state: 'ok' },
 ];
+
+for (const fallbacks of [[], ['claude-code'], ['codex']]) {
+  for (const held of [false, true]) {
+    test(`primary Claude retains account evidence without route fallback (${fallbacks.join(',')}, held=${held})`, async () => {
+      const result = await resolveReviewerWorkerClassWithFallback({
+        authorClass: 'codex', primary: 'claude-code', fallbackWorkerClasses: fallbacks,
+        execFileImpl: async () => ({ stdout: JSON.stringify(claudeAccountFixture({ corpReady: !held, primaryReady: !held })) }),
+      });
+      assert.equal(result.fellBack, false);
+      assert.equal(Boolean(result.claudeAccountSelection.hold), held);
+      if (!held) assert.equal(result.claudeAccountSelection.provider, 'claude-code-corp');
+      const route = { reviewerModel: 'claude', builderClass: 'codex' };
+      const applied = applyReviewerWorkerClassFallbackToRoute({ route, decision: result });
+      assert.equal(applied.applied, false);
+      assert.equal(applied.route.claudeAccountSelection, result.claudeAccountSelection);
+      assert.equal(applied.route.reviewerModel, 'claude');
+    });
+  }
+}
 
 test('falls back codex -> claude-code when the routed codex harness provider is exhausted', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
@@ -49,7 +69,7 @@ test('fleet quota status runs from the configured Agent OS root', async () => {
     env: { AGENT_OS_ROOT: '/tmp/agent-os-root-for-reviewer' },
     execFileImpl: async (cmd, args, options = {}) => {
       calls.push({ cmd, args, options });
-      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+      return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
     },
   });
   assert.equal(result.workerClass, 'claude-code');
@@ -168,7 +188,7 @@ test('retries transient fleet quota status failures with bounded backoff before 
     execFileImpl: async () => {
       calls += 1;
       if (calls === 1) throw transient;
-      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+      return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
     },
   });
 
@@ -204,7 +224,7 @@ test('retries execFile subprocess failures whose transient diagnostic is only in
     execFileImpl: async () => {
       calls += 1;
       if (calls === 1) throw subprocessFailure;
-      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+      return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
     },
   });
 
@@ -241,7 +261,7 @@ test('retries execFile subprocess failures whose transient diagnostic is only in
     execFileImpl: async () => {
       calls += 1;
       if (calls === 1) throw subprocessFailure;
-      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+      return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
     },
   });
 
@@ -290,7 +310,7 @@ test('shares one successful fleet quota status read across nearby subjects', asy
   let now = 1_000;
   const execFileImpl = async () => {
     calls += 1;
-    return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+    return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
   };
 
   const first = await resolveReviewerWorkerClassWithFallback({
@@ -328,7 +348,7 @@ test('shares one in-flight fleet quota status read across concurrent subjects', 
   const execFileImpl = async () => {
     calls += 1;
     await ready;
-    return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+    return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
   };
 
   const args = {
@@ -368,10 +388,10 @@ test('does not let an expired in-flight status read clobber a newer cache result
     calls += 1;
     if (calls === 1) {
       await firstReady;
-      return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+      return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
     }
     await secondReady;
-    return { stdout: JSON.stringify({ providerStatuses: CODEX_OK }) };
+    return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_OK)) };
   };
 
   const args = {
@@ -466,18 +486,22 @@ test('refreshes an unavailable fleet quota status result after its TTL', async (
   assert.equal(calls, 2);
 });
 
-test('does not read fleet quota status when no configured fallback is a viable alternate', async () => {
+test('primary Claude still reads account evidence when no fallback is a viable alternate', async () => {
+  let reads = 0;
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'codex',
     primary: 'claude-code',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: async () => {
-      throw new Error('fleet status should not be read');
+      reads++;
+      return { stdout: JSON.stringify(claudeAccountFixture()) };
     },
   });
   assert.equal(result.workerClass, 'claude-code');
   assert.equal(result.fellBack, false);
-  assert.equal(result.reason, 'no-available-fallback');
+  assert.equal(result.reason, 'primary-available');
+  assert.equal(reads, 1);
+  assert.equal(result.claudeAccountSelection.provider, 'claude-code-corp');
 });
 
 test('reviewWorkerClassFallback defaults to a cross-model pair and honors the env override', () => {
@@ -611,7 +635,7 @@ test('a second PR in the same poll reuses the cached quota read across per-PR wo
   const execFileImpl = async () => {
     execCount += 1;
     clock += 18_000; // the read itself: measured median on the reference host
-    return { stdout: JSON.stringify({ providerStatuses: CODEX_EXHAUSTED_CLAUDE_OK }) };
+    return { stdout: JSON.stringify(fleetStatusWithClaudeAccountEvidence(CODEX_EXHAUSTED_CLAUDE_OK)) };
   };
   const call = () => resolveReviewerWorkerClassWithFallback({
     authorClass: 'gemini',

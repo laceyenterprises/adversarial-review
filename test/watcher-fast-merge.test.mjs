@@ -1,3 +1,4 @@
+import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -346,6 +347,13 @@ echo "unexpected gh fixture call: $*" >&2
 exit 1
 `);
     chmodSync(ghPath, 0o755);
+    // Exercise real account admission using offline, independent quota evidence.
+    const hqPath = path.join(tmp, 'fixture-quota-hq');
+    writeFileSync(hqPath, `#!/usr/bin/env node
+if (process.argv.slice(2).join(' ') !== 'fleet quota status --json') process.exit(1);
+process.stdout.write(${JSON.stringify(JSON.stringify(claudeAccountFixture()))});
+`);
+    chmodSync(hqPath, 0o755);
     const result = spawnSync(
       process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
@@ -355,7 +363,7 @@ exit 1
         env: {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
-          AGENT_OS_HQ_BIN: '/usr/bin/false',
+          AGENT_OS_HQ_BIN: hqPath,
           FML_WATCHER_SKIP_ENABLED: skipEnabled ? 'true' : 'false',
           PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`,
           AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false',

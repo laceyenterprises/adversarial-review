@@ -1,3 +1,4 @@
+import { fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 // RSP-01 — CFG-gated queue-depth trigger that spills first-pass review across
 // worker classes.
 //
@@ -82,7 +83,7 @@ const ENTITLED_ENV = Object.freeze({
 });
 
 function fleetStatusStub(rows) {
-  const stdout = JSON.stringify({ providerStatuses: rows });
+  const stdout = JSON.stringify(fleetStatusWithClaudeAccountEvidence(rows));
   return async () => ({ stdout });
 }
 
@@ -896,8 +897,8 @@ test('an uncaptured completed pass still keeps rereview safety gates armed', asy
 
 test('watcher.mjs builds the per-tick controller from both production depth counters', () => {
   const src = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
-  assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingFirstPassReview/);
-  assert.match(src, /readRereviewDepth: countOpenPrsAwaitingRereview/);
+  assert.match(src, /createFirstPassSpilloverController\(\{[^}]*readDepth: countOpenPrsAwaitingReview/);
+  assert.match(src, /readRereviewDepth: countOpenPrsAwaitingReview/);
   assert.match(src, /^\s*firstPassSpilloverController,$/m, 'controller must be threaded into the per-PR ctx');
 });
 
@@ -916,10 +917,10 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
   assert.match(src, /applyWorkerFallback\(waitPressure \|\| firstPassSpilloverController\?\.depthPressure\?\.\(getDepthPassKind\(\)\) \|\| null\)/);
   assert.match(src, /passKind: getDepthPassKind\(\)/);
   // Cost is charged only for a spill that actually landed on a route, and only
-  // for the depth trigger — a quota fallback must not spend the depth budget.
+  // for depth or age pressure — quota fallback must not spend this budget.
   assert.match(
     src,
-    /rwfDecision\.reason === 'queue-depth-pressure'\)\s*\{\s*depthSpillReserved = firstPassSpilloverController\?\.recordSpill/
+    /\['queue-depth-pressure', 'review-max-wait'\]\.includes\(rwfDecision\.reason\)\)\s*\{\s*depthSpillReserved = firstPassSpilloverController\?\.recordSpill/
   );
   // The route swap gets the author so the diversity backstop can refuse.
   assert.match(src, /applyReviewerWorkerClassFallbackToRoute\(\{[^}]*authorClass: reviewerAuthorClass/);
@@ -1334,4 +1335,114 @@ test('failed held count is logged as unknown without disabling depth pressure', 
   assert.equal(ctl.plan().engaged, true);
   assert.ok(logs.some(message => /held count read failed: unavailable/.test(message)));
   assert.ok(logs.some(message => /held: unknown/.test(message)));
+});
+
+// REVIEWSPILL-01: the shared admission path must evaluate age with free seats.
+for (const reason of ['poll', 'capacity-freed', 'startup']) {
+  for (const occupied of [0, 2]) {
+    test(`overdue first pass spills at ${reason} admission with ${occupied} Argus seats`, async () => {
+      const { createReviewerDispatchDrain } = await import('../src/watcher-reviewer-dispatch.mjs');
+      const nowMs = Date.now();
+      const logs = [];
+      const candidate = {
+        repoPath: 'sample/project', prNumber: 1, reviewerModel: 'gemini', depthPassKind: 'first-pass',
+        current: { head_wait_started_at: new Date(nowMs - 481_000).toISOString() },
+        async reevaluateDepthSpill(pressure) {
+          assert.equal(pressure.reason, 'review-max-wait');
+          this.reviewerModel = 'claude';
+          this.claudeAccountSelection = { provider: 'claude-code-corp' };
+        },
+        async run() { return { dispatched: true }; },
+      };
+      const queue = [candidate];
+      const drain = createReviewerDispatchDrain({
+        reviewerPoolConfig: { enabled: true, maxConcurrent: 6 }, reviewerDispatchCandidates: queue,
+        detachedReviewerDispatchTracker: { activeCounts: () => new Map([['gemini', occupied], ['__total__', occupied]]), track() {} },
+        readWatcherDrainState: () => ({ active: false }),
+        resolveGeminiCredentialConcurrencyForDispatchCandidates: async () => 2,
+        logger: { log: line => logs.push(line), warn() {} },
+      });
+      assert.equal((await drain(reason)).dispatched, 1);
+      assert.equal(candidate.reviewerModel, 'claude');
+      assert.equal(logs.filter(line => line.includes('review-wait-decision')).length, 1);
+      assert.match(logs.find(line => line.includes('review-wait-decision')), /decision=spilled.*reviewer=claude.*claude_account=corporate/);
+    });
+  }
+}
+
+test('age spill budget is bounded per lane and refunds are reusable across admissions', () => {
+  const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => null, logger: {} });
+  const overdue = { engaged: true, reason: 'review-max-wait', waitSeconds: 481 };
+  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 1, reason: 'review-max-wait' }), true);
+  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, false);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 2, reason: 'review-max-wait' }), false);
+  assert.equal(ctl.waitPressure('rereview', overdue).engaged, true);
+  assert.equal(ctl.refundSpill({ repo: 'sample/project', prNumber: 1 }), true);
+  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
+});
+
+test('review depth includes requested rereviews and excludes held, draft and refused work', async () => {
+  const { ensureReviewStateSchema, openReviewStateDb } = await import('../src/review-state.mjs');
+  const { countOpenPrsAwaitingReview } = await import('../src/review-state-db.mjs');
+  const root = tempRoot('reviewspill-depth-');
+  const db = openReviewStateDb(root);
+  try {
+    ensureReviewStateSchema(db);
+    for (let number = 1; number <= 8; number++) {
+      db.prepare("INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,revision_ref) VALUES('sample/project',?,'2026-10-01T00:00:00Z','gemini','pending','new-head')").run(number);
+    }
+    // Only the first pass and requested re-review are actionable work.
+    db.prepare("INSERT INTO reviewer_passes(repo,pr_number,attempt_number,reviewer_class,reviewer_model,pass_kind,started_at,status,gh_comment_id,head_sha) VALUES('sample/project',2,1,'gemini','gemini','first-pass','2026-10-01T00:00:00Z','completed','synthetic-review','old-head')").run();
+    db.prepare("UPDATE reviewed_prs SET rereview_requested_at='2026-10-01T00:01:00Z' WHERE pr_number=2").run();
+    db.prepare("UPDATE reviewed_prs SET labels_json='[\"no-merge-hold\"]' WHERE pr_number=3").run();
+    db.prepare("UPDATE reviewed_prs SET is_draft=1 WHERE pr_number=4").run();
+    for (const [number, status] of [[5,'malformed'],[6,'argus-security-queued'],[7,'reviewing'],[8,'failed']]) {
+      db.prepare('UPDATE reviewed_prs SET review_status=? WHERE pr_number=?').run(status,number);
+    }
+    assert.equal(countOpenPrsAwaitingReview(db), 2);
+    const ctl = createFirstPassSpilloverController({ readDepth: () => countOpenPrsAwaitingReview(db),
+      readRereviewDepth: () => countOpenPrsAwaitingReview(db), resolveThresholdImpl: () => 2,
+      resolveRereviewThresholdImpl: () => 2, logger: {} });
+    assert.equal(ctl.depthPressure('first-pass').engaged, true);
+    assert.equal(ctl.depthPressure('rereview').engaged, true);
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('age spills follow live admission order and reuse a refusal refund in the same wave', async () => {
+  const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => null, logger: {} });
+  const models = [];
+  const candidates = [1, 2].map(prNumber => ({
+    repoPath: 'sample/project', prNumber, reviewerModel: 'gemini', depthPassKind: 'first-pass',
+    current: { reviewed_at: new Date(Date.now() - 481_000).toISOString() },
+    async reevaluateDepthSpill(pressure) {
+      if (ctl.recordSpill({ repo: this.repoPath, prNumber, reason: pressure.reason })) this.reviewerModel = 'claude';
+    },
+    async run() {
+      models.push(this.reviewerModel);
+      if (prNumber === 1) ctl.refundSpill({ repo: this.repoPath, prNumber });
+      return { dispatched: prNumber !== 1 };
+    },
+  }));
+  const ordered = await prepareQueueDepthSpillover(candidates, { controller: ctl, env: {}, logger: {} });
+  const result = await runBoundedReviewerDispatchQueue(ordered, { maxConcurrent: 1, geminiCredentialConcurrency: 1, logger: {} });
+  assert.deepEqual(models, ['claude', 'claude']);
+  assert.equal(result.dispatched, 1);
+  assert.equal(ctl.granted(), 1);
+});
+
+test('a full overall pool does not spend quota probes preparing age spills it cannot admit', async () => {
+  let probes = 0;
+  const candidate = { repoPath: 'sample/project', prNumber: 1, reviewerModel: 'gemini',
+    current: { reviewed_at: new Date(Date.now() - 481_000).toISOString() },
+    async reevaluateDepthSpill() { probes++; this.reviewerModel = 'claude'; },
+    async run() { throw new Error('full pool must defer'); },
+  };
+  const ordered = await prepareQueueDepthSpillover([candidate], { env: {}, logger: {} });
+  const result = await runBoundedReviewerDispatchQueue(ordered, {
+    maxConcurrent: 1, geminiCredentialConcurrency: 1,
+    activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]), logger: {},
+  });
+  assert.equal(probes, 0);
+  assert.equal(result.deferred, 1);
 });

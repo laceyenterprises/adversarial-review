@@ -21,6 +21,26 @@ function options(candidates, extra = {}) {
   };
 }
 
+for (const age of [600, 901]) {
+  test(`re-review telemetry derives its pass kind and bound without depthPassKind (${age}s)`, async () => {
+    const logs = [];
+    const c = { ...candidate(201), hasPriorPostedReview: true,
+      current: { rereview_requested_at: new Date(Date.now() - age * 1000).toISOString() } };
+    const drain = createReviewerDispatchDrain(options([c], {
+      prepareSpillover: async candidates => candidates,
+      runQueue: async candidates => ({ dispatched: 0, deferred: 1, deferredCandidates: candidates }),
+      logger: { log: line => logs.push(line), warn() {} },
+    }));
+    await drain('poll');
+    const waitLogs = logs.filter(line => line.includes('review-wait-decision'));
+    if (age === 600) assert.deepEqual(waitLogs, []);
+    else {
+      assert.equal(waitLogs.length, 1);
+      assert.match(waitLogs[0], /pass_kind=rereview/);
+    }
+  });
+}
+
 test('SEATIDLE-01: the shared drain obeys a live drain marker and the credential cap', async () => {
   let held = true, releaseFirst;
   const starts = [];
@@ -239,3 +259,32 @@ test('SEATIDLE-03: an inline hammer defers its PR without blocking another PR se
   assert.deepEqual(starts, [202]);
   assert.deepEqual(queue, [blocked]);
 });
+
+for (const throws of [false, true]) {
+  test(`started admission ${throws ? 'error' : 'refusal'} refunds before the next candidate`, async () => {
+    let reserved = true, refunded = 0;
+    const first = candidate(401, async () => {
+      if (throws) throw new Error('pre-spawn failure');
+      return { dispatched: false, reason: 'credential-hold' };
+    });
+    first.refundDepthSpill = () => { if (reserved) { reserved = false; refunded++; } };
+    const next = candidate(402, async () => {
+      assert.equal(reserved, false, 'the next admission must be able to reuse the slot');
+      return { dispatched: true };
+    });
+    const queue = [first, next];
+    const drain = createReviewerDispatchDrain(options(queue, {
+      runQueue: async (candidates, { onCandidateStarted }) => {
+        for (const c of candidates) {
+          const promise = c.run();
+          onCandidateStarted({ candidate: c, promise });
+          await promise.catch(() => {});
+        }
+        return { dispatched: 1, deferred: 0 };
+      },
+    }));
+    await drain('poll');
+    assert.equal(refunded, 1);
+    assert.deepEqual(queue, []);
+  });
+}

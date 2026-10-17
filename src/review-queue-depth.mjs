@@ -16,8 +16,8 @@
 // matter how deep the backlog — and `gemini` is not even a tracked quota harness
 // (`QUOTA_HARNESS_PROVIDER` covers openai/anthropic only), so that path returns
 // `primary-provider-untracked` and does nothing at all. This module supplies the
-// missing trigger: QUEUE DEPTH. REVIEWAGE-02 adds a separate wait bound at
-// credential saturation; disarming depth alone does not disable that bound.
+// missing trigger: QUEUE DEPTH. REVIEWSPILL-01 evaluates the independent
+// wait bound at every admission, including when Gemini seats are free.
 //
 // ── This is a COST lever, not a parallelism tuning knob ──────────────────────
 // `agy` is serialized on purpose: it is cheap, and keeping review on it
@@ -50,52 +50,11 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 
 // ── The unit ─────────────────────────────────────────────────────────────────
-// "Queue depth" is stated precisely, because an operator sets a threshold in it:
-//
-//   depth = OPEN PRs THAT HAVE NEVER RECEIVED A FIRST-PASS REVIEW.
-//
-// This is NOT a new number. It is exactly `countOpenPrsAwaitingFirstPassReview`
-// in `review-state-db.mjs` — the same count the review-stall pager already
-// reports — injected here as `readDepth`. Defining a second, subtly different
-// "queue depth" beside it would give the operator two numbers that disagree
-// during exactly the incident where both get read. Its predicate, verbatim from
-// that module:
-//   - `pr_state = 'open'` — merged/closed PRs are not waiting for anything.
-//   - NO completed `reviewer_passes` row with `pass_kind IN ('first-pass',
-//     'rereview')` and a non-empty `gh_comment_id` — that is GitHub-artifact
-//     evidence that a review really landed, deliberately chosen over
-//     `reviewed_prs.posted_at`/`review_status` because those are maskable by a
-//     stale success claim and are reset on re-entry.
-//   - `review_status NOT IN ('malformed','unroutable-bot-author',
-//     'argus-security-queued')` — work the dispatch loop explicitly refuses. It
-//     will never get a first pass, so more reviewers cannot drain it.
-//
-// SAY WHAT ELSE IT COUNTS, AND WHAT IT DOES NOT:
-//   - It DOES count a PR whose FIRST pass is in flight (`review_status =
-//     'reviewing'` with no delivered pass yet) — that PR still has no review. So
-//     the count cannot fall below the number of FIRST-PASS reviewers currently
-//     in flight. A threshold at or under the first-pass pool ceiling (default 6,
-//     max 12) could therefore be satisfied by a saturated-but-healthy pipeline
-//     and pin the lever on; set it meaningfully ABOVE the pool ceiling, which is
-//     also where arrivals genuinely exceed what one class absorbs.
-//   - It does NOT count re-review churn at all. A PR that already has a
-//     delivered pass is excluded even while a re-review is in flight for it.
-//     That is the intended scope: the ticket is about first-pass throughput, and
-//     re-review is not what the operator asked to parallelize. Observed on this
-//     host 2026-09-06: 9 open PRs, 6 reviewers in flight, depth = 0 — every open
-//     PR had already been first-passed, so the backlog was re-review, not
-//     first-pass, and the lever correctly would not engage at any threshold.
-//
-// One-tick lag, by design: a PR discovered seconds ago gets its `reviewed_prs`
-// row created later in the same tick that routes it, so it joins the count on
-// the next tick. PRs sit in this queue for tens of minutes (measured p90
-// time-to-merge 282 min), so one tick is immaterial to a depth threshold.
+// Both lanes measure the whole actionable queue but retain separate thresholds
+// and per-tick budgets. The historical first-pass pager count stays separate.
 export const FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT =
-  'open PRs that have never received a first-pass review '
-  + '(review-state-db.countOpenPrsAwaitingFirstPassReview: pr_state open, no reviewer_passes row '
-  + "with pass_kind IN ('first-pass','rereview'), status completed, and a gh_comment_id, "
-  + 'excluding malformed/unroutable-bot/argus-queued; '
-  + 'INCLUDES first passes currently in flight)';
+  'open PRs awaiting a review pass (first pass or requested re-review; '
+  + 'excluding held, draft, malformed, Argus-only and already-admitted rows)';
 
 export const REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY =
   'watcher.first_pass_review_queue_depth_failover_threshold';
@@ -137,7 +96,7 @@ export function reviewQueueDepthFailoverReportPath(rootDir) {
 
 /**
  * Read the queue depth through the injected counter (the composition root
- * supplies `countOpenPrsAwaitingFirstPassReview`; this module stays free of the
+ * supplies `countOpenPrsAwaitingReview`; this module stays free of the
  * singleton review-state DB so it can be unit-tested without opening it).
  *
  * Fails OPEN — returns `null` on a missing or throwing counter. An unreadable
@@ -446,6 +405,7 @@ export function createFirstPassSpilloverController({
   writeFileImpl = writeFileAtomic,
 } = {}) {
   const plans = new Map();
+  const depths = new Map();
   const heldByKind = new Map();
   const remainingByKind = new Map();
   const grantedByKind = new Map();
@@ -493,7 +453,8 @@ export function createFirstPassSpilloverController({
     }
     // Disarmed is the overwhelmingly common case; do not pay a SQL count for it.
     const depthReader = kind === 'rereview' ? readRereviewDepth : readDepth;
-    const depth = threshold === null ? null : readDepthImpl(depthReader, { logger });
+    if (threshold !== null && !depths.has(depthReader)) depths.set(depthReader, readDepthImpl(depthReader, { logger }));
+    const depth = threshold === null ? null : depths.get(depthReader);
     const plan = firstPassSpilloverPlan({ depth, threshold });
     let held = null;
     if (threshold !== null && typeof readHeld === 'function') {
@@ -616,15 +577,27 @@ export function createFirstPassSpilloverController({
         remaining,
       };
     },
+    // Age pressure shares the lane budget, with one bounded escape slot when
+    // depth is disarmed or below threshold. Refunds restore the same slot.
+    waitPressure(passKind, pressure) {
+      const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
+      const current = evaluate(kind);
+      const budget = Math.max(1, current.spillSlots);
+      return { ...pressure, engaged: pressure.engaged && (grantedByKind.get(kind) || 0) < budget,
+        remaining: Math.max(0, budget - (grantedByKind.get(kind) || 0)) };
+    },
     /**
      * Consume one slot and charge the cost ledger. Call ONLY once a depth-driven
      * fallback has actually been applied to a route.
      */
-    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass', waitSeconds = null } = {}) {
+    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass', waitSeconds = null, reason = 'queue-depth-pressure' } = {}) {
       const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
       const current = evaluate(kind);
       let remaining = remainingByKind.get(kind) || 0;
-      if (!current.engaged || remaining <= 0) return false;
+      if (reason === 'review-max-wait') {
+        remaining = Math.max(1, current.spillSlots) - (grantedByKind.get(kind) || 0);
+      } else if (!current.engaged) return false;
+      if (remaining <= 0) return false;
       remaining -= 1;
       remainingByKind.set(kind, remaining);
       granted += 1;
@@ -642,7 +615,7 @@ export function createFirstPassSpilloverController({
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
         + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} held: ${heldByKind.get(kind) ?? 'unknown'} threshold=${current.threshold} `
-        + `slot=${grantedByKind.get(kind)}/${current.spillSlots} `
+        + `slot=${grantedByKind.get(kind)}/${reason === 'review-max-wait' ? Math.max(1, current.spillSlots) : current.spillSlots} `
         + `engagement_spillover_reviews=${lane.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`
       );
@@ -677,7 +650,8 @@ export function createFirstPassSpilloverController({
 }
 
 /** Prepare every drain, including candidates deferred by an earlier wave.
- * The pool calls the spill hook only when its actual Gemini seats are full.
+ * The pool evaluates age before credential admission, even with free Gemini
+ * seats. Depth keeps its saturation hook; both share reservation accounting.
  * Repeated drains reuse the controller's unspent/refunded per-tick budget.
  */
 export async function prepareQueueDepthSpillover(candidates, {
@@ -693,16 +667,24 @@ export async function prepareQueueDepthSpillover(candidates, {
   const oldestMs = Math.min(...firstPass.map((candidate) => Date.parse(candidate.subject?.createdAt)).filter(Number.isFinite));
   logger.log?.(`[watcher] review-queue-depth-wait oldest_first_pass_age_ms=${Number.isFinite(oldestMs) ? Math.max(0, nowMs - oldestMs) : 0} first_pass_waiting=${firstPass.length}`);
   for (const candidate of ordered) {
+    let waitPrepared = false;
+    candidate.prepareForReviewWait = async () => {
+      if (waitPrepared) return;
+      waitPrepared = true;
+      const pressure = reviewWaitPressure({ ...candidate, depthPassKind: passKind(candidate) }, { nowMs: now(), env });
+      if (pressure.engaged && candidate.reviewerModel === 'gemini' && !(candidate.pipelineGeminiSeats > 0)) {
+        const bounded = controller?.waitPressure?.(passKind(candidate), pressure) || pressure;
+        if (bounded.engaged) await candidate.reevaluateDepthSpill?.(bounded);
+        else candidate.spillDecisionReason = 'spill-budget-exhausted';
+      }
+    };
     candidate.prepareForGeminiSaturation = async () => {
+      await candidate.prepareForReviewWait();
       // Changing the main route cannot release seats required by a pipeline.
       if (candidate.reviewerModel !== 'gemini' || candidate.pipelineGeminiSeats > 0) return;
-      const pressure = reviewWaitPressure(candidate, { nowMs: now(), env });
       // Preserve the depth lever's reservation/refund accounting when armed.
       if (controller?.depthPressure(passKind(candidate))?.engaged) {
         await candidate.reevaluateDepthSpill?.();
-      }
-      if (candidate.reviewerModel === 'gemini' && pressure.engaged) {
-        await candidate.reevaluateDepthSpill?.(pressure);
       }
     };
   }

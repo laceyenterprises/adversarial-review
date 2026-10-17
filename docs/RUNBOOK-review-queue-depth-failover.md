@@ -1,7 +1,7 @@
-# RUNBOOK — queue-depth failover for first-pass review (RSP-01)
+# RUNBOOK — review queue failover (RSP-01 / REVIEWSPILL-01)
 
-A **break-glass lever**. It is disarmed on every host until an operator arms it,
-and arming it is one config value.
+The depth lever is disarmed until an operator sets its threshold. The individual
+wait bound operates independently, including when depth is disarmed.
 
 ## What it does
 
@@ -50,7 +50,30 @@ reservation. A pool deferral uses reason `pool-admission-deferred`, restores the
 preferred route, and can be re-evaluated in a later drain. Spill and refund route
 changes refresh cross-model waiver metadata before spawn. A failed drain also
 refunds reservations for every candidate it did not start; started candidates
-settle their own reservations at spawn or refusal.
+settle their own reservations at spawn or refusal. The shared drain also refunds
+a started candidate that returns `dispatched: false` or rejects admission; refunds
+are idempotent with the candidate's cleanup and restore its preferred route.
+
+### Claude account order
+
+Every managed Claude reviewer, hammer and remediator lane tries the corporate
+account first. Corporate reserve flags (`nearCap`, `active`, `paused`) alone do
+not switch accounts. Fresh, independently measured quota and a serving broker
+are still required. Provider/model exhaustion, typed quota exhaustion on reviewer
+spawn, or a broker that explicitly cannot serve permits the primary account,
+whose own evidence must admit it. Unknown or stale corporate evidence holds.
+Worker-class fallback cannot admit Claude from aggregate quota alone when account
+selection is absent or held. Primary Claude routes retain account selection even
+when no worker-class fallback is configured or applied. The final Claude spawn
+gate refuses missing evidence and rechecks account holds; either refusal releases
+the claim, reservation and spill slot without spawning.
+Reviewer spawn logs include `claude_account=corporate|primary`; that account is
+also used for quota preflight and token minting/renewal.
+
+Typed corporate reviewer exhaustion persists an account-scoped cooldown before
+capacity is released. Subsequent admissions can use independently verified
+primary capacity until the provider reset (15 minutes when no reset is supplied,
+bounded to seven days). This does not alter Gemini cooldowns or take Argus seats.
 
 ## This is a cost lever, not a parallelism knob
 
@@ -64,7 +87,8 @@ threshold is not "how much parallelism do we want". It is:
 
 Consequences, all enforced in code:
 
-- **Conservative by default.** Unset = disarmed = behaviour identical to before.
+- **Depth is opt-in.** An unset threshold disables depth pressure; age pressure
+  still bounds individual waits.
 - **Graded, not a flood.** Each *full multiple* of the threshold sitting in the
   queue buys exactly **one** concurrent non-primary reviewer
   (`floor(depth / threshold)`). Depth 1.9× the threshold still spends one.
@@ -91,15 +115,9 @@ this stays a lever rather than becoming the default path.
 Re-reviews use the parallel key
 `watcher.rereview_queue_depth_failover_threshold` and canonical env
 `AGENT_OS_WATCHER_REREVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD`. When absent it
-inherits the first-pass threshold; `0` disables only re-review spillover. Its
-depth is open PRs with a completed, posted reviewer pass (`pass_kind` in
-`first-pass` or `rereview`) and a durable `rereview_requested_at` wake (or
-cleared `posted_at` after a head refresh) still awaiting admission. Only
-`pending` rows without a completed posted pass on the current head count.
-Rows already in `reviewing`, failed, awaiting an artifact, posted, or paused by
-the review-cycle cap do not count. When the re-review threshold inherits the
-first-pass threshold, the watcher logs that the lanes can spend separate spill
-slots.
+inherits the first-pass threshold; `0` disables only re-review depth spillover.
+Both lanes measure the same actionable queue, with separate thresholds and
+spill budgets. A requested re-review contributes pressure to both lanes.
 
 Both queue-depth lanes exclude open PRs carrying `no-merge-hold`,
 `do-not-merge`, or `merge-agent-skip`, matching enforced merge-action holds.
@@ -108,42 +126,43 @@ countable. Engage/disengage and spill logs include `held: N`, read once per
 armed lane plan and reused for that tick. An unreadable held count logs a
 specific warning and `held: unknown` without disabling depth pressure.
 
-The classes it may spill to are the pre-existing
-`ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK` list (default `['codex']`)
-— this ticket did not introduce a second roster. `claude-code` is intentionally
-not the default spillover class because the airlock launchd reviewer path cannot
-bootstrap Claude's audit session reliably; operators can still opt it in with
-the env override after proving that lane healthy.
+Depth uses the existing `ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK`
+list (default `['codex', 'claude-code']`). Age uses the original cross-model
+reviewer replaced by Gemini. Entitlement, quota and writer-diversity checks
+apply to both triggers.
 
 ### The unit: what "queue depth" counts
 
-Depth is **open PRs that have never received a first-pass review**, read from the
-existing `countOpenPrsAwaitingFirstPassReview` in `review-state-db.mjs` — the
-same number the review-stall pager already reports. Defining a second, slightly
-different "queue depth" beside it would give you two numbers that disagree during
-exactly the incident where you read both. Its predicate:
+Depth counts open PRs awaiting admission for either a first pass or a requested
+re-review (`pending` or `pending-upstream`). It excludes drafts, operator holds,
+malformed and Argus-only rows, and reviews already running. Genuine posted-pass
+evidence distinguishes the two populations; a posted review on the current head
+excludes a requested re-review. The first-pass stall pager retains its existing
+undelivered-review count. The CLI and both spill lanes use
+`countOpenPrsAwaitingReview` / `SQL_COUNT_OPEN_AWAITING_REVIEW`.
 
-- `pr_state = 'open'` (merged/closed PRs are not waiting for anything), **and**
-- no completed `reviewer_passes` row with `pass_kind IN ('first-pass',
-  'rereview')` and a non-empty `gh_comment_id` — GitHub-artifact evidence that a
-  review really landed, deliberately preferred over `reviewed_prs.posted_at` /
-  `review_status`, which are maskable by a stale success claim and are reset on
-  re-entry, **and**
-- `review_status NOT IN ('malformed', 'unroutable-bot-author',
-  'argus-security-queued')` — work the dispatch loop explicitly refuses and no
-  number of reviewers can drain.
+Draft evidence is persisted from subject discovery in `reviewed_prs.is_draft`.
+No new configuration key is needed.
 
-Two things worth stating explicitly, because they decide what threshold to pick:
+### Individual wait bound
 
-- **It counts first passes that are currently in flight.** A PR being reviewed
-  right now has still never received a review. So the count cannot fall below the
-  number of *first-pass* reviewers in flight, and a threshold at or under the
-  first-pass pool ceiling (default 6, max 12) could be satisfied by a
-  saturated-but-healthy pipeline and pin the lever on. Set it meaningfully
-  **above** the pool ceiling.
-- **It does not mix re-review churn into first-pass depth.** Re-reviews have a
-  separate depth and budget, so a saturated re-review lane can spill without
-  consuming the slots reserved for PRs still awaiting their first review.
+At every shared drain (poll and capacity-freed, also used by startup polling),
+the pool evaluates each candidate in its live admission order. A Gemini-primary
+candidate past 480 seconds for a first pass or 900 seconds for
+a re-review is evaluated for cross-model spill even when Gemini seats are free.
+The existing `ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS` and
+`ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS` overrides apply; zero disables
+the corresponding age trigger. The current head's durable wait marker wins over
+historical discovery timestamps.
+
+Age pressure shares each lane's per-tick budget and reservation/refund accounting.
+When depth grants no slots, age permits one escape slot per lane per tick.
+A refused candidate refunds its slot before the next candidate is evaluated; a
+full overall pool does not prepare spills it cannot admit.
+Argus keeps its seats; PR reviews spill to independent reviewer capacity.
+Pipeline candidates that still require Gemini retain their seat requirements.
+`review-wait-decision` records one decision per overdue candidate per drain,
+including the reviewer/account or the blocking reason.
 
 ## Arming it
 
@@ -171,7 +190,11 @@ npm run review-queue-depth -- --json  # machine
 ```
 
 Prints live depth, threshold, armed/engaged state, graded spill slots, and the
-cost ledger. The durable report is `data/review-queue-depth-failover.json`; it
+cost ledger. The CLI opens the database read-only. Legacy snapshots missing
+schema fields report unknown depth (`depth: null` and `depthError` in JSON),
+leave spillover disengaged, and identify schema convergence by the owning watcher
+as the required action; the diagnostic never migrates the database.
+The durable report is `data/review-queue-depth-failover.json`; it
 keeps independent `lanes["first-pass"]` and `lanes.rereview` engagement state,
 transitions, and current-engagement cost, with top-level fields retained as a
 compatibility summary. Top-level `engagementSpilloverReviews` is the live

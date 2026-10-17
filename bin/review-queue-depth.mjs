@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { SQL_COUNT_HELD_OPEN_PRS } from '../src/operator-hold-labels.mjs';
+import { readHeldOpenPrCount } from '../src/operator-hold-labels.mjs';
 // RSP-01 operator surface — "is the depth failover lever engaged right now, and
 // what has it cost?"
 //
@@ -29,7 +29,7 @@ import {
 // import. An operator will point `--root` at a LIVE deployed tree, and a
 // diagnostic reporter must not migrate a database a running watcher owns. Hence
 // the leaf import plus our own read-only handle below.
-import { SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW } from '../src/review-state-statements.mjs';
+import { SQL_COUNT_OPEN_AWAITING_REVIEW } from '../src/review-state-statements.mjs';
 
 const DEFAULT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -47,11 +47,17 @@ function main() {
 
   // Read-only, so this is safe to point at a live deployed tree.
   let depth = null;
-  let held = 0;
+  let held = null;
+  let depthError = null;
   const db = new Database(join(root, 'data', 'reviews.db'), { readonly: true });
   try {
-    held = Number(db.prepare(SQL_COUNT_HELD_OPEN_PRS).get()?.n || 0);
-    depth = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n ?? 0);
+    held = readHeldOpenPrCount(db);
+    try {
+      depth = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_REVIEW).get()?.n ?? 0);
+    } catch (error) {
+      if (error.code !== 'SQLITE_ERROR' || !/no such (table|column)/.test(error.message)) throw error;
+      depthError = `Queue depth unavailable: ${error.message}; schema convergence by the owning watcher is required.`;
+    }
   } finally {
     db.close();
   }
@@ -61,6 +67,7 @@ function main() {
   const report = readReviewQueueDepthFailoverReport(root);
   const payload = {
     held,
+    ...(depthError ? { depthError } : {}),
     knob: REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY,
     depthUnit: FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT,
     reportPath: reviewQueueDepthFailoverReportPath(root),
@@ -78,7 +85,8 @@ function main() {
 
   const state = !plan.armed ? 'DISARMED' : plan.engaged ? 'ENGAGED' : 'ARMED (not engaged)';
   process.stdout.write(
-    `first-pass review queue depth : ${depth} (held: ${held})\n`
+    `first-pass review queue depth : ${depth ?? 'unknown'} (held: ${held ?? 'unknown'})\n`
+    + (depthError ? `diagnostic                    : ${depthError}\n` : '')
     + `unit                          : ${FIRST_PASS_REVIEW_QUEUE_DEPTH_UNIT}\n`
     + `knob                          : ${REVIEW_QUEUE_DEPTH_FAILOVER_CFG_KEY}\n`
     + `threshold                     : ${threshold === null ? '(unset — disarmed)' : threshold}\n`

@@ -2,14 +2,14 @@
 // closer liveness predicates. Never reclaim on age alone or a failed ledger read.
 import { readFileSync } from 'node:fs';
 import { writeFileAtomic } from '../atomic-write.mjs';
-import { readLatestWorkerRunStatusFromLedger } from '../session-ledger-read-adapter.mjs';
+import { readLatestWorkerRunStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { readAmaCloserLease, updateAmaCloserLease } from './closer-lease.mjs';
 
 const TERMINAL = new Set(['succeeded', 'completed', 'failed', 'cancelled', 'canceled', 'superseded']);
 
 export async function reconcileRecoveryLaunches({
   rootDir, repo, prNumber, headSha, logger = console, env = process.env,
-  readStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   listActiveImpl = null, isPhantomImpl = null,
 }) {
   if (!listActiveImpl || !isPhantomImpl) {

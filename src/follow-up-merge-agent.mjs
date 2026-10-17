@@ -2437,19 +2437,15 @@ async function dispatchMergeAgentForPR({
       //     probe failure falls through to refusal-count-only
       //     classification (the OSS-safe behavior).
       const hqRootForAudit = resolveHqRoot(runtimeEnv);
-      const stuckDetail = describeStaleDispatch(latestRecordedDispatch, {
+      let stuckDetail = describeStaleDispatch(latestRecordedDispatch, {
         hqRoot: hqRootForAudit || null,
         now: Date.parse(String(now)) || Date.now(),
-        dispatchStateProbe: hqPath && _isValidLrqId(latestRecordedDispatch?.launchRequestId)
-          ? (lrqArg) => _probeDispatchStatusViaHq({
-              hqPath,
-              lrq: lrqArg,
-              asOwner: statusProbeAsOwner,
-              execFileImpl,
-              env: runtimeEnv,
-            })
-          : null,
       });
+      if (stuckDetail && hqPath && _isValidLrqId(latestRecordedDispatch?.launchRequestId)) {
+        const statusProbe = await probeDispatchStatusViaHq({ hqPath, lrq: latestRecordedDispatch.launchRequestId,
+          asOwner: statusProbeAsOwner, execFileImpl, env: runtimeEnv });
+        if (_NON_STUCK_DISPATCH_STATUSES.has(statusProbe?.status)) stuckDetail = null;
+      }
       if (stuckDetail) {
         mergeAgentLifecycleLog(logger, 'merge_agent.stuck_pre_spawn', {
           repo,

@@ -3,7 +3,7 @@ import { collectDuplicateContent } from './adapters/subject/github-pr/duplicate-
 import { spawnSync as nodeSpawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
+import { readBuildCompletionSignalForPr, readBuildCompletionSignalForPrAsync } from './session-ledger-read-adapter.mjs';
 import {
   DUPLICATE_FAMILY_HOLD_LABEL,
   DUPLICATE_FAMILY_LABEL,
@@ -932,14 +932,30 @@ export async function runDuplicateFamilyCensusForWatcher({
   octokit,
   env = process.env,
   log = console,
-  readBuildCompletionSignalForPrImpl: readSignal = readBuildCompletionSignalForPr,
+  readBuildCompletionSignalForPrImpl: readSignal = readBuildCompletionSignalForPrAsync,
 } = {}) {
   let provenanceDisabledReason = null;
+  const signals = new Map();
+  const signalKey = args => `${args.prNumber}:${args.headSha || ''}`;
+  async function primeSignal(args) {
+    const key = signalKey(args);
+    if (signals.has(key)) return signals.get(key);
+    const result = await readSignal({ ...args, timeoutMs: 1500 });
+    signals.set(key, result);
+    if (!result?.ok && shouldDisableProvenanceForTick(result?.reason)) {
+      provenanceDisabledReason = result?.reason || 'duplicate-family-provenance-unavailable';
+      throw new Error(`Transient provenance failure: ${provenanceDisabledReason}`);
+    }
+    return result;
+  }
   const readBuildCompletionSignalForPrImpl = (args) => {
     if (provenanceDisabledReason) {
       return { ok: false, reason: provenanceDisabledReason };
     }
-    const result = readSignal(args);
+    // Pure census passes consume this poll's evidence; never start a child
+    // while synchronous family classification holds the watcher event loop.
+    const result = signals.get(signalKey(args));
+    if (!result) throw new Error('Transient provenance failure: missing-census-snapshot');
     if (!result?.ok && shouldDisableProvenanceForTick(result.reason)) {
       provenanceDisabledReason = result.reason || 'duplicate-family-provenance-unavailable';
       throw new Error(`Transient provenance failure: ${provenanceDisabledReason}`);
@@ -959,20 +975,17 @@ export async function runDuplicateFamilyCensusForWatcher({
         throw new Error('Transient provenance failure: missing-ledger-target');
       }
     }
-    const probeSubject = (Array.isArray(subjectEntries) ? subjectEntries : [])
-      .map((entry) => entry?.subject || entry || {})
-      .find((subject) => Number.isInteger(Number(subject.number ?? subject.prNumber)));
-    if (probeSubject) {
-      readBuildCompletionSignalForPrImpl({
-        repo: repoPath,
-        prNumber: Number(probeSubject.number ?? probeSubject.prNumber),
-        headSha: normalizeText(probeSubject.headSha || probeSubject.headRefOid || probeSubject.ref?.revisionRef),
-        signalKind: 'pr_opened',
-        rootDir,
-        hqRoot: env.HQ_ROOT || null,
-        env,
-        spawnSyncImpl,
-      });
+    ensureDuplicateFamilySchema(db);
+    const censusEntries = mergePersistedDuplicateCandidates(db, subjectEntries || [], repoPath);
+    for (const entry of censusEntries) {
+      const subject = entry?.subject || entry || {};
+      const prNumber = Number(entry?.prNumber ?? subject.number ?? subject.prNumber);
+      if (!Number.isInteger(prNumber)) continue;
+      const headSha = normalizeText(subject.headSha || subject.headRefOid || subject.ref?.revisionRef);
+      const common = { repo: repoPath, prNumber, headSha, signalKind: 'pr_opened', rootDir,
+        hqRoot: env.HQ_ROOT || null, env, spawnSyncImpl };
+      const result = await primeSignal(common);
+      if (!result?.ok && headSha) await primeSignal({ ...common, headSha: null });
     }
     const entries = (subjectEntries || []).map((entry) => ({ ...entry, subject: { ...entry.subject } }));
     if (octokit) {

@@ -5,10 +5,9 @@ import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import Database from 'better-sqlite3';
 import fsExt from 'fs-ext';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readLaunchRequestStatusFromLedger } from '../session-ledger-read-adapter.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
 import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
 import { readAmaCloserLease, amaCloserPendingLeaseExpiryMs } from './closer-lease.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
@@ -25,7 +24,7 @@ const text = value => String(value || '').slice(0, 300);
 
 // Unknown evidence holds dispatch, but is distinct from a proven live owner.
 export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, reviewStateRow, labels = [],
-  readStatusImpl = readLaunchRequestStatusFromLedger, timeoutMs = 5000, signal = null, reservationStartedAt = null,
+  readStatusImpl = readLaunchRequestStatusFromLedgerAsync, timeoutMs = 5000, signal = null, reservationStartedAt = null,
   now = new Date().toISOString(), processKillImpl = process.kill, logger = console, reservationRecordHead = null,
   excludeWatcherPid = null, env = process.env }) {
   const alive = (pid, group = false) => {
@@ -101,11 +100,8 @@ export async function probeOrphanOwnership({ rootDir, repo, prNumber, headSha, r
       let probe = terminalLaunches.get(cacheKey);
       try {
         probe ||= await readStatusImpl({ launchRequestId, rootDir, hqRoot: record.hqRoot, signal,
-          // The adapter uses synchronous psql: a Promise timeout alone cannot
-          // interrupt it. Bound the subprocess by the remaining probe budget.
-          spawnSyncImpl: (cmd, args, options) => spawnSync(cmd, args, {
-            ...options, timeout: Math.max(1, Math.min(options?.timeout || 30000, deadline - Date.now())),
-          }) });
+          // Yield while psql runs, retaining the remaining ownership-probe budget.
+          timeoutMs: Math.max(1, deadline - Date.now()) });
       } catch { uncertain('ledger-read-failed'); continue; }
       if (!probe?.ok) {
         uncertain(probe?.reason || 'ledger-read-failed'); continue;

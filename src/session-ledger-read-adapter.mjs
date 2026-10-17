@@ -1,5 +1,5 @@
 import { observeSynchronousChild } from './watcher-latency.mjs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -615,7 +615,7 @@ function describePostgresSpawnFailure(result) {
     return {
       ok: false,
       reason: 'ledger-read-failed',
-      detail: `psql timed out after ${PSQL_TIMEOUT_MS}ms`,
+      detail: `psql timed out after ${result.error.timeoutMs ?? PSQL_TIMEOUT_MS}ms`,
       transient: true,
     };
   }
@@ -645,7 +645,9 @@ function describePostgresSpawnFailure(result) {
   return null;
 }
 
-function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false } = {}) {
+function queryPostgresRows(...args) { return runLedgerStepsSync(queryPostgresRowsSteps(...args)); }
+
+function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVars = [], readOnly = false } = {}) {
   const locator = normalizeText(target.dsn) || normalizeText(target.databaseName);
   if (!locator) {
     return {
@@ -695,21 +697,21 @@ function queryPostgresRows(target, jsonSql, { spawnSyncImpl = spawnSync, psqlVar
         : jsonSql;
       const script = `${statement}\n`;
       args.push(...spawnConfig.args, '-t', '-A');
-      result = observeSynchronousChild('psql', () => spawnSyncImpl('psql', args, {
+      result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
         timeout: PSQL_TIMEOUT_MS,
         killSignal: PSQL_TIMEOUT_SIGNAL,
         input: script,
-      }));
+      } };
     } else {
       args.push(...spawnConfig.args, '-t', '-A', '-c', jsonSql);
-      result = observeSynchronousChild('psql', () => spawnSyncImpl('psql', args, {
+      result = yield { kind: 'child', command: 'psql', args, spawnSyncImpl, options: {
         encoding: 'utf8',
         env: spawnConfig.env,
         timeout: PSQL_TIMEOUT_MS,
         killSignal: PSQL_TIMEOUT_SIGNAL,
-      }));
+      } };
     }
     const failure = describePostgresSpawnFailure(result);
     if (failure) return { ...failure, target };
@@ -738,7 +740,10 @@ function unsupportedBackend(target) {
   };
 }
 
-export function readLatestWorkerRunStatusFromLedger({
+export function readLatestWorkerRunStatusFromLedger(args) { return runLedgerStepsSync(readLatestWorkerRunStatusFromLedgerSteps(args)); }
+export function readLatestWorkerRunStatusFromLedgerAsync(args = {}) { return runLedgerStepsAsync(readLatestWorkerRunStatusFromLedgerSteps(args), args); }
+
+function* readLatestWorkerRunStatusFromLedgerSteps({
   launchRequestId,
   ledgerTarget = null,
   ledgerDbPath = null,
@@ -792,7 +797,7 @@ export function readLatestWorkerRunStatusFromLedger({
       { launchRequestId: normalizedLaunchRequestId },
     );
   } else if (resolution.target.backend === 'postgres') {
-    queried = queryPostgresRows(
+    queried = yield* queryPostgresRowsSteps(
       resolution.target,
       `SELECT json_build_object(
           'run_id', run_id,
@@ -846,7 +851,10 @@ export function readLatestWorkerRunStatusFromLedger({
   return { ok: true, row, target: queried.target };
 }
 
-export function readLaunchRequestStatusFromLedger({
+export function readLaunchRequestStatusFromLedger(args) { return runLedgerStepsSync(readLaunchRequestStatusFromLedgerSteps(args)); }
+export function readLaunchRequestStatusFromLedgerAsync(args = {}) { return runLedgerStepsAsync(readLaunchRequestStatusFromLedgerSteps(args), args); }
+
+function* readLaunchRequestStatusFromLedgerSteps({
   launchRequestId,
   ledgerTarget = null,
   ledgerDbPath = null,
@@ -886,7 +894,7 @@ export function readLaunchRequestStatusFromLedger({
       { launchRequestId: normalizedLaunchRequestId },
     );
   } else if (resolution.target.backend === 'postgres') {
-    queried = queryPostgresRows(
+    queried = yield* queryPostgresRowsSteps(
       resolution.target,
       `SELECT json_build_object(
           'launch_request_id', launch_request_id,
@@ -929,11 +937,11 @@ export const LIVE_DAG_RUN_STATES = Object.freeze(['pending', 'running', 'parked'
 const DAG_RUN_STATE_RE = /^[a-z][a-z0-9_-]*$/;
 const MAX_ACTIVE_DAG_RUNS = 20;
 
-function queryPostgresRowsWithRetry(target, sql, { sleepSyncImpl = sleepSync, ...options } = {}) {
+function* queryPostgresRowsWithRetrySteps(target, sql, { sleepSyncImpl = sleepSync, ...options } = {}) {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const result = queryPostgresRows(target, sql, options);
+    const result = yield* queryPostgresRowsSteps(target, sql, options);
     if (result.ok || !result.transient || attempt === 3) return result;
-    sleepSyncImpl(100 * attempt);
+    yield { kind: 'delay', ms: 100 * attempt, sleepSyncImpl };
   }
 }
 
@@ -943,7 +951,10 @@ function queryPostgresRowsWithRetry(target, sql, { sleepSyncImpl = sleepSync, ..
 // read-only transaction on Postgres and a readonly handle on SQLite. Returns
 // `{ ok: true, runs }` or `{ ok: false, reason, detail }`; callers that gate
 // on liveness must treat `ok: false` as inconclusive, never as "not live".
-export function readActiveDagRunsForPlan({
+export function readActiveDagRunsForPlan(args) { return runLedgerStepsSync(readActiveDagRunsForPlanSteps(args)); }
+export function readActiveDagRunsForPlanAsync(args = {}) { return runLedgerStepsAsync(readActiveDagRunsForPlanSteps(args), args); }
+
+function* readActiveDagRunsForPlanSteps({
   planId,
   states = LIVE_DAG_RUN_STATES,
   limit = MAX_ACTIVE_DAG_RUNS,
@@ -993,7 +1004,7 @@ export function readActiveDagRunsForPlan({
     // States are validated against DAG_RUN_STATE_RE above, so inlining them
     // as literals cannot inject; plan_id rides as a psql variable.
     const stateLiterals = stateList.map((state) => `'${state}'`).join(', ');
-    queried = queryPostgresRowsWithRetry(
+    queried = yield* queryPostgresRowsWithRetrySteps(
       resolution.target,
       `SELECT json_build_object(
           'run_id', run_id,
@@ -1027,7 +1038,10 @@ export function readActiveDagRunsForPlan({
   return { ok: true, runs, target: queried.target };
 }
 
-export function readBuildCompletionSignalForPr({
+export function readBuildCompletionSignalForPr(args) { return runLedgerStepsSync(readBuildCompletionSignalForPrSteps(args)); }
+export function readBuildCompletionSignalForPrAsync(args = {}) { return runLedgerStepsAsync(readBuildCompletionSignalForPrSteps(args), args); }
+
+function* readBuildCompletionSignalForPrSteps({
   repo,
   prNumber,
   headSha = null,
@@ -1082,7 +1096,7 @@ export function readBuildCompletionSignalForPr({
       },
     );
   } else if (resolution.target.backend === 'postgres') {
-    queried = queryPostgresRows(
+    queried = yield* queryPostgresRowsSteps(
       resolution.target,
       `SELECT json_build_object(
           'completion_id', completion_id,
@@ -1142,7 +1156,10 @@ export function readBuildCompletionSignalForPr({
   return { ok: true, row, target: queried.target };
 }
 
-export function readBuildCompletionProducerEvidence({
+export function readBuildCompletionProducerEvidence(args) { return runLedgerStepsSync(readBuildCompletionProducerEvidenceSteps(args)); }
+export function readBuildCompletionProducerEvidenceAsync(args = {}) { return runLedgerStepsAsync(readBuildCompletionProducerEvidenceSteps(args), args); }
+
+function* readBuildCompletionProducerEvidenceSteps({
   repo,
   signalKind = 'merged',
   ledgerTarget = null,
@@ -1185,7 +1202,7 @@ export function readBuildCompletionProducerEvidence({
       },
     );
   } else if (resolution.target.backend === 'postgres') {
-    queried = queryPostgresRows(
+    queried = yield* queryPostgresRowsSteps(
       resolution.target,
       `SELECT json_build_object(
           'completion_id', completion_id,
@@ -1522,7 +1539,10 @@ export function readReviewerSessionUsageFromLedger({
 // Builder identity survives follow-up commits; review/retrigger guards still
 // bind to the current head independently.
 // These reads never touch PgBouncer session settings or mutate the ledger.
-export function readPrBuilderProvenance({
+export function readPrBuilderProvenance(args) { return runLedgerStepsSync(readPrBuilderProvenanceSteps(args)); }
+export function readPrBuilderProvenanceAsync(args = {}) { return runLedgerStepsAsync(readPrBuilderProvenanceSteps(args), args); }
+
+function* readPrBuilderProvenanceSteps({
   repo, prNumber, env = process.env, rootDir = null,
   ledgerTarget = null, spawnSyncImpl = spawnSync, sleepSyncImpl = sleepSync,
 } = {}) {
@@ -1572,7 +1592,7 @@ export function readPrBuilderProvenance({
     // transaction-scoped READ ONLY guard is safe through PgBouncer.
     console.warn('[builder-routing] direct ledger DSN unavailable; using configured Postgres target');
   }
-  const queried = queryPostgresRowsWithRetry(target, `
+  const queried = yield* queryPostgresRowsWithRetrySteps(target, `
     SELECT json_build_object(
       'launchRequestId', lr.launch_request_id,
       'workerClass', lr.worker_class,
@@ -1603,4 +1623,51 @@ export function readPrBuilderProvenance({
   return queried.rows.length
     ? { ok: true, ...queried.rows[0] }
     : { ok: false, reason: 'missing-builder-provenance' };
+}
+
+// One set of query/validation rules, two execution modes. CLI consumers keep
+// their synchronous contract; watcher callers await children and retry delays.
+function runLedgerStepsSync(iterator) {
+  let step = iterator.next();
+  while (!step.done) {
+    try {
+      const effect = step.value;
+      const result = effect.kind === 'delay' ? effect.sleepSyncImpl(effect.ms)
+        : observeSynchronousChild(effect.command, () => effect.spawnSyncImpl(effect.command, effect.args, effect.options));
+      step = iterator.next(result);
+    } catch (error) { step = iterator.throw(error); }
+  }
+  return step.value;
+}
+
+async function runLedgerStepsAsync(iterator, { timeoutMs = null, signal = null, spawnAsyncImpl = spawnLedgerChild, delayAsyncImpl = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  let step = iterator.next();
+  while (!step.done) {
+    try {
+      const effect = step.value;
+      const result = effect.kind === 'delay' ? await delayAsyncImpl(effect.ms)
+        : await spawnAsyncImpl(effect.command, effect.args, { ...effect.options,
+          ...(signal ? { signal } : {}),
+          timeout: timeoutMs == null ? effect.options.timeout : Math.min(effect.options.timeout, Math.max(1, timeoutMs)) });
+      step = iterator.next(result);
+    } catch (error) { step = iterator.throw(error); }
+  }
+  return step.value;
+}
+
+function spawnLedgerChild(command, args, options) {
+  return new Promise(resolve => {
+    const child = execFile(command, args, { ...options, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const failure = error && typeof error.code !== 'number' ? error : null;
+      if (failure?.killed && failure.signal === options.killSignal && (failure.code == null || failure.code === 'ETIMEDOUT')) {
+        failure.code = 'ETIMEDOUT'; failure.timeoutMs = options.timeout;
+      }
+      resolve({ stdout, stderr, status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        signal: error?.signal || null, error: failure });
+    });
+    // psql variable substitution uses stdin script mode. End even an empty
+    // input, so a child waiting on stdin cannot hold admission indefinitely.
+    child.stdin.on('error', () => {});
+    child.stdin.end(options.input);
+  });
 }

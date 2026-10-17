@@ -70,9 +70,12 @@ import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
   readBuildCompletionProducerEvidence,
+  readBuildCompletionProducerEvidenceAsync,
   readBuildCompletionSignalForPr,
-  readLatestWorkerRunStatusFromLedger,
+  readBuildCompletionSignalForPrAsync,
+  readLatestWorkerRunStatusFromLedgerAsync,
   readLaunchRequestStatusFromLedger,
+  readLaunchRequestStatusFromLedgerAsync,
 } from '../session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -1487,8 +1490,17 @@ const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS = 60_000;
 
-// Follow-up claims are synchronous: use the live metadata probe's timeout,
-// but read only state and make no retries or branch lookup.
+// Watcher closure reads yield while the GitHub child runs.
+async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env }) {
+  try {
+    const { stdout } = await meteredExecFile(execFileAsync, 'gh', [
+      'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state',
+    ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    return JSON.parse(stdout);
+  } catch { return null; }
+}
+
+// Follow-up claim consumers retain their synchronous CLI contract.
 function readAmaCloserPullRequestState({ repo, prNumber, env }) {
   const result = meteredExecFileSync(spawnSync, 'gh', [
     'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state',
@@ -1551,9 +1563,9 @@ function dispatchStatusReason(status) {
 }
 
 async function readLaunchRequestStatusFromLedgerDefault(args) {
-  const launch = await readLaunchRequestStatusFromLedger(args);
+  const launch = await readLaunchRequestStatusFromLedgerAsync(args);
   if (launch?.ok && ['starting', 'running'].includes(launch.row?.status)) {
-    const worker = await readLatestWorkerRunStatusFromLedger(args);
+    const worker = await readLatestWorkerRunStatusFromLedgerAsync(args);
     if (worker?.ok) return { ...launch, row: { ...launch.row, pid: worker.row.pid,
       workerStatus: worker.row.status, process_status: worker.row.process_status } };
   }
@@ -1608,13 +1620,26 @@ function retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIde
   return true;
 }
 
-export function reconcileAmaCloserLease({
+export function reconcileAmaCloserLease(args) { return runCloserStepsSync(reconcileAmaCloserLeaseSteps(args)); }
+export function reconcileAmaCloserLeaseAsync(args) {
+  return runCloserStepsAsync(reconcileAmaCloserLeaseSteps({
+    readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync,
+    readBuildCompletionSignalForPrImpl: readBuildCompletionSignalForPrAsync,
+    readBuildCompletionProducerEvidenceImpl: readBuildCompletionProducerEvidenceAsync,
+    readPullRequestStateImpl: readAmaCloserPullRequestStateAsync,
+    readMergedSignalImpl: readMergedBuildCompletionSignalAsync,
+    ...args,
+  }));
+}
+
+function* reconcileAmaCloserLeaseSteps({
   rootDir, repo, prNumber, now = new Date().toISOString(),
   hqRoot = null, ledgerTarget = null, ledgerDbPath = null, env = process.env,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedger,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readPullRequestStateImpl = readAmaCloserPullRequestState,
+  readMergedSignalImpl = readMergedBuildCompletionSignal,
   statusProbe, probedLaunchRequestId = null, logger = console,
 } = {}) {
   try {
@@ -1622,9 +1647,9 @@ export function reconcileAmaCloserLease({
     if (held?.lease.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || !held.lease.lrqId) return false;
     const launchRequestId = held.lease.lrqId;
     if (probedLaunchRequestId && launchRequestId !== probedLaunchRequestId) return false;
-    const probe = statusProbe ?? readLaunchRequestStatusImpl({
+    const probe = statusProbe ?? (yield readLaunchRequestStatusImpl({
       launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env,
-    });
+    }));
     if (!probe?.ok) return false;
     if (probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) {
       const identity = { repo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
@@ -1647,7 +1672,7 @@ export function reconcileAmaCloserLease({
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
     // Merged completion rows are PR-scoped (their SHA may be the merge commit),
     // so this also observes completion from a lease's original dispatch head.
-    const mergedSignal = readMergedBuildCompletionSignal({
+    const mergedSignal = yield readMergedSignalImpl({
       ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env,
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
@@ -1655,7 +1680,7 @@ export function reconcileAmaCloserLease({
     // before releasing an open PR; unreadable evidence retains the reclaim bound.
     let decidingPrState = null;
     if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) {
-      const livePr = normalizeAmaLivePrProbeResult(readPullRequestStateImpl({ repo, prNumber, env }));
+      const livePr = normalizeAmaLivePrProbeResult(yield readPullRequestStateImpl({ repo, prNumber, env }));
       if (!livePr) return false;
       decidingPrState = livePr.state;
       if (decidingPrState === 'OPEN') {
@@ -2975,7 +3000,7 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
   hqRoot,
   workerId: workerIdOverride = null,
   env = process.env,
-  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   readJsonFileImpl = readJsonFile,
   processKillImpl = process.kill,
 } = {}) {
@@ -3023,7 +3048,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   nowMs = Date.now,
   sleepImpl = sleep,
   env = process.env,
-  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   readJsonFileImpl = readJsonFile,
   processKillImpl = process.kill,
 }) {
@@ -3157,7 +3182,7 @@ async function teardownSamePrHammerHolder({
   ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
-  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
   inspectHolderImpl = inspectHolderForTakeover,
   holderAccessImpl = holderCommand,
   sleepImpl = sleep,
@@ -3430,7 +3455,7 @@ async function resolveTerminalCodingBranchHolder({
   ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
-  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
 } = {}) {
   const normalizedWorkerId = String(workerId || '').trim();
   if (!isRecognizedCodingBranchHolderWorkerId(normalizedWorkerId) && !allowHammer) {
@@ -3719,7 +3744,16 @@ function refundExitedHammerDispatchBestEffort({ rootDir, repo, prNumber, jobKey,
   }
 }
 
-function readMergedBuildCompletionSignal({
+function readMergedBuildCompletionSignal(args) { return runCloserStepsSync(readMergedBuildCompletionSignalSteps(args)); }
+function readMergedBuildCompletionSignalAsync(args) {
+  return runCloserStepsAsync(readMergedBuildCompletionSignalSteps({
+    readBuildCompletionSignalForPrImpl: readBuildCompletionSignalForPrAsync,
+    readBuildCompletionProducerEvidenceImpl: readBuildCompletionProducerEvidenceAsync,
+    ...args,
+  }));
+}
+
+function* readMergedBuildCompletionSignalSteps({
   repo,
   prNumber,
   headSha,
@@ -3731,7 +3765,7 @@ function readMergedBuildCompletionSignal({
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
-  const result = readBuildCompletionSignalForPrImpl({
+  const result = yield readBuildCompletionSignalForPrImpl({
     repo,
     prNumber,
     signalKind: 'merged',
@@ -3753,7 +3787,7 @@ function readMergedBuildCompletionSignal({
     };
   }
   if (isCleanMissingMergedSignal(result)) {
-    const producerEvidence = readBuildCompletionProducerEvidenceImpl({
+    const producerEvidence = yield readBuildCompletionProducerEvidenceImpl({
       repo,
       signalKind: 'merged',
       hqRoot,
@@ -4344,14 +4378,14 @@ export async function maybeDispatchAmaCloser({
   observeCloserBacklogImpl = observeCloserBacklog,
   readTemplateImpl = null,
   writeFileImpl = null,
-  readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
-  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidenceAsync,
+  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPrAsync,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerDefault,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
-  readPullRequestStateImpl = readAmaCloserPullRequestState,
+  readPullRequestStateImpl = readAmaCloserPullRequestStateAsync,
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
   fetchPrimaryChangeImpl = fetchPrimaryChange,
   resolveHamTerminalRemediationEvidenceImpl = null,
@@ -4399,7 +4433,7 @@ export async function maybeDispatchAmaCloser({
         ledgerDbPath: dispatchContext.ledgerDbPath, env,
       })).catch(() => ({ ok: false }));
       earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
-      const settled = reconcileAmaCloserLease({ ...dispatchContext, rootDir: reconciliationRoot,
+      const settled = await reconcileAmaCloserLeaseAsync({ ...dispatchContext, rootDir: reconciliationRoot,
         repo: reconciliationRepo, prNumber,
         now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
         readLaunchRequestStatusImpl, readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
@@ -5048,7 +5082,7 @@ export async function maybeDispatchAmaCloser({
         ? await hasNoMergeAuditForCurrentHead({
           hqRoot, repo, prNumber, headSha: live.headRefOid, fetchPullRequestRollupImpl, execFileImpl,
         }) : null;
-      const merged = readMergedBuildCompletionSignal({
+      const merged = await readMergedBuildCompletionSignalAsync({
         repo, prNumber, headSha: existingRecord.headSha, hqRoot, rootDir, env: process.env,
         readBuildCompletionProducerEvidenceImpl, readBuildCompletionSignalForPrImpl,
       });
@@ -5177,7 +5211,7 @@ export async function maybeDispatchAmaCloser({
       existingLease: terminalizedLease,
     });
   }
-  const reviewedHeadMergedSignal = readMergedBuildCompletionSignal({
+  const reviewedHeadMergedSignal = await readMergedBuildCompletionSignalAsync({
     repo,
     prNumber,
     headSha: reviewedSha,
@@ -5188,7 +5222,7 @@ export async function maybeDispatchAmaCloser({
     readBuildCompletionSignalForPrImpl,
   });
   const targetHeadMergedSignal = headAdvancedDuringDispatch
-    ? readMergedBuildCompletionSignal({
+    ? await readMergedBuildCompletionSignalAsync({
         repo,
         prNumber,
         headSha: targetRemediationSha,
@@ -5418,7 +5452,7 @@ export async function maybeDispatchAmaCloser({
     // The LRQ's ledger row, when the unknown-status path below read it.
     let launchRequestProbe = prefetchedLaunchRequestProbe;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) {
-      const workerRunProbe = await readLatestWorkerRunStatusFromLedger({
+      const workerRunProbe = await readLatestWorkerRunStatusFromLedgerAsync({
         launchRequestId: existingRecord.launchRequestId,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -7459,4 +7493,21 @@ export async function maybeDispatchAmaCloser({
   } finally {
     if (!retainScratchDir) cleanupHammerScratchDir({ scratchDir, promptDir }, logger);
   }
+}
+
+function runCloserStepsSync(iterator) {
+  let step = iterator.next();
+  while (!step.done) {
+    try { step = iterator.next(step.value); }
+    catch (error) { step = iterator.throw(error); }
+  }
+  return step.value;
+}
+async function runCloserStepsAsync(iterator) {
+  let step = iterator.next();
+  while (!step.done) {
+    try { step = iterator.next(await step.value); }
+    catch (error) { step = iterator.throw(error); }
+  }
+  return step.value;
 }

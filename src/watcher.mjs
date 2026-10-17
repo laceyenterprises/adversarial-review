@@ -1186,8 +1186,7 @@ async function refreshOrgRepos(octokit) {
 let watcherLatencyMonitor;
 async function pollOnce(octokit, options = {}) {
   watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  try { return await withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)); }
-  finally { watcherLatencyMonitor.summary(); }
+  return watcherLatencyMonitor.poll(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)));
 }
 
 async function pollOnceWithinBudget(

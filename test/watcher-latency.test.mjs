@@ -42,3 +42,10 @@ test('WATCHERLAG-01: a child spanning polls reports completion in its completion
   assert.equal(next.count, 0);
   assert.equal(next.completed, 1);
 });
+
+test('WATCHERLAG-01: every poll emits a lag summary, including early return and error', async t => {
+  const { monitor, logs } = fixture(t);
+  assert.equal(await monitor.poll(async () => 'early'), 'early');
+  await assert.rejects(monitor.poll(async () => { throw new Error('synthetic failure'); }), /synthetic failure/);
+  assert.equal(logs.filter(line => line.includes('poll latency summary')).length, 2);
+});

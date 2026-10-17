@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { readLatestWorkerRunStatusFromLedger } from './session-ledger-read-adapter.mjs';
+import { readLatestWorkerRunStatusFromLedgerAsync } from './session-ledger-read-adapter.mjs';
 
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKER_ID_CLASS_PREFIXES = [
@@ -110,7 +110,7 @@ async function lookupOriginalWorkerRunStatus({
   ledgerTarget = null,
   workspace = undefined,
   runRecord = undefined,
-  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedgerAsync,
 } = {}) {
   const resolvedWorkspace = workspace === undefined
     ? readWorkerWorkspace(workerDir).workspace || null
@@ -128,7 +128,7 @@ async function lookupOriginalWorkerRunStatus({
     return { found: false, reason: 'missing-launch-request-id' };
   }
 
-  const result = readLatestWorkerRunStatusImpl({
+  const result = await readLatestWorkerRunStatusImpl({
     launchRequestId,
     ledgerTarget,
     env,

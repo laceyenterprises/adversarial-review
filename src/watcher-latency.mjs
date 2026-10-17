@@ -27,6 +27,10 @@ export function createWatcherLatencyMonitor({ logger = console, histogram = moni
     return children.get(name);
   };
   const observer = {
+    async poll(run) {
+      try { return await run(); }
+      finally { observer.summary(); }
+    },
     recordChild(command, spawnMs, wallMs) {
       const entry = bucket(command);
       if (!entry) return;
@@ -56,7 +60,9 @@ export function createWatcherLatencyMonitor({ logger = console, histogram = moni
     const started = performance.now();
     // The channel fires at construction, before spawnfile is assigned. The
     // spawn event measures time to spawn readiness, including event-loop delay.
+    let spawned = false;
     child.once('spawn', () => {
+      spawned = true;
       const entry = bucket(child.spawnfile);
       if (!entry) return;
       entry.count++;
@@ -65,6 +71,7 @@ export function createWatcherLatencyMonitor({ logger = console, histogram = moni
     child.once('close', () => {
       const entry = bucket(child.spawnfile);
       if (!entry) return;
+      if (!spawned) entry.count++;
       entry.completed++;
       record(entry.wall, performance.now() - started);
     });

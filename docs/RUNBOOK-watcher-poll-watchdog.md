@@ -5,15 +5,21 @@ The idle stall watchdog still handles a watcher that stops starting polls.
 The poll deadline still bounds an individual poll and preserves reviewer
 runtime sessions when it exits for supervisor recovery.
 
-The in-flight starvation threshold is the greater of the existing requested
-threshold and the current poll deadline plus 60 seconds. Without an override,
-the requested threshold is the greater of 15 minutes and three poll intervals.
-`ADVERSARIAL_WATCHER_POLL_STARVATION_MS` remains supported, but cannot lower
-that deadline safety bound. No configuration key is added.
+WATCHERSTARVE-02 makes the in-flight starvation threshold independent of the
+poll deadline. Without an override, the threshold is the greater of 15 minutes
+and three poll intervals. A positive `ADVERSARIAL_WATCHER_POLL_STARVATION_MS`
+sets the threshold exactly, including values below the poll deadline.
+
+Completed work resets the no-progress window, so a slow, productive poll does
+not need a threshold above its deadline. The workload-aware deadline can span
+hours: using it as a floor would delay hang detection for hours as well. For
+example, a 60,300-second poll deadline leaves the default threshold at 900
+seconds for a five-minute poll interval, or at 2700 seconds with a 2,700,000 ms
+override. The poll deadline computation is unchanged.
 
 The startup log prints the actual poll deadline and effective starvation
 threshold. Both values are logged again when workload changes the deadline
-between polls. Both guards use the same deadline captured for that poll.
+between polls. Deadline changes do not raise or lower the starvation threshold.
 
 Only completed work advances progress: completed poll phases, subject fetches
 and processing, posted-review and maintenance handlers, plus the existing
@@ -34,10 +40,11 @@ ordinary deployments and idle-stall/deadline exits do not count.
 
 After deployment, the SRE session verifies:
 
-1. The watcher restarted and the startup starvation threshold exceeds the poll
-   deadline.
+1. The watcher restarted after deployment and its startup line shows both the
+   poll deadline and `poll-starvation respawn` at the requested value (2700 s
+   while the operator override is set), rather than deadline plus 60 s.
 2. For six hours, progressing polls emit no `FATAL: watcher poll starved`, and
-   the supervisor run count stays flat.
+   the launchd run count stays flat.
 3. While pull requests are mergeable, the review lane merges at least once per
    hour.
 

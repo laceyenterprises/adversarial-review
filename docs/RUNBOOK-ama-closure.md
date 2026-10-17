@@ -1470,6 +1470,11 @@ actor on a bounded clock, or the operator has been paged once with the reason.
   external check runs with that name remain inputs. Per-attempt producer
   provenance excludes daemon failures, including daemon attempts on a
   HAM-certified head, so capacity deferral cannot invent a hammer decision.
+  HAMUNKNOWN-02 re-evaluates GitHub-read predicates (`github-gate-not-green`,
+  `pr-mergeability-unknown`) on every pass: fresh green checks and MERGEABLE
+  mergeability on the same open head release with `github-gate-cleared`, even
+  when the recorded baseline was already passing. Findings and primary-change
+  refusals retain their holds; release does not reset retry or lifetime counts.
   Unmarked legacy entries are accepted only in unattributed or hammer-owned
   audit documents; explicit hammer markers override document ownership.
   See the [audit](data-model/ama-audit.md) and
@@ -2918,6 +2923,10 @@ sample re-evaluates the full GitHub gate; a moved head, closed PR, conflict,
 red check or pending check never authorizes merge. Persistent UNKNOWN records
 `deferred / pr-mergeability-unknown`, marks the merge lease retryable before
 releasing it, and exits without a terminal `failed-without-merge` decision.
+Certified HAM heads resume through the existing bounded deferral queue,
+including its backoff, expiry and lifetime refund bound. Fresh exact-head
+eligibility and merge gates remain mandatory before daemon merge or a repair
+dispatch.
 
 ## CI-cost mode (CIGUARD-01 / CIGUARDADV-01)
 

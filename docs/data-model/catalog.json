@@ -588,7 +588,7 @@
       ],
       "owner": "AMA closer retry admission",
       "headRetention": { "clearOnCurrentHeadChange": true, "defensiveMaxEntries": 8, "ttl": null },
-      "releaseDimensions": ["head", "base", "mergeability", "checks", "conflicting", "primary-change-evidence", "hold-released"]
+      "releaseDimensions": ["head", "base", "mergeability", "checks", "conflicting", "primary-change-evidence", "hold-released", "github-gate-cleared"]
     },
     {
       "id": "ama-closer-leases",

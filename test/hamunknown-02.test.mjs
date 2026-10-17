@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderHammerProcedure } from '../src/hammer-procedure.mjs';
+import { evaluateHammerStopHold, hammerStopInputs, _resetHammerStopHoldPageDebounceForTests } from '../src/ama/hammer-stop-hold.mjs';
 
 const head = 'a'.repeat(40);
 const green = { ok: true, state: 'OPEN', headMatches: true, expectedHead: head, liveHead: head,
@@ -119,3 +120,95 @@ for (const [name, gate] of [
     assert.equal(result.events.filter(event => event.gate).length, 3);
   });
 }
+
+function heldFixture(t, { predicate = 'github-gate-not-green', reasons = ['pr-mergeability-unknown'], metadata = {}, excludeContexts = [] } = {}) {
+  _resetHammerStopHoldPageDebounceForTests();
+  const rootDir = mkdtempSync(join(tmpdir(), 'hamunknown-hold-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const prMetadata = { headSha: head, baseSha: 'b'.repeat(40), isOpen: true, state: 'OPEN',
+    mergeable: 'MERGEABLE', mergeableState: 'MERGEABLE', mergeStateStatus: 'CLEAN',
+    statusCheckRollup: [{ name: 'unit', conclusion: 'SUCCESS' }], ...metadata };
+  const recordedAt = '2026-01-01T00:00:00Z';
+  const stopKey = `${head}:0:${recordedAt}`;
+  const inputs = hammerStopInputs(prMetadata, { excludeContexts });
+  const statePath = join(rootDir, 'data/follow-up-jobs/hammer-stop-hold/fixture-repo-pr-1.json');
+  mkdirSync(join(rootDir, 'data/follow-up-jobs/hammer-stop-hold'), { recursive: true });
+  writeFileSync(statePath, JSON.stringify({ currentHead: head, heads: {
+    [head]: { stopKey, predicate, firstObservedAt: recordedAt, inputs, pagedAt: recordedAt },
+  } }));
+  const args = { rootDir, hqRoot: rootDir, repo: 'fixture/repo', prNumber: 1, headSha: head, prMetadata, excludeContexts,
+    readAuditImpl: () => ({ attempts: [{ head, outcome: 'failed-without-merge', reason: predicate,
+      startedAt: recordedAt, path: 'hammer', githubGate: { reasons } }] }),
+    logger: { log() {}, warn() {}, error() {} }, now: '2026-01-01T00:01:00Z',
+    deliverAlertImpl: () => assert.fail('an already paged or released hold must not page again'),
+    fetchPrimaryChangeImpl: async () => { throw new Error('Synthetic unavailable evidence'); },
+  };
+  return { args, statePath, inputs };
+}
+
+test('HAMUNKNOWN-02: existing GitHub gate hold with already-green recorded and fresh inputs releases on the next pass', async t => {
+  const { args, statePath, inputs } = heldFixture(t);
+  assert.deepEqual(hammerStopInputs(args.prMetadata), inputs, 'all recorded inputs are unchanged');
+  const result = await evaluateHammerStopHold(args);
+  assert.equal(result.action, 'release');
+  assert.deepEqual(result.changed, ['github-gate-cleared']);
+  const entry = JSON.parse(readFileSync(statePath, 'utf8')).heads[head];
+  assert.equal(entry.releasedAt, args.now);
+  assert.deepEqual(entry.releasedInputs, inputs);
+  _resetHammerStopHoldPageDebounceForTests();
+  assert.equal((await evaluateHammerStopHold(args)).action, 'release', 'release survives restart');
+});
+
+for (const reasons of [[], ['ci-not-green'], ['pr-not-mergeable']]) {
+  test(`HAMUNKNOWN-02: green GitHub gate releases legacy or deterministic gate-only stop ${JSON.stringify(reasons)}`, async t => {
+    const { args } = heldFixture(t, { reasons });
+    // A structured refusal gets its own generation on first observation.
+    const result = await evaluateHammerStopHold({ ...args, deliverAlertImpl: () => assert.fail('cleared gate must not page') });
+    assert.equal(result.action, 'release');
+  });
+}
+
+for (const [name, metadata, extra] of [
+  ['UNKNOWN', { mergeable: 'UNKNOWN', mergeableState: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }],
+  ['UNKNOWN beside CLEAN', { mergeable: 'UNKNOWN', mergeableState: 'MERGEABLE' }],
+  ['red', { statusCheckRollup: [{ name: 'unit', conclusion: 'FAILURE' }] }],
+  ['pending', { statusCheckRollup: [{ name: 'unit', conclusion: 'PENDING' }] }],
+  ['empty checks', { statusCheckRollup: [] }],
+  ['unreadable checks', { statusCheckRollup: null }],
+  ['missing required context', {}, { requiredCheckContexts: ['unit', 'integration'] }],
+  ['moved head', { headSha: 'c'.repeat(40) }],
+  ['closed', { isOpen: false, state: 'CLOSED' }],
+]) {
+  test(`HAMUNKNOWN-02: unchanged ${name} cannot clear a GitHub gate hold`, async t => {
+    const { args } = heldFixture(t, { metadata });
+    assert.equal((await evaluateHammerStopHold({ ...args, ...extra })).action, 'hold');
+  });
+}
+
+for (const [predicate, reasons] of [
+  ['primary-change-reverted', ['primary-change-reverted']],
+  ['predicate-not-eligible', ['blocking-findings-present']],
+  ['github-gate-not-green', ['primary-change-reverted']],
+  ['github-gate-not-green', ['pr-mergeability-unknown', 'primary-change-reverted']],
+  ['github-gate-not-green', ['pr-mergeability-unknown', 'blocking-findings-present']],
+]) {
+  test(`HAMUNKNOWN-02: green GitHub reads preserve real refusal ${predicate}/${reasons[0]}`, async t => {
+    const { args } = heldFixture(t, { predicate, reasons });
+    assert.equal((await evaluateHammerStopHold({ ...args, deliverAlertImpl: async () => {} })).action, 'hold');
+  });
+}
+
+test('HAMUNKNOWN-02: recovered gate uses latest-run classification and excludes only own status contexts', async t => {
+  const context = 'synthetic/gate';
+  const own = { __typename: 'StatusContext', context, state: 'FAILURE' };
+  const rerun = [
+    { name: 'unit', conclusion: 'FAILURE', createdAt: '2026-01-01T00:00:00Z' },
+    { name: 'unit', conclusion: 'SUCCESS', createdAt: '2026-01-01T00:01:00Z' }, own,
+  ];
+  const cleared = heldFixture(t, { excludeContexts: [context], metadata: { statusCheckRollup: rerun } });
+  assert.equal((await evaluateHammerStopHold({ ...cleared.args, excludeContexts: [context] })).action, 'release');
+  const externalRed = heldFixture(t, { excludeContexts: [context], metadata: { statusCheckRollup: [
+    ...rerun, { __typename: 'CheckRun', name: context, conclusion: 'FAILURE' },
+  ] } });
+  assert.equal((await evaluateHammerStopHold({ ...externalRed.args, excludeContexts: [context] })).action, 'hold');
+});

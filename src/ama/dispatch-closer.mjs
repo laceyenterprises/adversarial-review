@@ -170,6 +170,7 @@ import { maybeRearmInfraDeadHammer, unexecutedHammerReason } from './dead-hammer
 import {
   evaluateHammerStopHold,
   HAMMER_EVIDENCE_FAILURES,
+  HAMMER_GITHUB_READ_FAILURES,
   HAMMER_STOP_HOLD_REASON,
   readHammerStopForHead,
 } from './hammer-stop-hold.mjs';
@@ -4449,7 +4450,8 @@ export async function maybeDispatchAmaCloser({
     // GUARDREVERT-01: an unchanged deterministic terminal decision fences
     // every hammer route, including ownerless recovery and clean eligible
     // closures. Legacy transient evidence stops keep their recovery probes.
-    if (stop?.refusal || (!ownerProofRecovery && HAMMER_EVIDENCE_FAILURES.has(stop?.predicate))) {
+    if (stop?.refusal || (!ownerProofRecovery && (HAMMER_EVIDENCE_FAILURES.has(stop?.predicate)
+      || HAMMER_GITHUB_READ_FAILURES.has(stop?.predicate)))) {
       evidenceStopHold = await evaluateHammerStopHoldImpl({
         rootDir: dispatchContext?.rootDir || SUBMODULE_ROOT,
         hqRoot: dispatchContext?.hqRoot || DEFAULT_HQ_ROOT,
@@ -4458,6 +4460,7 @@ export async function maybeDispatchAmaCloser({
         strictNonBlockingRemediation: cfg?.strictNonBlockingRemediation !== false,
         fetchPrimaryChangeImpl, execFileImpl, deliverAlertImpl, logger,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+        requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
       });
       if (evidenceStopHold.action === 'hold') return noAmaDispatch({ dispatched: false,
@@ -4601,7 +4604,7 @@ export async function maybeDispatchAmaCloser({
   const queuedParkReason = queuedParkAudit?.status === 'deferred'
     ? queuedParkAudit.attempts?.at(-1)?.reason : null;
   const certifiedContentionPark = verdict.trace?.hamTerminalRemediation?.ok === true
-    && ['merge-lease-timeout', 'required-checks-pending'].includes(queuedParkReason);
+    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown'].includes(queuedParkReason);
   // A validated HAM already covered the original findings retained in trace.
   // Mechanical misses still require repair; certification cannot waive them.
   const parkRouteReasons = eligibleHammerRouteReasons.filter((reason) =>
@@ -4686,6 +4689,7 @@ export async function maybeDispatchAmaCloser({
         fetchPrimaryChangeImpl,
         execFileImpl,
         excludeContexts: [dispatchContext?.requiredGateContext].filter(Boolean),
+        requiredCheckContexts: resolveRequiredCheckContextsFromCfg(cfg),
         deliverAlertImpl,
         logger,
         now: dispatchContext?.dispatchedAt || new Date().toISOString(),
@@ -5001,7 +5005,7 @@ export async function maybeDispatchAmaCloser({
   const parkAttempt = parkAudit?.attempts?.at(-1);
   const parkReason = parkAttempt?.reason;
   const deferredPark = parkAudit?.status === 'deferred'
-    && ['merge-lease-timeout', 'required-checks-pending'].includes(parkReason)
+    && ['merge-lease-timeout', 'required-checks-pending', 'pr-mergeability-unknown'].includes(parkReason)
     && Date.parse(parkAttempt?.startedAt) >= Date.parse(existingRecord?.dispatchedAt);
   const certifiedPark = resumeCertifiedPark && deferredPark;
   if (!ownerProofRecovery && certifiedContentionPark && (!existingRecord || !existingRecord.launchRequestId)) {

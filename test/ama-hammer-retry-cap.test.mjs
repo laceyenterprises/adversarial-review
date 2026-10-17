@@ -3332,41 +3332,70 @@ for (const status of ['reaped', 'cancelled']) {
   });
 }
 
-test('LEASEPARK-01 certified lease park resumes daemon merge without remediation', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-closer-'));
-  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const first = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps() });
-  assert.equal(first.dispatched, true);
-  writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD,
-    attempt: { outcome: 'deferred', reason: 'merge-lease-timeout' }, now: '2026-07-06T12:01:00Z' });
-  let merges = 0;
-  const run = (dispatchedAt, currentHead = ADVANCED_HEAD) => maybeDispatchAmaCloser({
-    ...hammerDispatchArgs(rootDir, { reviewState: { reviewCycleExhausted: true,
-      verdict: 'request changes', blockingFindingCount: 1, completedRemediationRounds: 1 },
-      dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: currentHead },
-      prMetadata: { headSha: currentHead,
-        statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] } }),
-    options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
-    ...hammerDispatchDeps({
-      execFileImpl: async (_cmd, args) => {
-        if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
-        return { stdout: '{}', stderr: '' };
-      },
-      attemptDaemonCleanMergeImpl: async ({ validatedHead, liveGate }) => {
-        assert.equal(validatedHead, ADVANCED_HEAD);
-        assert.equal(liveGate.requirePrimaryChange, true);
-        merges++;
-        return { disposition: 'merged', reason: 'merged', mergeCommitSha: MERGE_COMMIT };
-      },
-    }),
+for (const parkReason of ['merge-lease-timeout', 'pr-mergeability-unknown']) {
+  test(`certified lease park resumes daemon merge without remediation: ${parkReason}`, async (t) => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'leasepark-closer-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const first = await maybeDispatchAmaCloser({ ...hammerDispatchArgs(rootDir), ...hammerDispatchDeps() });
+    assert.equal(first.dispatched, true);
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD,
+      attempt: { outcome: 'deferred', reason: parkReason }, now: '2026-07-06T12:01:00Z' });
+    let merges = 0;
+    const run = (dispatchedAt, currentHead = ADVANCED_HEAD) => maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, { reviewState: { reviewCycleExhausted: true,
+        verdict: 'request changes', blockingFindingCount: 1, completedRemediationRounds: 1 },
+        dispatchContext: { baseBranch: 'main', dispatchedAt, targetRemediationSha: currentHead },
+        prMetadata: { headSha: currentHead,
+          statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] } }),
+      options: validHamTerminalRemediationOptions({ reviewedHead: REVIEWED_HEAD, currentHead: ADVANCED_HEAD }),
+      ...hammerDispatchDeps({
+        execFileImpl: async (_cmd, args) => {
+          if (args[0] === 'dispatch' && args[1] === 'status') return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+          return { stdout: '{}', stderr: '' };
+        },
+        attemptDaemonCleanMergeImpl: async ({ validatedHead, liveGate }) => {
+          assert.equal(validatedHead, ADVANCED_HEAD);
+          assert.equal(liveGate.requirePrimaryChange, true);
+          merges++;
+          return { disposition: 'merged', reason: 'merged', mergeCommitSha: MERGE_COMMIT };
+        },
+      }),
+    });
+    assert.equal((await run('2026-07-06T12:02:00Z')).reason, 'hammer-merge-ready-backoff');
+    const moved = await run('2026-07-06T12:04:00Z', 'f'.repeat(40));
+    assert.notEqual(moved.reason, 'current-head-hammer-terminal-remediation-merged');
+    assert.equal(merges, 0);
+    assert.equal((await run('2026-07-06T12:05:00Z')).reason, 'current-head-hammer-terminal-remediation-merged');
+    assert.equal(merges, 1);
   });
-  assert.equal((await run('2026-07-06T12:02:00Z')).reason, 'hammer-merge-ready-backoff');
-  const moved = await run('2026-07-06T12:04:00Z', 'f'.repeat(40));
-  assert.notEqual(moved.reason, 'current-head-hammer-terminal-remediation-merged');
-  assert.equal(merges, 0);
-  assert.equal((await run('2026-07-06T12:05:00Z')).reason, 'current-head-hammer-terminal-remediation-merged');
-  assert.equal(merges, 1);
-});
+}
+
+for (const budget of ['available', 'series exhausted', 'lifetime exhausted']) {
+  test(`HAMUNKNOWN-02: recovered GitHub gate hold respects ${budget} dispatch budget`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hamunknown-dispatch-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: REPO, prNumber: PR_NUMBER };
+    if (budget === 'lifetime exhausted') seedExhaustedHammerCap(rootDir);
+    if (budget === 'series exhausted') {
+      for (let i = 0; i < HAMMER_RETRY_CAP_TOTAL_DISPATCHES; i++) recordHammerRetryDispatch(rootDir, identity, {
+        jobKey: REVIEWED_HEAD, headSha: REVIEWED_HEAD, now: '2026-07-06T11:00:00Z',
+      });
+    }
+    writeAmaAuditEntry({ hqRoot: join(rootDir, 'hq-root'), ...identity, headSha: REVIEWED_HEAD,
+      attempt: { outcome: 'failed-without-merge', reason: 'github-gate-not-green', path: 'hammer',
+        githubGate: { reasons: ['pr-mergeability-unknown'] } }, now: '2026-07-06T11:59:00Z' });
+    const deps = hammerDispatchDeps();
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, {
+        reviewState: { nonBlockingFindingCount: 1, reviewCycleExhausted: true, completedRemediationRounds: 1 },
+        prMetadata: { statusCheckRollup: [{ name: 'test', conclusion: 'SUCCESS' }] },
+      }), ...deps, deliverAlertImpl: async () => {},
+    });
+    assert.equal(result.dispatched, budget === 'available', JSON.stringify(result));
+    if (budget !== 'available') assert.match(result.reason, /hammer-(?:retry-cap-exhausted|lifetime-ceiling-reached)/);
+    assert.equal(deps.execCalls.some(call => call.args[0] === 'dispatch' && call.args[1] !== 'status'), budget === 'available');
+  });
+}
 
 for (const scenario of ['risk class changes', 'pending CI turns red', 'pending CI turns label-only', 'pending CI becomes conflicting', 'stale park timestamp', 'stale park pending CI', 'stale park active repair', 'pending CI remains pending', 'corrupt audit', 'missing head']) {
   test(`certified park preserves eligibility gates: ${scenario}`, async t => {

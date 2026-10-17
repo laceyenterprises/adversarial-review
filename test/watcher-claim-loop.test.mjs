@@ -4012,11 +4012,11 @@ for (const age of [600, 901]) {
   });
 }
 
-test('STARTADMIT-01: startup admits durable pending work before discovery and deduplicates rediscovery', () => {
+test('STARTADMIT-01: startup admits before discovery without duplicate dispatch or maintenance records', () => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'startup-admission-'));
   const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
   try {
-    let loader = buildLoaderSource({ discoveryHookSource: `
+    let loader = buildLoaderSource({ subject101Overrides: { labels: ['risk:medium', 'merge-agent-dispatched'] }, discoveryHookSource: `
       globalThis.__startupDiscoverySawSpawn = globalThis.__watcherClaimLoopReviewerSpawns.some(
         spawn => spawn.subjectContext.prNumber === 101);
     `, reviewerRuntimeSource: `
@@ -4032,6 +4032,11 @@ test('STARTADMIT-01: startup admits durable pending work before discovery and de
       export function loadDomainConfig() { return {}; }
       export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
     ` });
+    loader = loader
+      .replace('export function scanStuckMergeAgentDispatches() { return []; }',
+        'export function scanStuckMergeAgentDispatches(args) { (globalThis.__startupStuckScanInputs ||= []).push(args); return []; }')
+      .replace('export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; }',
+        'export async function reconcileProactivePhantomHandoffs(args) { (globalThis.__startupPhantomInputs ||= []).push(args); return { inspected: 0, graceStarted: 0, escalated: 0 }; }');
     loader = loader.replace('export async function load(url, context, nextLoad) {', `
       export async function load(url, context, nextLoad) {
         if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
@@ -4056,6 +4061,15 @@ test('STARTADMIT-01: startup admits durable pending work before discovery and de
           'a durable pending reviewer must spawn before discovery completes');
         assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
         assert.equal(claims.filter(c => c.prNumber === 101).length, 1, 'rediscovery must keep same-head dedup');
+        assert.equal(globalThis.__startupStuckScanInputs.length, 1);
+        const scan = globalThis.__startupStuckScanInputs[0];
+        assert.deepEqual(scan.activePRs.map(pr => pr.prNumber), [101],
+          'startup refill must not duplicate stuck-scan records');
+        assert.deepEqual(scan.currentPRs.map(pr => pr.prNumber), [101],
+          'startup refill must not duplicate current-head records');
+        assert.equal(globalThis.__startupPhantomInputs.length, 1);
+        assert.deepEqual(globalThis.__startupPhantomInputs[0].currentPRs.map(pr => pr.prNumber), [101],
+          'phantom reconciliation must inspect each discovered PR once');
       `,
     })));
     const result = spawnSync(process.execPath,

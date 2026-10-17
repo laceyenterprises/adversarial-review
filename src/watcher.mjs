@@ -1442,7 +1442,10 @@ async function pollOnceWithinBudget(
     if (!discoveryRepos.has(identity.slice(0, identity.lastIndexOf('#')))) priorityDiscoveryPending.delete(identity);
   }
   for (const { domainAdapterSet, repoPath } of domainRepoWork) {
-    const { subjectAdapter, context: reviewContext } = reviewerRefillContexts.get(`${domainAdapterSet.domainId}:${repoPath}`);
+    const { subjectAdapter, context: refillContext } = reviewerRefillContexts.get(`${domainAdapterSet.domainId}:${repoPath}`);
+    // Maintenance scans consume discovery snapshots only. Durable refill can
+    // process the same PR before or during discovery, so keep its collectors separate.
+    const reviewContext = { ...refillContext, activeMergeAgentPRs: [], currentRepoPRs: [] };
     const { activeMergeAgentPRs, currentRepoPRs } = reviewContext;
     let subjectRefs;
     try {

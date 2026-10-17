@@ -263,6 +263,9 @@ uses the same bounded refill and admission drain as capacity-freed handoffs.
 Live subject checks, operator holds, draft checks, credential limits, claim CAS,
 same-head deduplication and spawn-boundary freshness still apply. A route change
 must acquire the new route's reservation before spawning.
+Discovery owns separate per-repository PR collections for stuck-merge-agent
+scans and phantom-handoff reconciliation; durable refill does not add records
+to those collections when it processes the same PR.
 
 `watcher first reviewer spawn: startup_to_spawn_ms=<milliseconds>` records the
 first actual runtime spawn since watcher process start. Each poll logs

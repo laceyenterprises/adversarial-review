@@ -53,7 +53,7 @@ export async function holdStackedBase({ state, rootDir, repo, prNumber, execFile
   try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first hold */ }
   // Retain the delivered receipt if an intervening API read fails.
   if (reason !== 'stacked-base-merged' || prior?.commentedAt) {
-    if (!prior?.commentedAt) writeFileAtomic(path, JSON.stringify({ repo, prNumber, reason }));
+    if (prior?.reason !== reason) writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason }));
     return result;
   }
   const lock = `${path}.lock`;

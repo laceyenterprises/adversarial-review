@@ -74,6 +74,9 @@ test('default branch, unmerged parent and same-named fork branches stay eligible
   assert.equal(await guardStackedBase({ ...retargeted, rootDir: f.rootDir }), null);
   const file = readdirSync(join(f.rootDir, 'data', 'stacked-base-holds')).find(name => name.endsWith('.json'));
   assert.equal(JSON.parse(readFileSync(join(f.rootDir, 'data', 'stacked-base-holds', file))).reason, null);
+  assert.equal((await guardStackedBase(f)).reason, 'stacked-base-merged');
+  assert.equal(f.comments.length, 1, 'restacking retains the original comment receipt');
+  assert.equal(JSON.parse(readFileSync(join(f.rootDir, 'data', 'stacked-base-holds', file))).reason, 'stacked-base-merged');
 });
 
 test('unreadable base evidence fails closed without posting a retarget claim', async t => {

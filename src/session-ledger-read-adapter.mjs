@@ -1640,13 +1640,16 @@ function runLedgerStepsSync(iterator) {
   return step.value;
 }
 
-async function runLedgerStepsAsync(iterator, { timeoutMs = null, signal = null, spawnAsyncImpl = spawnLedgerChild, delayAsyncImpl = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+async function runLedgerStepsAsync(iterator, { timeoutMs = null, signal = null, spawnAsyncImpl, spawnSyncImpl, delayAsyncImpl = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  // Only adapt an explicitly injected sync executor: effects also carry the
+  // real spawnSync default, which must never replace the async production path.
+  const spawnImpl = spawnAsyncImpl || spawnSyncImpl || spawnLedgerChild;
   let step = iterator.next();
   while (!step.done) {
     try {
       const effect = step.value;
       const result = effect.kind === 'delay' ? await delayAsyncImpl(effect.ms)
-        : await spawnAsyncImpl(effect.command, effect.args, { ...effect.options,
+        : await spawnImpl(effect.command, effect.args, { ...effect.options,
           ...(signal ? { signal } : {}),
           timeout: timeoutMs == null ? effect.options.timeout : Math.min(effect.options.timeout, Math.max(1, timeoutMs)) });
       step = iterator.next(result);

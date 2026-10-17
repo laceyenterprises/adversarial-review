@@ -31,8 +31,10 @@ head-independent fallback; successful pinned reads need no fallback. Content
 verification rejects a moved live head without rewriting the discovery head.
 Missing snapshot evidence aborts the tick through the census error boundary,
 preserving existing families and holds. Fixture callers may inject
-`spawnAsyncImpl`; an explicitly supplied `spawnSyncImpl` is adapted when no
-async executor is supplied. Production retains the asynchronous child default.
+`spawnAsyncImpl`; an explicitly supplied `spawnSyncImpl` is awaited when no
+async executor is supplied. An async executor takes precedence when both are
+supplied. The steps' built-in synchronous default is never selected by async
+readers; production retains the asynchronous child default.
 Async closure also uses async gh/hq
 probes. Existing process-lifetime admission, durable refill, credential limits,
 holds, drafts, head dedup and spawn-boundary freshness checks remain in force.

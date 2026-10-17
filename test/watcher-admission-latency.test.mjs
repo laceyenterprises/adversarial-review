@@ -97,7 +97,17 @@ test('WATCHERLAG-01: independent candidate preflight completes while an unrelate
   assert.equal(missing.reason, 'psql-not-installed');
 });
 
-test('WATCHERLAG-01: asynchronous ledger readers preserve sync SQL, selectors, and failure results', async () => {
+test('WATCHERLAG-01: asynchronous ledger readers preserve sync fixtures, executor precedence, SQL, selectors, and failure results', async t => {
+  // A broken fixture seam must fail offline rather than query a host ledger.
+  const root = mkdtempSync(join(tmpdir(), 'ledger-fixture-path-'));
+  const previousPath = process.env.PATH;
+  process.env.PATH = root;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    rmSync(root, { recursive: true, force: true });
+  });
+  const monitor = createWatcherLatencyMonitor({ logger: quiet });
+  t.after(() => monitor.stop());
   const cases = [
     ['readLatestWorkerRunStatusFromLedger', { launchRequestId: 'lrq_synthetic' }],
     ['readLaunchRequestStatusFromLedger', { launchRequestId: 'lrq_synthetic' }],
@@ -112,11 +122,23 @@ test('WATCHERLAG-01: asynchronous ledger readers preserve sync SQL, selectors, a
       const exec = (...args) => { calls.push(args); return result; };
       const args = { ...selectors, ledgerTarget: target, env: { AGENT_OS_CONFIG_PATH: '/dev/null' } };
       const sync = ledger[name]({ ...args, spawnSyncImpl: exec });
+      monitor.summary(); // Discard telemetry from the synchronous reference reader.
       const asyncResult = await ledger[`${name}Async`]({ ...args, spawnAsyncImpl: exec });
       assert.deepEqual(asyncResult, sync, name);
       assert.deepEqual(calls[0], calls[1], name);
+      const syncFixtureResult = await ledger[`${name}Async`]({ ...args, spawnSyncImpl: exec });
+      assert.equal(calls.length, 3, `${name}: sync fixture must be invoked`);
+      assert.deepEqual(syncFixtureResult, sync, name);
+      assert.deepEqual(calls[0], calls[2], name);
+      const bothResult = await ledger[`${name}Async`]({ ...args, spawnAsyncImpl: exec,
+        spawnSyncImpl: () => assert.fail(`${name}: async executor must take precedence`),
+      });
+      assert.equal(calls.length, 4, `${name}: async executor must be invoked`);
+      assert.deepEqual(bothResult, sync, name);
+      assert.deepEqual(calls[0], calls[3], name);
     }
   }
+  assert.equal(monitor.summary().children.psql?.count ?? 0, 0, 'fixtures must not start real async children');
 });
 
 test('WATCHERLAG-01: transient retry backoff yields to other admission work and stays bounded', async t => {

@@ -672,8 +672,13 @@ external CI failures are exclusively registered operator-label gates and no
 external sibling is pending or unknown. The closer pages once per head through
 `data/operator-label-holds/`; labels alone do not release red CI, so the operator
 must inspect the refusal and rerun the check after applying an appropriate
-label. Review-findings remediation remains available to restore guarded deltas;
-no follow-up `operator-label-required:<label>` stop transition is emitted.
+label. REMLABEL-01 classifies review findings with the same registry. An
+operator-only review stops follow-up dispatch with
+`operator-label-required:<label>` and holds terminal HAM dispatch; a durable
+receipt owns one explanatory comment and page per head. Mixed reviews permit
+only ordinary fixes and preserve the gated changes. A fresh review observing
+the waiver clears the review finding; label presence alone cannot erase stale
+findings or waive red CI.
 A typed deferred hammer audit plus a matching live exact-head gate can refund
 series/target admission credit once per launch, retaining lifetime charges.
 `labelGateRefundedLaunchRequestId` prevents duplicate record/ordinary exit

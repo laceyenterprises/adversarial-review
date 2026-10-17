@@ -7,6 +7,7 @@
       "path": "docs/data-model/ama-dispatch-configuration.md",
       "store": "data/ama-dispatch-configuration/",
       "schemaSurface": "src/ama/dispatch-configuration-refusal.mjs",
+      "timestampSource": "alertedAt uses the dispatch timestamp or current ISO time when absent",
       "owner": "AMA closer dispatch"
     },
     {
@@ -15,6 +16,7 @@
       "path": "docs/data-model/stacked-base-holds.md",
       "store": "data/stacked-base-holds/",
       "schemaSurface": "src/ama/stacked-base.mjs",
+      "persistence": "best-effort receipt; filesystem failure preserves the hold result",
       "owner": "AMA closure and remediation"
     },
     {

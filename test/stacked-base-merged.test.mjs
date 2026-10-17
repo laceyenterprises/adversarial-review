@@ -3,7 +3,8 @@ import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { guardStackedBase, inspectStackedBase } from '../src/ama/stacked-base.mjs';
@@ -85,6 +86,28 @@ test('unreadable base evidence fails closed without posting a retarget claim', a
   assert.equal(held.reason, 'stacked-base-read-failed');
   assert.equal(held.needsOperator, false);
   assert.equal(f.comments.length, 0);
+});
+
+test('hold persistence failures return the hold without posting or throwing', async t => {
+  for (const failure of ['mkdir', 'write']) {
+    const f = fixture(t);
+    const warnings = [];
+    if (failure === 'mkdir') {
+      writeFileSync(join(f.rootDir, 'data'), 'directory unavailable');
+    } else {
+      const key = createHash('sha256').update(`${repo}#41`).digest('hex');
+      mkdirSync(join(f.rootDir, 'data', 'stacked-base-holds', `${key}.json`), { recursive: true });
+    }
+    const result = await guardStackedBase({ ...f,
+      execFileImpl: failure === 'write' ? async () => { throw new Error('API unavailable'); } : f.execFileImpl,
+      logger: { warn: message => warnings.push(message) } });
+    assert.equal(result.reason, failure === 'mkdir' ? 'stacked-base-merged' : 'stacked-base-read-failed');
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.recoveryWait, true);
+    assert.equal(f.comments.length, 0);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /hold persistence failed/);
+  }
 });
 
 test('remediation stops before spawning on a merged parent branch', async t => {

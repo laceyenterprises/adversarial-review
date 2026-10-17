@@ -42,19 +42,24 @@ export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFi
 
 // Repository + PR scope survives head changes and daemon restarts. The lock
 // serializes remediation and closure so they cannot both post the same comment.
-export async function holdStackedBase({ state, rootDir, repo, prNumber, execFileImpl = execFileAsync, signal }) {
+export async function holdStackedBase({ state, rootDir, repo, prNumber, execFileImpl = execFileAsync, signal, logger = console }) {
   if (state?.ok) return null;
   const reason = state?.reason || 'stacked-base-read-failed';
   const result = { dispatched: false, skipMergeAgent: true, recoveryWait: true, reason,
     needsOperator: reason === 'stacked-base-merged', retryAfterMs: 60_000 };
   const dir = join(rootDir, 'data', 'stacked-base-holds');
   const path = join(dir, `${createHash('sha256').update(`${repo.toLowerCase()}#${prNumber}`).digest('hex')}.json`);
-  mkdirSync(dir, { recursive: true });
   let prior;
-  try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first hold */ }
-  // Retain the delivered receipt if an intervening API read fails.
-  if (reason !== 'stacked-base-merged' || prior?.commentedAt) {
-    if (prior?.reason !== reason) writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason }));
+  try {
+    mkdirSync(dir, { recursive: true });
+    try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first hold */ }
+    // Retain the delivered receipt if an intervening API read fails.
+    if (reason !== 'stacked-base-merged' || prior?.commentedAt) {
+      if (prior?.reason !== reason) writeFileAtomic(path, JSON.stringify({ ...prior, repo, prNumber, reason }));
+      return result;
+    }
+  } catch (error) {
+    logger?.warn?.(`Stacked base hold persistence failed: ${error.message}`);
     return result;
   }
   const lock = `${path}.lock`;

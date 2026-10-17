@@ -14,3 +14,6 @@ claim escape. The GitHub marker `<!-- ama:stacked-base-merged -->` recovers a
 posted comment after a crash before the local receipt write. Failed comment
 reads/posts retain the hold and retry delivery later. Successful rechecks do not
 delete the comment receipt. The hold grants no retarget or force-push authority.
+Directory creation or receipt-write failures retain the in-memory hold result;
+initial persistence failures log a warning and defer comment delivery until a
+later observation can persist safely.

@@ -15,6 +15,7 @@ import {
   resolveAmaHammerDispatchMode,
 } from '../src/ama-hammer-background-dispatch.mjs';
 import { maybeDispatchAmaClosureFor, resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orchestration.mjs';
+import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 import { hammerWakeAuditPath, readHammerWakeAudit, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
 import { CLOSER_AUTHORED_STALE_WAKE_REASON, closerAuthoredStaleAuditPath } from '../src/closer-authored-stale.mjs';
@@ -271,6 +272,35 @@ function closureArgs(overrides = {}) {
     ...overrides,
   };
 }
+
+test('production closure context rechecks a parent merged after candidate inspection', async t => {
+  for (const field of ['baseBranch', 'baseRefName']) {
+    let checked = 0;
+    const args = closureArgs({
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'not-eligible' }),
+      maybeDispatchAmaCloserImpl: payload => {
+        assert.equal(payload.dispatchContext.baseBranch, 'feature/parent');
+        return maybeDispatchAmaCloser({ ...payload,
+          guardStackedBaseImpl: async options => {
+            checked++;
+            assert.equal(options.repo, args.repoPath);
+            assert.equal(options.prNumber, args.prNumber);
+            return { dispatched: false, skipMergeAgent: true, recoveryWait: true,
+              needsOperator: true, reason: 'stacked-base-merged' };
+          },
+          execFileImpl: async () => assert.fail('a held base cannot launch a worker'),
+        });
+      },
+    });
+    t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+    args.candidate[field] = 'feature/parent';
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.equal(checked, 1);
+    assert.equal(result.reason, 'stacked-base-merged');
+    assert.equal(result.dispatched, false);
+  }
+});
 
 test('inline mode (default) still awaits the closer and returns its result', async () => {
   let calls = 0;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -165,6 +165,23 @@ test('repository paging receipt survives process reload and failed delivery retr
   const restarted = await import('../src/ama/dispatch-configuration-refusal.mjs?restarted-process');
   await restarted.pageDispatchConfigurationRefusal(options);
   assert.equal(attempts, 2, 'only the failed delivery is retried; persisted success survives a new module process state');
+});
+
+test('repository paging without a dispatch time persists a restart-safe timestamp', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'configuration-page-time-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let attempts = 0;
+  const options = { rootDir, repo: 'example/widget', refusal: 'repo_unregistered',
+    deliverAlertImpl: async () => { attempts++; } };
+  const first = await import('../src/ama/dispatch-configuration-refusal.mjs?missing-time');
+  const before = Date.now();
+  await first.pageDispatchConfigurationRefusal(options);
+  const dir = join(rootDir, 'data', 'ama-dispatch-configuration');
+  const receipt = JSON.parse(readFileSync(join(dir, readdirSync(dir)[0]), 'utf8'));
+  assert.ok(Date.parse(receipt.alertedAt) >= before && Date.parse(receipt.alertedAt) <= Date.now());
+  const restarted = await import('../src/ama/dispatch-configuration-refusal.mjs?missing-time-restart');
+  await restarted.pageDispatchConfigurationRefusal(options);
+  assert.equal(attempts, 1);
 });
 
 test('legacy transient refusal with an exhausted slow window is reclassified and can resume', async t => {

@@ -3326,6 +3326,8 @@ The existing pending-lease reclaim backoff controls rechecks; a successful
 dispatch clears the PR blocker. Configuration refusals release the pending
 lease and consume no hammer launch credit. The repository page receipt remains
 as a deduplication record; failed delivery retries on later observations.
+When dispatch time is absent, the receipt uses the current timestamp so restart
+deduplication still applies.
 Other dispatch failures retain their existing classifications.
 
 ### Merged stacked base (UNREGREPO-01)
@@ -3339,3 +3341,5 @@ The daemon and hammer recheck before merging, including after CI waits.
 Unreadable base/history evidence holds with `stacked-base-read-failed` and
 retries without claiming that a parent was merged. Fork branches with the same
 name and closed-but-unmerged PRs do not establish a merged parent.
+Local hold-store failures preserve the hold and defer comment delivery; initial
+persistence failures log a warning for filesystem recovery.

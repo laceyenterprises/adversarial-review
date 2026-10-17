@@ -27,7 +27,7 @@ export async function pageDispatchConfigurationRefusal({ rootDir, repo, refusal,
       event: 'ama_closer.dispatch_configuration_refused', payload: { repo, refusal },
     });
     delivered.add(path);
-    writeFileAtomic(path, JSON.stringify({ repo, refusal, alertedAt: now }));
+    writeFileAtomic(path, JSON.stringify({ repo, refusal, alertedAt: now || new Date().toISOString() }));
   } catch (error) { logger?.warn?.(`Dispatch configuration page failed: ${error.message}`); }
   finally { if (claimed) { try { unlinkSync(lock); } catch { /* expired claim */ } } }
 }

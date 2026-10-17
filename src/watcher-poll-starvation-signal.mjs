@@ -1,8 +1,8 @@
 // Poll-starvation signal — the watcher's own page for "one tick is frozen".
 //
 // WPS-01. `createWatcherStallWatchdog` owns DETECTING the condition (a poll in
-// flight past its SLA with no `poll_counter` advance, across N consecutive
-// checks); this leaf owns what happens next. Split out of watcher.mjs to keep
+// flight with no completed work for its deadline-safe threshold, across N
+// consecutive checks); this leaf owns what happens next. Split out of watcher.mjs to keep
 // that file under its ARC-18 line ratchet, and because the delivery decision —
 // which file to write, which event name to page on — is exactly the kind of
 // policy leaf that should be unit-testable without booting a watcher.

@@ -33,6 +33,7 @@ test('WATCHERSTARVE-01: the second watchdog respawn within an hour pages once wi
   await h.restart(65 * minute, 20 * minute);
   const pages = h.alerts.filter(alert => alert.event === 'adversarial_review.poll_starvation_restart_loop');
   assert.equal(pages.length, 1);
+  assert.equal(h.alerts.length, 2, 'only the first starvation alert and one loop page are emitted');
   assert.deepEqual(pages[0].payload.restart_durations_ms, [20 * minute, 25 * minute]);
   assert.match(pages[0].text, /20m.*25m/);
   assert.equal(h.exits.length, 3, 'the guard must retain recovery and reviewer preservation');

@@ -385,8 +385,10 @@ function createWatcherStallWatchdog({
     const inFlightMs = nowMs() - pollStartedMs;
     const snapshot = heartbeat.snapshot();
     if (normalizeCounter(snapshot.poll_counter) !== pollStartCounter) {
-      // The counter advanced under us (a re-entrant or externally-driven poll):
-      // whatever this is, it is not a frozen loop.
+      // An externally-driven poll also counts as progress, but must not
+      // permanently exempt a subsequent hang from detection.
+      pollStartCounter = normalizeCounter(snapshot.poll_counter);
+      lastInPollMarker = inPollProgressMarker(snapshot);
       lastInPollProgressMs = nowMs();
       starvationChecks = 0;
       return false;

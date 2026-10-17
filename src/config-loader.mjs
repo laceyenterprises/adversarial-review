@@ -299,6 +299,14 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
+      // APPLEBUILD-01: shared CFG-01 toolchain selection, owned by Apple tools.
+      apple: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          developer_dir: { __type: TYPE_STRING, __default: '' },
+        },
+      },
       // SRS-03 — parse-only mirror of the Python-owned scheduled surface
       // harness timeout knob so strict checked-in config.yaml loads stay green.
       surface_harness: {
@@ -3421,6 +3429,10 @@ function postgresRuntimeAlias(value) {
 const identity = (v) => v;
 
 export const ENV_ALIASES = {
+  'apple.developer_dir': {
+    canonical: 'AGENT_OS_APPLE_DEVELOPER_DIR',
+    aliases: [],
+  },
   ...Object.fromEntries([
     'enabled',
     'state_dir',

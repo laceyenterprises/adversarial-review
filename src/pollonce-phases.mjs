@@ -2628,9 +2628,10 @@ export async function processReviewSubject(entry, ctx) {
               row.reviewer_started_at,
               reviewedHead,
             ).changes;
-            if (changes !== 1 && !reviewedHead) {
-              const released = stmtReleaseUnsettledPostedReview.run(null, row.repo, row.pr_number, row.reviewer_session_uuid);
-              console.warn(`[watcher] posted-settlement-missing-reviewed-head repo=${row.repo} pr=${row.pr_number} `
+            if (changes !== 1) {
+              const released = stmtReleaseUnsettledPostedReview.run(reviewedHead, row.repo, row.pr_number, row.reviewer_session_uuid);
+              const reason = reviewedHead ? 'posted-settlement-claim-mismatch' : 'posted-settlement-missing-reviewed-head';
+              console.warn(`[watcher] ${reason} repo=${row.repo} pr=${row.pr_number} `
                 + `released_to_pending=${released.changes === 1} source=command-failed-recovery`);
             }
             if (changes === 1) {

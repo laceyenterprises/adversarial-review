@@ -1119,7 +1119,7 @@ for (const [name, failureSource] of [
     const registerPath = path.join(tmp, 'fixture-register.mjs');
     const runnerPath = path.join(tmp, 'fixture-runner.mjs');
     try {
-      writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { '102': null } }));
+      writeFileSync(loaderPath, buildLoaderSource());
       writeFileSync(registerPath, buildRegisterSource(loaderPath));
       writeFileSync(runnerPath, buildRunnerSource({
         prePollSetup: `

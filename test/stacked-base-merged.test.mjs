@@ -1,3 +1,5 @@
+import { runDaemonCleanMergeAttempt } from '../src/daemon-clean-merge.mjs';
+import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -155,4 +157,51 @@ test('unreadable base evidence requeues remediation without spending its round',
   assert.equal(result.job.status, 'pending');
   assert.equal(result.job.remediationPlan.currentRound, 0);
   assert.equal(result.job.remediationPlan.retryAfter, '2026-10-16T11:01:00.000Z');
+});
+
+
+test('an otherwise mergeable PR cannot click daemon merge into a merged parent branch', async t => {
+  for (const base of ['feature/parent', 'trunk']) {
+    const f = fixture(t, { base });
+    const head = 'a'.repeat(40);
+    let clicks = 0, released = 0;
+    const checks = [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }];
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir: f.rootDir, repoPath: repo, prNumber: 41,
+      cfg: { mergeMethod: 'squash', autonomousMergeExecutionEnabled: true, strictMode: true },
+      candidate: { title: 'Synthetic change', baseBranch: base, headSha: head,
+        statusCheckRollup: checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
+        prState: 'open', labels: [], branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] } },
+      gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'comment-only' } },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: { blockingFindingCount: 0, blockingFindingState: 'known',
+        nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' },
+      reviewStateRow: { reviewer: 'codex' }, currentPrHeadSha: head,
+      fetchPrimaryChangeImpl: async () => primaryChangeFixture(head),
+      fetchRollupImpl: async () => ({ title: 'Synthetic change', state: 'OPEN', headRefOid: head,
+        checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', labels: [] }),
+      acquireMergeLeaseImpl: () => ({ acquired: true, lease: { repo, base, leaseId: 'synthetic-lease',
+        holderPr: 41, holderHead: head, acquiredAt: '2026-10-16T10:00:00Z' } }),
+      releaseMergeLeaseImpl: () => { released++; },
+      readBuildCompletionSignalForPrImpl: () => ({ ok: true,
+        row: { launch_request_id: 'lrq-synthetic', worker_class: 'codex', head_sha: head } }),
+      readHeadAttestationChainForPrImpl: async () => [],
+      dismissStaleRequestChangesOnResolved: false,
+      execFileImpl: async (cmd, args) => {
+        if (args[0] === 'pr' && args[1] === 'merge') { clicks++; return { stdout: '', stderr: '' }; }
+        return f.execFileImpl(cmd, args);
+      },
+      env: { HQ_ROOT: f.rootDir }, logger: { log() {}, warn() {} },
+    });
+    if (base === 'feature/parent') {
+      assert.equal(result.reason, 'stacked-base-merged');
+      assert.equal(result.merged, false);
+      assert.equal(clicks, 0);
+      assert.equal(f.comments.length, 1);
+    } else {
+      assert.equal(result.merged, true, 'the same otherwise eligible PR merges after a safe retarget');
+      assert.equal(clicks, 1);
+    }
+    assert.equal(released, 1);
+  }
 });

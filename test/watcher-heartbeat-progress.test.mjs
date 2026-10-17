@@ -93,3 +93,64 @@ for (const event of ['markReview', 'markSpawnDecision', 'markPollCompleted', 'pe
     assert.equal(f.persisted().last_poll_at, new Date(f.startedMs).toISOString());
   });
 }
+
+test('progress writes honor the exact one-minute boundary and coalesce bursts', async (t) => {
+  const f = fixture(t);
+  f.advanceTo(59_999);
+  f.heartbeat.markPollProgress();
+  assert.equal(f.writes.length, 1);
+  f.advanceTo(60_000);
+  for (let i = 0; i < 100; i += 1) f.heartbeat.markPollProgress();
+  await f.heartbeat.flush();
+  assert.equal(f.writes.length, 2);
+  assert.equal(f.persisted().updated_at, '2026-01-01T00:01:00.000Z');
+  f.advanceTo(119_999);
+  f.heartbeat.markPollProgress();
+  assert.equal(f.writes.length, 2);
+  f.advanceTo(120_000);
+  f.heartbeat.markPollProgress();
+  assert.equal(f.writes.length, 3);
+  assert.equal(f.persisted().poll_progress_counter, 103);
+});
+
+for (const failure of ['ownership', 'sync-write', 'async-write']) {
+  test(`progress persistence throttles and logs ${failure} failures`, async () => {
+    let clockMs = 0;
+    let attempts = 0;
+    const warnings = [];
+    const heartbeat = createWatcherHeartbeat({
+      rootDir: '/fixture',
+      now: () => new Date(clockMs),
+      readFile() { throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' }); },
+      ownerGuardOptions: {
+        currentUid: () => 101,
+        exists: () => true,
+        stat() {
+          if (failure === 'ownership') attempts += 1;
+          return { uid: failure === 'ownership' ? 102 : 101 };
+        },
+      },
+      writeFile() {
+        assert.notEqual(failure, 'ownership', 'ownership refusal must prevent writes');
+        attempts += 1;
+        const error = new Error('fixture write refused');
+        if (failure === 'sync-write') throw error;
+        return Promise.reject(error);
+      },
+      logger: { warn(message) { warnings.push(message); } },
+    });
+    heartbeat.markPoll();
+    await heartbeat.flush();
+    assert.equal(attempts, 1);
+    for (clockMs = 60_000; clockMs < 120_000; clockMs += 1000) {
+      heartbeat.markPollProgress();
+      await heartbeat.flush();
+      assert.equal(attempts, 2, 'failed progress writes must be rate limited');
+    }
+    assert.equal(warnings.length, 2);
+    assert.match(warnings[1], /failed to persist heartbeat/);
+    heartbeat.markPollProgress();
+    await heartbeat.flush();
+    assert.equal(attempts, 3, 'persistence retries on later progress');
+  });
+}

@@ -7,6 +7,7 @@ import { writeFileAtomic } from './atomic-write.mjs';
 const DEFAULT_WATCHER_STALL_EXIT_CODE = 75;
 const DEFAULT_WATCHER_STALL_WATCHDOG_MS = 10 * 60 * 1000;
 const DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS = 30 * 1000;
+const POLL_PROGRESS_PERSIST_INTERVAL_MS = 60 * 1000;
 
 // WPS-01 — poll STARVATION, as distinct from poll ABSENCE.
 //
@@ -130,6 +131,7 @@ function createWatcherHeartbeat({
   let watchdogRestartState = prior?.watchdog_restart_state || { restarts: [], loop_paged: false };
   let pollProgressCounter = 0;
   let lastPollProgressAt = null;
+  let lastHeartbeatWriteAttemptMs = null;
   let pendingReviewHeartbeat = null;
   let reviewPersistScheduled = false;
   let reviewPersistChain = Promise.resolve();
@@ -145,6 +147,9 @@ function createWatcherHeartbeat({
 
   function writeHeartbeat(heartbeat) {
     try {
+      // Include ordinary writes and failed attempts in the throttle so a broken
+      // filesystem cannot turn frequent progress markers into a write/log storm.
+      lastHeartbeatWriteAttemptMs = now().getTime();
       if (ownerGuardRootDir) {
         try {
           assertHeartbeatOwner();
@@ -238,11 +243,17 @@ function createWatcherHeartbeat({
     return persist('poll', extra, at);
   }
 
-  // Keep frequent completion markers in memory. The next ordinary heartbeat
-  // persists them without adding a synchronous disk write per subject/handler.
+  // Frequent completion markers stay in memory between writes. A progressing
+  // long poll refreshes external liveness at most once per minute, through the
+  // same guarded atomic writer as ordinary events. Elapsed time alone does not.
   function markPollProgress() {
+    const at = now();
     pollProgressCounter += 1;
-    lastPollProgressAt = now().toISOString();
+    lastPollProgressAt = at.toISOString();
+    if (lastHeartbeatWriteAttemptMs === null
+      || at.getTime() - lastHeartbeatWriteAttemptMs >= POLL_PROGRESS_PERSIST_INTERVAL_MS) {
+      persist('poll-progress', {}, lastPollProgressAt);
+    }
   }
 
   function markReview(extra = {}) {

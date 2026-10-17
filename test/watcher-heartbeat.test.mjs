@@ -28,15 +28,10 @@ function readJson(filePath) {
 test('watcher heartbeat persists poll counter and review timestamps', async () => {
   const rootDir = tempRoot();
   try {
-    const times = [
-      new Date('2026-07-04T10:00:00.000Z'),
-      new Date('2026-07-04T10:00:05.000Z'),
-      new Date('2026-07-04T10:00:06.000Z'),
-      new Date('2026-07-04T10:00:07.000Z'),
-    ];
+    let clockMs = Date.parse('2026-07-04T10:00:00.000Z');
     const heartbeat = createWatcherHeartbeat({
       rootDir,
-      now: () => times.shift() || new Date('2026-07-04T10:00:10.000Z'),
+      now: () => new Date(clockMs),
       pid: 4242,
       logger: { warn() {} },
     });
@@ -53,6 +48,7 @@ test('watcher heartbeat persists poll counter and review timestamps', async () =
     assert.equal(persisted.completed_poll_counter, 0);
     assert.equal(persisted.source, 'startup pollOnce');
 
+    clockMs += 5000;
     heartbeat.markPollCompleted({ source: 'startup pollOnce', ok: true });
     persisted = readJson(watcherHeartbeatPath(rootDir));
     assert.equal(persisted.event, 'poll-completed');
@@ -60,9 +56,10 @@ test('watcher heartbeat persists poll counter and review timestamps', async () =
     assert.equal(persisted.completed_poll_counter, 1);
     assert.equal(persisted.ok, true);
 
+    clockMs += 1000;
     heartbeat.markSpawnDecision({
-      repo: 'laceyenterprises/adversarial-review',
-      pr_number: 3046,
+      repo: 'example/review-service',
+      pr_number: 17,
       decision: 'cascade-backoff-hold',
       next_retry_after: '2026-07-04T10:05:00.000Z',
     });
@@ -70,11 +67,12 @@ test('watcher heartbeat persists poll counter and review timestamps', async () =
     assert.equal(persisted.event, 'spawn-decision');
     assert.equal(persisted.last_spawn_decision_at, '2026-07-04T10:00:06.000Z');
     assert.equal(persisted.last_spawn_decision.decision, 'cascade-backoff-hold');
-    assert.equal(persisted.last_spawn_decision.pr_number, 3046);
+    assert.equal(persisted.last_spawn_decision.pr_number, 17);
 
+    clockMs += 1000;
     heartbeat.markReview({
-      repo: 'laceyenterprises/adversarial-review',
-      pr_number: 3046,
+      repo: 'example/review-service',
+      pr_number: 17,
       posted_at: '2026-07-04T10:00:07.000Z',
     });
     await heartbeat.flush();
@@ -86,8 +84,8 @@ test('watcher heartbeat persists poll counter and review timestamps', async () =
     assert.equal(persisted.last_spawn_decision.decision, 'cascade-backoff-hold');
     assert.equal(persisted.poll_counter, 1);
     assert.equal(persisted.completed_poll_counter, 1);
-    assert.equal(persisted.repo, 'laceyenterprises/adversarial-review');
-    assert.equal(persisted.pr_number, 3046);
+    assert.equal(persisted.repo, 'example/review-service');
+    assert.equal(persisted.pr_number, 17);
   } finally {
     cleanup(rootDir);
   }
@@ -100,8 +98,8 @@ test('watcher heartbeat includes live status-provider fields on every event', as
       rootDir,
       statusProvider: () => ({
         detached_reviewer_dispatches: [{
-          repo: 'laceyenterprises/agent-os',
-          pr: 6980,
+          repo: 'example/workflow-service',
+          pr: 19,
           model: 'gemini',
           started_at: '2026-09-25T19:29:53.000Z',
         }],
@@ -111,7 +109,7 @@ test('watcher heartbeat includes live status-provider fields on every event', as
 
     heartbeat.markPoll({ source: 'test' });
     const persisted = readJson(watcherHeartbeatPath(rootDir));
-    assert.equal(persisted.detached_reviewer_dispatches[0].pr, 6980);
+    assert.equal(persisted.detached_reviewer_dispatches[0].pr, 19);
     assert.equal(persisted.detached_reviewer_dispatches[0].model, 'gemini');
   } finally {
     cleanup(rootDir);
@@ -140,12 +138,12 @@ test('watcher heartbeat debounces review persistence within a tick', async () =>
     });
 
     heartbeat.markReview({
-      repo: 'laceyenterprises/adversarial-review',
-      pr_number: 492,
+      repo: 'example/review-service',
+      pr_number: 21,
     });
     heartbeat.markReview({
-      repo: 'laceyenterprises/adversarial-review',
-      pr_number: 493,
+      repo: 'example/review-service',
+      pr_number: 22,
     });
 
     assert.equal(writes.length, 0);
@@ -154,7 +152,7 @@ test('watcher heartbeat debounces review persistence within a tick', async () =>
     assert.equal(writes.length, 1);
     assert.equal(writes[0].event, 'review');
     assert.equal(writes[0].watcher_pid, 4242);
-    assert.equal(writes[0].pr_number, 493);
+    assert.equal(writes[0].pr_number, 22);
     assert.equal(writes[0].last_review_at, '2026-07-04T10:03:01.000Z');
   } finally {
     cleanup(rootDir);
@@ -208,7 +206,7 @@ test('watcher heartbeat catches asynchronous atomic write failures', async () =>
 });
 
 test('watcher heartbeat refuses cross-user writes before invoking the writer', () => {
-  const rootDir = '/Users/airlock/agent-os-hq';
+  const rootDir = '/fixture/hq';
   const filePath = join(rootDir, '.adversarial-watcher', 'heartbeat.json');
   const warnings = [];
   const writes = [];
@@ -243,7 +241,7 @@ test('watcher heartbeat refuses cross-user writes before invoking the writer', (
 });
 
 test('watcher heartbeat recovers a wrong-owned existing file for the canonical owner', () => {
-  const rootDir = '/Users/airlock/agent-os-hq';
+  const rootDir = '/fixture/hq';
   const filePath = join(rootDir, '.adversarial-watcher', 'heartbeat.json');
   const targetDir = join(rootDir, '.adversarial-watcher');
   const warnings = [];
@@ -290,7 +288,7 @@ test('watcher heartbeat recovers a wrong-owned existing file for the canonical o
 });
 
 test('watcher heartbeat ignores concurrent ENOENT during wrong-owned file recovery', () => {
-  const rootDir = '/Users/airlock/agent-os-hq';
+  const rootDir = '/fixture/hq';
   const filePath = join(rootDir, '.adversarial-watcher', 'heartbeat.json');
   const targetDir = join(rootDir, '.adversarial-watcher');
   const warnings = [];
@@ -447,7 +445,7 @@ test('resolveWatcherHeartbeatPath honours the explicit env override first', () =
   const path = resolveWatcherHeartbeatPath({
     env: {
       ADVERSARIAL_WATCHER_HEARTBEAT_PATH: '/custom/heartbeat.json',
-      HQ_ROOT: '/Users/airlock/agent-os-hq',
+      HQ_ROOT: '/fixture/hq',
     },
     rootDir: '/deploy/tools/adversarial-review',
   });
@@ -456,27 +454,27 @@ test('resolveWatcherHeartbeatPath honours the explicit env override first', () =
 
 test('resolveWatcherHeartbeatPath defaults to the stable HQ_ROOT path', () => {
   const path = resolveWatcherHeartbeatPath({
-    env: { HQ_ROOT: '/Users/airlock/agent-os-hq' },
+    env: { HQ_ROOT: '/fixture/hq' },
     rootDir: '/deploy/tools/adversarial-review',
   });
-  assert.equal(path, join('/Users/airlock/agent-os-hq', '.adversarial-watcher', 'heartbeat.json'));
+  assert.equal(path, join('/fixture/hq', '.adversarial-watcher', 'heartbeat.json'));
 });
 
 test('resolveWatcherHeartbeatOwnerGuardRoot uses HQ_ROOT for the stable HQ heartbeat path', () => {
-  const filePath = join('/Users/airlock/agent-os-hq', '.adversarial-watcher', 'heartbeat.json');
+  const filePath = join('/fixture/hq', '.adversarial-watcher', 'heartbeat.json');
   const ownerGuardRoot = resolveWatcherHeartbeatOwnerGuardRoot({
-    env: { HQ_ROOT: '/Users/airlock/agent-os-hq' },
+    env: { HQ_ROOT: '/fixture/hq' },
     rootDir: '/deploy/tools/adversarial-review',
     filePath,
   });
-  assert.equal(ownerGuardRoot, '/Users/airlock/agent-os-hq');
+  assert.equal(ownerGuardRoot, '/fixture/hq');
 });
 
 test('resolveWatcherHeartbeatOwnerGuardRoot uses rootDir for explicit overrides', () => {
   const ownerGuardRoot = resolveWatcherHeartbeatOwnerGuardRoot({
     env: {
       ADVERSARIAL_WATCHER_HEARTBEAT_PATH: '/custom/heartbeat.json',
-      HQ_ROOT: '/Users/airlock/agent-os-hq',
+      HQ_ROOT: '/fixture/hq',
     },
     rootDir: '/deploy/tools/adversarial-review',
     filePath: '/custom/heartbeat.json',

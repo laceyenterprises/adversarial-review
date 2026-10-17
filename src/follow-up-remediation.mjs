@@ -3289,7 +3289,10 @@ async function consumeNextFollowUpJob({
     await holdForOperatorLabels({ rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
       headSha: claimed.job.revisionRef, gates, deliverAlertImpl, logger: log, now: now(),
       postCommentImpl: args => postCommentImpl({ ...args, rootDir, execFileImpl, log,
-        workerClass: resolveReconcileWorkerClass(claimed.job, null) }) });
+        // No remediator is admitted. Use the existing reviewer's comment
+        // identity without consulting remediation routing or provider config.
+        workerClass: remediationWorkerTrailerClass(claimed.job.reviewerModel === 'claude'
+          ? 'claude-code' : claimed.job.reviewerModel).replace(/-remediation$/, '') }) });
     return { consumed: false, reason: gates[0].reason, job: stopped.job, jobPath: stopped.jobPath };
   }
 

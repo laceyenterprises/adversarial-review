@@ -1,3 +1,4 @@
+import { dispatchConfigurationRefusal, pageDispatchConfigurationRefusal } from './dispatch-configuration-refusal.mjs';
 import { isHamWorkerTicket } from './ham-provenance.mjs';
 import { HAMMER_PHASES, renderHammerProcedure } from '../hammer-procedure.mjs';
 import { meteredExecFile, meteredExecFileSync } from '../metered-gh.mjs';
@@ -1019,7 +1020,7 @@ const HAMMER_SCRATCH_TERMINAL_STATUSES = new Set([
 
 export function isTerminalHammerScratchRecord(record) {
   if (!record || record.state === 'dispatching') return false;
-  return record.state === 'launch-terminal' || record.state === 'dispatch-failed'
+  return record.state === 'dispatch-configuration-refused' || record.state === 'launch-terminal' || record.state === 'dispatch-failed'
     || [record.state, record.lastObservedStatus, record.outcome, record.terminalOutcome]
       .some(value => HAMMER_SCRATCH_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(value)));
 }
@@ -2681,6 +2682,7 @@ export function isGithubRateLimitOrBrokerThrottle(errOrText) {
 }
 
 export function isTransientHqDispatchError(err) {
+  if (dispatchConfigurationRefusal(err)) return false;
   if (isExecTimeout(err)) return true;
   // A throttle / broker outage is transient, never terminal — classify it
   // first so the retry loop and retry-budget guard both treat it as retryable.
@@ -4929,6 +4931,19 @@ export async function maybeDispatchAmaCloser({
     ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
     : reviewedHeadDispatchIdentity;
   let existingRecord = ownerProofRecovery || reviewHandoffFindings ? null : newerLaunchRecord || reviewedHeadRecord;
+  if (existingRecord?.state === 'dispatch-configuration-refused') {
+    const refusal = dispatchConfigurationRefusal(existingRecord.lastError);
+    if (refusal) {
+      await pageDispatchConfigurationRefusal({ rootDir, repo, refusal, deliverAlertImpl, logger,
+        now: dispatchContext.dispatchedAt });
+      const age = amaCloserRecordAgeMs(existingRecord, { now: dispatchContext.dispatchedAt });
+      if (age !== null && age < amaCloserPendingLeaseReclaimAgeMs(existingRecord)) {
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true, needsOperator: true,
+          reason: `dispatch-configuration-refused:${refusal}`,
+          retryAfterMs: amaCloserPendingLeaseReclaimAgeMs(existingRecord) - age });
+      }
+    }
+  }
   if (ownerProofRecovery) logger?.info?.(`OWNERPROOF-01 setting aside historical closer dispatch and retry state for ${repo} PR ${prNumber}@${prMetadata.headSha}`);
   let existingRecordLeaseIdentity = {
     repo,
@@ -7235,7 +7250,8 @@ export async function maybeDispatchAmaCloser({
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       retainScratchDir ||= ambiguousLaunch;
-      const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
+      const configurationRefusal = !ambiguousLaunch && dispatchConfigurationRefusal(err);
+      const branchHolderBlocked = !ambiguousLaunch && !configurationRefusal && isProvisionBranchHolderBlocked(err);
       const dispatchError = formatHqDispatchError(err);
       if (branchHolderBlocked && isHammerWorkerClass(workerClass) && !samePrHammerHolderRetryUsed) {
         samePrHammerHolderRetryUsed = true;
@@ -7271,7 +7287,7 @@ export async function maybeDispatchAmaCloser({
         && (isTransientHqDispatchError(err)
           || (isHammerWorkerClass(workerClass)
             && sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl)));
-      const budgetPreservingFailure = branchHolderBlocked || transientFailure;
+      const budgetPreservingFailure = configurationRefusal || branchHolderBlocked || transientFailure;
       const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
         const currentBranchHolderBlockBase = existingRecordIsReclaimableBranchHolderBlock
           ? existingBranchHolderBlockCount
@@ -7302,7 +7318,8 @@ export async function maybeDispatchAmaCloser({
             ? priorRetryCount
             : Number(current?.retryCount || priorRetryCount + 1),
           branchHolderBlockCount,
-          state: ambiguousLaunch ? 'dispatched' : (
+          closureBlocker: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : null,
+          state: ambiguousLaunch ? 'dispatched' : configurationRefusal ? 'dispatch-configuration-refused' : (
             branchHolderBlocked && branchHolderBlockCount >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND
               ? 'dispatch-branch-holder-block-exhausted'
               : (branchHolderBlocked
@@ -7337,7 +7354,7 @@ export async function maybeDispatchAmaCloser({
             repo,
             prNumber,
             headSha: reviewedSha,
-            reason: transientFailure ? 'dispatch-deferred-transient' : (
+            reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : transientFailure ? 'dispatch-deferred-transient' : (
               branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
             ),
             error: dispatchError,
@@ -7349,21 +7366,27 @@ export async function maybeDispatchAmaCloser({
             repo,
             prNumber,
             headSha: reviewedSha,
-            reason: transientFailure ? 'dispatch-deferred-transient' : (
+            reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : transientFailure ? 'dispatch-deferred-transient' : (
               branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
             ),
             error: releasePendingLeaseError,
           }));
         }
       }
+      if (configurationRefusal) {
+        await pageDispatchConfigurationRefusal({ rootDir, repo, refusal: configurationRefusal,
+          deliverAlertImpl, logger, now: dispatchContext.dispatchedAt });
+      }
       return noAmaDispatch({
         dispatched: false,
+        ...(configurationRefusal ? { needsOperator: true,
+          retryAfterMs: amaCloserPendingLeaseReclaimAgeMs(updatedDispatchRecord) } : {}),
         // Transient failures keep the merge-agent fallback suppressed so the
         // closer (not merge-agent) re-dispatches once the throttle/broker
         // clears, since the budget was preserved above and re-dispatch is
         // guaranteed to be retry-eligible on the next tick.
-        skipMergeAgent: branchHolderBlocked || ambiguousLaunch || transientFailure,
-        reason: ambiguousLaunch ? 'dispatch-response-ambiguous' : (
+        skipMergeAgent: Boolean(configurationRefusal) || branchHolderBlocked || ambiguousLaunch || transientFailure,
+        reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : ambiguousLaunch ? 'dispatch-response-ambiguous' : (
           branchHolderBlocked ? (
             branchHolderBlockExhausted
               ? 'dispatch-branch-holder-block-exhausted'
@@ -7412,6 +7435,8 @@ export async function maybeDispatchAmaCloser({
       retryCount: Number(current?.retryCount || priorRetryCount + 1),
       branchHolderBlockCount: 0,
       state: 'dispatched',
+      closureBlocker: null,
+      lastFailureTransient: false,
       lastObservedStatus: 'starting',
       lastObservedAt: dispatchContext.dispatchedAt,
       lastError: null,

@@ -3313,3 +3313,17 @@ After deployment, SRE confirms that the watcher restarted. On the next PR
 rebased by a conflict owner after its final review, confirm that the hammer
 merges it without a provenance-proof refusal or an operator hand-merge, and
 that the conflict owner's completion consumes no hammer attempt.
+
+### Dispatch configuration refusals (UNREGREPO-01)
+
+`repo_unregistered` is a terminal configuration refusal for the current dispatch,
+not transient capacity pressure. The closer persists
+`dispatch-configuration-refused:repo_unregistered` as its closure blocker and
+pages once per repository, across PRs, heads and watcher restarts. An operator
+registers the repository using `hq repo register https://github.com/<owner>/<repo>.git`
+against the same HQ root as the watcher. Code never registers it automatically.
+The existing pending-lease reclaim backoff controls rechecks; a successful
+dispatch clears the PR blocker. Configuration refusals release the pending
+lease and consume no hammer launch credit. The repository page receipt remains
+as a deduplication record; failed delivery retries on later observations.
+Other dispatch failures retain their existing classifications.

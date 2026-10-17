@@ -1,0 +1,129 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  amaCloserDispatchFilePath,
+  isGithubRateLimitOrBrokerThrottle,
+  isTransientHqDispatchError,
+  HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
+  maybeDispatchAmaCloser,
+  resolveHamTerminalRemediationEvidence,
+} from '../src/ama/dispatch-closer.mjs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(__dirname, '..');
+const HAMMER_TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'hammer-prompt.md');
+const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+
+function eligibleInputs(rootDir) {
+  const headSha = 'abc12345abc12345abc12345abc12345abc12345';
+  const reviewState = {
+    verdict: 'comment-only',
+    headSha,
+    riskClass: 'low',
+    remediationPending: false,
+    blockingFindingState: 'known',
+    blockingFindingCount: 0,
+    nonBlockingFindingState: 'known',
+    nonBlockingFindingCount: 0,
+    operatorApprovedEvidence: null,
+    prAuthor: 'codex-worker-bot',
+    reviewerFamily: 'claude',
+  };
+  const prMetadata = {
+    prNumber: 1234,
+    headSha,
+    isOpen: true,
+    isDraft: false,
+    mergeableState: 'MERGEABLE',
+    labels: [],
+    statusCheckRollup: [
+      { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+      { __typename: 'CheckRun', name: 'integration', conclusion: 'FAILURE' },
+    ],
+    branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
+    author: 'codex-worker-bot',
+  };
+  const cfg = {
+    enabled: true,
+    workerClass: 'hammer',
+    mergeMethod: 'squash',
+    eligibility: {
+      riskClasses: ['low'],
+      fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
+    },
+    branchProtection: {},
+  };
+  const dispatchContext = {
+    repo: 'acme/myrepo',
+    prUrl: 'https://github.com/acme/myrepo/pull/1234',
+    reviewedSha: headSha,
+    riskClass: 'low',
+    requiredGateContext: 'agent-os/adversarial-gate',
+    reviewedBy: 'claude-reviewer-lacey',
+    reviewer: 'claude',
+    parentSession: 'session:test:watcher',
+    hqProject: 'adversarial-merge-authority',
+    hqPath: '/bin/true-stub-hq',
+    hqRoot: join(rootDir, 'hq-root'),
+    hqOwnerUser: CURRENT_USER,
+    currentUser: CURRENT_USER,
+    rootDir,
+    dispatchedAt: '2026-06-11T20:00:00Z',
+  };
+  return { reviewState, prMetadata, cfg, dispatchContext, headSha };
+}
+
+// UNREGREPO-01: configuration repair is repository-wide, not a transient loop.
+test('UNREGREPO-01: unregistered repository pages once and resumes after registration', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'unregistered-repo-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const inputs = eligibleInputs(rootDir);
+  inputs.dispatchContext.repo = 'example/widget';
+  inputs.dispatchContext.reviewedBy = 'synthetic-reviewer';
+  const pages = [];
+  let attempts = 0;
+  let registered = false;
+  const run = async (prNumber, dispatchedAt) => maybeDispatchAmaCloser({
+    ...inputs,
+    prMetadata: { ...inputs.prMetadata, prNumber },
+    dispatchContext: { ...inputs.dispatchContext, dispatchedAt },
+    execFileImpl: async (cmd, args) => {
+      if (args[0] !== 'dispatch') return { stdout: '{}' };
+      attempts++;
+      if (registered) return { stdout: JSON.stringify({ launchRequestId: 'lrq-synthetic', dispatchId: 'dispatch-synthetic' }) };
+      throw Object.assign(new Error('hq dispatch failed'), {
+        stderr: '[hq] dispatch refused: repo_unregistered; retry your request after registration',
+      });
+    },
+    deliverAlertImpl: async text => { pages.push(text); },
+    writeFileImpl: () => {}, readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+  });
+  const first = await run(41, '2026-10-16T10:00:00Z');
+  assert.equal(first.reason, 'dispatch-configuration-refused:repo_unregistered');
+  assert.equal(first.needsOperator, true);
+  assert.equal(first.skipMergeAgent, true);
+  assert.equal(attempts, 1, 'configuration refusal never uses transient immediate retries');
+  await run(42, '2026-10-16T10:00:01Z');
+  assert.equal(pages.length, 1, 'page is shared by PRs in the repository');
+  assert.match(pages[0], /repo_unregistered/);
+  assert.match(pages[0], /hq repo register/);
+  const waiting = await run(41, '2026-10-16T10:00:02Z');
+  assert.equal(waiting.reason, first.reason);
+  assert.equal(attempts, 2, 'same PR waits for normal rewalk backoff');
+  const identity = { repo: inputs.dispatchContext.repo, prNumber: 41, headSha: inputs.headSha };
+  const blocked = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(blocked.closureBlocker, first.reason);
+  assert.equal(blocked.retryCount, 0);
+  registered = true;
+  const resumed = await run(41, '2026-10-16T12:00:00Z');
+  assert.equal(resumed.dispatched, true);
+  const cleared = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(cleared.closureBlocker, null);
+  assert.equal(pages.length, 1);
+});

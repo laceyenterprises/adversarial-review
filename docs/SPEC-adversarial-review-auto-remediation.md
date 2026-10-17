@@ -11,6 +11,10 @@ hold, leave the changes in place, and publish one label-specific comment and
 page per head. Mixed reviews remediate only ordinary findings and report the
 gated ones as blockers. Workers never apply labels or restore guarded changes
 to base to satisfy these findings. A new review must observe the waiver.
+Follow-up consumption resolves PR lifecycle before this review hold. Closed,
+merged and superseded reviewed heads take the existing lifecycle stop path
+without an operator-label hold comment or page. Lifecycle read failures retain
+the consumer's existing live/mirror fallback behavior.
 
 Remediation publishes through `bin/remediation-publish.mjs`, which refreshes the
 base and inspects the exact candidate commit before a lease-protected push.

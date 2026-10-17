@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as gates from '../src/ama/operator-label-gates.mjs';
@@ -54,6 +54,29 @@ test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and
   assert.equal(readdirSync(join(rootDir, 'data', 'operator-label-holds')).some(name => name.endsWith('.lock')), false);
   assert.match(comments[0], /live-pack-edit-approved/);
   assert.match(comments[0], /leave the guarded changes in place/);
+});
+
+test('operator hold retries an unposted comment without repaging and releases each claim', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-comment-retry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  let comments = 0;
+  let pages = 0;
+  const args = { rootDir, repo: 'sample/repo', prNumber: 1, headSha: head, logger: log,
+    gates: gates.classifyOperatorGatedFindings(gatedBody).gated.map(({ check, label, reason }) => ({ check, label, reason })),
+    now: '2026-10-16T12:00:00Z',
+    postCommentImpl: async () => ({ posted: ++comments > 1 }),
+    deliverAlertImpl: async () => { pages++; } };
+  const dir = join(rootDir, 'data', 'operator-label-holds');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await gates.holdForOperatorLabels(args);
+    const files = readdirSync(dir);
+    assert.equal(files.some(name => name.endsWith('.lock')), false);
+    const receipt = JSON.parse(readFileSync(join(dir, files.find(name => name.endsWith('.json'))), 'utf8'));
+    assert.equal(receipt.commentedAt, attempt === 0 ? null : args.now);
+    assert.equal(receipt.alertedAt, args.now);
+  }
+  assert.equal(comments, 2, 'only the unposted comment retries');
+  assert.equal(pages, 1, 'comment retry must not redeliver the alert');
 });
 
 for (const [prState, headSha, expected] of [

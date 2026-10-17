@@ -38,6 +38,9 @@ the unspawned follow-up job with `operator-label-required:<label>` and holds
 terminal HAM dispatch. Mixed reviews retain ordinary remediation and explicitly
 preserve gated changes. A fresh review must observe the operator waiver. A receipt is
 paging evidence, never authorization to merge or proof of live CI greenness.
+The follow-up consumer resolves PR lifecycle before creating this hold; closed,
+merged or superseded reviewed heads use their lifecycle stop without a hold
+comment or page.
 
 ## Files and fields
 
@@ -54,6 +57,12 @@ there is no schema-version field.
 | `gates` | array of objects | Each contains `check`, `label`, and `reason`; preserves all observed label failures. |
 | `alertedAt` | ISO timestamp or null | Successful alert-delivery timestamp; null permits delivery retry. |
 | `commentedAt` | ISO timestamp or null (optional on legacy receipts) | Successful review-finding hold comment; absent/null permits comment retry independently of paging. CI-only holds do not require a comment. |
+
+The comment callback uses the normalized `postRemediationOutcomeComment`
+contract: only a truthy `posted` records `commentedAt`. That wrapper normalizes
+successful adapter payloads and returns `posted: false` for skipped or failed
+delivery. Such results retry the comment without repeating a successful page;
+the paging claim is released after each attempt.
 
 `<digest>.json.lock` is an empty exclusive-create paging claim. Its mtime is
 used to reclaim stale claims after `OPERATOR_LABEL_PAGE_LOCK_STALE_MS` (default

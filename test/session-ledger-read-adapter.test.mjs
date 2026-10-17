@@ -1,3 +1,4 @@
+import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -1132,4 +1133,43 @@ test('REBASEPROV-01 ledger status projects the actual launch ticket', t => {
     ledgerTarget: { backend: 'sqlite', path: dbPath }, env: HERMETIC_CONFIG_ENV });
   assert.equal(result.ok, true);
   assert.equal(result.row.ticket_ref, 'CONFLICT-PR-42-REBASE');
+});
+
+test('SCRATCHRACE-01: launch retry traversal includes all descendants and excludes unrelated live launches', t => {
+  const root = tempRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerTarget = launchRetryFixture(root);
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.row.status, 'failed');
+  assert.deepEqual(result.retryChain.map(row => row.launch_request_id).sort(),
+    ['synthetic-retry', 'synthetic-retry-leaf', 'synthetic-terminal-sibling']);
+  const db = new Database(ledgerTarget.path);
+  db.prepare('UPDATE launch_requests SET metadata_json = ? WHERE launch_request_id = ?')
+    .run(JSON.stringify({ retryOf: 'synthetic-retry-leaf' }), 'synthetic-lrq');
+  db.close();
+  const cycle = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
+  assert.deepEqual(cycle.retryChain, result.retryChain, 'cycles terminate without duplicating the root');
+});
+
+test('SCRATCHRACE-01: PostgreSQL retry query follows metadata.retryOf transitively with bound input', () => {
+  let queries = 0;
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq',
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV,
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/synthetic' },
+    spawnSyncImpl: (_cmd, args, options) => {
+      queries += 1;
+      if (queries === 1) return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq', status: 'failed' }) };
+      assert.match(options.input, /WITH RECURSIVE retry_chain/);
+      assert.match(options.input, /child.metadata_json::jsonb->>'retryOf'/);
+      assert.match(options.input, /UNION\s+SELECT child/);
+      assert.ok(args.includes('lrq=synthetic-lrq'));
+      return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-retry', status: 'requested' }) };
+    },
+  });
+  assert.equal(queries, 2);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.retryChain[0].status, 'requested');
 });

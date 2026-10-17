@@ -1,3 +1,5 @@
+import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import { buildMergeAgentPrompt, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER } from '../src/merge-agent-prompt.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 import { HAMMER_PHASES } from '../src/hammer-procedure.mjs';
@@ -455,4 +457,112 @@ test('GENCONFLICT-01: merge-agent leased rebase uses the same generated-conflict
   assert.match(prompt, /hq generated-conflicts rebase --worktree "\$PWD" --onto "\$VALIDATION_BASE"/);
   assert.doesNotMatch(prompt, /\ngit rebase "\$VALIDATION_BASE"/);
   assert.match(prompt, /Failure aborts the rebase and removes this worktree/);
+});
+
+for (const status of ['requested', 'starting', 'running', 'parked']) {
+  test(`SCRATCHRACE-01: a transitive ${status} fleet retry retains scratch and prevents closer dispatch`, async t => {
+    const root = fixture(t);
+    const args = dispatchArgs(root);
+    const first = await maybeDispatchAmaCloser({ ...args,
+      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
+    const before = readFileSync(path, 'utf8');
+    const record = JSON.parse(before);
+    const prompt = readFileSync(first.promptPath, 'utf8');
+    const ledgerTarget = launchRetryFixture(root, status);
+    assert.equal(reconcileAmaCloserLease({ rootDir: root, repo: 'fixture/repo', prNumber: 42,
+      hqRoot: args.dispatchContext.hqRoot, ledgerTarget, logger }), false);
+    assert.equal(existsSync(record.scratchDir), true, 'lease reconciliation must see fleet retries too');
+    const result = await maybeDispatchAmaCloser({ ...args,
+      dispatchContext: { ...args.dispatchContext, ledgerTarget },
+      execFileImpl: async () => { assert.fail('a live retry must prevent all worker teardown and dispatch'); },
+    });
+    assert.equal(result.reason, 'dispatch-retry-live');
+    assert.equal(result.liveRetryLaunchRequestId, 'synthetic-retry-leaf');
+    assert.equal(existsSync(record.scratchDir), true);
+    assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
+    assert.equal(readFileSync(path, 'utf8'), before);
+    const reconciled = await reconcileAmaCloserDispatches(root, { logger, ledgerTarget });
+    assert.equal(reconciled.changed, 0);
+    assert.equal(existsSync(record.scratchDir), true);
+  });
+}
+
+test('SCRATCHRACE-01: a terminal retry chain still removes predecessor scratch', async t => {
+  const root = fixture(t);
+  const first = await maybeDispatchAmaCloser({ ...dispatchArgs(root),
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+  const scratchDir = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
+  const ledgerTarget = launchRetryFixture(root, 'succeeded');
+  const reconciled = await reconcileAmaCloserDispatches(root, { logger, ledgerTarget });
+  assert.equal(reconciled.changed, 1);
+  assert.equal(existsSync(scratchDir), false);
+});
+
+test('SCRATCHRACE-01: a live logical-job refusal preserves predecessor prompt and helpers', async t => {
+  const root = fixture(t);
+  const args = dispatchArgs(root);
+  const first = await maybeDispatchAmaCloser({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+  const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
+  const previous = JSON.parse(readFileSync(path));
+  const prompt = readFileSync(first.promptPath, 'utf8');
+  const helper = join(previous.scratchDir, 'synthetic-phase.sh');
+  writeFileSync(helper, 'synthetic phase helper');
+  const ledgerTarget = launchRetryFixture(root, 'failed');
+  let attemptedPrompt;
+  const result = await maybeDispatchAmaCloser({ ...args,
+    dispatchContext: { ...args.dispatchContext, ledgerTarget },
+    readPullRequestStateImpl: () => ({ state: 'OPEN' }),
+    readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync,
+    execFileImpl: async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv.includes('--prompt')) {
+        attemptedPrompt = argv[argv.indexOf('--prompt') + 1];
+        assert.notEqual(attemptedPrompt, first.promptPath);
+        assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
+        assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
+        throw Object.assign(new Error('synthetic dispatch refused'), {
+          stderr: 'duplicate key value violates unique constraint "uq_worker_runs_live_logical_job"',
+        });
+      }
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
+  });
+  assert.equal(result.reason, 'dispatch-retry-live', JSON.stringify(result));
+  assert.ok(attemptedPrompt, 'exercise the admission race after the terminal ledger snapshot');
+  assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
+  assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
+  const record = JSON.parse(readFileSync(path));
+  assert.equal(record.state, 'dispatched');
+  assert.equal(record.launchRequestId, previous.launchRequestId);
+  assert.equal(record.scratchDir, previous.scratchDir);
+  assert.equal(record.promptPath, first.promptPath);
+  assert.equal(record.retryCount, previous.retryCount);
+  const unlaunchedScratch = readFileSync(attemptedPrompt, 'utf8').split('scratch=')[1];
+  assert.equal(existsSync(unlaunchedScratch), false);
+});
+
+test('SCRATCHRACE-01: ordinary redispatch failure still cleans terminal predecessor and unlaunched scratch', async t => {
+  const root = fixture(t);
+  const args = dispatchArgs(root);
+  const first = await maybeDispatchAmaCloser({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+  const previousScratch = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
+  const ledgerTarget = launchRetryFixture(root, 'failed');
+  let newScratch;
+  const result = await maybeDispatchAmaCloser({ ...args,
+    dispatchContext: { ...args.dispatchContext, ledgerTarget },
+    readPullRequestStateImpl: () => ({ state: 'OPEN' }),
+    execFileImpl: async (_cmd, argv) => {
+      if (argv[0] === 'dispatch' && argv.includes('--prompt')) {
+        newScratch = readFileSync(argv[argv.indexOf('--prompt') + 1], 'utf8').split('scratch=')[1];
+        throw new Error('synthetic permanent refusal');
+      }
+      return { stdout: JSON.stringify({ status: 'failed' }) };
+    },
+  });
+  assert.equal(result.reason, 'dispatch-failed', JSON.stringify(result));
+  assert.ok(newScratch);
+  assert.equal(existsSync(newScratch), false);
+  assert.equal(existsSync(previousScratch), false);
 });

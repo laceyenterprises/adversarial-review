@@ -107,6 +107,19 @@ an initial `dispatching` to `dispatch-failed` transition. Launch intents and
 successful launches carrying a predecessor's terminal status retain scratch
 until a fresh terminal observation.
 
+SCRATCHRACE-01: launch liveness includes every descendant linked by
+`metadata.retryOf`, transitively. Any non-terminal fleet retry retains the
+ancestor's scratch and prevents closer re-dispatch; the startup sweep uses the
+same rule even if the owner record already reports a terminal launch. Each
+attempt writes a unique prompt alongside its scratch, so retry admission never
+rewrites an earlier launch's prompt. Predecessor deletion is deferred until the
+closer's admission decision. A `uq_worker_runs_live_logical_job` refusal restores
+the previous ownership as `dispatched`, reason `dispatch-retry-live`, without
+charging a failed attempt or deleting the previous artifacts. All-terminal
+chains and ordinary non-retry failures retain their existing cleanup behavior.
+After deployment, verify that a fleet-retried hammer following a spawn timeout
+can source its phase helpers and produces no missing-phase-script no-merge note.
+
 At watcher startup, a sweep reclaims terminal or orphan directories whose entire
 tree has been idle for at least two hours. Until one full sweep completes, the
 first poll at least a minute after the previous attempt retries it; subsequent

@@ -856,6 +856,7 @@ export function readLaunchRequestStatusFromLedgerAsync(args = {}) { return runLe
 
 function* readLaunchRequestStatusFromLedgerSteps({
   launchRequestId,
+  includeRetryChain = false,
   ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
@@ -926,7 +927,41 @@ function* readLaunchRequestStatusFromLedgerSteps({
       target: queried.target,
     };
   }
-  return { ok: true, row, target: queried.target };
+  if (!includeRetryChain) return { ok: true, row, target: queried.target };
+  // Follow dispatcher-owned retries in one recursive query. UNION deduplicates IDs,
+  // so even corrupt cyclic retry metadata cannot make the traversal unbounded.
+  let retries;
+  if (resolution.target.backend === 'sqlite') {
+    const metadataColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'metadata_json');
+    if (!metadataColumn.ok) return metadataColumn;
+    if (!metadataColumn.exists) return { ok: true, row, retryChain: [], target: queried.target };
+    retries = querySqliteRows(resolution.target, `
+      WITH RECURSIVE retry_chain(launch_request_id) AS (
+        SELECT @launchRequestId
+        UNION
+        SELECT child.launch_request_id FROM launch_requests child
+        JOIN retry_chain parent
+          ON json_extract(child.metadata_json, '$.retryOf') = parent.launch_request_id
+      )
+      SELECT launch_request_id, status FROM launch_requests
+      WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
+        AND launch_request_id != @launchRequestId`, { launchRequestId: normalizedLaunchRequestId });
+  } else {
+    retries = yield* queryPostgresRowsSteps(resolution.target, `
+      WITH RECURSIVE retry_chain(launch_request_id) AS (
+        SELECT :'lrq'::text
+        UNION
+        SELECT child.launch_request_id FROM launch_requests child
+        JOIN retry_chain parent
+          ON child.metadata_json::jsonb->>'retryOf' = parent.launch_request_id
+      )
+      SELECT json_build_object('launch_request_id', launch_request_id, 'status', status)
+      FROM launch_requests
+      WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
+        AND launch_request_id != :'lrq'`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]] });
+  }
+  if (!retries.ok) return retries;
+  return { ok: true, row, retryChain: retries.rows, target: queried.target };
 }
 
 // LIVEPACK-01: non-terminal dag_runs states. `parked` is non-terminal (a

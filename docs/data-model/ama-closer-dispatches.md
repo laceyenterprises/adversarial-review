@@ -5,6 +5,23 @@
 **Source of truth:** `src/ama/dispatch-closer.mjs`
 **Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/prelaunch-refusal-retry.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`
 
+## Fleet retry ownership (SCRATCHRACE-01)
+
+Liveness reads follow launch-ledger `metadata.retryOf` descendants transitively;
+a non-terminal descendant keeps the recorded ancestor's scratch and prompt
+owned. No additional durable store is introduced. Each dispatch attempt has a
+unique `promptPath`, including retries of the same PR and reviewed head.
+
+A live logical-job claim refusal restores the predecessor's `launchRequestId`,
+`dispatchId`, `scratchDir`, `promptPath`, and retry count in the existing record,
+with `state: dispatched`, `reason: dispatch-retry-live`, and
+`lastObservedStatus: requested`. Stale terminal outcome fields are cleared.
+This represents fleet-owned work, so merge-agent fallback is suppressed. The
+next pass resolves actual liveness from the same launch chain. Predecessor
+scratch deletion is deferred until the admission decision; terminal chains and
+non-retry failures still clean up normally. The scratch sweep applies the same
+launch-chain rule over terminal owner records.
+
 ## Purpose
 
 `data/follow-up-jobs/ama-closer-dispatches/` records the AMA closer's current

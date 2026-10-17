@@ -829,6 +829,10 @@ remain authoritative; recovery waits for green CI and resolved mergeability
 before a daemon merge, and red CI still routes to bounded repair.
 Retryable UNKNOWN deferral requires an open PR at the validated head; moved
 heads and closed PRs retain their terminal refusal.
+Hammer launch ownership includes all transitive dispatcher retries. A live
+logical-job claim refusal restores `dispatched` ownership and the predecessor's
+scratch and prompt; prompts are unique per attempt. Terminal retry chains still
+permit cleanup. The offline scratch suites pin retention and admission races.
 Final-round closure stall receipts remain independent of immediate primary-change
 alerts; successful launch/head progress restarts the stall deadline. See the
 [closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.
@@ -1104,7 +1108,7 @@ stateDiagram-v2
     s0 --> s6: hammer-dispatch.06 launch result: dispatch-failed
     s0 --> s8: hammer-dispatch.07 launch result: no-dispatch
     s0 --> s9: hammer-dispatch.08 launch result: completed
-    s1 --> s2: hammer-dispatch.09 terminal launch evidence
+    s1 --> s2: hammer-dispatch.09 terminal launch chain evidence (no live fleet retry)
     s1 --> s6: hammer-dispatch.10 failed outcome reconciled
     s2 --> s0: hammer-dispatch.11 bounded retry or changed context
     s3 --> s0: hammer-dispatch.12 bounded retry or changed context
@@ -1117,6 +1121,7 @@ stateDiagram-v2
     s3 --> s7: hammer-dispatch.19 reclassify legacy configuration refusal
     s6 --> s7: hammer-dispatch.20 reclassify legacy configuration refusal
     s7 --> s0: hammer-dispatch.21 normal backoff due, re-probe dispatch, admission clears blocker
+    s0 --> s1: hammer-dispatch.22 live logical-job claim restores predecessor ownership and artifacts
     s2 --> [*]
     s5 --> [*]
     s6 --> [*]

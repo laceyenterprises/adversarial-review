@@ -1,3 +1,5 @@
+import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
@@ -873,3 +875,15 @@ test('HAMTMP-03: ticker runs at startup, hourly, and never overlaps', async () =
   assert.deepEqual(await ticker.tick(), []);
   assert.equal(calls, 2);
 });
+
+for (const status of ['requested', 'failed']) {
+  test(`SCRATCHRACE-01: sweep respects a ${status} transitive fleet retry over a terminal owner`, async t => {
+    const f = fixture(t);
+    const scratch = f.scratch();
+    f.record(scratch, { launchRequestId: 'synthetic-lrq', state: 'launch-terminal', lastObservedStatus: 'failed' });
+    const ledgerTarget = launchRetryFixture(f.root, status);
+    const result = await sweepHammerScratchDirs(f.root, { ...f.options, ledgerTarget,
+      readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync });
+    assert.equal(existsSync(scratch), status === 'requested', JSON.stringify(result));
+  });
+}

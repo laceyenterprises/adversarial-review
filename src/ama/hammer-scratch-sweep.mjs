@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstatSync, opendirSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, opendirSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
@@ -14,6 +14,9 @@ import {
 export const HAMMER_SCRATCH_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 export const HAMMER_SCRATCH_SWEEP_RETRY_MS = 60 * 1000;
+const PROCESS_CENSUS_TIMEOUT_MS = 15_000;
+const PROCESS_CENSUS_FRESHNESS_MS = 30_000;
+class ScratchScanBudgetExhausted extends Error {}
 const execFileAsync = promisify(execFile);
 // The disk checkpoint retains partial indexing across watcher restarts. Neither
 // cache authorizes deletion without a complete, current metadata census.
@@ -42,10 +45,11 @@ function readRecordIndex(path, directory) {
 }
 
 export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl = execFileAsync,
-  platform = process.platform }) {
+  platform = process.platform, logger = console }) {
   // TMPDIR is inherited by the hammer and its children. Include environments so
   // even an idle orphan with no open scratch file is protected. Never log this
   // output: it may contain credentials. An unavailable/truncated census holds.
+  const startedAt = Date.now();
   const results = await Promise.allSettled([
     // Darwin's -e lists processes; -E explicitly includes their environments.
     execFileImpl('ps', [platform === 'darwin' ? '-Eww' : 'eww', '-axo', 'pid=,command='], {
@@ -57,7 +61,12 @@ export async function readHammerScratchProcessSnapshot({ timeout, execFileImpl =
       encoding: 'utf8', timeout, maxBuffer: 32 * 1024 * 1024,
     }),
   ]);
-  if (results.some(result => result.status !== 'fulfilled' || !result.value?.stdout?.trim())) {
+  const unreadable = results.some(result => result.status !== 'fulfilled' || !result.value?.stdout?.trim());
+  const bytes = result => result.status === 'fulfilled' ? Buffer.byteLength(result.value?.stdout || '') : 0;
+  logger.info?.(JSON.stringify({ event: 'ama_closer.scratch_process_census',
+    durationMs: Date.now() - startedAt, psBytes: bytes(results[0]), lsofBytes: bytes(results[1]),
+    outcome: unreadable ? 'unreadable' : 'ok' }));
+  if (unreadable) {
     throw new Error('unreadable process census');
   }
   return results.map(result => result.value.stdout).join('\n');
@@ -79,7 +88,7 @@ function readRecords(rootDir, deadline, maxRecordReads, logger) {
   try {
     let entry;
     while ((entry = dir.readSync())) {
-      if (Date.now() >= deadline) throw new Error('scratch record scan budget exhausted');
+      if (Date.now() >= deadline) throw new ScratchScanBudgetExhausted('scratch record scan budget exhausted');
       if (!entry.name.endsWith('.json')) continue;
       // A corrupt/unreadable record could own any directory. Never classify it
       // as missing and reclaim that run's scratch on a diagnostic read failure.
@@ -132,7 +141,7 @@ function treeSize(path, deadline) {
   let newestMtimeMs = 0;
   const pending = [path];
   while (pending.length) {
-    if (Date.now() >= deadline) throw new Error('scratch size scan budget exhausted');
+    if (Date.now() >= deadline) throw new ScratchScanBudgetExhausted('scratch size scan budget exhausted');
     const current = pending.pop();
     const stat = lstatSync(current);
     bytes += Number.isFinite(stat.blocks) ? stat.blocks * 512 : stat.size;
@@ -142,7 +151,7 @@ function treeSize(path, deadline) {
     try {
       let entry;
       while ((entry = dir.readSync())) {
-        if (Date.now() >= deadline) throw new Error('scratch size scan budget exhausted');
+        if (Date.now() >= deadline) throw new ScratchScanBudgetExhausted('scratch size scan budget exhausted');
         pending.push(join(current, entry.name));
       }
     } finally { dir.closeSync(); }
@@ -235,10 +244,29 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
   const logger = settings.logger || console;
   const nowMs = settings.nowMs ?? Date.now();
   const maxAgeMs = settings.maxAgeMs ?? HAMMER_SCRATCH_MAX_AGE_MS;
-  const deadline = Date.now() + (settings.scanBudgetMs ?? 10_000);
+  let deadline = Date.now() + (settings.scanBudgetMs ?? 10_000);
   const promptDir = join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
   const removed = [];
-  let dir;
+  let candidates = [];
+  let candidateIndex = 0;
+  let pauseReason;
+  let processes;
+  let censusStartedAt;
+  let censusReads = 0;
+  async function refreshCensus() {
+    censusStartedAt = Date.now();
+    censusReads += 1;
+    try {
+      processes = await settings.readProcessSnapshotImpl({ timeout: PROCESS_CENSUS_TIMEOUT_MS, logger });
+      if (typeof processes !== 'string' || !processes.trim()) throw new Error('unreadable process census');
+    } catch {
+      // Executor errors can contain environments or command output. Never log them.
+      throw new Error('unreadable process census');
+    } finally {
+      // Census subprocesses have their own clock, independent of scan/ledger work.
+      deadline += Date.now() - censusStartedAt;
+    }
+  }
   let completed = false;
   try {
     let parentStat;
@@ -249,15 +277,15 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       return removed;
     }
     if (!parentStat.isDirectory()) { completed = true; return removed; }
+    candidates = readdirSync(promptDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name.startsWith('hammer-scratch-'));
     // The deadline bounds production scans; a count cap must not stretch a
     // small retained history over hours. Tests may force partial checkpoints.
     const records = readRecords(rootDir, deadline, settings.maxRecordReads ?? Infinity, logger);
-    dir = opendirSync(promptDir);
-    while (removed.length < (settings.maxRemovals ?? 64)
-      && Date.now() < deadline) {
-      const entry = dir.readSync();
-      if (!entry) { completed = true; break; }
-      if (!entry.isDirectory() || !entry.name.startsWith('hammer-scratch-')) continue;
+    for (; candidateIndex < candidates.length; candidateIndex += 1) {
+      if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
+      if (removed.length >= (settings.maxRemovals ?? 64)) { pauseReason = 'removal-limit'; break; }
+      const entry = candidates[candidateIndex];
       const scratchDir = join(promptDir, entry.name);
       const before = lstatSync(scratchDir);
       if (!before.isDirectory() || nowMs - before.mtimeMs < maxAgeMs) continue;
@@ -272,18 +300,29 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
           || !await isTerminalOwner(current, settings, deadline)
           || await hasLiveWorker(current, settings, deadline)) { live = true; break; }
       }
-      if (live || Date.now() >= deadline) continue;
-      // Refresh immediately before deletion, after traversal and ledger reads.
-      // A missing record alone cannot prove that a process stopped using TMPDIR.
-      const processes = await settings.readProcessSnapshotImpl({ timeout: Math.max(1, deadline - Date.now()) });
-      if (typeof processes !== 'string' || !processes.trim()) throw new Error('unreadable process census');
+      if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
+      if (live) continue;
+      // Read once before deletions, then refresh at most once if it ages out.
+      // Recheck every path and owner against the current census; an absent
+      // dispatch record alone cannot prove a process stopped using TMPDIR.
+      if (!processes || Date.now() - censusStartedAt >= PROCESS_CENSUS_FRESHNESS_MS) {
+        if (censusReads >= 2) { pauseReason = 'census-expired'; break; }
+        await refreshCensus();
+      }
+      if (Date.now() - censusStartedAt >= PROCESS_CENSUS_FRESHNESS_MS) {
+        pauseReason = 'census-expired'; break;
+      }
       if ([scratchDir, realpathSync(scratchDir)].some(path => processes.includes(path)) || owners.some(({ record }) =>
         [record.launchRequestId, record.workerId].some(id => id && processes.includes(id)))) continue;
       if (owners.some(({ path, record }) => JSON.stringify(JSON.parse(readFileSync(path, 'utf8')))
         !== JSON.stringify(record))) continue;
       const parentNow = lstatSync(promptDir);
       const current = lstatSync(scratchDir);
-      if (Date.now() >= deadline || !parentNow.isDirectory() || !current.isDirectory()
+      if (Date.now() >= deadline) { pauseReason = 'scan-budget'; break; }
+      if (Date.now() - censusStartedAt >= PROCESS_CENSUS_FRESHNESS_MS) {
+        pauseReason = 'census-expired'; break;
+      }
+      if (!parentNow.isDirectory() || !current.isDirectory()
         || parentNow.ino !== parentStat.ino || parentNow.dev !== parentStat.dev
         || current.ino !== before.ino || current.dev !== before.dev
         || current.mtimeMs !== before.mtimeMs) continue;
@@ -293,10 +332,14 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
           name: entry.name, bytesFreed: size.bytes, reason: owners.length ? 'terminal' : 'orphan' }));
       }
     }
+    completed = candidateIndex === candidates.length;
   } catch (error) {
-    if (error.code !== 'ENOENT') logger.warn?.(`hammer scratch sweep deferred: ${error.message}`);
+    if (error instanceof ScratchScanBudgetExhausted) {
+      pauseReason = 'scan-budget';
+    } else if (error.code !== 'ENOENT') logger.warn?.(`hammer scratch sweep deferred: ${error.message}`);
   } finally {
-    dir?.closeSync();
+    if (pauseReason) logger.info?.(JSON.stringify({ event: 'ama_closer.scratch_sweep_paused',
+      reason: pauseReason, removed: removed.length, remainingCandidates: candidates.length - candidateIndex }));
     if (completed) settings.onSweepComplete?.();
   }
   return removed;

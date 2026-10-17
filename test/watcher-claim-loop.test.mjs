@@ -217,7 +217,7 @@ export async function load(url, context, nextLoad) {
             builderClass: 'codex',
             labels: ['risk:medium'],
             updatedAt: '2026-05-15T12:00:02.000Z',
-            headSha: null,
+            headSha: Object.hasOwn(subjectHeadOverrides, '102') ? subjectHeadOverrides['102'] : 'sha-happy-102',
             terminal: false,
             observedAt: '2026-05-15T12:00:03.000Z',
           },
@@ -1034,7 +1034,7 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
   const registerPath = path.join(tmp, 'fixture-register.mjs');
   const runnerPath = path.join(tmp, 'fixture-runner.mjs');
   try {
-    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { '102': null } }));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource());
 
@@ -1061,7 +1061,7 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     assert.equal(summary.rows['101'].subject_external_id, 'laceyenterprises/adversarial-review#101');
     assert.equal(summary.rows['101'].revision_ref, 'sha-happy-101');
     assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-happy-101');
-    assert.equal(summary.rows['102'].review_status, 'posted');
+    assert.equal(summary.rows['102'].review_status, 'pending');
     assert.equal(summary.rows['102'].reviewer_head_sha, null);
     assert.equal(summary.rows['101'].codex_broker_provider, null);
     assert.equal(summary.rows['102'].codex_broker_provider, null);
@@ -1119,7 +1119,7 @@ for (const [name, failureSource] of [
     const registerPath = path.join(tmp, 'fixture-register.mjs');
     const runnerPath = path.join(tmp, 'fixture-runner.mjs');
     try {
-      writeFileSync(loaderPath, buildLoaderSource());
+      writeFileSync(loaderPath, buildLoaderSource({ subjectHeads: { '102': null } }));
       writeFileSync(registerPath, buildRegisterSource(loaderPath));
       writeFileSync(runnerPath, buildRunnerSource({
         prePollSetup: `

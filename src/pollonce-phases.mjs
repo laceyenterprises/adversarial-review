@@ -183,6 +183,7 @@ import {
   stmtMarkReviewerCommandFailedRecoveredPosted,
   stmtMarkUnknownFailureRetryAttemptStarted,
   stmtReleaseReviewerClaim,
+  stmtReleaseUnsettledPostedReview,
   stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
   stmtRestoreSameHeadSuppressedReviewPosted,
   stmtUpdateReviewLabels,
@@ -2616,14 +2617,22 @@ export async function processReviewSubject(entry, ctx) {
         const reconciliation = await reconcileReviewerCommandFailedBeforeRetry({
           row: current,
           findPostedReview: reviewerCommandFailedReviewProbe,
-          markPosted: ({ postedAt, row }) => {
+          markPosted: ({ postedAt, row, postedReview }) => {
+            const reviewedHead = String(postedReview?.commit_id || row.reviewer_head_sha || '').trim() || null;
             const changes = stmtMarkReviewerCommandFailedRecoveredPosted.run(
               postedAt,
+              reviewedHead,
               row.repo,
               row.pr_number,
               row.reviewer_session_uuid,
               row.reviewer_started_at,
+              reviewedHead,
             ).changes;
+            if (changes !== 1 && !reviewedHead) {
+              const released = stmtReleaseUnsettledPostedReview.run(null, row.repo, row.pr_number, row.reviewer_session_uuid);
+              console.warn(`[watcher] posted-settlement-missing-reviewed-head repo=${row.repo} pr=${row.pr_number} `
+                + `released_to_pending=${released.changes === 1} source=command-failed-recovery`);
+            }
             if (changes === 1) {
               markWatcherReviewHeartbeat({ repo: row.repo, pr_number: row.pr_number, posted_at: postedAt });
             }

@@ -650,7 +650,7 @@ async function main(argv, {
         stderr.write(`error: could not confirm active reviewer exit: ${err.message}\n`);
         return EXIT_RUNTIME;
       }
-      if (exitResult.checked && exitResult.exited === false) {
+      if (exitResult.exited !== true) {
         const row = makeAuditRow({
           ...baseAudit,
           priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
@@ -678,6 +678,7 @@ async function main(argv, {
           expectedReviewStatus: 'reviewing',
           expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
           expectedReviewerPgid: normalizeExpectedReviewerPgid(reviewRow.reviewer_pgid),
+          reviewerExitConfirmed: true,
         });
         if (!resetResult.reset) {
           const refreshed = readReviewRow({ rootDir, repo: values.repo, prNumber: values.pr });
@@ -708,6 +709,7 @@ async function main(argv, {
       activeReviewReset = 'cancelled';
     } else if (values['allow-active-review-reset']) {
       const reviewerPgid = reviewerCancelHandle(reviewRow);
+      if (reviewerPgid === null) return recordReviewRefusal('active-review-exit-unconfirmed');
       if (reviewerPgid !== null) {
         let reviewerAlive;
         try {
@@ -744,6 +746,7 @@ async function main(argv, {
           expectedReviewStatus: 'reviewing',
           expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
           expectedReviewerPgid: reviewerPgid,
+          reviewerExitConfirmed: true,
         });
       } catch (err) {
         stderr.write(`error: could not reset stale active review: ${err.message}\n`);

@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureReviewStateSchema, requestReviewRereview } from '../src/review-state.mjs';
+import { ensureReviewStateSchema, forceResetReviewToPending, requestReviewRereview } from '../src/review-state.mjs';
 import {
   prepareMarkAttemptStarted,
   prepareMarkPosted,
@@ -13,6 +13,9 @@ import {
 import { settleReviewerAttempt } from '../src/reviewer-spawn-settle.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
+import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
+import { reconcileReviewerSessions, reviewerBotLoginAliases } from '../src/reviewer-reattach.mjs';
+import { reconcilePostedFailedOrphans } from '../src/orphan-post-reconcile.mjs';
 
 const repo = 'example/review-head';
 const head = 'a'.repeat(40);
@@ -116,4 +119,77 @@ test('REVIEWHEAD-01: a late success cannot post or release a replacement session
   settle();
   assert.deepEqual(row(), before);
   assert.match(logs.join('\n'), /posted-settlement-claim-mismatch.*released_to_pending=false/);
+});
+
+test('REVIEWHEAD-01: an operator reset without exit proof preserves a pre-spawn claim', t => {
+  const { db, rootDir, row } = fixture(t);
+  const before = row();
+  const result = forceResetReviewToPending({ db, rootDir, repo, prNumber: 1,
+    expectedReviewerSessionUuid: session, expectedReviewerPgid: null });
+  assert.equal(result.reset, false);
+  assert.equal(result.reason, 'review-in-flight');
+  assert.deepEqual(row(), before);
+});
+
+for (const reviewedHead of [head, null]) {
+  test(`REVIEWHEAD-01: artifact recovery records its pass head or requeues (${reviewedHead ? 'known' : 'missing'})`, t => {
+    const { db, rootDir, row, logs } = fixture(t);
+    db.prepare(`INSERT INTO reviewer_passes (repo, pr_number, attempt_number,
+      reviewer_class, reviewer_model, pass_kind, started_at, status, head_sha,
+      gh_comment_id, body_captured_at, metadata_json)
+      VALUES (?, 1, 1, 'claude', 'claude', 'first-pass', ?, 'running', ?,
+        'synthetic-review', ?, ?)`)
+      .run(repo, startedAt, reviewedHead, startedAt, JSON.stringify({ reviewerSessionUuid: session }));
+    const before = row();
+    reapRunningPassTimeouts({ db, rootDir, now: () => new Date(),
+      log: { log() {}, warn: message => logs.push(message) },
+      queueFollowUpForRecoveredPostedReviewImpl: () => ({ queued: false }) });
+    assert.equal(row().review_status, reviewedHead ? 'posted' : 'pending');
+    assert.equal(row().reviewer_head_sha, reviewedHead);
+    assert.equal(row().review_attempts, before.review_attempts + (reviewedHead ? 1 : 0));
+    if (!reviewedHead) {
+      assert.equal(row().infra_auto_recover_attempts, before.infra_auto_recover_attempts);
+      assert.match(logs.join('\n'), /posted-settlement-unmatched-recovery/);
+    }
+  });
+
+  test(`REVIEWHEAD-01: reattachment records recovered review head or requeues (${reviewedHead ? 'known' : 'missing'})`, async t => {
+    const { db, rootDir, row, logs } = fixture(t);
+    db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = NULL, reviewer_started_at = ?, reviewer_pgid = 42')
+      .run(startedAt);
+    const before = row();
+    t.mock.timers.tick(1_200_000);
+    await reconcileReviewerSessions({ db, rootDir, now: new Date(),
+      log: { log() {}, warn: message => logs.push(message) },
+      probeSession: async () => ({ alive: false, matched: false }),
+      fetchHeadSha: async () => head,
+      fetchLivePrState: async () => ({ state: 'open', merged_at: null, head: { sha: head } }),
+      findPostedReview: async () => ({ submitted_at: new Date().toISOString(), commit_id: reviewedHead }),
+    });
+    assert.equal(row().review_status, reviewedHead ? 'posted' : 'pending');
+    assert.equal(row().reviewer_head_sha, reviewedHead);
+    assert.equal(row().review_attempts, before.review_attempts + (reviewedHead ? 1 : 0));
+    if (!reviewedHead) assert.match(logs.join('\n'), /posted-settlement-unmatched-recovery/);
+  });
+}
+
+test('REVIEWHEAD-01: a re-review reset during posted-orphan reconciliation cannot recreate a headless posted row', async t => {
+  const { db, rootDir, row, logs } = fixture(t);
+  db.prepare(`UPDATE reviewed_prs SET review_status = 'failed-orphan', reviewer_started_at = ?`).run(startedAt);
+  const before = row();
+  await reconcilePostedFailedOrphans({ db, rootDir, apply: true,
+    getPull: async () => {
+      db.prepare(`UPDATE reviewed_prs SET review_status = 'pending', reviewer_head_sha = NULL,
+        reviewer_session_uuid = NULL`).run();
+      return { state: 'open', merged_at: null };
+    },
+    listReviews: async () => [{ id: 'synthetic-review', state: 'COMMENTED', commit_id: head,
+      submitted_at: startedAt, user: { login: reviewerBotLoginAliases('claude')[0] } }],
+    log: { warn: message => logs.push(message) },
+  });
+  assert.equal(row().review_status, 'pending');
+  assert.equal(row().reviewer_head_sha, null);
+  assert.equal(row().revision_ref, head);
+  assert.equal(row().review_attempts, before.review_attempts);
+  assert.match(logs.join('\n'), /posted-settlement-unmatched-recovery/);
 });

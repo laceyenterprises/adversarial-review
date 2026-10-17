@@ -5,6 +5,7 @@ import { ghReviewStateToVerdict } from './backfill-review-bodies.mjs';
 import { queueFollowUpForRecoveredPostedReview } from './reviewer-pass-reaper.mjs';
 import { withSqliteBusyRetrySync } from './sqlite-busy-retry.mjs';
 import { findFollowUpJobForRevision } from './operator-retrigger-helpers.mjs';
+import { prepareReleaseUnsettledPostedReview } from './review-state-statements.mjs';
 
 function postedReviewForRow(row, reviews) {
   const aliases = reviewerBotLoginAliases(row.reviewer);
@@ -50,6 +51,7 @@ export async function reconcilePostedFailedOrphans({
   rootDir = process.cwd(),
   queueFollowUpForRecoveredPostedReviewImpl = queueFollowUpForRecoveredPostedReview,
   getPull = async () => null,
+  log = console,
 } = {}) {
   const scanLimit = Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
   const depthBefore = Number(db.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW).get()?.n || 0);
@@ -86,13 +88,26 @@ export async function reconcilePostedFailedOrphans({
   ).all(scanLimit);
   const markPosted = db.prepare(
     `UPDATE reviewed_prs
-        SET review_status = 'posted', posted_at = ?, failed_at = NULL,
+        SET review_status = 'posted', posted_at = ?, reviewer_head_sha = ?, failed_at = NULL,
             failure_message = NULL, reviewer_lease_expires_at = NULL,
             infra_auto_recover_attempts = 0
       WHERE repo = ? AND pr_number = ? AND review_status IN ('failed-orphan', 'pending')
         AND pr_state = 'open'
-        AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
+        AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')
+        AND reviewer_head_sha = ?`
   );
+  const releaseUnsettledPostedReview = prepareReleaseUnsettledPostedReview(db);
+  function markRecoveredPosted(row, review) {
+    const result = markPosted.run(review.submitted_at, row.reviewer_head_sha,
+      row.repo, row.pr_number, row.reviewer_session_uuid || '', row.reviewer_head_sha);
+    if (result.changes !== 1) {
+      const released = releaseUnsettledPostedReview.run(
+        row.reviewer_head_sha, row.repo, row.pr_number, row.reviewer_session_uuid ?? null);
+      log.warn?.(`[watcher] posted-settlement-unmatched-recovery repo=${row.repo} pr=${row.pr_number} `
+        + `released_to_pending=${released.changes === 1} source=posted-orphan-reconcile`);
+    }
+    return result;
+  }
   const latestPass = db.prepare(
     `SELECT pass_id, repo, pr_number, reviewer_class, reviewer_model, metadata_json, head_sha,
             verdict, body_md, gh_comment_id
@@ -192,12 +207,7 @@ export async function reconcilePostedFailedOrphans({
                 }
               : null;
             if (!artifactLinked) {
-              const result = markPosted.run(
-                review.submitted_at,
-                row.repo,
-                row.pr_number,
-                row.reviewer_session_uuid || ''
-              );
+              const result = markRecoveredPosted(row, review);
               return { rowMarkedPosted: result.changes === 1, artifactLinked, passFound: Boolean(pass), followUpPayload };
             }
             return { rowMarkedPosted: false, artifactLinked, passFound: Boolean(pass), followUpPayload };
@@ -223,12 +233,7 @@ export async function reconcilePostedFailedOrphans({
           } else {
             queueDecision = queueFollowUpForRecoveredPostedReviewImpl(applyResult.followUpPayload);
           }
-          const markResult = markPosted.run(
-            review.submitted_at,
-            row.repo,
-            row.pr_number,
-            row.reviewer_session_uuid || ''
-          );
+          const markResult = markRecoveredPosted(row, review);
           rowMarkedPosted = markResult.changes === 1;
         }
         if (rowMarkedPosted && !artifactLinked && !passFound) {

@@ -1392,12 +1392,17 @@ function forceResetReviewToPending({
   expectedReviewStatus = 'reviewing',
   expectedReviewerSessionUuid = null,
   expectedReviewerPgid = null,
+  reviewerExitConfirmed = false,
   db: dbOverride = null,
 } = {}) {
   const db = dbOverride || openReviewStateDb(rootDir);
   try {
     if (!dbOverride) {
       ensureReviewStateSchema(db);
+    }
+
+    if (expectedReviewStatus === 'reviewing' && !reviewerExitConfirmed) {
+      return { reset: false, reason: 'review-in-flight', reviewRow: getReviewRow(db, { repo, prNumber }) };
     }
 
     const sessionGuard = expectedReviewerSessionUuid === null

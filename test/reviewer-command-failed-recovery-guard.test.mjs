@@ -154,16 +154,18 @@ test('reviewer-command-failed recovery CAS accepts lease-released pending termin
       '[unknown] Command failed: gh api reviews timed out',
       ROW.reviewer_session_uuid,
       ROW.reviewer_started_at,
-      'head-407',
+      'synthetic-head',
       null,
     );
 
     const changes = prepareMarkReviewerCommandFailedRecoveredPosted(db).run(
       '2026-06-21T13:02:00.000Z',
+      'synthetic-head',
       ROW.repo,
       ROW.pr_number,
       ROW.reviewer_session_uuid,
       ROW.reviewer_started_at,
+      'synthetic-head',
     ).changes;
 
     assert.equal(changes, 1);

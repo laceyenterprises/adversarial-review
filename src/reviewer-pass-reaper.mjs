@@ -11,6 +11,7 @@ import {
 } from './follow-up-jobs.mjs';
 import { getConfig } from './config-loader.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
+import { prepareReleaseUnsettledPostedReview } from './review-state-statements.mjs';
 import { readSingleReviewDecision } from './review-mode-latency.mjs';
 import { readReviewerRunRecord, TERMINAL_RUN_STATES } from './adapters/reviewer-runtime/run-state.mjs';
 import { inFlightReviewerSessions } from './reviewer-session-registry.mjs';
@@ -310,6 +311,7 @@ function reapRunningPassTimeouts({
     `UPDATE reviewed_prs
         SET review_status = 'posted',
             posted_at = ?,
+            reviewer_head_sha = ?,
             failed_at = NULL,
             failure_message = NULL,
             quota_reset_at_utc = NULL,
@@ -319,8 +321,10 @@ function reapRunningPassTimeouts({
       WHERE repo = ?
         AND pr_number = ?
         AND review_status = 'reviewing'
+        AND NULLIF(TRIM(?), '') IS NOT NULL
         AND ${ACTIVE_REVIEW_CLAIM_PREDICATE}`
   );
+  const releaseUnsettledPostedReview = prepareReleaseUnsettledPostedReview(db);
   const recoverBouncedPostedReview = db.prepare(bouncedPostedReviewSettleSql(ACTIVE_REVIEW_CLAIM_PREDICATE));
   const updatePass = db.prepare(
     `UPDATE reviewer_passes
@@ -350,8 +354,10 @@ function reapRunningPassTimeouts({
       const reviewerSessionUuid = reviewerSessionUuidFromPass(row);
       const reviewResult = recoverPostedReviewClaim.run(
         endedAt,
+        row.head_sha || null,
         row.repo,
         row.pr_number,
+        row.head_sha || null,
         reviewerSessionUuid,
         reviewerSessionUuid,
         reviewerSessionUuid,
@@ -361,6 +367,12 @@ function reapRunningPassTimeouts({
         row.head_sha || null
       );
       reviewChanged = reviewResult.changes > 0;
+      if (!reviewChanged) {
+        const released = releaseUnsettledPostedReview.run(
+          row.head_sha || null, row.repo, row.pr_number, reviewerSessionUuid);
+        log.warn?.(`[watcher] posted-settlement-unmatched-recovery repo=${row.repo} pr=${row.pr_number} `
+          + `released_to_pending=${released.changes === 1} source=reviewer-pass-reaper`);
+      }
     } else if (
       (current?.review_status === 'failed' || current?.review_status === 'pending')
       && isDaemonBounceFailure(current)

@@ -26,7 +26,7 @@ export function prepareReleaseUnsettledPostedReview(db) {
           reviewer_timeout_ms = NULL, reviewer_lease_expires_at = NULL,
           failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL
     WHERE repo = ? AND pr_number = ?
-      AND review_status IN ('reviewing', 'pending', 'failed-orphan')
+      AND review_status IN ('reviewing', 'pending', 'failed', 'failed-orphan')
       AND (reviewer_session_uuid IS ? OR reviewer_session_uuid IS NULL)`);
 }
 
@@ -264,6 +264,7 @@ export const MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL =
   `UPDATE reviewed_prs
       SET review_status = 'posted',
           posted_at = ?,
+          reviewer_head_sha = ?,
           failed_at = NULL,
           failure_message = NULL,
           quota_reset_at_utc = NULL,
@@ -275,6 +276,8 @@ export const MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL =
       AND review_status IN ('failed', 'pending')
       AND reviewer_session_uuid = ?
       AND reviewer_started_at = ?
+      AND reviewer_head_sha = ?
+      AND NULLIF(TRIM(reviewer_head_sha), '') IS NOT NULL
       AND lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%'`;
 
 export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =

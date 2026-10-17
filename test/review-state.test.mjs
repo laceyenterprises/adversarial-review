@@ -1557,12 +1557,24 @@ test('OWNERPROOF-01: bounded recovery re-arms an old pending head and resets spe
   assert.equal(result.reviewRow.revision_ref, 'head');
 });
 
-test('OWNERPROOF-01: dead reviewing snapshot can be rearmed, but a replacement snapshot cannot', t => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'ownerproof-dead-review-'));
+test('REVIEWHEAD-01: ownerless re-review cannot erase a claim before its child starts', t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewhead-claim-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  insertReviewRow(rootDir, { reviewStatus: 'reviewing', reviewerStartedAt: '2026-04-24T12:00:00Z', revisionRef: 'head' });
-  const args = { rootDir, repo: 'laceyenterprises/adversarial-review', prNumber: 10,
-    targetRevisionRef: 'head', ownerlessRecovery: true, reason: 'system-orphan-head-review:head' };
-  assert.equal(requestReviewRereview({ ...args, expectedOwnerlessReviewer: { pgid: null, startedAt: 'other' } }).triggered, false);
-  assert.equal(requestReviewRereview({ ...args, expectedOwnerlessReviewer: { pgid: null, startedAt: '2026-04-24T12:00:00Z' } }).triggered, true);
+  const repo = 'example/review-head';
+  const requestedAt = '2026-01-01T00:00:15.000Z';
+  insertReviewRow(rootDir, { repo, reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'synthetic-session', reviewerHeadSha: 'synthetic-head',
+    reviewerLeaseExpiresAt: '2026-01-01T00:10:00.000Z', revisionRef: 'synthetic-head' });
+  const db = openReviewStateDb(rootDir);
+  t.after(() => db.close());
+  const before = db.prepare('SELECT * FROM reviewed_prs').get();
+  for (const ownerlessRecovery of [false, true]) {
+    const result = requestReviewRereview({ rootDir, db, repo, prNumber: 10, requestedAt,
+      targetRevisionRef: 'synthetic-head', ownerlessRecovery,
+      expectedOwnerlessReviewer: { pgid: null, startedAt: null },
+      reason: 'system-orphan-head-review:synthetic-head' });
+    assert.equal(result.triggered, false);
+    assert.equal(result.reason, 'review-in-flight');
+    assert.deepEqual(db.prepare('SELECT * FROM reviewed_prs').get(), before);
+  }
 });

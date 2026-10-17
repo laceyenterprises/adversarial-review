@@ -63,6 +63,13 @@ reviews.db row -> posted
 
 ## 1) Watcher delivery state machine
 
+Re-review requests, including ownerless `system-orphan-head-review` recovery,
+never reset a `reviewing` row. The durable claim starts before the child has a
+process group or start timestamp; missing process fields do not authorize a
+reset. The request returns `review-in-flight` and can be retried after settlement.
+Lease reconciliation owns abandoned claims. Explicit operator cancellation and
+reset still requires its existing process-exit verification and identity guards.
+
 Source of truth:
 
 ```text

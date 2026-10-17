@@ -89,6 +89,9 @@ is requeued only when its `revision_ref` equals the live subject head. The
 `system-missing-reviewed-head:<head>`, and logs the repair. It preserves attempt
 history and every retry budget; ordinary posted rows are untouched. Merge
 eligibility continues to require the existing reviewed-head evidence.
+An existing `system-orphan-head-review` request for that exact head keeps its
+reason and original timestamp, preserving its already-authorized admission
+intent without adding an exception to any review ceiling.
 
 Source of truth:
 

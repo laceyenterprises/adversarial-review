@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { requeuePostedReviewWithoutHead } from '../src/posted-review-head-repair.mjs';
+import { isOrphanHeadReviewRequested } from '../src/orphan-head-review-requested.mjs';
 
 const repo = 'example/review-head';
 const head = 'a'.repeat(40);
@@ -64,3 +65,16 @@ for (const kind of ['normal-posted', 'moved-head', 'missing-live-head', 'reviewi
     assert.deepEqual(logs, []);
   });
 }
+
+test('REVIEWHEAD-01: repair preserves an existing exact-head orphan request and its timestamp', t => {
+  const { db, row, repair } = fixture(t);
+  const requestedAt = '2026-01-01T00:00:15.000Z';
+  db.prepare('UPDATE reviewed_prs SET rereview_requested_at = ?').run(requestedAt);
+  assert.equal(isOrphanHeadReviewRequested(row(), head), true);
+  assert.equal(repair(), true);
+  assert.equal(row().rereview_requested_at, requestedAt);
+  assert.equal(isOrphanHeadReviewRequested(row(), head), true,
+    'repair must retain the existing admission intent without creating a new budget exception');
+  assert.equal(row().review_attempts, 4);
+  assert.equal(row().infra_auto_recover_attempts, 2);
+});

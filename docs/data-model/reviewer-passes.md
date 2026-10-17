@@ -34,6 +34,8 @@ when `revision_ref` matches the live head. The status CAS requeues once, writes
 `rereview_requested_at` and `rereview_reason=system-missing-reviewed-head:<head>`,
 and logs the repair without changing attempt history or retry budgets. There
 is no schema migration or new status value. Normal posted rows remain intact.
+An existing exact-head `system-orphan-head-review` request retains its reason
+and timestamp, so repair does not discard an already-authorized review intent.
 
 `reviewed_prs.head_wait_started_at` is nullable ISO 8601 text, added
 idempotently by `ensureReviewStateSchema` to both fresh and existing stores.

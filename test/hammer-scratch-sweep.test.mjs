@@ -81,6 +81,176 @@ function fixture(t) {
   return { root, promptDir, logs, options, scratch, record, history };
 }
 
+test('SCRATCHCENSUS-01: 100 terminal candidates share a slow census and retain progress at the scan deadline', async t => {
+  const f = fixture(t);
+  for (let index = 0; index < 100; index += 1) {
+    const path = f.scratch();
+    const owner = f.record(path);
+    writeFileSync(join(dirname(owner), `synthetic-owner-${index}.json`), readFileSync(owner));
+    rmSync(owner);
+  }
+  let clock = nowMs;
+  t.mock.method(Date, 'now', () => clock);
+  let censusCalls = 0;
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 2500,
+    readWorkerStatusImpl: () => {
+      clock += 50;
+      return { ok: true, row: { status: 'succeeded' } };
+    },
+    readProcessSnapshotImpl: async ({ timeout }) => {
+      censusCalls += 1;
+      clock += 1000; // One simulated second per full census; no host process reads.
+      if (timeout < 1000) throw new Error('synthetic census timeout');
+      return '123 synthetic-idle-process';
+    },
+  });
+  assert.ok(removed.length > 0 && removed.length < 100);
+  assert.equal(censusCalls, 1);
+  assert.ok(!f.logs.some(line => line.includes('sweep deferred')));
+  const progress = f.logs.map(line => JSON.parse(line)).find(row => row.event === 'ama_closer.scratch_sweep_paused');
+  assert.equal(progress.reason, 'scan-budget');
+  assert.equal(progress.removed, removed.length);
+  assert.equal(progress.remainingCandidates, 100 - removed.length);
+});
+
+test('SCRATCHCENSUS-01: a census path stays protected across a batch without repeated process reads', async t => {
+  const f = fixture(t);
+  const protectedPath = f.scratch();
+  for (let index = 0; index < 5; index += 1) f.scratch();
+  let calls = 0;
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+    readProcessSnapshotImpl: ({ timeout }) => {
+      calls += 1;
+      assert.equal(timeout, 15_000);
+      return `123 synthetic-hammer TMPDIR=${protectedPath}`;
+    },
+  });
+  assert.equal(removed.length, 5);
+  assert.equal(existsSync(protectedPath), true);
+  assert.equal(calls, 1);
+});
+
+test('SCRATCHCENSUS-01: nonzero census exit defers every deletion and logs only duration and byte counts', async t => {
+  const f = fixture(t);
+  const paths = [f.scratch(), f.scratch(), f.scratch()];
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+    readProcessSnapshotImpl: args => readHammerScratchProcessSnapshot({ ...args,
+      execFileImpl: async command => {
+        if (command === 'lsof') throw Object.assign(new Error('synthetic-secret-output'), { code: 1 });
+        return { stdout: '123 synthetic-secret-environment' };
+      },
+    }),
+  });
+  assert.deepEqual(removed, []);
+  assert.ok(paths.every(existsSync));
+  assert.ok(f.logs.some(line => line.includes('sweep deferred: unreadable process census')));
+  const diagnostic = f.logs.filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+    .find(row => row.event === 'ama_closer.scratch_process_census');
+  assert.equal(diagnostic.outcome, 'unreadable');
+  assert.ok(diagnostic.durationMs >= 0);
+  assert.equal(diagnostic.psBytes, Buffer.byteLength('123 synthetic-secret-environment'));
+  assert.equal(diagnostic.lsofBytes, 0);
+  assert.ok(f.logs.every(line => !line.includes('synthetic-secret')));
+});
+
+for (const refreshedLive of [false, true]) {
+  test(`SCRATCHCENSUS-01: refresh once after 30 seconds and stop before a third census (live=${refreshedLive})`, async t => {
+    const f = fixture(t);
+    for (let index = 0; index < 4; index += 1) {
+      const owner = f.record(f.scratch());
+      writeFileSync(join(dirname(owner), `synthetic-owner-${index}.json`), readFileSync(owner));
+      rmSync(owner);
+    }
+    let clock = nowMs;
+    t.mock.method(Date, 'now', () => clock);
+    let calls = 0;
+    let completed = false;
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 200_000,
+      readWorkerStatusImpl: () => {
+        clock += 31_000;
+        return { ok: true, row: { status: 'succeeded' } };
+      },
+      readProcessSnapshotImpl: ({ timeout }) => {
+        calls += 1;
+        assert.equal(timeout, 15_000);
+        return refreshedLive && calls === 2 ? '123 synthetic-lrq' : '123 synthetic-idle-process';
+      },
+      onSweepComplete: () => { completed = true; },
+    });
+    assert.equal(calls, 2);
+    assert.equal(removed.length, refreshedLive ? 1 : 2);
+    assert.equal(completed, false);
+    const progress = JSON.parse(f.logs.at(-1));
+    assert.equal(progress.reason, 'census-expired');
+    assert.equal(progress.remainingCandidates, 2);
+    assert.ok(!f.logs.some(line => line.includes('sweep deferred')));
+  });
+}
+
+for (const afterRefresh of ['idle', 'process', 'worker', 'owner', 'expired']) {
+  test(`SCRATCHCENSUS-01: expiration during final checks refreshes and revalidates the candidate (${afterRefresh})`, async t => {
+    const f = fixture(t);
+    const paths = [f.scratch(), f.scratch()];
+    for (let index = 0; index < paths.length; index += 1) {
+      const owner = f.record(paths[index]);
+      writeFileSync(join(dirname(owner), `synthetic-owner-${index}.json`), readFileSync(owner));
+      rmSync(owner);
+    }
+    let clock = nowMs;
+    let ticking = false;
+    let censusStartedAt;
+    let calls = 0;
+    let completed = false;
+    t.mock.method(Date, 'now', () => ticking ? clock++ : clock);
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 200_000,
+      readWorkerStatusImpl: () => {
+        if (calls === 1 || (calls === 2 && afterRefresh === 'expired')) {
+          // Enter with a fresh census, then cross 30 seconds during final checks.
+          clock = censusStartedAt + 29_997;
+          ticking = true;
+        }
+        return { ok: true, row: { status: calls === 2 && afterRefresh === 'worker' ? 'running' : 'succeeded' } };
+      },
+      readProcessSnapshotImpl: () => {
+        calls += 1;
+        censusStartedAt = clock;
+        ticking = false;
+        if (calls === 2 && afterRefresh === 'owner') {
+          const directory = dirname(amaCloserDispatchFilePath(f.root, identity));
+          for (let index = 0; index < paths.length; index += 1) {
+            writeFileSync(join(directory, `synthetic-owner-${index}.json`), JSON.stringify({ state: 'dispatching' }));
+          }
+        }
+        return calls === 2 && afterRefresh === 'process' ? '123 synthetic-lrq' : '123 synthetic-idle-process';
+      },
+      onSweepComplete: () => { completed = true; },
+    });
+    assert.equal(calls, 2);
+    assert.equal(removed.length, afterRefresh === 'idle' ? 2 : 1);
+    assert.equal(paths.filter(existsSync).length, afterRefresh === 'idle' ? 0 : 1);
+    assert.equal(completed, afterRefresh !== 'expired');
+    const pauses = f.logs.map(line => JSON.parse(line)).filter(row => row.event === 'ama_closer.scratch_sweep_paused');
+    assert.deepEqual(pauses.map(row => [row.reason, row.remainingCandidates]), afterRefresh === 'expired' ? [['census-expired', 1]] : []);
+  });
+}
+
+test('SCRATCHCENSUS-01: successful census measures UTF-8 bytes without exposing process contents', async () => {
+  const logs = [];
+  const outputs = { ps: '123 synthetic-secret-é', lsof: 'p123\nn/synthetic-secret-λ' };
+  const snapshot = await readHammerScratchProcessSnapshot({ timeout: 15_000,
+    logger: { info: line => logs.push(line) },
+    execFileImpl: async command => ({ stdout: outputs[command] }),
+  });
+  assert.equal(snapshot, `${outputs.ps}\n${outputs.lsof}`);
+  assert.equal(logs.length, 1);
+  const diagnostic = JSON.parse(logs[0]);
+  assert.equal(diagnostic.outcome, 'ok');
+  assert.equal(diagnostic.psBytes, Buffer.byteLength(outputs.ps));
+  assert.equal(diagnostic.lsofBytes, Buffer.byteLength(outputs.lsof));
+  assert.ok(diagnostic.durationMs >= 0);
+  assert.ok(!logs[0].includes('synthetic-secret'));
+});
+
 for (const status of ['succeeded', 'canceled']) {
   test(`HAMTMP-05: ledger ${status} reclaims old scratch owned by a starting record`, async t => {
     const f = fixture(t);
@@ -282,7 +452,8 @@ test('HAMTMP-04: a scan deadline checkpoints its prefix before a restart', async
   try {
     assert.deepEqual(await firstSweep(f.root, { ...f.options, scanBudgetMs: 1 }), []);
   } finally { clock.mock.restore(); }
-  assert.match(f.logs[0], /scratch record scan budget exhausted/);
+  assert.equal(JSON.parse(f.logs[0]).reason, 'scan-budget');
+  assert.equal(JSON.parse(f.logs[0]).remainingCandidates, 1);
   assert.equal(existsSync(orphan), true);
   const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
   assert.equal((await restartedSweep(f.root, { ...f.options, maxRecordReads: 3 })).length, 1);

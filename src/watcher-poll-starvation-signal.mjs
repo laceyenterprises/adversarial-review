@@ -176,7 +176,7 @@ export function trackPollHandlerProgress(handler, heartbeat) {
 // independent no-progress threshold whenever the workload changes.
 export function createPollWatchdogBudget({ getDeadlineMs, env, intervalMs, logger = console }) {
   let deadlineMs = getDeadlineMs();
-  let config = resolvePollStarvationConfig({ env, intervalMs });
+  const config = resolvePollStarvationConfig({ env, intervalMs });
   return {
     get deadlineMs() { return deadlineMs; },
     get starvationMs() { return config.starvationMs; },
@@ -185,7 +185,6 @@ export function createPollWatchdogBudget({ getDeadlineMs, env, intervalMs, logge
       const next = getDeadlineMs();
       if (next === deadlineMs) return;
       deadlineMs = next;
-      config = resolvePollStarvationConfig({ env, intervalMs });
       logger.log(`[watcher] poll deadline changed: ${deadlineMs / 1000}s | poll-starvation respawn: ${config.starvationMs / 1000}s × ${config.checksRequired} checks`);
     },
   };

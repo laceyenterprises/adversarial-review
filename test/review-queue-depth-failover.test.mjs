@@ -916,10 +916,10 @@ test('pollonce-phases passes depth pressure in and charges the cost ledger back'
   assert.match(src, /applyWorkerFallback\(waitPressure \|\| firstPassSpilloverController\?\.depthPressure\?\.\(getDepthPassKind\(\)\) \|\| null\)/);
   assert.match(src, /passKind: getDepthPassKind\(\)/);
   // Cost is charged only for a spill that actually landed on a route, and only
-  // for the depth trigger — a quota fallback must not spend the depth budget.
+  // for depth or age pressure — quota fallback must not spend this budget.
   assert.match(
     src,
-    /rwfDecision\.reason === 'queue-depth-pressure'\)\s*\{\s*depthSpillReserved = firstPassSpilloverController\?\.recordSpill/
+    /\['queue-depth-pressure', 'review-max-wait'\]\.includes\(rwfDecision\.reason\)\)\s*\{\s*depthSpillReserved = firstPassSpilloverController\?\.recordSpill/
   );
   // The route swap gets the author so the diversity backstop can refuse.
   assert.match(src, /applyReviewerWorkerClassFallbackToRoute\(\{[^}]*authorClass: reviewerAuthorClass/);
@@ -1334,4 +1334,48 @@ test('failed held count is logged as unknown without disabling depth pressure', 
   assert.equal(ctl.plan().engaged, true);
   assert.ok(logs.some(message => /held count read failed: unavailable/.test(message)));
   assert.ok(logs.some(message => /held: unknown/.test(message)));
+});
+
+// REVIEWSPILL-01: the shared admission path must evaluate age with free seats.
+for (const reason of ['poll', 'capacity-freed', 'startup']) {
+  for (const occupied of [0, 2]) {
+    test(`overdue first pass spills at ${reason} admission with ${occupied} Argus seats`, async () => {
+      const { createReviewerDispatchDrain } = await import('../src/watcher-reviewer-dispatch.mjs');
+      const nowMs = Date.now();
+      const logs = [];
+      const candidate = {
+        repoPath: 'sample/project', prNumber: 1, reviewerModel: 'gemini', depthPassKind: 'first-pass',
+        current: { head_wait_started_at: new Date(nowMs - 481_000).toISOString() },
+        async reevaluateDepthSpill(pressure) {
+          assert.equal(pressure.reason, 'review-max-wait');
+          this.reviewerModel = 'claude';
+        },
+        async run() { return { dispatched: true }; },
+      };
+      const queue = [candidate];
+      const drain = createReviewerDispatchDrain({
+        reviewerPoolConfig: { enabled: true, maxConcurrent: 6 }, reviewerDispatchCandidates: queue,
+        detachedReviewerDispatchTracker: { activeCounts: () => new Map([['gemini', occupied], ['__total__', occupied]]), track() {} },
+        readWatcherDrainState: () => ({ active: false }),
+        resolveGeminiCredentialConcurrencyForDispatchCandidates: async () => 2,
+        logger: { log: line => logs.push(line), warn() {} },
+      });
+      assert.equal((await drain(reason)).dispatched, 1);
+      assert.equal(candidate.reviewerModel, 'claude');
+      assert.equal(logs.filter(line => line.includes('review-wait-decision')).length, 1);
+      assert.match(logs.find(line => line.includes('review-wait-decision')), /decision=spilled.*reviewer=claude/);
+    });
+  }
+}
+
+test('age spill budget is bounded per lane and refunds are reusable across admissions', () => {
+  const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => null, logger: {} });
+  const overdue = { engaged: true, reason: 'review-max-wait', waitSeconds: 481 };
+  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 1, reason: 'review-max-wait' }), true);
+  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, false);
+  assert.equal(ctl.recordSpill({ repo: 'sample/project', prNumber: 2, reason: 'review-max-wait' }), false);
+  assert.equal(ctl.waitPressure('rereview', overdue).engaged, true);
+  assert.equal(ctl.refundSpill({ repo: 'sample/project', prNumber: 1 }), true);
+  assert.equal(ctl.waitPressure('first-pass', overdue).engaged, true);
 });

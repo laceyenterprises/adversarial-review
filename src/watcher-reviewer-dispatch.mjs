@@ -1,5 +1,5 @@
-import { withAdmissionReadCache } from './watcher-admission-read-cache.mjs';
-import { prepareQueueDepthSpillover } from './review-queue-depth.mjs';
+import { withAdmissionReadCache } from ./watcher-admission-read-cache.mjs;
+import { prepareQueueDepthSpillover, reviewWaitPressure } from ./review-queue-depth.mjs;
 import { compareReviewerDispatchCandidates, reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from './watcher-reviewer-pool.mjs';
 
 // Both poll and settlement admissions call this drain under the same mutex.
@@ -32,7 +32,7 @@ export function createReviewerDispatchDrain({
       const geminiCredentialConcurrency =
         await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
       const eligible = candidates.filter(candidate => !candidate.admissionBlocked?.());
-      const orderedCandidates = await prepareSpillover(eligible, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates });
+      const orderedCandidates = await prepareSpillover(eligible, { controller: firstPassSpilloverController, compareCandidates: compareReviewerDispatchCandidates, logger });
       const drainResult = await runQueue(orderedCandidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
         geminiCredentialConcurrency,
@@ -66,6 +66,19 @@ export function createReviewerDispatchDrain({
       // Also settle reservations when the drain throws before returning its
       // deferred list. Started candidates own their spawn/refusal settlement.
       for (const candidate of candidates) {
+        const pressure = reviewWaitPressure(candidate);
+        if (pressure.engaged) {
+          const started = startedCandidates.has(candidate);
+          const spilled = started && candidate.reviewerModel !== 'gemini';
+          const decision = spilled ? 'spilled' : candidate.admissionBlocked?.() ? 'admission-blocked'
+            : candidate.pipelineGeminiSeats > 0 ? 'pipeline-requires-gemini'
+            : started ? 'gemini-admitted' : candidate.spillDecisionReason || 'pool-admission-deferred';
+          logger.log?.(`[watcher] review-wait-decision repo=${candidate.repoPath} pr=${candidate.prNumber} `
+            + `admission=${JSON.stringify(reason)} pass_kind=${candidate.depthPassKind || 'first-pass'} `
+            + `wait_seconds=${pressure.waitSeconds} decision=${decision} reviewer=${candidate.reviewerModel} `
+            + `claude_account=${candidate.claudeAccountSelection?.provider === 'claude-code-corp' ? 'corporate'
+              : candidate.reviewerModel === 'claude' ? 'primary' : 'none'}`);
+        }
         if (!startedCandidates.has(candidate)) {
           candidate.retainWakeForCapacity?.();
           candidate.refundDepthSpill?.();

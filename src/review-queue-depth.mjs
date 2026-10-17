@@ -616,15 +616,27 @@ export function createFirstPassSpilloverController({
         remaining,
       };
     },
+    // Age pressure shares the lane budget, with one bounded escape slot when
+    // depth is disarmed or below threshold. Refunds restore the same slot.
+    waitPressure(passKind, pressure) {
+      const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
+      const current = evaluate(kind);
+      const budget = Math.max(1, current.spillSlots);
+      return { ...pressure, engaged: pressure.engaged && (grantedByKind.get(kind) || 0) < budget,
+        remaining: Math.max(0, budget - (grantedByKind.get(kind) || 0)) };
+    },
     /**
      * Consume one slot and charge the cost ledger. Call ONLY once a depth-driven
      * fallback has actually been applied to a route.
      */
-    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass', waitSeconds = null } = {}) {
+    recordSpill({ repo = null, prNumber = null, fromWorkerClass = null, toWorkerClass = null, passKind = 'first-pass', waitSeconds = null, reason = 'queue-depth-pressure' } = {}) {
       const kind = passKind === 'rereview' ? 'rereview' : 'first-pass';
       const current = evaluate(kind);
       let remaining = remainingByKind.get(kind) || 0;
-      if (!current.engaged || remaining <= 0) return false;
+      if (reason === 'review-max-wait') {
+        remaining = Math.max(1, current.spillSlots) - (grantedByKind.get(kind) || 0);
+      } else if (!current.engaged) return false;
+      if (remaining <= 0) return false;
       remaining -= 1;
       remainingByKind.set(kind, remaining);
       granted += 1;
@@ -677,7 +689,8 @@ export function createFirstPassSpilloverController({
 }
 
 /** Prepare every drain, including candidates deferred by an earlier wave.
- * The pool calls the spill hook only when its actual Gemini seats are full.
+ * Age pressure runs here even with free Gemini seats. Depth keeps its live
+ * saturation hook; both paths share reservation/refund accounting.
  * Repeated drains reuse the controller's unspent/refunded per-tick budget.
  */
 export async function prepareQueueDepthSpillover(candidates, {
@@ -693,16 +706,18 @@ export async function prepareQueueDepthSpillover(candidates, {
   const oldestMs = Math.min(...firstPass.map((candidate) => Date.parse(candidate.subject?.createdAt)).filter(Number.isFinite));
   logger.log?.(`[watcher] review-queue-depth-wait oldest_first_pass_age_ms=${Number.isFinite(oldestMs) ? Math.max(0, nowMs - oldestMs) : 0} first_pass_waiting=${firstPass.length}`);
   for (const candidate of ordered) {
+    const pressure = reviewWaitPressure({ ...candidate, depthPassKind: passKind(candidate) }, { nowMs: now(), env });
+    if (pressure.engaged && candidate.reviewerModel === 'gemini' && !(candidate.pipelineGeminiSeats > 0)) {
+      const bounded = controller?.waitPressure?.(passKind(candidate), pressure) || pressure;
+      if (bounded.engaged) await candidate.reevaluateDepthSpill?.(bounded);
+      else candidate.spillDecisionReason = 'spill-budget-exhausted';
+    }
     candidate.prepareForGeminiSaturation = async () => {
       // Changing the main route cannot release seats required by a pipeline.
       if (candidate.reviewerModel !== 'gemini' || candidate.pipelineGeminiSeats > 0) return;
-      const pressure = reviewWaitPressure(candidate, { nowMs: now(), env });
       // Preserve the depth lever's reservation/refund accounting when armed.
       if (controller?.depthPressure(passKind(candidate))?.engaged) {
         await candidate.reevaluateDepthSpill?.();
-      }
-      if (candidate.reviewerModel === 'gemini' && pressure.engaged) {
-        await candidate.reevaluateDepthSpill?.(pressure);
       }
     };
   }

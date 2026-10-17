@@ -939,8 +939,8 @@ for (const decision of ['retry', 'no-merge', 'cap']) {
       assert.equal(summary.ciInspections, 3, 'each poll probes current-head CI before hammer reconciliation');
       assert.equal(summary.reviewerSpawns.length, 0);
       assert.equal(summary.dispatches.length, 0, 'legacy merge-agent cannot take over');
-      assert.equal(summary.ciHammerPages.length, decision === 'retry' ? 0 : 1, output);
-      if (decision !== 'retry') {
+      assert.equal(summary.ciHammerPages.length, decision === 'no-merge' ? 1 : 0, output);
+      if (decision === 'no-merge') {
         assert.equal(summary.ciHammerPages[0].event, 'ama.ci_blocked.hammer_final');
         assert.equal(summary.ciHammerPages[0].payload.headSha, 'ham-pushed-head-164');
         assert.equal(summary.ciHammerPages[0].payload.outcome, decision === 'cap' ? 'hammer-cap-exhausted' : 'hammer-no-merge');
@@ -990,7 +990,7 @@ for (const transition of ['non-ham', 'retrigger', 'retrigger-green']) {
           { review_status: 'ci-blocked', reviewer_head_sha: 'ham-pushed-head-164' },
         ], output);
         assert.equal(summary.ciBlockedCloserCalls.length, 3, 'unresolved hammer remains reachable until its final decision');
-        assert.equal(summary.ciHammerPages.length, 1, output);
+        assert.equal(summary.ciHammerPages.length, 0, 'the closer already owns cap paging');
       }
     } finally {
       rmSync(tmp, { recursive: true, force: true });

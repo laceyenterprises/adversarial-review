@@ -101,7 +101,7 @@ test('tree evidence diffs file/submodule transitions and preserves standalone gi
   }
 });
 
-test('two preflight failed reads refund both attempts and hold/probe/page once rather than spend retry cap', async t => {
+test('FINALCLOSE-01 preflight read failures stay charged and release for capped retry', async t => {
   const root = mkdtempSync(join(tmpdir(), 'hamenobufs-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const identity = { repo, prNumber: 1 };
@@ -116,17 +116,17 @@ test('two preflight failed reads refund both attempts and hold/probe/page once r
     readAuditImpl: () => ({ attempts }), now: '2026-10-10T00:03:00Z',
     fetchPrimaryChangeImpl: async () => { probes++; return { headSha: head, hasHammerCommits: null, historyReadFailed: true, reason: 'ENOBUFS' }; },
     deliverAlertImpl: async (text, { payload }) => { pages++; assert.match(text, /ENOBUFS/); assert.equal(payload.historyReadError, 'spawnSync gh ENOBUFS'); }, logger: { warn() {}, error() {} } };
-  assert.equal((await evaluateHammerStopHold(args)).action, 'hold');
+  assert.equal((await evaluateHammerStopHold(args)).action, 'release');
   const ledger = readHammerRetryCapLedger(root, identity);
-  assert.equal(ledger.attemptCount, 0);
-  assert.equal(ledger.lifetimeAttemptCount, 0);
-  assert.equal(ledger.targetAttemptCount, 0);
-  assert.equal((await evaluateHammerStopHold({ ...args, prMetadata: { headSha: head, mergeable: 'CONFLICTING', baseSha: author } })).action, 'hold');
-  assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 0);
-  assert.equal(probes, 2);
+  assert.equal(ledger.attemptCount, 2);
+  assert.equal(ledger.lifetimeAttemptCount, 2);
+  assert.equal(ledger.targetAttemptCount, 2);
+  assert.equal((await evaluateHammerStopHold({ ...args, prMetadata: { headSha: head, mergeable: 'CONFLICTING', baseSha: author } })).action, 'release');
+  assert.equal(readHammerRetryCapLedger(root, identity).attemptCount, 2);
+  assert.equal(probes, 0);
   assert.equal(pages, 0);
   await evaluateHammerStopHold({ ...args, now: '2026-10-10T00:13:00Z' });
-  assert.equal(pages, 1);
+  assert.equal(pages, 0);
   assert.equal((await evaluateHammerStopHold({ ...args, fetchPrimaryChangeImpl: async () => ({ headSha: head, hasHammerCommits: false }) })).action, 'release');
 });
 

@@ -181,15 +181,12 @@ remediation, against its merge base. `hammer-context`
 includes `primaryChange.primaryHead`, `mergeBase`, and bounded per-file hunk summaries, plus
 `statedIntent` from the PR body (including Why or Operator decision sections).
 `<<ROOT_DIR>>/bin/primary-change-context.mjs` supplies patches; use `--diagnostics` only outside merge execution. Context never waives blocking findings.
-If primary evidence is missing or unsupported, stop before remediation and
-print `primaryChange.reason` in the stop message. When the snapshot status is
-`history-read-failed` or the helper reports `historyReadFailed: true`, record a
-no-merge audit with reason `history-read-failed`, `noExecution: true`, and
-`historyReadError` containing the underlying error. Release the lease and end as a
-retryable abort; the closer retries under the per-PR cap (two per series, lifetime
-six), then pages once. Do not park or retain a stop hold for a read failure.
-Otherwise record `deferred` with reason `primary-change-unknown`. Never substitute the latest hammer head for the
-original change.
+If primary evidence is missing or unsupported, stop before remediation and report
+`primaryChange.reason`. For `history-read-failed` / `historyReadFailed: true`,
+audit that reason with `noExecution: true` and the underlying `historyReadError`.
+Release the lease and abort retryably under the per-PR cap (two per series,
+lifetime six); do not park or retain a stop hold. Otherwise audit `deferred`
+with reason `primary-change-unknown`. Never replace the original author head.
 
 The syntactic preservation gate covers production and config paths only. Test
 paths (`test/`, `tests/`, `**/*.test.mjs`, `**/*.test.js`, and
@@ -318,9 +315,8 @@ recomputed on the next pipeline tick, and ordinary gates must pass before redisp
    step and blocker where it stopped, whether the merge lease was released, and
    what happens next (automatic bounded retry or operator escalation). This is
    distinct from the existing single in-lease audit comment, which remains the
-   only comment for the successful merge path. If that audit was already posted
-   before a later merge failure, edit it in place into the required no-merge
-   closing-status comment; do not leave the audit and add a second comment.
+   only comment for the successful merge path. If that audit was already posted,
+   edit it in place into closing status; do not leave the audit and add a second comment.
    Include `HAM_NO_MERGE_NOTE`, or the measured `HAM_HEAD_WAITED_SECONDS` and
    `HAM_REQUIRED_CHECKS_WAITED_SECONDS`, in the note. Missing exact-head CI is
    a terminal reason only after the published-head visibility wait and the
@@ -755,8 +751,7 @@ API-publish one single-parent commit above fetched remote HEAD; rebased/multi-co
   <<REPO>> <<REVIEWED_SHA>> "$POST_REMEDIATION_SHA" --pr <<PR_URL>> \
   > "$HAM_RUN_DIR/range.json" 2> "$HAM_RUN_DIR/range.stderr" || {
     HAM_RANGE_EXIT=$?
-    # Only a completed negative proof (65) transfers to review. An API read,
-    # process timeout or interruption aborts retryably under the hammer cap.
+    # Negative proof: review. Read failure/timeout: capped retry.
     if [ "$HAM_RANGE_EXIT" -ne 65 ]; then
       HAM_HISTORY_READ_ERROR=$(tail -c 2000 "$HAM_RUN_DIR/range.stderr")
       cat "$HAM_RUN_DIR/range.stderr" >&2

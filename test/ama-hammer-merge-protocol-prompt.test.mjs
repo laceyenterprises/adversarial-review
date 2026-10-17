@@ -16,7 +16,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_TEMPLATE = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
-const RANGE_PROBE = /\/usr\/bin\/perl[^]*?> "\$HAM_RUN_DIR\/range\.json"/;
+const RANGE_PROBE = /\/usr\/bin\/perl[^]*?> "\$HAM_RUN_DIR\/range\.json"(?: 2> "\$HAM_RUN_DIR\/range\.stderr")?/;
 // Structural merge-protocol assertions inspect the extracted versioned procedures
 // at their call sites, while the dispatched prompt remains small.
 const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
@@ -24,7 +24,7 @@ const HAMMER_PROMPT = HAMMER_TEMPLATE.replace(
   (_, phase) => `\`\`\`bash\n${readFileSync(join(REPO_ROOT, 'bin', `${phase}.sh`), 'utf8')}\`\`\`\n`,
 );
 
-test('HAMVERIFY-01: publish uses API and every range failure requests one review without escalation', () => {
+test('FINALCLOSE-01 publish transfers only a completed negative proof to exact-head review', () => {
   assert.match(HAMMER_TEMPLATE, /HAM_COMMIT_PUBLICATION_ONLY=1/);
   assert.match(HAMMER_TEMPLATE, /tree IDs/);
   const start = HAMMER_TEMPLATE.indexOf('/usr/bin/perl -e \'alarm shift; exec @ARGV\' 90 "$HAM_NODE_BIN"');
@@ -33,7 +33,7 @@ test('HAMVERIFY-01: publish uses API and every range failure requests one review
   assert.match(block, /hammer-head-context\.mjs/);
   assert.match(block, /--pr <<PR_URL>>/);
   assert.match(block, RANGE_PROBE);
-  for (const exitCode of [1, 65, 124]) {
+  for (const exitCode of [65]) {
     const script = block.replace(RANGE_PROBE, `(exit ${exitCode})`)
       .replace(/[^\n]*ham_gh pr comment[^\n]+/g, 'echo re-review')
       .replace(/[^\n]*\/usr\/bin\/perl -e 'alarm shift; exec @ARGV' 30 [^\n]+/g, 'echo re-review')

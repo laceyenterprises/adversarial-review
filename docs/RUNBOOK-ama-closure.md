@@ -3406,10 +3406,10 @@ charged attempt. Deterministic refusals and other stop holds retain their rules.
 Terminal launch evidence takes precedence over stale active worker status.
 An open same-head PR without a terminal closing decision retries through the
 existing cap: two charged dispatches per series, lifetime six. A final hammer
-that exited without closing remains charged. A durable per-head final-round
-wait records the latest blocker and pages after thirty minutes without a new
-launch; successful launch progress restarts the clock. Cap exhaustion uses the
-same page receipt, so subsequent observations do not page again. Paging does
+that exited without closing remains charged. A durable per-PR final-round
+wait records the current head and latest blocker and pages after thirty minutes
+without launch or head progress. Cap exhaustion shares that receipt across head
+changes, so subsequent observations do not page again. Paging does
 not grant merge authority or suppress remaining retry budget.
 
 After deploy, SRE owns these checks:

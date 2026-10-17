@@ -3321,6 +3321,9 @@ for (const stranded of [false, true]) test(`HAMCLOSE-04 real pollOnce admits a f
     const probePath = path.join(tmp, 'nonempty-probes');
     const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
     let loader = buildLoaderSource({ subjectHeads: { 101: head } });
+    if (stranded) loader = loader
+      .replace("return async () => ({ suppressed: false, reason: 'fixture' });", "return async () => ({ suppressed: true, reason: 'closer-commit-trailer' });")
+      .replace("export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: false, reason: 'fixture' }; }", "export async function getHeadCloserCommitSuppressionWithBoundedRetry() { return { suppressed: true, reason: 'closer-commit-trailer' }; }");
     const leaseUrl = fileUrl('src', 'ama', 'closer-lease.mjs');
     const waitUrl = fileUrl('src', 'ama', 'closure-wait.mjs');
     loader = loader.replace('export async function resolve',
@@ -3363,6 +3366,7 @@ for (const stranded of [false, true]) test(`HAMCLOSE-04 real pollOnce admits a f
       if (${stranded}) await boundedRequest(identity);
       acquireAmaCloserLease(identity);
       await handoffHammerReview({ ...identity, requestBoundedReviewImpl: boundedRequest });
+      if (${stranded}) db.prepare("UPDATE reviewed_prs SET review_status='pending', revision_ref=?, rereview_reason='auto-refresh: PR head moved', rereview_requested_at=? WHERE pr_number=101").run(identity.headSha, new Date().toISOString());
       db.prepare(\`INSERT INTO review_cycle_verdicts(pr_url,head_sha,verdict_count,verdict_at)
         VALUES (?, ?, 6, ?)\`).run('https://github.com/' + repo + '/pull/101', 'a'.repeat(40), new Date().toISOString());
       for (let attempt = 1; attempt <= 36; attempt++) db.prepare(\`INSERT INTO reviewer_passes(repo,pr_number,

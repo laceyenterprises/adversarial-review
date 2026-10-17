@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord, amaCloserDispatchFilePath, _resetHammerRetryCapAlertDebounceForTests } from '../src/ama/dispatch-closer.mjs';
 import { recordHammerRetryDispatch, readHammerRetryCapLedger } from '../src/ama/hammer-retry-cap.mjs';
-import { acquireAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
+import { acquireAmaCloserLease, updateAmaCloserLease, deleteAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { observeClosureWait } from '../src/ama/closure-wait.mjs';
@@ -241,5 +241,54 @@ test('FINALCLOSE-01 first observation thirty minutes after the final push pages 
   const rootDir = finalRound(t), pages = [];
   await observeClosureWait({ rootDir, repo, prNumber, headSha, now: 1800000,
     startedAt: 0, waitClass: 'final-round', reason: 'coexistence-timeout', pageImpl: async text => pages.push(text) });
+  assert.equal(pages.length, 1);
+});
+
+
+test('FINALCLOSE-01 head progress restarts the wait and carries the once-only page across later heads', async t => {
+  const rootDir = finalRound(t), pages = [];
+  const observe = (head, now, immediate = false) => observeClosureWait({ rootDir, repo, prNumber,
+    headSha: head, now, startedAt: 0, waitClass: 'final-round', immediate,
+    reason: 'synthetic closure blocker', pageImpl: async text => pages.push(text) });
+  await observe(headSha, 0);
+  assert.equal((await observe(reviewed, 1799999)).exhausted, false);
+  assert.equal((await observe(reviewed, 1800000)).exhausted, false);
+  assert.equal((await observe(reviewed, 3599999)).exhausted, true);
+  assert.equal(pages.length, 1);
+  await observe('d'.repeat(40), 3600000, true);
+  assert.equal(pages.length, 1, 'cap exhaustion on another head cannot page twice');
+});
+
+
+test('FINALCLOSE-01 dispatch after an elapsed stall still pages, then records launch progress', async t => {
+  const rootDir = finalRound(t), pages = [];
+  const args = { rootDir, repo, prNumber, headSha, startedAt: 0, waitClass: 'final-round',
+    reason: 'synthetic blocker', pageImpl: async text => pages.push(text) };
+  await observeClosureWait({ ...args, now: 0 });
+  assert.equal((await observeClosureWait({ ...args, now: 1800000, progress: true })).exhausted, true);
+  assert.equal(pages.length, 1);
+  assert.equal((await observeClosureWait({ ...args, now: 1800001 })).exhausted, false);
+});
+
+
+test('FINALCLOSE-01 an exhausted ledger without a dispatch record still pages once', async t => {
+  _resetHammerRetryCapAlertDebounceForTests();
+  const f = fixture(t, { charged: 2 });
+  rmSync(amaCloserDispatchFilePath(f.rootDir, { repo, prNumber, headSha }));
+  deleteAmaCloserLease(f.rootDir, { repo, prNumber, headSha });
+  for (let tick = 0; tick < 2; tick++) assert.equal((await maybeDispatchAmaCloser(f.args)).reason, 'hammer-retry-cap-exhausted');
+  assert.equal(f.launches.length, 0);
+  assert.equal(f.pages.length, 1);
+});
+
+
+test('FINALCLOSE-01 a failed page retries even when the head advances during delivery', async t => {
+  const rootDir = finalRound(t), pages = [];
+  const args = { rootDir, repo, prNumber, now: 0, waitClass: 'final-round', immediate: true, reason: 'synthetic blocker' };
+  await assert.rejects(observeClosureWait({ ...args, headSha, pageImpl: async () => {
+    await observeClosureWait({ ...args, headSha: reviewed, pageImpl: async () => assert.fail('one page in flight') });
+    throw new Error('synthetic transport failure');
+  } }), /synthetic transport failure/);
+  await observeClosureWait({ ...args, headSha: reviewed, pageImpl: async text => pages.push(text) });
   assert.equal(pages.length, 1);
 });

@@ -1226,6 +1226,8 @@ export async function processReviewSubject(entry, ctx) {
         }
       }
 
+      const transferredHeadReview = hammerHandoffReviewBypass({ db, rootDir: ROOT,
+        repo: repoPath, prNumber, headSha: subject.headSha, row: existing });
       const observeLabelControl = createLabelControlObservationCache(operatorSurface);
       try {
         await observeOperatorLabelWakes({
@@ -1388,7 +1390,8 @@ export async function processReviewSubject(entry, ctx) {
       });
       // CAPROUTE-01: route before generic failed-row retry admission. A cap
       // failure is an ownership handoff, including when revision_ref is stale.
-      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)) {
+      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
+        && !transferredHeadReview) {
         if ((await routeReviewCycleCapToHammer(stmtGetReviewRow.get(repoPath, prNumber))).handled) return;
       }
 
@@ -1419,7 +1422,7 @@ export async function processReviewSubject(entry, ctx) {
       // That suppression is state-aware rather than raw-label-based so stale
       // labels and `awaiting-rereview` handoffs still re-arm review.
       let cappedClosure = false;
-      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha) {
+      if (effectiveDomainId === CODE_PR_DOMAIN_ID && existing?.reviewer_head_sha !== subject.headSha && !transferredHeadReview) {
         const ledger = summarizePRRemediationLedger(ROOT, { repo: repoPath, prNumber });
         const roundBudget = resolveRoundBudgetForJob({
           linearTicketId, riskClass: ledger.latestRiskClass,
@@ -2847,7 +2850,8 @@ export async function processReviewSubject(entry, ctx) {
         });
       };
 
-      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)) {
+      if (!isExplicitOperatorReviewRetrigger(existing) && !isOrphanHeadReviewRequested(existing, subject.headSha)
+        && !handoffReviewAdmission) {
         // The HAM head suppresses reviewers, not reconciliation of its owner.
         // The cap route still passes through the closer's eligibility/lease gates.
         if ((await routeReviewCycleCapToHammer(current)).handled) return;
@@ -3668,7 +3672,7 @@ export async function processReviewSubject(entry, ctx) {
               const handoffReviewBypass = hammerHandoffReviewBypass({ db, rootDir: ROOT, repo: repoPath,
                 prNumber, headSha: reviewerHeadSha, row: current });
               const closerHead = await readPreflight('closer');
-              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview) {
+              if (closerHead?.suppressed && !explicitOperatorReviewRetrigger && !orphanHeadReview && !handoffReviewBypass) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
@@ -3680,7 +3684,7 @@ export async function processReviewSubject(entry, ctx) {
                 console.log(
                   `[watcher] Allowing explicit re-review for ${repoPath}#${prNumber}: head ` +
                   `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
-                  `(${closerHead.reason}), but an exact-head operator or orphan recovery request owns this pass.`
+                  `(${closerHead.reason}), but an exact-head operator, orphan or hammer handoff owns this pass.`
                 );
               }
 

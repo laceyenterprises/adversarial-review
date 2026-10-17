@@ -342,7 +342,7 @@ for (const signalRead of [
   { ok: false, reason: 'ledger-read-failed' },
   { ok: false, reason: 'missing-build-completion-signal' },
 ]) {
-  test(`HAMREFUND-01: succeeded run retains ownership and retry hold on unknown merged evidence (${signalRead.reason})`, async (t) => {
+  test(`FINALCLOSE-01 terminal final launch retries on confirmed open head despite unavailable merge-signal metadata (${signalRead.reason})`, async (t) => {
     const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-success-hold-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     seedDeadHammer(rootDir, { retryCount: 1 });
@@ -356,23 +356,19 @@ for (const signalRead of [
       readBuildCompletionSignalForPrImpl: () => signalRead,
       readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     });
-    assert.equal(result.reason, 'existing-dispatch-succeeded');
-    assert.equal(deps.launches.length, 0);
-    assert.equal(deps.events.some((event) => event.event === 'ama_closer.hammer_worker_cleanup'), false);
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(deps.launches.length, 1);
     const record = readAmaCloserDispatchRecord(rootDir, identity);
-    assert.equal(record.launchRequestId, DEAD_LRQ);
-    assert.equal(record.lastError, 'terminal-success-awaiting-audit-or-merged-signal');
-    assert.equal(record.unexecutedRefundCount, undefined);
-    assert.equal(readAmaCloserLease(rootDir, identity).status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
-    assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, null);
+    assert.notEqual(record.launchRequestId, DEAD_LRQ);
+    assert.equal(Number(record.unexecutedRefundCount || 0), 0);
     const ledger = readHammerRetryCapLedger(rootDir, identity);
-    assert.equal(ledger.attemptCount, 1);
-    assert.equal(ledger.lifetimeAttemptCount, 1);
+    assert.equal(ledger.attemptCount, 2);
+    assert.equal(ledger.lifetimeAttemptCount, 2);
     assert.equal(ledger.retryable, undefined);
   });
 }
 
-test('HAMREFUND-01: cleanly missing merged evidence leaves succeeded launches on the bounded exit refund path', async (t) => {
+test('FINALCLOSE-01 final launches stay charged after a cleanly missing merge signal', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hamrefund-success-bounded-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   seedDeadHammer(rootDir, { retryCount: 1 });
@@ -381,8 +377,8 @@ test('HAMREFUND-01: cleanly missing merged evidence leaves succeeded launches on
     ...closerArgs(rootDir, { dispatchedAt: '2026-10-10T23:07:00Z' }), ...deps,
   });
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
-  assert.deepEqual(ledger.retryableLaunchRequestIds, [DEAD_LRQ]);
-  assert.equal(ledger.retryable, 1);
+  assert.equal(ledger.retryableLaunchRequestIds, undefined);
+  assert.equal(ledger.retryable, undefined);
   assert.equal(ledger.unexecutedLaunchRequestIds, undefined);
   assert.equal(ledger.lifetimeAttemptCount, 2, 'both the exit and the new launch remain charged');
 });

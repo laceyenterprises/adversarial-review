@@ -847,7 +847,10 @@ export async function maybeDispatchAmaClosureFor({
   }
   if (finalRoundSink.value && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label))) {
     try {
+      const launchAt = Date.parse(result?.closerProgressAt || '');
       await (options.observeClosureWaitImpl || observeClosureWait)({ ...finalRoundSink.value,
+        ...(Number.isFinite(launchAt) ? { startedAt: Math.max(launchAt,
+          Number.isFinite(finalRoundSink.value.startedAt) ? finalRoundSink.value.startedAt : launchAt) } : {}),
         reason: result?.reasons?.join(', ') || result?.reason || 'closure-pending',
         progress: result?.dispatched === true, now: options.now ? options.now() : Date.now(),
         env: options.env || process.env, waitClass: 'final-round',

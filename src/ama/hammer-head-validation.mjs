@@ -252,8 +252,11 @@ export async function fetchHammerHeadRange(options) {
     const read = options[key];
     if (read) options[key] = async (...args) => {
       try { return await read(...args); }
-      catch (cause) { throw Object.assign(new Error(`history read failed: ${cause.message}`, { cause }),
-        { hammerHistoryReadFailed: true }); }
+      catch (cause) {
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        error.hammerHistoryReadFailed = true;
+        throw error;
+      }
     };
   }
   const existing = await fetchExistingHammerHeadRange(options);

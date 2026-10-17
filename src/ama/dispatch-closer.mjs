@@ -3840,6 +3840,7 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
     dispatched: false,
     skipMergeAgent: true,
     reason: `existing-dispatch-${status || 'unknown'}`,
+    closerProgressAt: existingRecord.dispatchedAt || existingRecord.lastAttemptedAt || null,
     workerClass: existingRecord.workerClass || workerClass,
     dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
     launchRequestId: existingRecord.launchRequestId || null,
@@ -5431,13 +5432,16 @@ export async function maybeDispatchAmaCloser({
     // FINALCLOSE-01: worker status can remain `starting` after a reboot while
     // the launch ledger is terminal. Process success alone is not merge proof;
     // feed it through the live PR/audit reconciliation below.
-    if (prefetchedLaunchRequestProbe?.ok
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) && prefetchedLaunchRequestProbe?.ok
       && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
       const terminalStatus = amaCloserStatusFromTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row.status);
       status = AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(terminalStatus)
         ? 'unknown' : terminalStatus;
     }
     existingDispatchStatus = status;
+    const finalRoundLaunchEnded = dispatchContext?.dispatchReason === 'exhausted-final-hammer'
+      && prefetchedLaunchRequestProbe?.ok
+      && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status);
     if (isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
         status, (typeof now === 'function' ? now() : now) || new Date().toISOString());
@@ -5582,7 +5586,7 @@ export async function maybeDispatchAmaCloser({
         && !(currentHeadFinalHammerTerminalRemediation && validatedHamTerminalRemediation && mergedSignalUnknown)
         // Preserve the terminal-success hold below before HAMBG-02 can infer
         // an exit without close from an OPEN PR whose merge may be queued.
-        && !(mergedSignalUnknown && !existingDispatchHeadAdvanced
+        && !(mergedSignalUnknown && !existingDispatchHeadAdvanced && !finalRoundLaunchEnded
           && terminalSuccessHoldLease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
           && !isReclaimableDispatchedAmaCloserLease(terminalSuccessHoldLease, {
             now: dispatchContext.dispatchedAt,
@@ -6657,7 +6661,7 @@ export async function maybeDispatchAmaCloser({
           ...(existingRecord?.lastError ? [existingRecord.lastError]
             : (existingRecord?.dispatchReason === 'exhausted-final-hammer'
               || dispatchContext?.dispatchReason === 'exhausted-final-hammer')
-              ? [existingRecord.outcome || 'terminal-launch-without-merge'] : [])],
+              ? [existingRecord?.outcome || 'terminal-launch-without-merge'] : [])],
         hammerStop: hammerStopRelease?.hammerStop || readHammerStopForHead({
           hqRoot, repo, prNumber, headSha: targetRemediationSha, reviewedSha, logger,
         }),

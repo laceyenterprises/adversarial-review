@@ -19,6 +19,12 @@ const gatedBody = applyLivePackCrossEditFindings(clean, [finding]);
 const log = { log() {}, warn() {}, error() {}, info() {} };
 
 test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and page occur once', async t => {
+  const oldRemediator = process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+  process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = 'remediator-codex-corp';
+  t.after(() => {
+    if (oldRemediator === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+    else process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR = oldRemediator;
+  });
   const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   createFollowUpJob({ rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
@@ -28,7 +34,7 @@ test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and
   const args = { rootDir, promptTemplate: 'Remediate', log,
     resolvePRLifecycleImpl: async () => ({ state: 'OPEN', headSha: head }),
     postCommentImpl: async ({ body, workerClass }) => {
-      assert.ok(workerClass, 'the production comment poster requires a bot identity');
+      assert.equal(workerClass, 'claude-code', 'the hold uses its reviewer bot without resolving remediation config');
       comments.push(body); return { posted: true };
     },
     deliverAlertImpl: async body => { pages.push(body); },

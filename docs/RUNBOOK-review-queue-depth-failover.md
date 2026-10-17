@@ -140,7 +140,8 @@ No new configuration key is needed.
 ### Individual wait bound
 
 At every shared drain (poll and capacity-freed, also used by startup polling),
-a Gemini-primary candidate past 480 seconds for a first pass or 900 seconds for
+the pool evaluates each candidate in its live admission order. A Gemini-primary
+candidate past 480 seconds for a first pass or 900 seconds for
 a re-review is evaluated for cross-model spill even when Gemini seats are free.
 The existing `ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS` and
 `ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS` overrides apply; zero disables
@@ -149,6 +150,8 @@ historical discovery timestamps.
 
 Age pressure shares each lane's per-tick budget and reservation/refund accounting.
 When depth grants no slots, age permits one escape slot per lane per tick.
+A refused candidate refunds its slot before the next candidate is evaluated; a
+full overall pool does not prepare spills it cannot admit.
 Argus keeps its seats; PR reviews spill to independent reviewer capacity.
 Pipeline candidates that still require Gemini retain their seat requirements.
 `review-wait-decision` records one decision per overdue candidate per drain,

@@ -1214,6 +1214,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   const activeRecords = new Map();
   const errors = [];
   const saturationPrepared = new Set();
+  const waitPrepared = new Set();
   const laneStarts = { firstPass: 0, rereview: 0 };
   let maxObservedConcurrency = 0;
   let attempted = 0;
@@ -1361,6 +1362,10 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         recordDeferredReason(entry, 'rereview-cap-reserves-first-pass-capacity');
         continue;
       }
+      // Evaluate the wait bound in live lane order before the credential cap.
+      // Refusals can refund a spill slot before the next candidate gets here.
+      if (typeof entry.candidate.prepareForReviewWait === 'function'
+        && !waitPrepared.has(entry.candidate)) return entry;
       if (isGeminiCandidate(entry.candidate) && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiLimitForCandidate(entry.candidate)) {
         // Use actual admission order and occupied seats, including pipelines.
         // Returning to the selector after the async hook preserves lane fairness
@@ -1417,6 +1422,12 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       && !initialWaveClosed
       && (entry = nextStartableEntry()) !== null
     ) {
+      if (typeof entry.candidate.prepareForReviewWait === 'function'
+        && !waitPrepared.has(entry.candidate)) {
+        waitPrepared.add(entry.candidate);
+        await entry.candidate.prepareForReviewWait();
+        continue;
+      }
       if (isGeminiCandidate(entry.candidate)
         && activeGemini + reviewerDispatchCandidateGeminiSeats(entry.candidate) > geminiLimitForCandidate(entry.candidate)
         && !saturationPrepared.has(entry.candidate)) {

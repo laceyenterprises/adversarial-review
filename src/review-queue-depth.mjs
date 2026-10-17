@@ -650,8 +650,8 @@ export function createFirstPassSpilloverController({
 }
 
 /** Prepare every drain, including candidates deferred by an earlier wave.
- * Age pressure runs here even with free Gemini seats. Depth keeps its live
- * saturation hook; both paths share reservation/refund accounting.
+ * The pool evaluates age before credential admission, even with free Gemini
+ * seats. Depth keeps its saturation hook; both share reservation accounting.
  * Repeated drains reuse the controller's unspent/refunded per-tick budget.
  */
 export async function prepareQueueDepthSpillover(candidates, {
@@ -667,13 +667,19 @@ export async function prepareQueueDepthSpillover(candidates, {
   const oldestMs = Math.min(...firstPass.map((candidate) => Date.parse(candidate.subject?.createdAt)).filter(Number.isFinite));
   logger.log?.(`[watcher] review-queue-depth-wait oldest_first_pass_age_ms=${Number.isFinite(oldestMs) ? Math.max(0, nowMs - oldestMs) : 0} first_pass_waiting=${firstPass.length}`);
   for (const candidate of ordered) {
-    const pressure = reviewWaitPressure({ ...candidate, depthPassKind: passKind(candidate) }, { nowMs: now(), env });
-    if (pressure.engaged && candidate.reviewerModel === 'gemini' && !(candidate.pipelineGeminiSeats > 0)) {
-      const bounded = controller?.waitPressure?.(passKind(candidate), pressure) || pressure;
-      if (bounded.engaged) await candidate.reevaluateDepthSpill?.(bounded);
-      else candidate.spillDecisionReason = 'spill-budget-exhausted';
-    }
+    let waitPrepared = false;
+    candidate.prepareForReviewWait = async () => {
+      if (waitPrepared) return;
+      waitPrepared = true;
+      const pressure = reviewWaitPressure({ ...candidate, depthPassKind: passKind(candidate) }, { nowMs: now(), env });
+      if (pressure.engaged && candidate.reviewerModel === 'gemini' && !(candidate.pipelineGeminiSeats > 0)) {
+        const bounded = controller?.waitPressure?.(passKind(candidate), pressure) || pressure;
+        if (bounded.engaged) await candidate.reevaluateDepthSpill?.(bounded);
+        else candidate.spillDecisionReason = 'spill-budget-exhausted';
+      }
+    };
     candidate.prepareForGeminiSaturation = async () => {
+      await candidate.prepareForReviewWait();
       // Changing the main route cannot release seats required by a pipeline.
       if (candidate.reviewerModel !== 'gemini' || candidate.pipelineGeminiSeats > 0) return;
       // Preserve the depth lever's reservation/refund accounting when armed.

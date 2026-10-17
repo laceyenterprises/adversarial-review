@@ -1407,3 +1407,41 @@ test('review depth includes requested rereviews and excludes held, draft and ref
     assert.equal(ctl.depthPressure('rereview').engaged, true);
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('age spills follow live admission order and reuse a refusal refund in the same wave', async () => {
+  const ctl = createFirstPassSpilloverController({ resolveThresholdImpl: () => null, logger: {} });
+  const models = [];
+  const candidates = [1, 2].map(prNumber => ({
+    repoPath: 'sample/project', prNumber, reviewerModel: 'gemini', depthPassKind: 'first-pass',
+    current: { reviewed_at: new Date(Date.now() - 481_000).toISOString() },
+    async reevaluateDepthSpill(pressure) {
+      if (ctl.recordSpill({ repo: this.repoPath, prNumber, reason: pressure.reason })) this.reviewerModel = 'claude';
+    },
+    async run() {
+      models.push(this.reviewerModel);
+      if (prNumber === 1) ctl.refundSpill({ repo: this.repoPath, prNumber });
+      return { dispatched: prNumber !== 1 };
+    },
+  }));
+  const ordered = await prepareQueueDepthSpillover(candidates, { controller: ctl, env: {}, logger: {} });
+  const result = await runBoundedReviewerDispatchQueue(ordered, { maxConcurrent: 1, geminiCredentialConcurrency: 1, logger: {} });
+  assert.deepEqual(models, ['claude', 'claude']);
+  assert.equal(result.dispatched, 1);
+  assert.equal(ctl.granted(), 1);
+});
+
+test('a full overall pool does not spend quota probes preparing age spills it cannot admit', async () => {
+  let probes = 0;
+  const candidate = { repoPath: 'sample/project', prNumber: 1, reviewerModel: 'gemini',
+    current: { reviewed_at: new Date(Date.now() - 481_000).toISOString() },
+    async reevaluateDepthSpill() { probes++; this.reviewerModel = 'claude'; },
+    async run() { throw new Error('full pool must defer'); },
+  };
+  const ordered = await prepareQueueDepthSpillover([candidate], { env: {}, logger: {} });
+  const result = await runBoundedReviewerDispatchQueue(ordered, {
+    maxConcurrent: 1, geminiCredentialConcurrency: 1,
+    activeReviewerCounts: new Map([['gemini', 1], ['__total__', 1]]), logger: {},
+  });
+  assert.equal(probes, 0);
+  assert.equal(result.deferred, 1);
+});

@@ -1,3 +1,4 @@
+import { readAdmissionChecks } from './watcher-admission-read-cache.mjs';
 import { observeSynchronousChild } from './watcher-latency.mjs';
 // The only gh execution seam. GH_DEBUG captures headers even for high-level
 // commands (and every page of --paginate) without changing stdout or exit codes.
@@ -140,7 +141,7 @@ async function finish(result, { failed = false, resource = 'core', credential = 
 
 function meteredExecFile(execFileImpl = execFileAsync, command, args, options = {}) {
   if (command !== 'gh') return execFileImpl(command, args, options);
-  return executeGh();
+  return readAdmissionChecks(execFileImpl, command, args, options, executeGh);
   async function executeGh() {
     const credential = githubCredential({ env: options.env || process.env });
     const resource = args[0] === 'api' ? ghResources(args)[0] : 'graphql';

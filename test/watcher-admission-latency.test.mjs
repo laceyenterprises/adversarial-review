@@ -132,7 +132,7 @@ test('WATCHERLAG-01: transient retry backoff yields to other admission work and 
   assert.equal((await lookup).deferClaim, true);
 });
 
-for (const evidence of ['merged', 'unreadable', 'replacement-owner']) {
+for (const evidence of ['merged', 'unreadable', 'replacement-owner', 'replacement-status-owner']) {
   test(`WATCHERLAG-01: async closure retains lease authority across ${evidence} evidence`, async t => {
     const { reconcileAmaCloserLeaseAsync, updateAmaCloserDispatchRecord } = await import('../src/ama/dispatch-closer.mjs');
     const { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease } = await import('../src/ama/closer-lease.mjs');
@@ -147,7 +147,10 @@ for (const evidence of ['merged', 'unreadable', 'replacement-owner']) {
     const gate = new Promise(resolve => { release = resolve; });
     let queried = false;
     const lookup = reconcileAmaCloserLeaseAsync({ rootDir, hqRoot: rootDir, ...identity, now, logger: quiet,
-      readLaunchRequestStatusImpl: async () => ({ ok: true, row: { status: 'succeeded' } }),
+      readLaunchRequestStatusImpl: async () => {
+        if (evidence === 'replacement-status-owner') { queried = true; await gate; }
+        return { ok: true, row: { status: 'succeeded', ...(evidence === 'replacement-status-owner' ? { ticket_ref: 'SYNTHETIC-OTHER' } : {}) } };
+      },
       readBuildCompletionSignalForPrImpl: async () => {
         queried = true; await gate;
         return evidence === 'unreadable' ? { ok: false, reason: 'ledger-read-failed' }
@@ -157,12 +160,12 @@ for (const evidence of ['merged', 'unreadable', 'replacement-owner']) {
     });
     await flush(); assert.equal(queried, true);
     assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
-    if (evidence === 'replacement-owner') updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_replacement', now });
+    if (evidence.startsWith('replacement')) updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'lrq_replacement', now });
     release();
     assert.equal(await lookup, evidence === 'merged');
     const lease = readAmaCloserLease(rootDir, identity);
     if (evidence === 'merged') assert.equal(lease.terminalOutcome, 'succeeded');
     else assert.equal(lease.status, 'dispatched');
-    if (evidence === 'replacement-owner') assert.equal(lease.lrqId, 'lrq_replacement');
+    if (evidence.startsWith('replacement')) assert.equal(lease.lrqId, 'lrq_replacement');
   });
 }

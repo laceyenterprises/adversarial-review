@@ -1651,6 +1651,10 @@ function* reconcileAmaCloserLeaseSteps({
       launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env,
     }));
     if (!probe?.ok) return false;
+    // Async evidence can outlive the owner we started probing. Revalidate
+    // before even the foreign-launch retirement branch mutates ownership.
+    const ownerAfterProbe = readAmaCloserLease(rootDir, { repo, prNumber, headSha: held.headSha });
+    if (ownerAfterProbe?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || ownerAfterProbe.lrqId !== launchRequestId) return false;
     if (probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) {
       const identity = { repo, prNumber, headSha: held.lease.rekeyedFromHeadSha || held.headSha };
       return retireForeignCloserLaunch({ rootDir, repo, prNumber, identity, leaseIdentity: { repo, prNumber, headSha: held.headSha },

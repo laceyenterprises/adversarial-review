@@ -77,6 +77,7 @@ export function createDurableReviewerCandidate(row, { subjectAdapter, context, p
     pipelineGeminiSeats: context.pipelineGeminiSeats,
     supportsAdmissionSplit: context.supportsAdmissionSplit,
     subject: { headSha: row.revision_ref },
+    current: row,
     hasPriorPostedReview: context.hasPriorPostedReview(row),
     pendingSince: row.head_wait_started_at || row.rereview_requested_at || row.reviewed_at,
     async run() {

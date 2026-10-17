@@ -127,6 +127,7 @@ function createWatcherHeartbeat({
   let lastSpawnDecision = prior?.last_spawn_decision && typeof prior.last_spawn_decision === 'object'
     ? prior.last_spawn_decision
     : null;
+  let watchdogRestartState = prior?.watchdog_restart_state || { restarts: [], loop_paged: false };
   let pollProgressCounter = 0;
   let lastPollProgressAt = null;
   let pendingReviewHeartbeat = null;
@@ -160,7 +161,9 @@ function createWatcherHeartbeat({
           assertHeartbeatOwner();
         }
       }
-      return Promise.resolve(writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`))
+      return Promise.resolve(writeFile(filePath, `${JSON.stringify({
+        ...heartbeat, watchdog_restart_state: watchdogRestartState,
+      }, null, 2)}\n`))
         .catch((err) => {
           logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
         });
@@ -206,6 +209,21 @@ function createWatcherHeartbeat({
     const heartbeat = heartbeatPayload(event, extra, at);
     void writeHeartbeat(heartbeat);
     return heartbeat;
+  }
+
+  // Persist with the heartbeat's ownership guard and atomic writer. All writes
+  // merge the current state, including review writes queued before this restart.
+  function recordStarvationRestart({ inFlightMs, noProgressMs } = {}) {
+    const atMs = now().getTime();
+    const recent = (Array.isArray(watchdogRestartState?.restarts) ? watchdogRestartState.restarts : [])
+      .filter(entry => Number.isFinite(entry?.at_ms) && atMs - entry.at_ms >= 0
+        && atMs - entry.at_ms <= 60 * 60_000);
+    const alreadyPaged = recent.length > 0 && watchdogRestartState.loop_paged === true;
+    const restarts = [...recent, { at_ms: atMs, in_flight_ms: inFlightMs, no_progress_ms: noProgressMs }].slice(-64);
+    const restartLoop = restarts.length >= 2;
+    watchdogRestartState = { restarts, loop_paged: alreadyPaged || restartLoop };
+    persist('poll-starvation-restart');
+    return { restartLoop, shouldPage: !restartLoop || !alreadyPaged, restarts };
   }
 
   function markPoll(extra = {}) {
@@ -267,7 +285,7 @@ function createWatcherHeartbeat({
     await reviewPersistChain;
   }
 
-  return { filePath, markPoll, markPollProgress, markPollCompleted, markReview, markSpawnDecision, persist, snapshot, flush };
+  return { filePath, recordStarvationRestart, markPoll, markPollProgress, markPollCompleted, markReview, markSpawnDecision, persist, snapshot, flush };
 }
 
 function createWatcherStallWatchdog({

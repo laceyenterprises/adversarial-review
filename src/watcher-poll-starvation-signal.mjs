@@ -75,6 +75,19 @@ export function createPollStarvationHandler({
 } = {}) {
   return function onStarvation({ inFlightMs, noProgressMs, starvationMs, checks, heartbeat } = {}) {
     const roundedMs = Math.round(inFlightMs || 0);
+    let restartState = null;
+    try {
+      if (typeof requestRestartFn === 'function') {
+        restartState = getHeartbeat?.()?.recordStarvationRestart?.({ inFlightMs: roundedMs, noProgressMs });
+      }
+    } catch (err) {
+      logger?.error?.(`[watcher] poll-starvation restart history write failed: ${err?.message || err}`);
+    }
+    const loopDurations = restartState?.restartLoop
+      ? restartState.restarts.slice(-2).map(entry => entry.in_flight_ms) : null;
+    if (loopDurations && restartState.shouldPage) {
+      logger?.error?.(`[watcher] poll-starvation restart loop: durations_ms=${loopDurations.join(',')}`);
+    }
     try {
       getHeartbeat?.()?.persist?.('poll-starvation', {
         poll_starvation: {
@@ -87,15 +100,18 @@ export function createPollStarvationHandler({
     } catch (err) {
       logger?.error?.(`[watcher] poll-starvation heartbeat write failed: ${err?.message || err}`);
     }
-    if (typeof deliverAlertFn === 'function') {
+    if (typeof deliverAlertFn === 'function' && restartState?.shouldPage !== false) {
       Promise.resolve()
         .then(() => deliverAlertFn(
-          `Adversarial watcher poll starved: one tick has been in flight for ` +
+          loopDurations
+            ? `Adversarial watcher watchdog restarted twice within one hour: polls ran for ${loopDurations.map(ms => `${Math.round(ms / 60000)}m`).join(' and ')}. Review discovery is repeatedly interrupted.`
+            : `Adversarial watcher poll starved: one tick has been in flight for ` +
           `${Math.round(roundedMs / 60000)}m with no poll_counter or in-poll heartbeat progress. ` +
           'New PRs are not being discovered.',
           {
-            event: 'adversarial_review.poll_starved',
+            event: loopDurations ? 'adversarial_review.poll_starvation_restart_loop' : 'adversarial_review.poll_starved',
             payload: {
+              ...(loopDurations ? { restart_durations_ms: loopDurations } : {}),
               reason: 'poll-in-flight-past-sla-without-heartbeat-progress',
               in_flight_ms: roundedMs,
               no_progress_ms: noProgressMs,

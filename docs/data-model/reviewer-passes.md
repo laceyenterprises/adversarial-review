@@ -23,6 +23,18 @@ logical AMA dispatch class, even when `reviewer_class` names a fallback harness.
 
 ## Delivery head wait marker
 
+The delivery row's `reviewer_head_sha` is written together with `posted` by
+claim-bound successful settlement. A missing reviewed head or mismatched claim
+releases to `pending` at the current `revision_ref`, preserving attempts and
+retry budgets and logging the reason. A replacement session is never released
+by an older review's settlement.
+
+Discovery repairs legacy open `posted` rows with an empty reviewed head only
+when `revision_ref` matches the live head. The status CAS requeues once, writes
+`rereview_requested_at` and `rereview_reason=system-missing-reviewed-head:<head>`,
+and logs the repair without changing attempt history or retry budgets. There
+is no schema migration or new status value. Normal posted rows remain intact.
+
 `reviewed_prs.head_wait_started_at` is nullable ISO 8601 text, added
 idempotently by `ensureReviewStateSchema` to both fresh and existing stores.
 Existing rows retain `NULL`; no discovery timestamps are backfilled or changed.

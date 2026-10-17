@@ -77,6 +77,13 @@ lost claim match releases the affected row to `pending` at its current
 budget charge. A replacement session is left intact. No closure handoff runs
 for an unsuccessful row settlement.
 
+On discovery of an open PR, a legacy `posted` row with an empty reviewed head
+is requeued only when its `revision_ref` equals the live subject head. The
+`posted` → `pending` compare-and-swap applies once, records
+`system-missing-reviewed-head:<head>`, and logs the repair. It preserves attempt
+history and every retry budget; ordinary posted rows are untouched. Merge
+eligibility continues to require the existing reviewed-head evidence.
+
 Source of truth:
 
 ```text

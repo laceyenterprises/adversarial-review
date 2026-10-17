@@ -260,6 +260,7 @@ import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './re
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
+import { requeuePostedReviewWithoutHead } from './posted-review-head-repair.mjs';
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
@@ -1176,6 +1177,11 @@ export async function processReviewSubject(entry, ctx) {
 
       if (subject.terminal) {
         return;
+      }
+
+      if (existing?.review_status === 'posted' && !String(existing.reviewer_head_sha || '').trim()
+        && requeuePostedReviewWithoutHead({ db, repo: repoPath, prNumber, headSha: subject.headSha })) {
+        existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
       }
 
       db.exec('CREATE TABLE IF NOT EXISTS nonempty_pr_heads (repo TEXT, pr_number INTEGER, head TEXT, PRIMARY KEY(repo, pr_number))');

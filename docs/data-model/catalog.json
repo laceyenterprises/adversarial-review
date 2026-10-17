@@ -221,6 +221,7 @@
         "src/github-auth-recovery.mjs"
       ],
       "owner": "follow-up remediation queue",
+      "publicationFailureRetention": "Successful guarded publication removes the supplied failure sidecar; retained failures follow reply-artifact storage",
       "missingLabelEventObservationFields": ["firstSeenAt"],
       "missingLabelEventRetention": "no automatic expiry; operator cleanup after PR closure or head supersession",
       "infrastructureRefundRetryCode": "infrastructure-refund",

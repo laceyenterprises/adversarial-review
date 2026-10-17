@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as gates from '../src/ama/operator-label-gates.mjs';
@@ -32,7 +32,7 @@ test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and
   const comments = [];
   const pages = [];
   const args = { rootDir, promptTemplate: 'Remediate', log,
-    resolvePRLifecycleImpl: async () => ({ state: 'OPEN', headSha: head }),
+    resolvePRLifecycleImpl: async () => ({ prState: 'open', source: 'live', headSha: head }),
     postCommentImpl: async ({ body, workerClass }) => {
       assert.equal(workerClass, 'claude-code', 'the hold uses its reviewer bot without resolving remediation config');
       comments.push(body); return { posted: true };
@@ -51,9 +51,36 @@ test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and
     gates: classification.gated.map(({ check, label, reason }) => ({ check, label, reason })) });
   assert.equal(comments.length, 1);
   assert.equal(pages.length, 1);
+  assert.equal(readdirSync(join(rootDir, 'data', 'operator-label-holds')).some(name => name.endsWith('.lock')), false);
   assert.match(comments[0], /live-pack-edit-approved/);
   assert.match(comments[0], /leave the guarded changes in place/);
 });
+
+for (const [prState, headSha, expected] of [
+  ['closed', head, 'pr-closed'], ['merged', head, 'pr-merged'],
+  ['open', 'b'.repeat(40), 'stale-review-head'],
+]) {
+  test(`operator-only review respects lifecycle before paging: ${expected}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-lifecycle-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    createFollowUpJob({ rootDir, repo: 'sample/repo', prNumber: 1, revisionRef: head,
+      reviewerModel: 'claude', reviewBody: gatedBody, reviewPostedAt: '2026-10-16T12:00:00Z' });
+    let lifecycleReads = 0;
+    const result = await consumeNextFollowUpJob({ rootDir, promptTemplate: 'Remediate', log,
+      resolvePRLifecycleImpl: async () => { lifecycleReads++; return { prState, headSha, source: 'live' }; },
+      postCommentImpl: async ({ body }) => {
+        assert.doesNotMatch(body, /Operator-gated review held/);
+        return { posted: true };
+      },
+      deliverAlertImpl: async () => assert.fail('obsolete PR must not page'),
+      execFileImpl: async () => assert.fail('obsolete PR must not prepare a worker'),
+      spawnImpl: () => assert.fail('obsolete PR must not spawn') });
+    assert.equal(result.reason, expected);
+    assert.equal(result.job.status, 'stopped');
+    assert.equal(lifecycleReads, 1);
+    assert.equal(result.job.remediationWorker.state, 'never-spawned');
+  });
+}
 
 test('REMLABEL-01: mixed findings restrict the prompt to actionable fixes and preserve gated changes', () => {
   const body = gatedBody.replace('## Blocking issues', '## Blocking issues\n- **Repair parser** — reject malformed input.');

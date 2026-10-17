@@ -24,8 +24,10 @@ Once the worker exits, a matching preservation refusal precedes lifecycle
 completion, reply validation, no-progress handling and published-head recovery.
 The job moves to `failed/` with `failure.code: remediation-empties-pr-diff`, an
 owed failure comment, and a failed worker; no re-review is requested. A sidecar
-for another reviewed head cannot fail this round. Its retention follows the
-existing reply-artifact storage; no separate sweeper or new CI gate is added.
+for another reviewed head cannot fail this round. A successful guarded publication
+removes the supplied failure sidecar before reporting success; missing files are
+harmless and other unlink errors are reported. Retained failures follow existing
+reply-artifact storage; no separate sweeper or new CI gate is added.
 
 
 ## Missing retrigger-review label-event observations

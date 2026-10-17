@@ -105,7 +105,9 @@
         {"id": "follow-up-job.12","from": "failed","to": "pending","trigger": "explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.13","from": "stopped","to": "pending","trigger": "allowlisted explicit retrigger","codeSource": "src/follow-up-jobs.mjs"},
         {"id": "follow-up-job.14","from": "in_progress","to": "stopped","trigger": "stacked-base-merged: hold before worker spawn and request rebase/retarget","codeSource": "src/follow-up-remediation.mjs"},
-        {"id": "follow-up-job.15","from": "in_progress","to": "pending","trigger": "base evidence unreadable: budget-neutral delayed recheck","codeSource": "src/follow-up-remediation.mjs"}
+        {"id": "follow-up-job.15","from": "in_progress","to": "pending","trigger": "base evidence unreadable: budget-neutral delayed recheck","codeSource": "src/follow-up-remediation.mjs"},
+        {"id": "follow-up-job.16","from": "in_progress","to": "stopped","trigger": "operator-only findings after lifecycle admission: hold without spawning","codeSource": "src/follow-up-remediation.mjs"},
+        {"id": "follow-up-job.17","from": "in_progress","to": "failed","trigger": "exited worker has a matching preservation-refusal sidecar","codeSource": "src/follow-up-remediation.mjs"}
       ]
     },
     {
@@ -263,7 +265,7 @@
     "src/ama/dispatch-closer.mjs": "1cde7feda8055b5f072da7f15fce21002cdf23ffe3d7d7dab6cd7127181a9d5b",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
-    "src/follow-up-remediation.mjs": "e7040add9e27706ced329c6412f2a9dfbc1db7080e640e1de65fef97b6da9f0b",
+    "src/follow-up-remediation.mjs": "b7eb5c36aa49e84062b2c836e9cb5831151cf061622075af572c7ef7cf33a611",
     "src/orphan-post-reconcile.mjs": "a4f21f7764d361da91bfa699ad5261e41a2f8348f13c6330ea113b3ae4dad826",
     "src/posted-review-row.mjs": "8edfebcef0cbc9849a97bab961b327c8735a8318e8a2690b7145a6627f6aff4d",
     "src/review-state-db.mjs": "b0d63342a60bb2c0cfed1d727bae3c45ae7239604391e39c071b160288effa87",

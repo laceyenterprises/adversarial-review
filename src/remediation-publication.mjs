@@ -1,13 +1,27 @@
 // REMLABEL-01: the remediation publisher owns the final diff check and push.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { accessSync, constants } from 'node:fs';
+import { delimiter, resolve } from 'node:path';
+import { runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
 
 const execFileAsync = promisify(execFile);
 const SHA = /^[a-f0-9]{40}$/i;
 
+function defaultPushCommand(env) {
+  for (const directory of (env.PATH ?? process.env.PATH ?? '').split(delimiter)) {
+    try {
+      const command = resolve(directory || '.', 'git-safe');
+      accessSync(command, constants.X_OK);
+      return command;
+    } catch { /* Try the next PATH entry; plain git is supported without the shim. */ }
+  }
+  return 'git';
+}
+
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
   branch, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
-  pushCommand = 'git-safe', env = process.env } = {}) {
+  pushCommand, env = process.env } = {}) {
   if (typeof baseBranch !== 'string' || !baseBranch || typeof branch !== 'string' || !branch
     || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) {
     throw Object.assign(new Error('Remediation publication requires the previous head and exact remote lease.'), { code: 'remediation-publication-unproven' });
@@ -17,7 +31,13 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   await git(['check-ref-format', `refs/heads/${baseBranch}`]);
   await git(['check-ref-format', `refs/heads/${branch}`]);
   // Refresh the actual target branch; never compare against a stale worker base.
-  await git(['fetch', '--no-tags', 'origin', `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`]);
+  await runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
+    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-tags', 'origin',
+      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`],
+    options: { env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+    // Keep the worker's selected credentials; auth failures are not transport retries.
+    refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'publisher retains worker credentials' }),
+  });
   const base = await git(['rev-parse', '--verify', `refs/remotes/origin/${baseBranch}^{commit}`]);
   const candidate = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
   const anchor = await git(['merge-base', base, previousHead]);
@@ -38,7 +58,7 @@ export async function publishRemediation({ workspaceDir = process.cwd(), baseBra
   }
   // Pin the inspected commit as well as the expected old remote head. Neither
   // a concurrent local checkout nor a competing branch push can swap the result.
-  await execFileImpl(pushCommand, ['-C', workspaceDir, 'push',
+  await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
     `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
   { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
   return { published: true, headSha: candidate, previousHead };

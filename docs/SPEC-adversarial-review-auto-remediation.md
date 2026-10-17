@@ -14,12 +14,20 @@ to base to satisfy these findings. A new review must observe the waiver.
 
 Remediation publishes through `bin/remediation-publish.mjs`, which refreshes the
 base and inspects the exact candidate commit before a lease-protected push.
+The base fetch uses the shared workspace network retry helper (three attempts,
+250/750 ms backoff); authentication and missing-ref failures stop immediately.
+The publisher retains the worker's credentials. It selects executable `git-safe`
+from `PATH` when available, otherwise `git`; `--push-command` explicitly selects
+the push executable. A selected executable's failure never triggers a fallback.
 It refuses an empty base-to-candidate or merge-base diff, and restoration of
 every originally changed path even if unrelated new files keep the diff
 nonempty. The original reviewed head defines those paths across rebases and
 stale-head replay. A refusal retains the prior remote head and records
 `remediation-empties-pr-diff` in a sidecar next to the reply artifact;
 reconciliation marks the round failed before any completion/re-review path.
+Successful publication removes the supplied `--failure-path` sidecar before
+reporting success, so a prior failed attempt cannot override the new result.
+An absent sidecar is harmless; other cleanup errors remain publication errors.
 This is a production publication boundary, with no new CI job or Git hook.
 Ordinary empty-diff closure remains unchanged.
 

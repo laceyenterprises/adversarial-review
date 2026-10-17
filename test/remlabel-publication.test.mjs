@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { publishRemediation } from '../src/remediation-publication.mjs';
@@ -142,5 +142,99 @@ test('REMLABEL-01: missing branch metadata refuses publication before any Git op
     await assert.rejects(publishRemediation({ ...metadata, previousHead: 'a'.repeat(40),
       execFileImpl: async () => { assert.fail('invalid metadata must not reach Git'); } }),
     { code: 'remediation-publication-unproven' });
+  }
+});
+
+for (const shim of ['absent', 'executable', 'non-executable']) {
+  test(`publication selects a usable push executable (git-safe: ${shim})`, async t => {
+    const f = fixture(t);
+    const pathDir = join(f.work, 'path');
+    mkdirSync(pathDir);
+    const gitPath = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+    symlinkSync(gitPath, join(pathDir, 'git'));
+    if (shim !== 'absent') {
+      writeFileSync(join(pathDir, 'git-safe'), '#!/bin/sh\nexec git "$@"\n');
+      chmodSync(join(pathDir, 'git-safe'), shim === 'executable' ? 0o755 : 0o644);
+    }
+    let push;
+    const result = await publishRemediation({ ...f.publish, pushCommand: undefined,
+      env: { ...env, PATH: pathDir }, execFileImpl: async (cmd, args, opts) => {
+        if (args.includes('push')) push = cmd;
+        return execAsync(cmd, args, opts);
+      } });
+    assert.equal(push, shim === 'executable' ? join(pathDir, 'git-safe') : 'git');
+    assert.equal(result.headSha, f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0]);
+  });
+}
+
+test('an explicit publisher push command failure never bypasses the selected command', async t => {
+  const f = fixture(t);
+  let pushes = 0;
+  await assert.rejects(publishRemediation({ ...f.publish, pushCommand: 'selected-git-safe',
+    execFileImpl: async (cmd, args, opts) => {
+      if (args.includes('push')) {
+        pushes++;
+        assert.equal(cmd, 'selected-git-safe');
+        throw Object.assign(new Error('selected shim refused'), { code: 78 });
+      }
+      return execAsync(cmd, args, opts);
+    } }), /selected shim refused/);
+  assert.equal(pushes, 1);
+});
+
+for (const succeeds of [true, false]) {
+  test(`publication retries transient fetch failures at most three times (recovers: ${succeeds})`, async t => {
+    const f = fixture(t);
+    let fetches = 0;
+    let pushes = 0;
+    const failure = Object.assign(new Error('git fetch failed'), { stderr: 'fatal: unable to access origin: TLS handshake timeout' });
+    const operation = publishRemediation({ ...f.publish, execFileImpl: async (cmd, args, opts) => {
+      if (args.includes('fetch')) {
+        fetches++;
+        if (!succeeds || fetches < 3) throw failure;
+      }
+      if (args.includes('push')) pushes++;
+      return execAsync(cmd, args, opts);
+    } });
+    if (succeeds) assert.equal((await operation).published, true);
+    else await assert.rejects(operation, error => error === failure);
+    assert.equal(fetches, 3);
+    assert.equal(pushes, succeeds ? 1 : 0);
+  });
+}
+
+for (const stderr of ['fatal: Authentication failed', 'fatal: repository not found', "fatal: couldn't find remote ref main"]) {
+  test(`publication does not retry permanent fetch failure: ${stderr}`, async t => {
+    const f = fixture(t);
+    let fetches = 0;
+    await assert.rejects(publishRemediation({ ...f.publish, execFileImpl: async (cmd, args, opts) => {
+      if (args.includes('fetch')) {
+        fetches++;
+        throw Object.assign(new Error('git fetch failed'), { stderr });
+      }
+      assert.equal(args.includes('push'), false);
+      return execAsync(cmd, args, opts);
+    } }));
+    assert.equal(fetches, 1);
+  });
+}
+
+test('publication CLI clears a prior refusal after a corrected publication and tolerates a missing sidecar', async t => {
+  const f = fixture(t);
+  const failurePath = join(f.work, 'publication-failure.json');
+  const args = [new URL('../bin/remediation-publish.mjs', import.meta.url).pathname,
+    '--base-branch', 'main', '--branch', 'topic', '--previous-head', f.previousHead,
+    '--failure-path', failurePath, '--push-command', 'git'];
+  writeFileSync(join(f.work, 'feature.txt'), 'base\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Restore sample feature');
+  await assert.rejects(execAsync(process.execPath, args, { cwd: f.work, env }));
+  assert.equal(JSON.parse(readFileSync(failurePath)).code, 'remediation-empties-pr-diff');
+  writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Repair sample feature');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await execAsync(process.execPath, [...args, '--expected-remote-sha',
+      attempt === 0 ? f.previousHead : f.git('rev-parse', 'HEAD')], { cwd: f.work, env });
+    assert.equal(JSON.parse(result.stdout).published, true);
+    assert.equal(existsSync(failurePath), false);
   }
 });

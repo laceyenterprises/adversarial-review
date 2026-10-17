@@ -4428,6 +4428,7 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  let finalHammerRetryReason = null;
   let reconciledDispatchedLease = null;
   let earlyLaunchRequestProbe = null;
   const reconciliationRoot = dispatchContext?.rootDir;
@@ -5415,6 +5416,13 @@ export async function maybeDispatchAmaCloser({
     });
     throwIfAborted(signal);
     let status = statusProbe?.status || null;
+    // FINALCLOSE-01: worker status can remain `starting` after a reboot while
+    // the launch ledger is terminal. Process success alone is not merge proof;
+    // feed it through the live PR/audit reconciliation below.
+    if (prefetchedLaunchRequestProbe?.ok
+      && isTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row?.status)) {
+      status = amaCloserStatusFromTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row.status);
+    }
     existingDispatchStatus = status;
     if (isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
@@ -5615,6 +5623,7 @@ export async function maybeDispatchAmaCloser({
           hammerEndedWithoutMerge = true;
           const noMergeOutcome = hammerOutcome.outcome;
           const exitedWithoutClose = noMergeOutcome === HAMMER_EXITED_WITHOUT_CLOSE;
+          finalHammerRetryReason = noMergeOutcome;
           status = 'failed';
           existingDispatchStatus = status;
           // Releasing this lease is what releases the single-flight: the PR's
@@ -5637,7 +5646,9 @@ export async function maybeDispatchAmaCloser({
           }));
           // An exit without a close never ran its close, so its re-arm is
           // refunded (bounded) instead of spending the series' real retry.
-          const retryRefund = exitedWithoutClose && isHammerWorkerClass(existingRecord.workerClass || workerClass)
+          const retryRefund = exitedWithoutClose
+            && existingRecord.dispatchReason !== 'exhausted-final-hammer'
+            && isHammerWorkerClass(existingRecord.workerClass || workerClass)
             ? refundExitedHammerDispatchBestEffort({
               rootDir,
               repo,
@@ -6624,7 +6635,11 @@ export async function maybeDispatchAmaCloser({
           : hammerTargetCapExhausted
           ? hammerRetryCapDecision.targetAlertAlreadyEmitted
           : hammerRetryCapDecision.seriesAlertAlreadyEmitted,
-        gateReasons: dispatchContext?.daemonFailureReasons || [],
+        gateReasons: [...(dispatchContext?.daemonFailureReasons || []),
+          ...(finalHammerRetryReason ? [finalHammerRetryReason] : []),
+          ...(existingRecord?.lastError ? [existingRecord.lastError]
+            : existingRecord?.dispatchReason === 'exhausted-final-hammer'
+              ? [existingRecord.outcome || 'terminal-launch-without-merge'] : [])],
         hammerStop: hammerStopRelease?.hammerStop || readHammerStopForHead({
           hqRoot, repo, prNumber, headSha: targetRemediationSha, reviewedSha, logger,
         }),

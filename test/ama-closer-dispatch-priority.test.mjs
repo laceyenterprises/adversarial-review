@@ -1012,7 +1012,7 @@ test('LABELGATE-01: only label failures hold closure and page once per head', as
     assert.equal(result.skipMergeAgent, true);
   }
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0].text, /apply the label, then rerun the named check/);
+  assert.match(alerts[0].text, /apply the named label and rerun review or the named check/);
   assert.match(alerts[0].text, /submodule-pointer-gate.*allow-submodule-pointer-bump/);
   await maybeDispatchAmaCloser({ ...args, ...deps, prMetadata: { ...args.prMetadata, headSha: 'b'.repeat(40) },
     reviewState: { ...args.reviewState, headSha: 'b'.repeat(40) },
@@ -1596,4 +1596,29 @@ test('stale missing review context still reconciles a dispatched lease', async t
   assert.equal(result.reason, 'dispatch-head-context-unavailable');
   assert.equal(readAmaCloserLease(rootDir, identity).status, 'terminal');
   assert.equal(deps.calls.length, 0);
+});
+
+
+test('REMLABEL-01: operator-only findings hold the terminal hammer and page once', async t => {
+  const { classifyOperatorGatedFindings } = await import('../src/ama/operator-label-gates.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-hammer-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const operatorLabelFindings = classifyOperatorGatedFindings('## Blocking issues\n- **[live_pack_cross_edit] Live pack** — operator waiver needed.');
+  const args = findingsRemediationArgs(rootDir, { reviewState: { reviewCycleExhausted: true, operatorLabelFindings } });
+  let pages = 0;
+  let comments = 0;
+  const deps = { ...testDeps(), deliverAlertImpl: async () => { pages++; },
+    execFileImpl: async (cmd, argv) => {
+      assert.equal(cmd, 'gh');
+      assert.ok(argv.includes('repos/acme/repo/issues/404/comments'));
+      comments++;
+      return { stdout: '{}', stderr: '' };
+    } };
+  for (let i = 0; i < 2; i++) {
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.reason, 'operator-label-required:live-pack-edit-approved');
+  }
+  assert.equal(pages, 1);
+  assert.equal(comments, 1);
 });

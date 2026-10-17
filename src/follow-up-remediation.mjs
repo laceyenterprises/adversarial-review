@@ -102,6 +102,7 @@ import {
   createLocalRemediationHandle,
 } from './adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from './adapters/agent-runtime/local/non-blocking-codex-model.mjs';
+import { classifyOperatorGatedFindings, holdForOperatorLabels } from './ama/operator-label-gates.mjs';
 import {
   OAuthError,
   assertClaudeCodeOAuth,
@@ -3257,6 +3258,19 @@ async function consumeNextFollowUpJob({
       job: stopped.job,
       jobPath: stopped.jobPath,
     };
+  }
+
+  const operatorFindings = classifyOperatorGatedFindings(claimed.job.reviewBody);
+  if (operatorFindings.allGated) {
+    const gates = operatorFindings.gated.map(({ check, label, reason }) => ({ check, label, reason }));
+    const reason = `Operator-gated findings require ${[...new Set(gates.map(gate => gate.label))].join(', ')}. `
+      + 'Remediation was not dispatched. Keep the PR changes in place; an operator must inspect the finding and apply the appropriate label, then rerun review.';
+    const stopped = markFollowUpJobStopped({ rootDir, jobPath: claimed.jobPath,
+      stoppedAt: now(), stopCode: gates[0].reason, stopReason: reason, sourceStatus: 'in_progress',
+      remediationWorker: { state: 'never-spawned', reconciledAt: now() } });
+    await holdForOperatorLabels({ rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
+      headSha: claimed.job.revisionRef, gates, deliverAlertImpl, postCommentImpl, logger: log, now: now() });
+    return { consumed: false, reason: gates[0].reason, job: stopped.job, jobPath: stopped.jobPath };
   }
 
   // A pre-spawn failure burns no remediation round.

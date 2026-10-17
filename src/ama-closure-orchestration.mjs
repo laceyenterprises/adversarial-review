@@ -1505,6 +1505,7 @@ async function dispatchAmaClosureFor({
 
   throwIfAborted(signal);
   const reviewState = {
+    operatorLabelFindings: gateSnapshot.settledReview?.operatorLabelFindings || null,
     // A same-head review edit is new evidence even when verdict/counts agree.
     refusalReviewVersion: gateSnapshot.settledReview?.evidenceVersion || null,
     verdict: gateSnapshot.settledReview?.verdict || '',

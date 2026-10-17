@@ -125,8 +125,9 @@ out during final path and ownership checks, the sweep reads its second census
 and repeats all checks for that candidate, including owner and live-worker
 validation. The census keeps process command lines and environments (`ps`)
 separate from open-file and working-directory names (`lsof`). Before each
-deletion, the candidate's lexical and real paths are checked against both
-sources; an open-file name must equal one of those paths or begin with that
+deletion, the candidate's distinct lexical and real paths are checked against both
+sources. Both LF and CRLF census line endings are accepted; an open-file name
+must equal one of those paths or begin with that
 path followed by `/`. Launch-request and worker IDs are checked only against
 `ps`. An unrelated process holding an audit file named after a launch or worker
 does not keep terminal scratch alive. A process retaining an ID in its arguments

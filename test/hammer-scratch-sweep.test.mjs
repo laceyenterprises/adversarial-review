@@ -165,17 +165,19 @@ for (const [kind, fileName, protects] of [
   ['sibling prefix', path => `${path}-other/synthetic.log`, false],
   ['embedded path', path => `/fixture/audit${path}/synthetic.log`, false],
 ]) {
-  test(`SCRATCHCENSUS-02: open-file path boundaries (${kind})`, async t => {
-    const f = fixture(t);
-    const path = f.scratch();
-    f.record(path);
-    const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
-      readProcessSnapshotImpl: syntheticCensus({ lsof: `p123\nn${fileName(path)}` }),
+  for (const [ending, newline] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+    test(`SCRATCHCENSUS-02: open-file path boundaries (${kind}, ${ending})`, async t => {
+      const f = fixture(t);
+      const path = f.scratch();
+      f.record(path);
+      const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+        readProcessSnapshotImpl: syntheticCensus({ lsof: `p123${newline}n${fileName(path)}${newline}` }),
+      });
+      assert.equal(existsSync(path), protects);
+      assert.equal(removed.length, protects ? 0 : 1);
+      assert.equal(sweepSummary(f).kept['process-references-path'], protects ? 1 : 0);
     });
-    assert.equal(existsSync(path), protects);
-    assert.equal(removed.length, protects ? 0 : 1);
-    assert.equal(sweepSummary(f).kept['process-references-path'], protects ? 1 : 0);
-  });
+  }
 }
 
 for (const ps of ['123 synthetic-hammer --launch=synthetic-lrq',

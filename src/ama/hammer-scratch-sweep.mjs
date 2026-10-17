@@ -266,7 +266,7 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       if (typeof snapshot?.ps !== 'string' || !snapshot.ps.trim()
         || typeof snapshot?.lsof !== 'string' || !snapshot.lsof.trim()) throw new Error('unreadable process census');
       processes = snapshot.ps;
-      openFiles = snapshot.lsof.split('\n').filter(line => line.startsWith('n')).map(line => line.slice(1));
+      openFiles = snapshot.lsof.split(/\r?\n/).filter(line => line.startsWith('n')).map(line => line.slice(1));
     } catch {
       // Executor errors can contain environments or command output. Never log them.
       throw new Error('unreadable process census');
@@ -320,7 +320,7 @@ export async function sweepHammerScratchDirs(rootDir, options = {}) {
       if (Date.now() - censusStartedAt >= PROCESS_CENSUS_FRESHNESS_MS) {
         pauseReason = 'census-expired'; break;
       }
-      const paths = [scratchDir, realpathSync(scratchDir)];
+      const paths = [...new Set([scratchDir, realpathSync(scratchDir)])];
       if (paths.some(path => processes.includes(path)
         || openFiles.some(file => file === path || file.startsWith(`${path}/`)))) {
         kept['process-references-path'] += 1; continue;

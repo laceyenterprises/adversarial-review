@@ -1,7 +1,7 @@
 // Poll-starvation signal — the watcher's own page for "one tick is frozen".
 //
 // WPS-01. `createWatcherStallWatchdog` owns DETECTING the condition (a poll in
-// flight with no completed work for its deadline-safe threshold, across N
+// flight with no completed work for its requested threshold, across N
 // consecutive checks); this leaf owns what happens next. Split out of watcher.mjs to keep
 // that file under its ARC-18 line ratchet, and because the delivery decision —
 // which file to write, which event name to page on — is exactly the kind of
@@ -16,7 +16,6 @@ import {
 } from './watcher-heartbeat.mjs';
 
 const DEFAULT_STARVATION_MS_FLOOR_INTERVAL_MULTIPLIER = 3;
-const POLL_STARVATION_DEADLINE_MARGIN_MS = 60_000;
 
 function positiveNumberOr(value, fallback) {
   const numeric = Number(value);
@@ -27,19 +26,18 @@ function positiveNumberOr(value, fallback) {
  * Resolve the starvation thresholds for this process.
  *
  * The default is the larger of the shipped floor and three poll intervals, so a
- * legitimately long tick on a slow configuration is not paged while a frozen one
- * always is. The existing override can raise this threshold, but cannot lower it
- * below the current poll deadline plus one minute of scheduling slack.
+ * frozen poll is detected within the requested window. Completed work resets
+ * that window, so productive polls need no floor tied to the workload deadline.
+ * The existing override sets the threshold exactly.
  */
 export function resolvePollStarvationConfig({
   env = process.env,
   intervalMs = 0,
-  pollDeadlineMs = 0,
   defaultStarvationMs = DEFAULT_WATCHER_POLL_STARVATION_MS,
   defaultChecks = DEFAULT_WATCHER_POLL_STARVATION_CHECKS,
 } = {}) {
   const configured = Number(env?.ADVERSARIAL_WATCHER_POLL_STARVATION_MS);
-  const requestedStarvationMs = Number.isFinite(configured) && configured > 0
+  const starvationMs = Number.isFinite(configured) && configured > 0
     ? configured
     : Math.max(
       positiveNumberOr(defaultStarvationMs, DEFAULT_WATCHER_POLL_STARVATION_MS),
@@ -49,8 +47,6 @@ export function resolvePollStarvationConfig({
   const checksRequired = Number.isFinite(configuredChecks) && configuredChecks > 0
     ? Math.trunc(configuredChecks)
     : Math.max(1, Math.trunc(positiveNumberOr(defaultChecks, DEFAULT_WATCHER_POLL_STARVATION_CHECKS)));
-  const starvationMs = Math.max(requestedStarvationMs,
-    positiveNumberOr(pollDeadlineMs, 0) + POLL_STARVATION_DEADLINE_MARGIN_MS);
   return { starvationMs, checksRequired };
 }
 
@@ -176,11 +172,11 @@ export function trackPollHandlerProgress(handler, heartbeat) {
   } };
 }
 
-// Capture one deadline for both guards. Recompute between polls as workload
-// changes, so neither guard can read a different budget for the same poll.
+// Capture the workload deadline between polls and log it alongside the
+// independent no-progress threshold whenever the workload changes.
 export function createPollWatchdogBudget({ getDeadlineMs, env, intervalMs, logger = console }) {
   let deadlineMs = getDeadlineMs();
-  let config = resolvePollStarvationConfig({ env, intervalMs, pollDeadlineMs: deadlineMs });
+  let config = resolvePollStarvationConfig({ env, intervalMs });
   return {
     get deadlineMs() { return deadlineMs; },
     get starvationMs() { return config.starvationMs; },
@@ -189,7 +185,7 @@ export function createPollWatchdogBudget({ getDeadlineMs, env, intervalMs, logge
       const next = getDeadlineMs();
       if (next === deadlineMs) return;
       deadlineMs = next;
-      config = resolvePollStarvationConfig({ env, intervalMs, pollDeadlineMs: deadlineMs });
+      config = resolvePollStarvationConfig({ env, intervalMs });
       logger.log(`[watcher] poll deadline changed: ${deadlineMs / 1000}s | poll-starvation respawn: ${config.starvationMs / 1000}s × ${config.checksRequired} checks`);
     },
   };

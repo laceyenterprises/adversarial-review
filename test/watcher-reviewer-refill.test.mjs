@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { reviewWaitPressure } from '../src/review-queue-depth.mjs';
+import { reviewerSafetyPassKind } from '../src/watcher-reviewer-pool.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { attachDurableReviewerRefill, createDurableReviewerCandidate, createDurableReviewerRefill } from '../src/watcher-reviewer-refill.mjs';
 
@@ -103,6 +105,27 @@ test('durable candidate defers API/discovery until pool admission and preserves 
   assert.deepEqual(f.counts(), { reads: 0, processes: 0, runs: 0, admissions: 0, releases: 0 });
   await f.candidate.run();
   assert.deepEqual(f.counts(), { reads: 1, processes: 1, runs: 1, admissions: 1, releases: 1 });
+});
+
+test('durable candidate retains ledger age for the separate re-review wait bound before discovery', () => {
+  const nowMs = Date.parse('2026-10-17T10:00:00Z');
+  for (const ageSeconds of [600, 900, 901]) {
+    const candidate = createDurableReviewerCandidate({
+      repo: 'example/fixture', pr_number: 1, reviewer: 'gemini', revision_ref: 'head-a',
+      posted_at: '2026-10-16T10:00:00Z',
+      rereview_requested_at: new Date(nowMs - ageSeconds * 1000).toISOString(),
+    }, {
+      context: { hasPriorPostedReview: () => true },
+      subjectAdapter: { fetchState() { assert.fail('wait classification must not fetch GitHub state'); } },
+      processSubject() { assert.fail('wait classification must not run discovery'); },
+      enqueue() { assert.fail('wait classification must not enqueue another route'); },
+    });
+    const pressure = reviewWaitPressure({ ...candidate, depthPassKind: reviewerSafetyPassKind(candidate) }, {
+      nowMs, env: { ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS: '900' },
+    });
+    assert.equal(pressure.waitSeconds, ageSeconds);
+    assert.equal(pressure.engaged, ageSeconds > 900);
+  }
 });
 
 test('durable candidate forwards spawn timing and the post timestamp before releasing capacity', async () => {

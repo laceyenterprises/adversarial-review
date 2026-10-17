@@ -193,7 +193,10 @@ test('SEATIDLE-03: gap measures the durable post through settlement and a later 
     } };
   admission.enqueue(next);
   await next.run();
-  assert.deepEqual(logs, ['[watcher] reviewer seat handoff: model=gemini post_to_spawn_ms=55000']);
+  assert.deepEqual(logs, [
+    '[watcher] watcher first reviewer spawn: startup_to_spawn_ms=55000',
+    '[watcher] reviewer seat handoff: model=gemini post_to_spawn_ms=55000',
+  ]);
 });
 
 function durableFixture(t, f, createCandidate = row => f.candidate(row.pr_number)) {

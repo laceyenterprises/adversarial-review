@@ -139,10 +139,16 @@ at completion. Without admission splitting, the completed review result (or
 pipeline rollup delivery receipt) supplies the durable timestamp for the
 `post_to_spawn_ms` handoff metric.
 
-At startup, refill contexts intentionally remain empty until initial poll
-discovery registers each repo/domain's policy, runtime and subject adapter.
-A seat freed before its context is registered defers durable work to that
-initial discovery pass; it does not bypass discovery with a partial context.
+At startup, refill contexts remain empty until the first poll refreshes the
+repository scope and registers each repo/domain's policy, runtime and subject
+adapter. After lifecycle synchronization, reviewer-session reconciliation,
+orphan recovery and pass-timeout reaping, it drains durable pending work before subject discovery
+only when watcher drain mode is inactive. Active drain mode leaves startup
+admission armed for the first resumed poll. A seat freed before context
+registration defers durable work until that setup completes;
+it does not bypass admission with a partial context. Discovery uses separate PR
+collectors so durable refill does not duplicate the stuck-merge-agent scan or
+phantom-handoff reconciliation inputs.
 
 The per-head dispatch lease is released by the candidate's unconditional
 `finally`, including after a queued freshness-read failure refunds its SQLite

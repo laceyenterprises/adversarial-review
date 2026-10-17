@@ -3757,7 +3757,7 @@ for (const stale of ['none', 'release-order', 'head-moved', 'closed', 'merged', 
                 'onCapacityFreed: async (',
                 'onCapacityFreed: globalThis.__seatIdleCapacityFreed = async (');
               result.source = result.source.replace(
-                'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates })',
+                'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, startedAt: Date.now() - Math.floor(process.uptime() * 1000) })',
                 'createReviewerAdmissionQueue({ candidates: reviewerDispatchCandidates, schedule: callback => callback() })');
               result.source = result.source.replace(
                 'const reviewerMemoryReservationState =',
@@ -4011,3 +4011,208 @@ for (const age of [600, 901]) {
     else assert.match(output, /review-wait-decision .*pr=101 .*pass_kind=rereview/);
   });
 }
+
+for (const startupState of ['open', 'drain', 'drain-cleared-during-recovery', 'closed', 'merged']) test(`STARTADMIT-01: startup admission follows recovery and drain guards (${startupState})`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'startup-admission-'));
+  const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+  try {
+    let loader = buildLoaderSource({ subjectHeads: { '102': null }, subject101Overrides: { labels: ['risk:medium', 'merge-agent-dispatched'] }, discoveryHookSource: `
+      if (['closed', 'merged'].includes(process.env.FIXTURE_STARTUP_STATE)) subjects[0].terminal = true;
+      globalThis.__startupDiscoverySawSpawn = globalThis.__watcherClaimLoopReviewerSpawns.some(
+        spawn => spawn.subjectContext.prNumber === 101);
+    `, reviewerRuntimeSource: `
+      globalThis.__watcherClaimLoopReviewerSpawns = [];
+      export function createReviewerRuntimeAdapterForDomain() { return {
+        spawnReviewer: async payload => {
+          if (globalThis.__startupRecoveryPhases?.slice(-3).join(',') !== 'lifecycle,sessions,passes') {
+            throw new Error('startup reviewer spawned before lifecycle/session/pass recovery');
+          }
+          globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+          payload.onReviewerPgid?.({ pgid: 123456, spawnedAt: new Date().toISOString() });
+          return { ok: true, stdout: '', stderr: '' };
+        }, cancel: async () => {}, reattach: async () => ({}),
+      }; }
+      export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+      export function loadDomainConfig() { return {}; }
+      export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+    ` });
+    loader = loader.replace("return { state: 'open', mergedAt: null, closedAt: null, headRefOid, labels: [] };",
+      "return { state: process.env.FIXTURE_STARTUP_STATE === 'merged' ? 'MERGED' : process.env.FIXTURE_STARTUP_STATE === 'closed' ? 'closed' : 'open', mergedAt: process.env.FIXTURE_STARTUP_STATE === 'merged' ? '2026-05-15T12:01:00Z' : null, closedAt: process.env.FIXTURE_STARTUP_STATE === 'closed' ? '2026-05-15T12:01:00Z' : null, headRefOid, labels: [] };");
+    loader = loader
+      .replace('export function scanStuckMergeAgentDispatches() { return []; }',
+        'export function scanStuckMergeAgentDispatches(args) { (globalThis.__startupStuckScanInputs ||= []).push(args); return []; }')
+      .replace('export async function reconcileProactivePhantomHandoffs() { return { inspected: 0, graceStarted: 0, escalated: 0 }; }',
+        'export async function reconcileProactivePhantomHandoffs(args) { (globalThis.__startupPhantomInputs ||= []).push(args); return { inspected: 0, graceStarted: 0, escalated: 0 }; }');
+    loader = loader.replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(fileUrl('src', 'watcher.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace(
+            "JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+            '({ org: "example", repos: ["example/review-fixture"] })')
+            .replace("join(ROOT, 'data', 'watcher-drain.json')", ${JSON.stringify(JSON.stringify(path.join(tmp, 'drain.json')))})
+            .replace('await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);',
+              "await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID); (globalThis.__startupRecoveryPhases ||= []).push('lifecycle'); if (process.env.FIXTURE_STARTUP_STATE === 'drain-cleared-during-recovery') (await import('node:fs')).rmSync(" + ${JSON.stringify(JSON.stringify(path.join(tmp, 'drain.json')))} + ");")
+            .replace('if (reattach.skipped > 0)', "globalThis.__startupRecoveryPhases.push('sessions'); if (reattach.skipped > 0)")
+            .replace('if (passReaper.reaped > 0)', "globalThis.__startupRecoveryPhases.push('passes'); if (passReaper.reaped > 0)")
+            .replace("await drainReviewerDispatchCandidates('startup durable pending');",
+              "globalThis.__startupDrainCalls = (globalThis.__startupDrainCalls || 0) + 1; await drainReviewerDispatchCandidates('startup durable pending');");
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, seatIdleSynthetic(loader));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, seatIdleSynthetic(buildRunnerSource({
+      prePollSetup: `
+        const { writeFileSync, rmSync } = await import('node:fs');
+        const startupState = process.env.FIXTURE_STARTUP_STATE;
+        const drainFile = ${JSON.stringify(path.join(tmp, 'drain.json'))};
+        if (startupState.startsWith('drain')) writeFileSync(drainFile, JSON.stringify({
+          reason: 'fixture maintenance', expiresAt: new Date(Date.now() + 60000).toISOString(),
+        }));
+        db.prepare(\`INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state,
+          review_status, revision_ref, labels_json)
+          VALUES ('example/review-fixture', 101, '2026-05-15T12:00:00Z', 'claude', 'open',
+            'pending', 'sha-happy-101', '[]')\`).run();
+      `,
+      healthProbeSetup: `
+        pollOptions.consumeWakePayload = () => {
+          assert.deepEqual(globalThis.__startupRecoveryPhases?.slice(-3), ['lifecycle', 'sessions', 'passes'],
+            'quota/refill context construction must not consume wakes before recovery');
+          globalThis.__startupLateWakeRead = true;
+          return { repo: 'example/review-fixture', pr_number: 101, head_sha: 'sha-happy-101' };
+        };
+      `,
+      afterFirstPoll: `
+        assert.deepEqual(globalThis.__startupRecoveryPhases, ['lifecycle', 'sessions', 'passes']);
+        assert.equal(globalThis.__startupLateWakeRead, true, 'recovered wakes must be consumed in the same poll');
+        if (startupState === 'drain') {
+          assert.equal(globalThis.__startupDrainCalls || 0, 0, 'active drain must skip startup refill');
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0);
+          assert.equal(claims.filter(c => c.prNumber === 101).length, 0);
+          rmSync(drainFile);
+          await pollOnce(octokit, pollOptions);
+          assert.equal(globalThis.__startupDrainCalls, 1, 'startup refill remains armed until drain clears');
+        }
+        if (['closed', 'merged'].includes(startupState)) {
+          assert.equal(db.prepare('SELECT pr_state FROM reviewed_prs WHERE pr_number = 101').get().pr_state, startupState);
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.length, 0, 'terminal PRs must not spawn from stale durable rows');
+          assert.equal(claims.filter(c => c.prNumber === 101).length, 0);
+        } else {
+          assert.equal(globalThis.__startupDiscoverySawSpawn, true,
+            'a durable pending reviewer must spawn before discovery completes');
+          assert.equal(globalThis.__watcherClaimLoopReviewerSpawns.filter(s => s.subjectContext.prNumber === 101).length, 1);
+          assert.equal(claims.filter(c => c.prNumber === 101).length, 1, 'rediscovery must keep same-head dedup');
+          assert.equal(globalThis.__startupStuckScanInputs.length, startupState === 'drain' ? 2 : 1);
+          const scan = globalThis.__startupStuckScanInputs.at(-1);
+          assert.deepEqual(scan.activePRs.map(pr => pr.prNumber), [101],
+            'startup refill must not duplicate stuck-scan records');
+          assert.deepEqual(scan.currentPRs.map(pr => pr.prNumber), [101],
+            'startup refill must not duplicate current-head records');
+          assert.equal(globalThis.__startupPhantomInputs.length, startupState === 'drain' ? 2 : 1);
+          assert.deepEqual(globalThis.__startupPhantomInputs.at(-1).currentPRs.map(pr => pr.prNumber), [101],
+            'phantom reconciliation must inspect each discovered PR once');
+        }
+      `,
+    })));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: fixtureEnv({ ...installGhFixture(tmp), FIXTURE_STARTUP_STATE: startupState }),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    if (['open', 'drain'].includes(startupState)) assert.match(result.stdout, /watcher first reviewer spawn: startup_to_spawn_ms=\d+/);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+for (const failed of [false, true]) test(`STARTADMIT-01: real poll shares one quota snapshot across candidates (failed=${failed})`, () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'poll-quota-'));
+  const loaderPath = path.join(tmp, 'loader.mjs'), registerPath = path.join(tmp, 'register.mjs'), runnerPath = path.join(tmp, 'runner.mjs');
+  try {
+    let loader = buildLoaderSource();
+    loader = loader.replace('export async function load(url, context, nextLoad) {', `
+      export async function load(url, context, nextLoad) {
+        if (url === ${JSON.stringify(fileUrl('src', 'posted-review-row.mjs'))}) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source).replace('export async function runQueuedReviewAdoptionPhase(',
+            'async function runQueuedReviewAdoptionPhaseActual(');
+          result.source += ${JSON.stringify(`
+            export async function runQueuedReviewAdoptionPhase(args) {
+              globalThis.__quotaPostedSnapshot = await globalThis.__quotaContext.execFileAsync(
+                'hq', ['fleet', 'quota', 'status', '--json']).catch(error => {
+                  globalThis.__quotaPostedError = error;
+                  return null;
+                });
+              return runQueuedReviewAdoptionPhaseActual(args);
+            }
+          `)};
+          return result;
+        }
+        if ([${JSON.stringify(fileUrl('src', 'watcher.mjs'))}, ${JSON.stringify(fileUrl('src', 'afh-reviewer-fallback.mjs'))}].includes(url)) {
+          const result = await nextLoad(url, context);
+          result.source = String(result.source)
+            .replace('const execFileAsync = promisify(execFile);', 'const execFileAsync = (...args) => globalThis.__quotaExec(...args);')
+            .replace("JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'))",
+              '({ org: "example", repos: ["example/review-fixture"] })')
+            .replace('const reviewContext = {', 'const reviewContext = globalThis.__quotaContext = {')
+            .replace('await processReviewSubject(subjectEntry, { ...reviewContext });',
+              'await processReviewSubject(subjectEntry, { ...reviewContext }); globalThis.__advanceQuotaClock();');
+          return result;
+        }
+    `);
+    writeFileSync(loaderPath, seatIdleSynthetic(loader));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, seatIdleSynthetic(buildRunnerSource({
+      prePollSetup: `
+        const { promisify } = await import('node:util');
+        const { execFile } = await import('node:child_process');
+        const actualExec = promisify(execFile);
+        let quotaReads = 0, failQuota = false, clockOffset = 0;
+        const realNow = Date.now;
+        Date.now = () => realNow() + clockOffset;
+        globalThis.__advanceQuotaClock = () => { clockOffset += 61_000; };
+        globalThis.__quotaExec = async (command, args, options) => {
+          if (args.join(' ') !== 'fleet quota status --json') return actualExec(command, args, options);
+          quotaReads++;
+          if (failQuota) throw new Error('synthetic quota failure');
+          return { stdout: JSON.stringify({ providerStatuses: ['openai', 'anthropic', 'google'].map(provider => ({
+            provider, authPath: 'oauth', state: 'ok', afhGrounding: { grounded: false },
+          })) }) };
+        };
+      `,
+      afterFirstPoll: `
+        assert.ok(JSON.parse(globalThis.__quotaPostedSnapshot.stdout).providerStatuses.every(row => row.state === 'ok'),
+          'the posted-review phase receives the shared quota snapshot');
+        ${failed ? `
+          const readsBeforeFailure = quotaReads;
+          db.prepare('DELETE FROM reviewed_prs').run();
+          failQuota = true;
+          await pollOnce(octokit, pollOptions);
+          assert.equal(quotaReads, readsBeforeFailure + 1, 'a failed read must be shared for the whole second poll');
+          assert.match(globalThis.__quotaPostedError.message, /synthetic quota failure/,
+            'posted handlers receive the quota failure instead of stale stdout');
+          await assert.rejects(globalThis.__quotaContext.execFileAsync('hq', ['fleet', 'quota', 'status', '--json']),
+            /synthetic quota failure/);
+          assert.equal(quotaReads, readsBeforeFailure + 1, 'posted handlers reuse the same failure without another read');
+        ` : `
+          assert.equal(quotaReads, 1, 'N candidates must share one read despite more than one TTL elapsing');
+          await globalThis.__quotaContext.execFileAsync('hq', ['fleet', 'quota', 'status', '--json']);
+          assert.equal(quotaReads, 1, 'posted-review handlers receive the same quota executor');
+        `}
+      `,
+    })));
+    const result = spawnSync(process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
+        cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
+        env: fixtureEnv({ ...installGhFixture(tmp), ADVERSARIAL_AFH_REVIEWER_FALLBACK: '',
+          ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'codex,claude-code',
+          ADVERSARIAL_AFH_CLAUDE_RUNTIME_PROBE: 'false' }),
+      });
+    assert.equal(result.status, 0, `${result.stdout || ''}${result.stderr || ''}`);
+    assert.match(result.stdout, /quota-status reads per poll: poll=1 reads=1/);
+    if (failed) {
+      assert.match(result.stderr, /afh-reviewer-grounding stale-if-error/);
+      assert.match(result.stdout, /quota-status reads per poll: poll=2 reads=1/);
+    }
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});

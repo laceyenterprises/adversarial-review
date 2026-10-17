@@ -89,7 +89,6 @@ import {
 import { maybeInlineFinalHammerAfterReview } from './final-to-hammer-handoff.mjs';
 import {
   applyReviewerWorkerClassFallbackToRoute,
-  FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
 } from './review-worker-class-fallback.mjs';
@@ -575,12 +574,11 @@ export function markUnroutableTitleDisposition({
 }
 
 
-// AFH-04 — one bounded `hq fleet quota status --json` read per TTL window (not
-// one per PR) feeding the ordered reviewer fallback. Constructing the cache is
-// pure (a closure; no I/O until first call), so it lives at module scope rather
-// than growing watcher.mjs, which is under a hard ARC-18 line ratchet. Tests and
-// alternate schedulers override it by passing `getAfhReviewerGroundingForTick`
-// in ctx. Disable the whole hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
+// AFH-04 — alternate schedulers retain the bounded TTL cache below. The watcher
+// injects getAfhReviewerGroundingForTick with a snapshot pinned for its whole
+// poll (STARTADMIT-01), shared with worker-class fallback and posted handlers.
+// Constructing this fallback cache is pure; no I/O until its first call.
+// Disable the AFH hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
 function emitReviewCacheLatencyEvent(event, { reviewDb = db, logger = console } = {}) {
   if (!event?.event) return;
   try {
@@ -2040,10 +2038,11 @@ export async function processReviewSubject(entry, ctx) {
             }),
           }) ?? null,
           execFileImpl: execFileAsync,
+          fleetQuotaStatus: afhGrounding?.fleetQuotaStatus,
           ...(reviewerFleetQuotaStatusCache
             ? {
                 fleetQuotaStatusCache: reviewerFleetQuotaStatusCache,
-                fleetQuotaStatusCacheTtlMs: FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
+                fleetQuotaStatusCacheTtlMs: Infinity,
               }
             : {}),
         });

@@ -619,6 +619,32 @@ test('AFH-04R: Claude runtime probe receives caller execution context', async ()
   assert.equal(calls[0].sleepImpl, sleepImpl);
 });
 
+for (const probeOutcome of ['ready', 'unavailable', 'throw']) {
+  for (const quotaFails of [false, true]) test(`fleet quota evidence survives terminal runtime probe (${probeOutcome}, quotaFails=${quotaFails})`, async () => {
+    const stdout = fleetStatusJson({ openai: OK, anthropic: OK, google: OK });
+    const snapshot = await readAfhReviewerGrounding({
+      env: {}, retryDelaysMs: [], includeFleetQuotaStatus: true, claudeRuntimeProbeUid: 501,
+      execFileImpl: async () => {
+        if (quotaFails) throw new Error('fixture quota unavailable');
+        return { stdout };
+      },
+      claudeRuntimeProbeImpl: async () => {
+        if (probeOutcome === 'throw') throw new Error('fixture runtime failure');
+        return { available: probeOutcome === 'ready', reason: 'fixture runtime status' };
+      },
+    });
+    assert.ok(Object.isFrozen(snapshot));
+    assert.ok(Object.isFrozen(snapshot.fleetQuotaStatus));
+    if (quotaFails) {
+      assert.equal(snapshot.fleetQuotaStatus.error, true);
+      assert.match(snapshot.fleetQuotaStatus.errorMessage, /fixture quota unavailable/);
+    } else {
+      assert.deepEqual(snapshot.fleetQuotaStatus, { stdout });
+    }
+    assert.equal(snapshot.localRuntimeGrounding?.claude?.available, probeOutcome === 'ready' ? undefined : false);
+  });
+}
+
 test('AFH-04R: readAfhReviewerGrounding does not infer a Claude runtime probe uid', async () => {
   let probeCalls = 0;
   const grounding = await readAfhReviewerGrounding({

@@ -35,7 +35,6 @@ import {
 } from '../src/review-queue-depth.mjs';
 import {
   applyReviewerWorkerClassFallbackToRoute,
-  FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS,
   resolveReviewerWorkerClassWithFallback,
   reviewWorkerClassFallback,
   reviewerWorkerClassEntitled,
@@ -963,16 +962,17 @@ test('CI-red reservations are refunded so spill slots reach later admissible PRs
   }
 });
 
-test('pollonce-phases uses a bounded per-tick quota cache TTL', () => {
-  assert.equal(FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS, 60_000);
+test('pollonce-phases pins quota evidence for the whole poll instead of expiring per candidate', () => {
   const watcherSrc = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
   const pollonceSrc = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   assert.match(watcherSrc, /reviewerTickCaches = \{ fleetQuotaStatus: new Map\(\) \}/);
   assert.match(watcherSrc, /reviewerFleetQuotaStatusCache: reviewerTickCaches\.fleetQuotaStatus/);
   assert.match(watcherSrc, /ok=\$\{Boolean\(pollResult\?\.ok\)\} timed_out=\$\{Boolean\(pollResult\?\.timedOut\)\}/);
   assert.match(pollonceSrc, /fleetQuotaStatusCache: reviewerFleetQuotaStatusCache/);
-  assert.match(pollonceSrc, /fleetQuotaStatusCacheTtlMs: FLEET_QUOTA_STATUS_TICK_CACHE_TTL_MS/);
-  assert.doesNotMatch(pollonceSrc, /fleetQuotaStatusCacheTtlMs: Number\.MAX_SAFE_INTEGER/);
+  assert.match(watcherSrc, /getAfhReviewerGroundingForTick: reviewerQuotaPoll\.getGrounding/);
+  assert.match(watcherSrc, /execFileAsync: reviewerQuotaPoll\.execFile/);
+  assert.match(pollonceSrc, /fleetQuotaStatus: afhGrounding\?\.fleetQuotaStatus/);
+  assert.match(pollonceSrc, /fleetQuotaStatusCacheTtlMs: Infinity/);
 });
 
 // REVIEWFAILOVER-01: use the production drain preparation and fallback resolver.

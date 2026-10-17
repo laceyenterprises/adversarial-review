@@ -846,7 +846,9 @@ Each child has isolated state, a credential-free environment, network refusal,
 fake external commands and a file-only Git remote. The watcher entry is the
 production posted-review phase (`handlePostedReviewRow`) used by `pollOnce`;
 the consumer, closer dispatcher, handoff and daemon merge functions are real.
-The existing claim-loop suite continues to verify `pollOnce` admission itself.
+The existing claim-loop suite continues to verify `pollOnce` admission itself,
+including startup refill after lifecycle/session recovery, refusal during drain
+mode, and admission on the first poll after drain clears.
 
 <a id="smv-clean"></a>**smv-clean:** an approved exact-head, zero-finding review
 merges autonomously and the bare remote records that SHA. The synthetic commit
@@ -929,8 +931,8 @@ stateDiagram-v2
     [*] --> s8: review-row.04 bot route disabled
     s8 --> s9: review-row.05 legacy bot recovery
     s9 --> s9: review-row.06 enqueue new head
-    s0 --> s2: review-row.07 claim CAS
-    s1 --> s2: review-row.08 claim after hold
+    s0 --> s2: review-row.07 claim CAS (startup: recovery complete, drain inactive)
+    s1 --> s2: review-row.08 claim after hold (startup: recovery complete, drain inactive)
     s5 --> s2: review-row.09 eligible retry CAS
     s2 --> s4: review-row.10 deliver review with matching session and recorded reviewed head
     s2 --> s5: review-row.11 dispatch or reviewer failure

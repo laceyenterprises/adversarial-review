@@ -239,10 +239,21 @@ recovery already returns review to `agy` on its own.
 - **Entitlement + quota.** A fallback class is only selected if its GitHub
   reviewer bot token is present *and* its provider has quota. Spilling onto a
   class that cannot boot converts a slow queue into a stalled one.
-- **Quota freshness is bounded.** Within one watcher tick, reviewer worker-class
-  fallback shares `hq fleet quota status --json` results for 60 seconds. That
-  includes fail-open probe errors, which are reused only for that same bounded
-  window and emit `review-worker-class-fallback-fail-open` per affected PR.
+- **One shared reviewer quota read per poll.** AFH grounding and worker-class fallback
+  share one `hq fleet quota status --json` result throughout discovery,
+  admission and posted-review handling, even when a poll exceeds 60 seconds.
+  The next poll refreshes it. The shared read retries a transient subprocess
+  failure once after 250 ms, with a quarter of the initial timeout; permanent
+  errors are not retried. A failed refresh can select AFH's last good provider
+  evidence only when it is at most ten minutes old at refresh time. That selection
+  stays pinned for the rest of the poll and for capacity-freed refills using its
+  contexts until the next poll replaces them; ten minutes is not a wall-clock
+  reuse deadline. Managed account evidence remains held throughout stale reuse.
+  Stale snapshots expose quota failure status without stdout to worker-class
+  fallback, and quota exec consumers receive the original subprocess error,
+  including its code, killed flag and stderr. They cannot admit a managed account
+  from cached stdout. With no usable snapshot, routing keeps its existing
+  fail-open behavior for the whole poll.
 - **The quota trigger is unchanged.** A quota-grounded primary still fails over
   at any depth, and does not consume the depth budget. The two triggers compose.
 - **The pool ceiling is untouched.** More concurrent `gemini` reviewers contend
@@ -250,3 +261,30 @@ recovery already returns review to `agy` on its own.
   to raise.
 
 Discovery defers the posted-review SQL lookup until an engaged depth lane needs classification or the subject reaches pool admission. Early held/skipped subjects with no engaged depth lever do not pay that query cost.
+
+
+## Startup and quota observability (STARTADMIT-01)
+
+After repository scope is refreshed, the first poll prepares domain/repo policy
+contexts and refills durable pending rows before per-subject discovery. This
+uses the same bounded refill and admission drain as capacity-freed handoffs.
+Live subject checks, operator holds, draft checks, credential limits, claim CAS,
+same-head deduplication and spawn-boundary freshness still apply. A route change
+must acquire the new route's reservation before spawning.
+Wake payloads are read when admission or discovery uses a context, after
+lifecycle/session recovery, rather than while constructing it. Drain state is
+re-read after recovery and again at admission, so a drain cleared during
+recovery allows startup refill in that same poll.
+Discovery owns separate per-repository PR collections for stuck-merge-agent
+scans and phantom-handoff reconciliation; durable refill does not add records
+to those collections when it processes the same PR.
+
+`watcher first reviewer spawn: startup_to_spawn_ms=<milliseconds>` records the
+first actual runtime spawn since watcher process start. Each poll logs
+`quota-status reads per poll: poll=<sequence> reads=<count>`; an idle poll can
+report zero. The count includes actual subprocess attempts, so a transient retry
+can report two. Refusals do not count as reviewer spawns.
+
+After deployment, the SRE session confirms that the watcher restarted. With a
+normal backlog, confirm the first spawn occurs within about a minute and the
+posted-review phase stops logging `budget insufficient` under a normal queue.

@@ -153,6 +153,57 @@ test('SCRATCHCENSUS-01: nonzero census exit defers every deletion and logs only 
   assert.ok(f.logs.every(line => !line.includes('synthetic-secret')));
 });
 
+for (const refreshedLive of [false, true]) {
+  test(`SCRATCHCENSUS-01: refresh once after 30 seconds and stop before a third census (live=${refreshedLive})`, async t => {
+    const f = fixture(t);
+    for (let index = 0; index < 4; index += 1) {
+      const owner = f.record(f.scratch());
+      writeFileSync(join(dirname(owner), `synthetic-owner-${index}.json`), readFileSync(owner));
+      rmSync(owner);
+    }
+    let clock = nowMs;
+    t.mock.method(Date, 'now', () => clock);
+    let calls = 0;
+    let completed = false;
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options, scanBudgetMs: 200_000,
+      readWorkerStatusImpl: () => {
+        clock += 31_000;
+        return { ok: true, row: { status: 'succeeded' } };
+      },
+      readProcessSnapshotImpl: ({ timeout }) => {
+        calls += 1;
+        assert.equal(timeout, 15_000);
+        return refreshedLive && calls === 2 ? '123 synthetic-lrq' : '123 synthetic-idle-process';
+      },
+      onSweepComplete: () => { completed = true; },
+    });
+    assert.equal(calls, 2);
+    assert.equal(removed.length, refreshedLive ? 1 : 2);
+    assert.equal(completed, false);
+    const progress = JSON.parse(f.logs.at(-1));
+    assert.equal(progress.reason, 'census-expired');
+    assert.equal(progress.remainingCandidates, 2);
+    assert.ok(!f.logs.some(line => line.includes('sweep deferred')));
+  });
+}
+
+test('SCRATCHCENSUS-01: successful census measures UTF-8 bytes without exposing process contents', async () => {
+  const logs = [];
+  const outputs = { ps: '123 synthetic-secret-é', lsof: 'p123\nn/synthetic-secret-λ' };
+  const snapshot = await readHammerScratchProcessSnapshot({ timeout: 15_000,
+    logger: { info: line => logs.push(line) },
+    execFileImpl: async command => ({ stdout: outputs[command] }),
+  });
+  assert.equal(snapshot, `${outputs.ps}\n${outputs.lsof}`);
+  assert.equal(logs.length, 1);
+  const diagnostic = JSON.parse(logs[0]);
+  assert.equal(diagnostic.outcome, 'ok');
+  assert.equal(diagnostic.psBytes, Buffer.byteLength(outputs.ps));
+  assert.equal(diagnostic.lsofBytes, Buffer.byteLength(outputs.lsof));
+  assert.ok(diagnostic.durationMs >= 0);
+  assert.ok(!logs[0].includes('synthetic-secret'));
+});
+
 for (const status of ['succeeded', 'canceled']) {
   test(`HAMTMP-05: ledger ${status} reclaims old scratch owned by a starting record`, async t => {
     const f = fixture(t);

@@ -96,7 +96,7 @@ outside this commit-message protection.
 
 ## 1. Prerequisites
 
-### Hammer scratch lifetime (HAMTMP-03 / HAMTMP-04)
+### Hammer scratch lifetime (HAMTMP-03 / HAMTMP-04 / SCRATCHCENSUS-01)
 
 Each closer run owns one private `hammer-scratch-*` directory beneath
 `data/follow-up-jobs/ama-closer-prompts`. Recording a terminal outcome removes
@@ -112,6 +112,24 @@ tree has been idle for at least two hours. Until one full sweep completes, the
 first poll at least a minute after the previous attempt retries it; subsequent
 sweeps run hourly. Overlapping passes are suppressed. A pass removes at most 64
 directories and has a 10-second scan budget, with no production record-count cap.
+Process census time is excluded from that scan budget: parallel `ps` and `lsof`
+commands each have their own fixed 15-second timeout. The census is read once,
+just before the first eligible deletion, and refreshed only if 30 seconds have
+elapsed since that read started. At most two censuses run per pass; if the
+second ages out, remaining candidates wait for another pass. Before each
+deletion, the candidate's lexical and real paths and its owner identifiers are
+checked against the current census. The existing owner, worker and directory
+identity checks still apply.
+
+`ama_closer.scratch_process_census` records duration, UTF-8 byte counts for each
+command and whether the census was readable. Census contents and subprocess
+error output are never logged because they may contain credentials. A genuinely
+unreadable census still defers deletion. Scan-budget exhaustion instead emits
+`ama_closer.scratch_sweep_paused` with the number removed and remaining
+candidates; completed deletions are retained. The same progress event reports
+the removal cap or an expired second census. Remaining candidates count the
+unprocessed directory list, including any current candidate interrupted by the
+budget; directories created after enumeration wait for the next pass.
 A metadata-validated index reuses unchanged historical dispatch records. Partial
 progress is atomically checkpointed to
 `data/follow-up-jobs/hammer-scratch-record-index.json`, including on a deferred
@@ -139,10 +157,12 @@ Tests may inject a timestamp or clock function through `maybeDispatchAmaCloser`'
 `now` option. Scratch ledger probes honor the sweep's `spawnSyncImpl` option
 while retaining the scan deadline on each subprocess call.
 
-After deployment, SRE confirms that the watcher restarted, checks the first
-sweep's removal lines and the drop in `ama-closer-prompts` size, then verifies
-that size remains roughly flat over a day of hammer runs. No manual cleanup of
-live runs is required.
+After deployment, SRE confirms that the watcher restarted. Within two sweep
+intervals, the total `hammer-scratch-*` size should fall below 1 GB and no
+directory older than the maximum age should remain unless a live process holds
+it. Verify that no `deferred: unreadable process census` lines appear while
+`ps` and `lsof` work, then check that size remains roughly flat over a day of
+hammer runs. No manual cleanup of live runs is required.
 
 Merge execution evidence (OPSEV1-03) is appended under
 `$HQ_ROOT/dispatch/audit/automation-merge-actions/` by the daemon, fast-merge

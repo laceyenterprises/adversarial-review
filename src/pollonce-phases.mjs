@@ -1180,11 +1180,6 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
-      if (existing?.review_status === 'posted' && !String(existing.reviewer_head_sha || '').trim()
-        && requeuePostedReviewWithoutHead({ db, repo: repoPath, prNumber, headSha: subject.headSha })) {
-        existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
-      }
-
       db.exec('CREATE TABLE IF NOT EXISTS nonempty_pr_heads (repo TEXT, pr_number INTEGER, head TEXT, PRIMARY KEY(repo, pr_number))');
       const nonemptyHead = db.prepare('SELECT head FROM nonempty_pr_heads WHERE repo=? AND pr_number=?').get(repoPath, prNumber)?.head;
       if (effectiveDomainId === CODE_PR_DOMAIN_ID && !isOperatorHeld(prLabelNames)
@@ -1212,6 +1207,10 @@ export async function processReviewSubject(entry, ctx) {
       // head, memoized in `argus_classified_head_sha`; a steady-state tick spends
       // no GitHub calls here at all.
       const argusOutcome = await routeSecuritySurfaceSafe(existing);
+      if (existing?.review_status === 'posted' && !String(existing.reviewer_head_sha || '').trim()
+        && requeuePostedReviewWithoutHead({ db, repo: repoPath, prNumber, headSha: subject.headSha })) {
+        existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
+      }
       if (handoffAwaitingReview) {
         try {
           const requestRow = { revision_ref: subject.headSha,

@@ -19,8 +19,10 @@ const { acquireAmaCloserLease, updateAmaCloserLease, isHeldAmaCloserLease } = aw
 const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord } = await import('../../src/ama/dispatch-closer.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
 const { guardRereviewCiBeforeReviewer } = await import('../../src/reviewer-ci-admission.mjs');
-const { openReviewStateDb, ensureReviewStateSchema } = await import('../../src/review-state.mjs');
-const { prepareMarkRereviewCiBlocked } = await import('../../src/review-state-statements.mjs');
+const { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } = await import('../../src/review-state.mjs');
+const { prepareMarkRereviewCiBlocked, prepareMarkAttemptStarted, prepareMarkPosted,
+  prepareReleaseUnsettledPostedReview } = await import('../../src/review-state-statements.mjs');
+const { requeuePostedReviewWithoutHead } = await import('../../src/posted-review-head-repair.mjs');
 const { decideClosureOwner } = await import('../../src/ama/closure-owner.mjs');
 const { fleetCommitIdentityMatches } = await import('../../src/ama/hammer-head-validation.mjs');
 const rootDir = process.cwd(), repo = 'fixture/repo', prNumber = 7;
@@ -54,6 +56,30 @@ if (scenario === 'clean') {
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
   evidence = { merged: true, unsignedSyntheticHead: true, remoteHeadMatches: true };
 } else if (scenario === 'handoff') {
+  const db = openReviewStateDb(rootDir); ensureReviewStateSchema(db);
+  db.prepare(`INSERT INTO reviewed_prs(repo,pr_number,reviewed_at,reviewer,review_status,revision_ref)
+    VALUES (?,?,'2026-01-01','gemini','pending',?)`).run(repo, prNumber, headSha);
+  const claim = () => prepareMarkAttemptStarted(db).run('2026-01-01', 'synthetic-claim', headSha,
+    headSha, 600000, '2026-01-01T00:10:00Z', headSha, repo, prNumber);
+  assert.equal(claim().changes, 1);
+  assert.equal(requestReviewRereview({ db, rootDir, repo, prNumber, targetRevisionRef: headSha,
+    reason: `system-orphan-head-review:${headSha}`, ownerlessRecovery: true }).reason, 'review-in-flight');
+  const read = () => db.prepare('SELECT * FROM reviewed_prs WHERE repo=? AND pr_number=?').get(repo, prNumber);
+  assert.equal(read().reviewer_session_uuid, 'synthetic-claim');
+  assert.equal(read().reviewer_head_sha, headSha);
+  assert.equal(prepareMarkPosted(db).run('2026-01-01', null, repo, prNumber, 'synthetic-claim', null).changes, 0);
+  assert.equal(prepareReleaseUnsettledPostedReview(db).run(headSha, repo, prNumber, 'synthetic-claim').changes, 1);
+  assert.equal(read().review_status, 'pending'); assert.equal(read().review_attempts, 0);
+  assert.equal(claim().changes, 1);
+  assert.equal(prepareMarkPosted(db).run('2026-01-01', headSha, repo, prNumber, 'synthetic-claim', headSha).changes, 1);
+  assert.equal(read().review_status, 'posted'); assert.equal(read().reviewer_head_sha, headSha);
+  db.prepare('UPDATE reviewed_prs SET reviewer_head_sha=NULL WHERE repo=? AND pr_number=?').run(repo, prNumber);
+  const repair = () => requeuePostedReviewWithoutHead({ db, repo, prNumber, headSha, logger: quiet });
+  assert.equal(repair(), true); assert.equal(repair(), false);
+  assert.equal(read().review_attempts, 1); assert.equal(read().infra_auto_recover_attempts, 0);
+  assert.equal(claim().changes, 1);
+  assert.equal(prepareMarkPosted(db).run('2026-01-01', headSha, repo, prNumber, 'synthetic-claim', headSha).changes, 1);
+  db.close();
   // A finding routes through the watcher/closure hub to the fake hammer boundary.
   let hammers = 0;
   await tick({ findings: true, closerImpl: async () => {
@@ -86,7 +112,8 @@ if (scenario === 'clean') {
   const drained = await consumeFollowUpJobsUntilCapacity(drain); assert.equal(drained.stopped, 1);
   await tick(); assert.equal(store.merged, true); assert.notEqual(headSha, oldHead);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
-  evidence = { hammers, handoff: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
+  evidence = { hammers, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
+    headlessPostRequeuedOnce: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
   for (const exhausted of [false, true]) {

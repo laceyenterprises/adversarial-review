@@ -495,7 +495,10 @@ export async function readAfhReviewerGrounding({
   const fleetQuotaStatus = includeFleetQuotaStatus ? Object.freeze(snapshot.available
     ? { stdout } : { error: true, cause: quotaError, errorMessage: snapshot.error || snapshot.reason }) : null;
   const finalizeSnapshot = result => Object.freeze({ ...result,
-    ...(routingDisabled ? { reason: 'afh-reviewer-fallback-disabled' } : {}),
+    ...(routingDisabled ? { reason: 'afh-reviewer-fallback-disabled',
+      // Account-only reads must not widen Claude's existing rollback path.
+      claudeAccountSnapshot: null, claudeAccountSelection: null, claudeAccountModel: null,
+    } : {}),
     ...(fleetQuotaStatus ? { fleetQuotaStatus } : {}),
   });
   const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);

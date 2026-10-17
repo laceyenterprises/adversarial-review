@@ -116,6 +116,8 @@ test('AFH rollback retains corporate account admission without enabling model fa
     execFileImpl: async () => { reads++; return { stdout: JSON.stringify(codexAccountFixture()) }; },
   });
   assert.equal(reads, 1);
+  assert.equal(grounding.claudeAccountSelection, null);
+  assert.equal(grounding.claudeAccountSnapshot, null);
   const route = applyAfhReviewerFallback({ builderClass: 'claude-code',
     baseRoute: REVIEWER_ROUTE_BY_MODEL.codex, grounding, geminiReviewerMode: 'always-on' });
   assert.equal(route.reviewerModel, 'codex');

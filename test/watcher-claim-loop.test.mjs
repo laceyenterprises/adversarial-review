@@ -2447,10 +2447,17 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
           prNumber: 998, headSha: 'old-head' }), true, 'unconfirmed absence must not delete durable priority');
       ` : '',
     }));
+    const quotaFixtureEnv = installGhFixture(tmp);
+    if (primaryClaude && accountEvidence !== 'ready') {
+      const payload = accountEvidence === 'missing' ? {} : claudeAccountFixture({ corpReady: false, primaryReady: false });
+      writeFileSync(quotaFixtureEnv.AGENT_OS_HQ_BIN, `#!/usr/bin/env node
+process.stdout.write(${JSON.stringify(JSON.stringify(payload))});
+`);
+    }
     const result = spawnSync(process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath], {
         cwd: REPO_ROOT, encoding: 'utf8', timeout: 30000,
-        env: fixtureEnv({ ...installGhFixture(tmp), GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
+        env: fixtureEnv({ ...quotaFixtureEnv, GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
           GH_CLAUDE_REVIEWER_TOKEN: 'fixture-claude',
           ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code',
           // These scenarios pin depth/burst behavior independently of age.
@@ -2681,15 +2688,15 @@ test('head dispatch lease refusal refunds the production spill and restores its 
 });
 
 
-test('REVIEWSPILL-01 production admission spills an overdue request before Gemini saturation', () => {
+test('REVIEWSPILL-01 production admission spills overdue requests before Gemini saturation', () => {
   const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true });
   assert.match(output, /review-wait-spill repo=.* pr=101 pass_kind=first-pass wait_seconds=[\d.]+ to=claude-code/);
-  assert.equal((output.match(/review-wait-spill /g) || []).length, 1);
+  assert.equal((output.match(/review-wait-spill /g) || []).length, 2);
   assert.match(output, /review-queue-depth-route repo=.* pr=101 from=gemini to=claude reason=review-max-wait/);
   const spill = summary.reviewerSpawns.find(spawn => spawn.subjectContext.reviewerModel === 'claude');
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);
-  assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 1);
+  assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 2);
 });
 
 test('CAPROUTE-01: failed capped row with an old revision reaches the hammer before retry admission on every new head', () => {
@@ -3997,7 +4004,7 @@ for (const priorStatus of ['pending', 'failed']) test(`SEATIDLE-01: unreadable q
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-test('REVIEWSPILL-01: a late Claude account hold releases the claim and refunds the sole age slot', () => {
+test('REVIEWSPILL-01: a late Claude account hold releases the claim and refunds its age reservation', () => {
   const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true, lateAccountHold: true });
   assert.equal(summary.rows['101'].review_status, 'pending', output);
   assert.equal(summary.reviewerSpawns.length, 1, output);

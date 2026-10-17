@@ -74,6 +74,30 @@ test('a progress refresh stops writing when the poll stops advancing', async (t)
   }
 });
 
+for (const yieldToReviewMicrotask of [false, true]) {
+  test(`deferred review preserves newer progress (microtask queued: ${yieldToReviewMicrotask})`, async (t) => {
+    const f = fixture(t);
+    f.advanceTo(59_000);
+    const review = f.heartbeat.markReview({ repo: 'example/review-service', pr_number: 17 });
+    if (yieldToReviewMicrotask) await Promise.resolve();
+    f.advanceTo(60_000);
+    f.heartbeat.markPollProgress();
+    const progress = f.persisted();
+    assert.equal(progress.event, 'poll-progress');
+    assert.equal(progress.poll_progress_counter, 1);
+    await f.heartbeat.flush();
+    const persisted = f.persisted();
+    assert.equal(persisted.event, 'review');
+    assert.equal(persisted.repo, review.repo);
+    assert.equal(persisted.pr_number, review.pr_number);
+    assert.equal(persisted.last_review_at, review.last_review_at);
+    assert.equal(persisted.poll_progress_counter, progress.poll_progress_counter);
+    assert.equal(persisted.last_poll_progress_at, progress.last_poll_progress_at);
+    assert.equal(persisted.updated_at, progress.updated_at);
+    assert.equal(f.writes.length, 3, 'review remains debounced alongside the progress write');
+  });
+}
+
 for (const event of ['markReview', 'markSpawnDecision', 'markPollCompleted', 'persist']) {
   test(`progress persistence is deferred by an ordinary ${event} heartbeat`, async (t) => {
     const f = fixture(t);

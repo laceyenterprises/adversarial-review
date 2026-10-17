@@ -132,7 +132,7 @@ function createWatcherHeartbeat({
   let pollProgressCounter = 0;
   let lastPollProgressAt = null;
   let lastHeartbeatWriteAttemptMs = null;
-  let pendingReviewHeartbeat = null;
+  let pendingReviewExtra = null;
   let reviewPersistScheduled = false;
   let reviewPersistChain = Promise.resolve();
 
@@ -178,15 +178,17 @@ function createWatcherHeartbeat({
     }
   }
 
-  function persistReviewLater(heartbeat) {
-    pendingReviewHeartbeat = heartbeat;
+  function persistReviewLater(extra) {
+    pendingReviewExtra = { ...extra };
     if (reviewPersistScheduled) return;
     reviewPersistScheduled = true;
     queueMicrotask(() => {
       reviewPersistScheduled = false;
-      const nextHeartbeat = pendingReviewHeartbeat;
-      pendingReviewHeartbeat = null;
-      reviewPersistChain = reviewPersistChain.then(() => writeHeartbeat(nextHeartbeat));
+      const nextExtra = pendingReviewExtra;
+      pendingReviewExtra = null;
+      // Capture live counters and timestamps when the write runs, so a queued
+      // review cannot overwrite progress persisted earlier in this turn.
+      reviewPersistChain = reviewPersistChain.then(() => writeHeartbeat(heartbeatPayload('review', nextExtra)));
     });
   }
 
@@ -260,7 +262,7 @@ function createWatcherHeartbeat({
     const at = now().toISOString();
     lastReviewAt = at;
     const heartbeat = heartbeatPayload('review', extra, at);
-    persistReviewLater(heartbeat);
+    persistReviewLater(extra);
     return heartbeat;
   }
 

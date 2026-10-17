@@ -35,6 +35,9 @@ heartbeat writes reset that interval; failed attempts are throttled too. Each
 the same ownership guard and atomic writer. `last_poll_at` continues to record
 the poll start. There is no periodic refresh without completed work, and the
 in-process watchdog thresholds and poll deadline are unchanged.
+Debounced review writes capture current heartbeat state when they run, preserving
+progress counters and timestamps advanced after the review was queued. Review
+metadata is retained, and `last_review_at` still records the review marker time.
 
 Restart history and the loop-page debounce are persisted in the existing
 canonical heartbeat, using its ownership guard and atomic writer. A second

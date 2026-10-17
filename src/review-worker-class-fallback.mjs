@@ -312,7 +312,12 @@ export function applyReviewerWorkerClassFallbackToRoute({
   reviewerRouteByModel,
   authorClass = null,
 } = {}) {
-  if (!decision?.fellBack) return { applied: false, route, reason: 'no-fallback' };
+  if (!decision?.fellBack) return {
+    applied: false,
+    route: route?.reviewerModel === 'claude' && decision?.claudeAccountSelection
+      ? { ...route, claudeAccountSelection: decision.claudeAccountSelection } : route,
+    reason: 'no-fallback',
+  };
   const workerClass = String(decision.workerClass || '').trim().toLowerCase();
   const reviewerModel = reviewerModelForWorkerClass(workerClass);
   const target = reviewerModel ? reviewerRouteByModel?.[reviewerModel] : null;
@@ -413,6 +418,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     .map((value) => String(value || '').trim().toLowerCase())
     .filter(Boolean);
   const base = { workerClass: primaryClass, fellBack: false };
+  const primaryIsClaude = reviewerModelForWorkerClass(primaryClass) === 'claude';
 
   // RSP-01 — depth is an ADDITIONAL trigger beside quota, never a replacement.
   // `depthEngaged` only widens what this function is allowed to consider; every
@@ -439,7 +445,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     ? (depthPressure.reason === 'review-max-wait' ? 'review-max-wait' : 'queue-depth-pressure')
     : 'burst-lease-pressure';
 
-  if (!primaryClass || fallbacks.length === 0) {
+  if (!primaryClass || (fallbacks.length === 0 && !primaryIsClaude)) {
     return { ...base, reason: 'no-fallback-configured' };
   }
   // An untracked primary short-circuits the QUOTA trigger because there is no
@@ -462,7 +468,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     (candidate) => violatesWriterDiversity(author, candidate)
       && !reviewerRefusesBuilder(author, reviewerModelForWorkerClass(candidate))
   );
-  if (quotaTrackedFallbacks.length === 0) {
+  if (quotaTrackedFallbacks.length === 0 && !primaryIsClaude) {
     return { ...base, ...depthFields, reason: 'no-available-fallback' };
   }
 
@@ -506,6 +512,7 @@ export async function resolveReviewerWorkerClassWithFallback({
     claudeAccountSelection = selectClaudeAccountLane(stdout, {
       workerClass: 'claude-reviewer', blockedWorkerClasses: blockedClaudeWorkerClasses,
     });
+    Object.assign(base, accountFields(primaryClass));
     if (claudeAccountSelection?.hold) base.claudeAccountHoldReason = claudeAccountSelection.reason;
     // A primary with no tracked provider can only be here under depth pressure
     // (the gate above). It has no quota verdict, so it is treated as ungrounded

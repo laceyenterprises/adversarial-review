@@ -1,6 +1,6 @@
 import { withAdmissionReadCache } from './watcher-admission-read-cache.mjs';
 import { prepareQueueDepthSpillover, reviewWaitPressure } from './review-queue-depth.mjs';
-import { compareReviewerDispatchCandidates, reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from './watcher-reviewer-pool.mjs';
+import { compareReviewerDispatchCandidates, reviewerDispatchCandidateUsesGemini, reviewerSafetyPassKind, runBoundedReviewerDispatchQueue } from './watcher-reviewer-pool.mjs';
 
 // Both poll and settlement admissions call this drain under the same mutex.
 // Keep capacity, ordering and reservation settlement in one implementation.
@@ -73,7 +73,8 @@ export function createReviewerDispatchDrain({
       // Also settle reservations when the drain throws before returning its
       // deferred list. Started candidates own their spawn/refusal settlement.
       for (const candidate of candidates) {
-        const pressure = reviewWaitPressure(candidate);
+        const passKind = candidate.depthPassKind || reviewerSafetyPassKind(candidate);
+        const pressure = reviewWaitPressure({ ...candidate, depthPassKind: passKind });
         if (pressure.engaged) {
           const started = startedCandidates.has(candidate);
           const result = admissionResults.get(candidate);
@@ -84,7 +85,7 @@ export function createReviewerDispatchDrain({
             : started ? 'gemini-admitted' : candidate.spillDecisionReason || 'pool-admission-deferred';
           const account = candidate.spawnClaudeAccountSelection || candidate.claudeAccountSelection;
           logger.log?.(`[watcher] review-wait-decision repo=${candidate.repoPath} pr=${candidate.prNumber} `
-            + `admission=${JSON.stringify(reason)} pass_kind=${candidate.depthPassKind || 'first-pass'} `
+            + `admission=${JSON.stringify(reason)} pass_kind=${passKind} `
             + `wait_seconds=${pressure.waitSeconds} decision=${decision} reviewer=${candidate.reviewerModel} `
             + `reason=${candidate.spillDecisionReason || decision} `
             + `claude_account=${account?.provider === 'claude-code-corp' ? 'corporate'

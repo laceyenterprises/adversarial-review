@@ -51,7 +51,13 @@ echo "unexpected gh fixture call: $*" >&2
 exit 1
 `);
   chmodSync(ghPath, 0o755);
-  return { PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` };
+  const hqPath = path.join(tmp, 'fixture-quota-hq');
+  writeFileSync(hqPath, `#!/usr/bin/env node
+if (process.argv.slice(2).join(' ') !== 'fleet quota status --json') process.exit(1);
+process.stdout.write(${JSON.stringify(JSON.stringify(claudeAccountFixture()))});
+`);
+  chmodSync(hqPath, 0o755);
+  return { PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`, AGENT_OS_HQ_BIN: hqPath };
 }
 
 function fileUrl(...parts) {
@@ -2269,7 +2275,7 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false, lateAccountHold = false, rereviewAge = null, primaryClaude = false, accountEvidence = 'ready' } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2286,8 +2292,8 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         import { REVIEWER_ROUTE_BY_MODEL } from '${fileUrl('src', 'adapters', 'subject', 'github-pr', 'routing.mjs')}';
         export * from '${routeUrl}?actual';
         export function selectReviewerRouteForAttempt(args) {
-          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.gemini,
-            timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: 'gemini',
+          return { ...actual.selectReviewerRouteForAttempt(args), ...REVIEWER_ROUTE_BY_MODEL.${primaryClaude ? 'claude' : 'gemini'},
+            timeoutFallback: { fromReviewerModel: 'codex', toReviewerModel: '${primaryClaude ? 'claude' : 'gemini'}',
               timeoutFailures: 2, sameModelAsBuilder: false, builderClass: 'codex' } };
         }
       `,
@@ -2297,7 +2303,9 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         export * from '${fallbackUrl}?actual';
         export async function resolveReviewerWorkerClassWithFallback(args) {
           return actual.resolveReviewerWorkerClassWithFallback({ ...args,
-            execFileImpl: async () => ({ stdout: ${JSON.stringify(JSON.stringify(lateAccountHold ? claudeAccountFixture() : fleetStatusWithClaudeAccountEvidence([
+            execFileImpl: async () => ({ stdout: ${JSON.stringify(JSON.stringify(primaryClaude
+              ? accountEvidence === 'missing' ? {} : claudeAccountFixture({ corpReady: accountEvidence !== 'held', primaryReady: accountEvidence !== 'held' })
+              : lateAccountHold ? claudeAccountFixture() : fleetStatusWithClaudeAccountEvidence([
               { provider: 'google', authPath: 'oauth', state: 'ok' },
               { provider: 'anthropic', authPath: 'oauth', state: 'ok' },
             ])))} }) });
@@ -2452,6 +2460,19 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
     return { summary: JSON.parse(line.slice(SUMMARY_MARKER.length)), output };
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 }
+
+for (const accountEvidence of ['ready', 'missing', 'held']) test(`primary Claude account admission in pollOnce: ${accountEvidence}`, () => {
+  const { summary, output } = runDepthDiscoveryScenario({ primaryClaude: true, depthEngaged: false, accountEvidence });
+  if (accountEvidence === 'ready') {
+    assert.equal(summary.reviewerSpawns.length, 2, output);
+    assert.ok(summary.reviewerSpawns.every(spawn => spawn.subjectContext.claudeBrokerProvider === 'claude-code-corp'), output);
+  } else {
+    assert.equal(summary.reviewerSpawns.length, 0, output);
+    assert.equal(summary.claims.length, 2, output);
+    assert.ok(Object.values(summary.rows).every(row => row.review_status === 'pending'), output);
+    assert.equal(summary.reviewerPassRows.length, 0, output);
+  }
+});
 
 for (const capacity of ['pool', 'memory', 'credential', 'quota', 'fallback-quota', 'overdue', 'spawn-throw', 'spawn-refusal', 'spawn-started-failure']) test(capacity === 'overdue'
   ? 'WAKESTARVE-01: production discovery admits overdue work before newer wakes'

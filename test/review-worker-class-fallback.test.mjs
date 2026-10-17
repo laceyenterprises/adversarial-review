@@ -1,4 +1,4 @@
-import { fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
+import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -27,6 +27,25 @@ const GEMINI_EXHAUSTED_CODEX_OK = [
   { provider: 'google', authPath: 'agy', state: 'exhausted' },
   { provider: 'openai', authPath: 'oauth', state: 'ok' },
 ];
+
+for (const fallbacks of [[], ['claude-code'], ['codex']]) {
+  for (const held of [false, true]) {
+    test(`primary Claude retains account evidence without route fallback (${fallbacks.join(',')}, held=${held})`, async () => {
+      const result = await resolveReviewerWorkerClassWithFallback({
+        authorClass: 'codex', primary: 'claude-code', fallbackWorkerClasses: fallbacks,
+        execFileImpl: async () => ({ stdout: JSON.stringify(claudeAccountFixture({ corpReady: !held, primaryReady: !held })) }),
+      });
+      assert.equal(result.fellBack, false);
+      assert.equal(Boolean(result.claudeAccountSelection.hold), held);
+      if (!held) assert.equal(result.claudeAccountSelection.provider, 'claude-code-corp');
+      const route = { reviewerModel: 'claude', builderClass: 'codex' };
+      const applied = applyReviewerWorkerClassFallbackToRoute({ route, decision: result });
+      assert.equal(applied.applied, false);
+      assert.equal(applied.route.claudeAccountSelection, result.claudeAccountSelection);
+      assert.equal(applied.route.reviewerModel, 'claude');
+    });
+  }
+}
 
 test('falls back codex -> claude-code when the routed codex harness provider is exhausted', async () => {
   const result = await resolveReviewerWorkerClassWithFallback({
@@ -467,18 +486,22 @@ test('refreshes an unavailable fleet quota status result after its TTL', async (
   assert.equal(calls, 2);
 });
 
-test('does not read fleet quota status when no configured fallback is a viable alternate', async () => {
+test('primary Claude still reads account evidence when no fallback is a viable alternate', async () => {
+  let reads = 0;
   const result = await resolveReviewerWorkerClassWithFallback({
     authorClass: 'codex',
     primary: 'claude-code',
     fallbackWorkerClasses: ['claude-code'],
     execFileImpl: async () => {
-      throw new Error('fleet status should not be read');
+      reads++;
+      return { stdout: JSON.stringify(claudeAccountFixture()) };
     },
   });
   assert.equal(result.workerClass, 'claude-code');
   assert.equal(result.fellBack, false);
-  assert.equal(result.reason, 'no-available-fallback');
+  assert.equal(result.reason, 'primary-available');
+  assert.equal(reads, 1);
+  assert.equal(result.claudeAccountSelection.provider, 'claude-code-corp');
 });
 
 test('reviewWorkerClassFallback defaults to a cross-model pair and honors the env override', () => {

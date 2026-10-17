@@ -63,8 +63,10 @@ are still required. Provider/model exhaustion, typed quota exhaustion on reviewe
 spawn, or a broker that explicitly cannot serve permits the primary account,
 whose own evidence must admit it. Unknown or stale corporate evidence holds.
 Worker-class fallback cannot admit Claude from aggregate quota alone when account
-selection is absent or held. The final Claude spawn gate rechecks account holds;
-a late hold releases the claim, reservation and spill slot without spawning.
+selection is absent or held. Primary Claude routes retain account selection even
+when no worker-class fallback is configured or applied. The final Claude spawn
+gate refuses missing evidence and rechecks account holds; either refusal releases
+the claim, reservation and spill slot without spawning.
 Reviewer spawn logs include `claude_account=corporate|primary`; that account is
 also used for quota preflight and token minting/renewal.
 
@@ -188,7 +190,11 @@ npm run review-queue-depth -- --json  # machine
 ```
 
 Prints live depth, threshold, armed/engaged state, graded spill slots, and the
-cost ledger. The durable report is `data/review-queue-depth-failover.json`; it
+cost ledger. The CLI opens the database read-only. Legacy snapshots missing
+schema fields report unknown depth (`depth: null` and `depthError` in JSON),
+leave spillover disengaged, and identify schema convergence by the owning watcher
+as the required action; the diagnostic never migrates the database.
+The durable report is `data/review-queue-depth-failover.json`; it
 keeps independent `lanes["first-pass"]` and `lanes.rereview` engagement state,
 transitions, and current-engagement cost, with top-level fields retained as a
 compatibility summary. Top-level `engagementSpilloverReviews` is the live

@@ -2051,6 +2051,10 @@ export async function processReviewSubject(entry, ctx) {
           );
         }
 
+        // Account admission also applies when Claude remains the primary route.
+        if (!rwfDecision.fellBack && route.reviewerModel === 'claude') {
+          route = applyReviewerWorkerClassFallbackToRoute({ route, decision: rwfDecision }).route;
+        }
         if (rwfDecision.fellBack) {
           const appliedFallback = applyReviewerWorkerClassFallbackToRoute({
             route,
@@ -3762,10 +3766,10 @@ export async function processReviewSubject(entry, ctx) {
               return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
               const selectedClaudeAccount = getClaudeAccountSelection();
-              if (route.reviewerModel === 'claude' && selectedClaudeAccount?.hold) {
+              if (route.reviewerModel === 'claude' && (!selectedClaudeAccount || selectedClaudeAccount.hold)) {
                 stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
                 this.retainWakeForCapacity();
-                return { dispatched: false, reason: selectedClaudeAccount.reason || 'claude-account-evidence-unknown' };
+                return { dispatched: false, reason: selectedClaudeAccount?.reason || 'claude-account-evidence-unknown' };
               }
               credentialProbeKey = reviewerCredentialKey(route.reviewerModel, selectedClaudeAccount?.provider);
               const credentialOutageGate = shouldPauseReviewerModel(ROOT, credentialProbeKey);

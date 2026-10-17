@@ -1,3 +1,5 @@
+import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
+import { readLaunchRequestStatusFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
@@ -446,6 +448,17 @@ test('HAMTMP-05: a running launch protects starting scratch until the ledger is 
   assert.equal((await sweepHammerScratchDirs(f.root, f.options)).length, 1);
 });
 
+test('SCRATCHRACE-01: incomplete retry traversal preserves terminal-owner scratch', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path);
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'failed' }, retryChainUnreadable: true }),
+    readPullRequestStateImpl: () => assert.fail('incomplete retry evidence cannot authorize cleanup'),
+  }), []);
+  assert.equal(existsSync(path), true);
+});
+
 test('HAMTMP-05: unreadable launch ledger blocks reclaim and reports deferral', async t => {
   const f = fixture(t);
   const path = f.scratch();
@@ -873,3 +886,15 @@ test('HAMTMP-03: ticker runs at startup, hourly, and never overlaps', async () =
   assert.deepEqual(await ticker.tick(), []);
   assert.equal(calls, 2);
 });
+
+for (const status of ['requested', 'failed']) {
+  test(`SCRATCHRACE-01: sweep respects a ${status} transitive fleet retry over a terminal owner`, async t => {
+    const f = fixture(t);
+    const scratch = f.scratch();
+    f.record(scratch, { launchRequestId: 'synthetic-lrq', state: 'launch-terminal', lastObservedStatus: 'failed' });
+    const ledgerTarget = launchRetryFixture(f.root, status);
+    const result = await sweepHammerScratchDirs(f.root, { ...f.options, ledgerTarget,
+      readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync });
+    assert.equal(existsSync(scratch), status === 'requested', JSON.stringify(result));
+  });
+}

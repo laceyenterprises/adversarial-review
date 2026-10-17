@@ -9,7 +9,7 @@ import { decideClosureOwner } from './closure-owner.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
 import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
-import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
+import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry } from './launch-request-status.mjs';
 import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
 import { observeCloserBacklog } from './closure-lag.mjs';
@@ -1045,6 +1045,7 @@ async function cleanupHammerCloserWorker({
   execFileImpl,
   logger = console,
   reason,
+  cleanupScratchImpl = cleanupHammerScratchDir,
 }) {
   const effectiveWorkerClass = String(existingRecord?.workerClass || workerClass || '').trim();
   if (!isHammerWorkerClass(effectiveWorkerClass)) return null;
@@ -1067,7 +1068,7 @@ async function cleanupHammerCloserWorker({
         status: 'ok',
         attempts: attempt + 1,
       }));
-      cleanupHammerScratchDir(existingRecord, logger);
+      cleanupScratchImpl(existingRecord, logger);
       return { ok: true, workerId, reason, attempts: attempt + 1 };
     } catch (err) {
       const error = String(err?.stderr || err?.message || err);
@@ -1079,7 +1080,7 @@ async function cleanupHammerCloserWorker({
           status: 'not-found',
           attempts: attempt + 1,
         }));
-        cleanupHammerScratchDir(existingRecord, logger);
+        cleanupScratchImpl(existingRecord, logger);
         return { ok: true, workerId, reason, alreadyAbsent: true, attempts: attempt + 1 };
       }
       const transient = isTransientHqDispatchError(error);
@@ -1572,9 +1573,10 @@ function dispatchStatusReason(status) {
 }
 
 async function readLaunchRequestStatusFromLedgerDefault(args) {
-  const launch = await readLaunchRequestStatusFromLedgerAsync(args);
+  const launch = withLiveLaunchRetry(await readLaunchRequestStatusFromLedgerAsync({ ...args, includeRetryChain: true }));
   if (launch?.ok && ['starting', 'running'].includes(launch.row?.status)) {
-    const worker = await readLatestWorkerRunStatusFromLedgerAsync(args);
+    const worker = await readLatestWorkerRunStatusFromLedgerAsync({ ...args,
+      launchRequestId: launch.liveRetryLaunchRequestId || args.launchRequestId });
     if (worker?.ok) return { ...launch, row: { ...launch.row, pid: worker.row.pid,
       workerStatus: worker.row.status, process_status: worker.row.process_status } };
   }
@@ -1590,7 +1592,7 @@ function terminalLaunchLeaseOutcome({ status, auditOutcome, merged = false, head
   return headAdvanced ? 'superseded' : 'failed-without-merge';
 }
 
-function recordTerminalCloserLaunch(rootDir, identity, launchRequestId, status, now) {
+function recordTerminalCloserLaunch(rootDir, identity, launchRequestId, status, now, cleanupScratchImpl = cleanupHammerScratchDir) {
   let updated = false;
   updateAmaCloserDispatchRecord(rootDir, identity, live => {
     if (!live || live.state === 'dispatching' || live.launchRequestId !== launchRequestId) return null;
@@ -1599,7 +1601,7 @@ function recordTerminalCloserLaunch(rootDir, identity, launchRequestId, status, 
     return { ...live,
       lastObservedStatus: preserve ? live.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(status),
       lastObservedAt: now, terminalLaunchStatus: status };
-  });
+  }, { cleanupScratchImpl });
   return updated;
 }
 
@@ -1650,16 +1652,17 @@ function* reconcileAmaCloserLeaseSteps({
   readPullRequestStateImpl = readAmaCloserPullRequestState,
   readMergedSignalImpl = readMergedBuildCompletionSignal,
   statusProbe, probedLaunchRequestId = null, logger = console,
+  cleanupScratchImpl = cleanupHammerScratchDir,
 } = {}) {
   try {
     const held = findLiveAmaCloserLease(rootDir, { repo, prNumber });
     if (held?.lease.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || !held.lease.lrqId) return false;
     const launchRequestId = held.lease.lrqId;
     if (probedLaunchRequestId && launchRequestId !== probedLaunchRequestId) return false;
-    const probe = statusProbe ?? (yield readLaunchRequestStatusImpl({
-      launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env,
-    }));
-    if (!probe?.ok) return false;
+    const probe = withLiveLaunchRetry(statusProbe ?? (yield readLaunchRequestStatusImpl({
+      launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env, includeRetryChain: true,
+    })));
+    if (!probe?.ok || probe.retryChainUnreadable) return false;
     // Async evidence can outlive the owner we started probing. Revalidate
     // before even the foreign-launch retirement branch mutates ownership.
     const ownerAfterProbe = readAmaCloserLease(rootDir, { repo, prNumber, headSha: held.headSha });
@@ -1680,7 +1683,7 @@ function* reconcileAmaCloserLeaseSteps({
     // Disk ownership ends at terminal launch observation, even while merge
     // evidence is unreadable or still inside the success-settlement grace.
     // The shared writer runs terminal scratch cleanup without releasing leases.
-    if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now)) return false;
+    if (record && !recordTerminalCloserLaunch(rootDir, dispatchIdentity, launchRequestId, status, now, cleanupScratchImpl)) return false;
     const auditOutcome = readAmaAuditTerminalOutcome(hqRoot || rootDir, identity)
       || readAmaAuditTerminalOutcome(hqRoot || rootDir, dispatchIdentity);
     // Merged completion rows are PR-scoped (their SHA may be the merge commit),
@@ -2166,7 +2169,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       lastObservedStatus: preserve ? current.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(terminalStatus),
       terminalLaunchStatus: terminalStatus, lastObservedAt: now, reconciledAt: now,
     }, null, 2)}\n`);
-    cleanupHammerScratchDir(current, options.log || options.logger);
+    (options.cleanupScratchImpl || cleanupHammerScratchDir)(current, options.log || options.logger);
     logAmaCloserDispatchEvent(options.log || options.logger, 'ama_closer.launch_capacity_reconciled', {
       repo: record.repo, prNumber: record.prNumber, launchRequestId: record.launchRequestId,
       terminalStatus, backend: probe.target?.backend || options.ledgerTarget?.backend || null,
@@ -2204,22 +2207,35 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     let terminalStatus = observedTerminal ? observedStatus : null;
     if (observedTerminal) counts.terminal += 1;
     let probe;
-    if (!observedTerminal && record.launchRequestId) {
+    if (record.launchRequestId) {
       throwIfAborted(options.signal);
-      if (Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000)) ledgerUnreadable = true;
-      probe = ledgerUnreadable ? { ok: false, reason: 'scan-ledger-unreadable' } : await readStatus({
+      const budgetExpired = Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
+      if (budgetExpired && !observedTerminal) ledgerUnreadable = true;
+      probe = ledgerUnreadable || budgetExpired ? { ok: false, reason: 'scan-ledger-unreadable' } : withLiveLaunchRetry(await readStatus({
+        includeRetryChain: true,
         launchRequestId: record.launchRequestId,
         rootDir, hqRoot: options.hqRoot,
         ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
         env: options.env || process.env,
-      });
-      if (!ledgerUnreadable) probes += 1;
+      }));
+      if (!ledgerUnreadable && !budgetExpired && !observedTerminal) probes += 1;
       throwIfAborted(options.signal);
       if (probe?.ok && probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) continue;
       const status = String(probe?.row?.status || '').trim().toLowerCase();
-      if (probe?.ok && status) {
+      // A historical terminal observation can only be overridden by a live
+      // descendant. Missing/unreadable probes cannot poison other reservations.
+      if (probe?.retryChainUnreadable) {
+        if (!observedTerminal) {
+          counts.unreadable += 1;
+          active.push({ ...record, prNumber, dispatchPath, holdsCapacity: true });
+        }
+        continue;
+      }
+      if (observedTerminal) {
+        if (!probe?.ok) continue;
+      } else if (probe?.ok && status) {
         terminalStatus = isTerminalLaunchRequestStatus(status) ? status : null;
-        if (terminalStatus) counts.terminal += 1;
+        if (terminalStatus && !observedTerminal) counts.terminal += 1;
       } else if (probe?.reason === 'missing-launch-request-row') {
         counts.missing += 1;
         missingProbes += 1;
@@ -2235,6 +2251,10 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     } else if (!observedTerminal && record.state === 'dispatched' && isAmaCloserMissingLrqTimedOut(record, { now })) {
       terminalStatus = 'not-found';
       counts.missing += 1;
+    }
+    if (probe?.liveRetryLaunchRequestId) {
+      active.push({ ...record, prNumber, dispatchPath, holdsCapacity: true });
+      continue;
     }
     progressOptions.ledgerActive = terminalStatus ? false : undefined;
     const launchInProgress = isAmaCloserLaunchInProgress(record, progressOptions);
@@ -2549,7 +2569,7 @@ function resolveMergeClassDispatchRoute({
   return route;
 }
 
-export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
+export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { cleanupScratchImpl = cleanupHammerScratchDir } = {}) {
   const existing = readAmaCloserDispatchRecord(rootDir, identity);
   const next = mutate(existing ? { ...existing } : null);
   if (!next) return existing;
@@ -2562,7 +2582,7 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
   if (next.state !== 'dispatching'
     && (existing?.state !== 'dispatching' || ['dispatch-failed', 'dispatch-configuration-refused'].includes(next.state))
     && isTerminalHammerScratchRecord(next)) {
-    cleanupHammerScratchDir(next);
+    cleanupScratchImpl(next);
   }
   return next;
 }
@@ -4383,7 +4403,42 @@ export async function resolveHamTerminalRemediationEvidence({
   };
 }
 
-export async function maybeDispatchAmaCloser({
+// Delay predecessor deletion until admission finishes: a dispatcher retry can
+// acquire the live logical-job claim after our ledger snapshot. Its refusal
+// must still leave every predecessor helper and prompt intact.
+export async function maybeDispatchAmaCloser(args) {
+  const pendingCleanup = new Map();
+  const targetRepo = args.dispatchContext?.repo || args.prMetadata?.repo || args.repo;
+  const targetPrNumber = args.dispatchContext?.prNumber ?? args.prMetadata?.prNumber ?? args.prNumber;
+  const dispatchContext = args.dispatchContext && { ...args.dispatchContext, repo: targetRepo };
+  let admissionCompleted = false;
+  let preservePredecessor = false;
+  try {
+    const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
+    const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
+      prMetadata: { ...args.prMetadata, prNumber: targetPrNumber },
+      readLaunchRequestStatusImpl: async request => withLiveLaunchRetry(await readStatus({ ...request, includeRetryChain: true })),
+      cleanupScratchImpl: (record, logger) => {
+        if (record?.repo !== targetRepo || Number(record?.prNumber) !== Number(targetPrNumber)) {
+          cleanupHammerScratchDir(record, logger);
+        } else if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
+      },
+    });
+    preservePredecessor = result.reason === 'dispatch-retry-live' || result.preservePredecessorArtifacts === true;
+    admissionCompleted = true;
+    return result;
+  } finally {
+    // Interrupted admission cannot prove that predecessor ownership ended.
+    for (const { record, logger } of admissionCompleted ? pendingCleanup.values() : []) {
+      const predecessor = record.repo === targetRepo
+        && Number(record.prNumber) === Number(targetPrNumber);
+      if (!preservePredecessor || !predecessor) cleanupHammerScratchDir(record, logger);
+    }
+  }
+}
+
+async function maybeDispatchAmaCloserAttempt({
+  cleanupScratchImpl,
   reviewState,
   prMetadata,
   cfg,
@@ -4416,6 +4471,8 @@ export async function maybeDispatchAmaCloser({
   signal = null,
   now = null,
 }) {
+  const updateDispatchRecord = (root, identity, mutate) =>
+    updateAmaCloserDispatchRecord(root, identity, mutate, { cleanupScratchImpl });
   throwIfAborted(signal);
   // The master gate. With no operator config, this is `false` per
   // AMA-01 schema defaults and the entire path is a no-op.
@@ -4451,9 +4508,14 @@ export async function maybeDispatchAmaCloser({
         ledgerDbPath: dispatchContext.ledgerDbPath, env,
       })).catch(() => ({ ok: false }));
       earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
+      if (statusProbe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
+        skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
+      if (statusProbe?.liveRetryLaunchRequestId) return noAmaDispatch({ dispatched: false,
+        skipMergeAgent: true, inFlight: true, reason: 'dispatch-retry-live',
+        launchRequestId: held.lease.lrqId, liveRetryLaunchRequestId: statusProbe.liveRetryLaunchRequestId });
       const settled = await reconcileAmaCloserLeaseAsync({ ...dispatchContext, rootDir: reconciliationRoot,
         repo: reconciliationRepo, prNumber,
-        now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
+        cleanupScratchImpl, now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
         readLaunchRequestStatusImpl, readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
         readPullRequestStateImpl });
       if (settled) reconciledDispatchedLease = held.lease;
@@ -4996,15 +5058,27 @@ export async function maybeDispatchAmaCloser({
     listAmaCloserDispatchRecordsForPr(rootDir, { repo, prNumber }),
     { reviewedSha, reviewedHeadSha: dispatchRecordHeadSha, reviewedHeadRecord },
   );
-  const existingDispatchIdentity = newerLaunchRecord
+  let existingDispatchIdentity = newerLaunchRecord
     ? { repo, prNumber, headSha: newerLaunchRecord.headSha }
     : reviewedHeadDispatchIdentity;
   let existingRecord = ownerProofRecovery || reviewHandoffFindings ? null : newerLaunchRecord || reviewedHeadRecord;
+  // Advanced-head refusals retain a pointer, never the ancestor's launch IDs.
+  // Resolve ownership before liveness, cleanup and refusal probes use the record.
+  const retryOwnerHeads = new Set([existingDispatchIdentity.headSha]);
+  while (existingRecord && !existingRecord.launchRequestId && existingRecord.retryOwnerHeadSha
+    && !retryOwnerHeads.has(existingRecord.retryOwnerHeadSha)) {
+    const identity = { repo, prNumber, headSha: existingRecord.retryOwnerHeadSha };
+    retryOwnerHeads.add(identity.headSha);
+    const owner = readAmaCloserDispatchRecord(rootDir, identity);
+    if (!owner) break;
+    existingRecord = owner;
+    existingDispatchIdentity = identity;
+  }
   if (existingRecord && !existingRecord.launchRequestId && !existingRecord.dispatchId) {
     const refusal = dispatchConfigurationRefusal(existingRecord.lastError);
     if (refusal) {
       if (existingRecord.state !== 'dispatch-configuration-refused') {
-        existingRecord = updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, current => ({
+        existingRecord = updateDispatchRecord(rootDir, existingDispatchIdentity, current => ({
           ...current, state: 'dispatch-configuration-refused',
           closureBlocker: `dispatch-configuration-refused:${refusal}`, lastFailureTransient: false,
           prelaunchRefusalSlowRetry: null,
@@ -5105,6 +5179,11 @@ export async function maybeDispatchAmaCloser({
       ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
     })).catch(() => ({ ok: false }));
     const probe = prefetchedLaunchRequestProbe;
+    if (probe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
+      skipMergeAgent: true, reason: 'dispatch-retry-chain-unreadable' });
+    if (probe?.liveRetryLaunchRequestId) return noAmaDispatch({ dispatched: false,
+      skipMergeAgent: true, inFlight: true, reason: 'dispatch-retry-live',
+      launchRequestId: existingRecord.launchRequestId, liveRetryLaunchRequestId: probe.liveRetryLaunchRequestId });
     if (probe?.ok && probe.row?.ticket_ref && !isAmaHammerLaunchTicket(probe.row.ticket_ref, prNumber)) {
       retireForeignCloserLaunch({ rootDir, repo, prNumber, identity: existingDispatchIdentity,
         record: existingRecord, launchRequestId: existingRecord.launchRequestId,
@@ -5129,7 +5208,7 @@ export async function maybeDispatchAmaCloser({
     // ledger terminality before retry/refund/PR evidence can return early.
     if (probe?.ok && isTerminalLaunchRequestStatus(probe.row?.status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
-        normalizeWorkerRunStatus(probe.row.status), (typeof now === 'function' ? now() : now) || new Date().toISOString());
+        normalizeWorkerRunStatus(probe.row.status), (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }
     const terminal = probe?.ok && ['failed', 'succeeded'].includes(probe.row?.status);
     const reason = terminal ? unexecutedHammerReason(probe.row) : null;
@@ -5154,6 +5233,7 @@ export async function maybeDispatchAmaCloser({
         if (refund.refunded || ['already-refunded', 'no-charged-attempt'].includes(refund.reason)
           || (refund.reason === 'no-ledger' && !readHammerRetryCapLedger(rootDir, { repo, prNumber }))) {
           const cleanup = await cleanupHammerCloserWorker({
+        cleanupScratchImpl,
             prNumber, workerClass, existingRecord, hqPath, hqRoot, execFileImpl, logger,
             reason: 'unexecuted-hammer',
           });
@@ -5173,7 +5253,7 @@ export async function maybeDispatchAmaCloser({
           // Preserve retryCount as the monotonic reviewer-pass identity. Only
           // admission subtracts these refunds; reusing a pass number is unsafe.
           let dispatchRecordReconciled = false;
-          existingRecord = updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => {
+          existingRecord = updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => {
             if (current?.launchRequestId !== reconciledLaunchRequestId) return null;
             dispatchRecordReconciled = true;
             return {
@@ -5304,7 +5384,7 @@ export async function maybeDispatchAmaCloser({
         repo,
         prNumber,
       });
-      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+      updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
         ...(current || existingRecord),
         lastObservedStatus: 'succeeded',
         lastObservedAt: dispatchContext.dispatchedAt,
@@ -5327,6 +5407,7 @@ export async function maybeDispatchAmaCloser({
       });
     }
     const rawHammerCleanup = await cleanupHammerCloserWorker({
+        cleanupScratchImpl,
       prNumber,
       workerClass,
       existingRecord,
@@ -5444,7 +5525,7 @@ export async function maybeDispatchAmaCloser({
       && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status);
     if (isTerminalLaunchRequestStatus(status)) {
       recordTerminalCloserLaunch(rootDir, existingDispatchIdentity, existingRecord.launchRequestId,
-        status, (typeof now === 'function' ? now() : now) || new Date().toISOString());
+        status, (typeof now === 'function' ? now() : now) || new Date().toISOString(), cleanupScratchImpl);
     }
     // A durable closing decision outranks the process exit (including failure
     // after posting it) and certified parks. Unknown evidence holds the launch;
@@ -5476,7 +5557,7 @@ export async function maybeDispatchAmaCloser({
         terminalOutcome: 'failed-without-merge', now: dispatchContext.dispatchedAt,
         logger, repo, prNumber,
       });
-      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+      updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
         ...(current || existingRecord),
         lastObservedStatus: observedStatus,
         lastObservedAt: dispatchContext.dispatchedAt,
@@ -5484,6 +5565,7 @@ export async function maybeDispatchAmaCloser({
         outcome: 'failed-without-merge',
       }));
       const hammerCleanup = await cleanupHammerCloserWorker({
+        cleanupScratchImpl,
         prNumber, workerClass, existingRecord, hqPath, hqRoot, execFileImpl, logger,
         reason: `terminal-status-${observedStatus}`,
       });
@@ -5550,7 +5632,7 @@ export async function maybeDispatchAmaCloser({
           repo,
           prNumber,
         });
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: originalStatus,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -5624,7 +5706,7 @@ export async function maybeDispatchAmaCloser({
           const unconfirmedReason = terminalLivePr?.error
             ? 'live-pr-probe-failed'
             : noMergeAuditForCurrentHead === null ? 'audit-comments-unreadable' : 'live-pr-state-unknown';
-          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
             lastObservedStatus: status,
             lastObservedAt: dispatchContext.dispatchedAt,
@@ -5655,7 +5737,7 @@ export async function maybeDispatchAmaCloser({
             repo,
             prNumber,
           });
-          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
             lastObservedStatus: 'succeeded',
             lastObservedAt: dispatchContext.dispatchedAt,
@@ -5710,7 +5792,7 @@ export async function maybeDispatchAmaCloser({
           repo,
           prNumber,
         });
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -5920,7 +6002,7 @@ export async function maybeDispatchAmaCloser({
           if (!mergeSignalEmitted) {
             // The terminal lease is the breadcrumb that lets the next closer
             // pass rediscover the merge and retry the missing signal.
-            updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+            updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
               ...(current || existingRecord),
               lastObservedStatus: status,
               lastObservedAt: dispatchContext.dispatchedAt,
@@ -5929,7 +6011,7 @@ export async function maybeDispatchAmaCloser({
             }));
             return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
           }
-          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
             lastObservedStatus: status,
             lastObservedAt: dispatchContext.dispatchedAt,
@@ -5956,6 +6038,7 @@ export async function maybeDispatchAmaCloser({
             logger,
           });
           const rawHammerCleanup = await cleanupHammerCloserWorker({
+        cleanupScratchImpl,
             prNumber,
             workerClass,
             existingRecord,
@@ -5998,7 +6081,7 @@ export async function maybeDispatchAmaCloser({
           message:
             'Final HAM terminal remediation already completed for the current head, but structural merge gates did not pass; refusing same-head re-dispatch',
         }));
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -6024,7 +6107,7 @@ export async function maybeDispatchAmaCloser({
         mergedSignalUnknown
         && auditTerminalOutcome === 'succeeded'
       ) {
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -6044,7 +6127,7 @@ export async function maybeDispatchAmaCloser({
           now: dispatchContext.dispatchedAt,
         })
       ) {
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -6131,7 +6214,7 @@ export async function maybeDispatchAmaCloser({
           prNumber,
         });
       } else if (!advancedTerminalDispatchSuperseded && !hammerEndedWithoutMerge) {
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -6168,7 +6251,7 @@ export async function maybeDispatchAmaCloser({
           logger,
         });
         if (!mergeSignalEmitted) {
-          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
             lastObservedStatus: status,
             lastObservedAt: dispatchContext.dispatchedAt,
@@ -6199,7 +6282,7 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
-      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+      updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
         ...(current || existingRecord),
         lastObservedStatus: status,
         lastObservedAt: dispatchContext.dispatchedAt,
@@ -6207,6 +6290,7 @@ export async function maybeDispatchAmaCloser({
       }));
       if (releaseUnprovenTerminalHoldMerged) {
         const rawHammerCleanup = await cleanupHammerCloserWorker({
+        cleanupScratchImpl,
           prNumber,
           workerClass,
           existingRecord,
@@ -6253,7 +6337,7 @@ export async function maybeDispatchAmaCloser({
         existingDispatchStatus = status;
         const capFinalDecision = await reconcileCapFinalDecision(status);
         if (capFinalDecision) return capFinalDecision;
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -6280,7 +6364,7 @@ export async function maybeDispatchAmaCloser({
           });
         }
       } else {
-        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -6301,7 +6385,7 @@ export async function maybeDispatchAmaCloser({
       // Keep the terminal status read from HQ for the capacity scan below.
       // A missing lease plus an unreadable ledger otherwise resurrects the
       // old running record and delays this already-admitted retry until age-out.
-      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
+      updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
         current?.launchRequestId === existingRecord.launchRequestId && current.state !== 'dispatching'
           && !AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(current.lastObservedStatus))
           ? { ...current, lastObservedStatus: status, lastObservedAt: dispatchContext.dispatchedAt || new Date().toISOString() }
@@ -6318,6 +6402,7 @@ export async function maybeDispatchAmaCloser({
         prNumber,
       });
       const hammerCleanup = await cleanupHammerCloserWorker({
+        cleanupScratchImpl,
         prNumber,
         workerClass,
         existingRecord,
@@ -6397,7 +6482,7 @@ export async function maybeDispatchAmaCloser({
             launchRequestId: existingRecord.launchRequestId,
             ...deadHammerRearm,
           }, { level: deadHammerRearm.rearmed ? 'info' : 'warn' });
-          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
+          updateDispatchRecord(rootDir, existingDispatchIdentity, (current) => (
             current?.launchRequestId === existingRecord.launchRequestId
               ? { ...current, infraRearmLoggedLaunchRequestId: existingRecord.launchRequestId }
               : null
@@ -6426,7 +6511,7 @@ export async function maybeDispatchAmaCloser({
       repo,
       prNumber,
       headSha: existingRecord?.headSha || targetRemediationSha,
-      persistImpl: (prelaunchRefusalSlowRetry) => updateAmaCloserDispatchRecord(
+      persistImpl: (prelaunchRefusalSlowRetry) => updateDispatchRecord(
         rootDir,
         existingDispatchIdentity,
         (current) => (current ? { ...current, prelaunchRefusalSlowRetry } : null),
@@ -6548,7 +6633,7 @@ export async function maybeDispatchAmaCloser({
         });
         if (refund.refunded || (refund.reason === 'already-refunded'
           && ledger.unexecutedLaunchRequestIds?.includes(record.launchRequestId))) {
-          updateAmaCloserDispatchRecord(rootDir, { repo, prNumber, headSha: record.headSha }, current => {
+          updateDispatchRecord(rootDir, { repo, prNumber, headSha: record.headSha }, current => {
             if (current?.launchRequestId !== record.launchRequestId
               || current.labelGateRefundedLaunchRequestId === record.launchRequestId) return null;
             return { ...current, labelGateRefundedLaunchRequestId: record.launchRequestId,
@@ -6705,10 +6790,7 @@ export async function maybeDispatchAmaCloser({
 
   // Persist the prompt under watcher-owned repo state and pass that path
   // to `hq dispatch --prompt`. This avoids cross-user writes into HQ_ROOT.
-  const promptPath = join(
-    promptDir,
-    `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.md`,
-  );
+  let promptPath;
   // An interrupted in-flight dispatch already bumped retryCount before it was
   // killed without completing an attempt. Roll that phantom increment back so
   // the redispatch bound reflects only genuine completed failures and does not
@@ -6790,6 +6872,7 @@ export async function maybeDispatchAmaCloser({
   }
   const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
   const activeLaunches = await findActiveAmaCloserLaunches(rootDir, {
+    cleanupScratchImpl,
     signal,
     readLaunchRequestStatusImpl,
     hqRoot,
@@ -6908,6 +6991,7 @@ export async function maybeDispatchAmaCloser({
   try {
   try {
   scratchDir = createHammerScratchDir(promptDir);
+  promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}-${basename(scratchDir)}.md`);
   const procedureValues = closerTemplateValues({ ...promptInputs, scratchDir });
   for (const phase of HAMMER_PHASES) {
     writeFileSync(join(scratchDir, `${phase}.sh`), renderHammerProcedure(phase, procedureValues),
@@ -6973,7 +7057,7 @@ export async function maybeDispatchAmaCloser({
   // A follow-up can claim between the first queue check and lease acquisition.
   if (!ownerProofRecovery && findActiveRemediationJob(rootDir, { repo, prNumber })) {
     deleteAmaCloserLease(rootDir, leaseIdentity);
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+    updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
       if (!current) return null;
       return {
         ...current, state: 'no-dispatch', reason: 'active-remediation-job', retryCount: priorRetryCount,
@@ -6993,7 +7077,7 @@ export async function maybeDispatchAmaCloser({
   });
   throwIfAborted(signal);
   if (livePrProbe?.state === 'MERGED') {
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+    updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
       if (!current) return null;
       return {
         ...current,
@@ -7032,7 +7116,7 @@ export async function maybeDispatchAmaCloser({
     });
   }
   if (livePrProbe?.state === 'CLOSED') {
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+    updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
       if (!current) return null;
       return {
         ...current,
@@ -7059,7 +7143,7 @@ export async function maybeDispatchAmaCloser({
     });
   }
   if (livePrProbe?.state === 'OPEN' && livePrProbe?.headBranchExists === false) {
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+    updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
       if (!current) return null;
       return {
         ...current,
@@ -7092,7 +7176,7 @@ export async function maybeDispatchAmaCloser({
   if (livePrProbe?.state === 'OPEN' && livePrProbe.headRefOid
     && livePrProbe.headRefOid !== targetRemediationSha) {
     deleteAmaCloserLease(rootDir, leaseIdentity);
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, current => current ? {
+    updateDispatchRecord(rootDir, targetDispatchIdentity, current => current ? {
       ...current, state: 'no-dispatch', reason: 'dispatch-head-context-changed',
       retryCount: priorRetryCount, observedHeadSha: livePrProbe.headRefOid,
     } : null);
@@ -7257,8 +7341,8 @@ export async function maybeDispatchAmaCloser({
       }
     }
   }
-  // The final worker-liveness check has cleared the previous run.
-  cleanupHammerScratchDir(existingRecord, logger);
+  // Retire the predecessor only after the dispatcher accepts or refuses.
+  cleanupScratchImpl(existingRecord, logger);
   const argsWithPriority = ['dispatch', '--priority', dispatchPriority, ...args.slice(1)];
   let activeArgs = argsWithPriority;
   let execResult;
@@ -7295,7 +7379,7 @@ export async function maybeDispatchAmaCloser({
     retainScratchDir = false;
     finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity, terminalOutcome: 'superseded',
       now: dispatchContext.dispatchedAt, logger, repo, prNumber });
-    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, current => ({
+    updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({
       ...(current || {}), state: 'no-dispatch', reason,
       launchRequestId: null, dispatchId: null, retryCount: priorRetryCount,
       lastError: null, unadoptedLaunchRequestId: payload.launchRequestId,
@@ -7329,6 +7413,43 @@ export async function maybeDispatchAmaCloser({
       throwIfAborted(signal);
       break;
     } catch (err) {
+      const liveClaimRefusal = /uq_worker_runs_live_logical_job/i.test(formatHqDispatchError(err));
+      const retryProbe = liveClaimRefusal && existingRecord?.launchRequestId
+        ? withLiveLaunchRetry(await Promise.resolve().then(() => readLaunchRequestStatusImpl({
+          launchRequestId: existingRecord.launchRequestId, includeRetryChain: true, rootDir, hqRoot,
+          ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
+        })).catch(() => ({ ok: false }))) : null;
+      const retryChainUnknown = liveClaimRefusal && existingRecord?.launchRequestId
+        && (!retryProbe?.ok || retryProbe.retryChainUnreadable);
+      if (retryProbe?.ok && retryProbe.liveRetryLaunchRequestId) {
+        // Only a proven descendant owns these artifacts. Keep its original head
+        // identity even if this admission was targeting a newer remediation head.
+        const previous = existingRecord;
+        updateDispatchRecord(rootDir, existingDispatchIdentity, () => ({
+          ...previous,
+          state: 'dispatched', reason: 'dispatch-retry-live', lastObservedStatus: 'requested',
+          lastObservedAt: dispatchContext.dispatchedAt, lastError: formatHqDispatchError(err),
+          retryCount: priorRetryCount, outcome: null, terminalOutcome: null, terminalLaunchStatus: null,
+          scratchDir: previous.scratchDir || null, promptPath: previous.promptPath || null,
+          launchRequestId: previous.launchRequestId || null, dispatchId: previous.dispatchId || null,
+          liveRetryLaunchRequestId: retryProbe.liveRetryLaunchRequestId,
+        }));
+        if (existingDispatchIdentity.headSha === targetDispatchIdentity.headSha) {
+          promoteLaunchedLease({ launchRequestId: previous.launchRequestId });
+        } else {
+          updateDispatchRecord(rootDir, targetDispatchIdentity, current => ({
+            ...current, state: 'no-dispatch', reason: 'dispatch-retry-live',
+            retryOwnerHeadSha: existingDispatchIdentity.headSha,
+            launchRequestId: null, dispatchId: null, scratchDir: null, promptPath: null,
+            lastObservedStatus: null, lastObservedAt: null, retryCount: priorRetryCount,
+          }));
+          deleteAmaCloserLease(rootDir, leaseIdentity);
+        }
+        return noAmaDispatch({ dispatched: false, skipMergeAgent: true, inFlight: true,
+          reason: 'dispatch-retry-live', launchRequestId: previous.launchRequestId || null,
+          liveRetryLaunchRequestId: retryProbe.liveRetryLaunchRequestId,
+          promptPath: previous.promptPath || null });
+      }
       const launchEvidence = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const refused = await refuseForeignLaunch(launchEvidence);
       if (refused) return refused;
@@ -7385,7 +7506,7 @@ export async function maybeDispatchAmaCloser({
       // `dispatch-retry-exhausted`. Otherwise a transient rate-limit storm
       // permanently grounds the closer for a PR even after the limit resets,
       // which is exactly the cascade observed in the macOS-upgrade incident.
-      const transientFailure = !ambiguousLaunch
+      const transientFailure = !liveClaimRefusal && !ambiguousLaunch
         && !configurationRefusal
         && !branchHolderBlocked
         // A live provision-slot holder is competing work, not proof this
@@ -7395,7 +7516,7 @@ export async function maybeDispatchAmaCloser({
           || (isHammerWorkerClass(workerClass)
             && sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl)));
       const budgetPreservingFailure = configurationRefusal || branchHolderBlocked || transientFailure;
-      const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+      const updatedDispatchRecord = updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
         const currentBranchHolderBlockBase = existingRecordIsReclaimableBranchHolderBlock
           ? existingBranchHolderBlockCount
           : Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount);
@@ -7441,6 +7562,15 @@ export async function maybeDispatchAmaCloser({
       });
       const branchHolderBlockExhausted = branchHolderBlocked
         && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
+      if (retryChainUnknown) {
+        // Charge the refusal, but preserve the ancestor's identity/artifacts for
+        // the next probe. Incomplete evidence is not a dispatched worker claim.
+        updateDispatchRecord(rootDir, existingDispatchIdentity, () => ({
+          ...existingRecord, state: 'dispatch-failed', reason: 'dispatch-retry-chain-unreadable',
+          retryCount: priorRetryCount + 1, lastError: dispatchError,
+          lastObservedStatus: 'unknown', terminalLaunchStatus: null,
+        }));
+      }
       // A worker DID spawn (hq emitted an lrq/dispatchId) even though the launch
       // call surfaced as an error — the classic `worker_killed`-shortly-after-spawn
       // shape. Count it against the per-PR firing ceiling so a hammer that spawns
@@ -7492,7 +7622,8 @@ export async function maybeDispatchAmaCloser({
         // closer (not merge-agent) re-dispatches once the throttle/broker
         // clears, since the budget was preserved above and re-dispatch is
         // guaranteed to be retry-eligible on the next tick.
-        skipMergeAgent: Boolean(configurationRefusal) || branchHolderBlocked || ambiguousLaunch || transientFailure,
+        skipMergeAgent: Boolean(configurationRefusal) || Boolean(retryChainUnknown) || branchHolderBlocked || ambiguousLaunch || transientFailure,
+        ...(retryChainUnknown ? { preservePredecessorArtifacts: true } : {}),
         reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : ambiguousLaunch ? 'dispatch-response-ambiguous' : (
           branchHolderBlocked ? (
             branchHolderBlockExhausted
@@ -7515,7 +7646,7 @@ export async function maybeDispatchAmaCloser({
   }
 
   const parsed = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || ''));
-  updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
+  updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
     const liveRecord = { ...(current || {}) };
     delete liveRecord.terminalLaunchStatus;
     delete liveRecord.reconciledAt;
@@ -7589,7 +7720,15 @@ export async function maybeDispatchAmaCloser({
     ...(leaseUpdateError ? { leaseUpdateError } : {}),
   };
   } finally {
-    if (!retainScratchDir) cleanupHammerScratchDir({ scratchDir, promptDir }, logger);
+    if (!retainScratchDir) {
+      cleanupHammerScratchDir({ scratchDir, promptDir }, logger);
+      // Only this attempt's unique prompt is unowned; launched prompts remain
+      // durable evidence even after their scratch directory is reclaimed.
+      if (promptPath) {
+        try { rmSync(promptPath, { force: true }); }
+        catch (err) { logger?.warn?.(`hammer unlaunched prompt cleanup failed: ${err.message}`); }
+      }
+    }
   }
 }
 

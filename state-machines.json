@@ -230,7 +230,7 @@
         {"id": "hammer-dispatch.06","from": "dispatching","to": "dispatch-failed","trigger": "launch result: dispatch-failed","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.07","from": "dispatching","to": "no-dispatch","trigger": "launch result: no-dispatch","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.08","from": "dispatching","to": "completed","trigger": "launch result: completed","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.09","from": "dispatched","to": "launch-terminal","trigger": "terminal launch evidence","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.09","from": "dispatched","to": "launch-terminal","trigger": "readable terminal chain evidence (no live fleet retry)","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.10","from": "dispatched","to": "dispatch-failed","trigger": "failed outcome reconciled","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.11","from": "launch-terminal","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.12","from": "dispatch-deferred-transient","to": "dispatching","trigger": "bounded retry or changed context","codeSource": "src/ama/dispatch-closer.mjs"},
@@ -242,7 +242,9 @@
         {"id": "hammer-dispatch.18","from": "dispatching","to": "dispatch-configuration-refused","trigger": "repo_unregistered: release pending lease and page repository once","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.19","from": "dispatch-deferred-transient","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.20","from": "dispatch-failed","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.21","from": "dispatch-configuration-refused","to": "dispatching","trigger": "normal backoff due, re-probe dispatch, admission clears blocker","codeSource": "src/ama/dispatch-closer.mjs"}
+        {"id": "hammer-dispatch.21","from": "dispatch-configuration-refused","to": "dispatching","trigger": "normal backoff due, re-probe dispatch, admission clears blocker","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.22","from": "dispatching","to": "dispatched","trigger": "proven live retry restores same-head ownership and artifacts","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.23","from": "launch-terminal","to": "dispatched","trigger": "proven live retry restores original-head ownership","codeSource": "src/ama/dispatch-closer.mjs"}
       ]
     }
   ],
@@ -258,7 +260,7 @@
     "src/ama-closure-orchestration.mjs": "4ce897fd6013b48155500abd4a4701398c73e793cecea2ee005ad42b1fd0355e",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "81a5fa898be8b26fae2ddab5d6fd0d0a3cdaf2b3f59b845e0508012101c85069",
+    "src/ama/dispatch-closer.mjs": "1cde7feda8055b5f072da7f15fce21002cdf23ffe3d7d7dab6cd7127181a9d5b",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
     "src/follow-up-remediation.mjs": "e7040add9e27706ced329c6412f2a9dfbc1db7080e640e1de65fef97b6da9f0b",

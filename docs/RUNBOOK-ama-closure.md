@@ -107,6 +107,46 @@ an initial `dispatching` to `dispatch-failed` transition. Launch intents and
 successful launches carrying a predecessor's terminal status retain scratch
 until a fresh terminal observation.
 
+SCRATCHRACE-01: launch liveness includes every descendant linked by
+`metadata.retryOf`, transitively. Any non-terminal fleet retry retains the
+ancestor's scratch and prevents closer re-dispatch; the startup sweep uses the
+same rule even if the owner record already reports a terminal launch. Each
+attempt writes a unique prompt alongside its scratch, so retry admission never
+rewrites an earlier launch's prompt. Predecessor deletion is deferred until the
+closer's admission decision. A `uq_worker_runs_live_logical_job` refusal re-reads
+the existing non-null predecessor LRQ with its retry chain. Only a proven live
+descendant restores `dispatched` ownership, reason `dispatch-retry-live`, and
+`liveRetryLaunchRequestId`, without charging a failed attempt or deleting the
+previous artifacts. Restore the record at its original head; a different target
+head stays `no-dispatch` with `retryOwnerHeadSha` and no launch/artifact ownership,
+and its pending lease is removed. Later admission resolves that pointer before
+probing liveness or a claim refusal, preserving the original owner's identity.
+Without chain proof (or without a predecessor
+LRQ), use charged dispatch failure and existing capped, paged recovery. An
+unreadable refusal-time probe also charges a failure, but keeps the predecessor's LRQ and
+artifacts in `dispatch-failed` on its original identity and suppresses fallback
+until ownership can be read; it does not claim a dispatched worker.
+Malformed unrelated metadata is skipped. If retry traversal is unreadable, the
+base status remains observable but cannot authorize cleanup, lease settlement
+or re-dispatch. Historical terminal observations survive missing/unreadable
+probes without degrading reconciliation of other records. All-terminal chains
+and ordinary non-retry failures retain their existing cleanup behavior.
+Admission and predecessor matching resolve the repository from `dispatchContext.repo`,
+then `prMetadata.repo`, then the top-level `repo`. PR number resolution uses
+`dispatchContext.prNumber`, then `prMetadata.prNumber`, then top-level `prNumber`
+for both admission and cleanup. Descendants are ordered by latest update and
+launch ID, and promoted live rows retain their status metadata. PostgreSQL reads
+one timeout-bounded, read-only snapshot and parses metadata in the adapter;
+this supports pre-16 servers and missing metadata columns without casting malformed
+historical text in SQL. SQLite retains its recursive query. Interrupted admission (including
+shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later
+completed pass. Capacity reconciliation cleans other PRs' terminal scratch
+immediately, including when the current admission subsequently aborts. A refused
+or aborted attempt that never launched removes its own unique prompt alongside
+its scratch; launched and ambiguous-launch prompts remain available.
+After deployment, verify that a fleet-retried hammer following a spawn timeout
+can source its phase helpers and produces no missing-phase-script no-merge note.
+
 At watcher startup, a sweep reclaims terminal or orphan directories whose entire
 tree has been idle for at least two hours. Until one full sweep completes, the
 first poll at least a minute after the previous attempt retries it; subsequent

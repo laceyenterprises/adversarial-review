@@ -851,11 +851,14 @@ function* readLatestWorkerRunStatusFromLedgerSteps({
   return { ok: true, row, target: queried.target };
 }
 
+// With includeRetryChain, a traversal failure preserves the base status and
+// sets retryChainUnreadable. Ownership-changing callers must check that flag.
 export function readLaunchRequestStatusFromLedger(args) { return runLedgerStepsSync(readLaunchRequestStatusFromLedgerSteps(args)); }
 export function readLaunchRequestStatusFromLedgerAsync(args = {}) { return runLedgerStepsAsync(readLaunchRequestStatusFromLedgerSteps(args), args); }
 
 function* readLaunchRequestStatusFromLedgerSteps({
   launchRequestId,
+  includeRetryChain = false,
   ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
@@ -877,6 +880,7 @@ function* readLaunchRequestStatusFromLedgerSteps({
   });
   if (!resolution.ok) return resolution;
   let queried;
+  let sqliteLaunchProjection;
   if (resolution.target.backend === 'sqlite') {
     // HAMREFUND-01: older offline ledgers may predate the detail column.
     const detailColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'failure_detail');
@@ -885,9 +889,10 @@ function* readLaunchRequestStatusFromLedgerSteps({
     const ticketColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'ticket_ref');
     if (!ticketColumn.ok) return ticketColumn;
     const ticketSelect = ticketColumn.exists ? 'ticket_ref' : 'NULL AS ticket_ref';
+    sqliteLaunchProjection = `launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}, ${ticketSelect}`;
     queried = querySqliteRows(
       resolution.target,
-      `SELECT launch_request_id, status, updated_at, terminal_at, failure_class, ${detailSelect}, ${ticketSelect}
+      `SELECT ${sqliteLaunchProjection}
          FROM launch_requests
         WHERE launch_request_id = @launchRequestId
         LIMIT 1`,
@@ -926,7 +931,60 @@ function* readLaunchRequestStatusFromLedgerSteps({
       target: queried.target,
     };
   }
-  return { ok: true, row, target: queried.target };
+  if (!includeRetryChain) return { ok: true, row, target: queried.target };
+  const unreadableRetryChain = () => ({ ok: true, row, retryChainUnreadable: true, target: queried.target });
+  // Follow dispatcher-owned retries with cycle-safe traversal on either backend.
+  let retries;
+  if (resolution.target.backend === 'sqlite') {
+    const metadataColumn = sqliteTableHasColumn(resolution.target, 'launch_requests', 'metadata_json');
+    if (!metadataColumn.ok) return unreadableRetryChain();
+    if (!metadataColumn.exists) return { ok: true, row, retryChain: [], target: queried.target };
+    retries = querySqliteRows(resolution.target, `
+      WITH RECURSIVE retry_chain(launch_request_id) AS (
+        SELECT @launchRequestId
+        UNION
+        SELECT child.launch_request_id FROM launch_requests child
+        JOIN retry_chain parent
+          ON CASE WHEN json_valid(child.metadata_json)
+            THEN json_extract(child.metadata_json, '$.retryOf') END = parent.launch_request_id
+      )
+      SELECT ${sqliteLaunchProjection} FROM launch_requests
+      WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
+        AND launch_request_id != @launchRequestId
+      ORDER BY updated_at DESC, launch_request_id DESC`, { launchRequestId: normalizedLaunchRequestId });
+  } else {
+    // Decode historical text metadata in JS: PostgreSQL before 16 has no safe
+    // IS JSON predicate. A row-to-JSON projection also tolerates absent columns.
+    // One bounded snapshot avoids per-descendant queries and database mutations.
+    retries = yield* queryPostgresRowsSteps(resolution.target, `
+      SELECT json_build_object(
+        'launch_request_id', launch_request_id, 'status', status,
+        'updated_at', updated_at, 'terminal_at', terminal_at,
+        'failure_class', failure_class,
+        'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
+        'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref',
+        'metadata_json', to_jsonb(launch_requests)->'metadata_json')
+      FROM launch_requests
+      ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC`, { spawnSyncImpl, readOnly: true });
+    if (retries.ok) {
+      const children = new Map();
+      for (const candidate of retries.rows) {
+        let metadata = candidate.metadata_json;
+        try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { continue; }
+        if (!metadata || typeof metadata.retryOf !== 'string') continue;
+        if (!children.has(metadata.retryOf)) children.set(metadata.retryOf, []);
+        children.get(metadata.retryOf).push(candidate.launch_request_id);
+      }
+      const descendants = new Set([normalizedLaunchRequestId]);
+      for (const id of descendants) {
+        for (const child of children.get(id) || []) descendants.add(child);
+      }
+      retries.rows = retries.rows.filter(candidate => candidate.launch_request_id !== normalizedLaunchRequestId
+        && descendants.has(candidate.launch_request_id)).map(({ metadata_json: _metadata, ...candidate }) => candidate);
+    }
+  }
+  if (!retries.ok) return unreadableRetryChain();
+  return { ok: true, row, retryChain: retries.rows, target: queried.target };
 }
 
 // LIVEPACK-01: non-terminal dag_runs states. `parked` is non-terminal (a

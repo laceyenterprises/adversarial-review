@@ -1,3 +1,5 @@
+import { launchRetryFixture } from './helpers/launch-retry-fixture.mjs';
+import { withLiveLaunchRetry } from '../src/ama/launch-request-status.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -1132,4 +1134,89 @@ test('REBASEPROV-01 ledger status projects the actual launch ticket', t => {
     ledgerTarget: { backend: 'sqlite', path: dbPath }, env: HERMETIC_CONFIG_ENV });
   assert.equal(result.ok, true);
   assert.equal(result.row.ticket_ref, 'CONFLICT-PR-42-REBASE');
+});
+
+test('SCRATCHRACE-01: launch retry traversal includes all descendants and excludes unrelated live launches', t => {
+  const root = tempRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerTarget = launchRetryFixture(root);
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.row.status, 'failed');
+  assert.deepEqual(result.retryChain.map(row => row.launch_request_id).sort(),
+    ['synthetic-retry', 'synthetic-retry-leaf', 'synthetic-terminal-sibling']);
+  const db = new Database(ledgerTarget.path);
+  db.prepare('UPDATE launch_requests SET metadata_json = ? WHERE launch_request_id = ?')
+    .run(JSON.stringify({ retryOf: 'synthetic-retry-leaf' }), 'synthetic-lrq');
+  db.close();
+  const cycle = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
+  assert.deepEqual(cycle.retryChain, result.retryChain, 'cycles terminate without duplicating the root');
+});
+
+test('SCRATCHRACE-01: PostgreSQL retry snapshot handles portable metadata, cycles and full row projection', () => {
+  let queries = 0;
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq',
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV,
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/synthetic' },
+    spawnSyncImpl: (_cmd, args, options) => {
+      queries += 1;
+      if (queries === 1) return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq', status: 'failed' }) };
+      assert.match(options.input, /BEGIN READ ONLY/);
+      assert.match(options.input, /to_jsonb\(launch_requests\)->'metadata_json'/);
+      assert.doesNotMatch(options.input, /IS JSON|metadata_json::jsonb/);
+      assert.match(options.input, /ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC/);
+      return { status: 0, stdout: [
+        { launch_request_id: 'synthetic-leaf', status: 'requested', updated_at: '2026-10-17T02:00:00Z',
+          failure_class: null, failure_detail: null, terminal_at: null, ticket_ref: 'HAM',
+          metadata_json: JSON.stringify({ retryOf: 'synthetic-retry' }) },
+        { launch_request_id: 'unrelated', status: 'running', metadata_json: '{broken' },
+        { launch_request_id: 'legacy', status: 'running' },
+        { launch_request_id: 'synthetic-retry', status: 'running', metadata_json: { retryOf: 'synthetic-lrq' } },
+        { launch_request_id: 'synthetic-lrq', status: 'failed', metadata_json: { retryOf: 'synthetic-leaf' } },
+      ].map(row => JSON.stringify(row)).join('\n') };
+    },
+  });
+  assert.equal(queries, 2);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.retryChain.map(row => row.launch_request_id), ['synthetic-leaf', 'synthetic-retry']);
+  assert.deepEqual(withLiveLaunchRetry(result).row, {
+    launch_request_id: 'synthetic-leaf', status: 'requested', updated_at: '2026-10-17T02:00:00Z',
+    failure_class: null, failure_detail: null, terminal_at: null, ticket_ref: 'HAM',
+  });
+});
+
+test('SCRATCHRACE-01: SQLite promotes the latest live retry with its complete status fields', t => {
+  const root = tempRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerTarget = launchRetryFixture(root, 'running');
+  const db = new Database(ledgerTarget.path);
+  db.exec('ALTER TABLE launch_requests ADD COLUMN failure_detail TEXT');
+  db.prepare('UPDATE launch_requests SET status = ?, updated_at = ?, failure_class = ?, failure_detail = ? WHERE launch_request_id = ?')
+    .run('running', '2026-10-17T01:00:00Z', 'older', 'older failure', 'synthetic-retry');
+  db.prepare('UPDATE launch_requests SET updated_at = ? WHERE launch_request_id = ?')
+    .run('2026-10-17T02:00:00Z', 'synthetic-retry-leaf');
+  db.close();
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq', ledgerTarget,
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV });
+  const promoted = withLiveLaunchRetry(result);
+  assert.equal(promoted.liveRetryLaunchRequestId, 'synthetic-retry-leaf');
+  assert.deepEqual(promoted.row, { launch_request_id: 'synthetic-retry-leaf', status: 'running',
+    updated_at: '2026-10-17T02:00:00Z', terminal_at: null, failure_class: null, failure_detail: null, ticket_ref: 'HAM' });
+});
+
+test('SCRATCHRACE-01: a failed retry traversal retains the successfully observed PostgreSQL status', () => {
+  let queries = 0;
+  const row = { launch_request_id: 'synthetic-lrq', status: 'failed' };
+  const result = readLaunchRequestStatusFromLedger({ launchRequestId: 'synthetic-lrq',
+    includeRetryChain: true, env: HERMETIC_CONFIG_ENV,
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/synthetic' },
+    spawnSyncImpl: () => ++queries === 1 ? { status: 0, stdout: JSON.stringify(row) }
+      : { status: 1, stderr: 'synthetic retry query unavailable' },
+  });
+  assert.equal(queries, 2);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.row, row);
+  assert.equal(result.retryChainUnreadable, true);
 });

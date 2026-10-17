@@ -6,7 +6,7 @@ import { writeFileAtomic } from '../atomic-write.mjs';
 import { meteredExecFile } from '../metered-gh.mjs';
 import { withGitHubBudgetScope } from '../rate-limit-throttle.mjs';
 import { readLatestWorkerRunStatusFromLedgerAsync, readLaunchRequestStatusFromLedgerAsync } from '../session-ledger-read-adapter.mjs';
-import { isTerminalLaunchRequestStatus } from './launch-request-status.mjs';
+import { isTerminalLaunchRequestStatus, withLiveLaunchRetry } from './launch-request-status.mjs';
 import {
   amaCloserDispatchDir, cleanupHammerScratchDir, isTerminalHammerScratchRecord,
 } from './dispatch-closer.mjs';
@@ -180,7 +180,7 @@ async function hasLiveWorker(record, options, deadline) {
 
 function ledgerReadArgs(record, options, deadline) {
   return {
-    launchRequestId: record.launchRequestId, rootDir: options.rootDir,
+    launchRequestId: record.launchRequestId, rootDir: options.rootDir, includeRetryChain: true,
     hqRoot: record.hqRoot || options.hqRoot, env: options.env,
     ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
     timeoutMs: Math.max(1, deadline - Date.now()),
@@ -208,11 +208,12 @@ async function isTerminalOwner(record, options, deadline) {
   // A retry intent can still carry its predecessor's LRQ and terminal status.
   if (record.state === 'dispatching' || Date.now() >= deadline) return false;
   if (record.launchRequestId) {
-    const probe = await options.readLaunchRequestStatusImpl(ledgerReadArgs(record, options, deadline));
+    const probe = withLiveLaunchRetry(await options.readLaunchRequestStatusImpl(ledgerReadArgs(record, options, deadline)));
     if (!probe?.ok && probe?.reason !== 'missing-launch-request-row') {
       throw new Error('unreadable launch ledger');
     }
     if (probe?.ok) {
+      if (probe.retryChainUnreadable) return false;
       // Explicit live or unknown ledger state outranks stale record/PR state.
       return isTerminalLaunchRequestStatus(probe.row?.status);
     }

@@ -15,3 +15,12 @@ export const AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES = new Set([
 export function isTerminalLaunchRequestStatus(status) {
   return AMA_CLOSER_CAPACITY_TERMINAL_LAUNCH_REQUEST_STATUSES.has(String(status || '').trim().toLowerCase());
 }
+
+// A fleet retry reuses its ancestor's prompt and scratch. Leave the
+// ancestor record unchanged; any non-terminal descendant supplies its liveness.
+export function withLiveLaunchRetry(probe) {
+  if (probe?.liveRetryLaunchRequestId) return probe;
+  const live = probe?.ok && probe.retryChain?.find(row => !isTerminalLaunchRequestStatus(row.status));
+  return live ? { ...probe, row: { ...live, ticket_ref: live.ticket_ref ?? probe.row?.ticket_ref },
+    liveRetryLaunchRequestId: live.launch_request_id } : probe;
+}

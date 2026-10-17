@@ -5,6 +5,51 @@
 **Source of truth:** `src/ama/dispatch-closer.mjs`
 **Runtime surface:** `src/ama/primary-change.mjs`, `src/ama/dispatch-closer.mjs`, `src/ama/prelaunch-refusal-retry.mjs`, `src/ama/dispatch-dir-names.mjs`, `src/ama/closer-terminal-cancel.mjs`, `src/follow-up-stuck-claim-sweep.mjs`, `src/recovery-reaper.mjs`, `bin/reconcile-ama-closer-dispatches.mjs`
 
+## Fleet retry ownership (SCRATCHRACE-01)
+
+Liveness reads follow launch-ledger `metadata.retryOf` descendants transitively;
+a non-terminal descendant keeps the recorded ancestor's scratch and prompt
+owned. No additional durable store is introduced. Each dispatch attempt has a
+unique `promptPath`, including retries of the same PR and reviewed head.
+
+A `uq_worker_runs_live_logical_job` refusal triggers a fresh retry-chain read
+for the existing record's non-null `launchRequestId`. Only a proven non-terminal
+descendant restores the predecessor's IDs, scratch, prompt and retry count,
+with `state: dispatched`, `reason: dispatch-retry-live`,
+`lastObservedStatus: requested`, and `liveRetryLaunchRequestId` naming the live
+retry. Terminal outcome fields are cleared. Restoration uses the identity that
+owns the ancestor LRQ; its `headSha`, `reviewedSha` and `targetRemediationSha`
+never change. If admission targeted a different head, that target is left as
+`no-dispatch`, reason `dispatch-retry-live`, with `retryOwnerHeadSha` pointing
+to the original record and null launch IDs, scratch and prompt. The target's
+pending lease is removed rather than assigning another head's LRQ to it.
+Later admissions follow `retryOwnerHeadSha` to the original owner before any
+liveness or claim-refusal probe; pointer cycles terminate without inventing a launch.
+A same-head restore promotes the pending lease with the ancestor LRQ.
+
+An unproven refusal, including one without a predecessor LRQ, follows the charged
+`dispatch-failed` path and existing capped, paged prelaunch recovery. It cannot
+suppress merge-agent fallback by claiming fleet ownership. If the refusal-time
+retry probe is itself unreadable, charge the failure but retain the predecessor
+LRQ and artifacts on its original identity as `dispatch-failed`, reason
+`dispatch-retry-chain-unreadable`; suppress fallback until a readable probe can
+resolve ownership. No dispatched lease is fabricated. Retry-query failures retain
+the successfully read base status with `retryChainUnreadable: true`; that status alone cannot authorize lease settlement, scratch cleanup or
+re-dispatch. Malformed unrelated JSON metadata is skipped by both ledger backends.
+
+Predecessor scratch deletion is deferred until the current PR's admission
+decision; terminal chains and non-retry failures clean up normally. Interrupted
+admission retains that PR's deferred artifacts. Terminal scratch for other PRs
+is cleaned immediately by capacity reconciliation, even if admission later aborts.
+Admission and cleanup use the same repository identity (`dispatchContext.repo`,
+then `prMetadata.repo`, then top-level `repo`) and PR number (`dispatchContext.prNumber`,
+then `prMetadata.prNumber`, then top-level `prNumber`). Unlaunched attempts remove their
+own unique prompt and scratch; launched prompts remain retained evidence. The
+scratch sweep applies the same launch-chain rule over terminal owner records.
+Historical terminal records are probed only to discover live descendants;
+missing or unreadable probes preserve their stronger evidence without poisoning
+other records' capacity reconciliation.
+
 ## Purpose
 
 `data/follow-up-jobs/ama-closer-dispatches/` records the AMA closer's current

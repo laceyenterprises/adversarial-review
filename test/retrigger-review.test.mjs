@@ -1011,54 +1011,27 @@ test('retrigger-review allow-active-review-reset resets a dead process group', a
   }
 });
 
-test('retrigger-review allow-active-review-reset preserves a null pgid guard', async () => {
-  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
-  insertReviewRow(rootDir, {
-    reviewStatus: 'reviewing',
-    reviewerSessionUuid: 'sess-238',
-    reviewerPgid: null,
-  });
-  insertReviewerPass(rootDir, {
-    reviewerModel: 'gemini',
-    metadata: { reviewerSessionUuid: 'sess-238', reviewerModel: 'gemini' },
-  });
-
-  const out = makeCaptureStream();
-  const rc = await main([
-    '--repo', 'laceyenterprises/agent-os',
-    '--pr', '238',
-    '--reason', 'retry',
-    '--exact-head-now',
-    '--allow-active-review-reset',
-    '--no-bump-budget',
-    '--root-dir', rootDir,
-    '--audit-root-dir', rootDir,
-  ], {
-    stdout: out,
-    stderr: makeCaptureStream(),
-    fetchCurrentHeadShaImpl: fakeCurrentHeadSha,
-    isPgidAliveImpl: () => { throw new Error('null pgid must not be probed'); },
-  });
-
-  assert.equal(rc, 0);
-  assert.equal(JSON.parse(out.text()).activeReviewReset, 'allowed');
+test('REVIEWHEAD-01: operator reset defers a pre-spawn claim without a process group', async t => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewhead-operator-'));
+  const repo = 'example/review-head';
+  insertReviewRow(rootDir, { repo, prNumber: 1, reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'synthetic-session', reviewerHeadSha: 'synthetic-head',
+    revisionRef: 'synthetic-head', reviewerPgid: null });
   const db = openReviewStateDb(rootDir);
-  try {
-    const row = db.prepare(
-      'SELECT review_status, reviewer_pgid, reviewer_session_uuid FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
-    ).get('laceyenterprises/agent-os', 238);
-    const pass = db.prepare(
-      'SELECT status, ended_at, metadata_json FROM reviewer_passes WHERE repo = ? AND pr_number = ?'
-    ).get('laceyenterprises/agent-os', 238);
-    assert.equal(row.review_status, 'pending');
-    assert.equal(row.reviewer_pgid, null);
-    assert.equal(row.reviewer_session_uuid, null);
-    assert.equal(pass.status, 'abandoned');
-    assert.ok(pass.ended_at);
-    assert.equal(JSON.parse(pass.metadata_json).activeReviewReset.reason, 'force-reset-review-to-pending');
-  } finally {
-    db.close();
-  }
+  t.after(() => db.close());
+  db.prepare("UPDATE reviewed_prs SET domain_id = 'code-pr', subject_external_id = ?").run(`${repo}#1`);
+  const before = db.prepare('SELECT * FROM reviewed_prs').get();
+  const err = makeCaptureStream();
+  const rc = await main(['--repo', repo, '--pr', '1', '--reason', 'synthetic retry',
+    '--exact-head-now', '--allow-active-review-reset', '--no-bump-budget',
+    '--root-dir', rootDir, '--audit-root-dir', rootDir], {
+    stdout: makeCaptureStream(), stderr: err,
+    fetchCurrentHeadShaImpl: async () => 'synthetic-head',
+    isPgidAliveImpl: () => { throw new Error('a missing process group is not exit proof'); },
+  });
+  assert.equal(rc, 1);
+  assert.match(err.text(), /active-review-exit-unconfirmed/);
+  assert.deepEqual(db.prepare('SELECT * FROM reviewed_prs').get(), before);
 });
 
 test('retrigger-review cancel recovery tolerates watcher reconciliation to failed-orphan', async () => {

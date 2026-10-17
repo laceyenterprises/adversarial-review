@@ -183,6 +183,7 @@ import {
   stmtMarkReviewerCommandFailedRecoveredPosted,
   stmtMarkUnknownFailureRetryAttemptStarted,
   stmtReleaseReviewerClaim,
+  stmtReleaseUnsettledPostedReview,
   stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
   stmtRestoreSameHeadSuppressedReviewPosted,
   stmtUpdateReviewLabels,
@@ -260,6 +261,7 @@ import { resolveReviewerCeilingSeconds, usesStreamedReviewerCeiling } from './re
 import { resolveReviewPopulationRetryConfig } from './role-config.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
+import { requeuePostedReviewWithoutHead } from './posted-review-head-repair.mjs';
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import {
@@ -1205,6 +1207,10 @@ export async function processReviewSubject(entry, ctx) {
       // head, memoized in `argus_classified_head_sha`; a steady-state tick spends
       // no GitHub calls here at all.
       const argusOutcome = await routeSecuritySurfaceSafe(existing);
+      if (existing?.review_status === 'posted' && !String(existing.reviewer_head_sha || '').trim()
+        && requeuePostedReviewWithoutHead({ db, repo: repoPath, prNumber, headSha: subject.headSha })) {
+        existing = stmtGetReviewRow.get(repoPath, prNumber) || existing;
+      }
       if (handoffAwaitingReview) {
         try {
           const requestRow = { revision_ref: subject.headSha,
@@ -2610,14 +2616,23 @@ export async function processReviewSubject(entry, ctx) {
         const reconciliation = await reconcileReviewerCommandFailedBeforeRetry({
           row: current,
           findPostedReview: reviewerCommandFailedReviewProbe,
-          markPosted: ({ postedAt, row }) => {
+          markPosted: ({ postedAt, row, postedReview }) => {
+            const reviewedHead = String(postedReview?.commit_id || row.reviewer_head_sha || '').trim() || null;
             const changes = stmtMarkReviewerCommandFailedRecoveredPosted.run(
               postedAt,
+              reviewedHead,
               row.repo,
               row.pr_number,
               row.reviewer_session_uuid,
               row.reviewer_started_at,
+              reviewedHead,
             ).changes;
+            if (changes !== 1) {
+              const released = stmtReleaseUnsettledPostedReview.run(reviewedHead, row.repo, row.pr_number, row.reviewer_session_uuid);
+              const reason = reviewedHead ? 'posted-settlement-claim-mismatch' : 'posted-settlement-missing-reviewed-head';
+              console.warn(`[watcher] ${reason} repo=${row.repo} pr=${row.pr_number} `
+                + `released_to_pending=${released.changes === 1} source=command-failed-recovery`);
+            }
             if (changes === 1) {
               markWatcherReviewHeartbeat({ repo: row.repo, pr_number: row.pr_number, posted_at: postedAt });
             }
@@ -3892,6 +3907,7 @@ export async function processReviewSubject(entry, ctx) {
                 },
               };
               let reviewRowSettled = false;
+              let reviewRowPosted = false;
               let handoffPromise = null;
               const handoff = result => {
                 if (handoffPromise) return handoffPromise;
@@ -3914,7 +3930,7 @@ export async function processReviewSubject(entry, ctx) {
               if (admissionSettlementSplitEnabled && !pipelineEnabled) spawnReviewerArgs.onPostOperationSettled = (postedResult) => {
                 if (reviewRowSettled) return;
                 const rowSettlementStartedAt = Date.now();
-                settleReviewerAttempt({
+                const settlement = settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,
                   prNumber,
@@ -3928,8 +3944,9 @@ export async function processReviewSubject(entry, ctx) {
                 });
                 console.log(`[watcher] reviewer settlement timing repo=${repoPath} pr=${prNumber} step=durable-row-settlement elapsed_ms=${Date.now() - rowSettlementStartedAt}`);
                 reviewRowSettled = true;
+                reviewRowPosted = settlement?.posted !== false;
                 dispatchCandidate.durablePostedAt = postedResult.durablePostedAt;
-                handoff(postedResult);
+                if (reviewRowPosted) handoff(postedResult);
                 releaseReviewerReservation();
                 releaseAdmissionCapacity?.({ dispatched: true });
               };
@@ -3990,7 +4007,7 @@ export async function processReviewSubject(entry, ctx) {
               }
 
               if (!reviewRowSettled) {
-                settleReviewerAttempt({
+                const settlement = settleReviewerAttempt({
                   rootDir: ROOT,
                   repoPath,
                   prNumber,
@@ -4003,9 +4020,10 @@ export async function processReviewSubject(entry, ctx) {
                   // ARC-18: watcher owns the heartbeat singleton; thread it in.
                   markReviewHeartbeat: markWatcherReviewHeartbeat,
                 });
+                reviewRowPosted = settlement?.posted !== false;
               }
               try {
-                await handoff(result);
+                if (reviewRowPosted) await handoff(result);
               } finally {
                 releaseAdmissionCapacity?.({ dispatched: true });
               }

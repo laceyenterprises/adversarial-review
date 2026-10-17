@@ -1,3 +1,4 @@
+import { prepareMarkPosted, prepareReleaseUnsettledPostedReview } from '../src/review-state-statements.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -32,6 +33,7 @@ function setupLegacyNullableCounterDb() {
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        repo TEXT NOT NULL,
        pr_number INTEGER NOT NULL,
+       revision_ref TEXT,
        reviewed_at TEXT,
        reviewer TEXT,
        pr_state TEXT,
@@ -139,19 +141,8 @@ function statements(db) {
           AND COALESCE(reviewer_pgid, '') = COALESCE(?, '')
           AND COALESCE(reviewer_lease_expires_at, '') = COALESCE(?, '')`
     ),
-    markPosted: db.prepare(
-      `UPDATE reviewed_prs
-          SET review_status = 'posted',
-              posted_at = ?,
-              failed_at = NULL,
-              failure_message = NULL,
-              quota_reset_at_utc = NULL,
-              review_attempts = review_attempts + 1,
-              reviewer_lease_expires_at = NULL,
-              infra_auto_recover_attempts = 0
-        WHERE repo = ?
-          AND pr_number = ?`
-    ),
+    markPosted: prepareMarkPosted(db),
+    releaseUnsettledPostedReview: prepareReleaseUnsettledPostedReview(db),
   };
 }
 

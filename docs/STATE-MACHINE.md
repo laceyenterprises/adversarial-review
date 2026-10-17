@@ -63,6 +63,36 @@ reviews.db row -> posted
 
 ## 1) Watcher delivery state machine
 
+Re-review requests, including ownerless `system-orphan-head-review` recovery,
+never reset a `reviewing` row. The durable claim starts before the child has a
+process group or start timestamp; missing process fields do not authorize a
+reset. The request returns `review-in-flight` and can be retried after settlement.
+Lease reconciliation owns abandoned claims. Explicit operator cancellation and
+reset still requires its existing process-exit verification and identity guards.
+An operator override with no process group cannot prove exit and leaves the
+pre-spawn claim intact; `forceResetReviewToPending` requires confirmed exit
+before resetting a `reviewing` row.
+
+Successful reviewer settlement atomically matches the dispatched session and
+head and records that reviewed head with `posted`. Missing head evidence or a
+lost claim match releases the affected row to `pending` at its current
+`revision_ref`, with a reason in the watcher log and no attempt or recovery
+budget charge. A replacement session is left intact. No closure handoff runs
+for an unsuccessful row settlement.
+Reattachment and posted-artifact recovery likewise write the recovered head
+explicitly, or release the affected claim without charging when no head can be
+recorded. Command-failure recovery matches the inspected session, start and head.
+
+On discovery of an open PR, a legacy `posted` row with an empty reviewed head
+is requeued only when its `revision_ref` equals the live subject head. The
+`posted` → `pending` compare-and-swap applies once, records
+`system-missing-reviewed-head:<head>`, and logs the repair. It preserves attempt
+history and every retry budget; ordinary posted rows are untouched. Merge
+eligibility continues to require the existing reviewed-head evidence.
+An existing `system-orphan-head-review` request for that exact head keeps its
+reason and original timestamp, preserving its already-authorized admission
+intent without adding an exception to any review ceiling.
+
 Source of truth:
 
 ```text
@@ -391,8 +421,12 @@ new PR
   reviewer-bot GitHub review on the stored reviewer head submitted at or after
   the stored reviewer start; when that timestamp is missing or corrupt, it falls
   back to `last_attempted_at`, and when neither timestamp is parseable it
-  refuses the row instead of widening the lower time bound. Add `--apply` to CAS
-  the still-open `failed-orphan` row to
+  refuses the row instead of widening the lower time bound. A missing stored
+  reviewer head is recovered from the matching GitHub review's `commit_id`;
+  at least one head must be non-empty at settlement, and a known stored head
+  must agree with a supplied GitHub head. Recovery scans `pending` rows too. Add `--apply`
+  to CAS the still-open row, matching the inspected session and prior head with
+  null-safe equality, to
   `posted`, clear orphan failure evidence and the reviewer lease, reset
   `infra_auto_recover_attempts`, and link the matching reviewer pass to the
   GitHub review artifact when the pass can be safely promoted, including a

@@ -25,6 +25,7 @@ import {
   shouldPauseReviewerModel,
 } from '../src/reviewer-cascade.mjs';
 import {
+  prepareMarkPosted,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkReviewerCredentialOutage,
   prepareMarkTokenRefreshHold,
@@ -1126,9 +1127,7 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1189,6 +1188,8 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
       rootDir,
       repoPath: repo,
       prNumber,
+      reviewerSessionUuid: 'session-cascade',
+      reviewerHeadSha: 'head-cascade',
       result: { ok: true },
       statements,
       log: { warn() {} },
@@ -1214,9 +1215,7 @@ test('settleReviewerAttempt marks success posted before optional cycle-cap bookk
     const prNumber = 195;
     let markPostedCalls = 0;
     let getReviewRowCalls = 0;
-    const markPostedStmt = db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-    );
+    const markPostedStmt = prepareMarkPosted(db);
     db.prepare(
       "UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_head_sha = ? WHERE repo = ? AND pr_number = ?"
     ).run('head-success', repo, prNumber);
@@ -1225,6 +1224,7 @@ test('settleReviewerAttempt marks success posted before optional cycle-cap bookk
       rootDir,
       repoPath: repo,
       prNumber,
+      reviewerHeadSha: 'head-success',
       result: { ok: true },
       statements: {
         markPosted: {
@@ -1275,9 +1275,7 @@ test('settleReviewerAttempt does not retry markPosted when heartbeat hits SQLITE
     const prNumber = 195;
     let markPostedCalls = 0;
     let heartbeatCalls = 0;
-    const markPostedStmt = db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-    );
+    const markPostedStmt = prepareMarkPosted(db);
     db.prepare(
       "UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_head_sha = ? WHERE repo = ? AND pr_number = ?"
     ).run('head-heartbeat', repo, prNumber);
@@ -1286,6 +1284,7 @@ test('settleReviewerAttempt does not retry markPosted when heartbeat hits SQLITE
       rootDir,
       repoPath: repo,
       prNumber,
+      reviewerHeadSha: 'head-heartbeat',
       result: { ok: true },
       statements: {
         markPosted: {
@@ -1413,9 +1412,7 @@ test('settleReviewerAttempt records cascade failures and leaves terminal evidenc
     const prNumber = 195;
     const warnings = [];
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1469,9 +1466,7 @@ test('settleReviewerAttempt keeps contextual defaults for empty transient errors
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1519,9 +1514,7 @@ test('settleReviewerAttempt records reviewer timeout class without burning attem
     const prNumber = 195;
     const warnings = [];
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1567,9 +1560,7 @@ test('settleReviewerAttempt records launchctl bootstrap stderr without burning a
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1618,9 +1609,7 @@ test('settleReviewerAttempt records oauth-broken without burning review attempts
     const prNumber = 195;
     const warnings = [];
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1672,9 +1661,7 @@ test('settleReviewerAttempt holds token-refresh-pending without burning attempts
     const warnings = [];
     db.prepare("UPDATE reviewed_prs SET review_status = 'reviewing' WHERE repo = ? AND pr_number = ?").run(repo, prNumber);
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1725,9 +1712,7 @@ test('single-PR oauth-broken failures exhaust infra recovery cap', () => {
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -1839,9 +1824,7 @@ test('oauth-broken across distinct PRs opens a model outage and success re-arms 
     );
 
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -1914,11 +1897,14 @@ test('oauth-broken across distinct PRs opens a model outage and success re-arms 
     db.prepare('UPDATE reviewed_prs SET reviewer = ? WHERE repo = ? AND pr_number = ?')
       .run('codex', repo, 195);
 
+    db.prepare(`UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_head_sha = ?
+      WHERE repo = ? AND pr_number = 196`).run('synthetic-head', repo);
     settleReviewerAttempt({
       rootDir,
       repoPath: repo,
       prNumber: 196,
       reviewerModel: 'claude',
+      reviewerHeadSha: 'synthetic-head',
       result: { ok: true },
       statements,
       log: { warn() {} },
@@ -2098,9 +2084,7 @@ test('settleReviewerAttempt records provider overload without burning attempts',
     const prNumber = 195;
     const warnings = [];
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -2149,9 +2133,7 @@ test('settleReviewerAttempt records HCP unavailable without burning attempts', (
     const prNumber = 195;
     const warnings = [];
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -2200,9 +2182,7 @@ test('settleReviewerAttempt records reviewer empty output without burning attemp
     const prNumber = 195;
     const warnings = [];
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -2251,9 +2231,7 @@ test('settleReviewerAttempt retries malformed reviewer artifacts without burning
     const prNumber = 195;
     const warnings = [];
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -2302,9 +2280,7 @@ test('settleReviewerAttempt routes reviewer-timeout failures to pending-upstream
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -2352,9 +2328,7 @@ test('settleReviewerAttempt requeues non-zero reviewer exits to pending when lea
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
@@ -2402,9 +2376,7 @@ test('settleReviewerAttempt keeps kill-pending adapter failures failed despite l
     const repo = 'laceyenterprises/adversarial-review';
     const prNumber = 195;
     const statements = {
-      markPosted: db.prepare(
-        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
-      ),
+      markPosted: prepareMarkPosted(db),
       markFailed: stmtMarkBugFailed(db),
       releaseReviewLease: db.prepare(
         "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"

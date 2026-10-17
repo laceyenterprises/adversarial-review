@@ -819,6 +819,10 @@ then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mj
 Each object's `codeSources` includes every transition's source file. The draft
 column and shared admission-depth query affect queue eligibility; account holds
 use the existing pre-spawn claim release and do not add lifecycle states.
+Posted-orphan recovery can heal an empty stored reviewer head from the GitHub
+review's commit ID. Settlement requires a non-empty recovered head and retains
+null-safe comparisons against the inspected session and prior head, so a
+replacement claim cannot be posted by an older reconciliation.
 Certified HAM contention parks retain bounded deferral recovery while GitHub
 mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expiry
 remain authoritative; recovery waits for green CI and resolved mergeability
@@ -852,6 +856,9 @@ is unsigned: an ordinary reviewed head does not require fleet identity proof.
 real closer, with a durable dispatch record and lease. The fake worker repairs
 local Git, hands off to exact-head review, and an approved review drains through
 the real follow-up consumer and merges through the watcher closure phase.
+An in-flight re-review request preserves its claim; settlement records the
+reviewed head or releases without charging, and a legacy headless posted row
+requeues once at its matching live revision without changing retry budgets.
 
 <a id="smv-ci-blocked"></a>**smv-ci-blocked:** same-head failed CI parks the real
 review claim; no follow-up job and exhausted/no-progress remediation both assign
@@ -925,10 +932,10 @@ stateDiagram-v2
     s0 --> s2: review-row.07 claim CAS
     s1 --> s2: review-row.08 claim after hold
     s5 --> s2: review-row.09 eligible retry CAS
-    s2 --> s4: review-row.10 deliver review
+    s2 --> s4: review-row.10 deliver review with matching session and recorded reviewed head
     s2 --> s5: review-row.11 dispatch or reviewer failure
     s2 --> s6: review-row.12 startup cannot prove recovery
-    s2 --> s0: review-row.13 stale head release or accepted rereview
+    s2 --> s0: review-row.13 operator reset after confirmed reviewer exit
     s2 --> s1: review-row.14 provider hold
     s0 --> s1: review-row.15 upstream outage
     s1 --> s0: review-row.16 provider recovery
@@ -936,7 +943,7 @@ stateDiagram-v2
     s3 --> s0: review-row.18 confirmed current-head green CI
     s4 --> s0: review-row.19 accepted rereview
     s5 --> s0: review-row.20 new head archives failure
-    s6 --> s4: review-row.21 posted review reconciliation
+    s6 --> s4: review-row.21 reconcile posted review with null-safe claim match and non-empty GitHub or stored head
     s6 --> s0: review-row.22 operator verified reset
     s4 --> s4: review-row.23 closure maintenance
     s0 --> s10: review-row.24 PR already merged
@@ -944,6 +951,11 @@ stateDiagram-v2
     s2 --> s10: review-row.26 PR already merged
     [*] --> s11: review-row.27 authorized bypass
     s11 --> s0: review-row.28 authorization withdrawn or head moved
+    s2 --> s0: review-row.29 stale head, missing reviewed head or lost claim match; no charge
+    s4 --> s0: review-row.30 repair empty reviewed head at matching live revision once; no charge
+    s5 --> s0: review-row.31 recovered post cannot settle its reviewed head; no charge
+    s6 --> s0: review-row.32 recovered post cannot match its claim; no charge
+    s2 --> s2: review-row.33 defer rereview request while claim is in flight
     s4 --> [*]
     s5 --> [*]
     s6 --> [*]

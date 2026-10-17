@@ -34,6 +34,12 @@ paths against already merged or closed targets. A daemon merge completed during
 closure settles the PR as terminal before recovery, even when the earlier live
 read still reported OPEN.
 
+A review request cannot reset a `reviewing` delivery row, including a claim
+whose child has not yet acquired a process group. It returns `review-in-flight`
+and preserves the session, head and lease for settlement or lease reconciliation.
+Discovery separately requeues legacy `posted` rows missing a reviewed head when
+their revision matches the live head, without changing any retry budget.
+
 Before the external action, `attempts` increments and `outcomes` appends an
 `outcome-unknown` record with action and timestamp. Settlement records the
 bounded reason, launch identity, dispatched flag and review-request result.

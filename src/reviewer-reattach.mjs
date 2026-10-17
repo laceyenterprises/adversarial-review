@@ -12,6 +12,7 @@ import {
 } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { recordReviewLatencyEvent } from './review-latency-event-writer.mjs';
+import { prepareReleaseUnsettledPostedReview } from './review-state-statements.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
   'Watcher restarted while review subprocess was in flight. ' +
@@ -322,6 +323,7 @@ async function fetchCurrentHeadSha(octokit, row) {
 
 function prepareStatements(db) {
   return {
+    releaseUnsettledPostedReview: prepareReleaseUnsettledPostedReview(db),
     listReviewing: db.prepare(
       `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
               reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
@@ -405,6 +407,7 @@ function prepareStatements(db) {
       `UPDATE reviewed_prs
           SET review_status = 'posted',
               posted_at = ?,
+              reviewer_head_sha = ?,
               failed_at = NULL,
               failure_message = NULL,
               review_attempts = review_attempts + 1,
@@ -413,7 +416,8 @@ function prepareStatements(db) {
         WHERE repo = ?
           AND pr_number = ?
           AND review_status = 'reviewing'
-          AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')`
+          AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')
+          AND NULLIF(TRIM(?), '') IS NOT NULL`
     ),
     adoptRunStatePgid: db.prepare(
       `UPDATE reviewed_prs
@@ -427,6 +431,19 @@ function prepareStatements(db) {
           AND (reviewer_pgid IS NULL OR reviewer_pgid = '')`
     ),
   };
+}
+
+function settleRecoveredPostedReview({ statements, row, postedReview, log }) {
+  const reviewedHead = String(postedReview.commit_id || row.reviewer_head_sha || '').trim() || null;
+  const result = statements.markPosted.run(postedReview.submitted_at, reviewedHead,
+    row.repo, row.pr_number, row.reviewer_session_uuid || '', reviewedHead);
+  if (result.changes !== 1) {
+    const released = statements.releaseUnsettledPostedReview.run(
+      reviewedHead, row.repo, row.pr_number, row.reviewer_session_uuid ?? null);
+    log.warn?.(`[watcher] posted-settlement-unmatched-recovery repo=${row.repo} pr=${row.pr_number} `
+      + `released_to_pending=${released.changes === 1} source=reviewer-reattach`);
+  }
+  return result;
 }
 
 function markLegacyOrphan({ statements, row, failureAt, log }) {
@@ -846,12 +863,7 @@ async function reconcileReviewerSessions({
             settledAt: postedReview.submitted_at,
             reason: 'posted-review-recovered-null-pgid',
           });
-          const markPostedResult = statements.markPosted.run(
-            postedReview.submitted_at,
-            row.repo,
-            row.pr_number,
-            row.reviewer_session_uuid || ''
-          );
+          const markPostedResult = settleRecoveredPostedReview({ statements, row, postedReview, log });
           if (markPostedResult.changes !== 1) {
             log.warn(
               `[watcher] reviewer_reattach_null_pgid_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
@@ -1202,12 +1214,7 @@ async function reconcileReviewerSessions({
         settledAt: postedReview.submitted_at,
         reason: 'posted-review-recovered',
       });
-      const markPostedResult = statements.markPosted.run(
-        postedReview.submitted_at,
-        row.repo,
-        row.pr_number,
-        row.reviewer_session_uuid || ''
-      );
+      const markPostedResult = settleRecoveredPostedReview({ statements, row, postedReview, log });
       if (markPostedResult.changes !== 1) {
         log.warn(
           `[watcher] reviewer_reattach_recovered_cas_miss repo=${row.repo} pr=${row.pr_number} ` +

@@ -461,9 +461,9 @@ for (const ok of [true, false]) {
       assert.equal(settled[0].effectiveReviewerModel, 'claude-code');
       settleReviewerAttempt({
         rootDir, repoPath: 'example/demo', prNumber: 2,
-        reviewerModel: 'gemini', result,
+        reviewerModel: 'gemini', reviewerHeadSha: 'deadbeef', result,
         statements: {
-          markPosted: { run() {} },
+          markPosted: { run() { return { changes: 1 }; } },
           markReviewerCredentialOutage: { run() {} },
           getReviewRow: { get: () => null },
         },
@@ -779,7 +779,7 @@ test('corporate credential failures and recovery neither pause nor clear primary
   const corp = reviewerCredentialKey('claude-code', 'claude-code-corp');
   const rearmed = [];
   const statements = {
-    markPosted: { run() {} }, markReviewerCredentialOutage: { run() {} },
+    markPosted: { run() { return { changes: 1 }; } }, markReviewerCredentialOutage: { run() {} },
     getReviewRow: { get: () => null },
     rearmReviewerCredentialOutage: { run: pattern => rearmed.push(pattern) },
   };
@@ -794,6 +794,7 @@ test('corporate credential failures and recovery neither pause nor clear primary
     assert.equal(readReviewerCredentialOutage(rootDir, 'claude-code').active, false);
     assert.equal(readReviewerCredentialOutage(rootDir, 'claude-code').distinctPrCount, 1);
     settleReviewerAttempt({ rootDir, repoPath: 'example/synthetic', prNumber: 2, reviewerModel: 'claude-code',
+      reviewerHeadSha: 'synthetic-head',
       result: { ok: true, claudeBrokerProvider: 'claude-code-corp' }, statements,
       log: { warn() {}, log() {} } });
     assert.equal(readReviewerCredentialOutage(rootDir, corp), null);

@@ -33,6 +33,8 @@ import {
   prepareFinalizePendingTerminalFailure,
   prepareReleaseReviewerClaim,
   prepareReleaseLegacyStaleReviewerClaim,
+  prepareMarkPosted,
+  prepareReleaseUnsettledPostedReview,
   prepareMarkInfraAutoRecoveryAttemptStarted,
   prepareMarkDaemonBounceRecoveryAttemptStarted,
   prepareMarkTokenRefreshRecoveryAttemptStarted,
@@ -291,9 +293,8 @@ export const stmtMarkReviewerPgid = db.prepare(
 );
 export const stmtReleaseReviewerClaim = prepareReleaseReviewerClaim(db);
 export const stmtReleaseLegacyStaleReviewerClaim = prepareReleaseLegacyStaleReviewerClaim(db);
-export const stmtMarkPosted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
-);
+export const stmtMarkPosted = prepareMarkPosted(db);
+export const stmtReleaseUnsettledPostedReview = prepareReleaseUnsettledPostedReview(db);
 // Head refresh clears reviewed_prs.posted_at. The pass ledger keeps durable
 // evidence that a prior review actually reached GitHub for this PR.
 export const stmtHasPostedReview = db.prepare(SQL_HAS_GENUINE_POSTED_REVIEW_FOR_PR);

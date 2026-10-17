@@ -53,6 +53,10 @@
       "id": "handoff",
       "promise": "smv-handoff",
       "edges": [
+        "review-row.10",
+        "review-row.29",
+        "review-row.30",
+        "review-row.33",
         "closer-lease.02",
         "closer-lease.06",
         "follow-up-job.03",

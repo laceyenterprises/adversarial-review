@@ -80,6 +80,7 @@ import {
   db,
   stmtUpdatePipelineStageStates,
   stmtMarkPosted,
+  stmtReleaseUnsettledPostedReview,
   stmtMarkFailed,
   stmtReleaseReviewLease,
   stmtMarkFailedQuota,
@@ -1345,6 +1346,7 @@ function settleReviewerAttempt({
   leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
   statements = {
     markPosted: stmtMarkPosted,
+    releaseUnsettledPostedReview: stmtReleaseUnsettledPostedReview,
     markFailed: stmtMarkFailed,
     releaseReviewerClaim: stmtReleaseReviewerClaim,
     releaseLegacyStaleReviewerClaim: stmtReleaseLegacyStaleReviewerClaim,
@@ -1370,6 +1372,21 @@ function settleReviewerAttempt({
   if (result.ok) {
     const postedAt = Number.isFinite(result.durablePostedAt)
       ? new Date(result.durablePostedAt).toISOString() : new Date().toISOString();
+    const reviewedHead = String(reviewerHeadSha || '').trim();
+    const posted = reviewedHead ? withSqliteBusyRetrySync(
+      () => statements.markPosted.run(postedAt, reviewedHead, repoPath, prNumber, reviewerSessionUuid, reviewedHead),
+      { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log }
+    ) : { changes: 0 };
+    if (posted.changes !== 1) {
+      const released = withSqliteBusyRetrySync(
+        () => statements.releaseUnsettledPostedReview.run(reviewedHead || null, repoPath, prNumber, reviewerSessionUuid),
+        { label: `reviewer-settle-unmatched-post:${repoPath}#${prNumber}`, log }
+      );
+      const reason = reviewedHead ? 'posted-settlement-claim-mismatch' : 'posted-settlement-missing-reviewed-head';
+      log.warn?.(`[watcher] ${reason} repo=${repoPath} pr=${prNumber} `
+        + `released_to_pending=${released.changes === 1} without charging review attempts or recovery budget`);
+      return { posted: false, reason };
+    }
     let recoveredOutage = null;
     try {
       recoveredOutage = reviewerModel ? clearReviewerCredentialOutage(rootDir, reviewerCredentialKey(reviewerModel, result.claudeBrokerProvider)) : null;
@@ -1386,9 +1403,6 @@ function settleReviewerAttempt({
       );
     }
     withSqliteBusyRetrySync(() => {
-      statements.markPosted.run(postedAt, repoPath, prNumber);
-    }, { label: `reviewer-settle-posted:${repoPath}#${prNumber}`, log });
-    withSqliteBusyRetrySync(() => {
       markReviewHeartbeat({ repo: repoPath, pr_number: prNumber, posted_at: postedAt });
     }, { label: `reviewer-settle-posted-heartbeat:${repoPath}#${prNumber}`, log });
     try {
@@ -1396,6 +1410,9 @@ function settleReviewerAttempt({
         const currentRow = typeof statements.getReviewRow?.get === 'function'
           ? statements.getReviewRow.get(repoPath, prNumber)
           : null;
+        if (currentRow && currentRow.reviewer_head_sha !== reviewedHead) {
+          log?.log?.(`[watcher] review-cycle-count retains settled head repo=${repoPath} pr=${prNumber} head=${reviewedHead}`);
+        }
         const { windowHours } = resolveReviewCycleCapConfig({
           loadConfigImpl: loadConfigCached,
           logger: log,
@@ -1404,7 +1421,7 @@ function settleReviewerAttempt({
           db,
           repoPath,
           prNumber,
-          headSha: currentRow?.reviewer_head_sha || null,
+          headSha: reviewedHead,
           postedAt,
           result,
           windowHours,

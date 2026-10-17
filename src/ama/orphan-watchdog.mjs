@@ -292,8 +292,7 @@ async function recoverOrphanWithStore({ rootDir, repo, prNumber, headSha, candid
       if (signal?.aborted) throw signal.reason || new Error('orphan recovery aborted');
       retry = action === 'review'
         ? await requestRereviewImpl({ rootDir, repo, prNumber, targetRevisionRef: headSha,
-          requestedAt: now, reason: `system-orphan-head-review:${headSha}`, ownerlessRecovery: true, expectedOwnerlessReviewer: { pgid: reviewStateRow?.reviewer_pgid ?? null,
-            startedAt: reviewStateRow?.reviewer_started_at ?? null }, logger })
+          requestedAt: now, reason: `system-orphan-head-review:${headSha}`, ownerlessRecovery: true, logger })
         : await dispatchHammer({ ownerProof: true, headSha });
       Object.assign(attempt, attemptSummary(retry), { triggered: retry?.triggered === true });
     } catch (error) {

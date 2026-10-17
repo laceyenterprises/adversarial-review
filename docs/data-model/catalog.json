@@ -312,6 +312,7 @@
         "src/reviewer-harness.mjs",
         "src/reviewer-pass-reaper.mjs",
         "src/daemon-bounce-posted-review.mjs",
+        "src/orphan-post-reconcile.mjs",
         "src/reviewer-spawn-settle.mjs",
         "src/ama/closer-pass-attempt.mjs"
       ],

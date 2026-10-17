@@ -2,6 +2,36 @@ import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.m
 import { operatorHeldSql } from './operator-hold-labels.mjs';
 import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
+// Settlement carries the dispatch identity; never infer the reviewed head from
+// a mutable delivery row or overwrite a replacement claim.
+// Both head parameters are the dispatched head: WHERE compares the existing
+// claim head, and SET explicitly records that same head with the posted status.
+export function prepareMarkPosted(db) {
+  return db.prepare(`UPDATE reviewed_prs
+      SET review_status = 'posted', posted_at = ?, reviewer_head_sha = ?,
+          failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL,
+          review_attempts = review_attempts + 1,
+          reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0
+    WHERE repo = ? AND pr_number = ?
+      AND review_status IN ('reviewing', 'failed-orphan')
+      AND reviewer_session_uuid IS ?
+      AND reviewer_head_sha = ?
+      AND NULLIF(TRIM(reviewer_head_sha), '') IS NOT NULL`);
+}
+
+export function prepareReleaseUnsettledPostedReview(db) {
+  return db.prepare(`UPDATE reviewed_prs
+      SET review_status = 'pending', posted_at = NULL,
+          revision_ref = COALESCE(NULLIF(revision_ref, ''), ?),
+          reviewer_session_uuid = NULL, reviewer_pgid = NULL,
+          reviewer_started_at = NULL, reviewer_head_sha = NULL,
+          reviewer_timeout_ms = NULL, reviewer_lease_expires_at = NULL,
+          failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL
+    WHERE repo = ? AND pr_number = ?
+      AND review_status IN ('reviewing', 'pending', 'failed', 'failed-orphan')
+      AND (reviewer_session_uuid IS ? OR reviewer_session_uuid IS NULL)`);
+}
+
 export const UPDATE_REVIEW_ROUTING_SQL = `UPDATE reviewed_prs
       SET reviewer = ?, linear_ticket = COALESCE(?, linear_ticket), codex_broker_provider = ?
     WHERE repo = ? AND pr_number = ? AND reviewer_session_uuid = ? AND review_status = 'reviewing'`;
@@ -236,6 +266,7 @@ export const MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL =
   `UPDATE reviewed_prs
       SET review_status = 'posted',
           posted_at = ?,
+          reviewer_head_sha = ?,
           failed_at = NULL,
           failure_message = NULL,
           quota_reset_at_utc = NULL,
@@ -247,6 +278,8 @@ export const MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL =
       AND review_status IN ('failed', 'pending')
       AND reviewer_session_uuid = ?
       AND reviewer_started_at = ?
+      AND reviewer_head_sha = ?
+      AND NULLIF(TRIM(reviewer_head_sha), '') IS NOT NULL
       AND lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%'`;
 
 export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =

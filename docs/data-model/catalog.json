@@ -159,6 +159,7 @@
       "leaseTimeoutEvidence": { "waited_s": "number or null when duration evidence is absent", "configured_s": "number" },
       "leaseAdmissionOutcomes": { "operator-hold": "deferred", "pr-is-draft": "deferred", "head-changed": "superseded", "pr-not-open": "failed-without-merge" },
       "stackedBaseHoldOutcomes": { "stacked-base-merged": "deferred", "stacked-base-read-failed": "deferred" },
+      "daemonAttemptPhases": ["daemon-pre-merge", "daemon-merged", "daemon-deferred", "daemon-failed"],
       "compatibilityFields": ["appendedRecords"]
     },
     {

@@ -88,6 +88,86 @@ test('unreadable base evidence fails closed without posting a retarget claim', a
   assert.equal(f.comments.length, 0);
 });
 
+test('transient PR and parent-history failures recover within the bounded retry budget', async t => {
+  const f = fixture(t);
+  const attempts = new Map();
+  const state = await inspectStackedBase({ ...f, execFileImpl: async (cmd, args) => {
+    const count = (attempts.get(args[1]) || 0) + 1;
+    attempts.set(args[1], count);
+    if (count === 1) throw new Error('HTTP 503 Service Unavailable');
+    return f.execFileImpl(cmd, args);
+  } });
+  assert.equal(state.reason, 'stacked-base-merged');
+  assert.deepEqual([...attempts.values()], [2, 2]);
+});
+
+test('exhausted transient errors and permanent errors retain a read-failure hold', async t => {
+  for (const [message, expectedAttempts] of [['HTTP 502 Bad Gateway', 3], ['HTTP 404 Not Found', 1]]) {
+    const f = fixture(t);
+    let attempts = 0;
+    const held = await guardStackedBase({ ...f, execFileImpl: async () => {
+      attempts++;
+      throw new Error(message);
+    } });
+    assert.equal(held.reason, 'stacked-base-read-failed');
+    assert.equal(attempts, expectedAttempts);
+    assert.equal(f.comments.length, 0);
+  }
+});
+
+test('a lost POST response is recovered from GitHub without duplicating the hold comment', async t => {
+  const f = fixture(t);
+  let posts = 0;
+  const options = { ...f, execFileImpl: async (cmd, args) => {
+    const result = await f.execFileImpl(cmd, args);
+    if (args.includes('POST') && ++posts === 1) throw new Error('socket hang up');
+    return result;
+  } };
+  assert.equal((await guardStackedBase(options)).reason, 'stacked-base-merged');
+  assert.equal(posts, 1);
+  assert.equal(f.comments.length, 1);
+  await guardStackedBase(options);
+  assert.equal(posts, 1, 'the durable receipt survives the lost POST response');
+});
+
+test('comment read and post transient failures recover without losing the delivery receipt', async t => {
+  const f = fixture(t);
+  const attempts = new Map();
+  const options = { ...f, execFileImpl: async (cmd, args) => {
+    if (args[1].endsWith('/comments')) {
+      const key = args.includes('POST') ? 'post' : 'read';
+      const count = (attempts.get(key) || 0) + 1;
+      attempts.set(key, count);
+      if (count === 1) throw new Error('TLS handshake timeout');
+    }
+    return f.execFileImpl(cmd, args);
+  } };
+  assert.equal((await guardStackedBase(options)).reason, 'stacked-base-merged');
+  await guardStackedBase(options);
+  assert.deepEqual(Object.fromEntries(attempts), { read: 3, post: 2 });
+  assert.equal(f.comments.length, 1);
+});
+
+test('omitted root directory writes and clears the same hold receipt under cwd', async t => {
+  const f = fixture(t);
+  t.mock.method(process, 'cwd', () => f.rootDir);
+  const { rootDir, ...options } = f;
+  assert.equal((await guardStackedBase(options)).reason, 'stacked-base-merged');
+  const retargeted = fixture(t, { base: 'trunk' });
+  const { rootDir: retargetRoot, ...retargetOptions } = retargeted;
+  assert.equal(await guardStackedBase(retargetOptions), null);
+  const file = readdirSync(join(rootDir, 'data', 'stacked-base-holds')).find(name => name.endsWith('.json'));
+  assert.equal(JSON.parse(readFileSync(join(rootDir, 'data', 'stacked-base-holds', file))).reason, null);
+});
+
+test('candidate hold returns a defined daemon disposition without attempting merge', async () => {
+  const result = await runDaemonCleanMergeAttempt({ candidate: { stackedBaseHold: {
+    reason: 'stacked-base-merged', skipMergeAgent: true,
+  } }, guardStackedBaseImpl: () => assert.fail('candidate already owns hold evidence') });
+  assert.equal(result.disposition, 'deferred');
+  assert.equal(result.reason, 'stacked-base-merged');
+});
+
 test('hold persistence failures return the hold without posting or throwing', async t => {
   for (const failure of ['mkdir', 'write']) {
     const f = fixture(t);

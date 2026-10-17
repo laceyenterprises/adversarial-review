@@ -13,7 +13,7 @@ const COMMENT_MARKER = '<!-- ama:stacked-base-merged -->';
 export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFileAsync, signal }) {
   const get = async path => {
     const { stdout } = await execGhWithRetry({ execFileImpl,
-      args: ['api', path], timeoutMs: 15_000, retries: 0, signal });
+      args: ['api', path], timeoutMs: 15_000, retries: 2, backoffMs: 500, signal });
     return JSON.parse(stdout);
   };
   try {
@@ -42,7 +42,7 @@ export async function inspectStackedBase({ repo, prNumber, execFileImpl = execFi
 
 // Repository + PR scope survives head changes and daemon restarts. The lock
 // serializes remediation and closure so they cannot both post the same comment.
-export async function holdStackedBase({ state, rootDir, repo, prNumber, execFileImpl = execFileAsync, signal, logger = console }) {
+export async function holdStackedBase({ state, rootDir = process.cwd(), repo, prNumber, execFileImpl = execFileAsync, signal, logger = console }) {
   if (state?.ok) return null;
   const reason = state?.reason || 'stacked-base-read-failed';
   const result = { dispatched: false, skipMergeAgent: true, recoveryWait: true, reason,
@@ -65,7 +65,8 @@ export async function holdStackedBase({ state, rootDir, repo, prNumber, execFile
   const lock = `${path}.lock`;
   let claimed = false;
   try {
-    try { if (Date.now() - statSync(lock).mtimeMs > 60_000) unlinkSync(lock); } catch { /* no stale claim */ }
+    // Cover read/post retry budgets, receipt probes and auth refresh.
+    try { if (Date.now() - statSync(lock).mtimeMs > 300_000) unlinkSync(lock); } catch { /* no stale claim */ }
     try { closeSync(openSync(lock, 'wx')); claimed = true; }
     catch (error) { if (error.code === 'EEXIST') return result; throw error; }
     try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first comment */ }
@@ -74,13 +75,27 @@ export async function holdStackedBase({ state, rootDir, repo, prNumber, execFile
     // GitHub is the receipt after a crash between posting and the local write.
     const { stdout } = await execGhWithRetry({ execFileImpl, args: ['api',
       `repos/${repo}/issues/${prNumber}/comments`, '--paginate', '--slurp'],
-    timeoutMs: 15_000, retries: 0, signal });
+    timeoutMs: 15_000, retries: 2, backoffMs: 500, signal });
     const comments = JSON.parse(stdout);
     if (!Array.isArray(comments)) throw new Error('comment history unavailable');
     if (!comments.flat().some(comment => String(comment.body || '').includes(COMMENT_MARKER))) {
       const body = `${COMMENT_MARKER}\nClosure held: stacked-base-merged. The base branch \`${state.baseBranch}\` belongs to an already-merged PR. Rebase this PR onto the default branch \`${state.defaultBranch}\` and retarget it there before remediation or merge can continue. No automatic retarget or force-push will be performed.`;
-      await execGhWithRetry({ execFileImpl, args: ['api', `repos/${repo}/issues/${prNumber}/comments`,
-        '-X', 'POST', '-f', `body=${filterGitHubBody(body, { rootDir })}`], timeoutMs: 15_000, retries: 0, signal });
+      let postAttempted = false;
+      const postWithReceiptProbe = async (command, args, options) => {
+        // A failed POST may already have reached GitHub. Probe before retrying;
+        // a failed probe consumes an attempt without risking another POST.
+        if (postAttempted) {
+          const receipt = await execFileImpl(command, ['api',
+            `repos/${repo}/issues/${prNumber}/comments`, '--paginate', '--slurp'], options);
+          const history = JSON.parse(receipt.stdout);
+          if (!Array.isArray(history)) throw new Error('comment history unavailable');
+          if (history.flat().some(comment => String(comment.body || '').includes(COMMENT_MARKER))) return receipt;
+        }
+        postAttempted = true;
+        return execFileImpl(command, args, options);
+      };
+      await execGhWithRetry({ execFileImpl: postWithReceiptProbe, args: ['api', `repos/${repo}/issues/${prNumber}/comments`,
+        '-X', 'POST', '-f', `body=${filterGitHubBody(body, { rootDir })}`], timeoutMs: 15_000, retries: 2, backoffMs: 500, signal });
     }
     writeFileAtomic(path, JSON.stringify({ repo, prNumber, reason, commentedAt: new Date().toISOString() }));
   } catch { /* Hold persists; retry comment delivery on the next observation. */ } finally { if (claimed) { try { unlinkSync(lock); } catch { /* expired claim */ } } }
@@ -88,6 +103,7 @@ export async function holdStackedBase({ state, rootDir, repo, prNumber, execFile
 }
 
 export async function guardStackedBase(options) {
+  options = { ...options, rootDir: options.rootDir || process.cwd() };
   const state = await inspectStackedBase(options);
   if (!state.ok) return holdStackedBase({ ...options, state });
   const path = join(options.rootDir, 'data', 'stacked-base-holds',

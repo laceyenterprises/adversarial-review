@@ -9,8 +9,14 @@ Each filename is the SHA-256 of `lowercase-repository#PR`, plus `.json`.
 records `clearedAt` as an ISO timestamp. `commentedAt` records successful
 retarget-comment delivery. That receipt survives head and base changes.
 
-An exclusive `.lock` claim serializes comment delivery, with a 60-second stale
-claim escape. The GitHub marker `<!-- ama:stacked-base-merged -->` recovers a
+An exclusive `.lock` claim serializes comment delivery, with a 300-second stale
+claim escape covering bounded API retries. Each API call allows two transient
+retries with 500/1000 ms backoff and a 15-second per-attempt timeout. Before
+retrying a POST, a bounded comment-history probe checks whether GitHub already
+accepted it; an unreadable receipt never authorizes another POST. Permanent
+errors fail immediately. An omitted root directory defaults to the current
+working directory for both hold writes and successful recheck cleanup.
+The GitHub marker `<!-- ama:stacked-base-merged -->` recovers a
 posted comment after a crash before the local receipt write. Failed comment
 reads/posts retain the hold and retry delivery later. Successful rechecks do not
 delete the comment receipt. The hold grants no retarget or force-push authority.

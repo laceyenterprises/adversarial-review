@@ -382,7 +382,7 @@ ham_refresh_github_gate() {
       # HAMUNKNOWN-02: a successful read can still be GitHub recomputing
       # mergeability. Re-read the whole gate, retaining the shared check cadence
       # (three samples over about 60s by default). Head/state races stop here.
-      if ! ham_required_gate_mergeability_unknown || ham_live_head_moved \
+      if ! ham_required_gate_mergeability_unknown || ham_required_gate_red || ham_live_head_moved \
         || ! jq -e '.state == "OPEN"' "$HAM_GATE_JSON" >/dev/null; then
         return 0
       fi
@@ -526,7 +526,12 @@ while :; do
     ham_release_merge_lease
     return 20
   fi
-  if ham_required_gate_mergeability_unknown; then
+  # Pending checks retain the full CI wait window even when mergeability's
+  # shorter sampling budget is spent. The CI deadline still bounds this wait.
+  if ham_required_gate_mergeability_unknown && {
+    jq -e '.checksConclusion == "SUCCESS"' "$HAM_GATE_JSON" >/dev/null \
+      || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]
+  }; then
     ham_defer_unknown_mergeability
     return 20
   fi

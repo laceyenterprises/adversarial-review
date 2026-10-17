@@ -4609,14 +4609,18 @@ export async function maybeDispatchAmaCloser({
   // Mechanical misses still require repair; certification cannot waive them.
   const parkRouteReasons = eligibleHammerRouteReasons.filter((reason) =>
     !['blocking-findings-present', 'non-blocking-findings-present'].includes(reason));
+  // GitHub's asynchronous mergeability calculation is waitable, including
+  // alongside pending CI. Keep other eligibility misses on the repair/hold path.
+  const parkWaitReasons = verdict.reasons.filter(reason => reason !== 'pr-mergeability-unknown');
   const resumeCertifiedPark = certifiedContentionPark
     && parkRouteReasons.length === 0
-    && (verdict.eligible || isPendingCiMechanicalGateMiss(verdict, verdict.reasons));
+    && (verdict.eligible || parkWaitReasons.length === 0 || isPendingCiMechanicalGateMiss(verdict, parkWaitReasons));
   const parkRepairReasons = (verdict.eligible ? parkRouteReasons : verdict.reasons)
     .filter(reason => !reason.startsWith('operator-label-required:'));
   const repairCertifiedPark = certifiedContentionPark && !resumeCertifiedPark
     && parkRepairReasons.length > 0
-    && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason));
+    && parkRepairReasons.some((reason) => ['ci-not-green', 'pr-not-mergeable'].includes(reason))
+    && parkRepairReasons.every((reason) => ['ci-not-green', 'pr-not-mergeable', 'pr-mergeability-unknown'].includes(reason));
   if (!resumeCertifiedPark && (!verdict.eligible || eligibleHammerRouteReasons.length > 0)) {
     if (!ownerProofRecovery && !verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true && !repairCertifiedPark) {
       return noAmaDispatch({
@@ -5028,7 +5032,7 @@ export async function maybeDispatchAmaCloser({
     if (expired || backoff) {
       return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
         reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-deferral-backoff',
-        needsOperator: expired });
+        recoveryWait: !expired, needsOperator: expired });
     }
   }
   // HAMBG-02: a lease rekeyed onto the head the recorded hammer pushed is that
@@ -5654,12 +5658,16 @@ export async function maybeDispatchAmaCloser({
           if (expired || backoff) {
             return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
               reason: expired ? 'hammer-deferral-budget-exhausted' : 'hammer-merge-ready-backoff',
-              needsOperator: expired });
+              recoveryWait: !expired, needsOperator: expired });
           }
         }
         if (certifiedPark && verdict.trace?.ciGreen?.conclusion === 'PENDING') {
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
-            reason: 'hammer-merge-ready-checks-pending' });
+            reason: 'hammer-merge-ready-checks-pending', recoveryWait: true });
+        }
+        if (certifiedPark && verdict.reasons.includes('pr-mergeability-unknown')) {
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: 'hammer-merge-ready-mergeability-unknown', recoveryWait: true });
         }
         const mergeHead = certifiedPark ? queuedHead : reviewedSha;
         const reason = certifiedPark ? 'hammer-merge-ready-deferred' : 'current-head-hammer-already-ran-needs-operator';

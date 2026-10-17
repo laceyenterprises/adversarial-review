@@ -814,6 +814,10 @@ permission to merge. Semantic source fingerprints track state writers, guards an
 review the state/edge inventory, update the map and independent graph snapshot,
 then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mjs`.
 Each object's `codeSources` includes every transition's source file.
+Certified HAM contention parks retain bounded deferral recovery while GitHub
+mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expiry
+remain authoritative; recovery waits for green CI and resolved mergeability
+before a daemon merge, and red CI still routes to bounded repair.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
 README equivalence; mutation tests alter both a state and a CAS edge in source.
 

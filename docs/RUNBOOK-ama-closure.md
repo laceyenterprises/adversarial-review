@@ -2923,8 +2923,16 @@ sample re-evaluates the full GitHub gate; a moved head, closed PR, conflict,
 red check or pending check never authorizes merge. Persistent UNKNOWN records
 `deferred / pr-mergeability-unknown`, marks the merge lease retryable before
 releasing it, and exits without a terminal `failed-without-merge` decision.
+While required CI is pending, exhausting the mergeability sampling budget
+continues polling until CI settles or `HAM_REMOTE_CI_WAIT_SECONDS` expires
+(900 seconds by default); UNKNOWN defers at that deadline or once CI succeeds.
+Red CI ends sampling immediately and retains its ordinary failure outcome.
 Certified HAM heads resume through the existing bounded deferral queue,
-including its backoff, expiry and lifetime refund bound. Fresh exact-head
+including its backoff, expiry and lifetime refund bound. Live UNKNOWN alone or
+with pending CI remains a wait in that queue, without a merge or immediate
+operator escalation. Red CI or conflicts still route to bounded repair,
+including red CI alongside UNKNOWN; independent eligibility holds still apply.
+Fresh exact-head
 eligibility and merge gates remain mandatory before daemon merge or a repair
 dispatch.
 

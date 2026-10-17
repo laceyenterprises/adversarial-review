@@ -66,6 +66,7 @@ POST_REMEDIATION_SHA=${head} HAM_PUBLISHED_AUDIT_HEAD=${head}
 HAM_VERDICT_FILE="$TMPDIR/verdict.json" HAM_VERDICT_READY_FILE="$TMPDIR/verdict.json"
 HAM_NODE_BIN="$TMPDIR/fixture-node"
 ham_release_merge_lease() { echo "release:$HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON" >> "$TMPDIR/release"; HAM_MERGE_LEASE_HELD=0; }
+ham_acquire_merge_lease() { HAM_MERGE_LEASE_HELD=1; }
 ham_mark_merge_lease_retryable_abort() { HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="$1"; }
 date() { if [ "$1" = +%s ]; then cat "$TMPDIR/clock"; else /bin/date "$@"; fi; }
 sleep() { echo $(( $(cat "$TMPDIR/clock") + $1 )) > "$TMPDIR/clock"; }
@@ -105,6 +106,34 @@ for (const phase of ['final', 'preflight']) {
     assert.match(result.release, /release:pr-mergeability-unknown/);
   });
 }
+
+test('HAMUNKNOWN-02: red CI with UNKNOWN mergeability fails without extra sampling', t => {
+  const result = runMerge(t, [{ ...unknown, checksConclusion: 'FAILURE', reasons: ['ci-not-green', 'pr-mergeability-unknown'] }]);
+  assert.equal(result.status, 20, result.stderr);
+  assert.equal(result.events.filter(event => event.gate).length, 1);
+  assert.ok(result.events.some(event => event.outcome === 'failed-without-merge' && event.attempt.reason === 'github-gate-red'));
+  assert.ok(!result.events.some(event => event.merge));
+});
+
+test('HAMUNKNOWN-02: pending CI outlives UNKNOWN sampling and merges only after both recover', t => {
+  const pending = { ...unknown, checksConclusion: 'PENDING', reasons: ['ci-not-green', 'pr-mergeability-unknown'] };
+  const result = runMerge(t, [pending, pending, pending, pending, green, green]);
+  assert.equal(result.status, 0, result.stderr);
+  const samples = result.events.filter(event => event.gate);
+  assert.ok(samples[4].at - samples[0].at > 60);
+  assert.ok(result.events.some(event => event.merge));
+  assert.ok(!result.events.some(event => event.outcome === 'deferred'));
+});
+
+test('HAMUNKNOWN-02: pending CI with persistent UNKNOWN waits for the CI deadline before deferring', t => {
+  const result = runMerge(t, [{ ...unknown, checksConclusion: 'PENDING', reasons: ['ci-not-green', 'pr-mergeability-unknown'] }]);
+  assert.equal(result.status, 20, result.stderr);
+  const samples = result.events.filter(event => event.gate);
+  const waited = samples.at(-1).at - samples[0].at;
+  assert.ok(waited >= 900 && waited <= 960, `bounded CI wait: ${waited}s`);
+  assert.ok(result.events.some(event => event.outcome === 'deferred' && event.attempt.reason === 'pr-mergeability-unknown'));
+  assert.ok(!result.events.some(event => event.merge || event.outcome === 'failed-without-merge'));
+});
 
 for (const [name, gate] of [
   ['red CI', { ...green, ok: false, checksConclusion: 'FAILURE', reasons: ['ci-not-green'] }],

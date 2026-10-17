@@ -1,3 +1,4 @@
+import { fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 // RSP-01 — CFG-gated queue-depth trigger that spills first-pass review across
 // worker classes.
 //
@@ -82,7 +83,7 @@ const ENTITLED_ENV = Object.freeze({
 });
 
 function fleetStatusStub(rows) {
-  const stdout = JSON.stringify({ providerStatuses: rows });
+  const stdout = JSON.stringify(fleetStatusWithClaudeAccountEvidence(rows));
   return async () => ({ stdout });
 }
 

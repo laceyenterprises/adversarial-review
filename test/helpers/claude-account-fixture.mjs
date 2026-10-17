@@ -15,3 +15,14 @@ export function claudeAccountFixture({ corp = 'ok', primary = 'ok', corpNearCap 
     } },
   };
 }
+
+// Legacy routing tests supply provider rows. Give those scenarios explicit
+// primary-account admission evidence while keeping the corporate lane capped.
+export function fleetStatusWithClaudeAccountEvidence(rows) {
+  const fixture = claudeAccountFixture({ corp: 'exhausted' });
+  fixture.providerStatuses = [
+    ...rows,
+    { provider: 'anthropic', authPath: 'oauth-corp', state: 'exhausted' },
+  ];
+  return fixture;
+}

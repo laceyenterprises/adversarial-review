@@ -1,5 +1,5 @@
-import { withAdmissionReadCache } from ./watcher-admission-read-cache.mjs;
-import { prepareQueueDepthSpillover, reviewWaitPressure } from ./review-queue-depth.mjs;
+import { withAdmissionReadCache } from './watcher-admission-read-cache.mjs';
+import { prepareQueueDepthSpillover, reviewWaitPressure } from './review-queue-depth.mjs';
 import { compareReviewerDispatchCandidates, reviewerDispatchCandidateUsesGemini, runBoundedReviewerDispatchQueue } from './watcher-reviewer-pool.mjs';
 
 // Both poll and settlement admissions call this drain under the same mutex.
@@ -44,8 +44,12 @@ export function createReviewerDispatchDrain({
         splitPostReviewSettlement,
         onCandidateStarted: (started) => {
           startedCandidates.add(started.candidate);
-          started.promise?.then(result => admissionResults.set(started.candidate, result),
-            () => admissionResults.set(started.candidate, { dispatched: false, reason: 'admission-error' }));
+          const settleAdmission = (result) => {
+            admissionResults.set(started.candidate, result);
+            if (result?.dispatched === false) started.candidate.refundDepthSpill?.();
+          };
+          started.promise?.then(settleAdmission,
+            () => settleAdmission({ dispatched: false, reason: 'admission-error' }));
           const index = reviewerDispatchCandidates.indexOf(started.candidate);
           if (index >= 0) reviewerDispatchCandidates.splice(index, 1);
           detachedReviewerDispatchTracker.track(started);

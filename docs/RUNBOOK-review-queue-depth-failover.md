@@ -50,7 +50,9 @@ reservation. A pool deferral uses reason `pool-admission-deferred`, restores the
 preferred route, and can be re-evaluated in a later drain. Spill and refund route
 changes refresh cross-model waiver metadata before spawn. A failed drain also
 refunds reservations for every candidate it did not start; started candidates
-settle their own reservations at spawn or refusal.
+settle their own reservations at spawn or refusal. The shared drain also refunds
+a started candidate that returns `dispatched: false` or rejects admission; refunds
+are idempotent with the candidate's cleanup and restore its preferred route.
 
 ### Claude account order
 
@@ -60,6 +62,9 @@ not switch accounts. Fresh, independently measured quota and a serving broker
 are still required. Provider/model exhaustion, typed quota exhaustion on reviewer
 spawn, or a broker that explicitly cannot serve permits the primary account,
 whose own evidence must admit it. Unknown or stale corporate evidence holds.
+Worker-class fallback cannot admit Claude from aggregate quota alone when account
+selection is absent or held. The final Claude spawn gate rechecks account holds;
+a late hold releases the claim, reservation and spill slot without spawning.
 Reviewer spawn logs include `claude_account=corporate|primary`; that account is
 also used for quota preflight and token minting/renewal.
 

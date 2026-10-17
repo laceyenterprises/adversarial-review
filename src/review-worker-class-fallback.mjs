@@ -489,8 +489,14 @@ export async function resolveReviewerWorkerClassWithFallback({
   const accountFields = (harness) => reviewerModelForWorkerClass(harness) === 'claude' && claudeAccountSelection
     ? { claudeAccountSelection } : {};
   const availability = (harness) => {
-    if (reviewerModelForWorkerClass(harness) === 'claude' && claudeAccountSelection) {
-      return { available: !claudeAccountSelection.hold, state: claudeAccountSelection.hold ? 'unknown' : 'ok' };
+    if (reviewerModelForWorkerClass(harness) === 'claude') {
+      if (claudeAccountSelection && !claudeAccountSelection.hold) return { available: true, state: 'ok' };
+      // A legacy quota projection may still prove the assigned provider is
+      // grounded. Preserve that trigger, but never use it to admit an account.
+      const quota = !claudeAccountSelection || claudeAccountSelection.reason === 'no-ready-claude-account'
+        ? quotaAvailableFromFleetStatus(stdout, { harness }) : null;
+      return { available: false, state: isGroundedProviderState(quota?.state)
+        ? quota.state : claudeAccountSelection?.reason || 'claude-account-unavailable' };
     }
     return reviewerModelForWorkerClass(harness) === 'gemini' && geminiAvailability
       ? geminiAvailability : quotaAvailableFromFleetStatus(stdout, { harness });

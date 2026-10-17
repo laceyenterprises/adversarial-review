@@ -3067,12 +3067,12 @@ export async function processReviewSubject(entry, ctx) {
         retainWakeForCapacity() {
           if (retainWakeForCapacity()) this.retainedWakePriority = true;
         },
-        refundDepthSpill() {
+        refundDepthSpill(reason = 'pool-admission-deferred') {
           if (!depthSpillReserved) return;
-          firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason: 'pool-admission-deferred' });
+          firstPassSpilloverController?.refundSpill?.({ repo: repoPath, prNumber, reason });
           depthSpillReserved = false;
           route = this.preferredRoute;
-          this.syncDepthSpillRoute('pool-admission-deferred');
+          this.syncDepthSpillRoute(reason);
         },
         syncDepthSpillRoute(reason) {
           const from = this.reviewerModel;
@@ -3128,6 +3128,7 @@ export async function processReviewSubject(entry, ctx) {
             return { dispatched: false, reason: 'watcher-drain-active' };
           }
           if (logReviewerQuotaBlock({ repoPath, prNumber, route })) {
+            this.refundDepthSpill('quota-blocked');
             this.retainWakeForCapacity();
             return { dispatched: false, reason: 'quota-blocked' };
           }
@@ -3761,6 +3762,11 @@ export async function processReviewSubject(entry, ctx) {
               return { dispatched: false, reason: skipReviewerSpawnReason };
             } else {
               const selectedClaudeAccount = getClaudeAccountSelection();
+              if (route.reviewerModel === 'claude' && selectedClaudeAccount?.hold) {
+                stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+                this.retainWakeForCapacity();
+                return { dispatched: false, reason: selectedClaudeAccount.reason || 'claude-account-evidence-unknown' };
+              }
               credentialProbeKey = reviewerCredentialKey(route.reviewerModel, selectedClaudeAccount?.provider);
               const credentialOutageGate = shouldPauseReviewerModel(ROOT, credentialProbeKey);
               if (credentialOutageGate.probe) credentialProbeReservation = credentialOutageGate;
@@ -4004,15 +4010,7 @@ export async function processReviewSubject(entry, ctx) {
                 console.warn(`[watcher] Credential probe release failed: ${releaseError?.message || releaseError}`);
               }
             }
-            if (depthSpillReserved) {
-              firstPassSpilloverController?.refundSpill?.({
-                repo: repoPath,
-                prNumber,
-                toWorkerClass: reviewerWorkerClassForRoute(route),
-                reason: 'reviewer-not-spawned',
-              });
-              depthSpillReserved = false;
-            }
+            this.refundDepthSpill('reviewer-not-spawned');
             releaseReviewerReservation();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
             // The detached tracker signals capacity only after this run has

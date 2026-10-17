@@ -251,3 +251,42 @@ test('local corporate exhaustion still requires independent primary evidence on 
   ] }), { workerClass: 'claude-reviewer', blockedWorkerClasses: ['claude-reviewer-corp'] });
   assert.equal(result?.hold, true);
 });
+
+for (const trigger of ['quota', 'depth']) {
+  for (const evidence of ['missing accounts', 'brokers unready', 'quota unmeasured']) {
+    test(`Claude worker fallback refuses ${evidence} under ${trigger} pressure`, async () => {
+      const { resolveReviewerWorkerClassWithFallback } = await import('../src/review-worker-class-fallback.mjs');
+      const fixture = evidence === 'missing accounts'
+        ? { providerStatuses: [
+          { provider: 'anthropic', authPath: 'oauth', state: 'ok' },
+        ] } : claudeAccountFixture({ corpReady: evidence !== 'brokers unready',
+          primaryReady: evidence !== 'brokers unready' });
+      if (evidence === 'quota unmeasured') fixture.reserveFloors = {};
+      fixture.providerStatuses.push({ provider: 'google', authPath: 'oauth',
+        state: trigger === 'quota' ? 'exhausted' : 'ok' });
+      const decision = await resolveReviewerWorkerClassWithFallback({
+        primary: 'gemini', authorClass: 'codex', fallbackWorkerClasses: ['claude-code'],
+        depthPressure: trigger === 'depth'
+          ? { engaged: true, reason: 'review-max-wait', waitSeconds: 481 } : null,
+        env: { GH_CLAUDE_REVIEWER_TOKEN: 'synthetic-token' },
+        execFileImpl: async () => ({ stdout: JSON.stringify(fixture) }), logger: {},
+      });
+      assert.equal(decision.fellBack, false);
+      assert.equal(decision.workerClass, 'gemini');
+      assert.equal(decision.reason, 'no-available-fallback');
+    });
+  }
+}
+
+test('unknown corporate evidence retains an assigned Claude hold even when primary quota is exhausted', async () => {
+  const { resolveReviewerWorkerClassWithFallback } = await import('../src/review-worker-class-fallback.mjs');
+  const fixture = claudeAccountFixture({ primary: 'exhausted' });
+  fixture.reserveFloors['anthropic-oauth-corp'].weeklyMeasurement = { status: 'unknown' };
+  fixture.providerStatuses.push({ provider: 'google', authPath: 'oauth', state: 'ok' });
+  const decision = await resolveReviewerWorkerClassWithFallback({
+    primary: 'claude-code', authorClass: 'codex', fallbackWorkerClasses: ['gemini'],
+    execFileImpl: async () => ({ stdout: JSON.stringify(fixture) }), logger: {},
+  });
+  assert.equal(decision.fellBack, false);
+  assert.equal(decision.claudeAccountHoldReason, 'claude-account-evidence-unknown');
+});

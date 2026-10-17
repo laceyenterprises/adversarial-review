@@ -2268,7 +2268,7 @@ test('NOOWNER-01: a suppressed AMA-recovery re-review on a closer head returns t
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false } = {}) {
+function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOutcome = null, stalePriority = false, ageSpill = false } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-depth-discovery-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -2411,6 +2411,9 @@ function runDepthDiscoveryScenario({ burst = false, depthEngaged = true, drainOu
         env: fixtureEnv({ ...installGhFixture(tmp), GH_GEMINI_REVIEWER_TOKEN: 'fixture-gemini',
           GH_CLAUDE_REVIEWER_TOKEN: 'fixture-claude',
           ADVERSARIAL_REVIEW_REVIEWER_WORKER_CLASS_FALLBACK: 'claude-code',
+          // These scenarios pin depth/burst behavior independently of age.
+          ADVERSARIAL_REVIEW_FIRST_PASS_REVIEW_MAX_WAIT_SECONDS: ageSpill ? '480' : '0',
+          ADVERSARIAL_REVIEW_REREVIEW_MAX_WAIT_SECONDS: ageSpill ? '900' : '0',
           AGENT_OS_WATCHER_FIRST_PASS_REVIEW_QUEUE_DEPTH_FAILOVER_THRESHOLD: depthEngaged ? '1' : '100',
           AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: burst ? '1' : '2' }),
       });
@@ -2623,15 +2626,15 @@ test('head dispatch lease refusal refunds the production spill and restores its 
 });
 
 
-test('REVIEWAGE-02 production saturation spills an overdue request below depth threshold', () => {
-  const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false });
-  assert.match(output, /review-wait-spill repo=.* pr=102 pass_kind=first-pass wait_seconds=[\d.]+ to=claude-code/);
+test('REVIEWSPILL-01 production admission spills an overdue request before Gemini saturation', () => {
+  const { summary, output } = runDepthDiscoveryScenario({ depthEngaged: false, ageSpill: true });
+  assert.match(output, /review-wait-spill repo=.* pr=101 pass_kind=first-pass wait_seconds=[\d.]+ to=claude-code/);
   assert.equal((output.match(/review-wait-spill /g) || []).length, 1);
-  assert.match(output, /review-queue-depth-route repo=.* pr=102 from=gemini to=claude reason=review-max-wait/);
+  assert.match(output, /review-queue-depth-route repo=.* pr=101 from=gemini to=claude reason=review-max-wait/);
   const spill = summary.reviewerSpawns.find(spawn => spawn.subjectContext.reviewerModel === 'claude');
   assert.ok(spill, output);
   assert.equal(spill.subjectContext.crossModelReviewWaived, false);
-  assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews || 0, 0);
+  assert.equal(summary.depthDiagnostics.report?.engagementSpilloverReviews, 1);
 });
 
 test('CAPROUTE-01: failed capped row with an old revision reaches the hammer before retry admission on every new head', () => {

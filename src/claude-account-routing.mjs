@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { writeFileAtomic } from './atomic-write.mjs';
+import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 import { normalizeReviewerModel } from './adapters/subject/github-pr/routing.mjs';
 // Account selection consumes the canonical fleet projection. Weekly thresholds,
 // freshness and reserve arithmetic stay in quota_reserve, not in this service.
@@ -43,14 +47,16 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
     const ready = payload?.brokerAuth?.provider_states?.[provider];
     const locallyBlocked = blockedWorkerClasses.includes(lane);
     const weekly = policy?.weeklyMeasurement;
-    if (!locallyBlocked && cap.available && row?.cachedEvidenceStale !== true && weekly?.status === 'measured'
-      && Number.isFinite(weekly.percentRemaining) && weekly.percentRemaining >= 0 && weekly.percentRemaining <= 100
-      && policy.active === false && policy.paused === false && policy.nearCap === false
+    const measured = weekly?.status === 'measured' && Number.isFinite(weekly.percentRemaining)
+      && weekly.percentRemaining >= 0 && weekly.percentRemaining <= 100;
+    const exhausted = locallyBlocked || cap.capped || (measured && weekly.percentRemaining === 0);
+    const reserveAllows = lane === corporate
+      || (policy?.active === false && policy?.paused === false && policy?.nearCap === false);
+    if (!exhausted && cap.available && row?.cachedEvidenceStale !== true && measured && reserveAllows
       && ready?.ready === true && ready?.can_serve === true) {
       return { workerClass: lane, provider, authPath, hold: false, reason: 'claude-account-ready' };
     }
-    if (lane === corporate && !locallyBlocked && !cap.capped && !policy?.nearCap && !policy?.active
-      && !policy?.paused && ready?.ready !== false && ready?.can_serve !== false) {
+    if (lane === corporate && !exhausted && ready?.ready !== false && ready?.can_serve !== false) {
       return { workerClass, hold: true, reason: 'claude-account-evidence-unknown' };
     }
   }
@@ -61,4 +67,21 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
 export function reviewerCredentialKey(reviewerModel, claudeBrokerProvider) {
   return normalizeReviewerModel(reviewerModel) === 'claude' && claudeBrokerProvider === 'claude-code-corp'
     ? 'claude-code-corp' : reviewerModel;
+}
+
+// Typed spawn exhaustion is independent of a lagging fleet projection. Keep it
+// account-scoped and bounded by the provider reset (or a short retry window).
+export function readCorporateClaudeQuotaCooldown(rootDir, { env = process.env, nowMs = Date.now() } = {}) {
+  try {
+    const state = JSON.parse(readFileSync(join(resolveAdversarialReviewStateDir(rootDir, env), 'claude-corporate-quota-cooldown.json'), 'utf8'));
+    return Date.parse(state.resetAt) > nowMs ? state : null;
+  } catch { return null; }
+}
+
+export function recordCorporateClaudeQuotaCooldown(rootDir, { resetAt = null, env = process.env, nowMs = Date.now() } = {}) {
+  const resetMs = Date.parse(resetAt);
+  const end = Number.isFinite(resetMs) && resetMs > nowMs ? resetMs : nowMs + 15 * 60 * 1000;
+  const state = { resetAt: new Date(Math.min(end, nowMs + 7 * 24 * 60 * 60 * 1000)).toISOString() };
+  writeFileAtomic(join(resolveAdversarialReviewStateDir(rootDir, env), 'claude-corporate-quota-cooldown.json'), JSON.stringify(state));
+  return state;
 }

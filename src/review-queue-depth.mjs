@@ -615,7 +615,7 @@ export function createFirstPassSpilloverController({
       logger?.warn?.(
         `[watcher] review-queue-depth-spillover repo=${repo} pr=${prNumber} `
         + `from=${fromWorkerClass} to=${to} pass_kind=${kind} wait_seconds=${waitSeconds} depth=${current.depth} held: ${heldByKind.get(kind) ?? 'unknown'} threshold=${current.threshold} `
-        + `slot=${grantedByKind.get(kind)}/${current.spillSlots} `
+        + `slot=${grantedByKind.get(kind)}/${reason === 'review-max-wait' ? Math.max(1, current.spillSlots) : current.spillSlots} `
         + `engagement_spillover_reviews=${lane.cost.currentEngagementSpilloverReviews} `
         + `total_spillover_reviews=${report.cost.spilloverReviewsTotal}`
       );

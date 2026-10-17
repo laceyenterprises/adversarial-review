@@ -11,7 +11,7 @@ import { claudeAccountFixture } from './helpers/claude-account-fixture.mjs';
 
 for (const workerClass of ['hammer-claude', 'remediator-claude', 'claude-reviewer']) {
   for (const [label, options, suffix] of [
-    ['healthy', {}, '-corp'], ['near cap', { corpNearCap: true }, ''],
+    ['healthy', {}, '-corp'], ['near cap', { corpNearCap: true }, '-corp'],
     ['unhealthy', { corpReady: false }, ''], ['capped', { corp: 'exhausted' }, ''],
     ['suspended', { corp: 'suspended' }, ''],
   ]) {
@@ -39,7 +39,7 @@ test('stale/unknown weekly measurement never fabricates corporate headroom or pr
 });
 
 test('reserve/pause/model and soft-grounding remain account local', () => {
-  for (const block of ['active', 'paused', 'soft', 'model']) {
+  for (const block of ['soft', 'model']) {
     const fixture = claudeAccountFixture();
     const row = fixture.providerStatuses[1];
     if (block === 'soft') row.afhGrounding = { grounded: true };
@@ -62,7 +62,7 @@ test('legacy projections retain ambiguity and builder classes cannot select priv
 });
 
 for (const [label, options, suffix] of [
-  ['healthy', {}, '-corp'], ['near cap', { corpNearCap: true }, ''],
+  ['healthy', {}, '-corp'], ['near cap', { corpNearCap: true }, '-corp'],
   ['unhealthy', { corpReady: false }, ''], ['both capped', { corp: 'exhausted', primary: 'exhausted' }, null],
 ]) {
   const execFileImpl = async () => ({ stdout: JSON.stringify(claudeAccountFixture(options)) });
@@ -156,6 +156,8 @@ test('provider name casing and whitespace preserve stale-evidence guards for bot
     fixture.providerStatuses[1].cachedEvidenceStale = true;
     assert.equal(select().hold, true);
     fixture.reserveFloors['anthropic-oauth-corp'].nearCap = true;
+    assert.equal(select().hold, true);
+    fixture.providerStatuses[1].state = 'exhausted';
     assert.equal(select().provider, 'claude-code');
     fixture.providerStatuses[0].cachedEvidenceStale = true;
     assert.equal(select().hold, true);
@@ -175,4 +177,70 @@ test('a stale-if-error cache cannot authorize a new corporate reviewer', async (
   assert.equal(stale.claudeAccountSelection.hold, true);
   assert.equal(stale.claudeAccountSelection.reason, 'claude-account-evidence-unknown');
   assert.equal(reviewerModelGrounding(stale, 'claude').grounded, false);
+});
+
+for (const [label, options, provider, stale] of [
+  ['reserve warning', { corpNearCap: true, primary: 'exhausted' }, 'claude-code-corp', false],
+  ['measured cap', { corp: 'exhausted' }, 'claude-code', false],
+  ['broker unavailable', { corpReady: false }, 'claude-code', false],
+  ['stale evidence plus reserve warning', { corpNearCap: true }, null, true],
+]) {
+  test(`Claude queue spill: ${label}`, async () => {
+    const { resolveReviewerWorkerClassWithFallback } = await import('../src/review-worker-class-fallback.mjs');
+    const fixture = claudeAccountFixture(options);
+    if (stale) fixture.providerStatuses[1].cachedEvidenceStale = true;
+    const decision = await resolveReviewerWorkerClassWithFallback({
+      primary: 'gemini', authorClass: 'codex', fallbackWorkerClasses: ['claude-code'],
+      depthPressure: { engaged: true, reason: 'review-max-wait', waitSeconds: 481 },
+      env: { GH_CLAUDE_REVIEWER_TOKEN: 'synthetic-token' },
+      execFileImpl: async () => ({ stdout: JSON.stringify(fixture) }), logger: {},
+    });
+    assert.equal(decision.fellBack, provider !== null);
+    if (provider) assert.equal(decision.claudeAccountSelection.provider, provider);
+  });
+}
+
+test('corporate reserve flags do not spend primary quota; measured zero does', () => {
+  const fixture = claudeAccountFixture({ corpNearCap: true });
+  Object.assign(fixture.reserveFloors['anthropic-oauth-corp'], { active: true, paused: true });
+  assert.equal(selectClaudeAccountLane(JSON.stringify(fixture), { workerClass: 'claude-reviewer' }).provider, 'claude-code-corp');
+  fixture.reserveFloors['anthropic-oauth-corp'].weeklyMeasurement.percentRemaining = 0;
+  assert.equal(selectClaudeAccountLane(JSON.stringify(fixture), { workerClass: 'claude-reviewer' }).provider, 'claude-code');
+});
+
+test('typed corporate spawn exhaustion persists an account-local hold until reset', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnReviewer } = await import('../src/reviewer-spawn-settle.mjs');
+  const { readCorporateClaudeQuotaCooldown } = await import('../src/claude-account-routing.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'reviewspill-account-'));
+  const requests = [];
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => logs.push(args.join(' '));
+  try {
+    const fixture = claudeAccountFixture({ corpNearCap: true });
+    const account = selectClaudeAccountLane(JSON.stringify(fixture), { workerClass: 'claude-reviewer' });
+    const result = await spawnReviewer({ rootDir: root, repo: 'sample/project', prNumber: 1,
+      reviewerModel: 'claude', builderTag: 'codex', claudeAccountSelection: account,
+      quotaCheckEnv: {}, readReviewerQuotaDecisionImpl: async () => ({ available: true, state: 'ok' }),
+      reviewerRuntimeAdapterOverride: { async spawnReviewer(request) {
+        requests.push(request);
+        return { ok: false, failureClass: 'quota-exhausted', error: 'synthetic quota exhausted' };
+      } },
+      beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
+      readBestReviewerEvidenceTokenUsageImpl: async () => null, ledgerLookupSleepImpl: async () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.equal(requests[0].subjectContext.claudeBrokerProvider, 'claude-code-corp');
+    assert.ok(logs.some(line => /Spawning reviewer.*claude_account=corporate/.test(line)));
+    const hold = readCorporateClaudeQuotaCooldown(root, { env: {} });
+    assert.ok(hold);
+    assert.equal(readCorporateClaudeQuotaCooldown(root, { env: {}, nowMs: Date.parse(hold.resetAt) }), null);
+    const fallback = selectClaudeAccountLane(JSON.stringify(fixture), {
+      workerClass: 'claude-reviewer', blockedWorkerClasses: ['claude-reviewer-corp'],
+    });
+    assert.equal(fallback.provider, 'claude-code');
+  } finally { console.log = originalLog; rmSync(root, { recursive: true, force: true }); }
 });

@@ -52,6 +52,22 @@ changes refresh cross-model waiver metadata before spawn. A failed drain also
 refunds reservations for every candidate it did not start; started candidates
 settle their own reservations at spawn or refusal.
 
+### Claude account order
+
+Every managed Claude reviewer, hammer and remediator lane tries the corporate
+account first. Corporate reserve flags (`nearCap`, `active`, `paused`) alone do
+not switch accounts. Fresh, independently measured quota and a serving broker
+are still required. Provider/model exhaustion, typed quota exhaustion on reviewer
+spawn, or a broker that explicitly cannot serve permits the primary account,
+whose own evidence must admit it. Unknown or stale corporate evidence holds.
+Reviewer spawn logs include `claude_account=corporate|primary`; that account is
+also used for quota preflight and token minting/renewal.
+
+Typed corporate reviewer exhaustion persists an account-scoped cooldown before
+capacity is released. Subsequent admissions can use independently verified
+primary capacity until the provider reset (15 minutes when no reset is supplied,
+bounded to seven days). This does not alter Gemini cooldowns or take Argus seats.
+
 ## This is a cost lever, not a parallelism knob
 
 `agy` is serialized on purpose: it is cheap, and keeping review on it preserves

@@ -23,6 +23,7 @@ export function createReviewerDispatchDrain({
     // started snapshot leaves the queue; a refreshed snapshot stays eligible.
     const candidates = [...reviewerDispatchCandidates];
     const startedCandidates = new Set();
+    const admissionResults = new Map();
     const startedAt = process.hrtime.bigint();
     logger.log(
       `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
@@ -43,6 +44,8 @@ export function createReviewerDispatchDrain({
         splitPostReviewSettlement,
         onCandidateStarted: (started) => {
           startedCandidates.add(started.candidate);
+          started.promise?.then(result => admissionResults.set(started.candidate, result),
+            () => admissionResults.set(started.candidate, { dispatched: false, reason: 'admission-error' }));
           const index = reviewerDispatchCandidates.indexOf(started.candidate);
           if (index >= 0) reviewerDispatchCandidates.splice(index, 1);
           detachedReviewerDispatchTracker.track(started);
@@ -69,14 +72,17 @@ export function createReviewerDispatchDrain({
         const pressure = reviewWaitPressure(candidate);
         if (pressure.engaged) {
           const started = startedCandidates.has(candidate);
-          const spilled = started && candidate.reviewerModel !== 'gemini';
-          const decision = spilled ? 'spilled' : candidate.admissionBlocked?.() ? 'admission-blocked'
+          const result = admissionResults.get(candidate);
+          const spilled = started && result?.dispatched !== false && candidate.reviewerModel !== 'gemini';
+          const decision = result?.dispatched === false ? result.reason || 'admission-refused'
+            : spilled ? 'spilled' : candidate.admissionBlocked?.() ? 'admission-blocked'
             : candidate.pipelineGeminiSeats > 0 ? 'pipeline-requires-gemini'
             : started ? 'gemini-admitted' : candidate.spillDecisionReason || 'pool-admission-deferred';
+          const account = candidate.spawnClaudeAccountSelection || candidate.claudeAccountSelection;
           logger.log?.(`[watcher] review-wait-decision repo=${candidate.repoPath} pr=${candidate.prNumber} `
             + `admission=${JSON.stringify(reason)} pass_kind=${candidate.depthPassKind || 'first-pass'} `
             + `wait_seconds=${pressure.waitSeconds} decision=${decision} reviewer=${candidate.reviewerModel} `
-            + `claude_account=${candidate.claudeAccountSelection?.provider === 'claude-code-corp' ? 'corporate'
+            + `claude_account=${account?.provider === 'claude-code-corp' ? 'corporate'
               : candidate.reviewerModel === 'claude' ? 'primary' : 'none'}`);
         }
         if (!startedCandidates.has(candidate)) {

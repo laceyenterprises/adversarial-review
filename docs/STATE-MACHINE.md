@@ -724,7 +724,9 @@ SCRATCHRACE-01 keeps a hammer dispatch live while any transitive
 scratch sweep preserve that launch's artifacts. A racing live logical-job claim
 refusal returns `dispatching` to `dispatched` with reason `dispatch-retry-live`,
 restoring predecessor ownership without consuming an attempt. Prompts are
-unique per attempt; all-terminal chains still permit scratch cleanup.
+unique per attempt; all-terminal chains still permit scratch cleanup. Interrupted
+admission preserves deferred predecessor artifacts for a later completed pass;
+unlaunched attempts remove their own prompt and scratch.
 
 LABELGATE-01 adds a non-terminal closure hold after hammer-route admission and
 terminal-worker/lease reconciliation, before dispatch, when latest live

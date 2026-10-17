@@ -4396,20 +4396,25 @@ export async function resolveHamTerminalRemediationEvidence({
 // must still leave every predecessor helper and prompt intact.
 export async function maybeDispatchAmaCloser(args) {
   const pendingCleanup = new Map();
+  const targetRepo = args.dispatchContext?.repo || args.prMetadata?.repo || args.repo;
+  const dispatchContext = args.dispatchContext && { ...args.dispatchContext, repo: targetRepo };
+  let admissionCompleted = false;
   let preservePredecessor = false;
   try {
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
-    const result = await maybeDispatchAmaCloserAttempt({ ...args,
+    const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
       readLaunchRequestStatusImpl: async request => withLiveLaunchRetry(await readStatus({ ...request, includeRetryChain: true })),
       cleanupScratchImpl: (record, logger) => {
         if (record?.scratchDir) pendingCleanup.set(record.scratchDir, { record, logger });
       },
     });
     preservePredecessor = result.reason === 'dispatch-retry-live';
+    admissionCompleted = true;
     return result;
   } finally {
-    for (const { record, logger } of pendingCleanup.values()) {
-      const predecessor = record.repo === args.dispatchContext?.repo
+    // Interrupted admission cannot prove that predecessor ownership ended.
+    for (const { record, logger } of admissionCompleted ? pendingCleanup.values() : []) {
+      const predecessor = record.repo === targetRepo
         && Number(record.prNumber) === Number(args.prMetadata?.prNumber);
       if (!preservePredecessor || !predecessor) cleanupHammerScratchDir(record, logger);
     }
@@ -7653,7 +7658,15 @@ async function maybeDispatchAmaCloserAttempt({
     ...(leaseUpdateError ? { leaseUpdateError } : {}),
   };
   } finally {
-    if (!retainScratchDir) cleanupHammerScratchDir({ scratchDir, promptDir }, logger);
+    if (!retainScratchDir) {
+      cleanupHammerScratchDir({ scratchDir, promptDir }, logger);
+      // Only this attempt's unique prompt is unowned; launched prompts remain
+      // durable evidence even after their scratch directory is reclaimed.
+      if (promptPath) {
+        try { rmSync(promptPath, { force: true }); }
+        catch (err) { logger?.warn?.(`hammer unlaunched prompt cleanup failed: ${err.message}`); }
+      }
+    }
   }
 }
 

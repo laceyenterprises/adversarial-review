@@ -832,7 +832,10 @@ heads and closed PRs retain their terminal refusal.
 Hammer launch ownership includes all transitive dispatcher retries. A live
 logical-job claim refusal restores `dispatched` ownership and the predecessor's
 scratch and prompt; prompts are unique per attempt. Terminal retry chains still
-permit cleanup. The offline scratch suites pin retention and admission races.
+permit cleanup. Repository fallback inputs share the same ownership identity;
+interrupted admission preserves deferred predecessor artifacts, while unlaunched
+attempts remove their own prompt and scratch. The offline scratch suites pin
+retention and admission races.
 Final-round closure stall receipts remain independent of immediate primary-change
 alerts; successful launch/head progress restarts the stall deadline. See the
 [closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.

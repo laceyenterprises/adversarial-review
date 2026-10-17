@@ -19,7 +19,11 @@ with `state: dispatched`, `reason: dispatch-retry-live`, and
 This represents fleet-owned work, so merge-agent fallback is suppressed. The
 next pass resolves actual liveness from the same launch chain. Predecessor
 scratch deletion is deferred until the admission decision; terminal chains and
-non-retry failures still clean up normally. The scratch sweep applies the same
+non-retry failures still clean up normally. Interrupted admission defers predecessor
+cleanup until a later completed pass. Admission and cleanup use the same repository
+identity (`dispatchContext.repo`, then `prMetadata.repo`, then top-level `repo`).
+Unlaunched attempts remove their own unique prompt and scratch; launched prompts
+remain retained evidence. The scratch sweep applies the same
 launch-chain rule over terminal owner records.
 
 ## Purpose

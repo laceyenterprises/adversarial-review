@@ -117,6 +117,11 @@ closer's admission decision. A `uq_worker_runs_live_logical_job` refusal restore
 the previous ownership as `dispatched`, reason `dispatch-retry-live`, without
 charging a failed attempt or deleting the previous artifacts. All-terminal
 chains and ordinary non-retry failures retain their existing cleanup behavior.
+Admission and predecessor matching resolve the repository from `dispatchContext.repo`,
+then `prMetadata.repo`, then the top-level `repo`. Interrupted admission (including
+shutdown aborts) leaves deferred predecessor cleanup for a later completed pass.
+A refused or aborted attempt that never launched removes its own unique prompt
+alongside its scratch; launched and ambiguous-launch prompts remain available.
 After deployment, verify that a fleet-retried hammer following a spawn timeout
 can source its phase helpers and produces no missing-phase-script no-merge note.
 

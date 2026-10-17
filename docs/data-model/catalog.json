@@ -573,7 +573,7 @@
       "fleetRetryRefusalReason": "dispatch-retry-live",
       "fleetRetryRefusalState": "dispatched",
       "fleetRetryLiveness": "transitive launch-ledger metadata.retryOf descendants",
-      "promptOwnership": "unique path per dispatch attempt",
+      "promptOwnership": "unique path per dispatch attempt; unlaunched prompts removed; interrupted admission retains predecessor artifacts",
       "nonExecutionRefundFields": ["unexecutedRefundCount", "previousUnexecutedLaunchRequestId"],
       "operatorLabelRefundFields": ["labelGateRefundedLaunchRequestId"],
       "operatorLabelRefundsLifetime": false,

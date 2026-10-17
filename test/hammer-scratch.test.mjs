@@ -185,9 +185,11 @@ for (const status of ['succeeded', 'failed', 'canceled', 'reaped']) {
 test('HAMTMP-01: a dispatch failure removes its unlaunched scratch directory', async t => {
   const root = fixture(t);
   let scratchDir;
+  let promptPath;
   const args = dispatchArgs(root);
   const result = await maybeDispatchAmaCloser({ ...args, execFileImpl: async (_cmd, argv) => {
-    const prompt = readFileSync(argv[argv.indexOf('--prompt') + 1], 'utf8');
+    promptPath = argv[argv.indexOf('--prompt') + 1];
+    const prompt = readFileSync(promptPath, 'utf8');
     scratchDir = prompt.split('scratch=')[1];
     assert.equal(existsSync(scratchDir), true);
     throw new Error('synthetic permanent dispatch refusal');
@@ -195,6 +197,7 @@ test('HAMTMP-01: a dispatch failure removes its unlaunched scratch directory', a
   assert.equal(result.dispatched, false);
   assert.ok(scratchDir);
   assert.equal(existsSync(scratchDir), false);
+  assert.equal(existsSync(promptPath), false);
 });
 
 test('HAMTMP-01: same-PR renders are fresh and every rendered helper uses private scratch', t => {
@@ -499,48 +502,57 @@ test('SCRATCHRACE-01: a terminal retry chain still removes predecessor scratch',
   assert.equal(existsSync(scratchDir), false);
 });
 
-test('SCRATCHRACE-01: a live logical-job refusal preserves predecessor prompt and helpers', async t => {
-  const root = fixture(t);
-  const args = dispatchArgs(root);
-  const first = await maybeDispatchAmaCloser({ ...args,
-    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
-  const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
-  const previous = JSON.parse(readFileSync(path));
-  const prompt = readFileSync(first.promptPath, 'utf8');
-  const helper = join(previous.scratchDir, 'synthetic-phase.sh');
-  writeFileSync(helper, 'synthetic phase helper');
-  const ledgerTarget = launchRetryFixture(root, 'failed');
-  let attemptedPrompt;
-  const result = await maybeDispatchAmaCloser({ ...args,
-    dispatchContext: { ...args.dispatchContext, ledgerTarget },
-    readPullRequestStateImpl: () => ({ state: 'OPEN' }),
-    readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync,
-    execFileImpl: async (_cmd, argv) => {
-      if (argv[0] === 'dispatch' && argv.includes('--prompt')) {
-        attemptedPrompt = argv[argv.indexOf('--prompt') + 1];
-        assert.notEqual(attemptedPrompt, first.promptPath);
-        assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
-        assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
-        throw Object.assign(new Error('synthetic dispatch refused'), {
-          stderr: 'duplicate key value violates unique constraint "uq_worker_runs_live_logical_job"',
-        });
-      }
-      return { stdout: JSON.stringify({ status: 'failed' }) };
-    },
+for (const repoSource of ['dispatchContext', 'prMetadata', 'repo']) {
+  test(`SCRATCHRACE-01: a live logical-job refusal preserves predecessor artifacts with ${repoSource} repository`, async t => {
+    const root = fixture(t);
+    const args = dispatchArgs(root);
+    const first = await maybeDispatchAmaCloser({ ...args,
+      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    const path = amaCloserDispatchFilePath(root, { repo: 'fixture/repo', prNumber: 42, headSha: head });
+    const previous = JSON.parse(readFileSync(path));
+    const prompt = readFileSync(first.promptPath, 'utf8');
+    const helper = join(previous.scratchDir, 'synthetic-phase.sh');
+    writeFileSync(helper, 'synthetic phase helper');
+    const ledgerTarget = launchRetryFixture(root, 'failed');
+    let attemptedPrompt;
+    let unlaunchedScratch;
+    const retryArgs = { ...args, dispatchContext: { ...args.dispatchContext, ledgerTarget } };
+    if (repoSource !== 'dispatchContext') {
+      delete retryArgs.dispatchContext.repo;
+      if (repoSource === 'prMetadata') retryArgs.prMetadata = { ...args.prMetadata, repo: 'fixture/repo' };
+      else retryArgs.repo = 'fixture/repo';
+    }
+    const result = await maybeDispatchAmaCloser({ ...retryArgs,
+      readPullRequestStateImpl: () => ({ state: 'OPEN' }),
+      readLaunchRequestStatusImpl: readLaunchRequestStatusFromLedgerAsync,
+      execFileImpl: async (_cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv.includes('--prompt')) {
+          attemptedPrompt = argv[argv.indexOf('--prompt') + 1];
+          unlaunchedScratch = readFileSync(attemptedPrompt, 'utf8').split('scratch=')[1];
+          assert.notEqual(attemptedPrompt, first.promptPath);
+          assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
+          assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
+          throw Object.assign(new Error('synthetic dispatch refused'), {
+            stderr: 'duplicate key value violates unique constraint "uq_worker_runs_live_logical_job"',
+          });
+        }
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      },
+    });
+    assert.equal(result.reason, 'dispatch-retry-live', JSON.stringify(result));
+    assert.ok(attemptedPrompt, 'exercise the admission race after the terminal ledger snapshot');
+    assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
+    assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
+    const record = JSON.parse(readFileSync(path));
+    assert.equal(record.state, 'dispatched');
+    assert.equal(record.launchRequestId, previous.launchRequestId);
+    assert.equal(record.scratchDir, previous.scratchDir);
+    assert.equal(record.promptPath, first.promptPath);
+    assert.equal(record.retryCount, previous.retryCount);
+    assert.equal(existsSync(attemptedPrompt), false);
+    assert.equal(existsSync(unlaunchedScratch), false);
   });
-  assert.equal(result.reason, 'dispatch-retry-live', JSON.stringify(result));
-  assert.ok(attemptedPrompt, 'exercise the admission race after the terminal ledger snapshot');
-  assert.equal(readFileSync(first.promptPath, 'utf8'), prompt);
-  assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
-  const record = JSON.parse(readFileSync(path));
-  assert.equal(record.state, 'dispatched');
-  assert.equal(record.launchRequestId, previous.launchRequestId);
-  assert.equal(record.scratchDir, previous.scratchDir);
-  assert.equal(record.promptPath, first.promptPath);
-  assert.equal(record.retryCount, previous.retryCount);
-  const unlaunchedScratch = readFileSync(attemptedPrompt, 'utf8').split('scratch=')[1];
-  assert.equal(existsSync(unlaunchedScratch), false);
-});
+}
 
 test('SCRATCHRACE-01: ordinary redispatch failure still cleans terminal predecessor and unlaunched scratch', async t => {
   const root = fixture(t);
@@ -566,3 +578,45 @@ test('SCRATCHRACE-01: ordinary redispatch failure still cleans terminal predeces
   assert.equal(existsSync(newScratch), false);
   assert.equal(existsSync(previousScratch), false);
 });
+
+for (const interrupted of ['prelaunch', 'dispatch']) {
+  test(`SCRATCHRACE-01: ${interrupted} admission abort preserves deferred predecessor artifacts`, async t => {
+    const root = fixture(t);
+    const args = dispatchArgs(root);
+    const first = await maybeDispatchAmaCloser({ ...args,
+      execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+    const previousScratch = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
+    const helper = join(previousScratch, 'synthetic-phase.sh');
+    writeFileSync(helper, 'synthetic phase helper');
+    const controller = new AbortController();
+    let newPrompt;
+    let newScratch;
+    await assert.rejects(maybeDispatchAmaCloser({ ...args, signal: controller.signal,
+      dispatchContext: { ...args.dispatchContext, ledgerTarget: launchRetryFixture(root, 'failed') },
+      readPullRequestStateImpl: () => ({ state: 'OPEN' }),
+      // The harness resolves after terminal predecessor cleanup is deferred,
+      // but before a new attempt can launch.
+      resolveCloserDispatchHarnessImpl: async () => {
+        if (interrupted === 'prelaunch') controller.abort(new Error('synthetic admission abort'));
+        controller.signal.throwIfAborted();
+        return { workerClass: 'hammer', fellBack: false };
+      },
+      execFileImpl: async (_cmd, argv) => {
+        if (argv[0] === 'dispatch' && argv.includes('--prompt')) {
+          newPrompt = argv[argv.indexOf('--prompt') + 1];
+          newScratch = readFileSync(newPrompt, 'utf8').split('scratch=')[1];
+          controller.abort(new Error('synthetic admission abort'));
+          throw controller.signal.reason;
+        }
+        return { stdout: JSON.stringify({ status: 'failed' }) };
+      },
+    }), /synthetic admission abort/);
+    assert.equal(readFileSync(helper, 'utf8'), 'synthetic phase helper');
+    assert.equal(existsSync(first.promptPath), true);
+    if (interrupted === 'dispatch') {
+      assert.ok(newScratch);
+      assert.equal(existsSync(newScratch), false);
+      assert.equal(existsSync(newPrompt), false);
+    }
+  });
+}

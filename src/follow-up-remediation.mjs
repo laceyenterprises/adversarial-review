@@ -3287,7 +3287,9 @@ async function consumeNextFollowUpJob({
       stoppedAt: now(), stopCode: gates[0].reason, stopReason: reason, sourceStatus: 'in_progress',
       remediationWorker: { state: 'never-spawned', reconciledAt: now() } });
     await holdForOperatorLabels({ rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
-      headSha: claimed.job.revisionRef, gates, deliverAlertImpl, postCommentImpl, logger: log, now: now() });
+      headSha: claimed.job.revisionRef, gates, deliverAlertImpl, logger: log, now: now(),
+      postCommentImpl: args => postCommentImpl({ ...args, rootDir, execFileImpl, log,
+        workerClass: resolveReconcileWorkerClass(claimed.job, null) }) });
     return { consumed: false, reason: gates[0].reason, job: stopped.job, jobPath: stopped.jobPath };
   }
 

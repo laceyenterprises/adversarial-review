@@ -27,7 +27,10 @@ test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and
   const pages = [];
   const args = { rootDir, promptTemplate: 'Remediate', log,
     resolvePRLifecycleImpl: async () => ({ state: 'OPEN', headSha: head }),
-    postCommentImpl: async ({ body }) => { comments.push(body); return { posted: true }; },
+    postCommentImpl: async ({ body, workerClass }) => {
+      assert.ok(workerClass, 'the production comment poster requires a bot identity');
+      comments.push(body); return { posted: true };
+    },
     deliverAlertImpl: async body => { pages.push(body); },
     execFileImpl: async () => { throw new Error('must not prepare or launch a worker'); },
     resolveRemediationWorkerClassImpl: async () => { throw new Error('must not route a remediator'); },

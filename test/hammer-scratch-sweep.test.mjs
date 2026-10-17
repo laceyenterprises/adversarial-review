@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, lutimesSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { amaCloserDispatchFilePath, createHammerScratchDir } from '../src/ama/dispatch-closer.mjs';
@@ -26,8 +26,8 @@ for (const platform of ['darwin', 'linux']) {
         calls.push({ command, args, options });
         return { stdout: command === 'ps' ? '123 synthetic-hammer TMPDIR=/fixture/scratch' : 'p123\nn/fixture/open-file' };
       } });
-    assert.match(snapshot, /TMPDIR=\/fixture\/scratch/);
-    assert.match(snapshot, /n\/fixture\/open-file/);
+    assert.match(snapshot.ps, /TMPDIR=\/fixture\/scratch/);
+    assert.match(snapshot.lsof, /n\/fixture\/open-file/);
     assert.deepEqual(calls[0].args, [platform === 'darwin' ? '-Eww' : 'eww', '-axo', 'pid=,command=']);
     assert.equal(calls[1].command, 'lsof');
     assert.deepEqual(calls[1].args, ['-nP', '-a', '-u', String(process.getuid()), '-F', 'n']);
@@ -46,7 +46,7 @@ function fixture(t) {
   const promptDir = join(root, 'data', 'follow-up-jobs', 'ama-closer-prompts');
   const logs = [];
   const options = { nowMs, logger: { info: line => logs.push(line), warn: line => logs.push(line) },
-    readProcessSnapshotImpl: async () => '123 synthetic-idle-process',
+    readProcessSnapshotImpl: async () => ({ ps: '123 synthetic-idle-process', lsof: 'p123\nn/fixture/unrelated' }),
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
     readPullRequestStateImpl: () => ({ state: 'OPEN' }),
     readWorkerStatusImpl: () => ({ ok: true, row: { status: 'succeeded', pid: 12345 } }),
@@ -81,6 +81,132 @@ function fixture(t) {
   return { root, promptDir, logs, options, scratch, record, history };
 }
 
+function syntheticCensus({ ps = '123 synthetic-idle-process', lsof = 'p123\nn/fixture/unrelated' } = {}) {
+  return args => readHammerScratchProcessSnapshot({ ...args,
+    execFileImpl: async command => ({ stdout: command === 'ps' ? ps : lsof }),
+  });
+}
+
+function sweepSummary(f) {
+  const summaries = f.logs.filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+    .filter(row => row.event === 'ama_closer.scratch_sweep_summary');
+  assert.equal(summaries.length, 1, 'one reason-count summary per sweep');
+  return summaries[0];
+}
+
+test('SCRATCHCENSUS-02: unrelated open audit files named after owner ids do not protect terminal scratch', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path, { workerId: 'synthetic-worker' });
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+    readProcessSnapshotImpl: syntheticCensus({
+      ps: '123 synthetic-log-shipper',
+      lsof: 'p123\nn/fixture/dispatch/audit/synthetic-lrq.jsonl\nn/fixture/dispatch/audit/synthetic-worker.jsonl',
+    }),
+  });
+  assert.equal(removed.length, 1);
+  assert.equal(existsSync(path), false);
+  assert.equal(sweepSummary(f).kept['process-references-id'], 0);
+});
+
+test('SCRATCHCENSUS-02: launch id in a process environment protects terminal scratch', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path);
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+    readProcessSnapshotImpl: syntheticCensus({ ps: '123 synthetic-hammer LAUNCH_REQUEST_ID=synthetic-lrq' }),
+  });
+  assert.deepEqual(removed, []);
+  assert.equal(existsSync(path), true);
+  assert.equal(sweepSummary(f).kept['process-references-id'], 1);
+});
+
+test('SCRATCHCENSUS-02: an open file inside scratch protects terminal scratch', async t => {
+  const f = fixture(t);
+  const path = f.scratch();
+  f.record(path);
+  assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+    readProcessSnapshotImpl: syntheticCensus({ lsof: `p123\nn${path}/nested/synthetic.log` }),
+  }), []);
+  assert.equal(existsSync(path), true);
+  assert.equal(sweepSummary(f).kept['process-references-path'], 1);
+});
+
+test('SCRATCHCENSUS-02: summary counts each kept candidate by its first protection reason', async t => {
+  const f = fixture(t);
+  const paths = Array.from({ length: 7 }, () => f.scratch());
+  for (const index of [0, 1, 3]) {
+    const owner = f.record(paths[index], { launchRequestId: `synthetic-lrq-${index}`,
+      state: index === 1 ? 'dispatching' : 'dispatched' });
+    writeFileSync(join(dirname(owner), `synthetic-owner-${index}.json`), readFileSync(owner));
+    rmSync(owner);
+  }
+  utimesSync(paths[4], new Date(nowMs), new Date(nowMs));
+  utimesSync(join(paths[5], 'ci-failed.log'), new Date(nowMs), new Date(nowMs));
+  const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+    readWorkerStatusImpl: ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === 'synthetic-lrq-0' ? 'running' : 'succeeded' } }),
+    readProcessSnapshotImpl: syntheticCensus({ ps: `123 synthetic-hammer TMPDIR=${paths[2]} LAUNCH_REQUEST_ID=synthetic-lrq-3` }),
+  });
+  assert.equal(removed.length, 1);
+  const summary = sweepSummary(f);
+  assert.deepEqual(summary.kept, { 'live-owner': 1, 'non-terminal': 1,
+    'process-references-path': 1, 'process-references-id': 1, 'too-young': 2 });
+  assert.equal(summary.removed, 1);
+  assert.equal(summary.remainingCandidates, 0);
+  assert.equal(summary.completed, true);
+  assert.ok(f.logs.every(line => !line.includes('LAUNCH_REQUEST_ID=')));
+});
+
+for (const [kind, fileName, protects] of [
+  ['cwd', path => path, true],
+  ['real cwd', path => realpathSync(path), true],
+  ['real nested file', path => `${realpathSync(path)}/nested/synthetic.log`, true],
+  ['sibling prefix', path => `${path}-other/synthetic.log`, false],
+  ['embedded path', path => `/fixture/audit${path}/synthetic.log`, false],
+]) {
+  test(`SCRATCHCENSUS-02: open-file path boundaries (${kind})`, async t => {
+    const f = fixture(t);
+    const path = f.scratch();
+    f.record(path);
+    const removed = await sweepHammerScratchDirs(f.root, { ...f.options,
+      readProcessSnapshotImpl: syntheticCensus({ lsof: `p123\nn${fileName(path)}` }),
+    });
+    assert.equal(existsSync(path), protects);
+    assert.equal(removed.length, protects ? 0 : 1);
+    assert.equal(sweepSummary(f).kept['process-references-path'], protects ? 1 : 0);
+  });
+}
+
+for (const ps of ['123 synthetic-hammer --launch=synthetic-lrq',
+  '123 synthetic-hammer WORKER_ID=synthetic-worker', '123 synthetic-hammer --worker=synthetic-worker']) {
+  test(`SCRATCHCENSUS-02: process arguments and environments retain owner ids (${ps})`, async t => {
+    const f = fixture(t);
+    const path = f.scratch();
+    f.record(path, { workerId: 'synthetic-worker' });
+    assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+      readProcessSnapshotImpl: syntheticCensus({ ps }),
+    }), []);
+    assert.equal(existsSync(path), true);
+    assert.equal(sweepSummary(f).kept['process-references-id'], 1);
+  });
+}
+
+for (const snapshot of ['synthetic-secret-legacy-census', {},
+  { ps: '123 synthetic-secret', lsof: '' }, { ps: '', lsof: 'p123\nn/fixture/synthetic-secret' }]) {
+  test('SCRATCHCENSUS-02: malformed or partial split census fails closed without exposing contents', async t => {
+    const f = fixture(t);
+    const path = f.scratch();
+    assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
+      readProcessSnapshotImpl: () => snapshot,
+    }), []);
+    assert.equal(existsSync(path), true);
+    assert.equal(sweepSummary(f).completed, false);
+    assert.equal(sweepSummary(f).remainingCandidates, 1);
+    assert.ok(f.logs.every(line => !line.includes('synthetic-secret')));
+  });
+}
+
 test('SCRATCHCENSUS-01: 100 terminal candidates share a slow census and retain progress at the scan deadline', async t => {
   const f = fixture(t);
   for (let index = 0; index < 100; index += 1) {
@@ -101,7 +227,7 @@ test('SCRATCHCENSUS-01: 100 terminal candidates share a slow census and retain p
       censusCalls += 1;
       clock += 1000; // One simulated second per full census; no host process reads.
       if (timeout < 1000) throw new Error('synthetic census timeout');
-      return '123 synthetic-idle-process';
+      return { ps: '123 synthetic-idle-process', lsof: 'p123\nn/fixture/unrelated' };
     },
   });
   assert.ok(removed.length > 0 && removed.length < 100);
@@ -111,6 +237,9 @@ test('SCRATCHCENSUS-01: 100 terminal candidates share a slow census and retain p
   assert.equal(progress.reason, 'scan-budget');
   assert.equal(progress.removed, removed.length);
   assert.equal(progress.remainingCandidates, 100 - removed.length);
+  assert.equal(sweepSummary(f).removed, removed.length);
+  assert.equal(sweepSummary(f).completed, false);
+  assert.equal(sweepSummary(f).remainingCandidates, progress.remainingCandidates);
 });
 
 test('SCRATCHCENSUS-01: a census path stays protected across a batch without repeated process reads', async t => {
@@ -122,7 +251,7 @@ test('SCRATCHCENSUS-01: a census path stays protected across a batch without rep
     readProcessSnapshotImpl: ({ timeout }) => {
       calls += 1;
       assert.equal(timeout, 15_000);
-      return `123 synthetic-hammer TMPDIR=${protectedPath}`;
+      return { ps: `123 synthetic-hammer TMPDIR=${protectedPath}`, lsof: 'p123\nn/fixture/unrelated' };
     },
   });
   assert.equal(removed.length, 5);
@@ -173,7 +302,8 @@ for (const refreshedLive of [false, true]) {
       readProcessSnapshotImpl: ({ timeout }) => {
         calls += 1;
         assert.equal(timeout, 15_000);
-        return refreshedLive && calls === 2 ? '123 synthetic-lrq' : '123 synthetic-idle-process';
+        return { ps: refreshedLive && calls === 2 ? '123 synthetic-lrq' : '123 synthetic-idle-process',
+          lsof: 'p123\nn/fixture/unrelated' };
       },
       onSweepComplete: () => { completed = true; },
     });
@@ -221,7 +351,8 @@ for (const afterRefresh of ['idle', 'process', 'worker', 'owner', 'expired']) {
             writeFileSync(join(directory, `synthetic-owner-${index}.json`), JSON.stringify({ state: 'dispatching' }));
           }
         }
-        return calls === 2 && afterRefresh === 'process' ? '123 synthetic-lrq' : '123 synthetic-idle-process';
+        return { ps: calls === 2 && afterRefresh === 'process' ? '123 synthetic-lrq' : '123 synthetic-idle-process',
+          lsof: 'p123\nn/fixture/unrelated' };
       },
       onSweepComplete: () => { completed = true; },
     });
@@ -241,7 +372,7 @@ test('SCRATCHCENSUS-01: successful census measures UTF-8 bytes without exposing 
     logger: { info: line => logs.push(line) },
     execFileImpl: async command => ({ stdout: outputs[command] }),
   });
-  assert.equal(snapshot, `${outputs.ps}\n${outputs.lsof}`);
+  assert.deepEqual(snapshot, outputs);
   assert.equal(logs.length, 1);
   const diagnostic = JSON.parse(logs[0]);
   assert.equal(diagnostic.outcome, 'ok');
@@ -378,7 +509,7 @@ test('HAMTMP-05: terminal launch still retains scratch referenced by a live proc
   const path = f.scratch();
   f.record(path, { lastObservedStatus: 'starting' });
   assert.deepEqual(await sweepHammerScratchDirs(f.root, { ...f.options,
-    readProcessSnapshotImpl: () => `123 synthetic-hammer TMPDIR=${path}` }), []);
+    readProcessSnapshotImpl: () => ({ ps: `123 synthetic-hammer TMPDIR=${path}`, lsof: 'p123\nn/fixture/unrelated' }) }), []);
   assert.equal(existsSync(path), true);
 });
 
@@ -452,8 +583,9 @@ test('HAMTMP-04: a scan deadline checkpoints its prefix before a restart', async
   try {
     assert.deepEqual(await firstSweep(f.root, { ...f.options, scanBudgetMs: 1 }), []);
   } finally { clock.mock.restore(); }
-  assert.equal(JSON.parse(f.logs[0]).reason, 'scan-budget');
-  assert.equal(JSON.parse(f.logs[0]).remainingCandidates, 1);
+  const progress = f.logs.map(line => JSON.parse(line)).find(row => row.event === 'ama_closer.scratch_sweep_paused');
+  assert.equal(progress.reason, 'scan-budget');
+  assert.equal(progress.remainingCandidates, 1);
   assert.equal(existsSync(orphan), true);
   const { sweepHammerScratchDirs: restartedSweep } = await freshSweeper();
   assert.equal((await restartedSweep(f.root, { ...f.options, maxRecordReads: 3 })).length, 1);
@@ -524,7 +656,7 @@ test('HAMTMP-03: an orphan older than the bound is removed and its freed bytes a
   assert.equal(existsSync(orphan), false);
   assert.equal(removed.length, 1);
   assert.ok(removed[0].bytesFreed > 0);
-  assert.equal(f.logs.length, 1);
+  assert.equal(f.logs.length, 2);
   assert.deepEqual(JSON.parse(f.logs[0]), { event: 'ama_closer.scratch_swept',
     name: removed[0].name, bytesFreed: removed[0].bytesFreed, reason: 'orphan' });
   assert.deepEqual(await sweepHammerScratchDirs(f.root, f.options), []);
@@ -568,7 +700,7 @@ test('HAMTMP-03: a live orphan process retaining TMPDIR survives the sweep', asy
   const f = fixture(t);
   const path = f.scratch();
   await sweepHammerScratchDirs(f.root, { ...f.options,
-    readProcessSnapshotImpl: () => `123 synthetic-hammer TMPDIR=${path}` });
+    readProcessSnapshotImpl: () => ({ ps: `123 synthetic-hammer TMPDIR=${path}`, lsof: 'p123\nn/fixture/unrelated' }) });
   assert.equal(existsSync(path), true);
 });
 

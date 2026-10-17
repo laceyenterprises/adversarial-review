@@ -52,6 +52,16 @@ other records' capacity reconciliation.
 
 ## Purpose
 
+After a native CI-blocked handoff settles without a launch, a skipped wake
+retires its unchanged `dispatching` intent as `dispatch-failed`, with
+`reason` and `lastError` set to `wake-refused:<eligibility reasons>`.
+The snapshot's attempt timestamp and remediation target must still match;
+launch receipts, active work and replacement intents retain ownership. Only
+the matching unlaunched pending lease is removed, and the phantom dispatch retry
+is rolled back once. Background handoffs reconcile
+when their queue entry settles. Wake refusal grants no merge authority and
+does not become a new dispatch gate.
+
 `data/follow-up-jobs/ama-closer-dispatches/` records the AMA closer's current
 dispatch state for a pull request head. The watcher, follow-up daemon, and
 reapers use these files to avoid double-dispatching terminal remediation, to

@@ -503,6 +503,8 @@
       "path": "docs/data-model/hammer-wakes.md",
       "store": "data/hammer-wakes/",
       "schemaSurface": "src/hammer-wake.mjs",
+      "relatedSchemaSurfaces": ["src/ama/review-cycle-cap-route.mjs", "src/ama-closure-orchestration.mjs"],
+      "nativeCiRepairEligibilityReason": "exhausted-final-hammer-ci-repair",
       "owner": "AMA event-driven hammer wake diagnostics"
     },
     {
@@ -573,6 +575,7 @@
       "path": "docs/data-model/ama-closer-dispatches.md",
       "store": "data/follow-up-jobs/ama-closer-dispatches/",
       "schemaSurface": "src/ama/dispatch-closer.mjs",
+      "wakeRefusal": "settled unchanged unlaunched intent becomes dispatch-failed with wake-refused:<reasons>",
       "relatedSchemaSurfaces": [
         "src/ama/dispatch-record-read.mjs",
         "src/ama/closer-terminal-cancel.mjs",

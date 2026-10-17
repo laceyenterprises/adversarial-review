@@ -21,6 +21,19 @@ import { writeFollowUpJob } from './follow-up-jobs.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { findCommentOnlyFinalRoundPushJob } from './comment-only-final-round.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import { ciBlockedHammerReasonsCovered } from './ama/review-cycle-cap-route.mjs';
+
+export function hammerWakeEligibility(eligibility, { dispatchReason, ciBlockedHammerOwner,
+  reviewState, headSha, checksConclusion } = {}) {
+  if (dispatchReason !== 'exhausted-final-hammer' || reviewState?.reviewCycleExhausted !== true) return eligibility;
+  const stale = Boolean(reviewState?.headSha && headSha && reviewState.headSha !== headSha);
+  const reasons = (eligibility?.reasons || []).map(reason => reason === 'stale-head' && stale
+    ? 'stale-review-head' : reason === 'verdict-not-eligible' && stale
+      ? 'verdict-not-settled-success' : reason);
+  if (!ciBlockedHammerReasonsCovered(reasons, { ciBlockedHammerOwner, checksConclusion,
+    remediationPending: reviewState?.remediationPending })) return eligibility;
+  return { eligible: true, reasons: [] };
+}
 
 // Mirrors the definition in follow-up-remediation.mjs: the repo root is two
 // levels up from this module, not something either file imports.

@@ -12,7 +12,8 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
   lease = null, retryExhausted = false, lifetimeExhausted = false,
   mergeable = 'MERGEABLE', checks = 'SUCCESS', roundsLeft = true,
   waitExhausted = false, primaryChange = null, reviewCeilingReached = false,
-  diffEmpty = false, followUpJob = null, strictMode = true, strictNonBlockingRemediation = true } = {}) {
+  diffEmpty = false, followUpJob = null, strictMode = true, strictNonBlockingRemediation = true,
+  ciBlockedHammerOwner = false } = {}) {
   const action = (owner, reason, extra = {}) => ({ owner, reason, ...extra });
   if (diffEmpty) return action('close', 'empty-diff');
   if (primaryChange) {
@@ -32,6 +33,12 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
   const hammer = reason => capped
     ? action('page', lifetimeExhausted ? 'hammer-lifetime-cap' : 'hammer-retry-cap')
     : action('hammer', reason);
+  if (ciBlockedHammerOwner && !roundsLeft && checks === 'FAILURE'
+    && lease?.status !== 'handed-to-review' && reviewState.remediationPending !== true
+    && reviewState.headSha && currentHead
+    && (reviewState.headSha !== currentHead || !reviewState.verdict)) {
+    return hammer('ci-blocked-remediation-exhausted');
+  }
   if (!reviewState.verdict || (reviewState.headSha !== currentHead && (!attested || lease?.status === 'handed-to-review'))) {
     if (reviewCeilingReached && lease?.status !== 'handed-to-review') return hammer('review-ceiling-stale-head');
     return (roundsLeft || (reviewCeilingReached && lease?.status === 'handed-to-review')) ? action('review', 'exact-head-review') : action('page', 'review-rounds-exhausted');

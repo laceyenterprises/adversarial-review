@@ -20,6 +20,7 @@ import {
   composeCiBlockedHammerPrompt,
   composeReviewCycleCapHammerPrompt,
   hammerOwnerRouteOf,
+  ciBlockedHammerReasonsCovered,
 } from './review-cycle-cap-route.mjs';
 import { fetchPrimaryChange, primaryChangeExactReviewEvidence } from './primary-change.mjs';
 /**
@@ -2606,6 +2607,33 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
   return next;
 }
 
+// Reconcile an unlaunched handoff only after its caller has settled. A wake is
+// diagnostic: its refusal must never cancel a dispatch that is still running.
+export function settleRefusedHammerWake({ rootDir, identity, intent, wake, result } = {}) {
+  if (wake?.outcome !== 'skipped' || result?.dispatched !== false || result?.inFlight
+    || result?.recoveryWait || result?.backgroundDispatch || result?.launchRequestId || result?.dispatchId
+    || ['lease-held', 'live-run-in-flight', 'hammer-closer-in-flight', 'existing-dispatch-unknown'].includes(result?.reason)) return null;
+  if (intent?.state !== 'dispatching' || intent.launchRequestId || intent.dispatchId) return null;
+  const reasons = wake.eligibilityReasons?.length ? wake.eligibilityReasons : [wake.reason || 'unknown'];
+  const settled = updateAmaCloserDispatchRecord(rootDir, identity, current => {
+    if (current?.state !== 'dispatching' || current.launchRequestId || current.dispatchId
+      || !intent.lastAttemptedAt || current.lastAttemptedAt !== intent.lastAttemptedAt
+      || current.promptPath !== intent.promptPath
+      || current.targetRemediationSha !== intent.targetRemediationSha) return null;
+    return { ...current, state: 'dispatch-failed', reason: `wake-refused:${reasons.join(',')}`,
+      lastError: `wake-refused:${reasons.join(',')}`,
+      retryCount: Math.max(0, Number(current.retryCount || 0) - 1) };
+  });
+  if (settled?.state === 'dispatch-failed' && settled.reason === `wake-refused:${reasons.join(',')}`) {
+    const leaseIdentity = { ...identity, headSha: intent.targetRemediationSha || identity.headSha };
+    const lease = readAmaCloserLease(rootDir, leaseIdentity);
+    if (lease?.status === 'pending' && !lease.lrqId && lease.acquiredAt === intent.lastAttemptedAt) {
+      deleteAmaCloserLease(rootDir, leaseIdentity);
+    }
+  }
+  return settled;
+}
+
 function errorDiagnosticLines(err) {
   return [err?.message, err?.stderr, err?.stdout]
     .filter(Boolean)
@@ -4880,10 +4908,6 @@ async function maybeDispatchAmaCloserAttempt({
     // CIBLOCKHAM-02: stale verdict/findings describe the pre-remediation head.
     // Failed required CI with no remediator is owned by the hammer immediately.
     // A parked route whose live checks are only pending still waits.
-    const ciBlockedFailureAdmit = ciBlockedRoute
-      && ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']
-        .includes(verdict.trace?.ciGreen?.conclusion)
-      && reviewState?.remediationPending !== true;
     const reviewCycleCapRoute = hammerOwnerRouteOf(dispatchContext) !== null
       && reviewState?.remediationPending !== true;
     const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
@@ -4979,8 +5003,11 @@ async function maybeDispatchAmaCloserAttempt({
     // Ordinary recovery widens worker-class admission only. Orphan recovery also
     // admits covered primary-repair/closer-head reasons after its ownerless grace.
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
-    const ciBlockedReasonsCovered = ciBlockedFailureAdmit && routeReasons.every((reason) =>
-      ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green'].includes(reason));
+    const ciBlockedReasonsCovered = ciBlockedHammerReasonsCovered(routeReasons, {
+      ciBlockedHammerOwner: ciBlockedRoute,
+      checksConclusion: verdict.trace?.ciGreen?.conclusion,
+      remediationPending: reviewState?.remediationPending,
+    });
     const finalRoundDispatchAdmit = dispatchContext?.finalRoundDispatchOnly === true
       && reviewState?.remediationPending !== true
       && routeReasons.every(reason => ['stale-review-head', 'verdict-not-settled-success',

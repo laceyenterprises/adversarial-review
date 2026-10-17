@@ -1034,6 +1034,14 @@ Key control points:
 
 ---
 
+Native exhausted CI-repair wake admission shares the closer's hammer-work
+rule. Red required CI and a stale pre-remediation verdict admit a wake, while
+current-head blocking verdicts and other holds keep their existing refusals.
+A settled refused handoff changes an unchanged unlaunched `dispatching` intent
+to `dispatch-failed` with `wake-refused:<reasons>`; receipts and in-flight work
+remain owned. Rescue projects an exhausted `[ci-regression-stopped]` row to
+the final hammer. Actual merges still require green CI and exact-head proof.
+
 ## 3) Fast-merge skip lane
 
 Source of truth:

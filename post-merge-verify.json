@@ -82,7 +82,8 @@
       "promise": "smv-ci-blocked",
       "edges": [
         "review-row.17",
-        "closure-owner.04"
+        "closure-owner.04",
+        "hammer-dispatch.06"
       ],
       "budgetSeconds": 35,
       "acceptance": {

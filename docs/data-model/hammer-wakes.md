@@ -8,11 +8,12 @@
 ## Purpose
 
 `data/hammer-wakes/` records event-driven watcher wake attempts for PR heads
-that have already cleared the AMA merge-eligibility snapshot, or whose only
-miss is `stale-head` and whose exact head is recorded as `workerPushedHeadSha`
-by the suppressed comment-only final round for the reviewed head. That handoff
-uses the same terminal job lookup as re-review suppression; another unreviewed
-head remains stale. The hammer performs terminal validation before merge.
+that have cleared the AMA merge-eligibility snapshot or native final-hammer
+dispatch admission for exhausted CI repair, or whose only miss is `stale-head`
+and whose exact head is recorded as `workerPushedHeadSha` by the suppressed
+comment-only final round for the reviewed head. That handoff uses the same
+terminal job lookup as re-review suppression; another unreviewed head remains
+stale. The hammer performs terminal validation before merge.
 The files are a reservation and audit trail for a latency optimization only: they do not grant
 merge authority, bypass the watcher, or replace the normal poll path.
 
@@ -37,8 +38,8 @@ Directory: `data/hammer-wakes/`
 | `event` | string | Always `hammer_wake`. |
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. Invalid, zero, fractional, boolean, null, or blank values are rejected before reservation. |
-| `headSha` | string | PR head SHA accepted by the wake eligibility snapshot. |
-| `eligibilityReason` | string | Stable reason used in the dedupe key. The default is `clean-current-head-ci-green-policy-eligible`. |
+| `headSha` | string | Live PR head SHA admitted for the wake. |
+| `eligibilityReason` | string | Stable reason used in the dedupe key. The default is `clean-current-head-ci-green-policy-eligible`; exhausted native CI repair uses `exhausted-final-hammer-ci-repair`. |
 | `observedAt` | string | ISO-8601 time when the eligible snapshot was observed. |
 | `outcome` | string | `reserved`, `requested`, or `failed`. Returned events may also report `skipped` or `duplicate` without replacing a requested audit file. |
 | `route` | string | Current value is `watcher-ama-merge-authority`, because the wake targets the existing watcher AMA route. |
@@ -51,6 +52,12 @@ Directory: `data/hammer-wakes/`
 
 ## Operational Contract
 
+- Native exhausted CI repair shares `ciBlockedHammerReasonsCovered` with the
+  closer. Failed required checks and a stale verdict on the unreviewed head
+  are hammer work. A current-head blocking verdict, pending-only CI, active
+  remediation and other eligibility gates retain their refusals. The daemon
+  and hammer's actual merge predicates still require green CI and exact-head
+  validation. Non-native wake admission is unchanged.
 - Writes are best-effort and synchronous. Audit directory, audit write, latency
   telemetry, and diagnostic logging failures must not abort AMA closure.
 - The success boundary is the watcher wake transport. Once the watcher confirms

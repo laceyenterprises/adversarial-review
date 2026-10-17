@@ -1538,6 +1538,18 @@ uses (`src/hammer-owner-route.mjs`).
   "CIBLOCKHAM-01 — failed CI with no remediation job left: you are the owner"
   prompt section with the failing checks. Codex-first, the lease and every
   merge predicate are unchanged.
+- CIBLOCKHAM-03: native wake admission uses that same CI-repair rule for the
+  exhausted final hammer, including the stale pre-remediation verdict. A
+  current-head blocking verdict and all other holds retain their wake refusal.
+  A refused, settled handoff retires an unchanged unlaunched intent as
+  `dispatch-failed`, reason `wake-refused:<reasons>`, rather than leaving a
+  phantom `dispatching` record. Launch receipts and in-flight work are preserved.
+  Rescue derives final-hammer ownership from a `ci-blocked` row carrying
+  `[ci-regression-stopped]` plus exhausted remediation evidence; it does not
+  choose an exact-head re-review while required CI is red. No config change is
+  needed. After deployment, verify the next exhausted red head requests its
+  wake and records a hammer launch in one watcher pass, and refused handoffs
+  have an explicit terminal reason without an ownerless dispatch intent.
 - `ci-blocked hammer route failed … authoritative reviewed head unavailable`
   means no posted review pass with a head SHA exists in `reviewer_passes`; the
   PR stays parked as before.

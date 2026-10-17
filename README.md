@@ -843,6 +843,11 @@ remain authoritative; recovery waits for green CI and resolved mergeability
 before a daemon merge, and red CI still routes to bounded repair.
 Retryable UNKNOWN deferral requires an open PR at the validated head; moved
 heads and closed PRs retain their terminal refusal.
+Native exhausted CI repair wakes under the closer's shared dispatch rule,
+including the stale verdict on the unreviewed head. Rescue projects an exhausted
+`[ci-regression-stopped]` row to the final hammer. A skipped wake retires a
+settled, unchanged unlaunched intent as `dispatch-failed` with
+`wake-refused:<reasons>`; launch receipts and in-flight work remain owned.
 Hammer launch ownership includes all transitive dispatcher retries. A live
 logical-job claim refusal restores ownership only after a fresh probe proves a
 live descendant of a non-null predecessor LRQ. The original head keeps the LRQ,
@@ -932,6 +937,8 @@ unreadable fresh launch reservations retain fleet capacity.
 <a id="smv-ci-blocked"></a>**smv-ci-blocked:** same-head failed CI parks the real
 review claim; no follow-up job and exhausted/no-progress remediation both assign
 the hammer, while the shared merge predicate refuses a merge over red CI.
+The native exhausted unreviewed head also clears wake admission, and a refused
+settled wake leaves a terminal dispatch reason.
 
 <a id="smv-refusals"></a>**smv-refusals:** lease expiry alone cannot steal a
 claim; exhaustion selects operator paging. Fleet identity proof requires a valid
@@ -1136,7 +1143,7 @@ stateDiagram-v2
     [*] --> s0: closure-owner.01 recompute ownership: close
     [*] --> s1: closure-owner.02 recompute ownership: page
     [*] --> s2: closure-owner.03 recompute ownership: wait
-    [*] --> s3: closure-owner.04 recompute ownership: hammer
+    [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped unreviewed head)
     [*] --> s4: closure-owner.05 recompute ownership: review
     [*] --> s5: closure-owner.06 recompute ownership: remediation
     [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain
@@ -1177,7 +1184,7 @@ stateDiagram-v2
     s0 --> s4: hammer-dispatch.03 launch result: dispatch-deferred-transient
     s0 --> s5: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
     s0 --> s6: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
-    s0 --> s7: hammer-dispatch.06 launch result: dispatch-failed
+    s0 --> s7: hammer-dispatch.06 launch failure or settled unlaunched wake refusal
     s0 --> s9: hammer-dispatch.07 launch result: no-dispatch
     s0 --> s10: hammer-dispatch.08 launch result: completed
     s1 --> s2: hammer-dispatch.09 terminal chain observed on PR decision path or shared capacity snapshot (no live retry)

@@ -201,6 +201,46 @@ for (const reviewedHead of [head, null]) {
   });
 }
 
+for (const storedHead of [null, '', head]) {
+  test(`REVIEWHEAD-01: posted-orphan recovery records GitHub's reviewed head (stored ${storedHead === null ? 'null' : storedHead ? 'known' : 'empty'})`, async t => {
+    const { db, rootDir, row, logs } = fixture(t);
+    db.prepare(`UPDATE reviewed_prs SET review_status = 'failed-orphan', reviewer_head_sha = ?,
+      reviewer_started_at = ?`).run(storedHead, startedAt);
+    if (storedHead === null) db.prepare('UPDATE reviewed_prs SET reviewer_session_uuid = NULL').run();
+    const before = row();
+    const result = await reconcilePostedFailedOrphans({ db, rootDir, apply: true,
+      listReviews: async () => [{ id: 'synthetic-review', state: 'COMMENTED', commit_id: head,
+        submitted_at: startedAt, user: { login: reviewerBotLoginAliases('claude')[0] } }],
+      log: { warn: message => logs.push(message) },
+    });
+    assert.equal(result.results[0].action, 'posted-no-artifact');
+    assert.equal(row().review_status, 'posted');
+    assert.equal(row().reviewer_head_sha, head);
+    assert.equal(row().posted_at, startedAt);
+    assert.equal(row().review_attempts, before.review_attempts);
+    assert.equal(row().review_population_retry_attempts, before.review_population_retry_attempts);
+    assert.deepEqual(logs, []);
+  });
+}
+
+test('REVIEWHEAD-01: posted-orphan recovery leaves a replacement claim intact', async t => {
+  const { db, rootDir, row } = fixture(t);
+  db.prepare(`UPDATE reviewed_prs SET review_status = 'failed-orphan', reviewer_head_sha = NULL`).run();
+  let replacement;
+  const result = await reconcilePostedFailedOrphans({ db, rootDir, apply: true,
+    listReviews: async () => {
+      db.prepare(`UPDATE reviewed_prs SET review_status = 'reviewing',
+        reviewer_session_uuid = 'replacement-session', reviewer_head_sha = ?`).run('b'.repeat(40));
+      replacement = row();
+      return [{ id: 'synthetic-review', state: 'COMMENTED', commit_id: head,
+        submitted_at: startedAt, user: { login: reviewerBotLoginAliases('claude')[0] } }];
+    },
+    log: { warn() {} },
+  });
+  assert.equal(result.results[0].action, 'cas-miss');
+  assert.deepEqual(row(), replacement);
+});
+
 test('REVIEWHEAD-01: a re-review reset during posted-orphan reconciliation cannot recreate a headless posted row', async t => {
   const { db, rootDir, row, logs } = fixture(t);
   db.prepare(`UPDATE reviewed_prs SET review_status = 'failed-orphan', reviewer_started_at = ?`).run(startedAt);

@@ -364,13 +364,33 @@ test('apply skips recovered follow-up queueing when the same revision already ha
   db.close();
 });
 
-test('apply refuses rows with no stored reviewer head', async () => {
+test('apply recovers a missing stored reviewer head and queues the matching pass', async () => {
+  const db = fixture();
+  db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = NULL').run();
+  db.prepare('UPDATE reviewer_passes SET head_sha = NULL').run();
+  const queueCalls = [];
+  const result = await reconcile({
+    db,
+    apply: true,
+    listReviews: async () => [POSTED_REVIEW],
+    queueFollowUpForRecoveredPostedReviewImpl: queueStub(queueCalls),
+  });
+  assert.equal(result.reconciled, 1);
+  assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'posted');
+  assert.equal(db.prepare('SELECT reviewer_head_sha FROM reviewed_prs').get().reviewer_head_sha, POSTED_REVIEW.commit_id);
+  assert.equal(db.prepare('SELECT gh_comment_id FROM reviewer_passes').get().gh_comment_id, String(POSTED_REVIEW.id));
+  assert.equal(queueCalls.length, 1);
+  assert.equal(queueCalls[0].row.head_sha, POSTED_REVIEW.commit_id);
+  db.close();
+});
+
+test('apply refuses rows when neither the stored head nor GitHub review identifies a head', async () => {
   const db = fixture();
   db.prepare('UPDATE reviewed_prs SET reviewer_head_sha = NULL').run();
   const result = await reconcile({
     db,
     apply: true,
-    listReviews: async () => [POSTED_REVIEW],
+    listReviews: async () => [{ ...POSTED_REVIEW, commit_id: null }],
     queueFollowUpForRecoveredPostedReviewImpl: () => {
       throw new Error('missing-head rows must not queue follow-up');
     },

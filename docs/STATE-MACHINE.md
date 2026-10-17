@@ -421,8 +421,12 @@ new PR
   reviewer-bot GitHub review on the stored reviewer head submitted at or after
   the stored reviewer start; when that timestamp is missing or corrupt, it falls
   back to `last_attempted_at`, and when neither timestamp is parseable it
-  refuses the row instead of widening the lower time bound. Add `--apply` to CAS
-  the still-open `failed-orphan` row to
+  refuses the row instead of widening the lower time bound. A missing stored
+  reviewer head is recovered from the matching GitHub review's `commit_id`;
+  at least one head must be non-empty at settlement, and a known stored head
+  must agree with a supplied GitHub head. Recovery scans `pending` rows too. Add `--apply`
+  to CAS the still-open row, matching the inspected session and prior head with
+  null-safe equality, to
   `posted`, clear orphan failure evidence and the reviewer lease, reset
   `infra_auto_recover_attempts`, and link the matching reviewer pass to the
   GitHub review artifact when the pass can be safely promoted, including a

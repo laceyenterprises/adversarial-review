@@ -29,6 +29,15 @@ releases to `pending` at the current `revision_ref`, preserving attempts and
 retry budgets and logging the reason. A replacement session is never released
 by an older review's settlement.
 
+Posted-orphan recovery takes the reviewed head from the GitHub review's
+`commit_id`, falling back to the stored reviewer head only when GitHub omits it.
+An empty stored head can therefore be healed by a matching reviewer-bot post
+after the attempt's start. Recovery refuses posts when both heads are empty or
+when a non-empty stored head conflicts with the GitHub head. The settlement CAS
+matches the inspected session and prior head with null-safe equality, writes the
+recovered non-empty head with `posted`, and supplies that head to recovered
+follow-up queueing when the pass lacks its own head. No schema change is needed.
+
 Discovery repairs legacy open `posted` rows with an empty reviewed head only
 when `revision_ref` matches the live head. The status CAS requeues once, writes
 `rereview_requested_at` and `rereview_reason=system-missing-reviewed-head:<head>`,

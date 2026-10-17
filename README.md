@@ -819,6 +819,10 @@ then regenerate the diagrams with `diagrams()` in `test/helpers/smv-contracts.mj
 Each object's `codeSources` includes every transition's source file. The draft
 column and shared admission-depth query affect queue eligibility; account holds
 use the existing pre-spawn claim release and do not add lifecycle states.
+Posted-orphan recovery can heal an empty stored reviewer head from the GitHub
+review's commit ID. Settlement requires a non-empty recovered head and retains
+null-safe comparisons against the inspected session and prior head, so a
+replacement claim cannot be posted by an older reconciliation.
 Certified HAM contention parks retain bounded deferral recovery while GitHub
 mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expiry
 remain authoritative; recovery waits for green CI and resolved mergeability
@@ -939,7 +943,7 @@ stateDiagram-v2
     s3 --> s0: review-row.18 confirmed current-head green CI
     s4 --> s0: review-row.19 accepted rereview
     s5 --> s0: review-row.20 new head archives failure
-    s6 --> s4: review-row.21 reconcile posted review with matching session and recovered head
+    s6 --> s4: review-row.21 reconcile posted review with null-safe claim match and non-empty GitHub or stored head
     s6 --> s0: review-row.22 operator verified reset
     s4 --> s4: review-row.23 closure maintenance
     s0 --> s10: review-row.24 PR already merged

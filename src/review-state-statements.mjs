@@ -4,6 +4,8 @@ import { REREVIEW_CI_BLOCKED_STATUS } from './review-statuses.mjs';
 
 // Settlement carries the dispatch identity; never infer the reviewed head from
 // a mutable delivery row or overwrite a replacement claim.
+// Both head parameters are the dispatched head: WHERE compares the existing
+// claim head, and SET explicitly records that same head with the posted status.
 export function prepareMarkPosted(db) {
   return db.prepare(`UPDATE reviewed_prs
       SET review_status = 'posted', posted_at = ?, reviewer_head_sha = ?,

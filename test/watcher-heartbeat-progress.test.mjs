@@ -74,22 +74,36 @@ test('a progress refresh stops writing when the poll stops advancing', async (t)
   }
 });
 
-for (const yieldToReviewMicrotask of [false, true]) {
-  test(`deferred review preserves newer progress (microtask queued: ${yieldToReviewMicrotask})`, async (t) => {
+for (const settleReviewWrite of [false, true]) {
+  test(`deferred review preserves newer progress (review write settled: ${settleReviewWrite})`, async (t) => {
     const f = fixture(t);
     f.advanceTo(59_000);
     const review = f.heartbeat.markReview({ repo: 'example/review-service', pr_number: 17 });
-    if (yieldToReviewMicrotask) await Promise.resolve();
+    if (settleReviewWrite) {
+      await f.heartbeat.flush();
+      assert.equal(f.writes.length, 2, 'the queued review write must settle before progress');
+      assert.equal(f.persisted().event, 'review');
+      assert.equal(f.persisted().repo, review.repo);
+      assert.equal(f.persisted().pr_number, review.pr_number);
+    }
     f.advanceTo(60_000);
     f.heartbeat.markPollProgress();
+    if (settleReviewWrite) {
+      assert.equal(f.writes.length, 2, 'the settled review write resets the progress throttle');
+      assert.equal(f.persisted().poll_progress_counter, 0);
+      f.advanceTo(119_000);
+      f.heartbeat.markPollProgress();
+    }
     const progress = f.persisted();
     assert.equal(progress.event, 'poll-progress');
-    assert.equal(progress.poll_progress_counter, 1);
+    assert.equal(progress.poll_progress_counter, settleReviewWrite ? 2 : 1);
     await f.heartbeat.flush();
     const persisted = f.persisted();
-    assert.equal(persisted.event, 'review');
-    assert.equal(persisted.repo, review.repo);
-    assert.equal(persisted.pr_number, review.pr_number);
+    assert.equal(persisted.event, settleReviewWrite ? 'poll-progress' : 'review');
+    if (!settleReviewWrite) {
+      assert.equal(persisted.repo, review.repo);
+      assert.equal(persisted.pr_number, review.pr_number);
+    }
     assert.equal(persisted.last_review_at, review.last_review_at);
     assert.equal(persisted.poll_progress_counter, progress.poll_progress_counter);
     assert.equal(persisted.last_poll_progress_at, progress.last_poll_progress_at);

@@ -127,6 +127,8 @@ function createWatcherHeartbeat({
   let lastSpawnDecision = prior?.last_spawn_decision && typeof prior.last_spawn_decision === 'object'
     ? prior.last_spawn_decision
     : null;
+  let pollProgressCounter = 0;
+  let lastPollProgressAt = null;
   let pendingReviewHeartbeat = null;
   let reviewPersistScheduled = false;
   let reviewPersistChain = Promise.resolve();
@@ -192,6 +194,8 @@ function createWatcherHeartbeat({
       last_spawn_decision: lastSpawnDecision,
       poll_counter: pollCounter,
       completed_poll_counter: completedPollCounter,
+      poll_progress_counter: pollProgressCounter,
+      last_poll_progress_at: lastPollProgressAt,
       event,
       ...statusProvider(),
       ...extra,
@@ -209,6 +213,13 @@ function createWatcherHeartbeat({
     pollCounter += 1;
     lastPollAt = at;
     return persist('poll', extra, at);
+  }
+
+  // Keep frequent completion markers in memory. The next ordinary heartbeat
+  // persists them without adding a synchronous disk write per subject/handler.
+  function markPollProgress() {
+    pollProgressCounter += 1;
+    lastPollProgressAt = now().toISOString();
   }
 
   function markReview(extra = {}) {
@@ -246,6 +257,8 @@ function createWatcherHeartbeat({
       last_spawn_decision: lastSpawnDecision,
       poll_counter: pollCounter,
       completed_poll_counter: completedPollCounter,
+      poll_progress_counter: pollProgressCounter,
+      last_poll_progress_at: lastPollProgressAt,
     };
   }
 
@@ -254,7 +267,7 @@ function createWatcherHeartbeat({
     await reviewPersistChain;
   }
 
-  return { filePath, markPoll, markPollCompleted, markReview, markSpawnDecision, persist, snapshot, flush };
+  return { filePath, markPoll, markPollProgress, markPollCompleted, markReview, markSpawnDecision, persist, snapshot, flush };
 }
 
 function createWatcherStallWatchdog({
@@ -279,7 +292,10 @@ function createWatcherStallWatchdog({
     checkIntervalMs,
     Math.min(DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS, effectiveStallMs),
   );
-  const effectiveStarvationMs = parsePositiveMs(starvationMs, DEFAULT_WATCHER_POLL_STARVATION_MS);
+  const effectiveStarvationMs = () => parsePositiveMs(
+    typeof starvationMs === 'function' ? starvationMs() : starvationMs,
+    DEFAULT_WATCHER_POLL_STARVATION_MS,
+  );
   const effectiveStarvationChecks = Math.max(
     1,
     Math.trunc(parsePositiveMs(starvationChecksRequired, DEFAULT_WATCHER_POLL_STARVATION_CHECKS)),
@@ -294,6 +310,7 @@ function createWatcherStallWatchdog({
   let starvationChecks = 0;
   let starvationSignalled = false;
   let lastInPollMarker = null;
+  let lastInPollProgressMs = null;
 
   function noteProgress() {
     const currentCounter = normalizeCounter(heartbeat.snapshot().poll_counter);
@@ -313,6 +330,7 @@ function createWatcherStallWatchdog({
   // last_spawn_decision_at was advancing seconds earlier.
   function inPollProgressMarker(snapshot) {
     return [
+      normalizeCounter(snapshot?.poll_progress_counter),
       snapshot?.last_spawn_decision_at || '',
       snapshot?.last_review_at || '',
       normalizeCounter(snapshot?.completed_poll_counter),
@@ -322,6 +340,7 @@ function createWatcherStallWatchdog({
   function beginPoll() {
     pollInFlight = true;
     pollStartedMs = nowMs();
+    lastInPollProgressMs = pollStartedMs;
     pollStartCounter = normalizeCounter(heartbeat.snapshot().poll_counter);
     starvationChecks = 0;
     starvationSignalled = false;
@@ -332,6 +351,7 @@ function createWatcherStallWatchdog({
   function endPoll() {
     pollInFlight = false;
     pollStartedMs = null;
+    lastInPollProgressMs = null;
     pollStartCounter = null;
     starvationChecks = 0;
     starvationSignalled = false;
@@ -345,14 +365,11 @@ function createWatcherStallWatchdog({
   function checkStarvation() {
     if (pollStartedMs === null) return false;
     const inFlightMs = nowMs() - pollStartedMs;
-    if (inFlightMs < effectiveStarvationMs) {
-      starvationChecks = 0;
-      return false;
-    }
     const snapshot = heartbeat.snapshot();
     if (normalizeCounter(snapshot.poll_counter) !== pollStartCounter) {
       // The counter advanced under us (a re-entrant or externally-driven poll):
       // whatever this is, it is not a frozen loop.
+      lastInPollProgressMs = nowMs();
       starvationChecks = 0;
       return false;
     }
@@ -365,6 +382,13 @@ function createWatcherStallWatchdog({
     const currentMarker = inPollProgressMarker(snapshot);
     if (currentMarker !== lastInPollMarker) {
       lastInPollMarker = currentMarker;
+      lastInPollProgressMs = nowMs();
+      starvationChecks = 0;
+      return false;
+    }
+    const noProgressMs = nowMs() - lastInPollProgressMs;
+    const thresholdMs = effectiveStarvationMs();
+    if (noProgressMs < thresholdMs) {
       starvationChecks = 0;
       return false;
     }
@@ -377,7 +401,7 @@ function createWatcherStallWatchdog({
     starvationSignalled = true;
     logger?.error?.(
       `[watcher] poll starvation: one poll has been in flight for ${Math.round(inFlightMs)}ms ` +
-      `with NO progress on any signal across ${starvationChecks} consecutive checks ` +
+      `with NO progress for ${Math.round(noProgressMs)}ms across ${starvationChecks} consecutive checks ` +
       `(poll_counter=${snapshot.poll_counter}, completed_poll_counter=${snapshot.completed_poll_counter}, ` +
       `last_poll_at=${snapshot.last_poll_at || 'null'}, ` +
       `last_review_at=${snapshot.last_review_at || 'null'}, ` +
@@ -386,7 +410,8 @@ function createWatcherStallWatchdog({
     );
     onStarvation?.({
       inFlightMs,
-      starvationMs: effectiveStarvationMs,
+      noProgressMs,
+      starvationMs: thresholdMs,
       checks: starvationChecks,
       checksRequired: effectiveStarvationChecks,
       heartbeat: snapshot,
@@ -444,7 +469,8 @@ function createWatcherStallWatchdog({
       lastProgressMs,
       stallMs: effectiveStallMs,
       checkIntervalMs: effectiveCheckIntervalMs,
-      starvationMs: effectiveStarvationMs,
+      starvationMs: effectiveStarvationMs(),
+      lastInPollProgressMs,
       starvationChecksRequired: effectiveStarvationChecks,
       starvationChecks,
       starvationSignalled,

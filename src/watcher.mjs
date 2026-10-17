@@ -360,7 +360,7 @@ import { orderSubjectEntriesDiscoveryFirst, orderSubjectEntriesRereviewOldestFir
 import {
   createPollStarvationHandler,
   createPollStarvationRestartRequester,
-  resolvePollStarvationConfig,
+  createPollWatchdogBudget, trackPollHandlerProgress,
 } from './watcher-poll-starvation-signal.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
@@ -1203,6 +1203,7 @@ async function pollOnceWithinBudget(
   refreshReviewerRuntimeAdapter();
   assertReviewDbWritesRoundTrip(db);
   await refreshWatcherAuthenticationForTick({ log: console });
+  watcherHeartbeat?.markPollProgress?.();
   const wakePayloadForPoll = createWatcherWakePayloadAccessor({ initialPayload: wakePayload, consumeWakePayload });
   const healthTick = healthProbe?.beginTick?.();
   const reviewerBurstController = createReviewerBurstController({ rootDir: ROOT, logger: console, readSpendUsd: readBurstScopedReviewerSpendUsd }), reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config, burstSlots: reviewerBurstController.slots() }); // RPL-07: burstSlots is 0 unless an operator lease is active, leaving steady-state capacity untouched
@@ -1242,6 +1243,7 @@ async function pollOnceWithinBudget(
   });
   try {
     await drainReviewerDispatchCandidates('poll-start retained candidates');
+    watcherHeartbeat?.markPollProgress?.();
     if (await runLowBudgetWatcherPoll({ db, activeRepos, rootDir: ROOT,
       domainId: WATCHER_PRIMARY_DOMAIN_ID, execFileImpl: execFileAsync,
       handlePostedReviewRow, createWatcherOperatorSurface, projectAdversarialGateStatus,
@@ -1257,12 +1259,14 @@ async function pollOnceWithinBudget(
     });
     const operatorSurface = createWatcherOperatorSurface();
     await refreshOrgRepos(octokit);
+    watcherHeartbeat?.markPollProgress?.();
     await retryPendingMergeAgentLifecycleCleanups();
     // Lifecycle sync is the health surface's authoritative "is this PR still
     // open?" mirror. It must refresh before the per-PR discovery/retry sweep:
     // under incident backlog that sweep can spend minutes enqueueing reviewer
     // work before the adoption phase gets a turn.
     await syncPRLifecycle(octokit, operatorSurface, WATCHER_PRIMARY_DOMAIN_ID);
+    watcherHeartbeat?.markPollProgress?.();
     recheckReviewerCleanupFindingsForWatcher(ROOT, console);
     const reattach = await reconcileReviewerSessions({
       db,
@@ -1309,7 +1313,9 @@ async function pollOnceWithinBudget(
   // the established contract expects those rows to be claimed in the same tick.
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
+  watcherHeartbeat?.markPollProgress?.();
   await runFastMergeClosePathIsolated({ repos: activeRepos });
+  watcherHeartbeat?.markPollProgress?.();
 
   const watcherDrain = readWatcherDrainState();
   if (watcherDrain.active) {
@@ -1383,6 +1389,7 @@ async function pollOnceWithinBudget(
     const currentRepoPRs = [];
     try {
       subjectRefs = await subjectAdapter.discoverSubjects();
+      watcherHeartbeat?.markPollProgress?.();
     } catch (err) {
       console.error(`[watcher] Failed to fetch PRs for ${repoPath}:`, err.message);
       reconcileWatcherPriorityDiscoveryPending(priorityDiscoveryPending, { repoPath, discoveredPrNumbers: new Set() });
@@ -1397,6 +1404,7 @@ async function pollOnceWithinBudget(
     let subjectEntries = (await Promise.all(subjectRefs.map(async (subjectRef) => {
       try {
         const subject = await subjectAdapter.fetchState(subjectRef);
+        watcherHeartbeat?.markPollProgress?.();
         const { prNumber } = parseSubjectExternalId(subject.ref.subjectExternalId);
         return { subjectRef, subject, prNumber };
       } catch (err) {
@@ -1480,6 +1488,7 @@ async function pollOnceWithinBudget(
     reviewerRefillContexts.set(`${domainId}:${repoPath}`, { subjectAdapter, context: reviewContext });
     for (const subjectEntry of subjectEntries) {
       await processReviewSubject(subjectEntry, { ...reviewContext });
+      watcherHeartbeat?.markPollProgress?.();
       priorityDiscoveryPending.delete(`${repoPath}#${subjectEntry.prNumber}`);
       firstPassSpilloverController.refundPendingSpill({ repo: repoPath, prNumber: subjectEntry.prNumber });
       await drainReviewerDispatchCandidatesIfBatchReady('continuing reviewer discovery');
@@ -1564,8 +1573,8 @@ async function pollOnceWithinBudget(
 
   await runQueuedReviewAdoptionPhase({
     drainReviewerDispatchCandidates,
-    postedReviewHandlers,
-    postReviewMaintenanceHandlers,
+    postedReviewHandlers: postedReviewHandlers.map(handler => trackPollHandlerProgress(handler, watcherHeartbeat)),
+    postReviewMaintenanceHandlers: postReviewMaintenanceHandlers.map(handler => trackPollHandlerProgress(handler, watcherHeartbeat)),
     octokit,
     operatorSurface,
     primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
@@ -1702,9 +1711,6 @@ async function main() {
   const stallWatchdogMs = Number.isFinite(configuredStallMs) && configuredStallMs > 0
     ? configuredStallMs
     : Math.max(DEFAULT_WATCHER_STALL_WATCHDOG_MS, intervalMs * 3);
-  // WPS-01: how long ONE poll may stay in flight with a frozen poll_counter
-  // before the watcher respawns itself. See watcher-poll-starvation-signal.mjs.
-  const pollStarvation = resolvePollStarvationConfig({ env: process.env, intervalMs });
   const configuredStallCheckMs = Number(process.env.ADVERSARIAL_WATCHER_STALL_CHECK_INTERVAL_MS);
   const stallWatchdogCheckMs = Number.isFinite(configuredStallCheckMs) && configuredStallCheckMs > 0
     ? configuredStallCheckMs
@@ -1747,24 +1753,12 @@ async function main() {
   const hammerScratchSweepTicker = createHammerScratchSweepTicker({ rootDir: ROOT, logger: console });
   await hammerScratchSweepTicker.tick();
 
-  // Workload-aware deadline: the previous fixed 10m watchdog tripped
-  // on legitimate org-wide work (a single reviewer can consume most of
-  // the reviewer subprocess deadline, and pollOnce processes repos/PRs
-  // serially). Resolve
-  // the deadline per-call from the current activeRepos count so the
-  // budget grows with the workload. Operators can still pin a fixed
-  // value via `config.pollDeadlineMs`; an explicit number always
-  // wins over the dynamic default.
-  function resolveDeadlineMsForCall() {
-    if (Number.isFinite(configuredDeadlineMs) && configuredDeadlineMs > 0) {
-      return configuredDeadlineMs;
-    }
-    return computeWorkloadAwarePollDeadlineMs({
-      activeRepoCount: activeRepos.length,
-      reviewerTimeoutMs: resolveReviewerTimeoutMs(),
-    });
-  }
-
+  const pollStarvation = createPollWatchdogBudget({ env: process.env, intervalMs,
+    getDeadlineMs: () => Number.isFinite(configuredDeadlineMs) && configuredDeadlineMs > 0
+      ? configuredDeadlineMs : computeWorkloadAwarePollDeadlineMs({
+        activeRepoCount: activeRepos.length, reviewerTimeoutMs: resolveReviewerTimeoutMs(),
+      }),
+  });
   const watchMode = config.org
     ? `org: ${config.org} (dynamic discovery, refresh every ${(config.repoRefreshIntervalMs ?? 3_600_000) / 60_000}m)`
     : `repos: ${activeRepos.join(', ')}`;
@@ -1773,7 +1767,7 @@ async function main() {
     : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_FLOOR_MS / 1000}s)`;
   console.log(
     `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | ` +
-    `poll deadline: ${deadlineLabel} | stall watchdog: ${stallWatchdogMs / 1000}s | ` +
+    `poll deadline: ${pollStarvation.deadlineMs / 1000}s (${deadlineLabel}) | stall watchdog: ${stallWatchdogMs / 1000}s | ` +
     `poll-starvation respawn: ${pollStarvation.starvationMs / 1000}s × ${pollStarvation.checksRequired} checks`);
 
   watcherHeartbeat = createWatcherHeartbeat({
@@ -1788,7 +1782,7 @@ async function main() {
     heartbeat: watcherHeartbeat,
     stallMs: stallWatchdogMs,
     checkIntervalMs: stallWatchdogCheckMs,
-    starvationMs: pollStarvation.starvationMs,
+    starvationMs: () => pollStarvation.starvationMs,
     starvationChecksRequired: pollStarvation.checksRequired,
     exitCode: DEFAULT_WATCHER_STALL_EXIT_CODE,
     logger: console,
@@ -1835,12 +1829,13 @@ async function main() {
     octokit,
     errorHandler: handlePollError,
     onTimeout: exitForPollDeadline,
-    deadlineMs: resolveDeadlineMsForCall,
+    deadlineMs: () => pollStarvation.deadlineMs,
   });
   const watcherWakeSource = createWatcherWakeSource({ rootDir: ROOT, logger: console, consumeExistingOnStart: true });
   let lastAlertSinkDegradedFingerprint = null;
   async function runHeartbeatPoll(source, pollOptions = undefined) {
     const pollStartedAtMs = Date.now(); let pollResult = null;
+    pollStarvation.refresh();
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
     try {
@@ -1868,7 +1863,9 @@ async function main() {
         console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
       }
       await staleStateReaperTicker.tick();
+      watcherHeartbeat?.markPollProgress?.();
       await hammerScratchSweepTicker.tick();
+      watcherHeartbeat?.markPollProgress?.();
       pollResult = await safePollOnce(source, { ...(pollOptions || {}), consumeWakePayload: () => watcherWakeSource.consumeCurrent() });
       watcherHeartbeat.markPollCompleted({ source, ok: Boolean(pollResult?.ok), timed_out: Boolean(pollResult?.timedOut), error: pollResult?.error ? String(pollResult.error?.message || pollResult.error) : null });
       return pollResult;

@@ -16,6 +16,7 @@ import {
 } from './watcher-heartbeat.mjs';
 
 const DEFAULT_STARVATION_MS_FLOOR_INTERVAL_MULTIPLIER = 3;
+const POLL_STARVATION_DEADLINE_MARGIN_MS = 60_000;
 
 function positiveNumberOr(value, fallback) {
   const numeric = Number(value);
@@ -27,16 +28,18 @@ function positiveNumberOr(value, fallback) {
  *
  * The default is the larger of the shipped floor and three poll intervals, so a
  * legitimately long tick on a slow configuration is not paged while a frozen one
- * always is. An explicit env value always wins.
+ * always is. The existing override can raise this threshold, but cannot lower it
+ * below the current poll deadline plus one minute of scheduling slack.
  */
 export function resolvePollStarvationConfig({
   env = process.env,
   intervalMs = 0,
+  pollDeadlineMs = 0,
   defaultStarvationMs = DEFAULT_WATCHER_POLL_STARVATION_MS,
   defaultChecks = DEFAULT_WATCHER_POLL_STARVATION_CHECKS,
 } = {}) {
   const configured = Number(env?.ADVERSARIAL_WATCHER_POLL_STARVATION_MS);
-  const starvationMs = Number.isFinite(configured) && configured > 0
+  const requestedStarvationMs = Number.isFinite(configured) && configured > 0
     ? configured
     : Math.max(
       positiveNumberOr(defaultStarvationMs, DEFAULT_WATCHER_POLL_STARVATION_MS),
@@ -46,6 +49,8 @@ export function resolvePollStarvationConfig({
   const checksRequired = Number.isFinite(configuredChecks) && configuredChecks > 0
     ? Math.trunc(configuredChecks)
     : Math.max(1, Math.trunc(positiveNumberOr(defaultChecks, DEFAULT_WATCHER_POLL_STARVATION_CHECKS)));
+  const starvationMs = Math.max(requestedStarvationMs,
+    positiveNumberOr(pollDeadlineMs, 0) + POLL_STARVATION_DEADLINE_MARGIN_MS);
   return { starvationMs, checksRequired };
 }
 
@@ -68,12 +73,13 @@ export function createPollStarvationHandler({
   requestRestartFn,
   logger = console,
 } = {}) {
-  return function onStarvation({ inFlightMs, starvationMs, checks, heartbeat } = {}) {
+  return function onStarvation({ inFlightMs, noProgressMs, starvationMs, checks, heartbeat } = {}) {
     const roundedMs = Math.round(inFlightMs || 0);
     try {
       getHeartbeat?.()?.persist?.('poll-starvation', {
         poll_starvation: {
           in_flight_ms: roundedMs,
+          no_progress_ms: noProgressMs,
           starvation_ms: starvationMs,
           consecutive_checks: checks,
         },
@@ -92,6 +98,7 @@ export function createPollStarvationHandler({
             payload: {
               reason: 'poll-in-flight-past-sla-without-heartbeat-progress',
               in_flight_ms: roundedMs,
+              no_progress_ms: noProgressMs,
               starvation_ms: starvationMs,
               consecutive_checks: checks,
               poll_counter: heartbeat?.poll_counter ?? null,
@@ -111,6 +118,7 @@ export function createPollStarvationHandler({
       requestRestartFn({
         reason: 'poll-in-flight-past-sla-without-heartbeat-progress',
         inFlightMs: roundedMs,
+        noProgressMs,
         starvationMs,
         checks,
         heartbeat,
@@ -138,5 +146,32 @@ export function createPollStarvationRestartRequester({
       message:
         'FATAL: watcher poll starved while in flight; preserving in-flight reviewer runtime sessions so launchd can respawn',
     });
+  };
+}
+
+// Only completed work advances this marker; starting work or timer ticks do not.
+export function trackPollHandlerProgress(handler, heartbeat) {
+  return { ...handler, async run(...args) {
+    try { return await handler.run(...args); }
+    finally { heartbeat?.markPollProgress?.({ phase: 'handler-completed' }); }
+  } };
+}
+
+// Capture one deadline for both guards. Recompute between polls as workload
+// changes, so neither guard can read a different budget for the same poll.
+export function createPollWatchdogBudget({ getDeadlineMs, env, intervalMs, logger = console }) {
+  let deadlineMs = getDeadlineMs();
+  let config = resolvePollStarvationConfig({ env, intervalMs, pollDeadlineMs: deadlineMs });
+  return {
+    get deadlineMs() { return deadlineMs; },
+    get starvationMs() { return config.starvationMs; },
+    get checksRequired() { return config.checksRequired; },
+    refresh() {
+      const next = getDeadlineMs();
+      if (next === deadlineMs) return;
+      deadlineMs = next;
+      config = resolvePollStarvationConfig({ env, intervalMs, pollDeadlineMs: deadlineMs });
+      logger.log(`[watcher] poll deadline changed: ${deadlineMs / 1000}s | poll-starvation respawn: ${config.starvationMs / 1000}s × ${config.checksRequired} checks`);
+    },
   };
 }

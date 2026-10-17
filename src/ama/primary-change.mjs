@@ -659,7 +659,7 @@ async function attestedReversal(commit, repo, read, prNumber) {
   return Array.isArray(comments) && comments.length < 100 && comments.some(comment => exactHammerValidation(comment, commit.sha));
 }
 
-async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, metadata, prNumber }) {
+async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber }) {
   if (!SHA.test(superseding.commit_id || '')) return null;
   const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (!['ahead', 'diverged'].includes(snapshot.status) || !Array.isArray(snapshot.commits)
@@ -667,7 +667,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
   const identity = reversalPatchIdentity(commit.files);
   for (const candidate of snapshot.commits.filter((entry) => isHammer(entry)
     && SHA.test(entry.sha || '') && entry.commit.message === commit.commit.message)) {
-    const original = await read(`repos/${repo}/commits/${candidate.sha}`);
+    const original = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
     if (original.sha !== candidate.sha || original.commit?.message !== candidate.commit.message
       || !hamCommitIdentityMatches(original) || original.parents?.length !== 1
       || !SHA.test(original.parents[0].sha || '') || reversalPatchIdentity(original.files) !== identity) continue;
@@ -711,6 +711,22 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
       return result;
     }));
     return responses.get(path);
+  };
+  // Bounded history reads omit signature payloads. Hydrate verification only
+  // for web-flow provenance, binding it to the immutable commit in every proof.
+  // Share successes and failures across proof scans without mutating raw reads.
+  const commits = new Map();
+  const readCommit = path => {
+    if (!commits.has(path)) commits.set(path, read(path).then(async commit => {
+      if (commit.committer?.login === 'web-flow' && get.commitVerification) {
+        const verification = await get.commitVerification(path);
+        if (verification.sha !== commit.sha) throw Object.assign(new Error('commit verification SHA mismatch'),
+          { code: 'COMMIT_VERIFICATION_SHA_MISMATCH' });
+        return { ...commit, commit: { ...commit.commit, verification: verification.verification } };
+      }
+      return commit;
+    }));
+    return commits.get(path);
   };
   const metadata = path => get.metadata ? get.metadata(path) : read(path);
   const unknown = (reason, extra = {}) => ({ headSha, hasHammerCommits: null, reason, ...extra });
@@ -795,11 +811,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
               pipelineRepair: null, repairKind: null });
           }
           if (!destinations.length) continue;
-          if (commit.committer?.login === 'web-flow' && get.commitVerification) {
-            const verification = await get.commitVerification(commitPath);
-            if (verification.sha !== candidate.sha) continue;
-            commit = { ...commit, commit: { ...commit.commit, verification: verification.verification } };
-          }
+          commit = await readCommit(commitPath);
           if (!isHammerCommit(commit, true) || !hamCommitIdentityMatches(commit)
             || ![1, 2].includes(commit.parents?.length) || !SHA.test(commit.parents[0].sha || '')) continue;
           const destination = destinations.find(entry => commitRenamesBlob(commit, file.filename, entry.filename, file.sha));
@@ -857,7 +869,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
           const pair = `${candidate.sha}:${review.node_id || review.html_url}`;
           if (authorizedPairs.has(pair)) continue;
           authorizedPairs.add(pair);
-          const commit = await read(`repos/${repo}/commits/${candidate.sha}`);
+          const commit = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
           if (commit.sha !== candidate.sha || commit.commit?.message !== candidate.commit.message
             || !hamCommitIdentityMatches(commit)
             || commit.parents?.length !== 1 || !SHA.test(commit.parents[0].sha)) { reject('commit-provenance'); continue; }
@@ -897,7 +909,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
-            originalAuthorization = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, metadata, prNumber });
+            originalAuthorization = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber });
             if (!originalAuthorization) { reject('original-reversal-not-proven-before-supersession'); continue; }
             if (originalAuthorization.rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) {
               reject('parent-is-not-reviewed-head-rebase'); continue;
@@ -910,7 +922,7 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
         } catch (error) {
           if (error?.primaryChangeReadFailed === true || error?.authOutage === true
             || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' || isTransientGhError(error)) throw error;
-          reject('unverifiable');
+          reject(error?.code === 'COMMIT_VERIFICATION_SHA_MISMATCH' ? 'commit-provenance' : 'unverifiable');
           // A stale/deleted citation refuses only this waiver, never the whole
           // protected author diff. Later candidates can still be evaluated.
         }

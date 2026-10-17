@@ -35,6 +35,69 @@ test('HAMREVERSAL-01: API-published reversal uses verification from the re-read 
   }
 });
 
+test('HAM reversal hydrates exact-commit verification from the bounded history reader', async () => {
+  const { transport } = await collect();
+  for (const scenario of ['valid', 'invalid', 'invalid-reason', 'foreign-author', 'wrong-sha', 'unreadable']) {
+    const verificationReads = [];
+    const get = async path => {
+      const response = await transport(path);
+      if (!path.endsWith(`/commits/${head}`)) return response;
+      // createHistoryReader intentionally leaves verification out of commitFields.
+      const { verification: _verification, ...commit } = response.commit;
+      return { ...response, ...(scenario === 'foreign-author' ? { author: { login: 'foreign-builder' } } : {}),
+        committer: { login: 'web-flow' }, commit };
+    };
+    get.commitVerification = async path => {
+      verificationReads.push(path);
+      if (scenario === 'unreadable') throw new Error('verification unavailable');
+      return { sha: scenario === 'wrong-sha' ? sha('d') : head,
+        verification: { verified: scenario !== 'invalid', reason: scenario === 'invalid-reason' ? 'unsigned' : 'valid' } };
+    };
+    const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head, get },
+      { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
+    const result = checkPrimaryChange(evidence, head);
+    assert.deepEqual(verificationReads, [`repos/fixture/repo/commits/${head}`], scenario);
+    assert.equal(result.ok, scenario === 'valid', scenario);
+    if (scenario === 'valid') {
+      assert.equal(evidence.reversalAuthorizations[0].commit.commit.verification.verified, true);
+    } else {
+      assert.equal(result.reason, 'primary-change-reverted', scenario);
+      assert.equal(evidence.reversalAuthorizations, undefined, scenario);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason,
+        scenario === 'unreadable' ? 'unverifiable' : 'commit-provenance', scenario);
+    }
+  }
+});
+
+test('historical reversal snapshots hydrate their own web-flow verification', async () => {
+  const later = review({ node_id: 'PRR_later', commit_id: sha('f'), state: 'COMMENTED',
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
+  const { transport } = await collect({ originalRecorded: true, reviews: [review(), later] });
+  for (const scenario of ['valid', 'invalid', 'wrong-sha', 'unreadable']) {
+    const get = async path => {
+      const response = await transport(path);
+      if (!path.endsWith(`/commits/${sha('d')}`)) return response;
+      const { verification: _verification, ...commit } = response.commit;
+      return { ...response, committer: { login: 'web-flow' }, commit };
+    };
+    get.commitVerification = async path => {
+      assert.equal(path, `repos/fixture/repo/commits/${sha('d')}`);
+      if (scenario === 'unreadable') throw new Error('verification unavailable');
+      return { sha: scenario === 'wrong-sha' ? head : sha('d'),
+        verification: { verified: scenario !== 'invalid', reason: 'valid' } };
+    };
+    const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head, get },
+      { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
+    assert.equal(checkPrimaryChange(evidence, head).ok, scenario === 'valid', scenario);
+    if (scenario !== 'valid') {
+      assert.equal(evidence.reversalAuthorizations, undefined, scenario);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason,
+        scenario === 'wrong-sha' ? 'commit-provenance' : scenario === 'unreadable' ? 'unverifiable'
+          : 'original-reversal-not-proven-before-supersession', scenario);
+    }
+  }
+});
+
 test('an authorized HAM reversal stays authorized after the branch is rebased onto a newer base', async () => {
   const { evidence, result } = await collect();
   assert.equal(evidence.reversalAuthorizations.length, 1);

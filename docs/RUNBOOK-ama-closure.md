@@ -1909,6 +1909,17 @@ The collector verifies authoritative
 reviewer identity, review/commit ancestry inside the protected closure, live HAM
 commit patches, and File/Lines coverage of each reverted base line. Base coordinates
 are projected into the reviewed and commit-parent heads, accounting for line shifts.
+API-published HAM commits with GitHub's `web-flow` committer retain the shared
+identity requirement: a linked HAM author and `verified: true` / `reason: valid`.
+The bounded history reader fetches compact verification separately for rename,
+current reversal, and historical reversal-snapshot proofs, binding it to the
+same immutable commit SHA. Missing, invalid, mismatched, or unreadable verification
+cannot authorize a reversal; signatures never replace review or line coverage.
+Hydrated commit reads (including failures) are shared within one history
+evaluation, so multi-file rename scans fetch verification once per commit.
+A fresh evaluation reads verification again. A verification SHA mismatch records
+`commit-provenance` in `rejectedReversalAuthorizations`, including for historical
+snapshots; an otherwise unclassified verification read error records `unverifiable`.
 Equal-length replacements map by line position; unequal-length replacements and
 insertions require the finding to cover the entire projected span. A one-line
 finding cannot waive the uncited remainder of a contiguous author hunk.

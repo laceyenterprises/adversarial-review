@@ -7,6 +7,7 @@ import * as gates from '../src/ama/operator-label-gates.mjs';
 import { consumeNextFollowUpJob } from '../src/follow-up-remediation.mjs';
 import { createFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { applyLivePackCrossEditFindings, evaluateLivePackCrossEdits, formatLivePackRemediationContext } from '../src/live-pack-cross-edit.mjs';
+import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
 import { buildRemediationPrompt } from '../src/remediation-prompt-builder.mjs';
 
 const head = 'a'.repeat(40);
@@ -78,4 +79,37 @@ test('REMLABEL-01: live-pack guidance never directs restoration to base', () => 
   assert.doesNotMatch(context, /addressed by restoring|restoring.*is allowed/i);
   assert.match(context, /never revert/);
   assert.doesNotMatch(gatedBody, /Restore these files/);
+});
+
+
+test('REMLABEL-01: every staged remediator uses the guarded publisher and bounded lease replay', () => {
+  for (const currentRound of [0, 1, 2]) {
+    const prompt = buildRemediationPrompt({ jobId: 'sample-job', repo: 'sample/repo', prNumber: 1,
+      baseBranch: 'main', branch: 'topic', revisionRef: head, reviewBody: gatedBody,
+      remediationPlan: { currentRound, maxRounds: 3 } }, { remediationReplyPath: '/tmp/sample/reply.json' });
+    assert.match(prompt, /remediation-publish\.mjs/);
+    assert.match(prompt, /--previous-head 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'/);
+    assert.match(prompt, /--expected-remote-sha <fresh-remote-sha>/);
+    assert.match(prompt, /Retry (?:that stale-head replay )?at most three times/);
+    assert.match(prompt, /diff-guard refusal is terminal/);
+    assert.doesNotMatch(prompt, /git push --force-with-lease/);
+  }
+});
+
+
+test('REMLABEL-01: closer classification uses the current review body after an operator hold', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-settled-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = { repo: 'sample/repo', prNumber: 1, currentHeadSha: head,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: head },
+    latestJobFinder: () => ({ status: 'stopped', revisionRef: head, reviewBody: gatedBody }),
+    capturedReviewerPassFinder: () => null };
+  const held = resolveSettledReviewVerdict(rootDir, { ...args, liveHeadReview: { resolved: true, bodies: [gatedBody] } });
+  assert.equal(held.remediationPending, false);
+  assert.equal(held.operatorLabelFindings.allGated, true);
+  const fresh = resolveSettledReviewVerdict(rootDir, { ...args, liveHeadReview: { resolved: true, bodies: [clean] } });
+  assert.equal(fresh.operatorLabelFindings.allGated, false);
+  assert.equal(fresh.blockingFindingCount, 0);
+  const unknown = resolveSettledReviewVerdict(rootDir, { ...args, liveHeadReview: { resolved: false } });
+  assert.equal(unknown.operatorLabelFindings, null);
 });

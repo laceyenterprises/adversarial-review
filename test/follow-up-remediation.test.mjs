@@ -810,7 +810,7 @@ test('buildRemediationPrompt treats moved PR heads as bounded optimistic-concurr
     });
     assert.match(
       prompt,
-      /Treat a moved remote PR branch as an optimistic-concurrency miss, not as an immediate human handoff\./,
+      /Treat a moved remote PR branch as an optimistic-concurrency miss\./,
       `full ${stage} prompt must retry moved PR heads before handoff`,
     );
     assert.match(
@@ -825,12 +825,12 @@ test('buildRemediationPrompt treats moved PR heads as bounded optimistic-concurr
     );
     assert.match(
       prompt,
-      /--force-with-lease=refs\/heads\/<this-pr-branch>:<fresh-remote-sha>/,
+      /--expected-remote-sha <fresh-remote-sha>/,
       `full ${stage} prompt must use lease-guarded publish after replay`,
     );
     assert.match(
       prompt,
-      /Retry this stale-head replay at most three times/,
+      /Retry at most three times/,
       `full ${stage} prompt must bound stale-head retries`,
     );
     assert.match(
@@ -861,7 +861,7 @@ test('remediator stage prompt snippets include the stale-head publish replay con
     assert.match(prompt, /Publish contract — moved PR heads are normal optimistic concurrency/);
     assert.match(prompt, /git format-patch --stdout "\$REMEDIATION_BASE_HEAD"\.\.HEAD/);
     assert.match(prompt, /git am --3way/);
-    assert.match(prompt, /--force-with-lease=refs\/heads\/<this-pr-branch>:<fresh-remote-sha>/);
+    assert.match(prompt, /--expected-remote-sha <fresh-remote-sha>/);
     assert.match(prompt, /Retry that stale-head replay at most three times/);
     assert.match(prompt, /Use `operationalBlockers\[\]` with `title: "stale-pr-head"` only after/);
     assert.doesNotMatch(prompt, /must stop with `operationalBlockers\[\]: \[\{ title: "stale-pr-head"/);
@@ -4265,7 +4265,8 @@ test('buildRemediationPrompt defaults the provenance trailer to codex-remediatio
   });
   assert.match(prompt, /WORKER_TRAILER_CLASS=codex-remediation/);
   assert.doesNotMatch(prompt, /(?:^|\s)WORKER_CLASS=/);
-  assert.match(prompt, /git push.*otherwise|otherwise.*git push/);
+  assert.match(prompt, /remediation-publish\.mjs/);
+  assert.match(prompt, /Never use a direct push/);
 });
 
 test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overrides', () => {

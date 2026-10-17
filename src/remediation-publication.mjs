@@ -8,7 +8,8 @@ const SHA = /^[a-f0-9]{40}$/i;
 export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
   branch, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
   pushCommand = 'git-safe', env = process.env } = {}) {
-  if (!SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) {
+  if (typeof baseBranch !== 'string' || !baseBranch || typeof branch !== 'string' || !branch
+    || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) {
     throw Object.assign(new Error('Remediation publication requires the previous head and exact remote lease.'), { code: 'remediation-publication-unproven' });
   }
   const git = async args => (await execFileImpl('git', ['--no-replace-objects', '-C', workspaceDir, ...args],

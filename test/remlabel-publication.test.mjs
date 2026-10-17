@@ -50,6 +50,20 @@ for (const unrelatedFile of [false, true]) {
   });
 }
 
+test('REMLABEL-01: publication CLI persists the refusal before exiting with the old remote head intact', async t => {
+  const f = fixture(t);
+  writeFileSync(join(f.work, 'feature.txt'), 'base\n');
+  f.git('add', 'feature.txt'); f.git('commit', '-m', 'Restore sample files');
+  const failurePath = join(f.work, 'publication-failure.json');
+  await assert.rejects(execAsync(process.execPath, [new URL('../bin/remediation-publish.mjs', import.meta.url).pathname,
+    '--base-branch', 'main', '--branch', 'topic', '--previous-head', f.previousHead, '--failure-path', failurePath],
+  { cwd: f.work, env }), error => /remediation-empties-pr-diff/.test(error.stderr));
+  const failure = JSON.parse(readFileSync(failurePath));
+  assert.equal(failure.code, 'remediation-empties-pr-diff');
+  assert.equal(failure.previousHead, f.previousHead);
+  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/topic').split('\t')[0], f.previousHead);
+});
+
 test('REMLABEL-01: a real remediation preserving a changed file publishes normally', async t => {
   const f = fixture(t);
   writeFileSync(join(f.work, 'feature.txt'), 'corrected feature\n');
@@ -88,8 +102,8 @@ test('REMLABEL-01: refusal artifact marks a remediation round failed without req
   const rootDir = mkdtempSync(join(tmpdir(), 'remlabel-failed-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const priorEnv = { HQ_ROOT: process.env.HQ_ROOT, ADV_WITH_HQ_INTEGRATION: process.env.ADV_WITH_HQ_INTEGRATION,
-    ADV_REPLIES_ROOT: process.env.ADV_REPLIES_ROOT, ADV_REMEDIATION_WORKSPACE_ROOT: process.env.ADV_REMEDIATION_WORKSPACE_ROOT };
-  delete process.env.HQ_ROOT; delete process.env.ADV_WITH_HQ_INTEGRATION; delete process.env.ADV_REMEDIATION_WORKSPACE_ROOT;
+    ADV_REPLIES_ROOT: process.env.ADV_REPLIES_ROOT, ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT: process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT };
+  delete process.env.HQ_ROOT; delete process.env.ADV_WITH_HQ_INTEGRATION; delete process.env.ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT;
   process.env.ADV_REPLIES_ROOT = join(rootDir, 'replies');
   t.after(() => { for (const [key, value] of Object.entries(priorEnv)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -120,4 +134,13 @@ test('REMLABEL-01: refusal artifact marks a remediation round failed without req
   assert.equal(result.job.failure.code, 'remediation-empties-pr-diff');
   assert.equal(reviews, 0);
   assert.equal(JSON.parse(readFileSync(result.jobPath)).status, 'failed');
+});
+
+
+test('REMLABEL-01: missing branch metadata refuses publication before any Git operation', async () => {
+  for (const metadata of [{ baseBranch: 'main' }, { branch: 'topic' }]) {
+    await assert.rejects(publishRemediation({ ...metadata, previousHead: 'a'.repeat(40),
+      execFileImpl: async () => { assert.fail('invalid metadata must not reach Git'); } }),
+    { code: 'remediation-publication-unproven' });
+  }
 });

@@ -1914,7 +1914,8 @@ export async function processReviewSubject(entry, ctx) {
       const blockedClaudeWorkerClasses = () => readCorporateClaudeQuotaCooldown(ROOT)
         ? ['claude-reviewer-corp'] : [];
       const refreshClaudeAccount = (selection = afhGrounding?.claudeAccountSelection) => {
-        if (!blockedClaudeWorkerClasses().length || selection?.provider !== 'claude-code-corp') return selection;
+        if (!blockedClaudeWorkerClasses().length) return selection;
+        if (selection?.provider && selection.provider !== 'claude-code-corp') return selection;
         if (afhGrounding?.staleIfError || !afhGrounding?.claudeAccountSnapshot) {
           return { ...selection, hold: true, reason: 'claude-account-evidence-unknown' };
         }

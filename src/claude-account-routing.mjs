@@ -35,7 +35,7 @@ export function selectClaudeAccountLaneFromSnapshot(payload, { workerClass, mode
   if (!corporate) return null; // Never substitute a builder for a privileged lane.
   const hasCorporate = statuses.some(row => row.provider === 'anthropic' && row.authPath === 'oauth-corp');
   if (!hasCorporate && !payload?.brokerAuth?.provider_states?.['claude-code-corp']
-    && workerClass !== corporate) return null;
+    && workerClass !== corporate && !blockedWorkerClasses.includes(corporate)) return null;
   for (const [lane, authPath, provider] of [
     [corporate, 'oauth-corp', 'claude-code-corp'],
     [primary, 'oauth', 'claude-code'],

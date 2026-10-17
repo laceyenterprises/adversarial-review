@@ -244,3 +244,10 @@ test('typed corporate spawn exhaustion persists an account-local hold until rese
     assert.equal(fallback.provider, 'claude-code');
   } finally { console.log = originalLog; rmSync(root, { recursive: true, force: true }); }
 });
+
+test('local corporate exhaustion still requires independent primary evidence on a legacy projection', () => {
+  const result = selectClaudeAccountLane(JSON.stringify({ providerStatuses: [
+    { provider: 'anthropic', authPath: 'oauth', state: 'ok' },
+  ] }), { workerClass: 'claude-reviewer', blockedWorkerClasses: ['claude-reviewer-corp'] });
+  assert.equal(result?.hold, true);
+});

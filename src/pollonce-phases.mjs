@@ -2059,6 +2059,7 @@ export async function processReviewSubject(entry, ctx) {
             authorClass: reviewerAuthorClass,
           });
           if (appliedFallback.applied) {
+            const previousRoute = route;
             // Pressure is only a snapshot. Another PR in this poll can consume
             // the last unit before this one commits its fallback route.
             const burstAdmitted = rwfDecision.reason !== 'burst-lease-pressure'
@@ -2075,7 +2076,6 @@ export async function processReviewSubject(entry, ctx) {
                 'reason=burst-review-cap-exhausted'
               );
             } else {
-              const previousRoute = route;
               route = appliedFallback.route;
               // Charge the depth lever's budget/cost ledger only for a spill that
               // really landed on a route — the operator is owed the number of

@@ -242,7 +242,7 @@
         {"id": "hammer-dispatch.18","from": "dispatching","to": "dispatch-configuration-refused","trigger": "repo_unregistered: release pending lease and page repository once","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.19","from": "dispatch-deferred-transient","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.20","from": "dispatch-failed","to": "dispatch-configuration-refused","trigger": "reclassify legacy configuration refusal","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.21","from": "dispatch-configuration-refused","to": "dispatching","trigger": "normal backoff due; re-probe dispatch; admission clears blocker","codeSource": "src/ama/dispatch-closer.mjs"}
+        {"id": "hammer-dispatch.21","from": "dispatch-configuration-refused","to": "dispatching","trigger": "normal backoff due, re-probe dispatch, admission clears blocker","codeSource": "src/ama/dispatch-closer.mjs"}
       ]
     }
   ],

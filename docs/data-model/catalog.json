@@ -622,7 +622,9 @@
       "waitTable": "waits_by_class",
       "waitColumns": ["head", "class", "started", "reason", "paged"],
       "waitPrimaryKey": ["head", "class"],
-      "waitClasses": ["primary-change", "bounded-wait"],
+      "waitClasses": ["primary-change", "bounded-wait", "final-round"],
+      "finalRoundReceiptScope": "per PR across heads; independent of primary-change",
+      "waitProgress": "launch/head progress restarts the deadline before stall evaluation",
       "legacyWaitMigration": "none; one-time deadline and page-reservation reset"
     },
     {

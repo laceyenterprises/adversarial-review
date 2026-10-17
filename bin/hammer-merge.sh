@@ -126,6 +126,7 @@ ham_append_terminal_audit() {
 # FINALCLOSE-01: context/provenance reads can fail before merge admission.
 if [ "${1:-}" = --history-read-abort ]; then
   ham_append_terminal_audit failed-without-merge history-read-failed || true
+  rm -f "$HAM_MERGE_STDOUT" "$HAM_MERGE_STDERR" "$HAM_GATE_JSON" "$HAM_POST_MERGE_JSON" "$HAM_POST_MERGE_STDERR"
   ham_mark_merge_lease_retryable_abort history-read-failed
   ham_release_merge_lease
   return 1

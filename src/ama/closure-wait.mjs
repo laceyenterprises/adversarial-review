@@ -39,8 +39,8 @@ export async function observeClosureWait({ rootDir, repo, prNumber, headSha, rea
       db.prepare('INSERT OR IGNORE INTO waits_by_class(head, class, started, reason) VALUES (?, ?, ?, ?)').run(headSha, reasonClass, Number.isFinite(startedAt) ? Math.min(now, startedAt) : now, reason);
       db.prepare('UPDATE waits_by_class SET reason=? WHERE head=? AND class=?').run(reason, headSha, reasonClass);
       const row = db.prepare('SELECT * FROM waits_by_class WHERE head=? AND class=?').get(headSha, reasonClass);
-      const exhausted = immediate || now - row.started >= boundMs;
       if (progress) db.prepare('UPDATE waits_by_class SET started=? WHERE head=? AND class=?').run(now, headSha, reasonClass);
+      const exhausted = immediate || (!progress && now - row.started >= boundMs);
       const notify = exhausted && db.prepare('UPDATE waits_by_class SET paged=1 WHERE head=? AND class=? AND paged=0').run(headSha, reasonClass).changes === 1;
       return { exhausted, notify, startedAt: progress ? now : row.started, boundedMs: boundMs };
     }).immediate();

@@ -1113,7 +1113,8 @@ async function dispatchAmaClosureFor({
         || Date.parse(reviewStateRow?.posted_at || '') };
   }
   const observeWait = args => observeClosureWaitImpl({
-    ...(finalRoundSink?.value ? { waitClass: 'final-round', startedAt: finalRoundSink.value.startedAt } : {}),
+    ...(finalRoundSink?.value && args.immediate !== true
+      ? { waitClass: 'final-round', startedAt: finalRoundSink.value.startedAt } : {}),
     ...args,
   });
   if (finalRoundDispatchOnly) {

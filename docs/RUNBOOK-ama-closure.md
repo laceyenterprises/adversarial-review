@@ -3411,6 +3411,9 @@ wait records the current head and latest blocker and pages after thirty minutes
 without launch or head progress. Cap exhaustion shares that receipt across head
 changes, so subsequent observations do not page again. Paging does
 not grant merge authority or suppress remaining retry budget.
+Immediate primary-change alerts use their own receipt and cannot consume this
+final-round stall receipt. A successful launch resets the wait before checking
+the stall deadline, including when dispatch succeeds on the deadline tick.
 
 After deploy, SRE owns these checks:
 

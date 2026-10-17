@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord, amaCloserDispatchFilePath, _resetHammerRetryCapAlertDebounceForTests } from '../src/ama/dispatch-closer.mjs';
@@ -148,6 +148,47 @@ test('FINALCLOSE-01 final-round wait pages once at thirty minutes despite changi
   assert.match(pages[0], /history-read-failed/);
 });
 
+for (const path of ['daemon', 'closer']) {
+  test(`FINALCLOSE-01 ${path} primary-change page leaves the final-round stall receipt available`, async t => {
+    const rootDir = finalRound(t), pages = [];
+    let clock = Date.parse(started) + 60000;
+    const observe = args => observeClosureWait({ ...args, now: clock,
+      pageImpl: async (_text, options) => pages.push(options.dedupKey) });
+    const refusal = { dispatched: false, skipMergeAgent: true, needsOperator: true,
+      reason: path === 'daemon' ? 'primary-change-needs-operator' : 'primary-change-repair-required',
+      reasons: ['primary-change-reverted'],
+      missingEvidence: { path: 'src/fixture.mjs', summary: 'missing authorization' } };
+    const result = await maybeDispatchAmaClosureFor({ rootDir, repoPath: repo, prNumber,
+      currentRevisionRef: headSha, labelNames: [], now: () => clock,
+      reviewStateRow: { repo, pr_number: prNumber, review_status: 'posted', reviewer: 'claude',
+        reviewer_head_sha: reviewed, last_verdict: 'Comment only', posted_at: started },
+      candidate: { headSha, prState: 'open', riskClass: 'low', prAuthor: 'synthetic-builder',
+        mergeable: 'MERGEABLE', statusCheckRollup: [{ name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }] },
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: true }) }),
+      resolveAmaHammerDispatchModeImpl: () => 'inline',
+      fetchLatestHeadReviewBodiesImpl: async () => [body],
+      proveCloserAuthoredStaleHeadImpl: async () => ({ proven: false }),
+      runDaemonCleanMergeAttemptImpl: async () => path === 'daemon' ? refusal : { reason: 'not-eligible' },
+      maybeDispatchAmaCloserImpl: async () => refusal,
+      recoverStrandedCloserHeadImpl: async () => null,
+      observeClosureWaitImpl: observe,
+      logger: { log() {}, warn() {} },
+    });
+    assert.equal(result.reason, refusal.reason);
+    assert.deepEqual(pages, [`hamclose:${repo}:${prNumber}:${headSha}:primary-change`]);
+    clock = Date.parse(started) + 1800000;
+    const wait = await observe({ rootDir, repo, prNumber, headSha,
+      waitClass: 'final-round', reason: 'hammer-stalled' });
+    assert.equal(wait.notify, true);
+    assert.deepEqual(pages, [
+      `hamclose:${repo}:${prNumber}:${headSha}:primary-change`,
+      `hamclose:${repo}:${prNumber}:${headSha}:final-round`,
+    ]);
+    assert.equal((await observe({ rootDir, repo, prNumber, headSha,
+      waitClass: 'final-round', reason: 'hammer-still-stalled' })).notify, false);
+  });
+}
+
 for (const handoffHead of [headSha, 'c'.repeat(40)]) {
   test(`FINALCLOSE-01 interrupted handoff admits only its exact final-round head: ${handoffHead === headSha}`, async t => {
     const rootDir = finalRound(t);
@@ -224,6 +265,7 @@ test('FINALCLOSE-01 provenance read abort writes its terminal audit and releases
   const attempt = JSON.parse(readFileSync(captured));
   assert.equal(attempt.reason, 'history-read-failed');
   assert.equal(attempt.historyReadError, 'synthetic compare API timeout');
+  assert.deepEqual(readdirSync(runDir), [], 'history-read abort removes all merge scratch files');
 });
 
 test('FINALCLOSE-01 dispatch-only closer admits a stale final head and does not resolve merge evidence', async t => {
@@ -260,14 +302,16 @@ test('FINALCLOSE-01 head progress restarts the wait and carries the once-only pa
 });
 
 
-test('FINALCLOSE-01 dispatch after an elapsed stall still pages, then records launch progress', async t => {
+test('FINALCLOSE-01 launch progress at the stall deadline restarts the wait without paging', async t => {
   const rootDir = finalRound(t), pages = [];
   const args = { rootDir, repo, prNumber, headSha, startedAt: 0, waitClass: 'final-round',
     reason: 'synthetic blocker', pageImpl: async text => pages.push(text) };
   await observeClosureWait({ ...args, now: 0 });
-  assert.equal((await observeClosureWait({ ...args, now: 1800000, progress: true })).exhausted, true);
-  assert.equal(pages.length, 1);
+  assert.equal((await observeClosureWait({ ...args, now: 1800000, progress: true })).exhausted, false);
+  assert.equal(pages.length, 0);
   assert.equal((await observeClosureWait({ ...args, now: 1800001 })).exhausted, false);
+  assert.equal((await observeClosureWait({ ...args, now: 3600000 })).exhausted, true);
+  assert.equal(pages.length, 1);
 });
 
 

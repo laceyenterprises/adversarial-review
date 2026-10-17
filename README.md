@@ -825,6 +825,9 @@ remain authoritative; recovery waits for green CI and resolved mergeability
 before a daemon merge, and red CI still routes to bounded repair.
 Retryable UNKNOWN deferral requires an open PR at the validated head; moved
 heads and closed PRs retain their terminal refusal.
+Final-round closure stall receipts remain independent of immediate primary-change
+alerts; successful launch/head progress restarts the stall deadline. See the
+[closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
 README equivalence; mutation tests alter both a state and a CAS edge in source.
 

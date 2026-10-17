@@ -16,8 +16,8 @@ daemon owns these databases. `CREATE TABLE IF NOT EXISTS` initializes
 | Column | SQLite definition | Meaning |
 | --- | --- | --- |
 | `head` | `TEXT` | Exact PR head SHA. |
-| `class` | `TEXT` | `primary-change` for immediate pages, `bounded-wait` otherwise; separate deadlines and reservations per head/class. |
-| `started` | `INTEGER NOT NULL` | First observation in epoch milliseconds. |
+| `class` | `TEXT` | `primary-change` for immediate primary-change pages, `final-round` for final-round stalls and cap exhaustion, `bounded-wait` for other waits. Primary-change receipts remain independent of final-round receipts. |
+| `started` | `INTEGER NOT NULL` | First observation or latest launch/head progress in epoch milliseconds. |
 | `reason` | `TEXT` | Latest wait reason, refreshed on every observation. |
 | `paged` | `INTEGER DEFAULT 0` | Exhaustion page reservation: 0 available, 1 reserved/sent. |
 
@@ -27,7 +27,15 @@ An immediate transaction inserts the head/class with `INSERT OR IGNORE`, updates
 reason and compares elapsed time against the wait bound. Later ticks, changed
 reasons and process restarts retain the original `started`. A new head starts
 its own boundary for each class. Immediate primary-change observations exhaust
-immediately without starting or consuming the bounded-wait clock or page.
+immediately without starting or consuming the bounded-wait or final-round clock or page.
+Final-round observations can seed the deadline from completion of the final
+remediation push. Launch progress resets the deadline before exhaustion is
+evaluated, so a successful launch at the deadline does not emit a stall page.
+Explicit immediate observations still page regardless of launch progress.
+For `final-round`, head movement replaces prior class rows and restarts the
+deadline while carrying the maximum `paged` value forward. Final-round stalls
+and cap exhaustion therefore share one receipt per PR, including across heads;
+an immediate primary-change alert cannot consume it.
 The default bound is 30 minutes; a finite positive
 `AMA_CLOSURE_WAIT_BOUND_MS` overrides it. Invalid or nonpositive values retain
 the default. Observations return a 30-second `retryAfterMs`.

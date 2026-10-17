@@ -180,8 +180,8 @@ export function createHistoryReader(options = {}) {
   };
   // Cost/ancestry consumers need metadata, not reconstructed per-file patches.
   reader.metadata = path => json(path, '{status, total_commits, merge_base_commit: {sha: .merge_base_commit.sha}}');
-  // Rename proof alone needs web-flow verification. Keep it separate from
-  // legacy reversal evidence so this exception widens only the rename shape.
+  // Provenance proofs request compact web-flow verification separately; avoid
+  // buffering signature payloads in every history and commit-file page.
   reader.commitVerification = path => json(path, '{sha, verification: .commit.verification}');
   reader.persistPrimaryChange = true;
   return reader;

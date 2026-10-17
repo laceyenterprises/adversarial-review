@@ -105,3 +105,75 @@ test('typed corporate Codex exhaustion persists before settlement and permits pe
     assert.equal(selectCodexReviewerAccount(codexAccountFixture(), { corporateExhausted: true }).provider, 'codex');
   } finally { console.log = originalLog; rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test('AFH rollback retains corporate account admission without enabling model fallback', async () => {
+  const { readAfhReviewerGrounding } = await import('../src/afh-reviewer-fallback.mjs');
+  let reads = 0;
+  const grounding = await readAfhReviewerGrounding({
+    env: { ADVERSARIAL_AFH_REVIEWER_FALLBACK: '0' }, includeFleetQuotaStatus: true,
+    claudeRuntimeProbeUid: 1234, claudeRuntimeProbeImpl: () => assert.fail('AFH rollback must not probe model runtime'),
+    execFileImpl: async () => { reads++; return { stdout: JSON.stringify(codexAccountFixture()) }; },
+  });
+  assert.equal(reads, 1);
+  const route = applyAfhReviewerFallback({ builderClass: 'claude-code',
+    baseRoute: REVIEWER_ROUTE_BY_MODEL.codex, grounding, geminiReviewerMode: 'always-on' });
+  assert.equal(route.reviewerModel, 'codex');
+  assert.equal(route.codexBrokerProvider, 'codex-corp');
+  assert.equal(route.afhReviewerFallback, undefined);
+});
+
+test('worker spills check the pinned reviewer model on the corporate account', async () => {
+  const fixture = codexAccountFixture();
+  fixture.providerStatuses[1].models = [{ model: 'synthetic-model', state: 'exhausted' }];
+  const decision = await resolveReviewerWorkerClassWithFallback({ primary: 'gemini', authorClass: 'claude-code',
+    fallbackWorkerClasses: ['codex'], depthPressure: { engaged: true, reason: 'review-max-wait' },
+    env: { GH_CODEX_REVIEWER_TOKEN: 'synthetic-token', CODEX_MODEL_ID: 'synthetic-model' },
+    execFileImpl: async () => ({ stdout: JSON.stringify(fixture) }) });
+  assert.equal(decision.codexBrokerProvider, 'codex');
+});
+
+
+for (const kind of ['execution', 'timeout']) test(`${kind} fallback selects corporate Codex and skips stale corporate evidence`, async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { recordCascadeFailure } = await import('../src/reviewer-cascade.mjs');
+  const { selectReviewerRouteForAttempt } = await import('../src/reviewer-route-selection.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'codex-review-fallback-'));
+  try {
+    if (kind === 'timeout') recordCascadeFailure(root, { repo: 'sample/project', prNumber: 1,
+      failureClass: 'reviewer-timeout', reviewerModel: 'gemini', failedAt: new Date().toISOString() });
+    const fixture = codexAccountFixture();
+    const select = () => selectReviewerRouteForAttempt({ rootDir: root, repoPath: 'sample/project', prNumber: 1,
+      subject: { builderClass: 'claude-code' }, baseRoute: REVIEWER_ROUTE_BY_MODEL.gemini,
+      headSha: 'synthetic-head', currentRow: { review_status: 'failed', reviewer: 'gemini',
+        reviewer_head_sha: 'synthetic-head', failure_message: '[quota-exhausted] synthetic exhaustion', infra_auto_recover_attempts: 1 },
+      env: kind === 'timeout' ? { AGENT_OS_REVIEWER_EXEC_FALLBACK_THRESHOLD: '0',
+        ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD: '1', ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL: 'codex' } : {},
+      afhGrounding: groundingFor(fixture) });
+    assert.equal(select().reviewerModel, 'codex');
+    assert.equal(select().codexBrokerProvider, 'codex-corp');
+    fixture.providerStatuses[1].cachedEvidenceStale = true;
+    assert.equal(select().reviewerModel, 'gemini');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('selected corporate cap at spawn preflight persists a cooldown without launching', async () => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { spawnReviewer } = await import('../src/reviewer-spawn-settle.mjs');
+  const { readCorporateCodexQuotaCooldown } = await import('../src/codex-account-routing.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'codex-review-preflight-'));
+  try {
+    const result = await spawnReviewer({ rootDir: root, repo: 'sample/project', prNumber: 1,
+      reviewerModel: 'codex', builderTag: 'claude-code', codexBrokerProvider: 'codex-corp', quotaCheckEnv: {},
+      readReviewerQuotaDecisionImpl: async () => ({ available: false, capped: true, state: 'exhausted' }),
+      reviewerRuntimeAdapterOverride: { spawnReviewer() { assert.fail('capped account cannot launch'); } },
+      beginReviewerPassImpl() {}, completeReviewerPassImpl() {},
+    });
+    assert.equal(result.failureClass, 'quota-exhausted');
+    assert.ok(readCorporateCodexQuotaCooldown(root, { env: {} }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

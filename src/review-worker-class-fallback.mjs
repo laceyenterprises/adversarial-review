@@ -525,7 +525,7 @@ export async function resolveReviewerWorkerClassWithFallback({
   let primaryAvail;
   try {
     codexAccountSelection = selectCodexReviewerAccount(parseHqFleetQuotaSnapshot(stdout), {
-      model: resolveRemediationModel('codex-reviewer', { env, fallbackModel: null }).resolvedModel,
+      model: resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel,
       corporateExhausted: blockedCodexCorporate,
     });
     claudeAccountSelection = selectClaudeAccountLane(stdout, {

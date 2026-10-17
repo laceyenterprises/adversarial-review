@@ -1,3 +1,4 @@
+import { codexAccountFixture } from './helpers/codex-account-fixture.mjs';
 import { claudeAccountFixture, fleetStatusWithClaudeAccountEvidence } from './helpers/claude-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -54,7 +55,11 @@ exit 1
   const hqPath = path.join(tmp, 'fixture-quota-hq');
   writeFileSync(hqPath, `#!/usr/bin/env node
 if (process.argv.slice(2).join(' ') !== 'fleet quota status --json') process.exit(1);
-process.stdout.write(${JSON.stringify(JSON.stringify(claudeAccountFixture()))});
+process.stdout.write(${JSON.stringify(JSON.stringify({ ...claudeAccountFixture(),
+  providerStatuses: [...claudeAccountFixture().providerStatuses.filter(row => row.provider !== 'openai'), ...codexAccountFixture().providerStatuses],
+  reserveFloors: { ...claudeAccountFixture().reserveFloors, ...codexAccountFixture().reserveFloors },
+  brokerAuth: { provider_states: { ...claudeAccountFixture().brokerAuth.provider_states, ...codexAccountFixture().brokerAuth.provider_states } },
+}))});
 `);
   chmodSync(hqPath, 0o755);
   return { PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`, AGENT_OS_HQ_BIN: hqPath };
@@ -1682,8 +1687,9 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
 
     assert.equal(summary.pollError, '2 reviewer dispatch tasks failed');
     assert.equal(summary.reviewerSpawns.length, 2, output);
-    assert.equal(summary.rows['101'].codex_broker_provider, 'codex');
-    assert.equal(summary.rows['102'].codex_broker_provider, 'codex');
+    assert.equal(summary.rows['101'].codex_broker_provider, 'codex-corp');
+    assert.match(output, /codex_account=corporate/);
+    assert.equal(summary.rows['102'].codex_broker_provider, 'codex-corp');
     assert.equal(summary.reviewerPassRows.length, 2);
     assert.ok(summary.reviewerPassRows.every((row) => row.status === 'failed'));
     assert.ok(summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT));

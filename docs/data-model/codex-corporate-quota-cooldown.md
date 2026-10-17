@@ -5,8 +5,9 @@ Source: `src/codex-account-routing.mjs`, `src/reviewer-spawn-settle.mjs`, and
 
 `data/codex-corporate-quota-cooldown.json` lives under the resolved review state
 directory and contains `{ "resetAt": "<ISO timestamp>" }`. A typed corporate
-Codex reviewer runtime `quota-exhausted` result writes it atomically before
-reviewer capacity is released. Other accounts and failure classes do not write it.
+Codex reviewer runtime `quota-exhausted` result, or an authoritative cap from
+selected-account spawn preflight, writes it atomically before reviewer capacity
+is released. Other accounts and failure classes do not write it.
 
 A future reset blocks corporate reviewer admission and permits personal only
 with independent fresh quota and broker evidence. Missing, unreadable, malformed

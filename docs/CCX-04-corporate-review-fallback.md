@@ -25,7 +25,8 @@ Codex is eligible only after corporate exhaustion or explicit broker unavailabil
 and requires its own quota and broker evidence. Stale or unknown corporate evidence
 holds instead of spending personal quota. Legacy AFH projections retain their
 provider classification; final watcher admission still requires account evidence.
-Every Codex spawn logs `codex_account=corporate|primary`.
+Every Codex spawn logs `codex_account=corporate|primary`. Disabling the AFH model
+hop retains the watcher’s shared quota read and account admission.
 `CODEX_BROKER_PROVIDER` reaches the reviewer child and every per-worker auth-sync
 request. Corporate auth starts empty, requires a successful corporate broker
 mint, and fails closed instead of copying or falling back to primary tokens.

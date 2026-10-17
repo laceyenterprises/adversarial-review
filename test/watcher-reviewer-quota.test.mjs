@@ -1,3 +1,4 @@
+import { fleetStatusWithCodexAccountEvidence } from './helpers/codex-account-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createWatcherReviewerQuotaPollFactory } from '../src/watcher-reviewer-quota.mjs';
@@ -5,11 +6,11 @@ import { readAfhReviewerGrounding, DEFAULT_AFH_STALE_IF_ERROR_MS } from '../src/
 import { FLEET_QUOTA_STATUS_TIMEOUT_MS, resolveReviewerWorkerClassWithFallback,
   applyReviewerWorkerClassFallbackToRoute } from '../src/review-worker-class-fallback.mjs';
 
-const stdout = JSON.stringify({ providerStatuses: [
+const stdout = JSON.stringify(fleetStatusWithCodexAccountEvidence({ providerStatuses: [
   { provider: 'openai', authPath: 'oauth', state: 'ok' },
   { provider: 'anthropic', authPath: 'oauth', state: 'exhausted' },
   { provider: 'google', authPath: 'oauth', state: 'exhausted' },
-] });
+] }));
 const quiet = { log() {}, warn() {}, error() {} };
 
 function fixture(quotaStdout = stdout, failure = new Error('synthetic quota read failure')) {

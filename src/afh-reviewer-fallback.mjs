@@ -454,7 +454,10 @@ export async function readAfhReviewerGrounding({
   claudeRuntimeProbeTimeoutMs = CLAUDE_REVIEWER_RUNTIME_PROBE_TIMEOUT_MS,
   claudeRuntimeProbeRetryDelaysMs = CLAUDE_REVIEWER_RUNTIME_PROBE_RETRY_DELAYS_MS,
 } = {}) {
-  if (afhReviewerFallbackDisabled(env)) {
+  const routingDisabled = afhReviewerFallbackDisabled(env);
+  // Standalone AFH rollback remains a no-I/O operation. Watcher callers also
+  // request shared quota evidence, which account admission still needs.
+  if (routingDisabled && !includeFleetQuotaStatus) {
     return unavailableGrounding('afh-reviewer-fallback-disabled');
   }
   const resolvedHqPath = hqPath || resolveHqPath(env);
@@ -491,8 +494,10 @@ export async function readAfhReviewerGrounding({
   // terminal snapshot so every probe outcome retains the same fleet result.
   const fleetQuotaStatus = includeFleetQuotaStatus ? Object.freeze(snapshot.available
     ? { stdout } : { error: true, cause: quotaError, errorMessage: snapshot.error || snapshot.reason }) : null;
-  const finalizeSnapshot = result => fleetQuotaStatus
-    ? Object.freeze({ ...result, fleetQuotaStatus }) : result;
+  const finalizeSnapshot = result => Object.freeze({ ...result,
+    ...(routingDisabled ? { reason: 'afh-reviewer-fallback-disabled' } : {}),
+    ...(fleetQuotaStatus ? { fleetQuotaStatus } : {}),
+  });
   const runtimeProbeUid = normalizeClaudeRuntimeProbeUid(claudeRuntimeProbeUid);
   const probeImpl = runtimeProbeUid === null
     ? null
@@ -501,7 +506,7 @@ export async function readAfhReviewerGrounding({
       : shouldAutoProbeClaudeRuntime({ execFileImpl, env, uid: runtimeProbeUid })
         ? probeClaudeReviewerRuntime
         : null;
-  if (!probeImpl) return finalizeSnapshot(snapshot);
+  if (routingDisabled || !probeImpl) return finalizeSnapshot(snapshot);
   try {
     const runtimeStatus = await probeImpl({
       execFileImpl,
@@ -837,11 +842,13 @@ export function afhReviewerFallbackDecision({
   });
 
   if (!baseRoute || baseRoute.configBroken) return notApplied('no-route');
-  if (grounding?.reason === 'afh-reviewer-fallback-disabled') {
-    return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled');
-  }
   const currentModel = normalizeReviewerModel(baseRoute.reviewerModel);
   if (!currentModel) return notApplied('unknown-reviewer-model');
+  if (grounding?.reason === 'afh-reviewer-fallback-disabled') {
+    return notApplied('afh-grounding-unavailable:afh-reviewer-fallback-disabled', {
+      primary: currentModel === 'codex' ? reviewerModelGrounding(grounding, currentModel) : null,
+    });
+  }
   // An explicit operator reviewer pin outranks the AFH degradation path, exactly
   // as it outranks the gemini default layer. The grounded-pin case is logged by
   // the caller so the operator can see why reviews stopped.

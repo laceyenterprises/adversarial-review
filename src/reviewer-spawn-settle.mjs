@@ -232,7 +232,7 @@ async function readReviewerQuotaDecision({
         ? resolveRemediationModel('codex-reviewer', { env, pin: env.CODEX_MODEL_ID || null, fallbackModel: null }).resolvedModel
         : null,
     });
-    return { available: !cap.capped, capped: cap.capped, state: cap.state, provider };
+    return { available: !cap.capped, capped: cap.capped, state: cap.state, resetAt: cap.resetAt, provider };
   } catch {
     return {
       available: true,
@@ -761,6 +761,10 @@ async function spawnReviewerOnceWithAccount({
     quotaDecision = { available: false, capped: true, state: claudeAccountSelection.reason, provider: 'anthropic' };
   }
   if (!quotaDecision.available && (quotaDecision.capped || isGroundedProviderState(quotaDecision.state))) {
+    if (normalizeReviewerModel(reviewerModel) === 'codex' && codexBrokerProvider === 'codex-corp') {
+      try { recordCorporateCodexQuotaCooldown(rootDir, { env: quotaCheckEnv, resetAt: quotaDecision.resetAt }); }
+      catch (error) { console.warn(`[watcher] corporate Codex quota cooldown persistence failed: ${error.message}`); }
+    }
     const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
     const startedAt = new Date().toISOString();
     const metadata = {

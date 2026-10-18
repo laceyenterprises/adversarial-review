@@ -1135,9 +1135,14 @@ async function dispatchAmaClosureFor({
     || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure';
   // CIBLOCKHAM-01: the same final-hammer close for a red-CI head with no
   // remediation job left to fix it.
+  // Historical stop evidence is not enough: rescue must observe failed external
+  // checks on the current candidate head, and carry their names into the prompt.
+  const derivedCiFailedChecks = reviewCycleExhausted && candidate?.headSha
+    && reviewStateRow?.review_status === 'ci-blocked'
+    && String(reviewStateRow?.failure_message || '').startsWith('[ci-regression-stopped]')
+    ? summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig }).failedChecks : [];
   const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true
-    || (reviewCycleExhausted && reviewStateRow?.review_status === 'ci-blocked'
-      && String(reviewStateRow?.failure_message || '').startsWith('[ci-regression-stopped]'));
+    || derivedCiFailedChecks.length > 0;
   if (reviewCycleCapReached || ciBlockedHammerOwner) reviewCycleExhausted = true;
 
   const finalHead = candidate?.headSha || currentRevisionRef || null;
@@ -2463,7 +2468,7 @@ async function dispatchAmaClosureFor({
       ? dispatchJob.reviewCycleHistory : [],
     ciBlockedHammerOwner,
     ciFailedChecks: ciBlockedHammerOwner && Array.isArray(dispatchJob?.ciFailedChecks)
-      ? dispatchJob.ciFailedChecks : [],
+      ? dispatchJob.ciFailedChecks : derivedCiFailedChecks,
     allowStaleReviewHeadHammerResume,
     liveHeadCloserAuthored,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,

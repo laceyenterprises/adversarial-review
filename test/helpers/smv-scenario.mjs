@@ -217,15 +217,23 @@ if (scenario === 'clean') {
   const intent = { ...identity(), targetRemediationSha: headSha, state: 'dispatching',
     lastAttemptedAt: '2026-01-01T00:00:00Z' };
   updateAmaCloserDispatchRecord(rootDir, identity(), () => intent);
+  const leaseBefore = acquireAmaCloserLease({ ...identity(), now: intent.lastAttemptedAt,
+    watcherPid: process.pid }).lease;
+  const liveNow = '2026-01-01T00:01:00Z';
+  settleRefusedHammerWake({ rootDir, identity: identity(), intent, now: liveNow,
+    wake: { outcome: 'requested' }, result: { dispatched: false } });
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatching');
+  assert.deepEqual(readAmaCloserLease(rootDir, identity()), leaseBefore);
   settleRefusedHammerWake({ rootDir, identity: identity(), intent,
-    wake: { outcome: 'skipped', eligibilityReasons: ['synthetic-hold'] }, result: { dispatched: false } });
-  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).reason, 'wake-refused:synthetic-hold');
+    wake: { outcome: 'duplicate' }, result: { dispatched: false, reason: 'synthetic-refusal' } });
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).reason, 'wake-refused:synthetic-refusal');
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatch-failed');
+  assert.equal(readAmaCloserLease(rootDir, identity()), null);
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
-    nativeFinalHammerWake: true, refusedWakeTerminal: true, merges: 0 };
+    nativeFinalHammerWake: true, refusedWakeTerminal: true, livePendingLeasePreserved: true, merges: 0 };
 } else if (scenario === 'refusals') {
   acquireAmaCloserLease({ ...identity(), now: '2000-01-01T00:00:00Z' });
   updateAmaCloserLease({ ...identity(), status: 'dispatched', lrqId: 'stale-synthetic', now: '2000-01-01T00:00:00Z' });

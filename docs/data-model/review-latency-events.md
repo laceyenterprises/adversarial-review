@@ -95,7 +95,12 @@ watcher sweeps preserve one audit event per recovery transition.
 
 Known `hammer_wake` writers are `source: 'follow-up-remediation'` for the
 settled clean-review handoff and `source: 'event-driven-hammer-wake'` for the
-AMA merge-eligibility watcher wake reservation in `src/hammer-wake.mjs`.
+AMA merge-eligibility or native CI-repair watcher wake reservation in
+`src/hammer-wake.mjs`. CI-repair events carry
+`reason: exhausted-final-hammer-ci-repair` and remain visible in event telemetry,
+but do not end the `clean_verdict_to_hammer_wake` latency segment. That segment
+uses the first non-repair wake, so a stale pre-remediation verdict cannot pair
+with a red-CI repair wake.
 
 `at` is the event time used for latency calculations. `recorded_at` is the
 database insert time and is diagnostic only. `source` and `source_ref` identify

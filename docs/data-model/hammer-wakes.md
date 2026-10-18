@@ -58,6 +58,9 @@ Directory: `data/hammer-wakes/`
   remediation and other eligibility gates retain their refusals. The daemon
   and hammer's actual merge predicates still require green CI and exact-head
   validation. Non-native wake admission is unchanged.
+- CI-repair latency events carry `reason: exhausted-final-hammer-ci-repair`.
+  They remain in telemetry but are excluded from `clean_verdict_to_hammer_wake`;
+  repair admission does not assert a fresh clean verdict.
 - Writes are best-effort and synchronous. Audit directory, audit write, latency
   telemetry, and diagnostic logging failures must not abort AMA closure.
 - The success boundary is the watcher wake transport. Once the watcher confirms

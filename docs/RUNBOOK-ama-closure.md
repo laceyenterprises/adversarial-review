@@ -1542,14 +1542,22 @@ uses (`src/hammer-owner-route.mjs`).
   exhausted final hammer, including the stale pre-remediation verdict. A
   current-head blocking verdict and all other holds retain their wake refusal.
   A refused, settled handoff retires an unchanged unlaunched intent as
-  `dispatch-failed`, reason `wake-refused:<reasons>`, rather than leaving a
-  phantom `dispatching` record. Launch receipts and in-flight work are preserved.
+  `dispatch-failed`, reason `wake-refused:<closer result.reason>`, only with a
+  matching pending lease whose owner is dead or whose bounded launch reclaim
+  age elapsed. Missing leases, launch receipts and live work are preserved.
+  Settlement follows the closer result regardless of the diagnostic wake outcome.
+  CI-repair wake events stay in telemetry but are excluded from the
+  `clean_verdict_to_hammer_wake` latency segment.
   Rescue derives final-hammer ownership from a `ci-blocked` row carrying
-  `[ci-regression-stopped]` plus exhausted remediation evidence; it does not
+  `[ci-regression-stopped]` plus exhausted remediation evidence and live failed
+  external checks on the current candidate head. It fills the prompt's failed
+  check list from that live rollup, so a historical stop message alone cannot
+  keep the CI-blocked route active after CI changes; it does not
   choose an exact-head re-review while required CI is red. No config change is
   needed. After deployment, verify the next exhausted red head requests its
   wake and records a hammer launch in one watcher pass, and refused handoffs
-  have an explicit terminal reason without an ownerless dispatch intent.
+  have an explicit closer refusal reason when their matching lease is reclaimable,
+  while a fresh live-PID lease and its intent remain untouched.
 - `ci-blocked hammer route failed … authoritative reviewed head unavailable`
   means no posted review pass with a head SHA exists in `reviewer_passes`; the
   PR stays parked as before.

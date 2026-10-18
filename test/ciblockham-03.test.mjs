@@ -139,6 +139,8 @@ for (const parkedHead of [reviewed, head]) test('rescue uses the stopped exhaust
   args.dispatchJob = {}; // Rescue has the durable row, not the watcher's handoff flag.
   args.maybeDispatchAmaCloserImpl = async payload => {
     assert.equal(payload.dispatchContext.ciBlockedHammerOwner, true);
+    assert.deepEqual(payload.dispatchContext.ciFailedChecks, [{ name: 'synthetic-ci',
+      state: 'FAILURE', workflowName: null, detailsUrl: null }]);
     return { dispatched: false, skipMergeAgent: true, reason: 'synthetic-probe' };
   };
   const result = await maybeDispatchAmaClosureFor(args);
@@ -157,7 +159,8 @@ test('a parked row without a proven stale reviewed head retains ordinary wake ad
   assert.equal(launches.length, 1);
 });
 
-for (const recordHead of [head, reviewed]) test('a refused native handoff retires its unlaunched intent with an explicit reason: ' + recordHead[0], async t => {
+for (const outcome of ['skipped', 'requested', 'duplicate'])
+for (const recordHead of [head, reviewed]) test(`a ${outcome} wake records the actual handoff refusal: ${recordHead[0]}`, async t => {
   const { args } = fixture(t);
   const identity = { repo, prNumber, headSha: recordHead };
   const at = '2026-01-01T00:00:00Z';
@@ -167,13 +170,14 @@ for (const recordHead of [head, reviewed]) test('a refused native handoff retire
   updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
   const leaseIdentity = { ...identity, headSha: head };
   acquireAmaCloserLease({ rootDir: args.rootDir, ...leaseIdentity, now: at });
-  args.requestEligibleHammerWakeImpl = () => ({ outcome: 'skipped', reason: 'synthetic-hold',
+  args.requestEligibleHammerWakeImpl = () => ({ outcome, reason: 'synthetic-hold',
     eligibilityReasons: ['synthetic-hold'] });
   args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, skipMergeAgent: true, reason: 'not-eligible' });
   await maybeDispatchAmaClosureFor(args);
   const record = readAmaCloserDispatchRecord(args.rootDir, identity);
   assert.equal(record.state, 'dispatch-failed');
-  assert.equal(record.reason, 'wake-refused:synthetic-hold');
+  assert.equal(record.reason, 'wake-refused:not-eligible');
+  assert.equal(record.lastError, 'wake-refused:not-eligible');
   assert.equal(record.retryCount, 0, 'an unlaunched handoff does not spend the dispatch retry');
   assert.equal(readAmaCloserLease(args.rootDir, leaseIdentity), null);
 });
@@ -195,12 +199,15 @@ test('refusal reconciliation preserves launch receipts, active work and replacem
   const { args } = fixture(t);
   const identity = { repo, prNumber, headSha: head };
   const intent = { ...identity, targetRemediationSha: head, state: 'dispatching', lastAttemptedAt: '2026-01-01T00:00:00Z' };
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
   const wake = { outcome: 'skipped', eligibilityReasons: ['synthetic-hold'] };
   for (const [patch, result] of [
     [{ launchRequestId: 'synthetic-live' }, { dispatched: false }],
     [{ dispatchId: 'synthetic-receipt' }, { dispatched: false }],
     [{}, { dispatched: false, inFlight: true }],
     [{}, { dispatched: false, reason: 'lease-held' }],
+    [{}, { dispatched: false, reason: 'closer-lease-held-by-other-process' }],
+    [{ lastError: 'already-failed' }, { dispatched: false }],
     [{}, { dispatched: false, backgroundDispatch: { state: 'started' } }],
     [{ lastAttemptedAt: '2026-01-02T00:00:00Z' }, { dispatched: false }],
     [{ promptPath: 'synthetic-new-prompt' }, { dispatched: false }],
@@ -210,3 +217,60 @@ test('refusal reconciliation preserves launch receipts, active work and replacem
     assert.equal(readAmaCloserDispatchRecord(args.rootDir, identity).state, 'dispatching');
   }
 });
+
+test('a plain refusal preserves a fresh live-pid pending lease and its dispatch intent', t => {
+  const { args } = fixture(t);
+  const identity = { repo, prNumber, headSha: head };
+  const now = '2026-10-18T00:00:00Z';
+  const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
+    lastAttemptedAt: now, retryCount: 1 };
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now, watcherPid: process.pid });
+  const leaseBefore = readAmaCloserLease(args.rootDir, identity);
+  settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent, now,
+    result: { dispatched: false } });
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  assert.deepEqual(readAmaCloserLease(args.rootDir, identity), leaseBefore);
+  // The same fresh lease becomes reclaimable only with proven owner death.
+  settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent, now,
+    processKillImpl: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }); },
+    result: { dispatched: false, reason: 'not-eligible' } });
+  assert.equal(readAmaCloserDispatchRecord(args.rootDir, identity).reason, 'wake-refused:not-eligible');
+  assert.equal(readAmaCloserLease(args.rootDir, identity), null);
+});
+
+test('refusal settlement cannot retire an intent without a matching reclaimable lease', t => {
+  const { args } = fixture(t);
+  const identity = { repo, prNumber, headSha: head };
+  const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
+    lastAttemptedAt: '2026-01-01T00:00:00Z', retryCount: 1 };
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
+  const settle = () => settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
+    result: { dispatched: false, reason: 'not-eligible' } });
+  settle();
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: '2026-01-02T00:00:00Z' });
+  const leaseBefore = readAmaCloserLease(args.rootDir, identity);
+  settle();
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  assert.deepEqual(readAmaCloserLease(args.rootDir, identity), leaseBefore);
+});
+
+for (const checks of [[], [{ name: 'synthetic-ci', conclusion: 'SUCCESS' }],
+  [{ name: 'synthetic-ci', status: 'IN_PROGRESS' }],
+  [{ name: 'synthetic-ci', conclusion: 'FAILURE', startedAt: '2026-01-01' },
+    { name: 'synthetic-ci', conclusion: 'SUCCESS', startedAt: '2026-01-02' }],
+  [{ __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'FAILURE' }]]) {
+  test('historical stop evidence without live failed external CI cannot derive CI-blocked ownership: ' + JSON.stringify(checks), async t => {
+    const { args } = fixture(t);
+    args.dispatchJob = {};
+    args.candidate.statusCheckRollup = checks;
+    args.maybeDispatchAmaCloserImpl = async payload => {
+      assert.equal(payload.dispatchContext.ciBlockedHammerOwner, false);
+      assert.deepEqual(payload.dispatchContext.ciFailedChecks, []);
+      return { dispatched: false, reason: 'synthetic-probe' };
+    };
+    const result = await maybeDispatchAmaClosureFor(args);
+    assert.notEqual(result.closureOwner?.reason, 'ci-blocked-remediation-exhausted');
+  });
+}

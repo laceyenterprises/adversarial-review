@@ -2609,25 +2609,32 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
 
 // Reconcile an unlaunched handoff only after its caller has settled. A wake is
 // diagnostic: its refusal must never cancel a dispatch that is still running.
-export function settleRefusedHammerWake({ rootDir, identity, intent, wake, result } = {}) {
-  if (wake?.outcome !== 'skipped' || result?.dispatched !== false || result?.inFlight
+export function settleRefusedHammerWake({ rootDir, identity, intent, result,
+  now = new Date().toISOString(), processKillImpl = process.kill } = {}) {
+  if (result?.dispatched !== false || result?.inFlight
     || result?.recoveryWait || result?.backgroundDispatch || result?.launchRequestId || result?.dispatchId
-    || ['lease-held', 'live-run-in-flight', 'hammer-closer-in-flight', 'existing-dispatch-unknown'].includes(result?.reason)) return null;
+    || ['lease-held', 'closer-lease-held-by-other-process', 'live-run-in-flight',
+      'hammer-closer-in-flight', 'existing-dispatch-unknown'].includes(result?.reason)) return null;
   if (intent?.state !== 'dispatching' || intent.launchRequestId || intent.dispatchId) return null;
-  const reasons = wake.eligibilityReasons?.length ? wake.eligibilityReasons : [wake.reason || 'unknown'];
+  const reason = `wake-refused:${result.reason || 'dispatch-refused'}`;
+  const leaseIdentity = { ...identity, headSha: intent.targetRemediationSha || identity.headSha };
+  let retiredLease = null;
   const settled = updateAmaCloserDispatchRecord(rootDir, identity, current => {
     if (current?.state !== 'dispatching' || current.launchRequestId || current.dispatchId
       || !intent.lastAttemptedAt || current.lastAttemptedAt !== intent.lastAttemptedAt
       || current.promptPath !== intent.promptPath
       || current.targetRemediationSha !== intent.targetRemediationSha) return null;
-    return { ...current, state: 'dispatch-failed', reason: `wake-refused:${reasons.join(',')}`,
-      lastError: `wake-refused:${reasons.join(',')}`,
+    const lease = readAmaCloserLease(rootDir, leaseIdentity);
+    if (lease?.lrqId || lease?.acquiredAt !== intent.lastAttemptedAt
+      || !isInterruptedInFlightAmaCloserDispatch(current, lease, { now, processKillImpl })) return null;
+    retiredLease = lease;
+    return { ...current, state: 'dispatch-failed', reason, lastError: reason,
       retryCount: Math.max(0, Number(current.retryCount || 0) - 1) };
   });
-  if (settled?.state === 'dispatch-failed' && settled.reason === `wake-refused:${reasons.join(',')}`) {
-    const leaseIdentity = { ...identity, headSha: intent.targetRemediationSha || identity.headSha };
+  if (retiredLease) {
     const lease = readAmaCloserLease(rootDir, leaseIdentity);
-    if (lease?.status === 'pending' && !lease.lrqId && lease.acquiredAt === intent.lastAttemptedAt) {
+    if (lease?.status === 'pending' && !lease.lrqId
+      && lease.acquiredAt === retiredLease.acquiredAt && lease.watcherPid === retiredLease.watcherPid) {
       deleteAmaCloserLease(rootDir, leaseIdentity);
     }
   }

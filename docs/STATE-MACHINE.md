@@ -1038,9 +1038,12 @@ Native exhausted CI-repair wake admission shares the closer's hammer-work
 rule. Red required CI and a stale pre-remediation verdict admit a wake, while
 current-head blocking verdicts and other holds keep their existing refusals.
 A settled refused handoff changes an unchanged unlaunched `dispatching` intent
-to `dispatch-failed` with `wake-refused:<reasons>`; receipts and in-flight work
+to `dispatch-failed` with `wake-refused:<closer result.reason>` only with a
+matching pending lease whose owner is dead or whose bounded launch reclaim age
+elapsed, regardless of wake outcome; missing leases, receipts and live work
 remain owned. Rescue projects an exhausted `[ci-regression-stopped]` row to
-the final hammer. Actual merges still require green CI and exact-head proof.
+the final hammer only with live failed external CI on the candidate head and
+passes those failed checks into its prompt. Actual merges still require green CI and exact-head proof.
 
 ## 3) Fast-merge skip lane
 

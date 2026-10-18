@@ -236,7 +236,7 @@
         {"id": "hammer-dispatch.03","from": "dispatching","to": "dispatch-deferred-transient","trigger": "launch result: dispatch-deferred-transient","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.04","from": "dispatching","to": "dispatch-blocked-branch-holder","trigger": "launch result: dispatch-blocked-branch-holder","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.05","from": "dispatching","to": "dispatch-branch-holder-block-exhausted","trigger": "launch result: dispatch-branch-holder-block-exhausted","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.06","from": "dispatching","to": "dispatch-failed","trigger": "launch failure or settled unlaunched wake refusal","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.06","from": "dispatching","to": "dispatch-failed","trigger": "launch failure or settled unlaunched closer refusal with matching reclaimable pending lease","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.07","from": "dispatching","to": "no-dispatch","trigger": "launch result: no-dispatch","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.08","from": "dispatching","to": "completed","trigger": "launch result: completed","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.09","from": "dispatched","to": "launch-terminal","trigger": "terminal chain observed on PR decision path or shared capacity snapshot (no live retry)","codeSource": "src/ama/dispatch-closer.mjs"},

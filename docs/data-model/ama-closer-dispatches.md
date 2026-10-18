@@ -52,16 +52,6 @@ other records' capacity reconciliation.
 
 ## Purpose
 
-After a native CI-blocked handoff settles without a launch, a skipped wake
-retires its unchanged `dispatching` intent as `dispatch-failed`, with
-`reason` and `lastError` set to `wake-refused:<eligibility reasons>`.
-The snapshot's attempt timestamp and remediation target must still match;
-launch receipts, active work and replacement intents retain ownership. Only
-the matching unlaunched pending lease is removed, and the phantom dispatch retry
-is rolled back once. Background handoffs reconcile
-when their queue entry settles. Wake refusal grants no merge authority and
-does not become a new dispatch gate.
-
 `data/follow-up-jobs/ama-closer-dispatches/` records the AMA closer's current
 dispatch state for a pull request head. The watcher, follow-up daemon, and
 reapers use these files to avoid double-dispatching terminal remediation, to
@@ -132,6 +122,18 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `status`, `reason`, `terminalOutcome`, `closureAuthority` | string or null | Terminal/no-dispatch annotations used by recovery and audit paths when present. |
 
 ## Operational Contract
+
+After a native CI-blocked handoff settles with `dispatched: false`, settlement
+retires its unchanged `dispatching` intent only when the matching unlaunched
+pending lease satisfies `isInterruptedInFlightAmaCloserDispatch`: its owner PID
+is dead or the bounded pending-launch reclaim age has elapsed. Missing leases,
+live launches, receipts, other-process ownership and replacement intents remain
+untouched. The matching lease is removed and the phantom retry rolled back once.
+`reason` and `lastError` are `wake-refused:<closer result.reason>` (falling back
+to `wake-refused:dispatch-refused` when absent), independent of whether the
+wake was skipped, requested or duplicated. Wake eligibility reasons remain
+wake diagnostics. Background handoffs reconcile when their queue entry settles.
+Settlement grants no merge authority and adds no dispatch gate.
 
 - A newly returned launch receipt retains `state: dispatched`, its launch IDs,
   and its active lease when ticket evidence is unavailable. It is charged

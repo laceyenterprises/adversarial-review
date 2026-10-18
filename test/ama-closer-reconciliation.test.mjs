@@ -315,6 +315,28 @@ test('scan budget stops additional queries and reconciliation logs safe metadata
   assert.equal(JSON.stringify(events).includes('secret'), false);
 });
 
+for (const snapshotRows of [undefined, []]) {
+  test(`scan budget applies to per-launch probes, not snapshot rows (${snapshotRows ? 'snapshot' : 'sqlite'})`, async t => {
+    const root = fixture(t, 'snapshot-budget');
+    dispatchRecord(root, 1);
+    dispatchRecord(root, 2);
+    let probes = 0;
+    const result = await reconcileAmaCloserDispatches(root, {
+      now: NOW, scanBudgetMs: 0, useLaunchSnapshot: true,
+      readLaunchRequestSnapshotImpl: () => ({ ok: true,
+        ...(snapshotRows ? { rows: snapshotRows } : {}),
+        target: { backend: snapshotRows ? 'postgres' : 'sqlite' } }),
+      readLaunchRequestStatusImpl: () => {
+        probes += 1;
+        return { ok: true, row: { status: 'failed' } };
+      },
+    });
+    assert.equal(probes, snapshotRows ? 2 : 0);
+    assert.equal(result.changed, snapshotRows ? 2 : 0);
+    assert.equal(result.active.length, snapshotRows ? 0 : 2);
+  });
+}
+
 test('CLI apply refuses a foreign directory owner while dry-run remains available', async (t) => {
   const root = fixture(t, 'owner');
   dispatchRecord(root, 1);

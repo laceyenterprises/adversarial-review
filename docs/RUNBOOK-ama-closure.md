@@ -2792,7 +2792,7 @@ head settles as `failed-without-merge` after the readable `terminal_at` grace
 armed `autoMergeRequest`. Both synchronous lease reconciliation and watcher
 dispatch read that field and retain ownership only inside the 30-minute
 dispatched-lease window; observations never refresh that clock. Expiry emits
-`ama_closer.auto_merge_hold_released` and settles as `failed-without-merge`,
+`ama_closer.auto_merge_hold_released` once per launch in the dispatch turn and settles as `failed-without-merge`,
 allowing bounded CI-repair retries. A no-merge audit bypasses the hold. Audited
 no-merge outcomes also release the lease. When the worker status is stale-active
 but the ledger says `succeeded`, the watcher keeps raw `succeeded` for the terminal-success classifier rather than
@@ -2840,7 +2840,7 @@ changes. The normal dispatch capacity scan reconciles only launches still within
 the record/lease liveness window; the CLI also visits historical dispatched records.
 No cap default or shared CFG schema changes are included in this single-repo fix.
 
-HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes admit queries for at most one second. Unprobed, missing and unreadable records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
+HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes, including in-process SQLite reads without snapshot rows, admit queries for at most one second. Unprobed, missing and unreadable records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
 
 HAM closure diagnostics hardening: explicit ineligibility or a new head resets the eligible wait and removes stale PR pages; reopened candidates start fresh. Unchanged observations skip durable writes, redundant recovery observations are omitted, and recovery reuses the first daemon result unless deferred. SEV1 payloads keep the five longest pending and completed waits with omitted counts; page text is capped at 3500 characters. Process startup warns when the configured max acts as a floor below the adaptive ceiling.
 

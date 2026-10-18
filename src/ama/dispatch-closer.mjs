@@ -2228,7 +2228,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
         launchSnapshot = await (options.readLaunchRequestSnapshotImpl || readLaunchRequestSnapshotFromLedgerAsync)({ ...options, rootDir });
         throwIfAborted(options.signal);
       }
-      const budgetExpired = !launchSnapshot?.ok && Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
+      const budgetExpired = !Array.isArray(launchSnapshot?.rows) && Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
       if (budgetExpired && !observedTerminal) ledgerUnreadable = true;
       probe = ledgerUnreadable || budgetExpired ? { ok: false, reason: 'scan-ledger-unreadable' } : withLiveLaunchRetry(await readStatus({
         includeRetryChain: true, launchSnapshot,
@@ -5822,7 +5822,7 @@ async function maybeDispatchAmaCloserAttempt({
             execFileImpl,
           })
           : false;
-        const terminalAgeMs = terminalLaunchAgeMs(launchRequestProbe?.row, dispatchContext.dispatchedAt);
+        const terminalAgeMs = terminalLaunchAgeMs(prefetchedLaunchRequestProbe?.row, dispatchContext.dispatchedAt);
         if (terminalLivePr?.state === 'OPEN' && !auditTerminalOutcome
           && noMergeAuditForCurrentHead !== true
           && Number.isFinite(terminalAgeMs) && terminalAgeMs < AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS) {
@@ -5833,10 +5833,12 @@ async function maybeDispatchAmaCloserAttempt({
           if (isAmaCloserAutoMergeHoldActive(terminalSuccessHoldLease, dispatchContext.dispatchedAt)) {
             return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
           }
-          logAmaCloserDispatchEvent(logger, 'ama_closer.auto_merge_hold_released', {
-            repo, prNumber, launchRequestId: existingRecord.launchRequestId,
-            reason: 'dispatched-lease-bound',
-          });
+          if (reconciledDispatchedLease?.lrqId !== existingRecord.launchRequestId) {
+            logAmaCloserDispatchEvent(logger, 'ama_closer.auto_merge_hold_released', {
+              repo, prNumber, launchRequestId: existingRecord.launchRequestId,
+              reason: 'dispatched-lease-bound',
+            });
+          }
         }
         const hammerOutcome = classifySucceededHammerOutcome({
           livePrState: terminalLivePr?.state,

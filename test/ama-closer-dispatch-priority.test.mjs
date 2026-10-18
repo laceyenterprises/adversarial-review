@@ -1873,7 +1873,9 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
     const baseExec = deps.execFileImpl;
     deps.execFileImpl = async (cmd, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
       ? { stdout: JSON.stringify({ status: 'starting' }) } : baseExec(cmd, argv, options);
+    const events = [];
     const input = { ...args, ...deps,
+      logger: { info: line => events.push(JSON.parse(line)), warn() {}, error() {} },
       readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
       readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: HEAD }),
       fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: HEAD, comments: [] }),
@@ -1904,6 +1906,9 @@ for (const scenario of ['audit', 'no audit', 'auto-merge armed', 'expired auto-m
       assert.equal(result.reason, 'stale-dispatched-lease-terminalized');
       assert.equal(readAmaCloserLease(rootDir, identity).terminalOutcome, 'failed-without-merge');
       result = await maybeDispatchAmaCloser(input);
+    }
+    if (scenario.startsWith('expired auto-merge')) {
+      assert.equal(events.filter(event => event.event === 'ama_closer.auto_merge_hold_released').length, 1);
     }
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(result.launchRequestId, 'lrq_hammer_1');
@@ -2054,6 +2059,38 @@ for (const ageMs of [30 * 60_000 - 1, 30 * 60_000]) {
     if (expired) {
       assert.equal(lease.terminalOutcome, 'failed-without-merge');
       assert.ok(events.some(event => event.event === 'ama_closer.auto_merge_hold_released'));
+    }
+  });
+}
+
+for (const ageMs of [0, 59_999, 60_000]) {
+  test(`dispatch fallback respects prefetched terminal settle grace at age ${ageMs}`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'dispatch-settle-grace-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir, { dispatchContext: { dispatchReason: 'exhausted-final-hammer' } });
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const now = args.dispatchContext.dispatchedAt;
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-first' });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+      workerClass: 'hammer', launchRequestId: 'synthetic-first', retryCount: 1,
+      reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
+    const deps = testDeps();
+    const baseExec = deps.execFileImpl;
+    deps.execFileImpl = async (cmd, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
+      ? { stdout: JSON.stringify({ status: 'starting' }) } : baseExec(cmd, argv, options);
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded',
+        terminal_at: new Date(Date.parse(now) - ageMs).toISOString() } }),
+      // Early reconciliation has no live PR evidence; the dispatch fallback does.
+      readPullRequestStateImpl: () => null,
+      fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: HEAD, comments: [] }),
+      deliverAlertImpl: async () => ({ ok: true }),
+    });
+    assert.equal(result.dispatched, ageMs >= 60_000, JSON.stringify(result));
+    if (ageMs < 60_000) {
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+      assert.equal(deps.calls.length, 0);
     }
   });
 }

@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { setImmediate as turn } from 'node:timers/promises';
 import { POSTED_REVIEW_CONCURRENCY, createPostedReviewFairnessState,
   runPostedReviewHandlersFairly } from '../src/watcher-poll-fairness.mjs';
-import { createNoProgressLaneGate, handlePostedReviewRow, preparePostedReviewHandlers } from '../src/posted-review-row.mjs';
+import { createNoProgressLaneGate, handlePostedReviewRow, preparePostedReviewHandlers,
+  runQueuedReviewAdoptionPhase } from '../src/posted-review-row.mjs';
 import { readNoProgressLane, recordNoProgressLaneRun, recordNoProgressLaneSkip } from '../src/watcher-no-progress-lane.mjs';
 import { withClosureEvaluationReadCache } from '../src/closure-evaluation-cache.mjs';
 import { fetchMergeAgentCandidate } from '../src/merge-agent-candidate.mjs';
@@ -16,7 +17,8 @@ import { createHistoryReader } from '../src/ama/history-reader.mjs';
 import { acquireAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { readAdapterPrRollup, readAdapterHeadAndState,
   withGitHubAdapterReadTick } from '../src/github-adapter-client.mjs';
-import { recordFinalReviewHammerLatency, finalReviewHammerLatencySummary } from '../src/ama-closure-orchestration.mjs';
+import { recordFinalReviewHammerLatency, finalReviewHammerLatencySummary,
+  resetFinalReviewHammerLatenciesForTesting } from '../src/ama-closure-orchestration.mjs';
 
 const repo = 'fixture/project';
 const head = 'a'.repeat(40);
@@ -24,6 +26,47 @@ const otherHead = 'b'.repeat(40);
 const quiet = { log() {}, warn() {}, error() {} };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const handler = (prNumber, run) => ({ repoPath: repo, prNumber, headSha: head, run });
+
+test('adoption readiness probes use the injected executor through the real snapshot reader', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'closure-executor-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const calls = [];
+  const execFileImpl = async (command, args, options) => {
+    calls.push({ command, args, signal: options.signal });
+    return { stdout: JSON.stringify({ headRefOid: head, state: 'OPEN',
+      statusCheckRollup: [{ name: 'build', conclusion: 'SUCCESS' }] }) };
+  };
+  let prepared;
+  await runQueuedReviewAdoptionPhase({
+    rootDir, execFileImpl, logger: quiet,
+    postedReviewHandlers: [handler(1, async () => {})],
+    drainReviewerDispatchCandidates: async () => ({}),
+    noProgressLaneGate: { evaluate: () => ({ run: true }) },
+    recoveryRoots: new Set([rootDir]),
+    preparePostedReviewHandlersImpl: (handlers, options) => preparePostedReviewHandlers(handlers, {
+      ...options,
+      readReviewRow: () => ({ review_status: 'posted', reviewer_head_sha: head }),
+      resolveSettled: () => ({ verdict: 'comment-only', remediationPending: false }),
+    }),
+    runPostedReviewHandlersFairlyImpl: async ({ handlers }) => { prepared = handlers; return {}; },
+    retryPendingMergeAgentLifecycleCleanupsImpl: async () => {},
+    syncPRLifecycleImpl: async () => {},
+    retryPendingCloserCancelsImpl: async () => {},
+    sweepRereviewWakeQueueImpl: () => ({ scanned: 0 }),
+    rereviewWakeBacklogImpl: () => ({ pending: 0 }),
+    retryPendingTriageSyncsImpl: async () => ({ attempted: 0 }),
+    retryPendingDagAutowalkOnMergeImpl: async () => {},
+    retryPendingMergeCloseoutsImpl: async () => {},
+    retryPendingRetriggerAckCommentsImpl: async () => ({ attempted: 0 }),
+    reportStalledRetriggerOutcomesImpl: async () => ({ checked: 0 }),
+    retryPendingRetriggerReviewAckCommentsImpl: async () => ({ attempted: 0 }),
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'gh');
+  assert.deepEqual(calls[0].args.slice(0, 5), ['pr', 'view', '1', '--repo', repo]);
+  assert.ok(calls[0].signal instanceof AbortSignal);
+  assert.equal(prepared[0].mergeReady, true);
+});
 
 test('25 PRs: three settled same-head green reviews lead the first tick and reuse their candidates', async () => {
   let clock = 0;
@@ -170,8 +213,38 @@ test('unsupported read transport falls back once per tick, retries next tick and
   assert.equal(calls, 4);
 });
 
-test('launch latency percentiles count confirmed samples, expire after a day, and report an empty window', () => {
-  const now = Date.now() + 2 * 86400000;
+test('nested adapter scopes share capability refusals until the outer tick exits', async () => {
+  let calls = 0;
+  const warnings = [];
+  const options = { env: { GHA_ADAPTER_BIN: '/fixture/nested-adapter' }, execFileImpl: async () => {
+    calls++;
+    throw Object.assign(new Error(''), { code: 78,
+      stdout: JSON.stringify({ ok: false, failureClass: 'unsupported', code: 'unsupported_command', requested: 'read' }) });
+  } };
+  const logger = { warn: message => warnings.push(message) };
+  await withGitHubAdapterReadTick(async () => {
+    await withGitHubAdapterReadTick(async () => {
+      await assert.rejects(readAdapterPrRollup(repo, 1, options));
+    });
+    assert.equal(await readAdapterHeadAndState(repo, 2, options), null);
+    await assert.rejects(withGitHubAdapterReadTick(async () => {
+      assert.equal(await readAdapterPrRollup(repo, 1, options), null);
+      throw new Error('nested failure');
+    }), /nested failure/);
+    assert.equal(await readAdapterHeadAndState(repo, 2, options), null);
+  }, { logger });
+  assert.equal(calls, 1);
+  assert.equal(warnings.length, 1);
+  await withGitHubAdapterReadTick(async () => {
+    await assert.rejects(readAdapterPrRollup(repo, 1, options));
+  }, { logger });
+  assert.equal(calls, 2, 'a new tick retries the transport');
+});
+
+test('launch latency percentiles count confirmed samples, expire after a day, and report an empty window', t => {
+  resetFinalReviewHammerLatenciesForTesting();
+  t.after(resetFinalReviewHammerLatenciesForTesting);
+  const now = Date.now();
   assert.equal(finalReviewHammerLatencySummary(now).samples, 0);
   for (let i = 1; i <= 20; i++) recordFinalReviewHammerLatency(i * 1000, now);
   recordFinalReviewHammerLatency(-1, now);
@@ -179,6 +252,11 @@ test('launch latency percentiles count confirmed samples, expire after a day, an
     window_ms: 86400000, samples: 20, p50_ms: 10000, p95_ms: 19000,
   });
   assert.equal(finalReviewHammerLatencySummary(now + 86400001).samples, 0);
+  recordFinalReviewHammerLatency(1000, now);
+  resetFinalReviewHammerLatenciesForTesting();
+  assert.deepEqual(finalReviewHammerLatencySummary(now), {
+    window_ms: 86400000, samples: 0, p50_ms: null, p95_ms: null,
+  });
 });
 
 

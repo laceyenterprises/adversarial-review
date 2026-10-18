@@ -926,7 +926,7 @@ export async function handlePostedReviewRow({
 // avoids serial GitHub reads before the scheduler can prioritize ready work.
 // Probe faults affect ordering only; the normal handler retries its own reads.
 export async function preparePostedReviewHandlers(handlers, {
-  rootDir = ROOT, logger = console,
+  rootDir = ROOT, logger = console, execFileImpl = execFileAsync,
   readReviewRow = handler => readCurrentReviewRow(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber }),
   resolveSettled = resolveSettledReviewVerdict,
   fetchSnapshot = fetchMergeAgentCandidateSnapshot,
@@ -950,7 +950,7 @@ export async function preparePostedReviewHandlers(handlers, {
           reviewRow: row, currentHeadSha: handler.headSha, logger });
         if (!['approved', 'comment-only', 'request-changes'].includes(settled.verdict) || settled.remediationPending !== false) continue;
         const value = await timePostedReviewStep('prepare-merge-ready', postedReviewHandlerKey(handler), logger,
-          ({ signal }) => fetchSnapshot(handler.repoPath, handler.prNumber, { signal }),
+          ({ signal }) => fetchSnapshot(handler.repoPath, handler.prNumber, { execFileImpl, signal }),
           undefined, { deadlineMs: Math.max(1, Math.min(10_000, deadlineAt - now())) });
         if (value?.headRefOid !== handler.headSha) continue;
         const candidate = { value, fetchedAt: now(), repoPath: handler.repoPath, prNumber: handler.prNumber };
@@ -1363,7 +1363,7 @@ export async function runQueuedReviewAdoptionPhase({
 
   const phaseStartedMs = Date.now();
   const preparedHandlers = await preparePostedReviewHandlersImpl(postedReviewHandlers, {
-    rootDir, logger, laneGate: noProgressLaneGate,
+    rootDir, logger, execFileImpl, laneGate: noProgressLaneGate,
     deadlineAt: phaseStartedMs + Math.min(30_000, effectivePostedReviewPhaseBudgetMs / 2),
   });
   const postedReviewSummary = await runPostedReviewHandlersFairlyImpl({

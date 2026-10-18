@@ -16,6 +16,7 @@ const adapterReadTick = new AsyncLocalStorage();
 // Capability skew is stable within a tick. Authentication/network failures are
 // request-specific and must never disable an otherwise supported transport.
 export async function withGitHubAdapterReadTick(run, { logger = console } = {}) {
+  if (adapterReadTick.getStore()?.open) return run();
   const state = { unsupported: new Map(), open: true, logger };
   try { return await adapterReadTick.run(state, run); }
   finally { state.open = false; state.unsupported.clear(); }

@@ -521,6 +521,8 @@ ten seconds on its matching head; older candidates are read again. Immutable
 commit/tree/blob and exact-SHA comparison reads are shared within a tick;
 mutable PR, base, review, label and dispatch-time reads remain fresh. Failed or
 aborted reads are not retained as successful evidence.
+Readiness probes use the adoption phase's injected `execFileImpl` executor,
+including the normal candidate snapshot read and its abort signal.
 
 Timed-out handler work keeps its concurrency slot until it actually settles.
 The hammer capacity census through dispatch-intent publication is serialized
@@ -536,6 +538,8 @@ window reports null percentiles; a restart starts a new window. After deployment
 SRE should verify p95 remains below ten minutes with a roughly 25-PR backlog
 and compare review settlement with hammer requests to check the one-tick target.
 This observation requires host traffic and is not established by offline tests.
+Offline tests clear the window with
+`resetFinalReviewHammerLatenciesForTesting()` during setup and teardown.
 
 The optional adapter's Node read seam invokes `read --kind ...`. Adapter CLI
 versions that lack `read` return structured `unsupported_command` evidence;
@@ -547,6 +551,8 @@ only for that kind. Every new tick probes again. Transient, authentication,
 timeout and unstructured failures do not disable the transport, and writes
 retain their existing path. This explains a repeatable failed-first-read
 pattern; it does not measure a host's failure percentage.
+Nested `withGitHubAdapterReadTick` calls share the enclosing tick's capability
+cache; only the outermost call clears it on exit.
 
 For each confirmed final-round hammer launch, the watcher emits structured event
 `ama.final_review_to_hammer_launch` with PR/head identity, `postedAt`,

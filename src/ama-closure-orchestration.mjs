@@ -118,6 +118,10 @@ import {
 // Rolling process-local diagnostics include acknowledgements from background
 // dispatches that settle between ticks. No durable state or merge authority.
 const finalReviewHammerLatencies = [];
+export function resetFinalReviewHammerLatenciesForTesting() {
+  finalReviewHammerLatencies.length = 0;
+}
+
 export function recordFinalReviewHammerLatency(latencyMs, at = Date.now()) {
   if (!Number.isFinite(latencyMs) || latencyMs < 0) return;
   finalReviewHammerLatencies.push({ latencyMs, at });

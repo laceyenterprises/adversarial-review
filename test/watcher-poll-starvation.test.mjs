@@ -198,6 +198,7 @@ function buildStarvationFixture() {
       });
     }
     const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
       handlers: postedHandlers,
       state: fairness,
       budgetMs: 60_000,
@@ -259,6 +260,7 @@ test('RVHAND-08: posted-review timeout continues to the rest of the bounded phas
   const logs = [];
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       {
         repoPath: REPO,
@@ -306,6 +308,7 @@ test('RVHAND-09: posted-review timeout still defers when the phase budget is spe
   let pendingTimer = null;
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       {
         repoPath: REPO,
@@ -363,6 +366,7 @@ test('RVHAND-06: posted-review phase warns when queued handlers make zero progre
   const warnings = [];
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       {
         repoPath: REPO,
@@ -403,6 +407,7 @@ test('RVHAND-03: per-handler timeout lets slow hammer launch finish without rais
   const errors = [];
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       {
         repoPath: REPO,
@@ -448,6 +453,7 @@ test('RVHAND-05: posted-review phase defers before starting when remaining budge
   let clock = 0;
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       {
         repoPath: REPO,
@@ -515,6 +521,7 @@ test('RVHAND-04: resolveMergeAgentCoexistence soft deadline does not consume the
 
   try {
     const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
       handlers: [
         {
           repoPath: REPO,
@@ -571,6 +578,7 @@ test('RVHAND-02: timeout log reports phase elapsed at handler start', async () =
   let pendingTimer = null;
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       {
         repoPath: REPO,
@@ -1041,6 +1049,7 @@ test('runPostedReviewHandlersFairly defers the tail when the budget runs out and
   }));
 
   const first = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers,
     state,
     budgetMs: 100,
@@ -1055,6 +1064,7 @@ test('runPostedReviewHandlersFairly defers the tail when the budget runs out and
   clock = 0;
   ran.length = 0;
   const second = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers,
     state,
     budgetMs: 100,
@@ -1081,6 +1091,7 @@ test('RVHAND-10: budget-deferred handlers do not record no-progress lane runs', 
   }));
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers,
     state,
     budgetMs: 100,
@@ -1108,6 +1119,7 @@ test('watcher wake priority runs the exact PR head ahead of slow-lane backlog', 
   ];
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers,
     priorityTargets: [{
       repoPath: REPO,
@@ -1143,6 +1155,7 @@ test('watcher wake priority runs the exact PR head ahead of slow-lane backlog', 
 test('watcher wake priority is head-scoped and does not bypass a stale head', async () => {
   const ran = [];
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [{
       repoPath: REPO,
       prNumber: 6569,
@@ -1196,6 +1209,7 @@ test('RVPRESS-01: posted-review phase warns on one-handler budget stall signatur
   }));
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers,
     budgetMs: 100,
     minimumHandlerStartBudgetMs: 1,
@@ -1219,6 +1233,7 @@ test('RVPRESS-01: posted-review phase warns on one-handler budget stall signatur
 test('RVHAND-10: timeout-deferred handlers do not record no-progress lane runs', async () => {
   const recorded = [];
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       { repoPath: REPO, prNumber: 1, headSha: HEAD_A, run: () => new Promise(() => {}) },
       { repoPath: REPO, prNumber: 2, headSha: HEAD_A, run: async () => {} },
@@ -1257,6 +1272,7 @@ test('runPostedReviewHandlersFairly preserves deferred order across more than tw
     clock = 0;
     ran.length = 0;
     const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
       handlers,
       state,
       budgetMs: 50,
@@ -1272,6 +1288,7 @@ test('runPostedReviewHandlersFairly preserves deferred order across more than tw
 test('runPostedReviewHandlersFairly bounds a single never-settling handler', async () => {
   const ran = [];
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       { repoPath: REPO, prNumber: 1, headSha: HEAD_A, run: () => new Promise(() => {}) },
       { repoPath: REPO, prNumber: 2, headSha: HEAD_A, run: async () => { ran.push(2); } },
@@ -1290,6 +1307,7 @@ test('runPostedReviewHandlersFairly bounds a single never-settling handler', asy
 test('runPostedReviewHandlersFairly isolates a throwing handler', async () => {
   const ran = [];
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       { repoPath: REPO, prNumber: 1, headSha: HEAD_A, run: async () => { throw new Error('boom'); } },
       { repoPath: REPO, prNumber: 2, headSha: HEAD_A, run: async () => { ran.push(2); } },
@@ -1304,6 +1322,7 @@ test('runPostedReviewHandlersFairly isolates a throwing handler', async () => {
 test('runPostedReviewHandlersFairly runs the handler when the lane gate faults', async () => {
   const ran = [];
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [{ repoPath: REPO, prNumber: 1, headSha: HEAD_A, run: async () => { ran.push(1); } }],
     laneGate: {
       evaluate() { throw new Error('ledger unreadable'); },
@@ -1317,6 +1336,7 @@ test('runPostedReviewHandlersFairly runs the handler when the lane gate faults',
 
 test('RVHAND-10: posted-review summary counts nested AMA daemon clean merges', async () => {
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [{
       repoPath: REPO,
       prNumber: 6529,
@@ -2903,6 +2923,7 @@ test('LANESTARVE-01: an all-slow-lane tick drains instead of reporting ran=0', a
   }));
 
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers,
     // Every PR slow-lane classified and none of them due: the exact live shape.
     laneGate: {
@@ -2942,6 +2963,7 @@ test('LANESTARVE-01: an all-slow-lane tick drains instead of reporting ran=0', a
 test('LANESTARVE-01: the floor never preempts a PR the lane considers live', async () => {
   const ran = [];
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [
       // A fast PR the lane is happy to walk...
       { repoPath: REPO, prNumber: 10, headSha: HEAD_A, run: async () => { ran.push(10); } },
@@ -2971,6 +2993,7 @@ test('LANESTARVE-01: the floor stands down when the budget cannot cover a handle
   const ran = [];
   const warnings = [];
   const summary = await runPostedReviewHandlersFairly({
+    concurrency: 1,
     handlers: [{
       repoPath: REPO,
       prNumber: 42,

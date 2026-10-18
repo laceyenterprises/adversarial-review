@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { awaitThrottleIfNeeded, githubCredential, isGitHubRateLimitError, recordRateLimitedCall, extractRateLimitObservation, currentGitHubBudgetScope, markGitHubRateLimited } from './rate-limit-throttle.mjs';
 import { filterGitHubBody } from './github-outbound-body.mjs';
 import { recordMergeActionBestEffort } from './ama/merge-action-receipt.mjs';
@@ -9,6 +10,28 @@ import {
   isUnsupportedOperationPayload,
   isUnsupportedOperationText,
 } from './github-adapter-unsupported.mjs';
+
+const adapterReadTick = new AsyncLocalStorage();
+
+// Capability skew is stable within a tick. Authentication/network failures are
+// request-specific and must never disable an otherwise supported transport.
+export async function withGitHubAdapterReadTick(run, { logger = console } = {}) {
+  if (adapterReadTick.getStore()?.open) return run();
+  const state = { unsupported: new Map(), open: true, logger };
+  try { return await adapterReadTick.run(state, run); }
+  finally { state.open = false; state.unsupported.clear(); }
+}
+
+function unsupportedReadCapability(error, kind) {
+  for (const output of [error?.stdout, error?.stderr]) {
+    let payload;
+    try { payload = JSON.parse(String(output)); } catch { continue; }
+    if (payload?.failureClass !== 'unsupported') continue;
+    if (payload.code === 'unsupported_command' && payload.requested === 'read') return 'read';
+    if (payload.code === 'unsupported_kind' && payload.requested === kind) return `read:${kind}`;
+  }
+  return null;
+}
 
 const ADAPTER_MAX_BUFFER = 25 * 1024 * 1024;
 const ADAPTER_TIMEOUT_MS = 30_000;
@@ -428,12 +451,30 @@ async function runGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
-  const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params, env), {
-    maxBuffer: ADAPTER_MAX_BUFFER,
-    timeout: ADAPTER_TIMEOUT_MS,
-    env: buildAdapterEnv(env),
-  });
-  return parseAdapterJson(stdout, kind);
+  const tick = adapterReadTick.getStore();
+  const unsupported = tick?.open ? tick.unsupported.get(adapterBin) : null;
+  if (unsupported?.has('read') || unsupported?.has(`read:${kind}`)) return null;
+  try {
+    const { stdout } = await execFileImpl(adapterBin, makeAdapterArgs(kind, params, env), {
+      maxBuffer: ADAPTER_MAX_BUFFER,
+      timeout: ADAPTER_TIMEOUT_MS,
+      env: buildAdapterEnv(env),
+    });
+    const payload = parseAdapterJson(stdout, kind);
+    if (payload?.ok === false) throw Object.assign(new Error(payload.message || 'GitHub adapter read failed'), { stdout });
+    return payload;
+  } catch (error) {
+    const capability = unsupportedReadCapability(error, kind);
+    if (tick?.open && capability) {
+      let unavailable = tick.unsupported.get(adapterBin);
+      if (!unavailable) { unavailable = new Set(); tick.unsupported.set(adapterBin, unavailable); }
+      if (!unavailable.has(capability)) {
+        unavailable.add(capability);
+        tick.logger?.warn?.(`[github-adapter] unsupported ${capability}; skipping this read transport for the rest of the tick; using existing fallback`);
+      }
+    }
+    throw error;
+  }
 }
 
 function adapterUnsupportedError(err) {

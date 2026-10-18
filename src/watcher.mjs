@@ -1,3 +1,5 @@
+import { withGitHubAdapterReadTick } from './github-adapter-client.mjs';
+import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { createWatcherLatencyMonitor } from './watcher-latency.mjs';
 import { runLowBudgetWatcherPoll } from './watcher-github-budget.mjs';
 import { withGitHubBudgetScope } from './rate-limit-throttle.mjs';
@@ -1142,7 +1144,7 @@ async function refreshOrgRepos(octokit) {
 let watcherLatencyMonitor;
 async function pollOnce(octokit, options = {}) {
   watcherLatencyMonitor ??= createWatcherLatencyMonitor();
-  return watcherLatencyMonitor.poll(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)));
+  return watcherLatencyMonitor.poll(() => withGitHubAdapterReadTick(() => withClosureEvaluationReadCache(() => withGitHubBudgetScope({}, () => pollOnceWithinBudget(octokit, options)))));
 }
 
 async function pollOnceWithinBudget(

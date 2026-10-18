@@ -891,6 +891,13 @@ The existing claim-loop suite continues to verify `pollOnce` admission itself,
 including startup refill after lifecycle/session recovery, refusal during drain
 mode, and admission on the first poll after drain clears.
 
+The posted-review scheduler prioritizes settled current-head reviews with green
+CI, preserves budget-deferred order, and runs up to four handlers concurrently.
+It retains timed-out work in its concurrency accounting and preserves the
+existing hammer launch cap. Per-tick readiness counts and rolling launch-latency
+percentiles are described in the [closure runbook](docs/RUNBOOK-ama-closure.md).
+These scheduling changes introduce no lifecycle states or SMV edge changes.
+
 <a id="smv-clean"></a>**smv-clean:** an approved exact-head, zero-finding review
 merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.

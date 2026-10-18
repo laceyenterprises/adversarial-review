@@ -367,8 +367,8 @@ handoff, see [Automation Merge Actions](data-model/automation-merge-actions.md).
          enabled: true
          worker_class: hammer    # default; operators may pin codex, claude-code, hammer-claude, or gemini
          # worker_class_fallback: [hammer-claude]  # HHR harness-fallback (default-on; see §2a)
-         # AMA hammer dispatch stays inline by default. To keep the serial
-         # posted-review phase from waiting on slow `hq dispatch` calls, set
+         # AMA hammer dispatch stays inline by default. To keep
+         # posted-review handlers from waiting on slow `hq dispatch` calls, set
          # watcher.ama_hammer_dispatch_mode / AGENT_OS_WATCHER_AMA_HAMMER_DISPATCH_MODE
          # to background; see §2b before enabling.
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
@@ -502,6 +502,62 @@ hammer still goes through `maybeDispatchAmaCloser`, the same closer lease,
 dispatch record, retry cap, prompt, and merge-under-lease contract. Only the
 posted-review watcher phase's wait behavior changes.
 
+Posted-review scheduling uses four concurrent handlers, with no deployment
+knob. Priority probes share the phase budget and use at most thirty seconds
+(or half the phase budget, if smaller), with ten seconds per read. They promote
+lane-due settled approved or comment-only reviews on the current head with green
+CI and no pending remediation ahead of ordinary handlers. The no-progress lane
+is previewed without advancing skip counters before any readiness probe;
+handlers still in backoff incur no readiness GitHub read. Merge readiness is an
+ordering hint only and cannot bypass lane backoff. The scheduler accounts for
+skips once per tick, and explicit wakes and the idle-lane floor retain their
+existing admission rules. Budget-deferred
+handlers retain their order at the front of the next tick; explicit wake
+priority and positive retry holds keep their existing meaning. Priority is
+scheduling evidence only: the probe reads a snapshot without performing hold
+actions. Normal review, stop-hold, lease, current-head and merge gates still
+decide every action. A snapshot read is reused for at most
+ten seconds on its matching head; older candidates are read again. Immutable
+commit/tree/blob and exact-SHA comparison reads are shared within a tick;
+mutable PR, base, review, label and dispatch-time reads remain fresh. Failed or
+aborted reads are not retained as successful evidence.
+Readiness probes use the adoption phase's injected `execFileImpl` executor,
+including the normal candidate snapshot read and its abort signal.
+
+Timed-out handler work keeps its concurrency slot until it actually settles.
+Deferrals caused by those occupied slots are reported as `in_flight_deferred`,
+separately from phase-time exhaustion (`budget_deferred`); both retain next-tick
+priority. Changes-requested reviews keep ordinary ordering and are excluded
+from `merge_ready_handled`.
+The hammer capacity census through dispatch-intent publication is serialized
+within the watcher process so concurrent evaluations cannot all claim the last
+launch slot. The slow dispatch acknowledgement remains outside that section;
+the existing hammer launch cap and per-PR leases still apply.
+
+Each tick logs `merge_ready_handled` and
+`ama.final_review_to_hammer_launch.summary` with `samples`, `p50_ms` and `p95_ms`.
+Percentiles use confirmed launch acknowledgements in a bounded process-local
+24-hour window, including background completions between ticks. An empty
+window reports null percentiles; a restart starts a new window. After deployment,
+SRE should verify p95 remains below ten minutes with a roughly 25-PR backlog
+and compare review settlement with hammer requests to check the one-tick target.
+This observation requires host traffic and is not established by offline tests.
+Offline tests clear the window with
+`resetFinalReviewHammerLatenciesForTesting()` during setup and teardown.
+
+The optional adapter's Node read seam invokes `read --kind ...`. Adapter CLI
+versions that lack `read` return structured `unsupported_command` evidence;
+subprocess failures are classified as `exec_error`, and API telemetry does not
+store the error message. After that specific capability refusal, the watcher
+logs that it is skipping the unsupported read transport for the rest of the
+tick and uses its existing fallback. Unsupported individual kinds are skipped
+only for that kind. Every new tick probes again. Transient, authentication,
+timeout and unstructured failures do not disable the transport, and writes
+retain their existing path. This explains a repeatable failed-first-read
+pattern; it does not measure a host's failure percentage.
+Nested `withGitHubAdapterReadTick` calls share the enclosing tick's capability
+cache; only the outermost call clears it on exit.
+
 For each confirmed final-round hammer launch, the watcher emits structured event
 `ama.final_review_to_hammer_launch` with PR/head identity, `postedAt`,
 `launchConfirmedAt`, `latencyMs`, and `launchRequestId`. Confirmation is the
@@ -518,7 +574,7 @@ The control is `watcher.ama_hammer_dispatch_mode`, with env override
 
 | Mode | Contract |
 |---|---|
-| `inline` (default) | The posted-review phase awaits the hammer `hq dispatch` attempt before moving to the next row. This is the historical behavior and the fail-safe fallback for missing, unreadable, or unknown config values. |
+| `inline` (default) | The posted-review phase awaits the hammer `hq dispatch` attempt within its handler; up to four posted-review handlers run concurrently. This is the historical dispatch mode and the fail-safe fallback for missing, unreadable, or unknown config values. |
 | `background` | The posted-review phase submits the hammer dispatch to the in-process AMA hammer background queue and immediately returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`. The watcher retains ownership until the closer gates return an outcome; a scoped operator label does not skip that evaluation. The background run calls `maybeDispatchAmaCloser` with the same closer args, detached from the posted-review step deadline. |
 
 The queue is process-local, bounded, and keyed by PR@head

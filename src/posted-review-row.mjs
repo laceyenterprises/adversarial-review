@@ -1,3 +1,6 @@
+import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
+import { summarizeChecksConclusion } from './checks-summary.mjs';
+import { resolveSettledReviewVerdict } from './adversarial-gate-status.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { isGitHubRateLimitError } from './rate-limit-throttle.mjs';
 import { primaryChangeReadStatus } from './ama/primary-change-store.mjs';
@@ -23,7 +26,7 @@ import {
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
-import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestration.mjs';
+import { finalReviewHammerLatencySummary, resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestration.mjs';
 import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { isSafetyRecoveryHold } from './ama/automated-recovery.mjs';
@@ -88,6 +91,7 @@ import {
   subjectProgressFingerprint,
 } from './watcher-no-progress-lane.mjs';
 import {
+  POSTED_REVIEW_CONCURRENCY,
   createPostedReviewFairnessState,
   derivePostedReviewExpensiveStepBudgetMs,
   enforcePostedReviewReviewerPressureBudgetFloor,
@@ -96,6 +100,7 @@ import {
   resolvePostedReviewPhaseBudgetMs,
   resolvePostedReviewReviewerPressurePhaseBudgetMs,
   runPostedReviewHandlersFairly,
+  postedReviewHandlerKey,
 } from './watcher-poll-fairness.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -330,6 +335,7 @@ export async function handlePostedReviewRow({
   labelNames = [],
   projectGateStatusSafe,
   execFileImpl = execFileAsync,
+  preparedCandidate = null,
   fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
   branchProtectionCache = null,
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
@@ -486,13 +492,19 @@ export async function handlePostedReviewRow({
             ADVERSARIAL_MERGE_REQUESTED_LABEL,
           );
     }
-    // Lifecycle sync now follows posted-review handling so reviewer adoption can
-    // drain first. This live fetch is therefore the dispatch-time guard: it
-    // re-reads PR state/mergeability/head before AMA or merge-agent selection
-    // instead of trusting the previous tick's lifecycle mirror.
+    // Candidate evaluation uses this tick's live read or a recent same-head
+    // snapshot, rather than the previous lifecycle mirror. Guard actions still
+    // execute here; downstream dispatch and merge retain their live checks.
     const candidateDeadlineMs = resolveMergeAgentCoexistenceStepDeadlineMs();
     let candidate;
     try {
+      // Preparation is scheduling evidence, never merge authority. Reuse only
+      // a recent same-PR/head snapshot; downstream live/lease checks still run.
+      const preparedAgeMs = Date.now() - Number(preparedCandidate?.fetchedAt);
+      const preparedSnapshot = preparedAgeMs >= 0 && preparedAgeMs < 10_000
+        && preparedCandidate?.repoPath === repoPath && preparedCandidate?.prNumber === prNumber
+        && preparedCandidate.value?.headRefOid === currentRevisionRef
+        ? preparedCandidate.value : null;
       candidate = await timePostedReviewStep(
         'fetchMergeAgentCandidate', stepKey, logger, ({ signal }) =>
           fetchMergeAgentCandidateImpl(repoPath, prNumber, {
@@ -502,6 +514,7 @@ export async function handlePostedReviewRow({
             mergeAgentRequestEvent,
             signal,
             branchProtectionCache,
+            preparedSnapshot,
           }),
         undefined,
         { deadlineMs: candidateDeadlineMs },
@@ -909,6 +922,50 @@ export async function handlePostedReviewRow({
 
 // ── Poll loop: once-per-tick post-review adoption + maintenance phase ─────────
 
+// Probe only lane-due, locally settled current-head reviews. The bounded probe wave
+// avoids serial GitHub reads before the scheduler can prioritize ready work.
+// Probe faults affect ordering only; the normal handler retries its own reads.
+export async function preparePostedReviewHandlers(handlers, {
+  rootDir = ROOT, logger = console, execFileImpl = execFileAsync,
+  readReviewRow = handler => readCurrentReviewRow(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber }),
+  resolveSettled = resolveSettledReviewVerdict,
+  fetchSnapshot = fetchMergeAgentCandidateSnapshot,
+  laneGate = null,
+  now = Date.now,
+  deadlineAt = Infinity,
+} = {}) {
+  let cursor = 0;
+  const prepared = [...handlers];
+  const worker = async () => {
+    while (cursor < handlers.length && now() < deadlineAt) {
+      const index = cursor++;
+      const handler = handlers[index];
+      try {
+        // Preview without advancing the ledger: the scheduler owns the one
+        // skip/run accounting decision, including wakes and the idle floor.
+        if (laneGate?.evaluate?.(handler, { recordSkip: false })?.run === false) continue;
+        const row = readReviewRow(handler);
+        if (row?.review_status !== 'posted' || !handler.headSha || row.reviewer_head_sha !== handler.headSha) continue;
+        const settled = resolveSettled(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber,
+          reviewRow: row, currentHeadSha: handler.headSha, logger });
+        if (!['approved', 'comment-only'].includes(settled.verdict) || settled.remediationPending !== false) continue;
+        const value = await timePostedReviewStep('prepare-merge-ready', postedReviewHandlerKey(handler), logger,
+          ({ signal }) => fetchSnapshot(handler.repoPath, handler.prNumber, { execFileImpl, signal }),
+          undefined, { deadlineMs: Math.max(1, Math.min(10_000, deadlineAt - now())) });
+        if (value?.headRefOid !== handler.headSha) continue;
+        const candidate = { value, fetchedAt: now(), repoPath: handler.repoPath, prNumber: handler.prNumber };
+        prepared[index] = { ...handler, mergeReady: String(value.state).toUpperCase() === 'OPEN' && !value.mergedAt
+            && summarizeChecksConclusion(value.statusCheckRollup) === 'SUCCESS',
+          run: () => handler.run({ preparedCandidate: candidate }) };
+      } catch (error) {
+        logger?.warn?.(`[watcher] merge-ready priority probe failed; normal handler retained: ${error.message}`);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(POSTED_REVIEW_CONCURRENCY, handlers.length) }, worker));
+  return prepared;
+}
+
 // WPS-01: cross-tick fairness state for the posted-review phase. Process-scoped
 // so a handler the per-tick budget cut off is promoted to the front of the NEXT
 // tick instead of being cut off in the same position forever.
@@ -919,6 +976,8 @@ const postedReviewStartupRecoveryRoots = new Set();
  * Bind the no-progress lane to real review-state rows.
  *
  * `evaluate` decides whether a queued posted-review handler runs this tick;
+ * `{ recordSkip: false }` previews that decision before readiness probes without
+ * advancing the skip counter. The scheduler alone accounts for skipped ticks;
  * `record` compares the post-run state fingerprint with the previous tick's to
  * decide whether the tick achieved anything for that PR. Both are kept here (and
  * out of the scheduler) so `runPostedReviewHandlersFairly` stays a pure,
@@ -944,7 +1003,7 @@ export function createNoProgressLaneGate({
     return fresh;
   };
   return {
-    evaluate(handler) {
+    evaluate(handler, { recordSkip = true } = {}) {
       const identity = { repo: handler.repoPath, prNumber: handler.prNumber };
       const ledger = readNoProgressLane(rootDir, identity, { logger });
       const observedAt = now();
@@ -985,7 +1044,7 @@ export function createNoProgressLaneGate({
             retryAfterMs: due ? 0 : HAMMER_EVIDENCE_RECHECK_INTERVAL_MS - elapsedMs };
         }
       }
-      if (!decision.due) {
+      if (!decision.due && recordSkip) {
         recordNoProgressLaneSkip(rootDir, identity, {
           headSha: handler.headSha || null,
           now: observedAt,
@@ -1193,6 +1252,7 @@ export async function runQueuedReviewAdoptionPhase({
     { handlerTimeoutMs: postedReviewHandlerTimeoutMs },
   ),
   noProgressLaneGate = createNoProgressLaneGate({ rootDir, logger }),
+  preparePostedReviewHandlersImpl = preparePostedReviewHandlers,
   runPostedReviewHandlersFairlyImpl = runPostedReviewHandlersFairly,
   postedReviewPriorityTargets = [],
   sweepRereviewWakeQueueImpl = sweepRereviewWakeQueue,
@@ -1301,8 +1361,14 @@ export async function runQueuedReviewAdoptionPhase({
     logger?.log?.(`[watcher] recovering pending AMA hammer dispatch for ${handler.repoPath}#${handler.prNumber}@${handler.headSha} through normal guards`);
   }
 
-  await runPostedReviewHandlersFairlyImpl({
-    handlers: postedReviewHandlers,
+  const phaseStartedMs = Date.now();
+  const preparedHandlers = await preparePostedReviewHandlersImpl(postedReviewHandlers, {
+    rootDir, logger, execFileImpl, laneGate: noProgressLaneGate,
+    deadlineAt: phaseStartedMs + Math.min(30_000, effectivePostedReviewPhaseBudgetMs / 2),
+  });
+  const postedReviewSummary = await runPostedReviewHandlersFairlyImpl({
+    handlers: preparedHandlers,
+    phaseStartedMs,
     state: postedReviewFairness,
     budgetMs: effectivePostedReviewPhaseBudgetMs,
     handlerTimeoutMs: postedReviewHandlerTimeoutMs,
@@ -1315,6 +1381,12 @@ export async function runQueuedReviewAdoptionPhase({
     ],
     logger,
   });
+
+  try {
+    logger?.log?.(JSON.stringify({ event: 'ama.final_review_to_hammer_launch.summary',
+      merge_ready_handled: postedReviewSummary?.mergeReadyHandled || 0,
+      ...finalReviewHammerLatencySummary() }));
+  } catch { /* Telemetry cannot interrupt closure maintenance. */ }
 
   // TREC-01: drains the Linear triage syncs owed by terminal transitions. This
   // is what lets syncPRLifecycle record a merge/close immediately instead of

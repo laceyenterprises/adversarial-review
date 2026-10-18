@@ -61,6 +61,8 @@ import { withGitHubBudgetScope, isGitHubRateLimitError } from './rate-limit-thro
 // as the hard default even when the handler timeout is longer; production once
 // carried a 30m override and fresh PR discovery stalled.
 export const DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS = 10 * 60 * 1000;
+// Fixed fan-out: handler scheduling is independent of the hammer launch cap.
+export const POSTED_REVIEW_CONCURRENCY = 4;
 export const DEFAULT_POSTED_REVIEW_PHASE_HANDLER_CAPACITY = 3;
 export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_HANDLER_CAPACITY = 2;
 export const DEFAULT_POSTED_REVIEW_BOUNDED_EXPENSIVE_STEP_COUNT = 2;
@@ -99,11 +101,9 @@ export const DEFAULT_POSTED_REVIEW_LANE_STARVATION_FLOOR = 1;
 // is already guarded by a lease or a CAS, and the alternative — a tick that never
 // returns to discovery — is exactly the outage being fixed.
 //
-// A timed-out handler is also a phase-level stop. Continuing through a backlog of
-// slow hammer/merge handlers just serializes one abandoned 3m dispatch after
-// another, which recreates poll starvation while the first abandoned promise is
-// still alive. Defer the tail to the next tick instead; the fairness state
-// promotes it, and the no-progress lane slows repeatedly unproductive PRs.
+// Timed-out work retains a concurrency slot until it actually settles; other
+// slots continue while the phase has budget. A saturated tick defers its tail
+// instead of starting another wave of abandoned work.
 export const DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS = 3 * 60 * 1000;
 export const DEFAULT_POSTED_REVIEW_REVIEWER_PRESSURE_PHASE_BUDGET_MS =
   DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS *
@@ -388,7 +388,7 @@ function orderPriorityFirst(handlers, priorityTargets) {
  * than being cut off again in the same position.
  */
 export function createPostedReviewFairnessState() {
-  return { deferredKeys: new Set() };
+  return { deferredKeys: new Set(), inFlight: new Map() };
 }
 
 function orderDeferredFirst(handlers, state) {
@@ -455,7 +455,9 @@ export async function runPostedReviewHandlersFairly({
   budgetMs = DEFAULT_POSTED_REVIEW_PHASE_BUDGET_MS,
   handlerTimeoutMs = DEFAULT_POSTED_REVIEW_HANDLER_TIMEOUT_MS,
   minimumHandlerStartBudgetMs = null,
+  phaseStartedMs = null,
   laneGate = null,
+  concurrency = POSTED_REVIEW_CONCURRENCY, // Test seam; production uses the fixed module constant.
   priorityTargets = [],
   laneStarvationFloor = DEFAULT_POSTED_REVIEW_LANE_STARVATION_FLOOR,
   nowMs = () => Date.now(),
@@ -466,10 +468,12 @@ export async function runPostedReviewHandlersFairly({
   const summary = {
     queued: handlers.length,
     ran: 0,
+    mergeReadyHandled: 0,
     failed: 0,
     timedOut: 0,
     skippedByLane: 0,
     deferredByBudget: 0,
+    deferredByInFlight: 0,
     deferredAfterTimeout: 0,
     continuedAfterTimeout: 0,
     daemonCleanMerges: 0,
@@ -496,9 +500,15 @@ export async function runPostedReviewHandlersFairly({
     minimumHandlerStartBudgetMs,
     derivePostedReviewExpensiveStepBudgetMs(effectiveHandlerTimeoutMs),
   );
-  const startedMs = nowMs();
+  const startedMs = Number.isFinite(phaseStartedMs) ? phaseStartedMs : nowMs();
   const normalizedPriorityTargets = normalizePostedReviewPriorityTargets(priorityTargets);
-  const ordered = orderPriorityFirst(orderDeferredFirst(handlers, state), normalizedPriorityTargets);
+  // Explicit wakes keep their established priority. Within that policy, retain
+  // budget-deferred order ahead of newly ready work; both precede ordinary work.
+  const readyFirst = [...handlers.filter(h => h.mergeReady), ...handlers.filter(h => !h.mergeReady)];
+  const ordered = orderPriorityFirst(orderDeferredFirst(readyFirst, state), normalizedPriorityTargets);
+  const limit = Math.min(POSTED_REVIEW_CONCURRENCY, Math.max(1, Math.floor(concurrency) || POSTED_REVIEW_CONCURRENCY));
+  const inFlight = state.inFlight ||= new Map();
+  const active = new Set();
   const nextDeferred = new Set();
   // LANESTARVE-01: every handler the lane turned away this tick, in queue order,
   // with the decision that turned it away. The starvation floor picks from here.
@@ -517,12 +527,17 @@ export async function runPostedReviewHandlersFairly({
     const handlerStartedMs = nowMs();
     const handlerDeadlineMs = parsePositiveMs(handler?.timeoutMs, effectiveHandlerTimeoutMs);
     let resourceLimited = false;
-    const outcome = await runWithDeadline(() => withGitHubBudgetScope({ urgent: handler.budgetUrgent === true }, async scope => {
+    if (handler.mergeReady) summary.mergeReadyHandled += 1;
+    const work = Promise.resolve().then(() => withGitHubBudgetScope({ urgent: handler.budgetUrgent === true }, async scope => {
       try { return await handler.run(); }
       // These aggregate flags describe this handler's accounting outcome;
       // admission itself uses resource/credential keys inside the scope.
       finally { resourceLimited = scope.rateLimited || scope.deferred; }
-    }), {
+    }));
+    inFlight.set(key, work);
+    const release = () => { if (inFlight.get(key) === work) inFlight.delete(key); };
+    work.then(release, release);
+    const outcome = await runWithDeadline(() => work, {
       timeoutMs: handlerDeadlineMs,
       setTimeoutFn,
       clearTimeoutFn,
@@ -588,6 +603,9 @@ export async function runPostedReviewHandlersFairly({
   for (let index = 0; index < ordered.length; index += 1) {
     const handler = ordered[index];
     const key = postedReviewHandlerKey(handler);
+    while (active.size > 0 && (active.size >= limit || inFlight.size >= POSTED_REVIEW_CONCURRENCY || inFlight.has(key))) {
+      await Promise.race(active);
+    }
     const phaseElapsedMs = nowMs() - startedMs;
     const remainingBudgetMs = effectiveBudgetMs - phaseElapsedMs;
 
@@ -601,16 +619,27 @@ export async function runPostedReviewHandlersFairly({
       for (let rest = index; rest < ordered.length; rest += 1) {
         nextDeferred.add(postedReviewHandlerKey(ordered[rest]));
       }
-      summary.deferredByBudget = ordered.length - index;
+      if (summary.timedOut > 0) {
+        summary.deferredAfterTimeout += ordered.length - index;
+        logger?.warn?.(`[watcher] posted-review phase yielding after timeout: ${ordered.length - index} handler(s) deferred; minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms`);
+      } else summary.deferredByBudget += ordered.length - index;
       logger?.warn?.(
         `[watcher] posted-review phase budget insufficient after ` +
           `${Math.round(nowMs() - startedMs)}ms (budget=${effectiveBudgetMs}ms): ` +
           `remaining=${Math.max(0, Math.round(remainingBudgetMs))}ms ` +
           `minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms; ` +
-          `${summary.deferredByBudget} handler(s) deferred to the front of the next tick ` +
+          `${ordered.length - index} handler(s) deferred to the front of the next tick ` +
           `(${[...nextDeferred].join(' ')})`,
       );
       break;
+    }
+
+    // Timed-out work still occupies a slot until it really settles. A later
+    // tick must not multiply abandoned handlers or duplicate a PR's evaluation.
+    if (inFlight.size >= POSTED_REVIEW_CONCURRENCY || inFlight.has(key)) {
+      nextDeferred.add(key);
+      summary.deferredByInFlight += 1;
+      continue;
     }
 
     let laneDecision = { run: true };
@@ -650,45 +679,17 @@ export async function runPostedReviewHandlersFairly({
       continue;
     }
 
-    const { outcome, handlerElapsedMs } = await executeHandler({
-      handler,
-      key,
-      positionLabel: `${index + 1}/${ordered.length}`,
-    });
-
-    if (outcome.timedOut) {
-      const remainingAfterTimeout = ordered.length - index - 1;
-      const phaseElapsedAfterTimeoutMs = Math.round(nowMs() - startedMs);
-      const remainingBudgetAfterTimeoutMs = effectiveBudgetMs - phaseElapsedAfterTimeoutMs;
-      if (
-        remainingAfterTimeout > 0
-        && remainingBudgetAfterTimeoutMs >= effectiveMinimumHandlerStartBudgetMs
-      ) {
-        summary.continuedAfterTimeout += 1;
-        logger?.warn?.(
-          `[watcher] posted-review phase continuing after timeout for ${key} ` +
-            `elapsed_ms=${handlerElapsedMs}: ${remainingAfterTimeout} handler(s) still eligible ` +
-            `this tick (remaining=${Math.max(0, remainingBudgetAfterTimeoutMs)}ms ` +
-            `minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms)`,
-        );
-        continue;
-      }
-      if (remainingAfterTimeout > 0) {
-        for (let rest = index + 1; rest < ordered.length; rest += 1) {
-          nextDeferred.add(postedReviewHandlerKey(ordered[rest]));
+    const task = executeHandler({ handler, key, positionLabel: `${index + 1}/${ordered.length}` })
+      .then(({ outcome }) => {
+        if (outcome.timedOut && effectiveBudgetMs - (nowMs() - startedMs) >= effectiveMinimumHandlerStartBudgetMs) {
+          summary.continuedAfterTimeout += 1;
+          logger?.warn?.(`[watcher] posted-review phase continuing after timeout for ${key}; remaining phase budget permits more work`);
         }
-        summary.deferredAfterTimeout = remainingAfterTimeout;
-        logger?.warn?.(
-          `[watcher] posted-review phase yielding after timeout for ${key} ` +
-            `elapsed_ms=${handlerElapsedMs}: ${remainingAfterTimeout} handler(s) deferred ` +
-            `to the front of the next tick (remaining=${Math.max(0, remainingBudgetAfterTimeoutMs)}ms ` +
-            `minimum_start_budget=${effectiveMinimumHandlerStartBudgetMs}ms; ` +
-            `${[...nextDeferred].join(' ')})`,
-        );
-      }
-      break;
-    }
+      });
+    active.add(task);
+    task.finally(() => active.delete(task));
   }
+  await Promise.all(active);
 
   // ── LANESTARVE-01: minimum-service floor ───────────────────────────────────
   //
@@ -714,6 +715,7 @@ export async function runPostedReviewHandlersFairly({
     && summary.failed === 0
     && summary.timedOut === 0
     && summary.deferredByBudget === 0
+    && summary.deferredByInFlight === 0
   ) {
     // Most-starved first: the PR that has waited the most ticks since its last
     // walk, then the one with the longest no-progress series, then queue order.
@@ -772,7 +774,7 @@ export async function runPostedReviewHandlersFairly({
       `[watcher] posted-review phase made zero progress: queued=${summary.queued} ` +
         `ran=0 failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout} ` +
+        `in_flight_deferred=${summary.deferredByInFlight} timeout_deferred=${summary.deferredAfterTimeout} ` +
         `slow_lane_floor_admissions=${summary.laneFloorAdmissions}`,
     );
   }
@@ -785,12 +787,14 @@ export async function runPostedReviewHandlersFairly({
       `[watcher] posted-review phase stall signature: queued=${summary.queued} ` +
         `ran=${summary.ran} failed=${summary.failed} timed_out=${summary.timedOut} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout}`,
+        `in_flight_deferred=${summary.deferredByInFlight} timeout_deferred=${summary.deferredAfterTimeout}`,
     );
   }
   if (
-    summary.skippedByLane > 0
+    summary.queued > 0
+    || summary.skippedByLane > 0
     || summary.deferredByBudget > 0
+    || summary.deferredByInFlight > 0
     || summary.deferredAfterTimeout > 0
     || summary.timedOut > 0
     || summary.laneFloorAdmissions > 0
@@ -800,9 +804,9 @@ export async function runPostedReviewHandlersFairly({
     // reading the per-PR lines above.
     logger?.log?.(
       `[watcher] posted-review phase: queued=${summary.queued} ran=${summary.ran} ` +
-        `failed=${summary.failed} timed_out=${summary.timedOut} ` +
+        `failed=${summary.failed} timed_out=${summary.timedOut} merge_ready_handled=${summary.mergeReadyHandled} ` +
         `slow_lane_deferred=${summary.skippedByLane} budget_deferred=${summary.deferredByBudget} ` +
-        `timeout_deferred=${summary.deferredAfterTimeout} ` +
+        `in_flight_deferred=${summary.deferredByInFlight} timeout_deferred=${summary.deferredAfterTimeout} ` +
         `continued_after_timeout=${summary.continuedAfterTimeout}` +
         (summary.priorityLaneBypasses > 0 ? ` priority_lane_bypasses=${summary.priorityLaneBypasses}` : '') +
         (summary.laneFloorAdmissions > 0 ? ` slow_lane_floor_admissions=${summary.laneFloorAdmissions}` : ''),

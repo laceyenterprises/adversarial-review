@@ -4439,6 +4439,26 @@ export async function resolveHamTerminalRemediationEvidence({
   };
 }
 
+// Posted handlers can reach capacity admission concurrently. Serialize only
+// the live census through the synchronous dispatch-intent write; the existing
+// per-PR lease and every eligibility decision remain unchanged. Slow dispatch
+// acknowledgements run outside this short process-local critical section.
+const launchAdmissions = new Map();
+async function acquireLaunchAdmission(rootDir) {
+  const previous = launchAdmissions.get(rootDir) || Promise.resolve();
+  let unlock;
+  const current = new Promise(resolve => { unlock = resolve; });
+  launchAdmissions.set(rootDir, current);
+  await previous;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (launchAdmissions.get(rootDir) === current) launchAdmissions.delete(rootDir);
+    unlock();
+  };
+}
+
 // Delay predecessor deletion until admission finishes: a dispatcher retry can
 // acquire the live logical-job claim after our ledger snapshot. Its refusal
 // must still leave every predecessor helper and prompt intact.
@@ -6961,6 +6981,9 @@ async function maybeDispatchAmaCloserAttempt({
     );
   }
   const dispatchTimeoutMs = resolveAmaDispatchTimeoutMs(cfg);
+  const releaseLaunchAdmission = await acquireLaunchAdmission(rootDir);
+  try {
+  throwIfAborted(signal);
   const activeLaunches = await findActiveAmaCloserLaunches(rootDir, {
     cleanupScratchImpl,
     signal,
@@ -7134,6 +7157,8 @@ async function maybeDispatchAmaCloserAttempt({
     deleteAmaCloserLease(rootDir, leaseIdentity);
     throw error;
   }
+
+  releaseLaunchAdmission();
 
   if (ownerProofRecovery) {
     const owner = await probeOrphanOwnership({ rootDir, repo, prNumber, headSha: prMetadata.headSha,
@@ -7827,6 +7852,7 @@ async function maybeDispatchAmaCloserAttempt({
       }
     }
   }
+  } finally { releaseLaunchAdmission(); }
 }
 
 function runCloserStepsSync(iterator) {

@@ -6,8 +6,8 @@ import { writeFileAtomic } from './atomic-write.mjs';
 // HAMASYNC-01 — take AMA's hammer `hq dispatch` out of the serial posted-review
 // phase.
 //
-// The posted-review phase handles PRs one at a time. When AMA decides a PR needs
-// a hammer, `maybeDispatchAmaCloser` shells out to `hq dispatch`, which took
+// The posted-review phase runs a fixed number of handlers concurrently. When
+// AMA decides a PR needs a hammer, `maybeDispatchAmaCloser` shells out to `hq dispatch`, which took
 // 118-165 s per call on the reference host (2026-09-25, 16+ coexistence-deadline
 // breaches across #6924/#6932/#6940/#6941/#6960/#6962/#6967/#6969). Every later
 // PR in the phase — including merge-ready ones that need only the daemon's merge

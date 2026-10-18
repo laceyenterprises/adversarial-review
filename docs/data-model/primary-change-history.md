@@ -53,6 +53,14 @@ File evidence and reversal citations use the collector's shapes in
 `src/ama/primary-change.mjs`.
 CI-cost evidence is collected live after history reuse and is never cached here.
 
+Entries in `rejectedReversalAuthorizations` retain their existing `reason` codes.
+An `original-reversal-not-proven-before-supersession` entry also carries optional
+`detail`: no candidate with the same commit message, a change-line mismatch with
+the affected paths, or the failed snapshot/provenance/ancestry/parent-patch check.
+At most ten candidate failures are included. The refusal's `missingEvidence`
+forwards this detail in both `rejected` and the operator-facing `summary`.
+Older cache records without `detail` remain readable.
+
 The rename-related optional history fields are:
 
 | Field | Shape and meaning |

@@ -2006,11 +2006,14 @@ primary segments. A citation with no later superseding authoritative review
 remains current by GitHub review order. If a later review supersedes it (same
 family, or another family on another head), the first such review's immutable
 head must contain the original HAM commit with the same message and complete
-reversal patch, ignoring only hunk coordinates. The collector verifies original
+reversal change: each file's path, previous path, status and ordered removed and
+added lines must match exactly. Context lines and hunk coordinates are ignored
+only for this original-commit match. The reviewed-parent rebase proof retains
+its existing context and hunk checks. The collector verifies original
 HAM identity, citation freshness at its original parent, and the parent's merge
 base. The evaluator rechecks finding coverage and HAM touch against that original
 patch as well as the rebased patch. Author and committer dates supply no freshness
-evidence. Missing, capped or diverged snapshot history cannot establish that
+evidence. Missing or capped snapshot history cannot establish that
 original authorization and refuses the waiver. Coordinates are translated through that
 matched hunk; File/Lines coverage and the HAM commit's own touch are checked as
 before. A changed, ambiguous or missing hunk, an unknown review or finding, or
@@ -2019,7 +2022,10 @@ a review superseded before the reversal stays refused. Every refusal carries
 missing findings and failed patch or File/Lines coverage; verified counts include
 only citations that passed evaluation) into the hammer gate
 JSON (`primaryChangeMissingEvidence`), the hammer's closing status and the
-watcher's hold log. When a HAM head's own exact-head self-certification failed
+watcher's hold log. An original-reversal proof rejection keeps its reason code
+and adds `detail` naming a missing same-message candidate, change-line mismatch
+paths, or another failed proof check. When a HAM head's own exact-head
+self-certification failed
 only on that authorization (`stale-review-head`, `verdict-not-settled-success`
 and `blocking-findings-unknown` are its cascade), the closer marks the
 `primary-change-repair-required` refusal `exactHeadReview: true` and the

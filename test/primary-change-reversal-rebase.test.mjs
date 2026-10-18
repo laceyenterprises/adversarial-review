@@ -7,6 +7,166 @@ import { recoverStrandedCloserHead } from '../src/ama/closer-head-recovery.mjs';
 
 const sha = (c) => c.repeat(40);
 const oldBase = sha('0'), base = sha('b'), reviewedHead = sha('1'), author = sha('2'), head = sha('c');
+
+async function snapshotReversal({ transform = (_path, response) => response,
+  read = (path, transport) => transport(path), ...options } = {}) {
+  const later = review({ node_id: 'PRR_snapshot', commit_id: sha('f'), state: 'COMMENTED',
+    body: '## Blocking issues\n- None.\n## Verdict\nComment only' });
+  const { transport } = await collect({ originalRecorded: true, reviews: [review(), later], ...options });
+  const evidence = await fetchPrimaryChange({ repo: 'fixture/repo', prNumber: 8088, headSha: head,
+    get: async path => transform(path, await read(path, transport)) },
+  { fetchCiCostImpl: async ({ headSha }) => ({ headSha, ok: true, failedCheck: false }) });
+  return { evidence, result: checkPrimaryChange(evidence, head) };
+}
+
+function withReversalContext(commit, context) {
+  return { ...commit, files: commit.files.map(file => ({ ...file,
+    patch: file.patch.replace(/^@@ -(\d+),2 \+(\d+) @@/,
+      (_header, oldLine, newLine) => `@@ -${Number(oldLine) - 1},4 +${Number(newLine) - 1},3 @@ ${context}`)
+      .replace('\n', `\n ${context}_before()\n`) + `\n ${context}_after()`,
+  })) };
+}
+
+test('a superseded authorized reversal survives changed context and hunk coordinates', async () => {
+  for (const originalRebased of [false, true]) {
+    const { evidence, result } = await snapshotReversal({
+      ...(originalRebased ? { originalParent: author, originalLine: 15, snapshotStatus: 'diverged' } : {}),
+      transform: (path, response) => {
+        if (path.endsWith(`/commits/${head}`)) return withReversalContext(response, 'new_base');
+        if (path.endsWith(`/commits/${sha('d')}`)) return withReversalContext(response, 'old_base');
+        return response;
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(evidence.rejectedReversalAuthorizations, undefined);
+    assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, sha('d'));
+    assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.rebased === true, originalRebased);
+  }
+});
+
+test('conflict resolution changing exact removed or added lines still refuses the original proof', async () => {
+  for (const rewrite of [
+    patch => patch.replace('-start_unsafe()', '-start_unsafe(retry=true)'),
+    patch => patch.replace('+start()', '+start_safe()'),
+    patch => patch.replace('-start_unsafe()', '- start_unsafe()'),
+    patch => patch.replace('-start_unsafe()\n-log_startup()', '-log_startup()\n-start_unsafe()'),
+  ]) {
+    const { evidence, result } = await snapshotReversal({ transform: (path, response) => {
+      if (!path.endsWith(`/commits/${head}`)) return response;
+      const contextual = withReversalContext(response, 'new_base');
+      return { ...contextual, files: contextual.files.map(file => ({ ...file, patch: rewrite(file.patch) })) };
+    } });
+    assert.equal(result.reason, 'primary-change-reverted');
+    const rejection = evidence.rejectedReversalAuthorizations[0];
+    assert.equal(rejection.reason, 'original-reversal-not-proven-before-supersession');
+    assert.match(rejection.detail, /change-line mismatch on paths: src\/a\.mjs/);
+    assert.equal(result.missingEvidence.rejected[0].detail, rejection.detail);
+    assert.ok(result.missingEvidence.summary.includes(rejection.detail));
+  }
+});
+
+test('original reversal proof retains file path, previous path and status identity', async () => {
+  for (const metadata of [{ filename: 'src/other.mjs' }, { previous_filename: 'src/old.mjs' }, { status: 'renamed' }]) {
+    const { evidence, result } = await snapshotReversal({ transform: (path, response) =>
+      path.endsWith(`/commits/${sha('d')}`)
+        ? { ...response, files: response.files.map(file => ({ ...file, ...metadata })) } : response });
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.match(evidence.rejectedReversalAuthorizations[0].detail, /change-line mismatch on paths: src\/a\.mjs/);
+    if (metadata.filename) assert.ok(evidence.rejectedReversalAuthorizations[0].detail.includes(metadata.filename));
+  }
+});
+
+test('original proof diagnostics distinguish missing messages, provenance and snapshot checks', async () => {
+  for (const [options, detail] of [
+    [{ transform: (path, response) => path.endsWith(`${reviewedHead}...${sha('f')}`)
+      ? { ...response, commits: response.commits.map(commit => ({ ...commit,
+        commit: { ...commit.commit, message: `Different repair\n${commit.commit.message}` } })) } : response },
+    /no candidate with the same commit message/],
+    [{ transform: (path, response) => path.endsWith(`${reviewedHead}...${sha('f')}`)
+      ? { ...response, commits: response.commits.map(commit => ({ ...commit, sha: 'invalid' })) } : response },
+    /commit-provenance/],
+    [{ originalLogin: 'foreign-builder' }, /commit-provenance/],
+    [{ originalParent: sha('9') }, /merge-base-mismatch/],
+    [{ snapshotCapped: true }, /incomplete or unsupported superseding snapshot/],
+  ]) {
+    const { evidence, result } = await snapshotReversal(options);
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'original-reversal-not-proven-before-supersession');
+    assert.match(evidence.rejectedReversalAuthorizations[0].detail, detail);
+    assert.match(result.missingEvidence.summary, detail);
+  }
+});
+
+test('a mismatched original candidate cannot hide a later valid original', async () => {
+  const { evidence, result } = await snapshotReversal({
+    read: async (path, transport) => {
+      if (!path.endsWith(`/commits/${sha('e')}`)) return transport(path);
+      const original = await transport(`repos/fixture/repo/commits/${sha('d')}`);
+      return { ...original, sha: sha('e'), files: original.files.map(file => ({ ...file,
+        patch: file.patch.replace('+start()', '+different_start()') })) };
+    },
+    transform: (path, response) => {
+      if (path.endsWith(`${reviewedHead}...${sha('f')}`)) return { ...response,
+        total_commits: 2, commits: [{ ...response.commits[0], sha: sha('e') }, ...response.commits] };
+      return response;
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, sha('d'));
+});
+
+test('finding coverage uses reviewed coordinates after a rebase and still refuses uncovered regions', async () => {
+  for (const shift of [0, 5, 8]) {
+    const covered = await collect({ shift });
+    assert.equal(covered.result.ok, true);
+    const narrow = review({ body: review().body.replace('`10-11`', '`11`') });
+    const uncovered = await collect({ shift, reviews: [narrow] });
+    assert.equal(uncovered.result.reason, 'primary-change-reverted');
+    assert.deepEqual(uncovered.result.missingEvidence.rejected.map(entry => entry.reason), ['finding-does-not-cover-region']);
+  }
+});
+
+test('rebased context does not change commit provenance requirements', async () => {
+  for (const scenario of ['linked', 'foreign', 'verified-web-flow', 'unsigned-web-flow']) {
+    const { evidence, result } = await snapshotReversal({ reviews: [review()], transform: (path, response) => {
+      if (!path.endsWith(`/commits/${head}`)) return response;
+      const contextual = withReversalContext(response, 'new_base');
+      if (scenario === 'foreign') return { ...contextual, author: { login: 'fixture-builder' } };
+      if (scenario.endsWith('web-flow')) return { ...contextual, committer: { login: 'web-flow' },
+        commit: { ...contextual.commit, verification: { verified: scenario === 'verified-web-flow', reason: 'valid' } } };
+      return contextual;
+    } });
+    if (['linked', 'verified-web-flow'].includes(scenario)) assert.equal(result.ok, true, scenario);
+    else {
+      assert.equal(result.reason, 'primary-change-reverted', scenario);
+      assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'commit-provenance', scenario);
+    }
+  }
+});
+
+test('context drift leaves the unsuperseded and unrebased authorization paths unchanged', async () => {
+  for (const rebased of [false, true]) {
+    const { evidence, result } = await snapshotReversal({ reviews: [review()], shift: rebased ? 5 : 0,
+      read: (path, transport) => {
+        if (!rebased && [author, reviewedHead].some(from => path.endsWith(`${from}...${reviewedHead}`))) return { status: 'identical' };
+        return transport(path);
+      },
+      transform: (path, response) => {
+        if (path.endsWith(`/commits/${head}`)) {
+          const contextual = withReversalContext(response, 'nearby_base');
+          return rebased ? contextual : { ...contextual, parents: [{ sha: reviewedHead }] };
+        }
+        if (!rebased && path.endsWith(`${base}...${reviewedHead}`)) return { ...response,
+          merge_base_commit: { sha: base }, files: response.files.filter(file => file.filename === 'src/a.mjs') };
+        return response;
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(evidence.reversalAuthorizations[0].rebased === true, rebased);
+    assert.equal(evidence.reversalAuthorizations[0].originalAuthorization, undefined);
+  }
+});
+
 test('HAMREVERSAL-01: API-published reversal uses verification from the re-read commit', async () => {
   const { transport } = await collect();
   for (const verified of [true, false]) {

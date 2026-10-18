@@ -1,11 +1,13 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
 import { hammerWakeEligibility, requestEligibleHammerWake } from '../src/hammer-wake.mjs';
-import { maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
+import { amaCloserDispatchFilePath, maybeDispatchAmaCloser, readAmaCloserDispatchRecord,
   settleRefusedHammerWake, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { evaluateMergeEligibility } from '../src/ama/merge-eligibility.mjs';
@@ -316,6 +318,54 @@ test('watcher CI handoff cannot treat only the adversarial gate as failed CI own
   const result = await maybeDispatchAmaClosureFor(args);
   assert.notEqual(result.closureOwner?.reason, 'ci-blocked-remediation-exhausted');
   assert.equal(wakes[0].outcome, 'skipped');
+});
+
+for (const name of [undefined, null, 42]) test(`rescue handles malformed external check names: ${name}`, async t => {
+  const { args } = fixture(t);
+  args.dispatchJob = {};
+  args.cfg = { ama: { required_check_contexts: ['synthetic-ci'] } };
+  args.candidate.statusCheckRollup = [{ ...red[0], name }, red[0]];
+  let invoked = false;
+  args.maybeDispatchAmaCloserImpl = async payload => {
+    invoked = true;
+    assert.equal(payload.dispatchContext.ciBlockedHammerOwner, true);
+    assert.deepEqual(payload.dispatchContext.ciFailedChecks.map(check => check.name), ['synthetic-ci']);
+    return { dispatched: false, reason: 'synthetic-probe' };
+  };
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(invoked, true);
+});
+
+test('failed dispatch settlement preserves the unlaunched prompt and pending lease', t => {
+  const { args } = fixture(t);
+  const identity = { repo, prNumber, headSha: head };
+  const promptDir = join(args.rootDir, 'prompts');
+  mkdirSync(promptDir);
+  const promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${reviewed}-hammer-scratch-fixture.md`);
+  writeFileSync(promptPath, 'synthetic unlaunched prompt');
+  const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
+    promptDir, promptPath, lastAttemptedAt: '2026-01-01T00:00:00Z', retryCount: 1 };
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
+  const leaseBefore = readAmaCloserLease(args.rootDir, identity);
+  const rename = fs.renameSync;
+  const mocked = t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === amaCloserDispatchFilePath(args.rootDir, identity)) {
+      throw Object.assign(new Error('synthetic rename failure'), { code: 'EIO' });
+    }
+    return rename(from, to);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
+      result: { dispatched: false, reason: 'not-eligible' } }), /synthetic rename failure/);
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  assert.deepEqual(readAmaCloserLease(args.rootDir, identity), leaseBefore);
+  assert.equal(existsSync(promptPath), true);
 });
 
 for (const pathKind of ['owned', 'outside', 'wrong-namespace']) test(`refused unlaunched prompt cleanup respects its path namespace: ${pathKind}`, t => {

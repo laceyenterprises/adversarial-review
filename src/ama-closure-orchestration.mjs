@@ -1146,7 +1146,7 @@ async function dispatchAmaClosureFor({
     && reviewStateRow?.review_status === 'ci-blocked'
     && String(reviewStateRow?.failure_message || '').startsWith('[ci-regression-stopped]')
     ? summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig }).failedChecks
-      .filter(check => requiredCiContexts.size === 0 || requiredCiContexts.has(check.name.toLowerCase())) : [];
+      .filter(check => requiredCiContexts.size === 0 || requiredCiContexts.has(String(check?.name || '').toLowerCase())) : [];
   const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true
     || derivedCiFailedChecks.length > 0;
   if (reviewCycleCapReached || ciBlockedHammerOwner) reviewCycleExhausted = true;

@@ -2646,7 +2646,7 @@ export function settleRefusedHammerWake({ rootDir, identity, intent, result,
     return { ...current, state: 'dispatch-failed', reason, lastError: reason,
       retryCount: Math.max(0, Number(current.retryCount || 0) - 1) };
   });
-  if (retiredLease) {
+  if (settled && retiredLease) {
     cleanupHammerUnlaunchedPrompt(settled);
     const lease = readAmaCloserLease(rootDir, leaseIdentity);
     if (lease?.status === 'pending' && !lease.lrqId

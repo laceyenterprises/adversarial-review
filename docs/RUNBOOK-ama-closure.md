@@ -1556,6 +1556,9 @@ uses (`src/hammer-owner-route.mjs`).
   A prompt populated after intent capture belongs to that attempt when its
   timestamp and target still match; an already captured prompt must match too.
   Settlement follows the closer result regardless of the diagnostic wake outcome.
+  Prompt and pending-lease cleanup require successful durable dispatch-record
+  settlement; a failed write preserves both for recovery. Required-context
+  filtering normalizes missing or non-string check names before matching.
   It removes the retired unlaunched prompt only when its path is an immediate
   child of its prompt directory and matches this PR's generated prompt namespace.
   CI-repair wake events stay in telemetry but are excluded from the

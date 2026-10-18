@@ -145,11 +145,16 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   Only launches that would otherwise consume a slot are probed in the ledger;
   aged-out historical records are left for manual reconciliation. Production PostgreSQL scans share one timeout-bounded read-only launch snapshot,
   including transitive retry descendants; SQLite uses its in-process indexed reads.
-  Unreadable or budget-skipped evidence retains same-PR ownership but does not
-  charge fleet capacity. Injected per-launch readers retain the one-second scan
-  budget and stop further queries after an unreadable result. Cancellation is checked between
+  Unreadable, missing or budget-skipped evidence retains same-PR ownership and
+  reserves fleet capacity inside the bounded pending-launch window. Unreadable
+  retry chains reserve the same bounded capacity even with a terminal ancestor.
+  The watcher explicitly enables snapshots through its status wrapper and
+  forwards the snapshot to every per-record read, including failed snapshots.
+  Injected per-launch readers retain the one-second scan budget and stop further queries after an unreadable result. Cancellation is checked between
   probes. `dispatching` intents are never probed or rewritten, since same-head
   retries can still reference the previous LRQ.
+- The path and read-only JSON reader live in `src/ama/dispatch-record-read.mjs`,
+  re-exported by the dispatcher for compatibility; hammer wakes import the leaf.
 - Reconciliation annotates confirmed terminal `dispatched` launches as
   `launch-terminal`, preserving existing fields and leaving closer and merge
   leases untouched. Launch success alone is not merge success. Missing rows
@@ -157,6 +162,11 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
   keeps the reservation until observation. New launch writes clear
   `terminalLaunchStatus` and `reconciledAt`. Capacity recognizes `reaped` and
   `cancelled` without widening the per-PR unknown-status retry/re-arm decision.
+- Terminal-success ownership remains held while a live OPEN PR has an armed
+  `autoMergeRequest`, unless a no-merge audit proves a closing decision. A
+  stale-active worker with ledger `succeeded` enters the live terminal-success
+  classifier before retry/refund admission; the persisted observation remains
+  `unverified-terminal-success` with raw `terminalLaunchStatus: succeeded`.
 - Manual reconciliation must run as the canonical daemon account for the runtime
   root, pinning `--hq-root` and `--ledger-target` to match the watcher. The CLI
   reports the resolved backend and source without exposing DSN credentials.

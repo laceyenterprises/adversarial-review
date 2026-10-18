@@ -282,6 +282,7 @@ test('DCR-02: default live probe checks fork head repository branches', async ()
             headRefName: 'codex/live',
             headRefOid: HEAD,
             headRepository: { nameWithOwner: 'contributor/repo' },
+            autoMergeRequest: { enabledAt: '2026-07-20T12:00:00Z' },
           }),
           stderr: '',
         };
@@ -296,7 +297,8 @@ test('DCR-02: default live probe checks fork head repository branches', async ()
   assert.equal(result.state, 'OPEN');
   assert.equal(result.headBranchExists, true);
   assert.deepEqual(calls.map((call) => call.cmd), ['gh', 'git']);
-  assert.ok(calls[0].args.includes('state,headRefName,headRefOid,headRepository'));
+  assert.ok(calls[0].args.includes('state,headRefName,headRefOid,headRepository,autoMergeRequest'));
+  assert.deepEqual(result.autoMergeRequest, { enabledAt: '2026-07-20T12:00:00Z' });
   assert.deepEqual(calls[1].args, [
     'ls-remote',
     '--exit-code',

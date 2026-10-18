@@ -4,7 +4,7 @@
 // adapters rather than inside the claim loop. Extracting it also pulls
 // follow-up-remediation.mjs back under the ARC-19 R3 line ratchet, which is
 // decrease-only by contract.
-import { readAmaCloserDispatchRecord } from './ama/dispatch-closer.mjs';
+import { readAmaCloserDispatchRecord } from './ama/dispatch-record-read.mjs';
 import { isTerminalLaunchRequestStatus } from './ama/launch-request-status.mjs';
 import { readAmaCloserLease, AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES } from './ama/closer-lease.mjs';
 import { createHash } from 'node:crypto';

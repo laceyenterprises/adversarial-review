@@ -1393,8 +1393,9 @@ number before reading closer leases, probing ledger status or settling ownership
 Disabled closure remains a no-op. On the enabled path, early ownership
 reconciliation writes terminal launch status back to the record and settles
 the lease from terminal audit, merged completion, or live PR evidence. A live OPEN
-same-head probe immediately records `failed-without-merge`; missing terminal
-timestamps do not pin that head. Without same-head proof or a terminal audit,
+same-head probe records `failed-without-merge` immediately when auto-merge is
+not armed; missing terminal timestamps do not pin that head. An armed GitHub
+`autoMergeRequest` retains ownership unless a no-merge audit resolves it. Without same-head proof or a terminal audit,
 the existing settlement grace and ownership hold apply without refreshing the
 reclaim clock. Follow-up claims use the same evidence rule, including rekeyed leases.
 Merged signals are read per PR, independent of the lease head SHA. Other
@@ -2751,14 +2752,19 @@ dispatches inside the bounded launch window. Terminal
 launches immediately stop consuming capacity when the next dispatch scans the
 records. Dispatching intents retain capacity inside the bounded pending-launch
 window. Unreadable, missing or budget-skipped ledger evidence preserves same-PR
-ownership under existing liveness rules, but does not charge fleet capacity. Live ledger
+ownership under existing liveness rules and reserves fleet capacity while the
+record is inside the bounded pending-launch window. Unreadable retry chains reserve the
+same bounded capacity even when the ancestor is terminal. Live ledger
 statuses still obey the age escape for workers that die without a terminal write.
 Confirmed missing LRQs expire after the existing pending-launch timeout;
 launch-only records with no parseable launch timestamp stay held. Before any
 ledger query, the dispatch scan checks identity, record age and lease liveness.
 Aged-out records release capacity without a probe or rewrite; historical cleanup
 belongs to the CLI. Production PostgreSQL capacity scans share a single timeout-bounded read-only
-launch snapshot with transitive retry metadata. SQLite reads remain in-process.
+launch snapshot with transitive retry metadata, explicitly enabled through the
+watcher's retry-status wrapper and forwarded to every per-record read. A failed
+snapshot is reused as unreadable evidence, without repeated PostgreSQL queries.
+SQLite reads remain in-process.
 Injected per-launch readers stop further probes at the one-second budget or
 first unreadable result. Cancellation is checked between probes. In-flight `dispatching`
 intents are never probed or rewritten, because retries may carry a previous LRQ.
@@ -2778,14 +2784,27 @@ Launch completion is not merge success. Capacity reconciliation leaves leases
 untouched; the current PR decision path separately reconciles its own record and
 lease before eligibility, inside the existing operation timeout. A terminal
 `succeeded` launch on a confirmed live OPEN same
-head settles as `failed-without-merge` immediately. Audited no-merge outcomes
-also release the lease. Confirmed merges stay sticky; existing retry, series and
+head settles as `failed-without-merge` immediately unless GitHub reports an
+armed `autoMergeRequest`. Both synchronous lease reconciliation and watcher
+dispatch read that field and retain ownership while auto-merge is armed, unless
+a no-merge audit proves the worker already made a closing decision. Audited
+no-merge outcomes also release the lease. When the worker status is stale-active
+but the ledger says `succeeded`, the watcher keeps raw `succeeded` for the terminal-success classifier rather than
+mapping it to the retryable `unverified-terminal-success`. Live PR state,
+no-merge audits and merged-signal evidence then decide retry/refund eligibility;
+an advanced OPEN head is still a no-merge exit, and unknown merge evidence
+retains the existing ownership hold when no live PR/audit proof resolves it.
+Dispatch records still persist the mapped observation separately from
+`terminalLaunchStatus`. Confirmed merges stay sticky; existing retry, series and
 lifetime caps still apply. A delivered wake for a reconciled no-merge LRQ may
 re-fire once for that attempt. Running hammers remain duplicates.
 
 After deployment, verify that a retryable no-merge exit launches again on the
 same head in the next watcher pass, queue-depth live launches match the ledger,
-and no active-launch deferral identifies an already-terminal launch.
+and no active-launch deferral identifies an already-terminal launch. During a
+ledger outage or skipped probe, fresh reservations still appear in queue depth
+until the pending-launch window expires. An OPEN PR with auto-merge armed must
+retain its lease without spending another hammer attempt.
 Closers can spill to `hammer-claude` through the existing harness fallback (§2a).
 
 Preview the one-time backlog repair, then apply it against the runtime root.
@@ -2814,7 +2833,7 @@ changes. The normal dispatch capacity scan reconciles only launches still within
 the record/lease liveness window; the CLI also visits historical dispatched records.
 No cap default or shared CFG schema changes are included in this single-repo fix.
 
-HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes admit queries for at most one second. Unprobed records preserve PR ownership but hold no fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
+HAM reconciliation safety: apply refuses a caller whose UID differs from the dispatch-directory owner; dry-run is available to other accounts. Missing rows use the latest observation age and are never terminalized when every ledger probe is missing or a scan is unreadable. Each applied rewrite emits `ama_closer.launch_capacity_reconciled` with backend/source metadata only. The shared production snapshot uses the ledger adapter timeout; fallback per-launch probes admit queries for at most one second. Unprobed, missing and unreadable records preserve PR ownership and reserve fleet capacity inside the bounded pending-launch window; after that window, existing liveness rules may still retain same-PR ownership without fleet capacity. Concurrent observation changes prevent a stale rewrite, and current terminal evidence is preserved.
 
 HAM closure diagnostics hardening: explicit ineligibility or a new head resets the eligible wait and removes stale PR pages; reopened candidates start fresh. Unchanged observations skip durable writes, redundant recovery observations are omitted, and recovery reuses the first daemon result unless deferred. SEV1 payloads keep the five longest pending and completed waits with omitted counts; page text is capped at 3500 characters. Process startup warns when the configured max acts as a floor below the adaptive ceiling.
 

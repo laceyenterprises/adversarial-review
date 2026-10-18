@@ -874,9 +874,12 @@ status without reaping. Clearance resumes normal ordered and capped
 admission that pass, including background mode. Status-read failures fall back
 to ordinary dispatch; other refusals retain their current handling.
 Before closer admission, terminal launch evidence updates that PR's dispatch
-record and lease. An open same-head no-merge exit releases ownership immediately
-under the ordinary retry caps; merged success remains sticky. Capacity scans
-share a read-only ledger snapshot so terminal launches stop holding other PRs.
+record and lease. An open same-head no-merge exit without armed auto-merge
+releases ownership immediately under the ordinary retry caps; merged success remains sticky. Capacity scans
+explicitly share a read-only ledger snapshot through the watcher status wrapper
+so terminal launches stop holding other PRs. Missing, unreadable or budget-skipped
+records reserve capacity inside the bounded pending-launch window. An armed
+GitHub auto-merge retains ownership until it settles or a no-merge audit resolves it.
 A delivered wake may re-fire once per reconciled no-merge launch. The handoff
 smoke scenario verifies terminal lease release, capacity release and wake retry.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
@@ -919,7 +922,8 @@ An in-flight re-review request preserves its claim; settlement records the
 reviewed head or releases without charging, and a legacy headless posted row
 requeues once at its matching live revision without changing retry budgets.
 A synthetic terminal no-merge launch releases its lease and capacity, and its
-delivered wake re-arms exactly once for that finished LRQ.
+delivered wake re-arms exactly once for that finished LRQ. An armed auto-merge
+retains the lease, and unreadable fresh launch reservations retain fleet capacity.
 
 <a id="smv-ci-blocked"></a>**smv-ci-blocked:** same-head failed CI parks the real
 review claim; no follow-up job and exhausted/no-progress remediation both assign
@@ -1102,7 +1106,7 @@ stateDiagram-v2
     [*] --> s0: closer-lease.01 exclusive acquisition
     s0 --> s1: closer-lease.02 launch receipt
     s0 --> s3: closer-lease.03 terminal observed before launch
-    s1 --> s3: closer-lease.04 terminal settlement; confirmed open same head releases no-merge launch immediately
+    s1 --> s3: closer-lease.04 terminal settlement; open same head releases no-merge launch unless auto-merge is armed without a no-merge audit
     s0 --> s2: closer-lease.05 bounded review request accepted
     s1 --> s2: closer-lease.06 bounded review request accepted
     s2 --> s0: closer-lease.07 review completed; locked reclaim

@@ -42,7 +42,10 @@ reopened PR to acquire a fresh lease. `pr-closed-externally` and
 `reconcileAmaCloserLease` settles terminal launch ownership before ordinary
 closer admission or follow-up claims. A bare `succeeded` process exit on a confirmed live OPEN same head settles
 as `failed-without-merge`, allowing same-head retry in that decision pass under
-the existing caps. Without that head proof, the existing settlement grace and
+the existing caps, unless GitHub reports an armed `autoMergeRequest`. Both the
+synchronous follow-up probe and asynchronous watcher probe request this field;
+armed auto-merge retains ownership unless a no-merge audit resolves the exit.
+Without that head proof, the existing settlement grace and
 ownership bound apply while terminal audit and merged completion evidence
 are absent or unreadable. Holding leaves the reclaim clock unchanged;
 the existing 30-minute lease expiry and active dispatch-record guards still

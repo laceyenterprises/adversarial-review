@@ -16,6 +16,7 @@ import { resolveMergeAgentCoexistenceForWatcher } from '../src/ama-closure-orche
 import { observeCloserBacklog } from '../src/ama/closure-lag.mjs';
 import { acquireAmaCloserLease, readAmaCloserLease, rekeyAmaCloserLease, updateAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { appendAmaAuditAttempt } from '../src/ama/audit.mjs';
+import { readLaunchRequestSnapshotFromLedgerAsync } from '../src/session-ledger-read-adapter.mjs';
 import {
   findMalformedProtectivePredecessorLines,
   hasMergedDependentProtectingPr,
@@ -120,6 +121,7 @@ function baseArgs(rootDir, overrides = {}) {
       hqRoot: join(rootDir, 'hq-root'),
       hqOwnerUser: CURRENT_USER,
       currentUser: CURRENT_USER,
+      closerTokenRollupPollDelaysMs: [],
       dispatchedAt: '2026-07-20T12:00:00Z',
       livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true, headRefName: 'codex/live' }),
       ...overrides.dispatchContext,
@@ -294,6 +296,70 @@ test('LCR: configured ceiling of three dispatching launches holds a fourth', asy
   assert.equal(result.skipMergeAgent, true);
   assert.equal(result.activeLaunch.prNumber, 997);
   assert.equal(deps.calls.length, 0, 'do not start another hq dispatch before the first has an lrq');
+});
+
+for (const unreadable of [false, true]) {
+  test(`HAMRETRY-01: production dispatch shares one PostgreSQL capacity snapshot (unreadable=${unreadable})`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'hammer-production-capacity-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir, {
+      cfg: { amaCloserMaxConcurrentLaunches: 3, amaCloserConcurrentLaunchCeiling: 3 },
+      dispatchContext: { ledgerTarget: { backend: 'postgres', databaseName: 'synthetic_ledger' } },
+    });
+    const rows = [997, 998, 999].map(prNumber => {
+      const identity = { repo: 'acme/repo', prNumber, headSha: 'b'.repeat(40) };
+      updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+        state: 'dispatched', launchRequestId: `lrq_${prNumber}`, lastObservedStatus: 'starting',
+        lastAttemptedAt: args.dispatchContext.dispatchedAt }));
+      return { launch_request_id: `lrq_${prNumber}`, status: 'succeeded' };
+    });
+    let queries = 0;
+    const deps = testDeps();
+    const events = [];
+    // Keep the production default status reader and its retry wrapper. Stub
+    // only the snapshot's subprocess boundary; no live database is contacted.
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      logger: { ...deps.logger, info: line => events.push(JSON.parse(line)) },
+      readLaunchRequestSnapshotImpl: input => readLaunchRequestSnapshotFromLedgerAsync({ ...input,
+        spawnSyncImpl: (command, _argv, opts) => {
+          queries++;
+          assert.equal(command, 'psql');
+          assert.match(opts.input, /BEGIN READ ONLY;/);
+          return unreadable ? { status: 1, stderr: 'synthetic ledger outage' }
+            : { status: 0, stdout: rows.map(row => JSON.stringify(row)).join('\n') };
+        },
+      }),
+    });
+    assert.equal(queries, 1, 'the wrapped production reader must share a single snapshot');
+    const depth = events.find(event => event.event === 'ama.closer_queue_depth');
+    assert.equal(depth.liveLaunches, unreadable ? 3 : 0);
+    assert.equal(result.dispatched, !unreadable, JSON.stringify(result));
+    if (unreadable) assert.equal(result.reason, 'ama-closer-launch-in-progress');
+    assert.equal(deps.calls.length, unreadable ? 0 : 1);
+  });
+}
+
+test('HAMRETRY-01: wrapped per-launch readers fail closed at fleet cap on unreadable evidence', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-unreadable-capacity-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const args = findingsRemediationArgs(rootDir, {
+    cfg: { amaCloserMaxConcurrentLaunches: 3, amaCloserConcurrentLaunchCeiling: 3 },
+  });
+  for (const prNumber of [997, 998, 999]) {
+    const identity = { repo: 'acme/repo', prNumber, headSha: 'b'.repeat(40) };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'dispatched', launchRequestId: `lrq_${prNumber}`, lastObservedStatus: 'starting',
+      lastAttemptedAt: args.dispatchContext.dispatchedAt }));
+  }
+  let probes = 0;
+  const deps = testDeps();
+  const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+    readLaunchRequestStatusImpl: () => { probes++; return { ok: false, reason: 'query-failed' }; },
+  });
+  assert.equal(probes, 1, 'the first unreadable result stops per-launch probes');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'ama-closer-launch-in-progress');
+  assert.equal(deps.calls.length, 0);
 });
 
 test('LCR: an active prior head holds its PR even when other-PR capacity remains', async (t) => {
@@ -1786,8 +1852,9 @@ test('concurrent capacity admission preserves the existing launch cap before ack
   }
 });
 
-for (const audited of [true, false]) {
-  test(`HAMRETRY-01: terminal success on the open same head retries in one pass (audit=${audited})`, async t => {
+for (const scenario of ['audit', 'no audit', 'auto-merge armed']) {
+  const audited = scenario === 'audit';
+  test(`HAMRETRY-01: terminal success on the open same head reconciles before retry (${scenario})`, async t => {
     const rootDir = mkdtempSync(join(tmpdir(), 'same-head-retry-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
     const args = findingsRemediationArgs(rootDir, { dispatchContext: { dispatchReason: 'exhausted-final-hammer' } });
@@ -1812,6 +1879,18 @@ for (const audited of [true, false]) {
       fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: HEAD, comments: [] }),
       deliverAlertImpl: async () => ({ ok: true }),
     };
+    if (scenario === 'auto-merge armed') {
+      const live = { state: 'OPEN', headRefOid: HEAD, headBranchExists: true,
+        autoMergeRequest: { enabledAt: now } };
+      input.readPullRequestStateImpl = () => live;
+      input.dispatchContext.livePrProbeImpl = async () => live;
+      const held = await maybeDispatchAmaCloser(input);
+      assert.equal(held.dispatched, false, JSON.stringify(held));
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched');
+      assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 1);
+      assert.equal(deps.calls.length, 0, 'do not dispatch while GitHub has a queued merge');
+      live.autoMergeRequest = null;
+    }
     const result = await maybeDispatchAmaCloser(input);
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(result.launchRequestId, 'lrq_hammer_1');
@@ -1844,6 +1923,52 @@ test('HAMRETRY-01: confirmed merged hammer keeps succeeded ownership sticky', t 
   assert.equal(record.state, 'launch-terminal');
   assert.equal(record.outcome, 'succeeded');
 });
+
+for (const advanced of [false, true]) {
+  test(`HAMRETRY-01: stale starting worker with ledger success respects live evidence (advanced=${advanced})`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'terminal-live-evidence-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const currentHead = advanced ? 'b'.repeat(40) : HEAD;
+    const args = findingsRemediationArgs(rootDir, {
+      reviewState: { headSha: currentHead, reviewCycleExhausted: true },
+      prMetadata: { headSha: currentHead },
+      dispatchContext: { reviewedSha: currentHead, targetRemediationSha: currentHead,
+        dispatchRecordHeadSha: HEAD, dispatchReason: 'exhausted-final-hammer',
+        livePrProbeImpl: async () => advanced
+          ? { state: 'OPEN', headRefOid: currentHead, headBranchExists: true } : null },
+    });
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const now = args.dispatchContext.dispatchedAt;
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-first' });
+    if (advanced) rekeyAmaCloserLease({ rootDir, ...identity, fromHeadSha: HEAD, toHeadSha: currentHead, now });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+      workerClass: 'hammer', launchRequestId: 'synthetic-first', retryCount: 1,
+      reviewedSha: HEAD, targetRemediationSha: currentHead,
+      dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
+    const deps = testDeps();
+    const baseExec = deps.execFileImpl;
+    deps.execFileImpl = async (cmd, argv, opts) => argv[0] === 'dispatch' && argv[1] === 'status'
+      ? { stdout: JSON.stringify({ status: 'starting' }) } : baseExec(cmd, argv, opts);
+    const result = await maybeDispatchAmaCloser({ ...args, ...deps,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      readPullRequestStateImpl: () => advanced ? { state: 'OPEN', headRefOid: currentHead } : null,
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'query-failed' }),
+      fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: currentHead, comments: [] }),
+      deliverAlertImpl: async () => ({ ok: true }),
+    });
+    const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
+    if (advanced) {
+      assert.equal(result.dispatched, true, JSON.stringify(result));
+      assert.equal(record.outcome, 'hammer-exited-without-close', 'head advance alone cannot claim a merge');
+    } else {
+      assert.equal(result.dispatched, false, JSON.stringify(result));
+      assert.equal(readAmaCloserLease(rootDir, identity).status, 'dispatched', 'unknown merge and PR evidence preserves ownership');
+      assert.equal(record.terminalLaunchStatus, 'succeeded');
+      assert.equal(deps.calls.length, 0);
+    }
+  });
+}
 
 test('HAMRETRY-01: operation cancellation prevents delayed lease settlement', async t => {
   const { reconcileAmaCloserLeaseAsync } = await import('../src/ama/dispatch-closer.mjs');

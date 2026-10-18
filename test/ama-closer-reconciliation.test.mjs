@@ -33,13 +33,13 @@ test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async
   assert.deepEqual(paths.map(p => readFileSync(p, 'utf8')), after);
 });
 
-test('missing or unreadable launch retains PR ownership without charging fleet capacity', async (t) => {
+test('missing or unreadable launch reserves fleet capacity inside the pending window', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-missing-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const now = '2026-10-03T00:00:00Z';
   updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: 1, headSha: 'abc', state: 'dispatched', launchRequestId: 'missing', lastAttemptedAt: now }));
-  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) }))[0].holdsCapacity, false);
-  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) }))[0].holdsCapacity, false);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) }))[0].holdsCapacity, true);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) }))[0].holdsCapacity, true);
   const expiredNow = new Date(Date.parse(now) + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS).toISOString();
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 0);
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) })).length, 0);
@@ -352,7 +352,7 @@ for (const status of ['running', 'succeeded', 'failed']) {
   });
 }
 
-test('HAMRETRY-01: capacity excludes terminal starting records and never charges an unprobed launch', async t => {
+test('HAMRETRY-01: capacity excludes proven terminal launches and reserves unprobed fresh launches', async t => {
   const root = fixture(t, 'terminal-capacity');
   for (let i = 1; i <= 4; i++) dispatchRecord(root, i, { lastObservedStatus: 'starting' });
   const active = await findActiveAmaCloserLaunches(root, { now: NOW,
@@ -371,5 +371,15 @@ test('HAMRETRY-01: capacity excludes terminal starting records and never charges
     readLaunchRequestStatusImpl: () => assert.fail('budget exhausted'),
   });
   assert.equal(unprobed.length, 1, 'unknown liveness still protects this PR from duplicate ownership');
-  assert.equal(unprobed[0].holdsCapacity, false, 'unknown evidence cannot hold every other PR behind it');
+  assert.equal(unprobed[0].holdsCapacity, true, 'unknown evidence reserves capacity within the pending window');
+});
+
+test('HAMRETRY-01: unreadable retry traversal reserves bounded capacity', async t => {
+  const root = fixture(t, 'unreadable-retry-capacity');
+  dispatchRecord(root, 1, { lastObservedStatus: 'starting' });
+  const active = await findActiveAmaCloserLaunches(root, { now: NOW,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' }, retryChainUnreadable: true }),
+  });
+  assert.equal(active.length, 1);
+  assert.equal(active[0].holdsCapacity, true, 'base terminality cannot release an unreadable descendant');
 });

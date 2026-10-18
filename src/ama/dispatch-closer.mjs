@@ -68,6 +68,8 @@ import { promisify } from 'node:util';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { findActiveRemediationJob } from './active-remediation-job.mjs';
 import { listSettledJsonNames } from './dispatch-dir-names.mjs';
+import { amaCloserDispatchDir, amaCloserDispatchFilePath, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
+export { amaCloserDispatchDir, amaCloserDispatchFilePath, readAmaCloserDispatchRecord } from './dispatch-record-read.mjs';
 import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
@@ -614,6 +616,7 @@ function normalizeAmaLivePrProbeResult(raw) {
     headBranchExists: headBranchExists === true ? true : headBranchExists === false ? false : null,
     headRefName: typeof raw.headRefName === 'string' ? raw.headRefName : null,
     headRefOid: typeof raw.headRefOid === 'string' ? raw.headRefOid : null,
+    autoMergeRequest: raw.autoMergeRequest ?? null,
     ...(raw.headBranchProbeError ? { headBranchProbeError: String(raw.headBranchProbeError) } : {}),
   };
 }
@@ -684,7 +687,7 @@ async function defaultAmaLivePrProbe({
     '--repo',
     repo,
     '--json',
-    'state,headRefName,headRefOid,headRepository',
+    'state,headRefName,headRefOid,headRepository,autoMergeRequest',
   ], {
     env: process.env,
     timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
@@ -740,6 +743,7 @@ async function defaultAmaLivePrProbe({
     state,
     headRefName,
     headRefOid: typeof payload?.headRefOid === 'string' ? payload.headRefOid : null,
+    autoMergeRequest: payload?.autoMergeRequest ?? null,
     headBranchExists,
     headBranchProbeError,
   });
@@ -1500,7 +1504,7 @@ const AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS = 60_000;
 async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal }) {
   try {
     const { stdout } = await meteredExecFile(execFileAsync, 'gh', [
-      'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid',
+      'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid,autoMergeRequest',
     ], { env, signal, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout);
   } catch { return null; }
@@ -1509,7 +1513,7 @@ async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal 
 // Follow-up claim consumers retain their synchronous CLI contract.
 function readAmaCloserPullRequestState({ repo, prNumber, env }) {
   const result = meteredExecFileSync(spawnSync, 'gh', [
-    'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid',
+    'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid,autoMergeRequest',
   ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   if (result.error || result.status !== 0) return null;
   const raw = result.stdout?.trim();
@@ -1692,14 +1696,15 @@ function* reconcileAmaCloserLeaseSteps({
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
     throwIfAborted(signal);
-    // A terminal hammer cannot merge later. Allow webhook/audit lag briefly
-    // before releasing an open PR; unreadable evidence retains the reclaim bound.
+    // GitHub can finish an armed auto-merge after the hammer exits. Retain
+    // ownership while it is armed; otherwise allow head-advance audit lag briefly.
     let decidingPrState = null;
     if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) {
       const livePr = normalizeAmaLivePrProbeResult(yield readPullRequestStateImpl({ repo, prNumber, env, signal }));
       throwIfAborted(signal);
       if (!livePr) return false;
       decidingPrState = livePr.state;
+      if (decidingPrState === 'OPEN' && livePr.autoMergeRequest != null) return false;
       if (decidingPrState === 'OPEN' && livePr.headRefOid !== held.headSha) {
         const terminalTime = probe.row?.terminal_at;
         const terminalAt = typeof terminalTime === 'number' ? terminalTime
@@ -1893,25 +1898,8 @@ function finalizeAmaCloserLeaseBestEffort({
  * merge path for this tick even though no fresh launch occurred.
  */
 
-export function amaCloserDispatchDir(rootDir) {
-  return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches');
-}
-
 function amaCloserPromptDir(rootDir) {
   return join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-prompts');
-}
-
-function sanitizeDispatchPathSegment(value) {
-  return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
-}
-
-export function amaCloserDispatchFilePath(rootDir, { repo, prNumber, headSha } = {}) {
-  const safeRepo = sanitizeDispatchPathSegment(String(repo ?? '').replace(/\//g, '__'));
-  const safeSha = sanitizeDispatchPathSegment(String(headSha || 'no-sha'));
-  return join(
-    amaCloserDispatchDir(rootDir),
-    `${safeRepo}-pr-${Number(prNumber)}-${safeSha}.json`
-  );
 }
 
 function readJsonFile(filePath) {
@@ -1928,10 +1916,6 @@ function readJsonFileSafe(readJsonFileImpl, filePath) {
   } catch {
     return null;
   }
-}
-
-export function readAmaCloserDispatchRecord(rootDir, identity) {
-  return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
 }
 
 // Every dispatch record for one PR, whatever head each is keyed on. The
@@ -2163,6 +2147,10 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
   const missingCandidates = [];
   let probes = 0;
   let missingProbes = 0;
+  const holdsPendingCapacity = record => {
+    const age = amaCloserRecordAgeMs(record, { now });
+    return age !== null && age < amaCloserPendingLeaseReclaimAgeMs(record);
+  };
   const applyTerminal = (record, dispatchPath, terminalStatus, probe = {}) => {
     const current = readJsonFile(dispatchPath);
     if (current?.launchRequestId !== record.launchRequestId || current?.state !== record.state
@@ -2217,8 +2205,8 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       throwIfAborted(options.signal);
       // The production reader shares one bounded PostgreSQL snapshot across
       // all records, including retry descendants. SQLite is already in-process.
-      if (readStatus === readLaunchRequestStatusFromLedgerDefault && !launchSnapshot) {
-        launchSnapshot = await readLaunchRequestSnapshotFromLedgerAsync({ ...options, rootDir });
+      if ((options.useLaunchSnapshot ?? !options.readLaunchRequestStatusImpl) && !launchSnapshot) {
+        launchSnapshot = await (options.readLaunchRequestSnapshotImpl || readLaunchRequestSnapshotFromLedgerAsync)({ ...options, rootDir });
         throwIfAborted(options.signal);
       }
       const budgetExpired = !launchSnapshot?.ok && Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
@@ -2239,7 +2227,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       if (probe?.retryChainUnreadable) {
         if (!observedTerminal) {
           counts.unreadable += 1;
-          active.push({ ...record, prNumber, dispatchPath, holdsCapacity: false });
+          active.push({ ...record, prNumber, dispatchPath, holdsCapacity: holdsPendingCapacity(record) });
         }
         continue;
       }
@@ -2277,12 +2265,12 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     if (launchInProgress) active.push({ ...record, prNumber, dispatchPath,
       holdsCapacity: probe?.ok && probe.row
         ? launchHoldsCloserCapacity(probe.row, options.processKillImpl)
-        : false });
+        : holdsPendingCapacity(record) });
   }
   const allMissing = probes > 0 && missingProbes === probes;
   for (const candidate of missingCandidates) {
     if (!allMissing && !ledgerUnreadable) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
-    else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath, holdsCapacity: false });
+    else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath, holdsCapacity: holdsPendingCapacity(candidate.record) });
   }
   return { ...counts, allMissing, active };
 }
@@ -4527,6 +4515,8 @@ export async function maybeDispatchAmaCloser(args) {
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
       prMetadata: { ...args.prMetadata, prNumber: targetPrNumber },
+      // Preserve the production snapshot contract through the retry wrapper.
+      useLaunchSnapshot: args.useLaunchSnapshot ?? !args.readLaunchRequestStatusImpl,
       readLaunchRequestStatusImpl: async request => withLiveLaunchRetry(await readStatus({ ...request, includeRetryChain: true })),
       cleanupScratchImpl: (record, logger) => {
         if (record?.repo !== targetRepo || Number(record?.prNumber) !== Number(targetPrNumber)) {
@@ -4562,6 +4552,8 @@ async function maybeDispatchAmaCloserAttempt({
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidenceAsync,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPrAsync,
   readLaunchRequestStatusImpl = readLaunchRequestStatusFromLedgerDefault,
+  useLaunchSnapshot = true,
+  readLaunchRequestSnapshotImpl = readLaunchRequestSnapshotFromLedgerAsync,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   acquireMergeLeaseImpl = acquireMergeLease,
@@ -5627,7 +5619,8 @@ async function maybeDispatchAmaCloserAttempt({
     let status = statusProbe?.status || null;
     // FINALCLOSE-01: worker status can remain `starting` after a reboot while
     // the launch ledger is terminal. Process success alone is not merge proof;
-    // feed it through the live PR/audit reconciliation below.
+    // keep raw `succeeded` in the terminal-hold classifier below so live PR,
+    // auto-merge and no-merge audit evidence decide ownership before retry/refund.
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) && prefetchedLaunchRequestProbe?.ok
       && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
       const terminalStatus = prefetchedLaunchRequestProbe.row.status;
@@ -5810,6 +5803,10 @@ async function maybeDispatchAmaCloserAttempt({
             execFileImpl,
           })
           : false;
+        if (terminalLivePr?.state === 'OPEN' && terminalLivePr.autoMergeRequest != null
+          && noMergeAuditForCurrentHead !== true) {
+          return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+        }
         const hammerOutcome = classifySucceededHammerOutcome({
           livePrState: terminalLivePr?.state,
           concurrentWriter,
@@ -7003,9 +7000,12 @@ async function maybeDispatchAmaCloserAttempt({
     cleanupScratchImpl,
     signal,
     readLaunchRequestStatusImpl,
+    useLaunchSnapshot,
+    readLaunchRequestSnapshotImpl,
     hqRoot,
     ledgerTarget: dispatchContext.ledgerTarget,
     ledgerDbPath: dispatchContext.ledgerDbPath,
+    env,
     now: dispatchContext.dispatchedAt,
     log: logger,
     processKillImpl,

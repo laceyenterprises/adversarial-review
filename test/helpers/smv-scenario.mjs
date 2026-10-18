@@ -156,6 +156,13 @@ if (scenario === 'clean') {
   assert.equal(await reconcileAmaCloserLeaseAsync({ ...retrySubject,
     readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
     readMergedSignalImpl: () => ({ ok: false }),
+    readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: headSha,
+      autoMergeRequest: { enabledAt: new Date().toISOString() } }), logger: quiet,
+  }), false);
+  assert.equal(readAmaCloserLease(rootDir, retrySubject).status, 'dispatched');
+  assert.equal(await reconcileAmaCloserLeaseAsync({ ...retrySubject,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readMergedSignalImpl: () => ({ ok: false }),
     readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: headSha }), logger: quiet,
   }), true);
   assert.equal(readAmaCloserLease(rootDir, retrySubject).terminalOutcome, 'failed-without-merge');
@@ -165,8 +172,18 @@ if (scenario === 'clean') {
   assert.equal(active.some(row => row.launchRequestId === 'synthetic-ended'), false);
   assert.equal(wake().outcome, 'requested'); assert.equal(wake().outcome, 'duplicate');
   assert.equal(wakes, 2);
+  const unreadableSubject = { ...retrySubject, prNumber: prNumber + 11 };
+  updateAmaCloserDispatchRecord(rootDir, unreadableSubject, () => ({ ...unreadableSubject,
+    state: 'dispatched', launchRequestId: 'synthetic-unreadable', lastObservedStatus: 'starting',
+    lastAttemptedAt: new Date().toISOString() }));
+  const unreadableActive = await findActiveAmaCloserLaunches(rootDir, {
+    readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }), log: quiet,
+  });
+  assert.equal(unreadableActive.find(row => row.launchRequestId === 'synthetic-unreadable').holdsCapacity, true);
   evidence = { hammers, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
-    headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
+    headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true,
+    autoMergeHeld: true, unreadableCapacityReserved: true,
+    wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
   for (const exhausted of [false, true]) {

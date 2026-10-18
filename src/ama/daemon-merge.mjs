@@ -931,7 +931,8 @@ async function attemptDaemonCleanMergeInner({
     }
     // A live safety hold prevented the transport from clicking merge. Keep
     // its reason and re-walkability; it is not a permanent merge rejection.
-    if (['stacked-base-merged', 'stacked-base-read-failed'].includes(mergeRes?.closureHold?.reason)) {
+    if (['stacked-base-merged', 'stacked-base-read-failed'].includes(mergeRes?.closureHold?.reason)
+      || mergeRes?.closureHold?.reason?.startsWith('fleet-stop-')) {
       terminal = { reason: mergeRes.closureHold.reason, permanent: false,
         closureHold: mergeRes.closureHold };
       break;
@@ -989,6 +990,7 @@ async function attemptDaemonCleanMergeInner({
   const terminalHasTransientRead = (terminal?.reasons || []).some((r) =>
     TRANSIENT_GATE_READ_REASONS.has(r));
   const cleanParkManualCloseRequired = !merged && terminal?.reason !== 'gate-read-failed' &&
+    !terminal?.reason?.startsWith('fleet-stop-') &&
     !(terminal?.reason === 'gate-not-eligible' && terminal?.permanent === false) &&
     !terminalHasTransientRead && isFullyCleanSettledReview(reviewState);
   let auditWritten = false;

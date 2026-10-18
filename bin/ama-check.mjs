@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { checkCiCost } from '../src/ama/ci-cost.mjs';
+import { fleetStopReason } from '../src/fleet-stop.mjs';
 /**
  * AMA eligibility CLI shim.
  *
@@ -594,6 +595,11 @@ function main(argv = process.argv.slice(2)) {
   if (!ciCostGate.ok) {
     result.eligible = false;
     if (!result.reasons.includes(ciCostGate.reason)) result.reasons.push(ciCostGate.reason);
+  }
+  const stopReason = fleetStopReason();
+  if (stopReason) {
+    result.eligible = false;
+    if (!result.reasons.includes(stopReason)) result.reasons.push(stopReason);
   }
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   return 0;

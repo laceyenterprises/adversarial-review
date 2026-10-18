@@ -45,6 +45,23 @@ function cleanReview(overrides = {}) {
   };
 }
 
+test('fleet stop at the merge boundary releases the lease without permanent parking', async () => {
+  for (const reason of ['fleet-stop-active', 'fleet-stop-merge-kill', 'fleet-stop-unreadable']) {
+    const harness = makeHarness({ mergeResults: [{ exitCode: 1, stderr: reason,
+      closureHold: { reason, needsOperator: false } }] });
+    const stopped = await attemptDaemonCleanMerge(baseArgs(harness));
+    assert.equal(stopped.reason, reason);
+    assert.equal(stopped.permanent, false);
+    assert.equal(stopped.manualCloseRequired, false);
+    assert.equal(harness.calls.release, 1);
+    assert.equal(harness.calls.sleeps.length, 0);
+    assert.equal(harness.calls.auditAppends.at(-1).attempt.outcome, 'deferred');
+    harness.deps.runMergeImpl = async () => ({ exitCode: 0 });
+    const resumed = await attemptDaemonCleanMerge(baseArgs(harness));
+    assert.equal(resumed.merged, true);
+  }
+});
+
 // Build a harness with recording, dependency-injected collaborators. `merge`
 // pops from a queued list of results so we can script transient-then-success.
 function makeHarness({

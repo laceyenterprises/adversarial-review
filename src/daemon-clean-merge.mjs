@@ -41,6 +41,7 @@ import {
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import { resolveRequiredCheckContextsFromCfg } from './ama/required-check-contexts.mjs';
+import { fleetStopReason } from './fleet-stop.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -407,6 +408,13 @@ export async function runDaemonCleanMergeAttempt({
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
   const NOT_TAKEN = (reason, extra = {}) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason, ...extra });
+  const stopHold = () => {
+    const reason = fleetStopReason({ env });
+    return reason ? { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, reason,
+      merged: false, needsOperator: false, skipMergeAgent: true, recoveryWait: true } : null;
+  };
+  const stopped = stopHold();
+  if (stopped) return stopped;
   if (candidate?.stackedBaseHold) return { disposition: DAEMON_MERGE_DISPOSITION.DEFERRED, ...candidate.stackedBaseHold };
   if (!base || !validatedHead) {
     return NOT_TAKEN('daemon-inputs-missing');
@@ -1106,15 +1114,25 @@ export async function runDaemonCleanMergeAttempt({
     runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method, body, subject }) => {
       const baseHold = await guardStackedBaseImpl({ rootDir, repo, prNumber: pr, execFileImpl, signal });
       if (baseHold) return { exitCode: 1, stderr: baseHold.reason, closureHold: baseHold };
+      const hold = stopHold();
+      if (hold) return { exitCode: 1, stderr: hold.reason, closureHold: hold };
       const methodFlag = method === 'merge' ? '--merge' : '--squash';
+      let transportHold;
       try {
         const { stdout, stderr } = await execGhWithRetryImpl({
-          execFileImpl,
+          // The transport can retry internally; fence every actual subprocess.
+          execFileImpl: (...args) => {
+            transportHold = stopHold();
+            if (transportHold) throw new Error(transportHold.reason);
+            return execFileImpl(...args);
+          },
           args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head, '--subject', subject, '--body', filterGitHubBody(body, { repo, reviewerHeadSha: head })],
           timeoutMs: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
         });
         return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
       } catch (err) {
+        const hold = transportHold || stopHold();
+        if (hold) return { exitCode: 1, stderr: hold.reason, closureHold: hold };
         return {
           exitCode: Number.isInteger(err?.code) ? err.code : 1,
           stdout: String(err?.stdout || ''),
@@ -1124,6 +1142,9 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  if (daemonResult?.reason?.startsWith('fleet-stop-')) {
+    return { ...daemonResult, disposition: DAEMON_MERGE_DISPOSITION.DEFERRED };
+  }
   if (['stacked-base-merged', 'stacked-base-read-failed'].includes(daemonResult?.reason)) return daemonResult;
   const mappedPrimary = mapDaemonPrimaryChangeResult(daemonResult);
   if (mappedPrimary !== daemonResult) return mappedPrimary;

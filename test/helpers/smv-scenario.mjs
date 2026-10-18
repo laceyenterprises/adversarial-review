@@ -1,7 +1,7 @@
 // Child of smv-smoke: only synthetic records and file-protocol Git are permitted.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -256,6 +256,17 @@ if (scenario === 'clean') {
     refusedWakeTerminal: true, livePendingLeasePreserved: true,
     emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
+  const { runDaemonCleanMergeAttempt } = await import('../../src/daemon-clean-merge.mjs');
+  const haltDirectory = join(rootDir, 'hq', 'control', 'halt');
+  mkdirSync(haltDirectory, { recursive: true });
+  const recoveryArgs = { env: { HQ_ROOT: join(rootDir, 'hq') }, execFileImpl: refuse };
+  for (const [name, reason] of [['active.json', 'fleet-stop-active'], ['merge-kill.json', 'fleet-stop-merge-kill']]) {
+    const latch = join(haltDirectory, name);
+    writeFileSync(latch, '', { mode: 0o600 });
+    assert.equal((await runDaemonCleanMergeAttempt(recoveryArgs)).reason, reason);
+    rmSync(latch);
+    assert.equal((await runDaemonCleanMergeAttempt(recoveryArgs)).reason, 'daemon-inputs-missing');
+  }
   acquireAmaCloserLease({ ...identity(), now: '2000-01-01T00:00:00Z' });
   updateAmaCloserLease({ ...identity(), status: 'dispatched', lrqId: 'stale-synthetic', now: '2000-01-01T00:00:00Z' });
   assert.equal(isHeldAmaCloserLease(rootDir, identity()), false);
@@ -286,7 +297,7 @@ if (scenario === 'clean') {
   assert.equal(store.merged, false, 'required signed commits are enforced by fake GitHub');
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   await tick({ gateOverrides: { candidateHead: 'a'.repeat(40) } }); assert.equal(store.merged, false);
-  evidence = { staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
+  evidence = { fleetStopRefused: true, fleetStopReasons: ['fleet-stop-active', 'fleet-stop-merge-kill'], fileResumeObserved: true, staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
     exhaustedStop: result.reason, operatorLabelStop: held.reason, holdPages, holdComments, staleHeadRefused: true };
 } else throw new Error('unknown scenario');
 console.log(JSON.stringify({ ok: true, ...evidence }));

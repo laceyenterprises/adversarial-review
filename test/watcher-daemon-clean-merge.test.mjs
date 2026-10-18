@@ -2697,6 +2697,72 @@ function operatorApprovedEventAt(head, overrides = {}) {
   };
 }
 
+test('file stop refuses daemon closure before dependencies and recovers without reload', async () => {
+  const rootDir = tempRoot();
+  try {
+    const directory = join(rootDir, 'control', 'halt');
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, 'active.json'), '', { mode: 0o600 });
+    const closure = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir), env: { HQ_ROOT: rootDir },
+      observeClosureWaitImpl: async () => assert.fail('intentional stop must not age into a page'),
+      runDaemonCleanMergeAttemptImpl: async () => assert.fail('stop before dependency reads'),
+      maybeDispatchAmaCloserImpl: async () => assert.fail('no hammer while stopped') });
+    assert.equal(closure.reason, 'fleet-stop-active');
+    assert.equal(closure.skipMergeAgent, true);
+    let attempts = 0;
+    const args = { ...unattributedDaemonArgs({ rootDir }), env: { HQ_ROOT: rootDir },
+      operatorApprovalEvent: operatorApprovedEventAt('operator-pr-head'),
+      fetchRollupImpl: async () => { throw new Error('ledger/GitHub unavailable'); } };
+    const stopped = await runDaemonCleanMergeAttempt(args);
+    assert.equal(stopped.reason, 'fleet-stop-active');
+    assert.equal(stopped.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(stopped.skipMergeAgent, true);
+    rmSync(join(directory, 'active.json'));
+    const lateStop = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir), env: { HQ_ROOT: rootDir },
+      observeClosureWaitImpl: async () => assert.fail('late stop must not enter wait paging'),
+      runDaemonCleanMergeAttemptImpl: async () => ({ disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+        reason: 'fleet-stop-active', merged: false }),
+      maybeDispatchAmaCloserImpl: async () => assert.fail('no late hammer') });
+    assert.equal(lateStop.skipMergeAgent, true);
+    const resumed = await runDaemonCleanMergeAttempt({ ...args,
+      fetchRollupImpl: unattributedDaemonArgs({ rootDir }).fetchRollupImpl,
+      attemptDaemonCleanMergeImpl: async () => { attempts++; return { reason: 'fixture-resumed' }; } });
+    assert.equal(attempts, 1);
+    assert.equal(resumed.reason, 'fixture-resumed');
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+test('stop appearing during merge checks or transport retry prevents every merge subprocess', async () => {
+  for (const phase of ['checks', 'transport']) {
+    const rootDir = tempRoot();
+    try {
+      const directory = join(rootDir, 'control', 'halt');
+      mkdirSync(directory, { recursive: true });
+      let subprocesses = 0;
+      const arm = () => writeFileSync(join(directory, 'active.json'), '', { mode: 0o600 });
+      const result = await runDaemonCleanMergeAttempt({
+        ...unattributedDaemonArgs({ rootDir }), env: { HQ_ROOT: rootDir },
+        operatorApprovalEvent: operatorApprovedEventAt('operator-pr-head'),
+        execFileImpl: async () => { subprocesses++; return { stdout: '' }; },
+        execGhWithRetryImpl: async ({ execFileImpl }) => {
+          arm();
+          return execFileImpl('gh', ['pr', 'merge']);
+        },
+        attemptDaemonCleanMergeImpl: async (options) => {
+          if (phase === 'checks') arm();
+          const response = await options.runMergeImpl({ repo: 'acme/repo', prNumber: 900,
+            head: 'operator-pr-head', mergeMethod: 'squash', subject: 'Fixture', body: '' });
+          assert.equal(response.exitCode, 1);
+          assert.equal(response.closureHold.reason, 'fleet-stop-active');
+          return response.closureHold;
+        },
+      });
+      assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+      assert.equal(subprocesses, 0);
+    } finally { rmSync(rootDir, { recursive: true, force: true }); }
+  }
+});
+
 test('Deliverable 1: operator-approved at the current head substitutes for worker identity → clean daemon merge proceeds', async () => {
   const rootDir = tempRoot();
   try {

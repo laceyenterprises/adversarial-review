@@ -1346,9 +1346,13 @@ refused. Launch records alone cannot establish a baseline.
 
 An exit-6 `dispatch refused: drain in effect` refusal persists
 `deferred-by-drain` with its epoch and releases the unlaunched pending lease.
-The watcher keeps this head in the active lane, without charging no-progress
-counters; it retires existing slow-lane debt when the current-head closer
-record identifies a drain. Each pass polls `hq dispatch drain-status --no-reap`.
+The watcher bypasses lane backoff without charging no-progress counters only
+while the current-head hint is less than 300 seconds old. Existing lane debt
+is preserved. Each closer pass polls `hq dispatch drain-status --no-reap`; only
+a confirmed active drain refreshes `updatedAt` and the epoch. Missing, invalid,
+future or expired timestamps resume ordinary accounting; the lane retires
+expired hints even when closure is never called. Either AMA kill switch also
+retires the hint without polling or dispatching.
 Once clear, normal dispatch resumes in existing order and within the existing
 capacity cap, including background mode. Failed status reads fall back to
 normal admission; no new eligibility or fail-closed gate is introduced.
@@ -1357,6 +1361,8 @@ Other exit-6 refusals retain their existing handling.
 After deployment, verify deferred closers launch within one watcher pass after
 the drain clears, subject to existing capacity. Inspect the durable closer
 records for `deferred-by-drain`/`drainEpoch` and confirm watcher logs contain no
-slow-lane deferral for a drain-deferred head. No config change or migration is
+slow-lane deferral for a freshly confirmed drain-deferred head. Disable either
+AMA switch on a deferred head and confirm ordinary backoff resumes; stop
+closer polling and confirm the bypass expires after five minutes. No config change or migration is
 required. The offline handoff smoke and drain regression fixtures cover this
 scheduling contract without dispatching live workers.

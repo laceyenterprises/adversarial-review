@@ -861,9 +861,11 @@ The follow-up graph maps operator-only review holds and preservation-refusal
 failures. A matching refusal sidecar fails an exited worker's round; successful
 publication clears that sidecar before reporting success.
 Deploy drain refusals persist `deferred-by-drain` and the drain epoch. These
-heads bypass no-progress backoff; drain waits charge no counters, and old
-slow-lane debt for the drain-blocked head is retired. Each watcher pass checks
-drain status without reaping. Clearance resumes normal ordered and capped
+heads bypass no-progress backoff for at most five minutes after each confirmed
+drain observation; drain waits preserve existing debt and charge no counters.
+The lane retires stale hints even when closure never runs, and either AMA kill
+switch retires hints immediately when observed. Each closer pass checks drain
+status without reaping. Clearance resumes normal ordered and capped
 admission that pass, including background mode. Status-read failures fall back
 to ordinary dispatch; other refusals retain their current handling.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
@@ -889,8 +891,9 @@ merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
 
 <a id="smv-handoff"></a>**smv-handoff:** drain refusal persists an epoch without
-charging no-progress counters; the first clear pass resumes dispatch. Findings
-dispatch one hammer through the
+charging no-progress counters; the first clear pass resumes dispatch. A stale
+hint expires after five minutes without closer polling and normal backoff
+resumes. Findings dispatch one hammer through the
 real closer, with a durable dispatch record and lease. The fake worker repairs
 local Git, hands off to exact-head review, and an approved review drains through
 the real follow-up consumer and merges through the watcher closure phase.
@@ -1138,7 +1141,8 @@ stateDiagram-v2
     state "no-dispatch" as s9
     state "completed" as s10
     s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
-    s3 --> s9: hammer-dispatch.25 drain wait ends: retire scheduling hint before ordinary admission and capacity
+    s3 --> s9: hammer-dispatch.25 drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission
+    s4 --> s9: hammer-dispatch.27 retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled
     s3 --> s3: hammer-dispatch.26 active drain status keeps deferral without attempt or no-progress charge
     [*] --> s0: hammer-dispatch.01 persist launch intent
     s0 --> s1: hammer-dispatch.02 launch result: dispatched

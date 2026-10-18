@@ -209,13 +209,15 @@
       "id": "hammer-dispatch",
       "owner": "closer dispatcher",
       "codeSources": [
-        "src/ama/dispatch-closer.mjs"
+        "src/ama/dispatch-closer.mjs",
+        "src/posted-review-row.mjs",
+        "src/ama-closure-orchestration.mjs"
       ],
       "states": [
         {"name": "dispatching","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1831.5,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
         {"name": "dispatched","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
         {"name": "launch-terminal","terminal": true},
-        {"name": "deferred-by-drain","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 300,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Next watcher pass polls drain status and retries after clearance through normal capacity; drain duration has no unconditional elapsed-time bound."},
+        {"name": "deferred-by-drain","terminal": false,"exitOwner": "closer dispatcher or watcher lane","maxDurationSeconds": 300,"overdueRecipient": "adversarial-review operator","enforcement": "present"},
         {"name": "dispatch-deferred-transient","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Retries preserve budget; repeated transport failure has no unconditional elapsed-time exit."},
         {"name": "dispatch-blocked-branch-holder","terminal": false,"exitOwner": "closer dispatcher","maxDurationSeconds": 1800,"overdueRecipient": "adversarial-review operator","enforcement": "missing","deadEndEvidence": "Attempt cap exists but no elapsed-time exit if polling/holder release stops."},
         {"name": "dispatch-branch-holder-block-exhausted","terminal": true},
@@ -226,7 +228,8 @@
       ],
       "transitions": [
         {"id": "hammer-dispatch.24","from": "dispatching","to": "deferred-by-drain","trigger": "exit 6 drain refusal: persist epoch, preserve budget, release pending lease","codeSource": "src/ama/dispatch-closer.mjs"},
-        {"id": "hammer-dispatch.25","from": "deferred-by-drain","to": "no-dispatch","trigger": "drain wait ends: retire scheduling hint before ordinary admission and capacity","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.25","from": "deferred-by-drain","to": "no-dispatch","trigger": "drain clears, expires, is unreadable or AMA is disabled: retire hint before ordinary accounting/admission","codeSource": "src/ama/dispatch-closer.mjs"},
+        {"id": "hammer-dispatch.27","from": "dispatch-deferred-transient","to": "no-dispatch","trigger": "retire legacy drain-only hint on clearance, expiry, unreadable status or AMA disabled","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.26","from": "deferred-by-drain","to": "deferred-by-drain","trigger": "active drain status keeps deferral without attempt or no-progress charge","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.01","from": "[*]","to": "dispatching","trigger": "persist launch intent","codeSource": "src/ama/dispatch-closer.mjs"},
         {"id": "hammer-dispatch.02","from": "dispatching","to": "dispatched","trigger": "launch result: dispatched","codeSource": "src/ama/dispatch-closer.mjs"},
@@ -266,7 +269,7 @@
     "src/ama-closure-orchestration.mjs": "8df2a587d74b481e6a0764f1a9ce8d8b3b79d81721aab7bb1f946ee975563529",
     "src/ama/closer-lease.mjs": "e82a70e2f95d60ffa11e3efc35f44e42edff3e4a7fa468add33a853f57d30103",
     "src/ama/closure-owner.mjs": "8bcac9935e39eabdbdf3cbaefe2794280d724378329804f78e9595c8f6bf37e3",
-    "src/ama/dispatch-closer.mjs": "676696cef3d9739be2c42d7a3d61b4410ef86c5a1312246e364690235b86c87d",
+    "src/ama/dispatch-closer.mjs": "5a526139deb664cf1e2dee1cc35fd0b8fcb7941f81537da61a60255d4e04e3a6",
     "src/fast-merge-processing.mjs": "2bb4cfe6ab2b4479285e1c48aaf1b0a7a4019a9e95437ba0a1a73a1af73a461b",
     "src/follow-up-jobs.mjs": "27810ad14f90aa3517f006d4a42f4f2dbbaca231102dee5b68150c5ed3e2d4af",
     "src/follow-up-remediation.mjs": "b7eb5c36aa49e84062b2c836e9cb5831151cf061622075af572c7ef7cf33a611",

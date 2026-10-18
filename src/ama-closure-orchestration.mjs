@@ -983,6 +983,9 @@ async function dispatchAmaClosureFor({
   }
 
   if (!cfg?.enabled) {
+    amaDispatchCloser.retireAmaCloserDrainHint(rootDir, {
+      repo: repoPath, prNumber, headSha: candidate?.headSha || currentRevisionRef || reviewStateRow?.revision_ref,
+    }, { logger });
     // AMA-06N — surface `amaEnabled` so the watcher's coexistence
     // decision (the call site of this helper) can branch on it. With
     // AMA off, the default `merge-agent-default` action falls through
@@ -1650,6 +1653,9 @@ async function dispatchAmaClosureFor({
       ? currentPrHeadSha : reviewState.headSha,
   });
   if (!autonomousMergeExecutionEnabled) {
+    amaDispatchCloser.retireAmaCloserDrainHint(rootDir, {
+      repo: repoPath, prNumber, headSha: currentPrHeadSha,
+    }, { logger });
     const hqRoot = resolveHqRoot(env);
     const disabledAudit = writeAutonomousMergeDisabledAuditImpl({
       hqRoot,

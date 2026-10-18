@@ -1,5 +1,6 @@
+import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
 import { proveCloserAuthoredStaleHead } from '../src/closer-authored-stale.mjs';
-import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { updateAmaCloserDispatchRecord, readAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import { inspectCiBootstrap } from '../src/ci-recovery.mjs';
 import test from 'node:test';
@@ -755,6 +756,12 @@ test('autonomous merge execution disabled → fail-closed audit; no daemon, clos
     let daemonCalls = 0;
     let closerCalls = 0;
     const audits = [];
+    const identity = { repo: 'acme/repo', prNumber: 300, headSha: 'head-live' };
+    const handler = { repoPath: identity.repo, ...identity };
+    const gate = createNoProgressLaneGate({ rootDir, readReviewRow: () => null, logger: { warn() {}, log() {} } });
+    for (let i = 0; i < 6; i++) await gate.record(handler);
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'deferred-by-drain', updatedAt: new Date().toISOString() }));
+    assert.equal(gate.evaluate(handler).reason, 'deferred-by-drain');
     const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
       loadConfigImpl: loadAmaEnabledAutonomousDisabledConfig,
@@ -778,6 +785,8 @@ test('autonomous merge execution disabled → fail-closed audit; no daemon, clos
     assert.equal(result.dispatched, false);
     assert.equal(result.skipMergeAgent, true);
     assert.equal(result.reason, 'autonomous-merge-execution-disabled');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity).state, 'no-dispatch');
+    assert.equal(gate.evaluate(handler).run, false);
     assert.equal(result.autonomousMergeDisabled.path, 'daemon-merge');
     assert.deepEqual(result.autonomousMergeDisabled.flagState, {
       autonomousMergeExecutionEnabled: false,
@@ -4156,4 +4165,23 @@ test('PCCSLOW-01: expired daemon attempt stores history and next attempt consume
   assert.equal(next.merged, true);
   assert.equal(histories, 1);
   assert.equal(merges, 1);
+});
+
+test('DRAINDEFER-01: disabled AMA orchestration retires a fresh drain hint without closer admission', async () => {
+  const rootDir = tempRoot();
+  try {
+    const identity = { repo: 'acme/repo', prNumber: 300, headSha: 'head-live' };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'deferred-by-drain', updatedAt: new Date().toISOString() }));
+    const result = await maybeDispatchAmaClosureFor({ ...baseArgs(rootDir),
+      loadConfigImpl: () => ({ getMergeAuthorityConfig: () => ({ enabled: false }), getOrchestrationMode: () => 'native' }),
+      maybeDispatchAmaCloserImpl: async () => assert.fail('disabled AMA must not call closer'),
+    });
+    assert.equal(result.reason, 'ama-disabled');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity).state, 'no-dispatch');
+    const gate = createNoProgressLaneGate({ rootDir, readReviewRow: () => null, logger: { warn() {}, log() {} } });
+    const handler = { repoPath: identity.repo, ...identity };
+    for (let i = 0; i < 6; i++) await gate.record(handler);
+    assert.equal(gate.evaluate(handler).run, false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
 });

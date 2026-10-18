@@ -2759,10 +2759,32 @@ export function isDrainDeferredAmaCloserRecord(record) {
       || (record.state === 'dispatch-deferred-transient' && parseHqDispatchDrainRefusal(record.lastError))));
 }
 
+export const AMA_DRAIN_HINT_TTL_MS = 300_000;
+
+export function isFreshDrainDeferredAmaCloserRecord(record, now = new Date().toISOString()) {
+  const age = Date.parse(now) - Date.parse(record?.updatedAt ?? record?.lastAttemptedAt ?? '');
+  return isDrainDeferredAmaCloserRecord(record) && Number.isFinite(age)
+    && age >= 0 && age < AMA_DRAIN_HINT_TTL_MS;
+}
+
+export function retireAmaCloserDrainHint(rootDir, identity, { logger = console } = {}) {
+  try {
+    if (!identity.headSha || !isDrainDeferredAmaCloserRecord(readAmaCloserDispatchRecord(rootDir, identity))) return;
+    updateAmaCloserDispatchRecord(rootDir, identity, current =>
+      isDrainDeferredAmaCloserRecord(current)
+        ? { ...current, state: 'no-dispatch', reason: 'drain-wait-ended', lastError: null }
+        : null);
+  } catch (error) {
+    logger?.warn?.(`[watcher] closer drain hint cleanup failed: ${error.message}`);
+  }
+}
+
+const drainStatusWarnings = new Set();
+
 async function readDispatchDrainStatus({ hqPath, hqRoot, ledgerDbPath, execFileImpl, signal, env }) {
   const args = ['dispatch', 'drain-status', '--no-reap', '--root', hqRoot];
   if (ledgerDbPath) args.push('--db-path', ledgerDbPath);
-  const { stdout } = await execFileImpl(hqPath, args, { encoding: 'utf8', timeout: 10_000, signal, env });
+  const { stdout } = await execFileImpl(hqPath, args, { encoding: 'utf8', timeout: 10_000, signal, env, cwd: AGENT_OS_ROOT });
   return JSON.parse(stdout);
 }
 
@@ -4446,6 +4468,9 @@ export async function maybeDispatchAmaCloser(args) {
     const drainIdentity = { repo: targetRepo, prNumber: targetPrNumber, headSha: args.prMetadata?.headSha };
     const deferred = dispatchContext?.rootDir && targetRepo && drainIdentity.headSha
       ? readAmaCloserDispatchRecord(dispatchContext.rootDir, drainIdentity) : null;
+    if (!args.cfg?.enabled && dispatchContext?.rootDir) {
+      retireAmaCloserDrainHint(dispatchContext.rootDir, drainIdentity, { logger: args.logger });
+    }
     if (args.cfg?.enabled && isDrainDeferredAmaCloserRecord(deferred)) {
       try {
         const status = await (args.readDispatchDrainStatusImpl || readDispatchDrainStatus)({
@@ -4455,7 +4480,12 @@ export async function maybeDispatchAmaCloser(args) {
           execFileImpl: args.execFileImpl || execFileAsync, signal: args.signal, env: args.env || process.env,
         });
         throwIfAborted(args.signal);
-        if (status?.isDraining === true) {
+        if (typeof status?.isDraining !== 'boolean') throw new Error('drain-status requires boolean isDraining');
+        if (status.isDraining) {
+          updateAmaCloserDispatchRecord(dispatchContext.rootDir, drainIdentity, current =>
+            isDrainDeferredAmaCloserRecord(current)
+              ? { ...current, updatedAt: new Date().toISOString(), drainEpoch: String(status.epoch ?? current.drainEpoch ?? '') || null }
+              : null);
           return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
             reason: 'deferred-by-drain', drainEpoch: String(status.epoch ?? deferred.drainEpoch ?? '') || null });
         }
@@ -4463,18 +4493,16 @@ export async function maybeDispatchAmaCloser(args) {
         throwIfAborted(args.signal);
         // Status is only a scheduling hint; unavailable evidence must not add
         // a new refusal gate. Dispatch itself remains authoritative.
-        args.logger?.warn?.(`[watcher] closer drain status unavailable: ${error.message}`);
+        const warningKey = JSON.stringify([dispatchContext.hqRoot || DEFAULT_HQ_ROOT, deferred.drainEpoch ?? null]);
+        if (!drainStatusWarnings.has(warningKey)) {
+          if (drainStatusWarnings.size >= 100) drainStatusWarnings.delete(drainStatusWarnings.values().next().value);
+          drainStatusWarnings.add(warningKey);
+          args.logger?.warn?.(`[watcher] closer drain status unavailable: ${error.message}`);
+        }
       }
       // Retire the scheduling hint before re-evaluating eligibility. An older
       // drain record must not hide a new, unrelated blocker from the lane.
-      try {
-        updateAmaCloserDispatchRecord(dispatchContext.rootDir, drainIdentity, current =>
-          isDrainDeferredAmaCloserRecord(current)
-            ? { ...current, state: 'no-dispatch', reason: 'drain-wait-ended', lastError: null }
-            : current);
-      } catch (error) {
-        args.logger?.warn?.(`[watcher] closer drain hint cleanup failed: ${error.message}`);
-      }
+      retireAmaCloserDrainHint(dispatchContext.rootDir, drainIdentity, { logger: args.logger });
     }
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
@@ -7636,6 +7664,7 @@ async function maybeDispatchAmaCloserAttempt({
           lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
           lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
           lastFailureTransient: transientFailure,
+          ...(drainRefusal ? { updatedAt: new Date().toISOString() } : {}),
           drainEpoch: drainRefusal?.epoch ?? null,
           lastError: dispatchError,
         };

@@ -93,6 +93,7 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 | `promptDir` | string or null | Directory holding durable AMA closer prompts. |
 | `hqRoot` | string or null | HQ root used for the dispatch. |
 | `state` | string | Launch state such as `dispatching`, `dispatched`, `launch-terminal`, `dispatch-deferred-transient`, `deferred-by-drain`, `dispatch-failed`, `no-dispatch`, or `completed`. `launch-terminal` releases launch capacity without asserting merge success. |
+| `updatedAt` | ISO timestamp, optional | Initial drain refusal or last confirmed active drain poll; lane hints expire after 300 seconds. Legacy drain records fall back to `lastAttemptedAt`. |
 | `dispatchId` | string or null | Dispatch id parsed from HQ output when available. |
 | `launchRequestId` | string or null | Launch request id parsed from HQ output when available. |
 | `unadoptedLaunchRequestId` | string, optional | Foreign launch receipt rejected using authoritative ticket evidence. Retained for diagnosis after clearing `launchRequestId` and `dispatchId`; it grants no closer ownership. Reconciliation refunds a previously charged foreign launch once. |
@@ -259,12 +260,16 @@ drain, including a newer epoch, keeps the PR deferred. A clear drain re-enters
 ordinary live-head, eligibility, lease and capacity admission on that pass.
 Unreadable status falls back to ordinary dispatch, whose refusal is authoritative.
 
-The lane reads the current-head closer record before applying backoff. Drain
-waits do not record no-progress runs or skips. Legacy transient records with an
-exit-6 drain diagnostic receive the same treatment; existing slow-lane debt for
-that drain-blocked head is retired. This recovery does not consume decision
-reset credit. Background settlement of a drain refusal submits fresh work on
-the next pass instead of spending that pass applying an obsolete refusal.
+The lane reads the current-head closer record before applying backoff. Only
+hints younger than 300 seconds bypass backoff and no-progress accounting.
+`updatedAt` records the initial drain refusal and each confirmed active status
+poll; legacy records fall back to `lastAttemptedAt`. Missing, malformed, future
+or expired timestamps do not bypass accounting. The lane retires expired hints
+independently of closer admission; either AMA kill switch retires them too.
+Existing lane debt is preserved, including debt predating the drain. Legacy
+transient records with an exit-6 drain diagnostic obey the same freshness rule.
+This recovery does not consume decision reset credit. Background settlement of
+a drain refusal submits fresh work on the next pass instead of spending that pass applying an obsolete refusal.
 Other exit-6 causes retain ordinary classification, inline retries and budgets.
 
 Before ordinary admission resumes, the closer retires the drain scheduling hint
@@ -272,3 +277,15 @@ as `no-dispatch`, reason `drain-wait-ended`, so a new eligibility blocker uses
 normal lane accounting. Hint cleanup is best effort and cannot refuse admission.
 Other exit-6 diagnostics include dispatch preflight timeouts and worker-class
 fallback refusals; these keep their existing transient/failure classification.
+
+The external producer contract was inspected in agent-os commit
+`071f52c62d802f03681ea69a5269a4384fa6cc93`:
+`modules/worker-pool/lib/python/cwp_dispatch/cli_drain.py` (`cmd_drain_status`
+and its parser) accepts `dispatch drain-status --no-reap --root <hqRoot>` and
+optional `--db-path <ledgerDbPath>`; `drain_state.py:DrainState.to_json` emits
+boolean `isDraining` and numeric `epoch`. The caller uses `cwd: AGENT_OS_ROOT`.
+Invalid JSON or a missing/non-boolean `isDraining` is unreadable status, never
+confirmed clearance. As with command failures, it falls back to authoritative
+ordinary dispatch, logging once per HQ root/recorded epoch per process (bounded
+to the latest 100 keys). Offline fixtures pin arguments, cwd and schema handling;
+this repository does not execute the external producer during tests.

@@ -1684,3 +1684,24 @@ test('DRAINDEFER-01: a cleared drain does not mask a new eligibility blocker', a
   assert.equal(record.state, 'no-dispatch');
   assert.equal(record.reason, 'drain-wait-ended');
 });
+
+for (const status of [{}, { isDraining: 'true' }, { isDraining: null }]) {
+  test(`DRAINDEFER-01: invalid drain schema ${JSON.stringify(status)} is unreadable and warns once per epoch`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-schema-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+    const warnings = [];
+    for (let i = 0; i < 2; i++) {
+      updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+        state: 'deferred-by-drain', drainEpoch: 'schema-fixture', updatedAt: new Date().toISOString() }));
+      const result = await maybeDispatchAmaCloser({
+        ...findingsRemediationArgs(rootDir, { prMetadata: { isDraft: true } }), ...testDeps(),
+        readDispatchDrainStatusImpl: async () => status,
+        logger: { warn: message => warnings.push(message), log() {}, info() {} },
+      });
+      assert.equal(result.dispatched, false);
+      assert.equal(JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8')).state, 'no-dispatch');
+    }
+    assert.equal(warnings.filter(message => message.includes('drain status unavailable')).length, 1);
+  });
+}

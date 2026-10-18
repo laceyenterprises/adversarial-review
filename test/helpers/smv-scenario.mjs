@@ -18,7 +18,7 @@ const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { acquireAmaCloserLease, updateAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
-const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord } = await import('../../src/ama/dispatch-closer.mjs');
+const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord } = await import('../../src/ama/dispatch-closer.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
 const { guardRereviewCiBeforeReviewer } = await import('../../src/reviewer-ci-admission.mjs');
 const { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } = await import('../../src/review-state.mjs');
@@ -112,6 +112,17 @@ if (scenario === 'clean') {
     await laneGate.record(handler, { value: { amaClosureResult: deferred } });
     assert.equal(readNoProgressLane(rootDir, identity()), null);
     assert.equal((await maybeDispatchAmaCloser(closerArgs)).reason, 'deferred-by-drain');
+    const drainRecord = readAmaCloserDispatchRecord(rootDir, identity());
+    updateAmaCloserDispatchRecord(rootDir, identity(), () => ({ ...drainRecord,
+      updatedAt: new Date(Date.now() - 300_001).toISOString() }));
+    for (let i = 0; i < 6; i++) await laneGate.record(handler);
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'no-dispatch');
+    assert.equal(laneGate.evaluate(handler).run, false);
+    updateAmaCloserDispatchRecord(rootDir, identity(), () => ({ ...drainRecord,
+      state: 'dispatch-deferred-transient', updatedAt: new Date(Date.now() - 300_001).toISOString() }));
+    assert.equal(laneGate.evaluate(handler).run, false);
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'no-dispatch');
+    updateAmaCloserDispatchRecord(rootDir, identity(), () => ({ ...drainRecord, updatedAt: new Date().toISOString() }));
     isDraining = false;
     assert.equal(laneGate.evaluate(handler).run, true);
     const result = await maybeDispatchAmaCloser(closerArgs);
@@ -129,7 +140,7 @@ if (scenario === 'clean') {
   const drained = await consumeFollowUpJobsUntilCapacity(drain); assert.equal(drained.stopped, 1);
   await tick(); assert.equal(store.merged, true); assert.notEqual(headSha, oldHead);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
-  evidence = { hammers, drainResumedNextPass: true, drainCountersUnchanged: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
+  evidence = { hammers, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };

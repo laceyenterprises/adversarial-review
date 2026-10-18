@@ -437,7 +437,9 @@
       "owner": "watcher posted-review dispatch fairness",
       "optionalCadenceFields": ["lastRunAt"],
       "lastRunAtContract": "Explicit null means no recorded walk; only absent legacy fields fall back to updatedAt",
-      "evidenceStopRecheckMs": 300000
+      "evidenceStopRecheckMs": 300000,
+      "drainHintTtlMs": 300000,
+      "drainDebtPolicy": "preserve existing debt; expired hints resume normal accounting independently of closer"
     },
     {
       "id": "operator-label-holds",
@@ -583,8 +585,10 @@
       "foreignLaunchEvidenceFields": ["unadoptedLaunchRequestId"],
       "foreignLaunchRefusalReason": "non-hammer-launch-not-adopted",
       "drainDeferralState": "deferred-by-drain",
-      "drainDeferralFields": ["drainEpoch"],
-      "drainDeferralResume": "first clear watcher pass through normal admission and capacity; no progress counters are charged",
+      "drainDeferralFields": ["drainEpoch", "updatedAt"],
+      "drainHintTtlMs": 300000,
+      "drainHintRetirement": "lane expiry or either AMA kill switch; preserves existing lane debt",
+      "drainDeferralResume": "first clear closer pass through normal admission and capacity; fresh confirmed drain hints alone bypass accounting",
       "fleetRetryRefusalReason": "dispatch-retry-live",
       "fleetRetryRefusalState": "dispatched",
       "fleetRetryRefusalRequires": "fresh live-descendant proof for a non-null ancestor LRQ",

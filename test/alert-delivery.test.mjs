@@ -31,8 +31,22 @@ import {
   pendingDir,
   readAlertSinkHealth,
   resolveAlertDefaults,
+  sanitizeAlertIdPrefix,
   sweepAlertArchiveRetention,
 } from '../src/alert-delivery.mjs';
+
+test('fleet-stop page uses the orphan recovery id sanitizer for its event', () => {
+  const event = sanitizeAlertIdPrefix('fleet.stop.unreadable');
+  assert.equal(event, 'fleet-stop-unreadable');
+  const presentation = alertPresentationForDoc({
+    event,
+    text: 'fleet-stop-unreadable: cannot read halt directory (EACCES); autonomous merges remain on hold.',
+    payload: { pathClass: 'halt directory', errorCode: 'EACCES' },
+  });
+  assert.equal(presentation.severity, 'SEV1');
+  assert.match(presentation.headline, /Fleet-stop state unreadable/u);
+  assert.match(presentation.detail, /halt directory.*EACCES/u);
+});
 
 function makeEnv(overrides = {}) {
   const rootDir = mkdtempSync(join(tmpdir(), 'alert-delivery-'));

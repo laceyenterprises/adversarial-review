@@ -53,6 +53,16 @@ Directory: `data/alert-delivery/`
 
 ## Operational Contract
 
+- `fleet-stop-unreadable` is an operator page. The shared fleet-stop evaluator
+  keeps its merge hold and emits one error log and alert per distinct state root,
+  path class (state root or halt directory), and error code per process lifetime.
+  Logs and payloads contain the path class and code, never paths or file contents.
+  Its event uses the same safe-prefix sanitizer as orphan recovery identities;
+  `deliverAlert` allocates the normal safe outbox ID. Recovery emits a log only;
+  deliberate halt markers and readable empty directories never alert here.
+  Enqueue failure is logged and retains the hold; the process debounce still
+  suppresses further attempts for that cause. Durable transport retries remain
+  owned by the existing drain.
 - Enqueue deduplication reads the real durable sink, matching its writes and
   state-transition renames. `deliverAlert`'s `fsImpl` supplies token/config
   reads, not a virtual outbox; tests use a temporary real state root. A mocked

@@ -3,6 +3,39 @@
 _Status: Living contract_
 _Related: `SPEC.md`, `docs/follow-up-runbook.md`_
 
+## REMLABEL-01: operator findings and preservation of the PR
+
+Blocking findings matching `src/ama/operator-label-gates.mjs` require operator
+attention. If all blockers are gated, follow-up and terminal-hammer dispatch
+hold, leave the changes in place, and publish one label-specific comment and
+page per head. Mixed reviews remediate only ordinary findings and report the
+gated ones as blockers. Workers never apply labels or restore guarded changes
+to base to satisfy these findings. A new review must observe the waiver.
+Follow-up consumption resolves PR lifecycle before this review hold. Closed,
+merged and superseded reviewed heads take the existing lifecycle stop path
+without an operator-label hold comment or page. Lifecycle read failures retain
+the consumer's existing live/mirror fallback behavior.
+
+Remediation publishes through `bin/remediation-publish.mjs`, which refreshes the
+base and inspects the exact candidate commit before a lease-protected push.
+The base fetch uses the shared workspace network retry helper (three attempts,
+250/750 ms backoff); authentication and missing-ref failures stop immediately.
+The publisher retains the worker's credentials. It selects executable `git-safe`
+from `PATH` when available, otherwise `git`; `--push-command` explicitly selects
+the push executable. A selected executable's failure never triggers a fallback.
+It refuses an empty base-to-candidate or merge-base diff, and restoration of
+every originally changed path even if unrelated new files keep the diff
+nonempty. The original reviewed head defines those paths across rebases and
+stale-head replay. A refusal retains the prior remote head and records
+`remediation-empties-pr-diff` in a sidecar next to the reply artifact;
+reconciliation marks the round failed before any completion/re-review path.
+Successful publication removes the supplied `--failure-path` sidecar before
+reporting success, so a prior failed attempt cannot override the new result.
+An absent sidecar is harmless; other cleanup errors remain publication errors.
+This is a production publication boundary, with no new CI job or Git hook.
+Ordinary empty-diff closure remains unchanged.
+
+
 For the AMA closer lane documented in [`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md),
 the operator-facing contract is that closure dispatch uses the configured
 `roles.adversarial.merge_authority.worker_class`, not a hardcoded `codex`

@@ -149,10 +149,21 @@ if (scenario === 'clean') {
   writeFollowUpJob(created.jobPath, created.job);
   const result = await consumeNextFollowUpJob(drain);
   assert.equal(result.reason, 'max-rounds-reached'); assert.equal(result.job.status, 'stopped');
+  createFollowUpJob({ ...identity(), prNumber: prNumber + 1, revisionRef: headSha, reviewerModel: 'gemini',
+    reviewBody: '## Blocking issues\n- **[live_pack_cross_edit] Live pack** — operator waiver needed.\n## Verdict\nRequest changes' });
+  let holdPages = 0, holdComments = 0;
+  const held = await consumeNextFollowUpJob({ ...drain,
+    resolvePRLifecycleImpl: async () => ({ prState: 'open', headSha, source: 'live' }),
+    deliverAlertImpl: async () => { holdPages++; },
+    postCommentImpl: async () => { holdComments++; return { posted: true }; } });
+  assert.equal(held.reason, 'operator-label-required:live-pack-edit-approved');
+  assert.equal(held.job.status, 'stopped'); assert.equal(held.job.remediationWorker.state, 'never-spawned');
+  assert.equal(holdPages, 1); assert.equal(holdComments, 1);
   await tick({ runMerge: async () => { throw new Error('GH013: Repository rule violations: commits must have verified signatures'); } });
   assert.equal(store.merged, false, 'required signed commits are enforced by fake GitHub');
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   await tick({ gateOverrides: { candidateHead: 'a'.repeat(40) } }); assert.equal(store.merged, false);
-  evidence = { staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true, exhaustedStop: result.reason, staleHeadRefused: true };
+  evidence = { staleLeaseRefused: true, pages, signedIdentityRequired: true, signedCommitPolicyRefused: true,
+    exhaustedStop: result.reason, operatorLabelStop: held.reason, holdPages, holdComments, staleHeadRefused: true };
 } else throw new Error('unknown scenario');
 console.log(JSON.stringify({ ok: true, ...evidence }));

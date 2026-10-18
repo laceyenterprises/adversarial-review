@@ -221,6 +221,7 @@
         "src/github-auth-recovery.mjs"
       ],
       "owner": "follow-up remediation queue",
+      "publicationFailureRetention": "Successful guarded publication removes the supplied failure sidecar; retained failures follow reply-artifact storage",
       "missingLabelEventObservationFields": ["firstSeenAt"],
       "missingLabelEventRetention": "no automatic expiry; operator cleanup after PR closure or head supersession",
       "infrastructureRefundRetryCode": "infrastructure-refund",
@@ -445,6 +446,7 @@
       "schemaSurface": "src/ama/operator-label-gates.mjs",
       "relatedSchemaSurfaces": ["src/ama/dispatch-closer.mjs"],
       "owner": "AMA closer operator-label paging",
+      "commentReceiptPolicy": "Normalized posted success records commentedAt; unposted comments retry independently of delivered alerts",
       "receiptWritePolicy": "Unchanged delivered identity/reason/gates skip paging locks and atomic replacement",
       "retentionPolicy": "Sweep closed/superseded heads and receipts older than 30 days; skip active claims; delivery memory capped at 512 entries"
     },

@@ -8,7 +8,7 @@ import { observeClosureWait } from './closure-wait.mjs';
 import { decideClosureOwner } from './closure-owner.mjs';
 import { createHistoryReader } from './history-reader.mjs';
 import { exactHammerValidation, fetchHammerHeadRange } from './hammer-head-validation.mjs';
-import { OPERATOR_LABEL_GATES, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
+import { OPERATOR_LABEL_GATES, operatorGatedRemediationInstructions, resolveOperatorLabelGateFailuresWithRetry, holdForOperatorLabels, sweepOperatorLabelHolds } from './operator-label-gates.mjs';
 import { AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES, isTerminalLaunchRequestStatus, withLiveLaunchRetry } from './launch-request-status.mjs';
 import { probeOrphanOwnership, ownerlessBoundMs } from './orphan-watchdog.mjs';
 import { isOperatorHeld } from '../operator-hold-labels.mjs';
@@ -5033,6 +5033,9 @@ async function maybeDispatchAmaCloserAttempt({
     reviewCycleExhausted: terminalHammerReviewCycleExhausted(reviewState),
   };
   let prompt = composeCloserPrompt(promptInputs);
+  if (reviewState?.operatorLabelFindings?.gated?.length) {
+    prompt += operatorGatedRemediationInstructions('', reviewState.operatorLabelFindings);
+  }
 
   const hammerOwnerRoute = hammerOwnerRouteOf(dispatchContext);
   if (hammerOwnerRoute === 'review-cycle-cap' && useHammerTerminalRemediationPrompt) {
@@ -6602,6 +6605,16 @@ async function maybeDispatchAmaCloserAttempt({
 
   // Resolve label holds only after route admission, stop releases, terminal
   // launch/lease reconciliation and same-PR remediation ownership checks.
+  if (reviewState?.operatorLabelFindings?.allGated && reviewState.headSha === prMetadata?.headSha) {
+    const gates = reviewState.operatorLabelFindings.gated.map(({ check, label, reason }) => ({ check, label, reason }));
+    return noAmaDispatch(await holdForOperatorLabels({ rootDir, repo, prNumber,
+      headSha: prMetadata.headSha, gates, deliverAlertImpl, logger, now: dispatchContext?.dispatchedAt,
+      postCommentImpl: async ({ body }) => {
+        await execGhWithRetry({ execFileImpl, args: ['api', `repos/${repo}/issues/${prNumber}/comments`,
+          '--method', 'POST', '-f', `body=${filterGitHubBody(body, { repo, reviewerHeadSha: prMetadata.headSha })}`], env, signal });
+        return { posted: true };
+      } }));
+  }
   if (prMetadata?.isOpen === true && prMetadata?.headSha) {
     const classification = await resolveOperatorLabelGateFailuresWithRetry({ rollup: prMetadata.statusCheckRollup,
       repo: dispatchContext?.repo, headSha: prMetadata.headSha, execFileImpl, env, signal,

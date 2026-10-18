@@ -3,7 +3,7 @@
 **Owner:** AMA closer operator-label paging
 **Store:** `data/operator-label-holds/`
 **Source of truth:** `src/ama/operator-label-gates.mjs`
-**Runtime surface:** `src/ama/dispatch-closer.mjs`
+**Runtime surface:** `src/ama/dispatch-closer.mjs`, `src/follow-up-remediation.mjs`
 
 ## Purpose
 
@@ -32,9 +32,18 @@ checks to their operator labels. Advisory/successful checks create no hold.
 
 The hold returns `dispatched: false`, `skipMergeAgent: true`,
 `recoveryWait: true`, `needsOperator: true`, `reason` and `operatorLabelGates`.
-It creates no dispatch record or follow-up job stop. Review-findings remediation
-remains available to restore a guarded change to its base state. A receipt is
+The CI hold creates no dispatch record or follow-up job stop. REMLABEL-01 also
+uses the registry for blocking review findings: an operator-only review stops
+the unspawned follow-up job with `operator-label-required:<label>` and holds
+terminal HAM dispatch. Mixed reviews retain ordinary remediation and explicitly
+preserve gated changes. A fresh review must observe the operator waiver. A receipt is
 paging evidence, never authorization to merge or proof of live CI greenness.
+The follow-up consumer resolves PR lifecycle before creating this hold; closed,
+merged or superseded reviewed heads use their lifecycle stop without a hold
+comment or page.
+The unspawned job records `commentDeliveryExemption: no-remediation-started`;
+the hold receipt owns its operator comment and retry instead of worker-reply
+delivery. Terminal HAM hold comments use the shared GitHub outbound-body filter.
 
 ## Files and fields
 
@@ -50,6 +59,13 @@ there is no schema-version field.
 | `reason` | string | First gate's `operator-label-required:<label>` reason. |
 | `gates` | array of objects | Each contains `check`, `label`, and `reason`; preserves all observed label failures. |
 | `alertedAt` | ISO timestamp or null | Successful alert-delivery timestamp; null permits delivery retry. |
+| `commentedAt` | ISO timestamp or null (optional on legacy receipts) | Successful review-finding hold comment; absent/null permits comment retry independently of paging. CI-only holds do not require a comment. |
+
+The comment callback uses the normalized `postRemediationOutcomeComment`
+contract: only a truthy `posted` records `commentedAt`. That wrapper normalizes
+successful adapter payloads and returns `posted: false` for skipped or failed
+delivery. Such results retry the comment without repeating a successful page;
+the paging claim is released after each attempt.
 
 `<digest>.json.lock` is an empty exclusive-create paging claim. Its mtime is
 used to reclaim stale claims after `OPERATOR_LABEL_PAGE_LOCK_STALE_MS` (default
@@ -67,7 +83,7 @@ the head, or observing a non-label failure removes this hold without deleting
 the old receipt. Applying a label alone does not clear red CI. Inspect the
 failure and repair a crashed script, or apply the appropriate override for a real
 label refusal if intended, then rerun the named check.
-Alternatively, review remediation can remove the offending guarded delta.
+Operator-gated review findings must retain the guarded changes; remediation cannot remove them to satisfy the gate.
 
 The alert event is `ama_closer.operator_label_required` with payload
 `{ repo, prNumber, headSha, reason, gates }`. Failed delivery is retried on later
@@ -77,4 +93,4 @@ The successful-delivery set is capped at 512 entries. A best-effort sweep remove
 superseded-head receipts when a new hold is observed, closed-PR receipts when
 closure observes the closed PR, and unrelated receipts older than 30 days.
 Active claim files are excluded from the sweep. These retention
-and claim limitations do not grant merge authority or stop review remediation.
+and claim limitations do not grant merge authority. Ordinary findings remain remediable.

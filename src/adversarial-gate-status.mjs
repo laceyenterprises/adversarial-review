@@ -1,4 +1,5 @@
 import { meteredExecFile } from './metered-gh.mjs';
+import { classifyOperatorGatedFindings } from './ama/operator-label-gates.mjs';
 import { readReviewFailureDecision } from './review-retry-exhaustion.mjs';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -299,6 +300,7 @@ function capturedPassAnswersReReview(job, capturedPass) {
 // failure). The AMA gate fails closed on `unknown`; never synthesize `known:0`
 // out of nothing.
 const UNKNOWN_BLOCKERS = {
+  operatorLabelFindings: null,
   blockingFindingState: 'unknown',
   blockingFindingCount: 0,
   nonBlockingFindingState: 'unknown',
@@ -326,6 +328,7 @@ function classifyBlockersFromBody(body, verdict) {
   const blocking = classifyBlockingFindings(body, { lastVerdict: verdict || null });
   const nonBlocking = classifyNonBlockingFindings(body, { lastVerdict: verdict || null });
   return {
+    operatorLabelFindings: classifyOperatorGatedFindings(body),
     blockingFindingState: blocking.state,
     blockingFindingCount: blocking.count,
     nonBlockingFindingState: nonBlocking.state,

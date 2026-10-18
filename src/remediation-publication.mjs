@@ -1,0 +1,65 @@
+// REMLABEL-01: the remediation publisher owns the final diff check and push.
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { accessSync, constants } from 'node:fs';
+import { delimiter, resolve } from 'node:path';
+import { runWorkspaceNetworkCommandWithTransientRetry } from './remediation-git-pr-io.mjs';
+
+const execFileAsync = promisify(execFile);
+const SHA = /^[a-f0-9]{40}$/i;
+
+function defaultPushCommand(env) {
+  for (const directory of (env.PATH ?? process.env.PATH ?? '').split(delimiter)) {
+    try {
+      const command = resolve(directory || '.', 'git-safe');
+      accessSync(command, constants.X_OK);
+      return command;
+    } catch { /* Try the next PATH entry; plain git is supported without the shim. */ }
+  }
+  return 'git';
+}
+
+export async function publishRemediation({ workspaceDir = process.cwd(), baseBranch, previousHead,
+  branch, expectedRemoteSha = previousHead, execFileImpl = execFileAsync,
+  pushCommand, env = process.env } = {}) {
+  if (typeof baseBranch !== 'string' || !baseBranch || typeof branch !== 'string' || !branch
+    || !SHA.test(previousHead || '') || !SHA.test(expectedRemoteSha || '')) {
+    throw Object.assign(new Error('Remediation publication requires the previous head and exact remote lease.'), { code: 'remediation-publication-unproven' });
+  }
+  const git = async args => (await execFileImpl('git', ['--no-replace-objects', '-C', workspaceDir, ...args],
+    { env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 })).stdout.replace(/\n$/, '');
+  await git(['check-ref-format', `refs/heads/${baseBranch}`]);
+  await git(['check-ref-format', `refs/heads/${branch}`]);
+  // Refresh the actual target branch; never compare against a stale worker base.
+  await runWorkspaceNetworkCommandWithTransientRetry({ execFileImpl, command: 'git',
+    args: ['--no-replace-objects', '-C', workspaceDir, 'fetch', '--no-tags', 'origin',
+      `+refs/heads/${baseBranch}:refs/remotes/origin/${baseBranch}`],
+    options: { env, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 },
+    // Keep the worker's selected credentials; auth failures are not transport retries.
+    refreshAuthEnvImpl: async () => ({ refreshed: false, detail: 'publisher retains worker credentials' }),
+  });
+  const base = await git(['rev-parse', '--verify', `refs/remotes/origin/${baseBranch}^{commit}`]);
+  const candidate = await git(['rev-parse', '--verify', 'HEAD^{commit}']);
+  const anchor = await git(['merge-base', base, previousHead]);
+  const paths = (await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--no-renames', '-z', anchor, previousHead]))
+    .split('\0').filter(Boolean);
+  const remaining = await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--no-renames', '-z', base, candidate]);
+  const originalRemaining = paths.length ? await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '--no-renames', '-z',
+    base, candidate, '--', ...paths.map(path => `:(literal)${path}`)]) : '';
+  // Refuse both an empty endpoint tree and an empty GitHub (merge-base) diff.
+  const prAnchor = await git(['merge-base', base, candidate]);
+  const prDiff = await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', prAnchor, candidate]);
+  if (!remaining || !prDiff || (paths.length && !originalRemaining)) {
+    throw Object.assign(new Error('Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.'),
+      { code: 'remediation-empties-pr-diff', previousHead, candidate });
+  }
+  if (await git(['rev-parse', 'HEAD']) !== candidate) {
+    throw Object.assign(new Error('Remediation head moved during publication validation.'), { code: 'remediation-publication-head-moved' });
+  }
+  // Pin the inspected commit as well as the expected old remote head. Neither
+  // a concurrent local checkout nor a competing branch push can swap the result.
+  await execFileImpl(pushCommand ?? defaultPushCommand(env), ['-C', workspaceDir, 'push',
+    `--force-with-lease=refs/heads/${branch}:${expectedRemoteSha}`, 'origin', `${candidate}:refs/heads/${branch}`],
+  { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  return { published: true, headSha: candidate, previousHead };
+}

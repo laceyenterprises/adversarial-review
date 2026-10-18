@@ -70,6 +70,14 @@ incident needs an agent-os dispatch-status follow-up, not narrative inference.
 
 ## Published-head recovery (REMLINK-01)
 
+The guarded worker publisher (`bin/remediation-publish.mjs`) retries transient
+base-fetch failures up to three attempts with 250/750 ms backoff, retaining the
+worker's credentials. It uses executable `git-safe` from `PATH` when present,
+otherwise `git`; `--push-command` overrides that selection without fallback on
+failure. A successful push clears the supplied `--failure-path` sidecar before
+reporting success. Missing sidecars are harmless; other cleanup failures are
+reported rather than leaving a prior refusal silently authoritative.
+
 A lost worker result can complete a round only when the live PR head matches a
 workspace tip carrying the job's exact `Worker-Job-Id` provenance trailer and
 differs from the round start and reviewed heads. Recorded head movement and

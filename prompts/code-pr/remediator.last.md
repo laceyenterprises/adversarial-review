@@ -121,8 +121,10 @@ rebase as routine and move on to the actual remediation work.
 ## Publish contract — moved PR heads are normal optimistic concurrency
 
 Do not halt just because the remote PR branch moved while you were working.
-After committing your remediation, push with a lease against the remote head
-you just fetched. If that lease fails or Git reports a non-fast-forward push,
+After committing your remediation, use only the guarded publisher command in
+Required Operating Rules. It preserves the original reviewed head as the path
+baseline and uses an exact remote-head lease. Never publish an empty diff or
+restore every originally changed file to base. If the lease fails,
 recover by replaying **only your remediation patch** onto the fresh PR head:
 
 1. Save your remediation commits with
@@ -131,8 +133,9 @@ recover by replaying **only your remediation patch** onto the fresh PR head:
 3. Reset the worktree to that fresh remote head.
 4. Replay the saved patch with `git am --3way`.
 5. Re-run the contamination audit and the relevant validation.
-6. Push again with
-   `git push --force-with-lease=refs/heads/<this-pr-branch>:<fresh-remote-sha> origin HEAD:refs/heads/<this-pr-branch>`.
+6. Retry the guarded publisher with `--expected-remote-sha <fresh-remote-sha>`;
+   retain its original `--previous-head` value. A diff-guard refusal is terminal:
+   report outcome `failed` and never retry through a direct push.
 
 Retry that stale-head replay at most three times. If the patch is already
 present on the fresh remote head, treat that as success and request re-review.

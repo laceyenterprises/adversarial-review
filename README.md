@@ -857,6 +857,9 @@ admission races.
 Final-round closure stall receipts remain independent of immediate primary-change
 alerts; successful launch/head progress restarts the stall deadline. See the
 [closure wait data model](docs/data-model/ama-closure-waits.md) for receipt scope.
+The follow-up graph maps operator-only review holds and preservation-refusal
+failures. A matching refusal sidecar fails an exited worker's round; successful
+publication clears that sidecar before reporting success.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
 README equivalence; mutation tests alter both a state and a CAS edge in source.
 
@@ -895,8 +898,10 @@ the hammer, while the shared merge predicate refuses a merge over red CI.
 claim; exhaustion selects operator paging. Fleet identity proof requires a valid
 GitHub signature (the signature metadata is faked, not cryptographically tested).
 A fake GitHub signed-commit policy refuses the unsigned head through the real
-daemon merge attempt. The real consumer stops exhausted rounds and the closure
-phase refuses a stale head. These checks do not waive any exact-head or primary-change predicate.
+daemon merge attempt. The real consumer stops exhausted rounds and operator-only
+findings; the latter page and comment once without spawning a remediator, after
+lifecycle admission. The closure phase refuses a stale head. These checks do not
+waive any exact-head or primary-change predicate.
 
 [post-merge-verify.json](post-merge-verify.json) is the SMV-01 declaration for the
 registered `tools/adversarial-review` repository integration. Parent discovery
@@ -1016,6 +1021,8 @@ stateDiagram-v2
     s4 --> s0: follow-up-job.13 allowlisted explicit retrigger
     s1 --> s4: follow-up-job.14 stacked-base-merged: hold before worker spawn and request rebase/retarget
     s1 --> s0: follow-up-job.15 base evidence unreadable: budget-neutral delayed recheck
+    s1 --> s4: follow-up-job.16 operator-only findings after lifecycle admission: hold without spawning
+    s1 --> s3: follow-up-job.17 exited worker has a matching preservation-refusal sidecar
     s2 --> [*]
     s3 --> [*]
     s4 --> [*]

@@ -371,7 +371,7 @@ function buildLivePackCrossEditFinding({ pack, touchedFiles }) {
       `This PR edits build pack \`${pack.slug}\` (${touchedFiles.map((file) => `\`${file}\``).join(', ')}) ` +
       `but its ticket is not one of that pack's plan tickets, and ${reason}. ` +
       'Editing a running pack\'s spec, plan or prompts from outside the pack changes the contract its in-flight ' +
-      'tickets are being built against. Restore these files to their base-branch content, or have an operator ' +
+      'tickets are being built against. Leave this change in place and have an operator ' +
       `apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label and re-run review.`,
   };
 }
@@ -459,7 +459,7 @@ function findingBullet(finding) {
   return `- **[${LIVE_PACK_CROSS_EDIT_KIND}] Cross-pack edit of live build pack \`${finding.pack}\`** — ` +
     `run(s): ${runs}; touched: ${finding.touched_files.map((file) => `\`${file}\``).join(', ')}. ` +
     `${finding.inconclusive ? `The live-run check was inconclusive, so this fails closed: ${finding.reason}. ` : ''}` +
-    `Restore these files to their base-branch content (or an operator applies \`${LIVE_PACK_EDIT_WAIVER_LABEL}\`).`;
+    `Leave the change in place; an operator must inspect it and apply \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` if appropriate, then rerun review.`;
 }
 
 // Split markdown into `## ` sections, ignoring headings inside code fences.
@@ -569,7 +569,7 @@ function formatLivePackRemediationContext({ packs = [], error = null } = {}) {
 ## Trusted Live Build Pack Facts
 The orchestrator could not determine which build packs this PR touches are running (${error}). Treat every build pack under \`projects/\` as live.
 - ${REMEDIATION_RULE}
-- Restoring a pack file this PR changed to its exact \`origin/<base>\` content is allowed; it removes the cross-edit instead of making one.
+- Leave guarded changes in place; do not restore them to base to satisfy an operator-label gate. Stop and report the required operator label.
 - Never apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label yourself; it is an operator waiver.
 `;
   }
@@ -593,7 +593,7 @@ ${JSON.stringify(facts, null, 2)}
 ${fence}
 - ${REMEDIATION_RULE}
 - A pack is "another" pack when \`ownPack\` is false. Only its \`SPEC.md\`, \`SPEC.meta.json\`, \`plan.json\` and \`prompts/**\` are protected; do not re-stamp its specRef either.
-- A \`${LIVE_PACK_CROSS_EDIT_KIND}\` finding is addressed by restoring the listed files to their exact \`origin/<base>\` content; that removes the cross-edit instead of making one.
+- A \`${LIVE_PACK_CROSS_EDIT_KIND}\` finding requires operator attention and the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label. Leave the listed changes in place; never revert them to satisfy this finding.
 - Never apply the \`${LIVE_PACK_EDIT_WAIVER_LABEL}\` label yourself; it is an operator waiver.
 `;
 }
@@ -642,8 +642,8 @@ async function resolveLivePackRemediationContext({
 
 // Reviewer entry point: evaluate the PR and inject any blocking findings into
 // the review text before the comment body is built. Unlike the additive-only
-// scope violation, the finding does not suppress follow-up remediation: the
-// remediator is told which packs are live and reverts or stops. Any failure
+// scope violation, the finding is operator-gated: dispatch holds it rather
+// than asking a remediator to revert the PR. Any failure
 // fails closed (inconclusive finding) rather than passing the edit through.
 async function applyLivePackCrossEditReview(reviewText, {
   repo,

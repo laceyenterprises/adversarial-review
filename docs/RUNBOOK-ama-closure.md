@@ -1269,13 +1269,17 @@ pages through
 `ama_closer.operator_label_required`, with a durable once-per-head delivery
 receipt in `data/operator-label-holds/`. Unchanged delivered receipts skip writes
 and paging locks. Inspect the actual refusal first; a script crash requires
-repair, not an override label. For an intended guarded delta, apply the appropriate operator label and rerun the named
-check. For an unintended delta, review remediation remains available to restore
-its base state. Consumption never terminally stops review jobs for this CI
-state. A running hammer may perform a review-authorized guard-preserving
-reversion before deferring; it cannot apply labels or weaken a guard. SUBSYNC-01
-still forbids gitlink changes in HAM commits, so pointer restoration belongs to
-review remediation rather than an operator override for an accidental bump.
+repair, not an override label. For an intended guarded delta, apply the appropriate
+operator label and rerun the named check. REMLABEL-01 also classifies blocking
+review findings against this registry before follow-up or terminal-hammer
+remediation. An operator-only review holds without dispatching, comments once
+with the label name, and shares the once-per-head paging receipt. Mixed reviews
+remediate only ordinary findings; guarded changes remain in place and are
+reported as blockers. Remediators never apply labels or revert those changes to
+satisfy a label gate. A fresh review must observe a waiver before the finding
+clears. Independent CI classification and current-head authority still apply. Before
+resuming remediation after deployment, drain workers launched with older prompts;
+only newly composed prompts use the guarded remediation publisher.
 
 The next closer pass releases the hold when live CI no longer classifies as
 label-only, without deleting historical receipts. A deferred hammer audit with

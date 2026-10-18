@@ -102,6 +102,7 @@ import {
   createLocalRemediationHandle,
 } from './adapters/agent-runtime/local/remediation.mjs';
 import { resolveConfiguredNonBlockingCodexModel } from './adapters/agent-runtime/local/non-blocking-codex-model.mjs';
+import { classifyOperatorGatedFindings, holdForOperatorLabels } from './ama/operator-label-gates.mjs';
 import {
   OAuthError,
   assertClaudeCodeOAuth,
@@ -1489,6 +1490,26 @@ async function reconcileFollowUpJob({
     workerTerminalEvent,
     workerTerminalReplyPath: paths?.replyPath || null,
   });
+  // A publication refusal wins over reply text, no-progress handling and
+  // published-head recovery. It cannot authorize a re-review or empty close.
+  if (liveness.state !== 'active') {
+    let publicationFailure;
+    try {
+      const checkedPaths = buildReconciliationPaths(rootDir, job);
+      publicationFailure = JSON.parse(readFileSync(`${checkedPaths.replyPath}.publication-failure.json`, 'utf8'));
+    } catch { /* No validated refusal artifact for this round. */ }
+    if (publicationFailure?.code === 'remediation-empties-pr-diff'
+      && publicationFailure.previousHead === job.revisionRef) {
+      const failure = { code: 'remediation-empties-pr-diff',
+        message: 'Remediation publication refused: the result empties the PR diff or restores every originally changed file to base. The previous remote head is retained.' };
+      const { commentDelivery } = buildReconcileCommentDelivery({ job, worker, action: 'failed', failure, now });
+      const failed = markFollowUpJobFailed({ rootDir, jobPath, failedAt: now(), failureCode: failure.code,
+        error: new Error(failure.message), remediationWorker: { ...worker, state: 'failed', reconciledAt: now() }, commentDelivery });
+      await postReconcileOutcomeCommentSafe({ rootDir, jobPath: failed.jobPath, job: failed.job, worker,
+        action: 'failed', failure, postCommentImpl, alreadyTerminal: failed.alreadyTerminal, now, log });
+      return { action: 'failed', reason: failure.code, job: failed.job, jobPath: failed.jobPath };
+    }
+  }
   const lifecycle = await resolveJobPRLifecycleSafe({
     rootDir,
     job,
@@ -3257,6 +3278,25 @@ async function consumeNextFollowUpJob({
       job: stopped.job,
       jobPath: stopped.jobPath,
     };
+  }
+
+  const operatorFindings = classifyOperatorGatedFindings(claimed.job.reviewBody);
+  if (operatorFindings.allGated) {
+    const gates = operatorFindings.gated.map(({ check, label, reason }) => ({ check, label, reason }));
+    const reason = `Operator-gated findings require ${[...new Set(gates.map(gate => gate.label))].join(', ')}. `
+      + 'Remediation was not dispatched. Keep the PR changes in place; an operator must inspect the finding and apply the appropriate label, then rerun review.';
+    const stopped = markFollowUpJobStopped({ rootDir, jobPath: claimed.jobPath,
+      stoppedAt: now(), stopCode: gates[0].reason, stopReason: reason, sourceStatus: 'in_progress',
+      commentDeliveryExemption: 'no-remediation-started',
+      remediationWorker: { state: 'never-spawned', reconciledAt: now() } });
+    await holdForOperatorLabels({ rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
+      headSha: claimed.job.revisionRef, gates, deliverAlertImpl, logger: log, now: now(),
+      postCommentImpl: args => postCommentImpl({ ...args, rootDir, execFileImpl, log,
+        // No remediator is admitted. Use the existing reviewer's comment
+        // identity without consulting remediation routing or provider config.
+        workerClass: remediationWorkerTrailerClass(claimed.job.reviewerModel === 'claude'
+          ? 'claude-code' : claimed.job.reviewerModel).replace(/-remediation$/, '') }) });
+    return { consumed: false, reason: gates[0].reason, job: stopped.job, jobPath: stopped.jobPath };
   }
 
   // A pre-spawn failure burns no remediation round.

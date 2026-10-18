@@ -1025,6 +1025,21 @@ export function cleanupHammerScratchDir(record, logger = console) {
   }
 }
 
+function cleanupHammerUnlaunchedPrompt(record, logger = console) {
+  const promptPath = record?.promptPath;
+  if (!promptPath || !record.promptDir || !record.repo || !record.prNumber
+    || dirname(resolve(promptPath)) !== resolve(record.promptDir)
+    || !basename(promptPath).startsWith(`${record.repo.replace('/', '-')}-pr-${record.prNumber}-`)
+    || !/-hammer-scratch-[^/]+\.md$/u.test(basename(promptPath))) return false;
+  try {
+    rmSync(promptPath, { force: true });
+    return true;
+  } catch (err) {
+    logger?.warn?.(`hammer unlaunched prompt cleanup failed: ${err.message}`);
+    return false;
+  }
+}
+
 // Scratch ownership ends independently of merge/retry authority. In particular,
 // merged-PR reconciliation writes outcome=succeeded without changing the last
 // observed worker status. Do not broaden the authority status sets for cleanup.
@@ -2632,6 +2647,7 @@ export function settleRefusedHammerWake({ rootDir, identity, intent, result,
       retryCount: Math.max(0, Number(current.retryCount || 0) - 1) };
   });
   if (retiredLease) {
+    cleanupHammerUnlaunchedPrompt(settled);
     const lease = readAmaCloserLease(rootDir, leaseIdentity);
     if (lease?.status === 'pending' && !lease.lrqId
       && lease.acquiredAt === retiredLease.acquiredAt && lease.watcherPid === retiredLease.watcherPid) {

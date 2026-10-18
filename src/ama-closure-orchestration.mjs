@@ -86,7 +86,7 @@ import {
 } from './closer-authored-stale.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
-import { classifyCheckRollup } from './checks-summary.mjs';
+import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -864,7 +864,10 @@ export async function maybeDispatchAmaClosureFor({
   const finalRoundSink = {};
   const hammerWakeSink = {};
   const dispatchArgs = { ...options, orphanRecovery, runDaemonCleanMergeAttemptImpl,
-    maybeDispatchAmaCloserImpl, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink, hammerWakeSink };
+    maybeDispatchAmaCloserImpl: (...args) => {
+      hammerWakeSink.closerInvoked = true;
+      return (maybeDispatchAmaCloserImpl || maybeDispatchAmaCloser)(...args);
+    }, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink, hammerWakeSink };
   let result;
   try { result = await dispatchAmaClosureFor(dispatchArgs); }
   catch (error) {
@@ -873,7 +876,7 @@ export async function maybeDispatchAmaClosureFor({
     // repeating the timed-out reads or attempting any watcher merge.
     result = await dispatchAmaClosureFor({ ...dispatchArgs, finalRoundDispatchOnly: error });
   }
-  if (hammerWakeSink.value) {
+  if (hammerWakeSink.value && hammerWakeSink.closerInvoked) {
     try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
     catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
   }
@@ -1137,10 +1140,13 @@ async function dispatchAmaClosureFor({
   // remediation job left to fix it.
   // Historical stop evidence is not enough: rescue must observe failed external
   // checks on the current candidate head, and carry their names into the prompt.
+  const requiredCiContexts = new Set(resolveRequiredCheckContextsFromCfg(cfg)
+    .map(context => String(context).trim().toLowerCase()).filter(Boolean));
   const derivedCiFailedChecks = reviewCycleExhausted && candidate?.headSha
     && reviewStateRow?.review_status === 'ci-blocked'
     && String(reviewStateRow?.failure_message || '').startsWith('[ci-regression-stopped]')
-    ? summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig }).failedChecks : [];
+    ? summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig }).failedChecks
+      .filter(check => requiredCiContexts.size === 0 || requiredCiContexts.has(check.name.toLowerCase())) : [];
   const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true
     || derivedCiFailedChecks.length > 0;
   if (reviewCycleCapReached || ciBlockedHammerOwner) reviewCycleExhausted = true;
@@ -1663,9 +1669,8 @@ async function dispatchAmaClosureFor({
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
     lease: handoffLease,
     mergeable: closureGateMergeability(mergeabilityForGate || {}),
-    checks: classifyCheckRollup(candidate?.statusCheckRollup, {
-      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
-    }), roundsLeft: !reviewCycleExhausted, ciBlockedHammerOwner,
+    checks: summarizeChecksConclusion(candidate?.statusCheckRollup, { env, cfg }),
+    roundsLeft: !reviewCycleExhausted, ciBlockedHammerOwner,
     reviewCeilingReached: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure' };
   let closureOwner = decideClosureOwner(closureOwnerInput);
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
@@ -2640,7 +2645,7 @@ async function dispatchAmaClosureFor({
             operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
         },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
-          if (ok && hammerWakeSink?.value) {
+          if (ok && hammerWakeSink?.value && hammerWakeSink.closerInvoked) {
             try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result: settledResult }); }
             catch (error) { logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
           }

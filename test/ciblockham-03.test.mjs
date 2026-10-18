@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { maybeDispatchAmaClosureFor } from '../src/ama-closure-orchestration.mjs';
@@ -152,7 +152,7 @@ test('native wake keeps current-head blocking verdicts and every other gate inel
   }
 });
 
-for (const parkedHead of [reviewed, head]) test('rescue uses the stopped exhausted row to choose a final hammer: ' + parkedHead[0], async t => {
+for (const parkedHead of [reviewed, head]) test('rescue requires a stale reviewed head for CI-repair ownership: ' + parkedHead[0], async t => {
   const { args, wakes } = fixture(t);
   args.reviewStateRow.reviewer_head_sha = parkedHead;
   args.dispatchJob = {}; // Rescue has the durable row, not the watcher's handoff flag.
@@ -163,11 +163,16 @@ for (const parkedHead of [reviewed, head]) test('rescue uses the stopped exhaust
     return { dispatched: false, skipMergeAgent: true, reason: 'synthetic-probe' };
   };
   const result = await maybeDispatchAmaClosureFor(args);
-  assert.equal(result.closureOwner.owner, 'hammer', JSON.stringify(result));
+  assert.equal(result.closureOwner.owner, parkedHead === reviewed ? 'hammer' : 'page', JSON.stringify(result));
   assert.equal(wakes[0].outcome, parkedHead === reviewed ? 'requested' : 'skipped');
   const rescue = classifyRescue({ closureOwner: result.closureOwner, reviewHeadSha: reviewed, headSha: head });
-  assert.equal(rescue.decision, 'hammer-eligible');
-  assert.equal(rescue.reason, 'ci-blocked-remediation-exhausted');
+  if (parkedHead === reviewed) {
+    assert.equal(rescue.decision, 'hammer-eligible');
+    assert.equal(rescue.reason, 'ci-blocked-remediation-exhausted');
+  } else {
+    assert.notEqual(rescue.decision, 'hammer-eligible');
+    assert.equal(result.closureOwner.reason, 'review-rounds-exhausted');
+  }
 });
 
 test('a parked row without a proven stale reviewed head retains ordinary wake admission', async t => {
@@ -223,6 +228,10 @@ test('rescue ownership preserves explicit review handoff, active remediation and
   const input = { reviewState: { verdict: 'comment-only', headSha: reviewed }, currentHead: head,
     checks: 'FAILURE', roundsLeft: false, ciBlockedHammerOwner: true };
   assert.equal(decideClosureOwner(input).owner, 'hammer');
+  assert.deepEqual(decideClosureOwner({ ...input,
+    reviewState: { headSha: head, verdict: '' } }),
+  { owner: 'page', reason: 'review-rounds-exhausted' },
+  'a missing same-head verdict cannot establish an unreviewed repair head');
   assert.equal(decideClosureOwner({ ...input, lease: { status: 'handed-to-review' },
     reviewCeilingReached: true }).owner, 'review');
   assert.equal(decideClosureOwner({ ...input, retryExhausted: true }).reason, 'hammer-retry-cap');
@@ -233,6 +242,99 @@ test('rescue ownership preserves explicit review handoff, active remediation and
   for (const checks of ['SUCCESS', 'PENDING', 'IN_PROGRESS', null, 'UNKNOWN']) {
     assert.notEqual(decideClosureOwner({ ...input, checks }).owner, 'hammer', String(checks));
   }
+});
+
+test('an early daemon deferral after wake does not retire an interrupted closer intent', async t => {
+  const { args, wakes } = fixture(t);
+  const identity = { repo, prNumber, headSha: head };
+  const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
+    lastAttemptedAt: '2026-01-01T00:00:00Z', retryCount: 1 };
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
+  const lease = readAmaCloserLease(args.rootDir, identity);
+  args.runDaemonCleanMergeAttemptImpl = async () => ({ disposition: 'deferred', reason: 'synthetic-daemon-wait' });
+  args.maybeDispatchAmaCloserImpl = () => assert.fail('daemon deferral never invokes the closer');
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.equal(wakes.length, 1);
+  assert.equal(result.reason, 'daemon-deferred');
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  assert.deepEqual(readAmaCloserLease(args.rootDir, identity), lease);
+});
+
+test('background pre-dispatch refusal leaves the interrupted intent and its lease untouched', async t => {
+  const { args } = fixture(t);
+  const identity = { repo, prNumber, headSha: head };
+  const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
+    lastAttemptedAt: '2026-01-01T00:00:00Z', retryCount: 1 };
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
+  const lease = readAmaCloserLease(args.rootDir, identity);
+  args.resolveAmaHammerDispatchModeImpl = () => 'background';
+  args.fetchCurrentPrStateImpl = async () => ({ state: 'OPEN', headSha: head, isDraft: true });
+  args.maybeDispatchAmaCloserImpl = () => assert.fail('background draft refusal never invokes the closer');
+  let submission;
+  args.amaHammerBackgroundQueueImpl = () => ({ submit(options) { submission = options; return { state: 'started' }; } });
+  await maybeDispatchAmaClosureFor(args);
+  const result = await submission.run(new AbortController().signal);
+  assert.equal(result.reason, 'background-pr-draft');
+  submission.onSettled({ ok: true, result, elapsedMs: 0 });
+  assert.deepEqual(readAmaCloserDispatchRecord(args.rootDir, identity), intent);
+  assert.deepEqual(readAmaCloserLease(args.rootDir, identity), lease);
+});
+
+for (const requiredFailure of [false, true]) test(`rescue prompt includes only configured required failures: ${requiredFailure}`, async t => {
+  const { args } = fixture(t);
+  args.dispatchJob = {};
+  const load = args.loadConfigImpl;
+  args.loadConfigImpl = () => {
+    const config = load();
+    const getConfig = config.getMergeAuthorityConfig;
+    return { ...config, getMergeAuthorityConfig: () => ({ ...getConfig(), requiredCheckContexts: [' Synthetic-CI '] }) };
+  };
+  args.candidate.statusCheckRollup = [
+    { ...red[0], conclusion: requiredFailure ? 'FAILURE' : 'SUCCESS' },
+    { ...red[0], name: 'optional-ci' },
+  ];
+  let invoked = false;
+  args.maybeDispatchAmaCloserImpl = async payload => {
+    invoked = true;
+    assert.equal(payload.dispatchContext.ciBlockedHammerOwner, requiredFailure);
+    assert.deepEqual(payload.dispatchContext.ciFailedChecks.map(check => check.name), requiredFailure ? ['synthetic-ci'] : []);
+    return { dispatched: false, reason: 'synthetic-probe' };
+  };
+  await maybeDispatchAmaClosureFor(args);
+  assert.equal(invoked, true);
+});
+
+test('watcher CI handoff cannot treat only the adversarial gate as failed CI ownership or a repair wake', async t => {
+  const { args, wakes } = fixture(t);
+  args.candidate.statusCheckRollup = [
+    { ...red[0], conclusion: 'SUCCESS' },
+    { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'FAILURE' },
+  ];
+  args.maybeDispatchAmaCloserImpl = async () => ({ dispatched: false, reason: 'synthetic-probe' });
+  const result = await maybeDispatchAmaClosureFor(args);
+  assert.notEqual(result.closureOwner?.reason, 'ci-blocked-remediation-exhausted');
+  assert.equal(wakes[0].outcome, 'skipped');
+});
+
+for (const pathKind of ['owned', 'outside', 'wrong-namespace']) test(`refused unlaunched prompt cleanup respects its path namespace: ${pathKind}`, t => {
+  const { args } = fixture(t);
+  const identity = { repo, prNumber, headSha: head };
+  const promptDir = join(args.rootDir, 'prompts');
+  mkdirSync(promptDir);
+  const filename = `${repo.replace('/', '-')}-pr-${prNumber}-${reviewed}-hammer-scratch-fixture.md`;
+  const promptPath = pathKind === 'outside' ? join(args.rootDir, filename)
+    : join(promptDir, pathKind === 'wrong-namespace' ? 'unrelated.md' : filename);
+  writeFileSync(promptPath, 'synthetic unlaunched prompt');
+  const intent = { ...identity, targetRemediationSha: head, state: 'dispatching',
+    promptDir, promptPath, lastAttemptedAt: '2026-01-01T00:00:00Z', retryCount: 1 };
+  updateAmaCloserDispatchRecord(args.rootDir, identity, () => intent);
+  acquireAmaCloserLease({ rootDir: args.rootDir, ...identity, now: intent.lastAttemptedAt });
+  settleRefusedHammerWake({ rootDir: args.rootDir, identity, intent,
+    result: { dispatched: false, reason: 'not-eligible' } });
+  assert.equal(readAmaCloserDispatchRecord(args.rootDir, identity).state, 'dispatch-failed');
+  assert.equal(existsSync(promptPath), pathKind !== 'owned');
 });
 
 test('refusal reconciliation preserves launch receipts, active work and replacement intents', t => {

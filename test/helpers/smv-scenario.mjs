@@ -1,7 +1,7 @@
 // Child of smv-smoke: only synthetic records and file-protocol Git are permitted.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -214,6 +214,9 @@ if (scenario === 'clean') {
   assert.equal(wake.outcome, 'requested');
   assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
     ciBlockedHammerOwner: true, roundsLeft: false, checks: 'FAILURE' }).owner, 'hammer');
+  assert.deepEqual(decideClosureOwner({ reviewState: { headSha, verdict: '' }, currentHead: headSha,
+    ciBlockedHammerOwner: true, roundsLeft: false, checks: 'FAILURE' }),
+  { owner: 'page', reason: 'review-rounds-exhausted' });
   const repairConclusions = ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR'];
   for (const checks of repairConclusions) {
     assert.equal(hammerWakeEligibility({ eligible: false,
@@ -223,8 +226,12 @@ if (scenario === 'clean') {
     assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
       ciBlockedHammerOwner: true, roundsLeft: false, checks }).owner, 'hammer');
   }
+  const promptDir = join(rootDir, 'prompts');
+  mkdirSync(promptDir, { recursive: true });
+  const promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${base}-hammer-scratch-smoke.md`);
+  writeFileSync(promptPath, 'synthetic unlaunched prompt');
   const intent = { ...identity(), targetRemediationSha: headSha, state: 'dispatching',
-    lastAttemptedAt: '2026-01-01T00:00:00Z' };
+    promptDir, lastAttemptedAt: '2026-01-01T00:00:00Z' };
   updateAmaCloserDispatchRecord(rootDir, identity(), () => intent);
   const leaseBefore = acquireAmaCloserLease({ ...identity(), now: intent.lastAttemptedAt,
     watcherPid: process.pid }).lease;
@@ -232,19 +239,22 @@ if (scenario === 'clean') {
   settleRefusedHammerWake({ rootDir, identity: identity(), intent, now: liveNow,
     wake: { outcome: 'requested' }, result: { dispatched: false } });
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatching');
+  assert.equal(existsSync(promptPath), true);
   assert.deepEqual(readAmaCloserLease(rootDir, identity()), leaseBefore);
-  updateAmaCloserDispatchRecord(rootDir, identity(), record => ({ ...record, promptPath: 'synthetic-generated-prompt' }));
+  updateAmaCloserDispatchRecord(rootDir, identity(), record => ({ ...record, promptPath }));
   settleRefusedHammerWake({ rootDir, identity: identity(), intent,
     wake: { outcome: 'duplicate' }, result: { dispatched: false, reason: 'synthetic-refusal' } });
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).reason, 'wake-refused:synthetic-refusal');
   assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatch-failed');
   assert.equal(readAmaCloserLease(rootDir, identity()), null);
+  assert.equal(existsSync(promptPath), false);
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
   evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
     nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
-    refusedWakeTerminal: true, livePendingLeasePreserved: true, merges: 0 };
+    refusedWakeTerminal: true, livePendingLeasePreserved: true,
+    emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
   acquireAmaCloserLease({ ...identity(), now: '2000-01-01T00:00:00Z' });
   updateAmaCloserLease({ ...identity(), status: 'dispatched', lrqId: 'stale-synthetic', now: '2000-01-01T00:00:00Z' });

@@ -846,11 +846,15 @@ heads and closed PRs retain their terminal refusal.
 Native exhausted CI repair wakes under the closer's shared dispatch rule,
 including the stale verdict on the unreviewed head. Rescue projects an exhausted
 `[ci-regression-stopped]` row to the final hammer only with live failed external
-checks on the candidate head, carrying those names into its prompt. A settled
-closer refusal retires an unchanged unlaunched intent as `dispatch-failed` with
+checks on the candidate head, restricted to configured required contexts when
+present, carrying those names into its prompt. Ownership and wake admission
+exclude the pipeline's adversarial-gate status; an empty same-head verdict
+alone cannot establish an unreviewed CI-repair head. Only an invoked closer's
+settled refusal retires an unchanged unlaunched intent as `dispatch-failed` with
 `wake-refused:<closer result.reason>` only when its matching pending lease has a
 dead owner or has reached the bounded launch reclaim age, regardless of wake
-outcome; missing leases, launch receipts and live work remain owned.
+outcome; missing leases, launch receipts and live work remain owned. Settlement
+removes the unlaunched prompt only inside its generated prompt namespace.
 Hammer launch ownership includes all transitive dispatcher retries. A live
 logical-job claim refusal restores ownership only after a fresh probe proves a
 live descendant of a non-null predecessor LRQ. The original head keeps the LRQ,
@@ -1150,7 +1154,7 @@ stateDiagram-v2
     [*] --> s0: closure-owner.01 recompute ownership: close
     [*] --> s1: closure-owner.02 recompute ownership: page
     [*] --> s2: closure-owner.03 recompute ownership: wait
-    [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped unreviewed head with terminal failed CI)
+    [*] --> s3: closure-owner.04 recompute ownership: hammer (including exhausted CI-stopped stale reviewed head with terminal failed external CI)
     [*] --> s4: closure-owner.05 recompute ownership: review
     [*] --> s5: closure-owner.06 recompute ownership: remediation
     [*] --> s6: closure-owner.07 recompute ownership: follow-up-drain

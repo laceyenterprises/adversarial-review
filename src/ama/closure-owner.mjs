@@ -38,7 +38,7 @@ export function decideClosureOwner({ reviewState = {}, currentHead, attested = f
     ciBlockedHammerOwner, checksConclusion: checks, remediationPending: reviewState.remediationPending,
   }) && lease?.status !== 'handed-to-review'
     && reviewState.headSha && currentHead
-    && (reviewState.headSha !== currentHead || !reviewState.verdict)) {
+    && reviewState.headSha !== currentHead) {
     return hammer('ci-blocked-remediation-exhausted');
   }
   if (!reviewState.verdict || (reviewState.headSha !== currentHead && (!attested || lease?.status === 'handed-to-review'))) {

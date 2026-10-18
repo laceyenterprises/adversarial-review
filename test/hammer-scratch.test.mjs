@@ -503,6 +503,41 @@ test('SCRATCHRACE-01: a terminal retry chain still removes predecessor scratch',
   assert.equal(existsSync(scratchDir), false);
 });
 
+test('RETRYCHAIN-01: PostgreSQL terminal retry chains allow a fresh hammer dispatch', async t => {
+  const root = fixture(t);
+  const args = dispatchArgs(root);
+  const first = await maybeDispatchAmaCloser({ ...args,
+    execFileImpl: async () => ({ stdout: JSON.stringify({ launchRequestId: 'synthetic-lrq' }) }) });
+  const previousScratch = readFileSync(first.promptPath, 'utf8').split('scratch=')[1];
+  const ledgerTarget = { backend: 'postgres', databaseName: 'synthetic' };
+  let chainReads = 0;
+  const result = await maybeDispatchAmaCloser({ ...args,
+    dispatchContext: { ...args.dispatchContext, ledgerTarget },
+    readLaunchRequestStatusImpl: probe => readLaunchRequestStatusFromLedgerAsync({ ...probe,
+      includeRetryChain: true,
+      spawnSyncImpl: (_command, _argv, options) => {
+        if (options.input.includes('WITH RECURSIVE')) {
+          chainReads += 1;
+          assert.match(options.input, /SELECT :'lrq'::text/);
+          return { status: 0, stdout: ['succeeded', 'canceled'].map((status, index) => JSON.stringify({
+            launch_request_id: `synthetic-terminal-${index}`, status, ticket_ref: 'HAM',
+          })).join('\n') };
+        }
+        return { status: 0, stdout: JSON.stringify({ launch_request_id: 'synthetic-lrq',
+          status: 'failed', ticket_ref: 'HAM' }) };
+      },
+    }),
+    readPullRequestStateImpl: () => ({ state: 'OPEN' }),
+    execFileImpl: async (_command, argv) => argv[0] === 'dispatch' && argv.includes('--prompt')
+      ? { stdout: JSON.stringify({ launchRequestId: 'synthetic-fresh-hammer' }) }
+      : { stdout: JSON.stringify({ status: 'failed' }) },
+  });
+  assert.ok(chainReads > 0);
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+  assert.equal(result.launchRequestId, 'synthetic-fresh-hammer');
+  assert.equal(existsSync(previousScratch), false);
+});
+
 for (const repoSource of ['dispatchContext', 'prMetadata', 'repo', 'advanced-head', 'context-pr-number', 'top-level-pr-number']) {
   test(`SCRATCHRACE-01: a live logical-job refusal preserves predecessor artifacts with ${repoSource} repository`, async t => {
     const root = fixture(t);

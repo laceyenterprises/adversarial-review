@@ -346,6 +346,7 @@ function loadBetterSqlite3() {
 
 const PSQL_TIMEOUT_MS = 30_000;
 const PSQL_TIMEOUT_SIGNAL = 'SIGKILL';
+const PSQL_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 
 function querySqliteRows(target, sql, params) {
   if (!existsSync(target.path)) {
@@ -702,6 +703,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
         env: spawnConfig.env,
         timeout: PSQL_TIMEOUT_MS,
         killSignal: PSQL_TIMEOUT_SIGNAL,
+        maxBuffer: PSQL_MAX_BUFFER_BYTES,
         input: script,
       } };
     } else {
@@ -711,6 +713,7 @@ function* queryPostgresRowsSteps(target, jsonSql, { spawnSyncImpl = spawnSync, p
         env: spawnConfig.env,
         timeout: PSQL_TIMEOUT_MS,
         killSignal: PSQL_TIMEOUT_SIGNAL,
+        maxBuffer: PSQL_MAX_BUFFER_BYTES,
       } };
     }
     const failure = describePostgresSpawnFailure(result);
@@ -984,12 +987,51 @@ function* readLaunchRequestStatusFromLedgerSteps({
         AND launch_request_id != @launchRequestId
       ORDER BY updated_at DESC, launch_request_id DESC`, { launchRequestId: normalizedLaunchRequestId });
   } else {
-    // Decode historical text metadata in JS: PostgreSQL before 16 has no safe
-    // IS JSON predicate. A row-to-JSON projection also tolerates absent columns.
-    // One bounded snapshot avoids per-descendant queries and database mutations.
-    retries = launchSnapshot ? { ...launchSnapshot } : (yield* readLaunchRequestSnapshotSteps({ ledgerTarget: resolution.target,
-      env, rootDir, hqRoot, spawnSyncImpl }));
-    if (retries.ok) {
+    // PostgreSQL 16+ can validate historical text without throwing or catalog
+    // writes. CASE guards the cast (including invalid Unicode escapes); materialize
+    // the edges once rather than parsing metadata on every recursive step.
+    // psql conditionals keep unsupported functions out of pre-16 SQL entirely.
+    // Older servers retain the bounded read-only snapshot/application traversal.
+    retries = Array.isArray(launchSnapshot?.rows) ? { ...launchSnapshot } : (yield* queryPostgresRowsSteps(resolution.target, `
+      SELECT current_setting('server_version_num')::int >= 160000 AS retry_native_parser
+      \\gset
+      \\if :retry_native_parser
+      WITH RECURSIVE retry_edges AS MATERIALIZED (
+        SELECT launch_request_id,
+          CASE WHEN pg_input_is_valid(to_jsonb(request)->>'metadata_json', 'jsonb')
+            THEN (to_jsonb(request)->>'metadata_json')::jsonb END AS metadata
+        FROM launch_requests request
+      ), retry_chain(launch_request_id) AS (
+        SELECT :'lrq'::text
+        UNION
+        SELECT child.launch_request_id FROM retry_edges child
+        JOIN retry_chain parent
+          ON CASE WHEN jsonb_typeof(child.metadata->'retryOf') = 'string'
+            THEN child.metadata->>'retryOf' END = parent.launch_request_id
+      )
+      SELECT json_build_object(
+        'launch_request_id', launch_request_id, 'status', status,
+        'updated_at', updated_at, 'terminal_at', terminal_at,
+        'failure_class', failure_class,
+        'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
+        'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref')
+      FROM launch_requests
+      WHERE launch_request_id IN (SELECT launch_request_id FROM retry_chain)
+        AND launch_request_id != :'lrq'
+      ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;
+      \\else
+      SELECT json_build_object(
+        'launch_request_id', launch_request_id, 'status', status,
+        'updated_at', updated_at, 'terminal_at', terminal_at,
+        'failure_class', failure_class,
+        'failure_detail', to_jsonb(launch_requests)->>'failure_detail',
+        'ticket_ref', to_jsonb(launch_requests)->>'ticket_ref',
+        'metadata_json', to_jsonb(launch_requests)->'metadata_json')
+      FROM launch_requests
+      ORDER BY updated_at DESC NULLS LAST, launch_request_id DESC;
+      \\endif
+      ;`, { spawnSyncImpl, psqlVars: [['lrq', normalizedLaunchRequestId]], readOnly: true }));
+    if (retries.ok && retries.rows.some(candidate => Object.hasOwn(candidate, 'metadata_json'))) {
       const children = new Map();
       for (const candidate of retries.rows) {
         let metadata = candidate.metadata_json;
@@ -1741,7 +1783,10 @@ async function runLedgerStepsAsync(iterator, { timeoutMs = null, signal = null, 
 
 function spawnLedgerChild(command, args, options) {
   return new Promise(resolve => {
-    const child = execFile(command, args, { ...options, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+    // Retry traversal returns only chain status rows, never table snapshots or
+    // metadata. Keep a hard memory bound; an unusually large chain still fails
+    // explicitly as unreadable rather than returning truncated ownership proof.
+    const child = execFile(command, args, options, (error, stdout, stderr) => {
       const failure = error && typeof error.code !== 'number' ? error : null;
       if (failure?.killed && failure.signal === options.killSignal && (failure.code == null || failure.code === 'ETIMEDOUT')) {
         failure.code = 'ETIMEDOUT'; failure.timeoutMs = options.timeout;

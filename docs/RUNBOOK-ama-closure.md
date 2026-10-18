@@ -135,10 +135,27 @@ Admission and predecessor matching resolve the repository from `dispatchContext.
 then `prMetadata.repo`, then the top-level `repo`. PR number resolution uses
 `dispatchContext.prNumber`, then `prMetadata.prNumber`, then top-level `prNumber`
 for both admission and cleanup. Descendants are ordered by latest update and
-launch ID, and promoted live rows retain their status metadata. PostgreSQL reads
-one timeout-bounded, read-only snapshot and parses metadata in the adapter;
-this supports pre-16 servers and missing metadata columns without casting malformed
-historical text in SQL. SQLite retains its recursive query. Interrupted admission (including
+launch ID, and promoted live rows retain their status metadata. RETRYCHAIN-01:
+PostgreSQL 16+ uses a recursive query rooted at the probed launch, returning only
+descendant status fields. Inline input validation skips malformed historical
+metadata, including invalid Unicode escapes, and tolerates missing metadata
+columns. All retry reads run in a read-only transaction, including through
+transaction pooling, with no function creation or other catalog writes; SELECT
+permission suffices on read replicas and read-only connections. Pre-16 servers
+retain the read-only snapshot with application-side parsing and traversal; those
+servers still transfer unrelated rows and metadata and can exhaust the output
+bound on large ledgers. Upgrade to 16+ for descendant-only output on individual
+probes. Capacity reconciliation reuses its supplied read-only launch snapshot
+and traverses that snapshot in the application without another query. Both sync
+and async Postgres children use a shared 2 MiB output bound. The 16+ recursive
+query materializes retry edges across the full launch table once per probe;
+descendant-only output bounds transport, not database scan or JSON parsing cost.
+After deployment, measure individual retry-probe latency as ledger volume grows.
+If that scan becomes costly, plan a ledger-owner schema change with an indexed
+retry-parent column or validated metadata expression; no such migration is part
+of RETRYCHAIN-01. A genuinely oversized
+chain, query error or timeout remains unreadable under the existing ownership rules. SQLite retains
+its recursive query. Interrupted admission (including
 shutdown aborts) leaves the current PR's deferred predecessor cleanup for a later
 completed pass. Capacity reconciliation cleans other PRs' terminal scratch
 immediately, including when the current admission subsequently aborts. A refused

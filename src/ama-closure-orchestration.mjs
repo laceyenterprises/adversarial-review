@@ -1654,7 +1654,7 @@ async function dispatchAmaClosureFor({
   });
   if (!autonomousMergeExecutionEnabled) {
     amaDispatchCloser.retireAmaCloserDrainHint(rootDir, {
-      repo: repoPath, prNumber, headSha: currentPrHeadSha,
+      repo: repoPath, prNumber, headSha: currentPrHeadSha || reviewState?.headSha,
     }, { logger });
     const hqRoot = resolveHqRoot(env);
     const disabledAudit = writeAutonomousMergeDisabledAuditImpl({

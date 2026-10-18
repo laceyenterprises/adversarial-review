@@ -4167,6 +4167,31 @@ test('PCCSLOW-01: expired daemon attempt stores history and next attempt consume
   assert.equal(merges, 1);
 });
 
+test('DRAINDEFER-01: execution kill switch retires the reviewed-head drain hint when the live head is unavailable', async () => {
+  const rootDir = tempRoot();
+  try {
+    const args = baseArgs(rootDir);
+    const identity = { repo: args.repoPath, prNumber: args.prNumber, headSha: 'head-live' };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'deferred-by-drain', updatedAt: new Date().toISOString() }));
+    const result = await maybeDispatchAmaClosureFor({ ...args,
+      candidate: { ...args.candidate, headSha: null }, currentRevisionRef: null,
+      loadConfigImpl: loadAmaEnabledAutonomousDisabledConfig,
+      writeAutonomousMergeDisabledAuditImpl: () => ({ written: true }),
+      runDaemonCleanMergeAttemptImpl: async () => assert.fail('disabled execution must not merge'),
+      maybeDispatchAmaCloserImpl: async () => assert.fail('disabled execution must not call closer'),
+    });
+    assert.equal(result.reason, 'autonomous-merge-execution-disabled');
+    const record = readAmaCloserDispatchRecord(rootDir, identity);
+    assert.equal(record.state, 'no-dispatch');
+    assert.equal(record.reason, 'drain-wait-ended');
+    const gate = createNoProgressLaneGate({ rootDir, readReviewRow: () => null, logger: { warn() {}, log() {} } });
+    const handler = { repoPath: identity.repo, ...identity };
+    for (let i = 0; i < 6; i++) await gate.record(handler);
+    assert.equal(gate.evaluate(handler).run, false);
+  } finally { rmSync(rootDir, { recursive: true, force: true }); }
+});
+
 test('DRAINDEFER-01: disabled AMA orchestration retires a fresh drain hint without closer admission', async () => {
   const rootDir = tempRoot();
   try {

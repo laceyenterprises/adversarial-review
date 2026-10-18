@@ -426,9 +426,9 @@ test('BUG-2: an hq drain-in-effect hammer-dispatch refusal is transient (no merg
   const drainStderr =
     "[hq] dispatch refused: drain in effect (epoch=515, started_at=2026-07-19T11:41:22Z, " +
     "started_by=operator:airlock, reason='main-catchup pass for SHA ddcb9eaec732').";
-  assert.equal(isTransientHqDispatchError({ stderr: drainStderr }), true, 'drain refusal must be transient');
+  assert.equal(isTransientHqDispatchError({ code: 6, stderr: drainStderr }), true, 'drain refusal must be transient');
   assert.equal(
-    isTransientHqDispatchError('hq dispatch failed\n' + drainStderr),
+    isTransientHqDispatchError('hq dispatch failed\ncode: 6\n' + drainStderr),
     true,
     'drain refusal transient even after a non-matching first line',
   );
@@ -497,18 +497,35 @@ test('DRAINDEFER-01: exit 6 drain refusal persists epoch, releases lease and pre
   assert.equal(readAmaCloserLease(rootDir, identity), null);
 });
 
+test('DRAINDEFER-01: drain epochs preserve numeric, formatted and alphanumeric tokens', () => {
+  for (const epoch of ['515', 'deploy-a9', '2026-10-18T02:00:00Z', '9-next']) {
+    for (const suffix of [', reason=deploy)', ')', ' extra']) {
+      const stderr = `[hq] dispatch refused: drain in effect (epoch=${epoch}${suffix}`;
+      assert.deepEqual(parseHqDispatchDrainRefusal({ code: 6, stderr }), { epoch });
+      assert.deepEqual(parseHqDispatchDrainRefusal(`code: 6\nstderr: ${stderr}`), { epoch });
+    }
+  }
+  assert.deepEqual(parseHqDispatchDrainRefusal({ code: 6, stderr: '[hq] dispatch refused: drain in effect' }), { epoch: null });
+});
+
 test('DRAINDEFER-01: other exit-6 refusals and wrong-code drain text keep existing handling', async t => {
   assert.deepEqual(parseHqDispatchDrainRefusal({ code: 6, stderr: 'dispatch refused: drain in effect (epoch=9)' }), { epoch: '9' });
   for (const err of [
     { code: 1, stderr: '[hq] dispatch refused: drain in effect (epoch=9)' },
+    { stderr: '[hq] dispatch refused: drain in effect (epoch=9)' },
+    { code: 6, stderr: '[hq] dispatch refused: drain unavailable' },
     { code: 6, stderr: 'payload: dispatch refused: drain in effect (epoch=9)' },
     { code: 6, stderr: '[hq] dispatch refused: provision slot busy' },
-  ]) assert.equal(parseHqDispatchDrainRefusal(err), null);
+  ]) {
+    assert.equal(parseHqDispatchDrainRefusal(err), null);
+    assert.equal(isTransientHqDispatchError(err), false);
+  }
   for (const [stderr, expected] of [
     ['temporary failure: synthetic dispatcher unavailable', 'dispatch-deferred-transient'],
     ['[hq] dispatch refused: dispatch_preflight_timeout: stage=synthetic (30s admission budget)', 'dispatch-deferred-transient'],
     ['[hq] dispatch refused: worker-class fallback unavailable: retained workspace requires synthetic class', 'dispatch-failed'],
     ['dispatch refused: synthetic admission refusal', 'dispatch-failed'],
+    ['payload: dispatch refused: drain in effect (epoch=9)', 'dispatch-failed'],
   ]) {
     const rootDir = mkdtempSync(join(tmpdir(), 'ama-other-refusal-'));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));

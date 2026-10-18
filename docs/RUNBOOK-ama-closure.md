@@ -3546,6 +3546,11 @@ After deploy, SRE owns these checks:
 
 ## Deploy drain deferrals (DRAINDEFER-01)
 
+Drain refusal classification requires exit 6 and an anchored diagnostic; incidental
+drain text and other exit codes keep their ordinary handling. Epoch metadata
+preserves numeric, formatted and alphanumeric tokens. When autonomous execution
+is disabled without an available live head, hint retirement uses the reviewed head.
+
 An exit-6 `dispatch refused: drain in effect` refusal persists
 `deferred-by-drain` with its epoch and releases the unlaunched pending lease.
 The watcher bypasses lane backoff without charging no-progress counters only

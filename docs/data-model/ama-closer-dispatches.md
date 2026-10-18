@@ -251,7 +251,12 @@ exhaustion; hammer launch/lifetime caps remain unchanged.
 ## Deploy drain scheduling (DRAINDEFER-01)
 
 Exit 6 with an anchored `dispatch refused: drain in effect` line records
-`state: deferred-by-drain` and `drainEpoch`. No launch IDs means the pending
+`state: deferred-by-drain` and `drainEpoch`.
+`drainEpoch` preserves the complete non-whitespace epoch token up to a comma or
+closing parenthesis, including formatted or alphanumeric identifiers; absent
+epochs are null. Drain classification requires exit 6 and the anchored diagnostic.
+Incidental drain text or another exit code does not qualify for drain retries.
+No launch IDs means the pending
 lease is released, the retry budget is preserved, and inline transient retries
 are skipped. The drain lookup and hint retirement resolve the head from
 `prMetadata.headSha`, then `reviewState.headSha`, then
@@ -268,6 +273,8 @@ hints younger than 300 seconds bypass backoff and no-progress accounting.
 poll; legacy records fall back to `lastAttemptedAt`. Missing, malformed, future
 or expired timestamps do not bypass accounting. The lane retires expired hints
 independently of closer admission; either AMA kill switch retires them too.
+When autonomous execution is disabled and the live head is unavailable,
+orchestration retires the hint keyed to the reviewed head.
 Existing lane debt is preserved, including debt predating the drain. Legacy
 transient records with an exit-6 drain diagnostic obey the same freshness rule.
 This recovery does not consume decision reset credit. Background settlement of

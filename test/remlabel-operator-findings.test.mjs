@@ -44,6 +44,7 @@ test('REMLABEL-01: operator-only live-pack finding never dispatches; comment and
   const result = await consumeNextFollowUpJob(args);
   assert.equal(result.reason, `operator-label-required:${label}`);
   assert.equal(result.job.remediationWorker.state, 'never-spawned');
+  assert.equal(result.job.commentDeliveryExemption, 'no-remediation-started');
   assert.equal(result.job.remediationPlan.rounds.at(-1).spawnedAt, undefined);
   assert.equal((await consumeNextFollowUpJob(args)).reason, 'no-pending-jobs');
   const classification = gates.classifyOperatorGatedFindings(gatedBody);

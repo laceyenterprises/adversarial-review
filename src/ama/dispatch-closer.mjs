@@ -6611,7 +6611,7 @@ async function maybeDispatchAmaCloserAttempt({
       headSha: prMetadata.headSha, gates, deliverAlertImpl, logger, now: dispatchContext?.dispatchedAt,
       postCommentImpl: async ({ body }) => {
         await execGhWithRetry({ execFileImpl, args: ['api', `repos/${repo}/issues/${prNumber}/comments`,
-          '--method', 'POST', '-f', `body=${body}`], env, signal });
+          '--method', 'POST', '-f', `body=${filterGitHubBody(body, { repo, reviewerHeadSha: prMetadata.headSha })}`], env, signal });
         return { posted: true };
       } }));
   }

@@ -31,7 +31,7 @@ const expected = {
   'duplicate-family-state.mjs': 1,
   'github-adapter-client.mjs': 3,
   'fast-merge-processing.mjs': 1,
-  'ama/dispatch-closer.mjs': 1,
+  'ama/dispatch-closer.mjs': 2,
   'ama/stacked-base.mjs': 1,
   'ama/hammer-api-publish.mjs': 1,
   'reviewer.mjs': 1,

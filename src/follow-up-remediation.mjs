@@ -3287,6 +3287,7 @@ async function consumeNextFollowUpJob({
       + 'Remediation was not dispatched. Keep the PR changes in place; an operator must inspect the finding and apply the appropriate label, then rerun review.';
     const stopped = markFollowUpJobStopped({ rootDir, jobPath: claimed.jobPath,
       stoppedAt: now(), stopCode: gates[0].reason, stopReason: reason, sourceStatus: 'in_progress',
+      commentDeliveryExemption: 'no-remediation-started',
       remediationWorker: { state: 'never-spawned', reconciledAt: now() } });
     await holdForOperatorLabels({ rootDir, repo: claimed.job.repo, prNumber: claimed.job.prNumber,
       headSha: claimed.job.revisionRef, gates, deliverAlertImpl, logger: log, now: now(),

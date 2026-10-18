@@ -41,6 +41,9 @@ paging evidence, never authorization to merge or proof of live CI greenness.
 The follow-up consumer resolves PR lifecycle before creating this hold; closed,
 merged or superseded reviewed heads use their lifecycle stop without a hold
 comment or page.
+The unspawned job records `commentDeliveryExemption: no-remediation-started`;
+the hold receipt owns its operator comment and retry instead of worker-reply
+delivery. Terminal HAM hold comments use the shared GitHub outbound-body filter.
 
 ## Files and fields
 

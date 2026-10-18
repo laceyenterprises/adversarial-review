@@ -8,8 +8,12 @@
 ## Purpose
 
 `data/hammer-wakes/` records event-driven watcher wake attempts for PR heads
-that have already cleared the AMA merge-eligibility snapshot. The files are a
-reservation and audit trail for a latency optimization only: they do not grant
+that have already cleared the AMA merge-eligibility snapshot, or whose only
+miss is `stale-head` and whose exact head is recorded as `workerPushedHeadSha`
+by the suppressed comment-only final round for the reviewed head. That handoff
+uses the same terminal job lookup as re-review suppression; another unreviewed
+head remains stale. The hammer performs terminal validation before merge.
+The files are a reservation and audit trail for a latency optimization only: they do not grant
 merge authority, bypass the watcher, or replace the normal poll path.
 
 The health collector reads the newest current audit records so an operator can see
@@ -33,7 +37,7 @@ Directory: `data/hammer-wakes/`
 | `event` | string | Always `hammer_wake`. |
 | `repo` | string | Repository full name, such as `owner/repo`. |
 | `prNumber` | positive integer | Pull request number. Invalid, zero, fractional, boolean, null, or blank values are rejected before reservation. |
-| `headSha` | string | PR head SHA that satisfied the merge-eligibility snapshot. |
+| `headSha` | string | PR head SHA accepted by the wake eligibility snapshot. |
 | `eligibilityReason` | string | Stable reason used in the dedupe key. The default is `clean-current-head-ci-green-policy-eligible`. |
 | `observedAt` | string | ISO-8601 time when the eligible snapshot was observed. |
 | `outcome` | string | `reserved`, `requested`, or `failed`. Returned events may also report `skipped` or `duplicate` without replacing a requested audit file. |

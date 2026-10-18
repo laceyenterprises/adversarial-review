@@ -626,6 +626,9 @@ function buildRemediationOutcomeCommentBody({
 
   if (action === 'refunded') {
     lines.push(`**Outcome:** ${sanitizeFailureText(failure?.message || 'not charged: infrastructure failure')}. Queued once more.`);
+  } else if (action === 'completed' && job?.completion?.pendingCiOnly !== true
+    && (reReview || job?.reReview)?.suppressed === 'comment-only-final-round') {
+    lines.push('**Outcome:** round finished; terminal hammer close queued.');
   } else if (action === 'completed' && job?.completion?.pendingCiOnly === true) {
     const pushedHead = typeof job.completion.workerPushedHeadSha === 'string'
       ? job.completion.workerPushedHeadSha.slice(0, 7) || 'unknown' : 'unknown';
@@ -775,6 +778,11 @@ function buildRemediationOutcomeCommentBody({
         '> **Human intervention required.** The worker did not produce a usable remediation reply. Inspect `data/follow-up-jobs/failed/` for the job record and the worker logs.'
       );
     }
+  }
+
+  if (action === 'completed' && (reReview || job?.reReview)?.suppressed === 'comment-only-final-round') {
+    lines.push('');
+    lines.push('The hammer owns final validation and close of this remediation round’s recorded head once structural gates are green. No re-review is queued.');
   }
 
   // Worker-supplied fields below are *untrusted*. They go through

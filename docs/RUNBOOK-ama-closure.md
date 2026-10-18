@@ -1022,6 +1022,15 @@ warning and the skipped re-review must still run (an FSR-06B request, or one an
 operator asked for), apply `adversarial-merge-blocked` before the hammer's
 terminal validation, then request the re-review.
 
+The eligible hammer wake recognizes that same recorded `workerPushedHeadSha`
+for the reviewed head: `stale-head` alone does not suppress its wake after CI
+turns green. Every other snapshot miss is retained. The closeout comment names
+the hammer as the next owner, and no re-review is queued for this head. An
+unrelated push remains `stale-head`; a round without a push keeps the ordinary
+current-head wake rule. Verify after deployment that the next suppressed
+comment-only worker push wakes and reaches the hammer on the first green-CI
+watcher pass, without a manual re-review request.
+
 A proven final-round head that conflicts with base reaches the hammer even with
 red or pending CI (DIRTYOWN-02), because the hammer must rebase before any CI on
 it counts. The conflict is proven only from GitHub's raw signal

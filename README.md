@@ -832,6 +832,11 @@ Posted-orphan recovery can heal an empty stored reviewer head from the GitHub
 review's commit ID. Settlement requires a non-empty recovered head and retains
 null-safe comparisons against the inspected session and prior head, so a
 replacement claim cannot be posted by an older reconciliation.
+The suppressed comment-only final round hands its recorded worker-pushed head
+to the hammer. A green-CI wake accepts that exact head despite the older review;
+merge still requires HAM terminal validation. Unrecorded pushes stay stale.
+The offline `test/wake-closeout.test.mjs` regression exercises the pending-to-green
+handoff through the real closer dispatcher and preserves re-review suppression.
 Certified HAM contention parks retain bounded deferral recovery while GitHub
 mergeability is UNKNOWN, including alongside pending CI. Queue backoff and expiry
 remain authoritative; recovery waits for green CI and resolved mergeability

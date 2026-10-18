@@ -2493,7 +2493,7 @@ async function dispatchAmaClosureFor({
     // A settled classification wait is not a refusal. Submit fresh work in
     // this pass instead of spending a whole pass consuming the wait.
     if (backgroundSettled?.ok && ['operator-label-classification-pending',
-      'background-pr-state-unavailable'].includes(backgroundSettled.result?.reason)) {
+      'background-pr-state-unavailable', 'deferred-by-drain'].includes(backgroundSettled.result?.reason)) {
       backgroundSettled = null;
     }
     // A scoped request must observe the closer's gates before taking ownership.

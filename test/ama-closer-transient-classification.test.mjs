@@ -1,3 +1,6 @@
+import { createNoProgressLaneGate } from '../src/posted-review-row.mjs';
+import { evaluateNoProgressLane, readNoProgressLane, recordNoProgressLaneRun } from '../src/watcher-no-progress-lane.mjs';
+import { readAmaCloserLease } from '../src/ama/closer-lease.mjs';
 import { createAmaHammerBackgroundQueue } from '../src/ama-hammer-background-dispatch.mjs';
 import { primaryChangeFixture } from './helpers/primary-change.mjs';
 import test from 'node:test';
@@ -9,6 +12,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   amaCloserDispatchFilePath,
+  parseHqDispatchDrainRefusal,
+  readAmaCloserDispatchRecord,
+  updateAmaCloserDispatchRecord,
   isGithubRateLimitOrBrokerThrottle,
   isTransientHqDispatchError,
   HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
@@ -360,6 +366,7 @@ function eligibleInputs(rootDir) {
     hqOwnerUser: CURRENT_USER,
     currentUser: CURRENT_USER,
     rootDir,
+    livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: headSha, headBranchExists: true, headRefName: 'synthetic-branch' }),
     dispatchedAt: '2026-06-11T20:00:00Z',
   };
   return { reviewState, prMetadata, cfg, dispatchContext, headSha };
@@ -378,6 +385,7 @@ async function dispatchWithError(rootDir, errFactory) {
     cfg,
     dispatchContext,
     execFileImpl,
+    resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
     writeFileImpl: () => {},
     readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
   });
@@ -443,27 +451,98 @@ test('BUG-2: drain transient classifier is anchored to hq refusal lines', () => 
   );
 });
 
-test('BUG-2: a drain-in-effect hammer-dispatch refusal defers (dispatch-deferred-transient) and does NOT burn the budget', async (t) => {
+test('DRAINDEFER-01: exit 6 drain refusal persists epoch, releases lease and preserves lane counters', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const identity = { repo: 'acme/myrepo', prNumber: 1234, headSha: 'abc12345abc12345abc12345abc12345abc12345' };
+  const inputs = eligibleInputs(rootDir);
+  const identity = { repo: inputs.dispatchContext.repo, prNumber: inputs.prMetadata.prNumber, headSha: inputs.headSha };
+  const logger = { warn() {}, log() {}, error() {} };
+  const handler = { repoPath: identity.repo, ...identity };
+  const gate = createNoProgressLaneGate({ rootDir, logger, readReviewRow: () => ({ review_status: 'posted' }) });
+  await gate.record(handler);
+  await gate.record(handler);
+  const before = readNoProgressLane(rootDir, identity);
+  const { result, calls } = await dispatchWithError(rootDir, () =>
+    Object.assign(new Error('dispatch refused'), { code: 6,
+      stderr: '[hq] dispatch refused: drain in effect (epoch=42, reason=synthetic-repo_unregistered-branch_holder_blocked-uq_worker_runs_live_logical_job)' }));
+  assert.equal(result.reason, 'deferred-by-drain');
+  assert.equal(result.drainEpoch, '42');
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(calls.filter(call => call.args[0] === 'dispatch').length, 1, 'a drain waits for the next pass, without inline transient retries');
+  const record = readAmaCloserDispatchRecord(rootDir, identity);
+  assert.equal(record.retryCount, 0);
+  assert.equal(record.state, 'deferred-by-drain');
+  assert.equal(record.drainEpoch, '42');
+  assert.equal(readAmaCloserLease(rootDir, identity), null);
+  for (let pass = 0; pass < 6; pass++) {
+    assert.equal(gate.evaluate(handler).run, true);
+    await gate.record(handler, { value: { amaClosureResult: result } });
+  }
+  assert.deepEqual(readNoProgressLane(rootDir, identity), before, 'drain leaves the entire counter ledger untouched');
 
-  const { result } = await dispatchWithError(rootDir, () => {
-    const err = new Error('hq dispatch failed');
-    err.stderr =
-      "[hq] dispatch refused: drain in effect (epoch=515, started_by=operator:airlock, " +
-      "reason='main-catchup pass for SHA ddcb9eaec732'). Run `hq dispatch resume --epoch 515` after the bounce.";
-    return err;
-  });
+  const statusCalls = [];
+  const waiting = await maybeDispatchAmaCloser({ ...inputs, logger,
+    execFileImpl: async (_cmd, args) => {
+      statusCalls.push(args);
+      return { stdout: JSON.stringify({ isDraining: true, epoch: 43 }) };
+    } });
+  assert.equal(waiting.reason, 'deferred-by-drain');
+  assert.equal(waiting.drainEpoch, '43', 'a replacement drain still blocks dispatch');
+  assert.deepEqual(statusCalls, [['dispatch', 'drain-status', '--no-reap', '--root', inputs.dispatchContext.hqRoot]]);
+  assert.deepEqual(readAmaCloserDispatchRecord(rootDir, identity), record, 'polling creates no attempt or lease');
+});
 
-  assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'dispatch-deferred-transient');
-  assert.equal(result.skipMergeAgent, true, 'drain keeps the hammer on the hook, suppresses merge-agent fallback');
+test('DRAINDEFER-01: other exit-6 refusals and wrong-code drain text keep existing handling', async t => {
+  assert.deepEqual(parseHqDispatchDrainRefusal({ code: 6, stderr: 'dispatch refused: drain in effect (epoch=9)' }), { epoch: '9' });
+  for (const err of [
+    { code: 1, stderr: '[hq] dispatch refused: drain in effect (epoch=9)' },
+    { code: 6, stderr: 'payload: dispatch refused: drain in effect (epoch=9)' },
+    { code: 6, stderr: '[hq] dispatch refused: provision slot busy' },
+  ]) assert.equal(parseHqDispatchDrainRefusal(err), null);
+  for (const [stderr, expected] of [
+    ['temporary failure: synthetic dispatcher unavailable', 'dispatch-deferred-transient'],
+    ['[hq] dispatch refused: dispatch_preflight_timeout: stage=synthetic (30s admission budget)', 'dispatch-deferred-transient'],
+    ['[hq] dispatch refused: worker-class fallback unavailable: retained workspace requires synthetic class', 'dispatch-failed'],
+    ['dispatch refused: synthetic admission refusal', 'dispatch-failed'],
+  ]) {
+    const rootDir = mkdtempSync(join(tmpdir(), 'ama-other-refusal-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const { result } = await dispatchWithError(rootDir, () => Object.assign(new Error('dispatch refused'), { code: 6, stderr }));
+    assert.equal(result.reason, expected);
+    const inputs = eligibleInputs(rootDir);
+    const gate = createNoProgressLaneGate({ rootDir, logger: { warn() {}, log() {} },
+      readReviewRow: () => ({ review_status: 'posted' }) });
+    const handler = { repoPath: inputs.dispatchContext.repo, prNumber: inputs.prMetadata.prNumber, headSha: inputs.headSha };
+    for (let pass = 0; pass < 5; pass++) await gate.record(handler, { value: { amaClosureResult: result } });
+    assert.equal(readNoProgressLane(rootDir, { repo: handler.repoPath, prNumber: handler.prNumber }).lane, 'slow');
+  }
+});
 
-  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
-  assert.equal(record.retryCount, 0, 'drain refusal did not increment retryCount');
-  assert.equal(record.state, 'dispatch-deferred-transient');
-  assert.equal(record.lastFailureTransient, true);
+test('DRAINDEFER-01: legacy drain-only slow lane returns to active, other heads and refusals stay slow', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-lane-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { headSha, dispatchContext, prMetadata } = eligibleInputs(rootDir);
+  const identity = { repo: dispatchContext.repo, prNumber: prMetadata.prNumber, headSha };
+  const handler = { repoPath: identity.repo, ...identity };
+  const logger = { warn() {}, log() {} };
+  for (let pass = 0; pass < 6; pass++) recordNoProgressLaneRun(rootDir, identity,
+    { headSha, fingerprint: 'unchanged', logger });
+  const slow = readNoProgressLane(rootDir, identity);
+  assert.equal(evaluateNoProgressLane(slow, { headSha }).due, false);
+  const gate = createNoProgressLaneGate({ rootDir, logger, readReviewRow: () => null });
+  for (const record of [
+    { state: 'dispatch-deferred-transient', lastError: 'code: 6\nstderr: temporary failure' },
+    { state: 'deferred-by-drain', headSha: 'd'.repeat(40) },
+  ]) {
+    const key = { ...identity, headSha: record.headSha || headSha };
+    updateAmaCloserDispatchRecord(rootDir, key, () => ({ ...key, ...record }));
+    assert.equal(gate.evaluate(handler).run, false);
+  }
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatch-deferred-transient',
+    lastError: 'code: 6\nstderr: [hq] dispatch refused: drain in effect (epoch=42)' }));
+  assert.equal(gate.evaluate(handler).lane, 'active');
+  assert.equal(gate.evaluate(handler).run, true);
+  assert.equal(readNoProgressLane(rootDir, identity), null, 'obsolete drain debt is retired durably');
 });
 
 test('a genuine (non-transient) hammer-dispatch failure DOES consume the budget', async (t) => {

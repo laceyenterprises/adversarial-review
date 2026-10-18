@@ -1622,3 +1622,65 @@ test('REMLABEL-01: operator-only findings hold the terminal hammer and page once
   assert.equal(pages, 1);
   assert.equal(comments, 1);
 });
+
+test('DRAINDEFER-01: first clear pass dispatches deferred PRs in order within the existing cap', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-resume-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const prNumbers = [41, 42, 43, 44];
+  let isDraining = true;
+  const launched = [];
+  const run = async prNumber => {
+    const deps = testDeps();
+    return maybeDispatchAmaCloser({
+      ...findingsRemediationArgs(rootDir, { prMetadata: { prNumber }, cfg: { amaCloserConcurrentLaunchCeiling: 3 } }),
+      ...deps,
+      readDispatchDrainStatusImpl: async () => ({ isDraining, epoch: 7 }),
+      execFileImpl: async (_cmd, args) => {
+        assert.ok(args.includes('dispatch'));
+        launched.push(prNumber);
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', launchRequestId: `synthetic-${prNumber}` }) };
+      },
+    });
+  };
+  for (const prNumber of prNumbers) {
+    const identity = { repo: 'acme/repo', prNumber, headSha: HEAD };
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+      state: 'deferred-by-drain', drainEpoch: '7', retryCount: 0 }));
+    assert.equal((await run(prNumber)).reason, 'deferred-by-drain');
+  }
+  assert.deepEqual(launched, []);
+  isDraining = false;
+  const results = [];
+  for (const prNumber of prNumbers) results.push(await run(prNumber));
+  assert.deepEqual(launched, prNumbers.slice(0, 3));
+  assert.ok(results.slice(0, 3).every(result => result.dispatched), JSON.stringify(results));
+  assert.equal(results[3].dispatched, false);
+  assert.match(results[3].reason, /launch-(?:capacity|in-progress)/);
+});
+
+test('DRAINDEFER-01: unreadable drain status retains normal admission instead of adding a gate', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-status-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'deferred-by-drain', drainEpoch: '7', retryCount: 0 }));
+  const result = await maybeDispatchAmaCloser({ ...findingsRemediationArgs(rootDir), ...testDeps(),
+    readDispatchDrainStatusImpl: async () => { throw new Error('synthetic unavailable status'); } });
+  assert.equal(result.dispatched, true, JSON.stringify(result));
+});
+
+
+test('DRAINDEFER-01: a cleared drain does not mask a new eligibility blocker', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-new-blocker-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/repo', prNumber: 404, headSha: HEAD };
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity,
+    state: 'deferred-by-drain', drainEpoch: '7', retryCount: 0 }));
+  const result = await maybeDispatchAmaCloser({
+    ...findingsRemediationArgs(rootDir, { prMetadata: { isDraft: true } }), ...testDeps(),
+    readDispatchDrainStatusImpl: async () => ({ isDraining: false, epoch: 7 }),
+  });
+  assert.equal(result.dispatched, false);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.state, 'no-dispatch');
+  assert.equal(record.reason, 'drain-wait-ended');
+});

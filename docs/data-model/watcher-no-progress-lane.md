@@ -68,6 +68,14 @@ Optional `stalledEvent` field:
 
 ## Operational Contract
 
+- A current-head closer `deferred-by-drain` record, or a legacy transient
+  record with an exit-6 drain-in-effect diagnostic, bypasses lane backoff.
+  Drain waits leave counter ledgers untouched. Existing slow-lane debt for
+  that drain-blocked head is removed before admission, restoring the active
+  lane without spending decision-reset credit. Other heads and refusals retain
+  normal backoff. Drain status polling and dispatch capacity remain owned by
+  the closer; this lane never launches work itself.
+
 - The lane only changes how often a PR is re-walked; it never changes review,
   remediation, or merge eligibility decisions.
 - An unresolved, unpaged hammer evidence stop uses a five-minute interval

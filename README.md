@@ -860,6 +860,12 @@ alerts; successful launch/head progress restarts the stall deadline. See the
 The follow-up graph maps operator-only review holds and preservation-refusal
 failures. A matching refusal sidecar fails an exited worker's round; successful
 publication clears that sidecar before reporting success.
+Deploy drain refusals persist `deferred-by-drain` and the drain epoch. These
+heads bypass no-progress backoff; drain waits charge no counters, and old
+slow-lane debt for the drain-blocked head is retired. Each watcher pass checks
+drain status without reaping. Clearance resumes normal ordered and capped
+admission that pass, including background mode. Status-read failures fall back
+to ordinary dispatch; other refusals retain their current handling.
 Normal `npm test` checks semantic producer fingerprints, SQL state inventory, graph and
 README equivalence; mutation tests alter both a state and a CAS edge in source.
 
@@ -882,7 +888,9 @@ mode, and admission on the first poll after drain clears.
 merges autonomously and the bare remote records that SHA. The synthetic commit
 is unsigned: an ordinary reviewed head does not require fleet identity proof.
 
-<a id="smv-handoff"></a>**smv-handoff:** findings dispatch one hammer through the
+<a id="smv-handoff"></a>**smv-handoff:** drain refusal persists an epoch without
+charging no-progress counters; the first clear pass resumes dispatch. Findings
+dispatch one hammer through the
 real closer, with a durable dispatch record and lease. The fake worker repairs
 local Git, hands off to exact-head review, and an approved review drains through
 the real follow-up consumer and merges through the watcher closure phase.
@@ -1121,42 +1129,46 @@ stateDiagram-v2
     state "dispatching" as s0
     state "dispatched" as s1
     state "launch-terminal" as s2
-    state "dispatch-deferred-transient" as s3
-    state "dispatch-blocked-branch-holder" as s4
-    state "dispatch-branch-holder-block-exhausted" as s5
-    state "dispatch-failed" as s6
-    state "dispatch-configuration-refused" as s7
-    state "no-dispatch" as s8
-    state "completed" as s9
+    state "deferred-by-drain" as s3
+    state "dispatch-deferred-transient" as s4
+    state "dispatch-blocked-branch-holder" as s5
+    state "dispatch-branch-holder-block-exhausted" as s6
+    state "dispatch-failed" as s7
+    state "dispatch-configuration-refused" as s8
+    state "no-dispatch" as s9
+    state "completed" as s10
+    s0 --> s3: hammer-dispatch.24 exit 6 drain refusal: persist epoch, preserve budget, release pending lease
+    s3 --> s9: hammer-dispatch.25 drain wait ends: retire scheduling hint before ordinary admission and capacity
+    s3 --> s3: hammer-dispatch.26 active drain status keeps deferral without attempt or no-progress charge
     [*] --> s0: hammer-dispatch.01 persist launch intent
     s0 --> s1: hammer-dispatch.02 launch result: dispatched
-    s0 --> s3: hammer-dispatch.03 launch result: dispatch-deferred-transient
-    s0 --> s4: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
-    s0 --> s5: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
-    s0 --> s6: hammer-dispatch.06 launch result: dispatch-failed
-    s0 --> s8: hammer-dispatch.07 launch result: no-dispatch
-    s0 --> s9: hammer-dispatch.08 launch result: completed
+    s0 --> s4: hammer-dispatch.03 launch result: dispatch-deferred-transient
+    s0 --> s5: hammer-dispatch.04 launch result: dispatch-blocked-branch-holder
+    s0 --> s6: hammer-dispatch.05 launch result: dispatch-branch-holder-block-exhausted
+    s0 --> s7: hammer-dispatch.06 launch result: dispatch-failed
+    s0 --> s9: hammer-dispatch.07 launch result: no-dispatch
+    s0 --> s10: hammer-dispatch.08 launch result: completed
     s1 --> s2: hammer-dispatch.09 readable terminal chain evidence (no live fleet retry)
-    s1 --> s6: hammer-dispatch.10 failed outcome reconciled
+    s1 --> s7: hammer-dispatch.10 failed outcome reconciled
     s2 --> s0: hammer-dispatch.11 bounded retry or changed context
-    s3 --> s0: hammer-dispatch.12 bounded retry or changed context
-    s4 --> s0: hammer-dispatch.13 bounded retry or changed context
-    s6 --> s0: hammer-dispatch.14 bounded retry or changed context
-    s8 --> s0: hammer-dispatch.15 bounded retry or changed context
-    s1 --> s8: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
-    s2 --> s8: hammer-dispatch.17 foreign ticket corrects terminal launch attribution
-    s0 --> s7: hammer-dispatch.18 repo_unregistered: release pending lease and page repository once
-    s3 --> s7: hammer-dispatch.19 reclassify legacy configuration refusal
-    s6 --> s7: hammer-dispatch.20 reclassify legacy configuration refusal
-    s7 --> s0: hammer-dispatch.21 normal backoff due, re-probe dispatch, admission clears blocker
+    s4 --> s0: hammer-dispatch.12 bounded retry or changed context
+    s5 --> s0: hammer-dispatch.13 bounded retry or changed context
+    s7 --> s0: hammer-dispatch.14 bounded retry or changed context
+    s9 --> s0: hammer-dispatch.15 bounded retry or changed context
+    s1 --> s9: hammer-dispatch.16 foreign ticket retires mistaken ownership and charge
+    s2 --> s9: hammer-dispatch.17 foreign ticket corrects terminal launch attribution
+    s0 --> s8: hammer-dispatch.18 repo_unregistered: release pending lease and page repository once
+    s4 --> s8: hammer-dispatch.19 reclassify legacy configuration refusal
+    s7 --> s8: hammer-dispatch.20 reclassify legacy configuration refusal
+    s8 --> s0: hammer-dispatch.21 normal backoff due, re-probe dispatch, admission clears blocker
     s0 --> s1: hammer-dispatch.22 proven live retry restores same-head ownership and artifacts
     s2 --> s1: hammer-dispatch.23 proven live retry restores original-head ownership
     s2 --> [*]
-    s5 --> [*]
     s6 --> [*]
     s7 --> [*]
     s8 --> [*]
     s9 --> [*]
+    s10 --> [*]
 ```
 
 <!-- smv:diagrams:end -->

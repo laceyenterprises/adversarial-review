@@ -11,6 +11,8 @@ globalThis.fetch = () => { throw new Error('SMV fetch boundary refused'); };
 syncBuiltinESMExports();
 const { createFixtureStubReviewerRuntimeAdapter } = await import('../../src/adapters/reviewer-runtime/fixture-stub/index.mjs');
 const { readReviewerRunRecord } = await import('../../src/adapters/reviewer-runtime/run-state.mjs');
+const { createNoProgressLaneGate } = await import('../../src/posted-review-row.mjs');
+const { readNoProgressLane } = await import('../../src/watcher-no-progress-lane.mjs');
 const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
@@ -84,7 +86,8 @@ if (scenario === 'clean') {
   let hammers = 0;
   await tick({ findings: true, closerImpl: async () => {
     assert.equal(acquireAmaCloserLease(identity()).acquired, true); hammers++;
-    const result = await maybeDispatchAmaCloser({
+    let isDraining = true;
+    const closerArgs = {
       cfg: { enabled: true, workerClass: 'hammer', branchProtection: { required: false }, eligibility: { riskClasses: ['low'] } },
       reviewState: { verdict: 'comment-only', headSha, riskClass: 'low', reviewCycleExhausted: true, remediationPending: false,
         blockingFindingState: 'known', blockingFindingCount: 0, nonBlockingFindingState: 'known', nonBlockingFindingCount: 1 },
@@ -93,11 +96,25 @@ if (scenario === 'clean') {
       dispatchContext: { rootDir, repo, reviewedSha: headSha, riskClass: 'low', reviewedBy: 'synthetic-reviewer', reviewer: 'gemini',
         parentSession: 'synthetic-parent', hqPath: 'hq', hqRoot: join(rootDir, 'hq'), currentUser: userInfo().username, hqOwnerUser: userInfo().username,
         livePrProbeImpl: async () => ({ state: 'OPEN', headRefOid: headSha, headBranchExists: true, headRefName: 'synthetic' }) },
-      execFileImpl: async (_command, args) => { assert.ok(args.includes('dispatch')); return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'synthetic-hammer', launchRequestId: 'synthetic-hammer' }) }; },
+      readDispatchDrainStatusImpl: async () => ({ isDraining, epoch: 7 }),
+      execFileImpl: async (_command, args) => { assert.ok(args.includes('dispatch'));
+        if (isDraining) throw Object.assign(new Error('synthetic deploy'), { code: 6, stderr: '[hq] dispatch refused: drain in effect (epoch=7)' });
+        return { stdout: JSON.stringify({ ticketRef: 'HAM', dispatchId: 'synthetic-hammer', launchRequestId: 'synthetic-hammer' }) }; },
       readTemplateImpl: () => 'Synthetic hammer <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>', writeFileImpl() {},
       resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
       readBuildCompletionSignalForPrImpl: () => ({ ok: false }), readBuildCompletionProducerEvidenceImpl: () => ({ ok: false }), logger: quiet,
-    });
+    };
+    const deferred = await maybeDispatchAmaCloser(closerArgs);
+    assert.equal(deferred.reason, 'deferred-by-drain');
+    assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).drainEpoch, '7');
+    const laneGate = createNoProgressLaneGate({ rootDir, hqRoot: join(rootDir, 'hq'), logger: quiet, readReviewRow: () => null });
+    const handler = { repoPath: repo, prNumber, headSha };
+    await laneGate.record(handler, { value: { amaClosureResult: deferred } });
+    assert.equal(readNoProgressLane(rootDir, identity()), null);
+    assert.equal((await maybeDispatchAmaCloser(closerArgs)).reason, 'deferred-by-drain');
+    isDraining = false;
+    assert.equal(laneGate.evaluate(handler).run, true);
+    const result = await maybeDispatchAmaCloser(closerArgs);
     assert.equal(result.dispatched, true, JSON.stringify(result));
     assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatched');
     updateAmaCloserLease({ ...identity(), status: 'dispatched', lrqId: 'synthetic-hammer' });
@@ -112,7 +129,7 @@ if (scenario === 'clean') {
   const drained = await consumeFollowUpJobsUntilCapacity(drain); assert.equal(drained.stopped, 1);
   await tick(); assert.equal(store.merged, true); assert.notEqual(headSha, oldHead);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
-  evidence = { hammers, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
+  evidence = { hammers, drainResumedNextPass: true, drainCountersUnchanged: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
     headlessPostRequeuedOnce: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };

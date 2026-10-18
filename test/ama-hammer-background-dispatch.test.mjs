@@ -1556,3 +1556,26 @@ test('HAMROUTE-01: a proof has a three-minute background bound and failures can 
   assert.equal(signal.aborted, true);
   assert.equal(await scope.read('proof', async () => 'retry-success'), 'retry-success');
 });
+
+
+test('DRAINDEFER-01: background drain settlement re-dispatches on the first clear pass', async t => {
+  const queue = createAmaHammerBackgroundQueue();
+  let calls = 0;
+  const args = closureArgs({
+    repoPath: 'example/repo', prNumber: 42,
+    resolveAmaHammerDispatchModeImpl: () => 'background',
+    amaHammerBackgroundQueueImpl: () => queue,
+    maybeDispatchAmaCloserImpl: async () => ++calls === 1
+      ? { dispatched: false, skipMergeAgent: true, reason: 'deferred-by-drain', drainEpoch: '7' }
+      : { dispatched: true, reason: 'dispatched' },
+  });
+  t.after(() => rmSync(args.rootDir, { recursive: true, force: true }));
+  await maybeDispatchAmaClosureFor(args);
+  await queue.drain();
+  assert.equal(calls, 1);
+  const clearPass = await maybeDispatchAmaClosureFor(args);
+  assert.equal(clearPass.reason, AMA_HAMMER_BACKGROUND_REASON);
+  await queue.drain();
+  assert.equal(calls, 2, 'a settled drain refusal costs no additional pass');
+  assert.equal(queue.takeSettled('example/repo#42@' + HEAD).result.dispatched, true);
+});

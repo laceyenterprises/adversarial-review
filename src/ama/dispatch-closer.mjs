@@ -2739,7 +2739,35 @@ export function isGithubRateLimitOrBrokerThrottle(errOrText) {
     || detail.includes('service unavailable');
 }
 
+// DRAINDEFER-01: exit 6 is shared with other refusals; only the anchored
+// drain-in-effect diagnostic proves a deploy drain. Accept formatted records
+// as well as exec errors so old transient records recover on the first pass.
+export function parseHqDispatchDrainRefusal(err) {
+  const detail = typeof err === 'string' ? err : [err?.message, err?.stderr, err?.stdout].filter(Boolean).join('\n');
+  const code = typeof err === 'string' ? detail.match(/^code:\s*(\d+)\s*$/m)?.[1] : err?.code;
+  if (Number(code) !== 6) return null;
+  const line = detail.split(/\r?\n/).find(line =>
+    /^\s*(?:(?:message|stderr|stdout):\s*)?(?:\[hq\]\s+)?dispatch refused:\s+drain\s+in\s+effect\b/i.test(line));
+  if (!line) return null;
+  const epoch = line.match(/\bepoch\s*=\s*(\d+)\b/i)?.[1];
+  return { epoch: epoch === undefined ? null : epoch };
+}
+
+export function isDrainDeferredAmaCloserRecord(record) {
+  return Boolean(record && !record.launchRequestId && !record.dispatchId
+    && (record.state === 'deferred-by-drain'
+      || (record.state === 'dispatch-deferred-transient' && parseHqDispatchDrainRefusal(record.lastError))));
+}
+
+async function readDispatchDrainStatus({ hqPath, hqRoot, ledgerDbPath, execFileImpl, signal, env }) {
+  const args = ['dispatch', 'drain-status', '--no-reap', '--root', hqRoot];
+  if (ledgerDbPath) args.push('--db-path', ledgerDbPath);
+  const { stdout } = await execFileImpl(hqPath, args, { encoding: 'utf8', timeout: 10_000, signal, env });
+  return JSON.parse(stdout);
+}
+
 export function isTransientHqDispatchError(err) {
+  if (parseHqDispatchDrainRefusal(err)) return true;
   if (dispatchConfigurationRefusal(err)) return false;
   if (isExecTimeout(err)) return true;
   // A throttle / broker outage is transient, never terminal — classify it
@@ -4414,6 +4442,40 @@ export async function maybeDispatchAmaCloser(args) {
   let admissionCompleted = false;
   let preservePredecessor = false;
   try {
+    throwIfAborted(args.signal);
+    const drainIdentity = { repo: targetRepo, prNumber: targetPrNumber, headSha: args.prMetadata?.headSha };
+    const deferred = dispatchContext?.rootDir && targetRepo && drainIdentity.headSha
+      ? readAmaCloserDispatchRecord(dispatchContext.rootDir, drainIdentity) : null;
+    if (args.cfg?.enabled && isDrainDeferredAmaCloserRecord(deferred)) {
+      try {
+        const status = await (args.readDispatchDrainStatusImpl || readDispatchDrainStatus)({
+          hqPath: dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH,
+          hqRoot: dispatchContext.hqRoot || DEFAULT_HQ_ROOT,
+          ledgerDbPath: dispatchContext.ledgerDbPath,
+          execFileImpl: args.execFileImpl || execFileAsync, signal: args.signal, env: args.env || process.env,
+        });
+        throwIfAborted(args.signal);
+        if (status?.isDraining === true) {
+          return noAmaDispatch({ dispatched: false, skipMergeAgent: true,
+            reason: 'deferred-by-drain', drainEpoch: String(status.epoch ?? deferred.drainEpoch ?? '') || null });
+        }
+      } catch (error) {
+        throwIfAborted(args.signal);
+        // Status is only a scheduling hint; unavailable evidence must not add
+        // a new refusal gate. Dispatch itself remains authoritative.
+        args.logger?.warn?.(`[watcher] closer drain status unavailable: ${error.message}`);
+      }
+      // Retire the scheduling hint before re-evaluating eligibility. An older
+      // drain record must not hide a new, unrelated blocker from the lane.
+      try {
+        updateAmaCloserDispatchRecord(dispatchContext.rootDir, drainIdentity, current =>
+          isDrainDeferredAmaCloserRecord(current)
+            ? { ...current, state: 'no-dispatch', reason: 'drain-wait-ended', lastError: null }
+            : current);
+      } catch (error) {
+        args.logger?.warn?.(`[watcher] closer drain hint cleanup failed: ${error.message}`);
+      }
+    }
     const readStatus = args.readLaunchRequestStatusImpl || readLaunchRequestStatusFromLedgerDefault;
     const result = await maybeDispatchAmaCloserAttempt({ ...args, dispatchContext,
       prMetadata: { ...args.prMetadata, prNumber: targetPrNumber },
@@ -7426,7 +7488,8 @@ async function maybeDispatchAmaCloserAttempt({
       throwIfAborted(signal);
       break;
     } catch (err) {
-      const liveClaimRefusal = /uq_worker_runs_live_logical_job/i.test(formatHqDispatchError(err));
+      const parsedDrainRefusal = parseHqDispatchDrainRefusal(err);
+      const liveClaimRefusal = !parsedDrainRefusal && /uq_worker_runs_live_logical_job/i.test(formatHqDispatchError(err));
       const retryProbe = liveClaimRefusal && existingRecord?.launchRequestId
         ? withLiveLaunchRetry(await Promise.resolve().then(() => readLaunchRequestStatusImpl({
           launchRequestId: existingRecord.launchRequestId, includeRetryChain: true, rootDir, hqRoot,
@@ -7481,6 +7544,7 @@ async function maybeDispatchAmaCloserAttempt({
         continue;
       }
       if (!launchEvidence.launchRequestId && !launchEvidence.dispatchId
+        && !parsedDrainRefusal
         && isTransientHqDispatchError(err) && transientRetryIndex < AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length) {
         const delayMs = Number(AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS[transientRetryIndex]) || 0;
         transientRetryIndex += 1;
@@ -7490,8 +7554,9 @@ async function maybeDispatchAmaCloserAttempt({
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       retainScratchDir ||= ambiguousLaunch;
-      const configurationRefusal = !ambiguousLaunch && dispatchConfigurationRefusal(err);
-      const branchHolderBlocked = !ambiguousLaunch && !configurationRefusal && isProvisionBranchHolderBlocked(err);
+      const drainRefusal = !ambiguousLaunch ? parsedDrainRefusal : null;
+      const configurationRefusal = !ambiguousLaunch && !drainRefusal && dispatchConfigurationRefusal(err);
+      const branchHolderBlocked = !ambiguousLaunch && !drainRefusal && !configurationRefusal && isProvisionBranchHolderBlocked(err);
       const dispatchError = formatHqDispatchError(err);
       if (branchHolderBlocked && isHammerWorkerClass(workerClass) && !samePrHammerHolderRetryUsed) {
         samePrHammerHolderRetryUsed = true;
@@ -7528,6 +7593,7 @@ async function maybeDispatchAmaCloserAttempt({
         && (isTransientHqDispatchError(err)
           || (isHammerWorkerClass(workerClass)
             && sameWorkerProvisionLaunchInFlight(err, workerId, processKillImpl)));
+      const transientReason = drainRefusal ? 'deferred-by-drain' : 'dispatch-deferred-transient';
       const budgetPreservingFailure = configurationRefusal || branchHolderBlocked || transientFailure;
       const updatedDispatchRecord = updateDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
         const currentBranchHolderBlockBase = existingRecordIsReclaimableBranchHolderBlock
@@ -7565,11 +7631,12 @@ async function maybeDispatchAmaCloserAttempt({
               ? 'dispatch-branch-holder-block-exhausted'
               : (branchHolderBlocked
                 ? 'dispatch-blocked-branch-holder'
-                : (transientFailure ? 'dispatch-deferred-transient' : 'dispatch-failed'))
+                : (transientFailure ? transientReason : 'dispatch-failed'))
           ),
           lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
           lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
           lastFailureTransient: transientFailure,
+          drainEpoch: drainRefusal?.epoch ?? null,
           lastError: dispatchError,
         };
       });
@@ -7604,7 +7671,7 @@ async function maybeDispatchAmaCloserAttempt({
             repo,
             prNumber,
             headSha: reviewedSha,
-            reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : transientFailure ? 'dispatch-deferred-transient' : (
+            reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : transientFailure ? transientReason : (
               branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
             ),
             error: dispatchError,
@@ -7616,7 +7683,7 @@ async function maybeDispatchAmaCloserAttempt({
             repo,
             prNumber,
             headSha: reviewedSha,
-            reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : transientFailure ? 'dispatch-deferred-transient' : (
+            reason: configurationRefusal ? `dispatch-configuration-refused:${configurationRefusal}` : transientFailure ? transientReason : (
               branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
             ),
             error: releasePendingLeaseError,
@@ -7643,9 +7710,10 @@ async function maybeDispatchAmaCloserAttempt({
               ? 'dispatch-branch-holder-block-exhausted'
               : 'dispatch-branch-holder-blocked'
           ) : (
-            transientFailure ? 'dispatch-deferred-transient' : 'dispatch-failed'
+            transientFailure ? transientReason : 'dispatch-failed'
           )
         ),
+        ...(drainRefusal ? { drainEpoch: drainRefusal.epoch } : {}),
         error: dispatchError,
         workerClass,
         ...(dispatchWorkerClass !== workerClass ? { dispatchWorkerClass } : {}),

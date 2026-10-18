@@ -498,6 +498,7 @@
     },
     {
       "id": "hammer-wakes",
+      "retryIdentity": "retryOfLaunchRequestId consumes one re-wake per reconciled terminal no-merge attempt.",
       "title": "Hammer Wakes",
       "path": "docs/data-model/hammer-wakes.md",
       "store": "data/hammer-wakes/",
@@ -567,6 +568,7 @@
     },
     {
       "id": "ama-closer-dispatches",
+      "reconciliation": "Terminal launch observation writes launch-terminal; same-PR no-merge settlement releases ownership under existing caps; shared read-only capacity snapshot excludes terminal launches.",
       "title": "AMA Closer Dispatch Records",
       "path": "docs/data-model/ama-closer-dispatches.md",
       "store": "data/follow-up-jobs/ama-closer-dispatches/",
@@ -632,6 +634,7 @@
     },
     {
       "id": "ama-closer-leases",
+      "reconciliation": "Terminal no-merge launch on a confirmed live OPEN same head is reclaimable immediately; merged success stays sticky.",
       "title": "AMA Closer Leases",
       "path": "docs/data-model/ama-closer-leases.md",
       "store": "data/ama-closer-leases/",

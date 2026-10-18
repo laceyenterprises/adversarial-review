@@ -27,7 +27,7 @@ Directory: `data/hammer-wakes/`
 | File | Shape | Contract |
 |---|---|---|
 | `<sha256>.json` | Current wake audit | One current reservation per `(repo, PR, head SHA, eligibility reason)`. The filename is the SHA-256 digest of `<repo>#<pr>@<head>:<eligibilityReason>`. |
-| `<sha256>.retry-<12hex>.json` | Archived retry hand-off audit | A failed current record or a `reserved` record abandoned for more than 10 minutes, moved aside by the retry election path. The suffix is diagnostic uniqueness derived from the retry observation. Older `.failed-<12hex>.json` archives remain under retention. |
+| `<sha256>.retry-<12hex>.json` | Archived retry hand-off audit | A failed current record, a delivered wake for a reconciled no-merge attempt, or a `reserved` record abandoned for more than 10 minutes, moved aside by the retry election path. The suffix is diagnostic uniqueness derived from the retry observation. Older `.failed-<12hex>.json` archives remain under retention. |
 
 ## Wake Audit Record
 
@@ -43,6 +43,7 @@ Directory: `data/hammer-wakes/`
 | `outcome` | string | `reserved`, `requested`, or `failed`. Returned events may also report `skipped` or `duplicate` without replacing a requested audit file. |
 | `route` | string | Current value is `watcher-ama-merge-authority`, because the wake targets the existing watcher AMA route. |
 | `requestId` | string or null | Watcher wake request ID after a successful transport confirmation. |
+| `retryOfLaunchRequestId` | optional string | Terminal no-merge lease LRQ consumed by this wake. Prevents repeated wakes for that same finished attempt; the next distinct failed attempt may wake again. |
 | `requestedAt` | string | Watcher wake timestamp after a successful transport confirmation. |
 | `reason` | string | Failure or duplicate reason on returned events and failed audit records. |
 | `error` | string | Best-effort diagnostic message for failed audit records. |
@@ -58,7 +59,14 @@ Directory: `data/hammer-wakes/`
 - Reservation creation uses atomic exclusive create. Readers should not observe
   partially written JSON at the final reservation path.
 - A current `requested` record suppresses duplicate wakes for the same
-  `(repo, PR, head SHA, eligibility reason)`. A current `failed` record may be
+  `(repo, PR, head SHA, eligibility reason)` while its hammer runs or after a
+  successful merge. A terminal lease with a reclaimable no-merge outcome permits
+  one new wake per distinct LRQ after the matching dispatch record observes
+  terminal launch status, using the ordinary retry election. A worker audit
+  written before process exit cannot re-arm the wake. Wakes grant
+  no additional retry budget; closer admission still enforces all caps. Retry
+  latency-event keys include that LRQ so each delivered attempt is observable.
+  A current `failed` record may be
   archived and retried by a bounded retry election. A `reserved` record whose
   `observedAt` is more than 10 minutes old takes the same path; if that field
   is missing or malformed, the audit file's mtime supplies the age. A rename

@@ -1785,3 +1785,83 @@ test('concurrent capacity admission preserves the existing launch cap before ack
     await Promise.all(attempts);
   }
 });
+
+for (const audited of [true, false]) {
+  test(`HAMRETRY-01: terminal success on the open same head retries in one pass (audit=${audited})`, async t => {
+    const rootDir = mkdtempSync(join(tmpdir(), 'same-head-retry-'));
+    t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+    const args = findingsRemediationArgs(rootDir, { dispatchContext: { dispatchReason: 'exhausted-final-hammer' } });
+    const identity = { repo: args.dispatchContext.repo, prNumber: 404, headSha: HEAD };
+    const now = args.dispatchContext.dispatchedAt;
+    acquireAmaCloserLease({ rootDir, ...identity, now });
+    updateAmaCloserLease({ rootDir, ...identity, now, status: 'dispatched', lrqId: 'synthetic-first' });
+    updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+      workerClass: 'hammer', launchRequestId: 'synthetic-first', retryCount: 1,
+      reviewedSha: HEAD, dispatchedAt: now, lastObservedAt: now, lastObservedStatus: 'starting' }));
+    const { recordHammerRetryDispatch, readHammerRetryCapLedger } = await import('../src/ama/hammer-retry-cap.mjs');
+    recordHammerRetryDispatch(rootDir, identity, { jobKey: HEAD, headSha: HEAD, now });
+    if (audited) appendAmaAuditAttempt({ hqRoot: args.dispatchContext.hqRoot, ...identity, now,
+      attempt: { outcome: 'failed-without-merge', reason: 'history-read-failed' } });
+    const deps = testDeps();
+    const baseExec = deps.execFileImpl;
+    deps.execFileImpl = async (cmd, argv, options) => argv[0] === 'dispatch' && argv[1] === 'status'
+      ? { stdout: JSON.stringify({ status: 'starting' }) } : baseExec(cmd, argv, options);
+    const input = { ...args, ...deps,
+      readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+      readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: HEAD }),
+      fetchPullRequestRollupImpl: async () => ({ state: 'OPEN', headSha: HEAD, comments: [] }),
+      deliverAlertImpl: async () => ({ ok: true }),
+    };
+    const result = await maybeDispatchAmaCloser(input);
+    assert.equal(result.dispatched, true, JSON.stringify(result));
+    assert.equal(result.launchRequestId, 'lrq_hammer_1');
+    assert.equal(deps.calls.filter(c => c.args[0] === 'dispatch').length, 1);
+    assert.equal(readAmaCloserLease(rootDir, identity).lrqId, 'lrq_hammer_1');
+    assert.equal(readHammerRetryCapLedger(rootDir, identity).lifetimeAttemptCount, 2);
+    const capped = await maybeDispatchAmaCloser(input);
+    assert.equal(capped.dispatched, false);
+    assert.equal(capped.reason, 'hammer-retry-cap-exhausted', JSON.stringify(capped));
+    assert.equal(deps.calls.filter(c => c.args[0] === 'dispatch').length, 1);
+  });
+}
+
+test('HAMRETRY-01: confirmed merged hammer keeps succeeded ownership sticky', t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'same-head-merged-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'synthetic/repository', prNumber: 23, headSha: HEAD };
+  acquireAmaCloserLease({ rootDir, ...identity });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'synthetic-merged' });
+  updateAmaCloserDispatchRecord(rootDir, identity, () => ({ ...identity, state: 'dispatched',
+    launchRequestId: 'synthetic-merged', lastObservedStatus: 'starting' }));
+  assert.equal(reconcileAmaCloserLease({ rootDir, ...identity,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readMergedSignalImpl: () => ({ ok: true }), logger: { info() {} },
+  }), true);
+  const lease = readAmaCloserLease(rootDir, identity);
+  assert.equal(lease.terminalOutcome, 'succeeded');
+  assert.equal(acquireAmaCloserLease({ rootDir, ...identity }).acquired, false);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity)));
+  assert.equal(record.state, 'launch-terminal');
+  assert.equal(record.outcome, 'succeeded');
+});
+
+test('HAMRETRY-01: operation cancellation prevents delayed lease settlement', async t => {
+  const { reconcileAmaCloserLeaseAsync } = await import('../src/ama/dispatch-closer.mjs');
+  const rootDir = mkdtempSync(join(tmpdir(), 'terminal-cancel-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'synthetic/repository', prNumber: 23, headSha: HEAD };
+  acquireAmaCloserLease({ rootDir, ...identity });
+  updateAmaCloserLease({ rootDir, ...identity, status: 'dispatched', lrqId: 'synthetic-ended' });
+  const before = readAmaCloserLease(rootDir, identity);
+  const controller = new AbortController();
+  await assert.rejects(reconcileAmaCloserLeaseAsync({ rootDir, ...identity, signal: controller.signal,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readMergedSignalImpl: () => ({ ok: false }),
+    readPullRequestStateImpl: ({ signal }) => {
+      assert.equal(signal, controller.signal);
+      controller.abort(new Error('synthetic operation timeout'));
+      return { state: 'OPEN', headRefOid: HEAD };
+    },
+  }), /synthetic operation timeout/);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity), before);
+});

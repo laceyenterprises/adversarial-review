@@ -63,6 +63,13 @@ const VALID_TERMINAL_OUTCOMES = new Set([
   'no-merge:pr-merged-externally',
 ]);
 
+// These attempts spent no closure authority. Retry admission remains owned by
+// the closer's existing series, target and lifetime budgets.
+export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
+  'failed-without-merge', 'deferred', 'superseded',
+  'pr-closed-externally', 'no-merge:concurrent-writer',
+]);
+
 // Shared with dispatch-closer so retry/poll changes also update the reclaim
 // boundary. Three launch attempts include two retry delays and three rollups.
 export const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];

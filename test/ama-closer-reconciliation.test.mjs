@@ -33,13 +33,13 @@ test('CLI dry-run preserves bytes; terminal reconciliation is idempotent', async
   assert.deepEqual(paths.map(p => readFileSync(p, 'utf8')), after);
 });
 
-test('missing ledger launch expires; unreadable ledger retains only fresh capacity', async (t) => {
+test('missing or unreadable launch retains PR ownership without charging fleet capacity', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'amacap-missing-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const now = '2026-10-03T00:00:00Z';
   updateAmaCloserDispatchRecord(root, { repo: 'fixture/repo', prNumber: 1, headSha: 'abc' }, () => ({ repo: 'fixture/repo', prNumber: 1, headSha: 'abc', state: 'dispatched', launchRequestId: 'missing', lastAttemptedAt: now }));
-  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) }))[0].holdsCapacity, true);
-  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) }))[0].holdsCapacity, true);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) }))[0].holdsCapacity, false);
+  assert.equal((await findActiveAmaCloserLaunches(root, { now, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) }))[0].holdsCapacity, false);
   const expiredNow = new Date(Date.parse(now) + AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS).toISOString();
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'query-failed' }) })).length, 0);
   assert.equal((await findActiveAmaCloserLaunches(root, { now: expiredNow, readLaunchRequestStatusImpl: () => ({ ok: false, reason: 'missing-launch-request-row' }) })).length, 0);
@@ -351,3 +351,25 @@ for (const status of ['running', 'succeeded', 'failed']) {
     assert.deepEqual(readFileSync(path), before, 'capacity reconciliation does not charge or record a hammer outcome');
   });
 }
+
+test('HAMRETRY-01: capacity excludes terminal starting records and never charges an unprobed launch', async t => {
+  const root = fixture(t, 'terminal-capacity');
+  for (let i = 1; i <= 4; i++) dispatchRecord(root, i, { lastObservedStatus: 'starting' });
+  const active = await findActiveAmaCloserLaunches(root, { now: NOW,
+    readLaunchRequestStatusImpl: ({ launchRequestId }) => ({ ok: true,
+      row: { status: launchRequestId === 'lrq-4' ? 'running' : 'succeeded' } }),
+  });
+  assert.deepEqual(active.map(r => r.launchRequestId), ['lrq-4']);
+  assert.equal(active[0].holdsCapacity, true);
+  for (let i = 1; i <= 3; i++) {
+    const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(root,
+      { repo: 'fixture/repo', prNumber: i, headSha: 'abc' })));
+    assert.equal(record.state, 'launch-terminal');
+    assert.equal(record.terminalLaunchStatus, 'succeeded');
+  }
+  const unprobed = await findActiveAmaCloserLaunches(root, { now: NOW, scanBudgetMs: 0,
+    readLaunchRequestStatusImpl: () => assert.fail('budget exhausted'),
+  });
+  assert.equal(unprobed.length, 1, 'unknown liveness still protects this PR from duplicate ownership');
+  assert.equal(unprobed[0].holdsCapacity, false, 'unknown evidence cannot hold every other PR behind it');
+});

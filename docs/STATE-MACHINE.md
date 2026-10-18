@@ -861,8 +861,14 @@ six-hour `non-execution` slow-retry window. The window survives replacement
 admission; fresh heads reset it but cannot bypass the PR-wide lifetime ceiling.
 Only bounded LEASEPARK-01 contention refunds reduce lifetime charges. Bare
 `succeeded` rows retain ordinary success reconciliation and the one-refund-per-series
-exit grant. Unknown merged evidence with a live same-head `DISPATCHED` lease
-keeps the success hold before exit classification. See the [retry ledger](data-model/hammer-retry-cap.md)
+exit grant. HAMRETRY-01 settles the current PR's terminal launch before
+admission: a live OPEN same-head probe or a retryable terminal audit releases
+no-merge ownership immediately, and the dispatch record becomes `launch-terminal`.
+Merged success remains sticky. A shared read-only ledger snapshot excludes
+terminal launches from fleet capacity. Unreadable or budget-skipped rows retain
+same-PR ownership without holding fleet capacity. Delivered wakes re-arm once
+per reconciled no-merge LRQ; running hammers remain duplicates. Without same-head
+or audit proof, unknown merged evidence retains the existing success hold. See the [retry ledger](data-model/hammer-retry-cap.md)
 and [dispatch records](data-model/ama-closer-dispatches.md) for fields and retention.
 
 The background hammer queue rechecks the live PR state, head, draft flag, and

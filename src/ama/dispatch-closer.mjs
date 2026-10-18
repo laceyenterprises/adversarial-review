@@ -78,6 +78,7 @@ import {
   readLatestWorkerRunStatusFromLedgerAsync,
   readLaunchRequestStatusFromLedger,
   readLaunchRequestStatusFromLedgerAsync,
+  readLaunchRequestSnapshotFromLedgerAsync,
 } from '../session-ledger-read-adapter.mjs';
 import {
   dismissStandingChangesRequestedReviewsForHead,
@@ -109,6 +110,7 @@ import {
   AMA_CLOSER_LEASE_STATUS,
   amaCloserPendingLeaseExpiryMs,
   acquireAmaCloserLease,
+  AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES,
   deleteAmaCloserLease,
   readAmaCloserLease,
   findLiveAmaCloserLease,
@@ -1460,13 +1462,7 @@ function amaCloserPendingLeaseReclaimAgeMs(record = null) {
 // stays sticky per SPEC 4.4 rule #5; these outcomes record attempts that did
 // not spend closure authority, so the audit model permits further attempts.
 export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME = 'failed-without-merge';
-export const AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES = new Set([
-  AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOME,
-  'deferred',
-  'superseded',
-  'pr-closed-externally',
-  'no-merge:concurrent-writer',
-]);
+export { AMA_CLOSER_RECLAIMABLE_TERMINAL_OUTCOMES } from './closer-lease.mjs';
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 // NOOWNER-01: eligibility misses a hammer may be re-admitted for after it
@@ -1501,11 +1497,11 @@ const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const AMA_CLOSER_TERMINAL_SETTLE_DELAY_MS = 60_000;
 
 // Watcher closure reads yield while the GitHub child runs.
-async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env }) {
+async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env, signal }) {
   try {
     const { stdout } = await meteredExecFile(execFileAsync, 'gh', [
-      'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state',
-    ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+      'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid',
+    ], { env, signal, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout);
   } catch { return null; }
 }
@@ -1513,7 +1509,7 @@ async function readAmaCloserPullRequestStateAsync({ repo, prNumber, env }) {
 // Follow-up claim consumers retain their synchronous CLI contract.
 function readAmaCloserPullRequestState({ repo, prNumber, env }) {
   const result = meteredExecFileSync(spawnSync, 'gh', [
-    'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state',
+    'pr', 'view', String(prNumber), '--repo', repo, '--json', 'state,headRefOid',
   ], { env, encoding: 'utf8', timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   if (result.error || result.status !== 0) return null;
   const raw = result.stdout?.trim();
@@ -1600,6 +1596,7 @@ function recordTerminalCloserLaunch(rootDir, identity, launchRequestId, status, 
     const preserve = AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(normalizeWorkerRunStatus(live.lastObservedStatus));
     return { ...live,
       lastObservedStatus: preserve ? live.lastObservedStatus : amaCloserStatusFromTerminalLaunchRequestStatus(status),
+      state: 'launch-terminal', reconciledAt: now,
       lastObservedAt: now, terminalLaunchStatus: status };
   }, { cleanupScratchImpl });
   return updated;
@@ -1651,17 +1648,19 @@ function* reconcileAmaCloserLeaseSteps({
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readPullRequestStateImpl = readAmaCloserPullRequestState,
   readMergedSignalImpl = readMergedBuildCompletionSignal,
-  statusProbe, probedLaunchRequestId = null, logger = console,
+  statusProbe, probedLaunchRequestId = null, logger = console, signal = null,
   cleanupScratchImpl = cleanupHammerScratchDir,
 } = {}) {
   try {
+    throwIfAborted(signal);
     const held = findLiveAmaCloserLease(rootDir, { repo, prNumber });
     if (held?.lease.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED || !held.lease.lrqId) return false;
     const launchRequestId = held.lease.lrqId;
     if (probedLaunchRequestId && launchRequestId !== probedLaunchRequestId) return false;
     const probe = withLiveLaunchRetry(statusProbe ?? (yield readLaunchRequestStatusImpl({
-      launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env, includeRetryChain: true,
+      launchRequestId, rootDir, hqRoot, ledgerTarget, ledgerDbPath, env, signal, includeRetryChain: true,
     })));
+    throwIfAborted(signal);
     if (!probe?.ok || probe.retryChainUnreadable) return false;
     // Async evidence can outlive the owner we started probing. Revalidate
     // before even the foreign-launch retirement branch mutates ownership.
@@ -1689,17 +1688,19 @@ function* reconcileAmaCloserLeaseSteps({
     // Merged completion rows are PR-scoped (their SHA may be the merge commit),
     // so this also observes completion from a lease's original dispatch head.
     const mergedSignal = yield readMergedSignalImpl({
-      ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env,
+      ...identity, hqRoot, rootDir, ledgerTarget, ledgerDbPath, env, signal,
       readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
     });
+    throwIfAborted(signal);
     // A terminal hammer cannot merge later. Allow webhook/audit lag briefly
     // before releasing an open PR; unreadable evidence retains the reclaim bound.
     let decidingPrState = null;
     if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status) && !auditOutcome && mergedSignal?.ok !== true) {
-      const livePr = normalizeAmaLivePrProbeResult(yield readPullRequestStateImpl({ repo, prNumber, env }));
+      const livePr = normalizeAmaLivePrProbeResult(yield readPullRequestStateImpl({ repo, prNumber, env, signal }));
+      throwIfAborted(signal);
       if (!livePr) return false;
       decidingPrState = livePr.state;
-      if (decidingPrState === 'OPEN') {
+      if (decidingPrState === 'OPEN' && livePr.headRefOid !== held.headSha) {
         const terminalTime = probe.row?.terminal_at;
         const terminalAt = typeof terminalTime === 'number' ? terminalTime
           : terminalTime instanceof Date ? terminalTime.getTime()
@@ -1720,11 +1721,15 @@ function* reconcileAmaCloserLeaseSteps({
       || (record && liveRecord?.launchRequestId !== launchRequestId)) return false;
     if (!finalizeAmaCloserLeaseBestEffort({ rootDir, leaseIdentity: identity,
       terminalOutcome, now, logger, repo, prNumber })) return false;
+    updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, live =>
+      live?.launchRequestId === launchRequestId && live.state !== 'dispatching'
+        ? { ...live, outcome: terminalOutcome, terminalOutcome } : null, { cleanupScratchImpl });
     logger?.info?.(JSON.stringify({ event: 'ama_closer.terminal_lease_reconciled',
       repo, prNumber, launchRequestId, terminalOutcome,
       ...(decidingPrState ? { prState: decidingPrState } : {}) }));
     return true;
   } catch {
+    throwIfAborted(signal);
     // Unreadable or timed-out evidence preserves the existing ownership answer.
     return false;
   }
@@ -2153,6 +2158,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
   const counts = { scanned: 0, terminal: 0, missing: 0, unreadable: 0, changed: 0 };
   const active = [];
   let ledgerUnreadable = false;
+  let launchSnapshot = null;
   const scanStarted = Date.now();
   const missingCandidates = [];
   let probes = 0;
@@ -2209,12 +2215,18 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     let probe;
     if (record.launchRequestId) {
       throwIfAborted(options.signal);
-      const budgetExpired = Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
+      // The production reader shares one bounded PostgreSQL snapshot across
+      // all records, including retry descendants. SQLite is already in-process.
+      if (readStatus === readLaunchRequestStatusFromLedgerDefault && !launchSnapshot) {
+        launchSnapshot = await readLaunchRequestSnapshotFromLedgerAsync({ ...options, rootDir });
+        throwIfAborted(options.signal);
+      }
+      const budgetExpired = !launchSnapshot?.ok && Date.now() - scanStarted >= (options.scanBudgetMs ?? 1000);
       if (budgetExpired && !observedTerminal) ledgerUnreadable = true;
       probe = ledgerUnreadable || budgetExpired ? { ok: false, reason: 'scan-ledger-unreadable' } : withLiveLaunchRetry(await readStatus({
-        includeRetryChain: true,
+        includeRetryChain: true, launchSnapshot,
         launchRequestId: record.launchRequestId,
-        rootDir, hqRoot: options.hqRoot,
+        rootDir, hqRoot: options.hqRoot, signal: options.signal,
         ledgerTarget: options.ledgerTarget, ledgerDbPath: options.ledgerDbPath,
         env: options.env || process.env,
       }));
@@ -2227,7 +2239,7 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
       if (probe?.retryChainUnreadable) {
         if (!observedTerminal) {
           counts.unreadable += 1;
-          active.push({ ...record, prNumber, dispatchPath, holdsCapacity: true });
+          active.push({ ...record, prNumber, dispatchPath, holdsCapacity: false });
         }
         continue;
       }
@@ -2265,12 +2277,12 @@ export async function reconcileAmaCloserDispatches(rootDir, options = {}) {
     if (launchInProgress) active.push({ ...record, prNumber, dispatchPath,
       holdsCapacity: probe?.ok && probe.row
         ? launchHoldsCloserCapacity(probe.row, options.processKillImpl)
-        : amaCloserRecordAgeMs(record, { now }) < amaCloserPendingLeaseReclaimAgeMs(record) });
+        : false });
   }
   const allMissing = probes > 0 && missingProbes === probes;
   for (const candidate of missingCandidates) {
     if (!allMissing && !ledgerUnreadable) applyTerminal(candidate.record, candidate.dispatchPath, 'not-found', candidate.probe);
-    else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath });
+    else if (isAmaCloserLaunchInProgress(candidate.record, { ...options, now })) active.push({ ...candidate.record, prNumber: candidate.prNumber, dispatchPath: candidate.dispatchPath, holdsCapacity: false });
   }
   return { ...counts, allMissing, active };
 }
@@ -3833,6 +3845,7 @@ function* readMergedBuildCompletionSignalSteps({
   ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
+  signal = null,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
@@ -3844,7 +3857,7 @@ function* readMergedBuildCompletionSignalSteps({
     rootDir,
     ledgerTarget,
     ledgerDbPath,
-    env,
+    env, signal,
   });
   if (!result) return { ok: false, reason: 'ledger-read-failed' };
   if (result.ok) {
@@ -3865,7 +3878,7 @@ function* readMergedBuildCompletionSignalSteps({
       rootDir,
       ledgerTarget,
       ledgerDbPath,
-      env,
+      env, signal,
     });
     if (producerEvidence?.ok) {
       return {
@@ -4602,7 +4615,7 @@ async function maybeDispatchAmaCloserAttempt({
       const statusProbe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
         launchRequestId: held.lease.lrqId, rootDir: reconciliationRoot,
         hqRoot: dispatchContext.hqRoot, ledgerTarget: dispatchContext.ledgerTarget,
-        ledgerDbPath: dispatchContext.ledgerDbPath, env,
+        ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
       })).catch(() => ({ ok: false }));
       earlyLaunchRequestProbe = { launchRequestId: held.lease.lrqId, probe: statusProbe };
       if (statusProbe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
@@ -4612,10 +4625,12 @@ async function maybeDispatchAmaCloserAttempt({
         launchRequestId: held.lease.lrqId, liveRetryLaunchRequestId: statusProbe.liveRetryLaunchRequestId });
       const settled = await reconcileAmaCloserLeaseAsync({ ...dispatchContext, rootDir: reconciliationRoot,
         repo: reconciliationRepo, prNumber,
-        cleanupScratchImpl, now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env,
+        cleanupScratchImpl, now: dispatchContext.dispatchedAt, statusProbe, probedLaunchRequestId: held.lease.lrqId, logger, env, signal,
         readLaunchRequestStatusImpl, readBuildCompletionSignalForPrImpl, readBuildCompletionProducerEvidenceImpl,
         readPullRequestStateImpl });
-      if (settled) reconciledDispatchedLease = held.lease;
+      if (settled) reconciledDispatchedLease = readAmaCloserLease(reconciliationRoot, {
+        repo: reconciliationRepo, prNumber, headSha: held.headSha,
+      });
     }
   }
 
@@ -5276,7 +5291,7 @@ async function maybeDispatchAmaCloserAttempt({
   if (existingRecord?.launchRequestId) {
     prefetchedLaunchRequestProbe ||= await Promise.resolve().then(() => readLaunchRequestStatusImpl({
       launchRequestId: existingRecord.launchRequestId, rootDir, hqRoot,
-      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false }));
     const probe = prefetchedLaunchRequestProbe;
     if (probe?.retryChainUnreadable) return noAmaDispatch({ dispatched: false,
@@ -5615,7 +5630,7 @@ async function maybeDispatchAmaCloserAttempt({
     // feed it through the live PR/audit reconciliation below.
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) && prefetchedLaunchRequestProbe?.ok
       && AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_STATUSES.has(prefetchedLaunchRequestProbe.row?.status)) {
-      const terminalStatus = amaCloserStatusFromTerminalLaunchRequestStatus(prefetchedLaunchRequestProbe.row.status);
+      const terminalStatus = prefetchedLaunchRequestProbe.row.status;
       status = AMA_CLOSER_TERMINAL_LAUNCH_REQUEST_OPERATOR_HOLD_STATUSES.has(terminalStatus)
         ? 'unknown' : terminalStatus;
     }
@@ -5695,8 +5710,8 @@ async function maybeDispatchAmaCloserAttempt({
         promptPath: existingRecord.promptPath || null,
       });
     };
-    // Releasing ownership must not change retry admission on unknown merge
-    // evidence. Keep this pass's pre-settlement hold evidence for that decision.
+    // Use settled ownership so the earlier dispatched lease cannot pin a
+    // proven no-merge exit. Unsettled evidence retains its existing hold.
     const terminalSuccessHoldLease = reconciledDispatchedLease?.lrqId === existingRecord.launchRequestId
       ? reconciledDispatchedLease : existingLeaseBeforeDispatch;
     let phantomActiveWorkerRun = null;
@@ -7481,7 +7496,7 @@ async function maybeDispatchAmaCloserAttempt({
     if (!payload.launchRequestId) return null;
     const probe = await Promise.resolve().then(() => readLaunchRequestStatusImpl({
       launchRequestId: payload.launchRequestId, rootDir, hqRoot,
-      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env,
+      ledgerTarget: dispatchContext.ledgerTarget, ledgerDbPath: dispatchContext.ledgerDbPath, env, signal, includeRetryChain: true,
     })).catch(() => ({ ok: false }));
     const ticket = probe?.ok && probe.row?.ticket_ref || payload.ticketRef;
     // A missing ledger row is not evidence of a foreign owner. Preserve the

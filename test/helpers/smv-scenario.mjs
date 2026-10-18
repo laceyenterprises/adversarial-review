@@ -17,8 +17,8 @@ const { observeClosureWait } = await import('../../src/ama/closure-wait.mjs');
 const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
-const { acquireAmaCloserLease, updateAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
-const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, updateAmaCloserDispatchRecord } = await import('../../src/ama/dispatch-closer.mjs');
+const { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
+const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, updateAmaCloserDispatchRecord, findActiveAmaCloserLaunches } = await import('../../src/ama/dispatch-closer.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
 const { guardRereviewCiBeforeReviewer } = await import('../../src/reviewer-ci-admission.mjs');
 const { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } = await import('../../src/review-state.mjs');
@@ -140,8 +140,33 @@ if (scenario === 'clean') {
   const drained = await consumeFollowUpJobsUntilCapacity(drain); assert.equal(drained.stopped, 1);
   await tick(); assert.equal(store.merged, true); assert.notEqual(headSha, oldHead);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], headSha);
+  // A finished same-head hammer releases retry ownership and fleet capacity.
+  const retrySubject = { ...identity(), prNumber: prNumber + 10 };
+  const { requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
+  let wakes = 0;
+  const wake = () => requestEligibleHammerWake({ ...retrySubject,
+    eligibility: { eligible: true, reasons: [] },
+    requestWatcherWakeImpl: () => { wakes++; return { requested: true }; }, log: quiet });
+  assert.equal(wake().outcome, 'requested');
+  acquireAmaCloserLease(retrySubject);
+  updateAmaCloserLease({ ...retrySubject, status: 'dispatched', lrqId: 'synthetic-ended' });
+  updateAmaCloserDispatchRecord(rootDir, retrySubject, () => ({ ...retrySubject,
+    state: 'dispatched', launchRequestId: 'synthetic-ended', lastObservedStatus: 'starting' }));
+  assert.equal(wake().outcome, 'duplicate');
+  assert.equal(await reconcileAmaCloserLeaseAsync({ ...retrySubject,
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }),
+    readMergedSignalImpl: () => ({ ok: false }),
+    readPullRequestStateImpl: () => ({ state: 'OPEN', headRefOid: headSha }), logger: quiet,
+  }), true);
+  assert.equal(readAmaCloserLease(rootDir, retrySubject).terminalOutcome, 'failed-without-merge');
+  const active = await findActiveAmaCloserLaunches(rootDir, {
+    readLaunchRequestStatusImpl: () => ({ ok: true, row: { status: 'succeeded' } }), log: quiet,
+  });
+  assert.equal(active.some(row => row.launchRequestId === 'synthetic-ended'), false);
+  assert.equal(wake().outcome, 'requested'); assert.equal(wake().outcome, 'duplicate');
+  assert.equal(wakes, 2);
   evidence = { hammers, drainResumedNextPass: true, drainCountersUnchanged: true, drainHintExpiredWithoutCloser: true, legacyDrainHintRetired: true, handoff: true, claimPreserved: true, reviewedHeadRecorded: true,
-    headlessPostRequeuedOnce: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
+    headlessPostRequeuedOnce: true, terminalRetryable: true, terminalCapacityFreed: true, wakeRearmed: true, followUpStopped: drained.stopped, merged: true, remoteHeadMatches: true };
 } else if (scenario === 'ci-blocked') {
   const ciGate = { state: 'failed', headSha, failedChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }], pendingChecks: [] };
   for (const exhausted of [false, true]) {

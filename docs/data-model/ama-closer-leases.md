@@ -40,9 +40,11 @@ reopened PR to acquire a fresh lease. `pr-closed-externally` and
 `no-merge:concurrent-writer` are reclaimable terminal outcomes.
 
 `reconcileAmaCloserLease` settles terminal launch ownership before ordinary
-closer admission or follow-up claims. A bare `succeeded` process exit retains
-`dispatched` ownership while both the terminal audit and merged completion
-signal are absent or unreadable. Holding leaves the reclaim clock unchanged;
+closer admission or follow-up claims. A bare `succeeded` process exit on a confirmed live OPEN same head settles
+as `failed-without-merge`, allowing same-head retry in that decision pass under
+the existing caps. Without that head proof, the existing settlement grace and
+ownership bound apply while terminal audit and merged completion evidence
+are absent or unreadable. Holding leaves the reclaim clock unchanged;
 the existing 30-minute lease expiry and active dispatch-record guards still
 apply. A terminal audit or PR-scoped merged signal permits settlement. Merge
 signals cover rekeyed leases too: their stored SHA can be a merge commit,

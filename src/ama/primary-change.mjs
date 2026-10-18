@@ -452,14 +452,14 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
   const accepted = cache.get('verifiedReversals')?.size || 0;
   let summary = missing === 'reversal-authorization'
     ? `no verified Reversal-Authorized-By covers the reverted ${path} region (${accepted} verified`
-      + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason})`).join(', ')}` : ''})`
+      + `${rejected.length ? `; rejected: ${rejected.map((entry) => `${entry.review} finding=${entry.finding} kind=${entry.kind} on ${String(entry.commit).slice(0, 12)} (${entry.reason}${entry.detail ? `: ${entry.detail}` : ''})`).join(', ')}` : ''})`
     : `the reverted ${path} change cannot be authorized by a finding (${missing})`;
   const regionDiagnostics = [...(evidence.revertedRegionDiagnostics || []), ...(evidence.primaryPathChanges || [])]
     .filter(entry => entry.path === path);
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
     `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
       `${commit.sha} author=${commit.author || 'unlinked'} pipeline-repair=${commit.pipelineRepair === true ? 'yes' : commit.pipelineRepair === false ? 'no' : 'unknown'}${commit.repairKind ? ` (${commit.repairKind})` : ''}`).join(', ') || 'unavailable'}${entry.error ? ` (${entry.error})` : ''}`).join('; ');
-  return { evidence: missing, path, accepted, rejected, summary, regions, regionDiagnostics };
+  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics };
 }
 
 // The exact-head re-review is the one automatic action that can supply a
@@ -569,15 +569,34 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
   }
 }
 
-// Strip only hunk coordinates. A review's immutable head pins the original
-// reversal before supersession; a worker-controlled commit date cannot do so.
+// Bind ordered change lines, hunk/context-run boundaries and newline markers.
+// Only context text/counts and hunk coordinates may drift across a rebase.
+// The immutable review head still pins the original reversal.
 function reversalPatchIdentity(files) {
   changes(files);
   return JSON.stringify(files.map((file) => {
     if (typeof file.patch !== 'string') throw new Error('opaque original reversal');
-    return [file.filename, file.previous_filename || '', file.status, file.additions, file.deletions,
-      file.patch.split('\n').filter((line) => !line.startsWith('@@'))];
+    const lines = [];
+    for (const line of file.patch.split('\n')) {
+      if (line.startsWith('@@ ')) lines.push('@@');
+      else if (line.startsWith(' ')) {
+        if (lines.at(-1) !== ' ') lines.push(' ');
+      } else if (line.startsWith('-') || line.startsWith('+') || line.startsWith('\\')) lines.push(line);
+    }
+    return [file.filename, file.previous_filename || '', file.status,
+      lines];
   }).sort((a, b) => a[0].localeCompare(b[0])));
+}
+
+function boundedReversalText(text, limit = 1200) {
+  return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
+}
+
+function reversalMismatchPaths(expected, actual) {
+  const byPath = identity => new Map(JSON.parse(identity).map(file => [file[0], JSON.stringify(file)]));
+  const left = byPath(expected), right = byPath(actual);
+  return [...new Set([...left.keys(), ...right.keys()])].sort()
+    .filter(path => left.get(path) !== right.get(path));
 }
 
 function normalizedRebaseHunks(patch) {
@@ -660,43 +679,69 @@ async function attestedReversal(commit, repo, read, prNumber) {
 }
 
 async function originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber }) {
-  if (!SHA.test(superseding.commit_id || '')) return null;
+  if (!SHA.test(superseding.commit_id || '')) return { detail: 'invalid superseding review head' };
   const snapshot = await read(`repos/${repo}/compare/${review.commit_id}...${superseding.commit_id}`);
   if (!['ahead', 'diverged'].includes(snapshot.status) || !Array.isArray(snapshot.commits)
-    || snapshot.commits.length !== snapshot.total_commits) return null;
+    || snapshot.commits.length !== snapshot.total_commits) return { detail: 'incomplete or unsupported superseding snapshot' };
   const identity = reversalPatchIdentity(commit.files);
-  for (const candidate of snapshot.commits.filter((entry) => isHammer(entry)
-    && SHA.test(entry.sha || '') && entry.commit.message === commit.commit.message)) {
+  const sameMessage = snapshot.commits.filter(entry => entry.commit?.message === commit.commit.message);
+  if (!sameMessage.length) return { detail: 'no candidate with the same commit message' };
+  const candidates = sameMessage.filter(entry => isHammer(entry) && SHA.test(entry.sha || ''));
+  if (!candidates.length) return { detail: 'commit-provenance: no valid same-message candidate identity' };
+  const failures = [];
+  for (const candidate of candidates) {
+    const reject = detail => {
+      if (failures.length < 10) failures.push(`${candidate.sha}: ${detail}`);
+    };
     const original = await readCommit(`repos/${repo}/commits/${candidate.sha}`);
     if (original.sha !== candidate.sha || original.commit?.message !== candidate.commit.message
       || !hamCommitIdentityMatches(original) || original.parents?.length !== 1
-      || !SHA.test(original.parents[0].sha || '') || reversalPatchIdentity(original.files) !== identity) continue;
+      || !SHA.test(original.parents[0].sha || '')) { reject('commit-provenance'); continue; }
+    let originalIdentity;
+    try {
+      originalIdentity = reversalPatchIdentity(original.files);
+    } catch {
+      reject('opaque or malformed original patch');
+      continue;
+    }
+    if (originalIdentity !== identity) {
+      const paths = reversalMismatchPaths(identity, originalIdentity);
+      reject(`change-line mismatch on paths: ${paths.slice(0, 5).map(path => boundedReversalText(path, 160)).join(', ')}${paths.length > 5 ? ` (+${paths.length - 5} more)` : ''}`);
+      continue;
+    }
     const parentSha = original.parents[0].sha;
     const current = await isCurrentAuthoritativeFamilyReview(review, reviews.slice(0, reviews.indexOf(superseding)), parentSha,
       (from, to) => metadata(`repos/${repo}/compare/${from}...${to}`));
     const rebased = !current;
     if (rebased && !original.author?.login) {
-      if (!await attestedReversal(original, repo, read, prNumber)) continue;
+      if (!await attestedReversal(original, repo, read, prNumber)) { reject('commit-provenance: missing App attestation'); continue; }
       original.reversalAppAttested = true;
     }
-    if (rebased && (await metadata(`repos/${repo}/compare/${review.commit_id}...${parentSha}`)).status !== 'diverged') continue;
+    if (rebased && (await metadata(`repos/${repo}/compare/${review.commit_id}...${parentSha}`)).status !== 'diverged') {
+      reject('review-not-current'); continue;
+    }
     // An immutable later review pins the original App commit even when that
     // commit's parent is a rebase of the cited head. Use the same region proof
     // as the unsuperseded path; dates and ancestry to later heads prove nothing.
     const parent = await read(`repos/${repo}/compare/${rebased ? mergeBase : reviewed.merge_base_commit.sha}...${parentSha}`);
-    if (parent.merge_base_commit?.sha !== (rebased ? mergeBase : reviewed.merge_base_commit.sha)) continue;
+    if (parent.merge_base_commit?.sha !== (rebased ? mergeBase : reviewed.merge_base_commit.sha)) {
+      reject('merge-base-mismatch'); continue;
+    }
     try {
       changes(parent.files);
-      if (rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) continue;
+      if (rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) {
+        reject('parent-is-not-reviewed-head-rebase'); continue;
+      }
     } catch {
       // Opaque or malformed patches decline this snapshot, not later candidates.
+      reject('opaque or malformed parent patch');
       continue;
     }
-    return { commit: original, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
+    return { authorization: { commit: original, review, reviewedFiles: reviewed.files, parentFiles: parent.files,
       ...(rebased ? { rebased: true } : {}),
-      completeFileLists: original.filesComplete === true && reviewed.filesComplete === true && parent.filesComplete === true };
+      completeFileLists: original.filesComplete === true && reviewed.filesComplete === true && parent.filesComplete === true } };
   }
-  return null;
+  return { detail: boundedReversalText(failures.join('; ')) };
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.
@@ -858,9 +903,10 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
     for (const candidate of candidates) {
       const trailers = parseCommitTrailers(candidate.commit.message);
       for (const cite of reversalCitations(candidate.commit.message)) {
-        const reject = (reason) => {
+        const reject = (reason, detail) => {
           if (rejectedReversalAuthorizations.length < 10) rejectedReversalAuthorizations.push({
-            commit: candidate.sha, review: cite[1], finding: Number(cite[2]), kind: cite[3] || 'blocking', reason });
+            commit: candidate.sha, review: cite[1], finding: Number(cite[2]), kind: cite[3] || 'blocking', reason,
+            ...(detail ? { detail } : {}) });
         };
         try {
           const review = reviews.find((entry) => cite && [entry.node_id, entry.html_url].filter(Boolean).includes(cite[1]));
@@ -909,8 +955,9 @@ async function fetchPrimaryChangeHistory({ repo, prNumber, headSha, get, rootDir
             || !Array.isArray(parent.files)) { reject('capped-file-list'); continue; }
           let originalAuthorization;
           if (superseding) {
-            originalAuthorization = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber });
-            if (!originalAuthorization) { reject('original-reversal-not-proven-before-supersession'); continue; }
+            const proof = await originalReversalAuthorization({ repo, review, reviews, superseding, commit, reviewed, mergeBase, read, readCommit, metadata, prNumber });
+            originalAuthorization = proof.authorization;
+            if (!originalAuthorization) { reject('original-reversal-not-proven-before-supersession', proof.detail); continue; }
             if (originalAuthorization.rebased && rebasePatchIdentity(reviewed.files) !== rebasePatchIdentity(parent.files)) {
               reject('parent-is-not-reviewed-head-rebase'); continue;
             }

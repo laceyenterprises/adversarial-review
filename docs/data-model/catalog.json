@@ -67,8 +67,9 @@
       "schemaSurface": "src/ama/primary-change-store.mjs",
       "relatedSchemaSurfaces": ["src/ama/primary-change.mjs", "src/ama/history-reader.mjs", "bin/primary-change-context.mjs", "src/watcher.mjs"],
       "owner": "AMA canonical daemon data owner",
-      "identityVersion": "primary-rename-v2",
+      "identityVersion": "hamreversal-v2",
       "optionalHistoryFields": ["builderBoundary", "diagnosticCommitRange", "reversalAuthorizations", "rejectedReversalAuthorizations", "renameProofs", "primaryPathChanges", "renameProofReadFailed"],
+      "rejectedReversalAuthorizationOptionalFields": ["detail"],
       "diagnosticCommitRangeEntryFields": ["sha"],
       "diagnosticCollection": "snapshot attribution is operator opt-in only, 20 commits and 15 seconds; shared reads retain commit-file attribution from rename proof reads, capped at 20 commits when no destination exists"
     },

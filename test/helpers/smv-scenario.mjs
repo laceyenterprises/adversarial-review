@@ -1,7 +1,7 @@
 // Child of smv-smoke: only synthetic records and file-protocol Git are permitted.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -18,7 +18,9 @@ const { watcherTick, cleanBody } = await import('./smv-watcher.mjs');
 const { createFollowUpJob, writeFollowUpJob } = await import('../../src/follow-up-jobs.mjs');
 const { consumeFollowUpJobsUntilCapacity, consumeNextFollowUpJob } = await import('../../src/follow-up-remediation.mjs');
 const { acquireAmaCloserLease, updateAmaCloserLease, readAmaCloserLease, isHeldAmaCloserLease } = await import('../../src/ama/closer-lease.mjs');
-const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, updateAmaCloserDispatchRecord, findActiveAmaCloserLaunches } = await import('../../src/ama/dispatch-closer.mjs');
+const { maybeDispatchAmaCloser, readAmaCloserDispatchRecord, reconcileAmaCloserLeaseAsync, findActiveAmaCloserLaunches, settleRefusedHammerWake,
+  updateAmaCloserDispatchRecord } = await import('../../src/ama/dispatch-closer.mjs');
+const { hammerWakeEligibility, requestEligibleHammerWake } = await import('../../src/hammer-wake.mjs');
 const { handoffHammerReview } = await import('../../bin/hammer-review-handoff.mjs');
 const { guardRereviewCiBeforeReviewer } = await import('../../src/reviewer-ci-admission.mjs');
 const { openReviewStateDb, ensureReviewStateSchema, requestReviewRereview } = await import('../../src/review-state.mjs');
@@ -200,10 +202,59 @@ if (scenario === 'clean') {
   assert.equal(prepareMarkRereviewCiBlocked(db).run('2026-01-01','red CI','2026-01-01',headSha,headSha,'synthetic-session',repo,prNumber).changes, 1);
   assert.equal(db.prepare('SELECT review_status FROM reviewed_prs').get().review_status, 'ci-blocked'); db.close();
   assert.equal(decideClosureOwner({ reviewState: { verdict: 'approved', headSha, blockingFindingCount: 0, blockingFindingState: 'known', nonBlockingFindingCount: 0, nonBlockingFindingState: 'known' }, currentHead: headSha, checks: 'FAILURE' }).owner, 'hammer');
+  const exhausted = { verdict: 'comment-only', headSha: base, reviewCycleExhausted: true };
+  const eligibility = hammerWakeEligibility({ eligible: false,
+    reasons: ['verdict-not-eligible', 'ci-not-green', 'stale-head'] }, {
+    dispatchReason: 'exhausted-final-hammer', ciBlockedHammerOwner: true,
+    reviewState: exhausted, headSha, checksConclusion: 'FAILURE' });
+  assert.equal(eligibility.eligible, true);
+  const wake = requestEligibleHammerWake({ ...identity(), eligibility,
+    eligibilityReason: 'exhausted-final-hammer-ci-repair', log: quiet,
+    requestWatcherWakeImpl: () => ({ requested: true }) });
+  assert.equal(wake.outcome, 'requested');
+  assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
+    ciBlockedHammerOwner: true, roundsLeft: false, checks: 'FAILURE' }).owner, 'hammer');
+  assert.deepEqual(decideClosureOwner({ reviewState: { headSha, verdict: '' }, currentHead: headSha,
+    ciBlockedHammerOwner: true, roundsLeft: false, checks: 'FAILURE' }),
+  { owner: 'page', reason: 'review-rounds-exhausted' });
+  const repairConclusions = ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR'];
+  for (const checks of repairConclusions) {
+    assert.equal(hammerWakeEligibility({ eligible: false,
+      reasons: ['verdict-not-eligible', 'ci-not-green', 'stale-head'] }, {
+      dispatchReason: 'exhausted-final-hammer', ciBlockedHammerOwner: true,
+      reviewState: exhausted, headSha, checksConclusion: checks }).eligible, true);
+    assert.equal(decideClosureOwner({ reviewState: exhausted, currentHead: headSha,
+      ciBlockedHammerOwner: true, roundsLeft: false, checks }).owner, 'hammer');
+  }
+  const promptDir = join(rootDir, 'prompts');
+  mkdirSync(promptDir, { recursive: true });
+  const promptPath = join(promptDir, `${repo.replace('/', '-')}-pr-${prNumber}-${base}-hammer-scratch-smoke.md`);
+  writeFileSync(promptPath, 'synthetic unlaunched prompt');
+  const intent = { ...identity(), targetRemediationSha: headSha, state: 'dispatching',
+    promptDir, lastAttemptedAt: '2026-01-01T00:00:00Z' };
+  updateAmaCloserDispatchRecord(rootDir, identity(), () => intent);
+  const leaseBefore = acquireAmaCloserLease({ ...identity(), now: intent.lastAttemptedAt,
+    watcherPid: process.pid }).lease;
+  const liveNow = '2026-01-01T00:01:00Z';
+  settleRefusedHammerWake({ rootDir, identity: identity(), intent, now: liveNow,
+    wake: { outcome: 'requested' }, result: { dispatched: false } });
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatching');
+  assert.equal(existsSync(promptPath), true);
+  assert.deepEqual(readAmaCloserLease(rootDir, identity()), leaseBefore);
+  updateAmaCloserDispatchRecord(rootDir, identity(), record => ({ ...record, promptPath }));
+  settleRefusedHammerWake({ rootDir, identity: identity(), intent,
+    wake: { outcome: 'duplicate' }, result: { dispatched: false, reason: 'synthetic-refusal' } });
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).reason, 'wake-refused:synthetic-refusal');
+  assert.equal(readAmaCloserDispatchRecord(rootDir, identity()).state, 'dispatch-failed');
+  assert.equal(readAmaCloserLease(rootDir, identity()), null);
+  assert.equal(existsSync(promptPath), false);
   await tick({ gateOverrides: { requiredChecks: [{ name: 'synthetic-ci', conclusion: 'FAILURE' }] } });
   assert.equal(store.merged, false);
   assert.equal(git('ls-remote', 'origin', 'refs/heads/main').split(/\s/)[0], base);
-  evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true, merges: 0 };
+  evidence = { sameHeadParked: true, noFollowUpJob: true, exhaustedRounds: true,
+    nativeFinalHammerWake: true, repairConclusions, generatedPromptSettled: true,
+    refusedWakeTerminal: true, livePendingLeasePreserved: true,
+    emptySameHeadVerdictRefused: true, unlaunchedPromptRemoved: true, merges: 0 };
 } else if (scenario === 'refusals') {
   acquireAmaCloserLease({ ...identity(), now: '2000-01-01T00:00:00Z' });
   updateAmaCloserLease({ ...identity(), status: 'dispatched', lrqId: 'stale-synthetic', now: '2000-01-01T00:00:00Z' });

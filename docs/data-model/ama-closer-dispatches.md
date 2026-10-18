@@ -123,6 +123,27 @@ Directory: `data/follow-up-jobs/ama-closer-dispatches/`
 
 ## Operational Contract
 
+After a native CI-blocked handoff actually invokes the closer and settles with
+`dispatched: false`, settlement
+retires its unchanged `dispatching` intent only when the matching unlaunched
+pending lease satisfies `isInterruptedInFlightAmaCloserDispatch`: its owner PID
+is dead or the bounded pending-launch reclaim age has elapsed. Missing leases,
+live launches, receipts, other-process ownership and replacement intents remain
+untouched. The matching lease is removed and the phantom retry rolled back once.
+If the captured intent had no prompt path, the same attempt may populate it
+before refusal settlement. A captured non-empty prompt path must still match;
+the attempt timestamp, target and reclaimable matching lease remain required.
+`reason` and `lastError` are `wake-refused:<closer result.reason>` (falling back
+to `wake-refused:dispatch-refused` when absent), independent of whether the
+wake was skipped, requested or duplicated. Wake eligibility reasons remain
+wake diagnostics. Background handoffs reconcile when their queue entry settles.
+Settlement grants no merge authority and adds no dispatch gate.
+Early daemon and background pre-dispatch returns leave interrupted intents
+untouched. Successful refusal settlement removes the retired unlaunched prompt
+only when it is an immediate child of `promptDir` and matches the PR's generated
+prompt filename namespace; launched prompts and paths outside that namespace
+remain untouched.
+
 - A newly returned launch receipt retains `state: dispatched`, its launch IDs,
   and its active lease when ticket evidence is unavailable. It is charged
   conservatively until reconciliation; authoritative foreign-ticket evidence

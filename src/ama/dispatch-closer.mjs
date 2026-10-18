@@ -20,6 +20,7 @@ import {
   composeCiBlockedHammerPrompt,
   composeReviewCycleCapHammerPrompt,
   hammerOwnerRouteOf,
+  ciBlockedHammerReasonsCovered,
 } from './review-cycle-cap-route.mjs';
 import { fetchPrimaryChange, primaryChangeExactReviewEvidence } from './primary-change.mjs';
 /**
@@ -1020,6 +1021,21 @@ export function cleanupHammerScratchDir(record, logger = console) {
     if (typeof logger?.warn === 'function') logger.warn(message);
     else if (typeof logger?.error === 'function') logger.error(message);
     else if (typeof logger === 'function') logger(message);
+    return false;
+  }
+}
+
+function cleanupHammerUnlaunchedPrompt(record, logger = console) {
+  const promptPath = record?.promptPath;
+  if (!promptPath || !record.promptDir || !record.repo || !record.prNumber
+    || dirname(resolve(promptPath)) !== resolve(record.promptDir)
+    || !basename(promptPath).startsWith(`${record.repo.replace('/', '-')}-pr-${record.prNumber}-`)
+    || !/-hammer-scratch-[^/]+\.md$/u.test(basename(promptPath))) return false;
+  try {
+    rmSync(promptPath, { force: true });
+    return true;
+  } catch (err) {
+    logger?.warn?.(`hammer unlaunched prompt cleanup failed: ${err.message}`);
     return false;
   }
 }
@@ -2604,6 +2620,41 @@ export function updateAmaCloserDispatchRecord(rootDir, identity, mutate, { clean
     cleanupScratchImpl(next);
   }
   return next;
+}
+
+// Reconcile an unlaunched handoff only after its caller has settled. A wake is
+// diagnostic: its refusal must never cancel a dispatch that is still running.
+export function settleRefusedHammerWake({ rootDir, identity, intent, result,
+  now = new Date().toISOString(), processKillImpl = process.kill } = {}) {
+  if (result?.dispatched !== false || result?.inFlight
+    || result?.recoveryWait || result?.backgroundDispatch || result?.launchRequestId || result?.dispatchId
+    || ['lease-held', 'closer-lease-held-by-other-process', 'live-run-in-flight',
+      'hammer-closer-in-flight', 'existing-dispatch-unknown'].includes(result?.reason)) return null;
+  if (intent?.state !== 'dispatching' || intent.launchRequestId || intent.dispatchId) return null;
+  const reason = `wake-refused:${result.reason || 'dispatch-refused'}`;
+  const leaseIdentity = { ...identity, headSha: intent.targetRemediationSha || identity.headSha };
+  let retiredLease = null;
+  const settled = updateAmaCloserDispatchRecord(rootDir, identity, current => {
+    if (current?.state !== 'dispatching' || current.launchRequestId || current.dispatchId
+      || !intent.lastAttemptedAt || current.lastAttemptedAt !== intent.lastAttemptedAt
+      || (intent.promptPath && current.promptPath !== intent.promptPath)
+      || current.targetRemediationSha !== intent.targetRemediationSha) return null;
+    const lease = readAmaCloserLease(rootDir, leaseIdentity);
+    if (lease?.lrqId || lease?.acquiredAt !== intent.lastAttemptedAt
+      || !isInterruptedInFlightAmaCloserDispatch(current, lease, { now, processKillImpl })) return null;
+    retiredLease = lease;
+    return { ...current, state: 'dispatch-failed', reason, lastError: reason,
+      retryCount: Math.max(0, Number(current.retryCount || 0) - 1) };
+  });
+  if (settled && retiredLease) {
+    cleanupHammerUnlaunchedPrompt(settled);
+    const lease = readAmaCloserLease(rootDir, leaseIdentity);
+    if (lease?.status === 'pending' && !lease.lrqId
+      && lease.acquiredAt === retiredLease.acquiredAt && lease.watcherPid === retiredLease.watcherPid) {
+      deleteAmaCloserLease(rootDir, leaseIdentity);
+    }
+  }
+  return settled;
 }
 
 function errorDiagnosticLines(err) {
@@ -4880,10 +4931,6 @@ async function maybeDispatchAmaCloserAttempt({
     // CIBLOCKHAM-02: stale verdict/findings describe the pre-remediation head.
     // Failed required CI with no remediator is owned by the hammer immediately.
     // A parked route whose live checks are only pending still waits.
-    const ciBlockedFailureAdmit = ciBlockedRoute
-      && ['FAILURE', 'TIMED_OUT', 'CANCELLED', 'STARTUP_FAILURE', 'ACTION_REQUIRED', 'ERROR']
-        .includes(verdict.trace?.ciGreen?.conclusion)
-      && reviewState?.remediationPending !== true;
     const reviewCycleCapRoute = hammerOwnerRouteOf(dispatchContext) !== null
       && reviewState?.remediationPending !== true;
     const reviewCycleExhausted = terminalHammerReviewCycleExhausted(reviewState) || reviewCycleCapRoute;
@@ -4979,8 +5026,11 @@ async function maybeDispatchAmaCloserAttempt({
     // Ordinary recovery widens worker-class admission only. Orphan recovery also
     // admits covered primary-repair/closer-head reasons after its ownerless grace.
     // Pending-CI-only misses still use the mechanical validate-and-click closer.
-    const ciBlockedReasonsCovered = ciBlockedFailureAdmit && routeReasons.every((reason) =>
-      ['stale-review-head', 'verdict-not-settled-success', 'non-blocking-findings-present', 'ci-not-green'].includes(reason));
+    const ciBlockedReasonsCovered = ciBlockedHammerReasonsCovered(routeReasons, {
+      ciBlockedHammerOwner: ciBlockedRoute,
+      checksConclusion: verdict.trace?.ciGreen?.conclusion,
+      remediationPending: reviewState?.remediationPending,
+    });
     const finalRoundDispatchAdmit = dispatchContext?.finalRoundDispatchOnly === true
       && reviewState?.remediationPending !== true
       && routeReasons.every(reason => ['stale-review-head', 'verdict-not-settled-success',

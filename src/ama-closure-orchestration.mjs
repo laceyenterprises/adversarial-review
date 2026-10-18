@@ -77,7 +77,7 @@ import {
   readAmaCloserLease,
   rekeyAmaCloserLease,
 } from './ama/closer-lease.mjs';
-import { requestEligibleHammerWake } from './hammer-wake.mjs';
+import { hammerWakeEligibility, requestEligibleHammerWake } from './hammer-wake.mjs';
 import {
   CLOSER_AUTHORED_STALE_WAKE_REASON,
   closerAuthoredStaleEligible,
@@ -86,7 +86,7 @@ import {
 } from './closer-authored-stale.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
 import { proveCommentOnlyFinalRoundHead } from './comment-only-final-round.mjs';
-import { classifyCheckRollup } from './checks-summary.mjs';
+import { classifyCheckRollup, summarizeChecksConclusion } from './checks-summary.mjs';
 import { summarizeExternalChecks } from './remediation-ci-regression.mjs';
 import {
   AMA_HAMMER_BACKGROUND_REASON,
@@ -862,8 +862,12 @@ export async function maybeDispatchAmaClosureFor({
   const ownerProofFactsSink = {};
   const closureOwnerSink = {};
   const finalRoundSink = {};
+  const hammerWakeSink = {};
   const dispatchArgs = { ...options, orphanRecovery, runDaemonCleanMergeAttemptImpl,
-    maybeDispatchAmaCloserImpl, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink };
+    maybeDispatchAmaCloserImpl: (...args) => {
+      hammerWakeSink.closerInvoked = true;
+      return (maybeDispatchAmaCloserImpl || maybeDispatchAmaCloser)(...args);
+    }, closerAuthoredStaleSink, ownerProofFactsSink, closureOwnerSink, finalRoundSink, hammerWakeSink };
   let result;
   try { result = await dispatchAmaClosureFor(dispatchArgs); }
   catch (error) {
@@ -871,6 +875,10 @@ export async function maybeDispatchAmaClosureFor({
     // FINALCLOSE-01: retry admission from local final-round evidence, without
     // repeating the timed-out reads or attempting any watcher merge.
     result = await dispatchAmaClosureFor({ ...dispatchArgs, finalRoundDispatchOnly: error });
+  }
+  if (hammerWakeSink.value && hammerWakeSink.closerInvoked) {
+    try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result }); }
+    catch (error) { options.logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
   }
   if (finalRoundSink.value && !(options.labelNames || []).some(label => OPERATOR_HOLD_LABELS.includes(label))) {
     try {
@@ -908,6 +916,7 @@ export async function maybeDispatchAmaClosureFor({
 }
 
 async function dispatchAmaClosureFor({
+  hammerWakeSink = null,
   finalRoundDispatchOnly = null,
   finalRoundSink = null,
   closerAuthoredStaleSink = null,
@@ -1129,7 +1138,17 @@ async function dispatchAmaClosureFor({
     || reviewStateRow?.rereview_reason === 'system-review-ceiling-closure';
   // CIBLOCKHAM-01: the same final-hammer close for a red-CI head with no
   // remediation job left to fix it.
-  const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true;
+  // Historical stop evidence is not enough: rescue must observe failed external
+  // checks on the current candidate head, and carry their names into the prompt.
+  const requiredCiContexts = new Set(resolveRequiredCheckContextsFromCfg(cfg)
+    .map(context => String(context).trim().toLowerCase()).filter(Boolean));
+  const derivedCiFailedChecks = reviewCycleExhausted && candidate?.headSha
+    && reviewStateRow?.review_status === 'ci-blocked'
+    && String(reviewStateRow?.failure_message || '').startsWith('[ci-regression-stopped]')
+    ? summarizeExternalChecks(candidate.statusCheckRollup, { env, cfg: loadedConfig }).failedChecks
+      .filter(check => requiredCiContexts.size === 0 || requiredCiContexts.has(String(check?.name || '').toLowerCase())) : [];
+  const ciBlockedHammerOwner = dispatchJob?.ciBlockedHammerOwner === true
+    || derivedCiFailedChecks.length > 0;
   if (reviewCycleCapReached || ciBlockedHammerOwner) reviewCycleExhausted = true;
 
   const finalHead = candidate?.headSha || currentRevisionRef || null;
@@ -1650,9 +1669,8 @@ async function dispatchAmaClosureFor({
     retryExhausted: ownerCap.capExhausted, lifetimeExhausted: ownerCap.lifetimeCapExhausted,
     lease: handoffLease,
     mergeable: closureGateMergeability(mergeabilityForGate || {}),
-    checks: classifyCheckRollup(candidate?.statusCheckRollup, {
-      requiredContexts: resolveRequiredCheckContextsFromCfg(cfg),
-    }), roundsLeft: !reviewCycleExhausted,
+    checks: summarizeChecksConclusion(candidate?.statusCheckRollup, { env, cfg }),
+    roundsLeft: !reviewCycleExhausted, ciBlockedHammerOwner,
     reviewCeilingReached: reviewStateRow?.rereview_reason === 'system-review-ceiling-closure' };
   let closureOwner = decideClosureOwner(closureOwnerInput);
   if (closureOwnerSink) closureOwnerSink.value = closureOwner;
@@ -1799,7 +1817,20 @@ async function dispatchAmaClosureFor({
     });
   }
   try {
-    requestEligibleHammerWakeImpl({
+    const eligibility = orchestrationMode === 'native' ? hammerWakeEligibility(disabledEligibility, {
+      dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
+      ciBlockedHammerOwner, reviewState, headSha: currentPrHeadSha,
+      checksConclusion: closureOwnerInput.checks,
+    }) : disabledEligibility;
+    let identity = { repo: repoPath, prNumber, headSha: currentPrHeadSha };
+    let intent = ciBlockedHammerOwner
+      ? amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, identity) : null;
+    if (ciBlockedHammerOwner && !intent && reviewState.headSha && reviewState.headSha !== currentPrHeadSha) {
+      const reviewedIdentity = { ...identity, headSha: reviewState.headSha };
+      const reviewedIntent = amaDispatchCloser.readAmaCloserDispatchRecord(rootDir, reviewedIdentity);
+      if (reviewedIntent) { identity = reviewedIdentity; intent = reviewedIntent; }
+    }
+    const wake = requestEligibleHammerWakeImpl({
       rootDir,
       repo: repoPath,
       prNumber,
@@ -1807,9 +1838,13 @@ async function dispatchAmaClosureFor({
       reviewedHeadSha: reviewState.headSha,
       ...(closerAuthoredStale.eligible
         ? { eligibilityReason: CLOSER_AUTHORED_STALE_WAKE_REASON, eligibility: { eligible: true, reasons: [] } }
-        : { eligibility: disabledEligibility }),
+        : { eligibility, ...(eligibility !== disabledEligibility
+          ? { eligibilityReason: 'exhausted-final-hammer-ci-repair' } : {}) }),
       log: logger,
     });
+    if (hammerWakeSink && ciBlockedHammerOwner && orchestrationMode === 'native') {
+      hammerWakeSink.value = { rootDir, identity, intent, wake };
+    }
   } catch (err) {
     logger?.warn?.(
       `[watcher] eligible hammer wake failed for ${repoPath}#${prNumber}; continuing AMA closure: ` +
@@ -2438,7 +2473,7 @@ async function dispatchAmaClosureFor({
       ? dispatchJob.reviewCycleHistory : [],
     ciBlockedHammerOwner,
     ciFailedChecks: ciBlockedHammerOwner && Array.isArray(dispatchJob?.ciFailedChecks)
-      ? dispatchJob.ciFailedChecks : [],
+      ? dispatchJob.ciFailedChecks : derivedCiFailedChecks,
     allowStaleReviewHeadHammerResume,
     liveHeadCloserAuthored,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,
@@ -2610,6 +2645,10 @@ async function dispatchAmaClosureFor({
             operatorLabelClassificationRetryDelaysMs: [20_000, 40_000] });
         },
         onSettled: ({ ok, result: settledResult, error, elapsedMs }) => {
+          if (ok && hammerWakeSink?.value && hammerWakeSink.closerInvoked) {
+            try { amaDispatchCloser.settleRefusedHammerWake({ ...hammerWakeSink.value, result: settledResult }); }
+            catch (error) { logger?.warn?.(`[watcher] refused hammer wake reconciliation failed: ${error.message}`); }
+          }
           if (ok) logHammerLaunchLatency(settledResult);
           logger?.log?.(
             `[watcher] AMA hammer background dispatch settled for ${backgroundKey}: ` +

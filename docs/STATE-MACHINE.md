@@ -722,6 +722,14 @@ PRs retain terminal refusals; pending CI at expiry is distinguished in the audit
 Findings, reversal refusals, current-head
 review authority, dispatch retry caps and the lifetime ceiling remain enforced.
 
+For an exhausted CI-blocked unreviewed head, wake admission and closure
+ownership share `ciBlockedHammerReasonsCovered`: `FAILURE`, `TIMED_OUT`,
+`CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR` select bounded
+hammer repair. Pending or unknown CI retains the ordinary ownership gates.
+Refused unlaunched handoffs can settle after the same attempt populates its
+previously absent prompt path; timestamp, target, launch and reclaimable-lease
+guards still apply, and an already captured prompt path must remain unchanged.
+
 | Path | When | What happens |
 |---|---|---|
 | **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture); its remediation may also require a rebase or CI repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). In the default `watcher.ama_hammer_dispatch_mode: inline` mode, the posted-review phase awaits that `hq dispatch` attempt. In `background` mode, the phase submits the same closer call to a bounded in-process queue keyed by PR@head with durable pending intent under `data/ama-hammer-background/` (recovered through normal guards on the first adoption phase after restart), returns retained ownership (`ama-pending`) with reason `ama-closer-dispatch-backgrounded`, and lets the closer's lease/dispatch-record guards prevent duplicate launches on later ticks. The hammer remediates, rebases at least once onto a recent current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. If the target branch does not require strict up-to-date heads (`required_status_checks.strict=false` or no strict rule), a post-validation `BEHIND` state caused only by unrelated base movement does not force another rebase when the PR remains `MERGEABLE` and the newer base has no changed-file overlap with this PR. |
@@ -1033,6 +1041,22 @@ Key control points:
   the new head enters its own review lifecycle.
 
 ---
+
+Native exhausted CI-repair wake admission shares the closer's hammer-work
+rule. Red required CI and a stale pre-remediation verdict admit a wake, while
+current-head blocking verdicts and other holds keep their existing refusals.
+Ownership and wake inputs exclude the pipeline's adversarial-gate status, and
+an empty same-head verdict alone does not establish an unreviewed repair head.
+Only an invoked closer's settled refusal changes an unchanged unlaunched `dispatching` intent
+to `dispatch-failed` with `wake-refused:<closer result.reason>` only with a
+matching pending lease whose owner is dead or whose bounded launch reclaim age
+elapsed, regardless of wake outcome; missing leases, receipts and live work
+remain owned. The retired unlaunched prompt is removed only within its generated
+prompt namespace. Early daemon and background pre-dispatch exits do not settle
+closer intents. Rescue projects an exhausted `[ci-regression-stopped]` row to
+the final hammer only with live failed external CI on the candidate head and
+passes those failed checks into its prompt, filtering to configured required
+contexts when present. Actual merges still require green CI and exact-head proof.
 
 ## 3) Fast-merge skip lane
 

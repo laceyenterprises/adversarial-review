@@ -555,3 +555,26 @@ test('latency report bounds explicit subject history to the report window', () =
   assert.equal(admission.sampleCount, 0);
   assert.equal(admission.p50Ms, null);
 });
+
+test('CI-repair wakes stay in telemetry but do not end the clean-verdict latency segment', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    for (const prNumber of [6701, 6702]) {
+      recordReviewLatencyEvent(db, { repo: REPO, prNumber, eventType: 'clean_verdict',
+        at: '2026-09-11T12:00:00Z', source: 'test', idempotencyKey: `clean-${prNumber}` });
+      recordReviewLatencyEvent(db, { repo: REPO, prNumber, eventType: 'hammer_wake',
+        reason: 'exhausted-final-hammer-ci-repair', at: '2026-09-11T12:01:00Z',
+        source: 'event-driven-hammer-wake', idempotencyKey: `repair-${prNumber}` });
+    }
+    recordReviewLatencyEvent(db, { repo: REPO, prNumber: 6702, eventType: 'hammer_wake',
+      reason: 'clean-current-head-ci-green-policy-eligible', at: '2026-09-11T12:05:00Z',
+      source: 'event-driven-hammer-wake', idempotencyKey: 'clean-wake-6702' });
+  } finally { db.close(); }
+  const report = collectReviewLatencyReport({ rootDir, since: '24h',
+    now: () => new Date('2026-09-11T13:00:00Z') });
+  assert.equal(report.surfaces.explicitEvents, 5);
+  const stage = report.stages.find(stage => stage.key === 'clean_verdict_to_hammer_wake');
+  assert.equal(stage.sampleCount, 1);
+  assert.equal(stage.p50Ms, 5 * 60 * 1000);
+});

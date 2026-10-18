@@ -1538,6 +1538,42 @@ uses (`src/hammer-owner-route.mjs`).
   "CIBLOCKHAM-01 — failed CI with no remediation job left: you are the owner"
   prompt section with the failing checks. Codex-first, the lease and every
   merge predicate are unchanged.
+- CIBLOCKHAM-03: native wake admission uses that same CI-repair rule for the
+  exhausted final hammer, including the stale pre-remediation verdict. A
+  current-head blocking verdict and all other holds retain their wake refusal.
+  Ownership uses the same rule for terminal failed conclusions: `FAILURE`,
+  `TIMED_OUT`, `CANCELLED`, `STARTUP_FAILURE`, `ACTION_REQUIRED` and `ERROR`.
+  Pending or unknown CI cannot acquire this repair ownership.
+  Both ownership and wake inputs exclude the pipeline's adversarial-gate status.
+  An empty verdict on the current head does not establish an unreviewed head;
+  exhausted ownership retains `page` / `review-rounds-exhausted` in that case.
+  Only a handoff that actually invoked the closer can settle a refusal. Early
+  daemon or background pre-dispatch exits leave the interrupted intent intact.
+  A refused, settled closer handoff retires an unchanged unlaunched intent as
+  `dispatch-failed`, reason `wake-refused:<closer result.reason>`, only with a
+  matching pending lease whose owner is dead or whose bounded launch reclaim
+  age elapsed. Missing leases, launch receipts and live work are preserved.
+  A prompt populated after intent capture belongs to that attempt when its
+  timestamp and target still match; an already captured prompt must match too.
+  Settlement follows the closer result regardless of the diagnostic wake outcome.
+  Prompt and pending-lease cleanup require successful durable dispatch-record
+  settlement; a failed write preserves both for recovery. Required-context
+  filtering normalizes missing or non-string check names before matching.
+  It removes the retired unlaunched prompt only when its path is an immediate
+  child of its prompt directory and matches this PR's generated prompt namespace.
+  CI-repair wake events stay in telemetry but are excluded from the
+  `clean_verdict_to_hammer_wake` latency segment.
+  Rescue derives final-hammer ownership from a `ci-blocked` row carrying
+  `[ci-regression-stopped]` plus exhausted remediation evidence and live failed
+  external checks on the current candidate head, filtered to configured required
+  contexts when present. It fills the prompt's failed
+  check list from that live rollup, so a historical stop message alone cannot
+  keep the CI-blocked route active after CI changes; it does not
+  choose an exact-head re-review while required CI is red. No config change is
+  needed. After deployment, verify the next exhausted red head requests its
+  wake and records a hammer launch in one watcher pass, and refused handoffs
+  have an explicit closer refusal reason when their matching lease is reclaimable,
+  while a fresh live-PID lease and its intent remain untouched.
 - `ci-blocked hammer route failed … authoritative reviewed head unavailable`
   means no posted review pass with a head SHA exists in `reviewer_passes`; the
   PR stays parked as before.

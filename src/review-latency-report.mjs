@@ -99,6 +99,7 @@ const STAGE_DEFINITIONS = Object.freeze([
     owner: 'merge',
     from: ['clean_verdict'],
     to: ['hammer_wake'],
+    acceptTo: event => event.reason !== 'exhausted-final-hammer-ci-repair',
   },
   {
     key: 'merge_to_deploy_observed',
@@ -242,10 +243,10 @@ function addSubjectEvent(subjects, {
   subjects.set(key, subject);
 }
 
-function firstEvent(subject, eventTypes) {
+function firstEvent(subject, eventTypes, accept = () => true) {
   for (const eventType of eventTypes) {
     const match = subject.events
-      .filter((event) => event.eventType === eventType)
+      .filter((event) => event.eventType === eventType && accept(event))
       .sort((left, right) => left.atMs - right.atMs)[0] || null;
     if (match) return match;
   }
@@ -605,7 +606,7 @@ function summarizeStages(subjects) {
     const samples = [];
     for (const subject of subjects.values()) {
       const from = firstEvent(subject, definition.from);
-      const to = firstEvent(subject, definition.to);
+      const to = firstEvent(subject, definition.to, definition.acceptTo);
       if (!from || !to) continue;
       const durationMs = to.atMs - from.atMs;
       if (durationMs < 0) continue;

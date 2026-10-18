@@ -1,6 +1,6 @@
+import { fetchMergeAgentCandidateSnapshot } from './merge-agent-candidate-snapshot.mjs';
 import { guardStackedBase } from './ama/stacked-base.mjs';
 import { fileURLToPath } from 'node:url';
-import { meteredExecFile } from './metered-gh.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { inspectCiBootstrap, recoverCancelledChecks } from './ci-recovery.mjs';
@@ -39,6 +39,7 @@ export function extractOperatorNotes(prBody) {
 export async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync, env = process.env,
   rootDir = null,
+  preparedSnapshot = null,
   reviewClean = false, autonomousMergeExecutionEnabled = false,
   logger = console,
   recoverCancelledChecksImpl = recoverCancelledChecks,
@@ -48,20 +49,7 @@ export async function fetchMergeAgentCandidate(repo, prNumber, {
   branchProtectionCache = null,
   guardStackedBaseImpl = guardStackedBase,
 } = {}) {
-  const { stdout } = await meteredExecFile(execFileImpl,
-    'gh',
-    [
-      'pr',
-      'view',
-      String(prNumber),
-      '--repo',
-      repo,
-      '--json',
-      'mergeable,mergeStateStatus,headRefName,baseRefName,baseRefOid,headRefOid,title,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
-    ],
-    { maxBuffer: 5 * 1024 * 1024, ...(signal ? { signal } : {}) }
-  );
-  const parsed = JSON.parse(String(stdout || '{}'));
+  const parsed = preparedSnapshot || await fetchMergeAgentCandidateSnapshot(repo, prNumber, { execFileImpl, signal });
   const stackedBaseHold = String(parsed.state || '').toUpperCase() === 'OPEN' && !parsed.mergedAt
     ? await guardStackedBaseImpl({ rootDir: rootDir || fileURLToPath(new URL('..', import.meta.url)),
       repo, prNumber, execFileImpl, signal }) : null;

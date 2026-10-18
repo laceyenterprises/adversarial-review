@@ -1,3 +1,4 @@
+import { withClosureEvaluationReadCache } from './closure-evaluation-cache.mjs';
 import { resolveHqRoot } from './hq-root.mjs';
 import { recordOperatorNoticeCloserOutcome } from './operator-decision-notice.mjs';
 import { checkPrimaryChange } from './ama/primary-change.mjs';
@@ -113,6 +114,25 @@ import {
   countCompletedReviewerRereviewRounds,
   reviewCycleExhaustedFromRounds,
 } from './review-ceiling-metrics.mjs';
+
+// Rolling process-local diagnostics include acknowledgements from background
+// dispatches that settle between ticks. No durable state or merge authority.
+const finalReviewHammerLatencies = [];
+export function recordFinalReviewHammerLatency(latencyMs, at = Date.now()) {
+  if (!Number.isFinite(latencyMs) || latencyMs < 0) return;
+  finalReviewHammerLatencies.push({ latencyMs, at });
+  if (finalReviewHammerLatencies.length > 10000) finalReviewHammerLatencies.shift();
+}
+
+export function finalReviewHammerLatencySummary(now = Date.now()) {
+  for (let i = finalReviewHammerLatencies.length - 1; i >= 0; i--) {
+    if (finalReviewHammerLatencies[i].at < now - 86400000) finalReviewHammerLatencies.splice(i, 1);
+  }
+  const values = finalReviewHammerLatencies.map(s => s.latencyMs).sort((a, b) => a - b);
+  return { window_ms: 86400000, samples: values.length,
+    p50_ms: values.length ? values[Math.ceil(values.length * 0.5) - 1] : null,
+    p95_ms: values.length ? values[Math.ceil(values.length * 0.95) - 1] : null };
+}
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -2470,6 +2490,7 @@ async function dispatchAmaClosureFor({
     // A background result is logged here when it settles, never again when the
     // next tick consumes it. Telemetry cannot change dispatch authority.
     try {
+      recordFinalReviewHammerLatency(confirmedMs - postedMs, confirmedMs);
       logger?.log?.(JSON.stringify({
         event: 'ama.final_review_to_hammer_launch', repo: repoPath, prNumber,
         headSha: dispatchContext.targetRemediationSha || reviewState?.headSha || dispatchContext.reviewedSha || null,
@@ -2741,7 +2762,11 @@ async function dispatchAmaClosureFor({
   );
 }
 
-export async function resolveMergeAgentCoexistenceForWatcher({
+export function resolveMergeAgentCoexistenceForWatcher(options) {
+  return withClosureEvaluationReadCache(() => resolveMergeAgentCoexistenceWithinEvaluation(options));
+}
+
+async function resolveMergeAgentCoexistenceWithinEvaluation({
   rootDir = ROOT,
   reviewStateRow,
   dispatchJob,

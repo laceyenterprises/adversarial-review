@@ -1746,3 +1746,42 @@ for (const headSource of ['prMetadata', 'reviewState', 'dispatchContext', 'args'
     assert.equal(readRecord().state, 'no-dispatch');
   });
 }
+
+test('concurrent capacity admission preserves the existing launch cap before acknowledgements settle', async t => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'concurrent-launch-cap-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const waiters = [];
+  const starts = [];
+  const attempts = [1, 2, 3, 4].map(prNumber => {
+    const deps = testDeps();
+    return maybeDispatchAmaCloser({
+      ...findingsRemediationArgs(rootDir, {
+        prMetadata: { prNumber },
+        cfg: { amaCloserMaxConcurrentLaunches: 3, amaCloserConcurrentLaunchCeiling: 3 },
+        dispatchContext: { repo: 'fixture/project', prNumber,
+          prUrl: `https://github.com/fixture/project/pull/${prNumber}` },
+      }), ...deps,
+      observeCloserBacklogImpl: async () => 4,
+      execFileImpl: async () => {
+        starts.push(prNumber);
+        await new Promise(resolve => waiters.push(resolve));
+        return { stdout: JSON.stringify({ dispatchId: `fixture-${prNumber}`, launchRequestId: `fixture-${prNumber}` }), stderr: '' };
+      },
+    });
+  });
+  try {
+    // Three independent launches can await acknowledgement concurrently. The
+    // fourth census must see their durable intents and refuse admission.
+    const timeout = new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('capacity admission did not settle')), 5000);
+      t.after(() => clearTimeout(timer));
+    });
+    const refused = await Promise.race([...attempts, timeout]);
+    assert.equal(refused.dispatched, false);
+    assert.equal(refused.reason, 'ama-closer-launch-in-progress');
+    assert.equal(starts.length, 3);
+  } finally {
+    waiters.forEach(resolve => resolve());
+    await Promise.all(attempts);
+  }
+});

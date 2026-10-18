@@ -206,7 +206,8 @@ test('watcher post-review phase behavior drains reviewers first and isolates mai
     'maintenance-a',
     'maintenance-b',
   ]);
-  assert.equal(logs.length, 0);
+  assert.ok(logs.some(line => line.includes('merge_ready_handled=0')));
+  assert.ok(logs.some(line => line.includes('ama.final_review_to_hammer_launch.summary')));
   assert.equal(errors.length, 1);
   assert.match(errors[0], /post-review maintenance failed for laceyenterprises\/adversarial-review/);
   assert.match(errors[0], /boom/);

@@ -1591,9 +1591,10 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       if (existing?.review_status === 'posted') {
-        const runPostedReviewHandler = async () => {
+        const runPostedReviewHandler = async ({ preparedCandidate = null } = {}) => {
           await waitForReviewerHandoff(repoPath, prNumber);
           return handlePostedReviewRow({
+          preparedCandidate,
           rootDir: ROOT,
           repoPath,
           prNumber,

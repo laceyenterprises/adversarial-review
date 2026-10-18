@@ -1,3 +1,4 @@
+import { readClosureImmutable } from '../closure-evaluation-cache.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
@@ -17,9 +18,20 @@ export function createHistoryReader(options = {}) {
   const cache = new Map();
   const json = async (path, jq = '.') => {
     try {
-      const { stdout } = await execGhWithRetryImpl({ ...ghOptions,
-        args: ['api', path, '--jq', jq], timeoutMs: 15000 });
-      return JSON.parse(stdout);
+      // Only object-addressed evidence is immutable. Keep PR metadata, refs,
+      // reviews and cost/label provenance live even on the same PR head.
+      const immutable = /\/(?:git\/(?:trees|blobs)|commits)\/[0-9a-f]{40}(?:\?|$)/i.test(path)
+        || /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}(?:\?|$)/i.test(path);
+      const execute = async () => {
+        const { stdout } = await execGhWithRetryImpl({ ...ghOptions,
+          args: ['api', path, '--jq', jq], timeoutMs: 15000 });
+        return JSON.parse(stdout);
+      };
+      const env = ghOptions.env || process.env;
+      return await (immutable && !ghOptions.signal
+        ? readClosureImmutable(execGhWithRetryImpl, [path, jq, env.GH_TOKEN, env.GITHUB_TOKEN,
+          env.GH_HOST, env.GH_CONFIG_DIR], execute, ghOptions.execFileImpl || execFileAsync)
+        : execute());
     } catch (cause) {
       const limit = cause.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || cause.code === 'ENOBUFS'
         ? ` (output limit ${GH_LOOKUP_MAX_BUFFER} bytes exceeded)` : '';

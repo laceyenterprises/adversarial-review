@@ -2030,7 +2030,10 @@ JSON (`primaryChangeMissingEvidence`), the hammer's closing status and the
 watcher's hold log. An original-reversal proof rejection keeps its reason code
 and adds `detail` naming a missing same-message candidate, change-line mismatch
 paths, or another failed proof check. Mismatches list at most five paths of at
-most 160 characters each, plus `(+N more)` for omitted paths. The complete detail
+most 160 characters each, plus `(+N more)` for omitted paths. Opaque or malformed
+original candidate patches are rejected with candidate diagnostics; the search
+continues through later candidates, and refuses authorization if none is valid.
+The complete detail
 is limited to 1200 characters and the operator summary to 4096 characters,
 including a trailing `...` on truncation. When a HAM head's own exact-head
 self-certification failed

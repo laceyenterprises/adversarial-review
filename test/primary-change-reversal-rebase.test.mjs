@@ -174,6 +174,36 @@ test('a mismatched original candidate cannot hide a later valid original', async
   assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, sha('d'));
 });
 
+test('an opaque or malformed original candidate cannot hide a later valid original', async () => {
+  for (const patch of [undefined, '', 'malformed patch']) {
+    const { evidence, result } = await snapshotReversal({
+      read: async (path, transport) => {
+        if (!path.endsWith(`/commits/${sha('e')}`)) return transport(path);
+        const original = await transport(`repos/fixture/repo/commits/${sha('d')}`);
+        return { ...original, sha: sha('e'), files: original.files.map(file => ({ ...file, patch })) };
+      },
+      transform: (path, response) => path.endsWith(`${reviewedHead}...${sha('f')}`)
+        ? { ...response, total_commits: 2,
+          commits: [{ ...response.commits[0], sha: sha('e') }, ...response.commits] } : response,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(evidence.reversalAuthorizations[0].originalAuthorization.commit.sha, sha('d'));
+  }
+});
+
+test('opaque or malformed original candidates alone refuse the proof with candidate diagnostics', async () => {
+  for (const patch of [undefined, '', 'malformed patch']) {
+    const { evidence, result } = await snapshotReversal({ transform: (path, response) =>
+      path.endsWith(`/commits/${sha('d')}`)
+        ? { ...response, files: response.files.map(file => ({ ...file, patch })) } : response });
+    assert.equal(result.reason, 'primary-change-reverted');
+    const rejection = evidence.rejectedReversalAuthorizations[0];
+    assert.equal(rejection.reason, 'original-reversal-not-proven-before-supersession');
+    assert.match(rejection.detail, /opaque or malformed original patch/);
+    assert.match(result.missingEvidence.summary, /opaque or malformed original patch/);
+  }
+});
+
 test('finding coverage uses reviewed coordinates after a rebase and still refuses uncovered regions', async () => {
   for (const shift of [0, 5, 8]) {
     const covered = await collect({ shift });

@@ -697,7 +697,13 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
     if (original.sha !== candidate.sha || original.commit?.message !== candidate.commit.message
       || !hamCommitIdentityMatches(original) || original.parents?.length !== 1
       || !SHA.test(original.parents[0].sha || '')) { reject('commit-provenance'); continue; }
-    const originalIdentity = reversalPatchIdentity(original.files);
+    let originalIdentity;
+    try {
+      originalIdentity = reversalPatchIdentity(original.files);
+    } catch {
+      reject('opaque or malformed original patch');
+      continue;
+    }
     if (originalIdentity !== identity) {
       const paths = reversalMismatchPaths(identity, originalIdentity);
       reject(`change-line mismatch on paths: ${paths.slice(0, 5).map(path => boundedReversalText(path, 160)).join(', ')}${paths.length > 5 ? ` (+${paths.length - 5} more)` : ''}`);

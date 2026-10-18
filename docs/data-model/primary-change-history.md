@@ -20,7 +20,7 @@ Each completed history read is an atomic JSON record named
 | 4 | Live merge-base SHA |
 | 5 | Review-response SHA-256 digest (`reviewKey`), or `null` |
 | 6 | Trusted dispatcher launch head (`launchHead`), or `null` |
-| 7 | Rename-proof cache identity version: `primary-rename-v2` |
+| 7 | History proof cache identity version: `hamreversal-v2` |
 
 The JSON object contains `key` and `history`; there is no schema-version field.
 `history.headSha` is the requested head and `hasHammerCommits` is a boolean.
@@ -30,7 +30,8 @@ history includes `primaryHead`, `mergeBase`, `primaryFiles`, `finalFiles`,
 `reversalAuthorizations`, `rejectedReversalAuthorizations`, `renameProofs` and
 `primaryPathChanges`. The returned history may also carry `renameProofReadFailed`,
 which prevents disk publication as described below. The identity version forces
-one recomputation of older records that lack rename proof for builder-renamed paths;
+one recomputation of older records, including cached original-reversal refusals
+and proofs from before context-tolerant, structure-preserving reversal matching;
 those older records remain disposable and expire through the ordinary sweep.
 New hammer-history records also include optional `diagnosticCommitRange`: an ordered array of
 `{ sha: <commit SHA> }` entries from the first hammer commit through `headSha`,
@@ -57,9 +58,13 @@ Entries in `rejectedReversalAuthorizations` retain their existing `reason` codes
 An `original-reversal-not-proven-before-supersession` entry also carries optional
 `detail`: no candidate with the same commit message, a change-line mismatch with
 the affected paths, or the failed snapshot/provenance/ancestry/parent-patch check.
-At most ten candidate failures are included. The refusal's `missingEvidence`
-forwards this detail in both `rejected` and the operator-facing `summary`.
-Older cache records without `detail` remain readable.
+At most ten candidate failures are included. Mismatches list the first five paths
+(at most 160 characters each), followed by `(+N more)` when paths are omitted.
+The complete `detail` is capped at 1200 characters, including a trailing `...`
+when truncated. The refusal's `missingEvidence` forwards this detail in `rejected`;
+the operator-facing `summary` is capped at 4096 characters, including truncation.
+Older cache records are recomputed once under the new identity, even if their
+head and reviews have not moved; no manual re-read or sweep wait is needed.
 
 The rename-related optional history fields are:
 

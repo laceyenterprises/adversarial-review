@@ -65,6 +65,65 @@ test('conflict resolution changing exact removed or added lines still refuses th
   }
 });
 
+test('original proof refuses changed hunk/context-run boundaries and newline markers', async () => {
+  for (const rewrite of [
+    patch => patch.replace('@@ -15,2 +15 @@', '@@ -15,2 +15,0 @@')
+      .replace('\n+start()', '\n@@ -55,0 +54 @@\n+start()'),
+    patch => patch.replace('@@ -15,2 +15 @@', '@@ -15,3 +15,2 @@')
+      .replace('\n+start()', '\n unchanged_context()\n+start()'),
+    patch => `${patch}\n\\ No newline at end of file`,
+    patch => patch.replace('\n+start()', '\n\\ No newline at end of file\n+start()'),
+  ]) {
+    const { evidence, result } = await snapshotReversal({ transform: (path, response) =>
+      path.endsWith(`/commits/${head}`)
+        ? { ...response, files: response.files.map(file => ({ ...file, patch: rewrite(file.patch) })) } : response });
+    assert.equal(result.reason, 'primary-change-reverted');
+    assert.equal(evidence.rejectedReversalAuthorizations[0].reason, 'original-reversal-not-proven-before-supersession');
+    assert.match(evidence.rejectedReversalAuthorizations[0].detail, /change-line mismatch/);
+  }
+});
+
+test('original proof ignores context run lengths but retains matching newline markers', async () => {
+  const { result: matching } = await snapshotReversal({ transform: (path, response) => {
+    if (![head, sha('d')].some(commit => path.endsWith(`/commits/${commit}`))) return response;
+    const current = path.endsWith(`/commits/${head}`);
+    return { ...response, files: response.files.map(file => ({ ...file,
+      patch: `@@ -${current ? '14,4 +14,3' : '9,5 +9,4'} @@ different context\n before()\n-start_unsafe()\n-log_startup()\n ${current ? 'new_context()' : 'old_context()\n another_old_context()'}\n+start()\n\\ No newline at end of file`,
+    })) };
+  } });
+  assert.equal(matching.ok, true);
+});
+
+test('original proof diagnostics bound paths, aggregate detail and operator summaries', async () => {
+  const originals = Array.from({ length: 10 }, (_, index) => (index + 3).toString(16).padStart(40, '0'));
+  const { evidence, result } = await snapshotReversal({
+    read: async (path, transport) => {
+      const candidate = originals.find(commit => path.endsWith(`/commits/${commit}`));
+      if (!candidate) return transport(path);
+      const original = await transport(`repos/fixture/repo/commits/${sha('d')}`);
+      return { ...original, sha: candidate, files: [...original.files,
+        ...Array.from({ length: 20 }, (_, index) => ({ ...original.files[0],
+          filename: `src/mismatch/${String(index).padStart(2, '0')}-${'long-path-'.repeat(30)}.mjs` }))] };
+    },
+    transform: (path, response) => path.endsWith(`${reviewedHead}...${sha('f')}`)
+      ? { ...response, total_commits: originals.length,
+        commits: originals.map(commit => ({ ...response.commits[0], sha: commit })) } : response,
+  });
+  assert.equal(result.reason, 'primary-change-reverted');
+  const rejection = evidence.rejectedReversalAuthorizations[0];
+  assert.equal(rejection.reason, 'original-reversal-not-proven-before-supersession');
+  assert.equal(rejection.detail.length, 1200);
+  assert.ok(rejection.detail.endsWith('...'));
+  assert.match(rejection.detail, /\(\+15 more\)/);
+  assert.match(rejection.detail, /src\/mismatch\/04-/);
+  assert.doesNotMatch(rejection.detail, /src\/mismatch\/05-/);
+  assert.ok(result.missingEvidence.summary.includes(rejection.detail));
+  evidence.rejectedReversalAuthorizations = Array.from({ length: 10 }, (_, index) => ({ ...rejection, commit: originals[index] }));
+  const summary = checkPrimaryChange(evidence, head).missingEvidence.summary;
+  assert.equal(summary.length, 4096);
+  assert.ok(summary.endsWith('...'));
+});
+
 test('original reversal proof retains file path, previous path and status identity', async () => {
   for (const metadata of [{ filename: 'src/other.mjs' }, { previous_filename: 'src/old.mjs' }, { status: 'renamed' }]) {
     const { evidence, result } = await snapshotReversal({ transform: (path, response) =>

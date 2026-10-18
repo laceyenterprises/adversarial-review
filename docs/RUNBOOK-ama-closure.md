@@ -1901,8 +1901,10 @@ removed or renamed; restoring the merge-base name does not qualify.
 PCCSLOW-01: daemon, hammer snapshot and full-context CLI share atomic history
 records under `data/primary-change-history`, keyed by repository, PR, base SHA,
 head SHA, merge base, reviews and dispatcher provenance, with builder-boundary
-compatibility checked on reuse and a `primary-rename-v2` identity version to
-invalidate older records without commit-level rename proof. Live head/base and
+compatibility checked on reuse and a `hamreversal-v2` identity version to
+invalidate older proof records, including original-reversal refusals cached before
+context-tolerant, structure-preserving matching. Already-held PRs recompute on
+their next evaluation without head/review movement or a manual cache purge. Live head/base and
 merge-base metadata are checked before reuse; CI-cost evidence remains live. Only completed successful
 history reads are stored. An unresolved optional rename-proof read failure
 prevents caching; a later valid proof resolves earlier failures for that source
@@ -2007,8 +2009,11 @@ remains current by GitHub review order. If a later review supersedes it (same
 family, or another family on another head), the first such review's immutable
 head must contain the original HAM commit with the same message and complete
 reversal change: each file's path, previous path, status and ordered removed and
-added lines must match exactly. Context lines and hunk coordinates are ignored
-only for this original-commit match. The reviewed-parent rebase proof retains
+added lines must match exactly, including hunk boundaries, context-run boundaries
+and `\ No newline at end of file` markers. Context text, context-run lengths and
+hunk coordinates are ignored only for this original-commit match. Moving an
+addition across a context run or into another hunk refuses the proof.
+The reviewed-parent rebase proof retains
 its existing context and hunk checks. The collector verifies original
 HAM identity, citation freshness at its original parent, and the parent's merge
 base. The evaluator rechecks finding coverage and HAM touch against that original
@@ -2024,7 +2029,10 @@ only citations that passed evaluation) into the hammer gate
 JSON (`primaryChangeMissingEvidence`), the hammer's closing status and the
 watcher's hold log. An original-reversal proof rejection keeps its reason code
 and adds `detail` naming a missing same-message candidate, change-line mismatch
-paths, or another failed proof check. When a HAM head's own exact-head
+paths, or another failed proof check. Mismatches list at most five paths of at
+most 160 characters each, plus `(+N more)` for omitted paths. The complete detail
+is limited to 1200 characters and the operator summary to 4096 characters,
+including a trailing `...` on truncation. When a HAM head's own exact-head
 self-certification failed
 only on that authorization (`stale-review-head`, `verdict-not-settled-success`
 and `blocking-findings-unknown` are its cascade), the closer marks the

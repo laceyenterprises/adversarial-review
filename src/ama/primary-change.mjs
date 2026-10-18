@@ -459,7 +459,7 @@ function missingReversalEvidence(evidence, path, missing, cache, regions) {
   if (regionDiagnostics.length) summary += '; region history: ' + regionDiagnostics.map(entry =>
     `${entry.start === null ? 'file-level' : `${entry.start}-${entry.end}`}: ${entry.commits.map(commit =>
       `${commit.sha} author=${commit.author || 'unlinked'} pipeline-repair=${commit.pipelineRepair === true ? 'yes' : commit.pipelineRepair === false ? 'no' : 'unknown'}${commit.repairKind ? ` (${commit.repairKind})` : ''}`).join(', ') || 'unavailable'}${entry.error ? ` (${entry.error})` : ''}`).join('; ');
-  return { evidence: missing, path, accepted, rejected, summary, regions, regionDiagnostics };
+  return { evidence: missing, path, accepted, rejected, summary: boundedReversalText(summary, 4096), regions, regionDiagnostics };
 }
 
 // The exact-head re-review is the one automatic action that can supply a
@@ -569,15 +569,27 @@ export function checkPrimaryChange(evidence, headSha, { strictNonBlockingRemedia
   }
 }
 
-// Bind the exact ordered change lines, independent of rebase context and hunk
-// coordinates. The immutable review head still pins the original reversal.
+// Bind ordered change lines, hunk/context-run boundaries and newline markers.
+// Only context text/counts and hunk coordinates may drift across a rebase.
+// The immutable review head still pins the original reversal.
 function reversalPatchIdentity(files) {
   changes(files);
   return JSON.stringify(files.map((file) => {
     if (typeof file.patch !== 'string') throw new Error('opaque original reversal');
+    const lines = [];
+    for (const line of file.patch.split('\n')) {
+      if (line.startsWith('@@ ')) lines.push('@@');
+      else if (line.startsWith(' ')) {
+        if (lines.at(-1) !== ' ') lines.push(' ');
+      } else if (line.startsWith('-') || line.startsWith('+') || line.startsWith('\\')) lines.push(line);
+    }
     return [file.filename, file.previous_filename || '', file.status,
-      file.patch.split('\n').filter((line) => line.startsWith('-') || line.startsWith('+'))];
+      lines];
   }).sort((a, b) => a[0].localeCompare(b[0])));
+}
+
+function boundedReversalText(text, limit = 1200) {
+  return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
 }
 
 function reversalMismatchPaths(expected, actual) {
@@ -687,7 +699,8 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
       || !SHA.test(original.parents[0].sha || '')) { reject('commit-provenance'); continue; }
     const originalIdentity = reversalPatchIdentity(original.files);
     if (originalIdentity !== identity) {
-      reject(`change-line mismatch on paths: ${reversalMismatchPaths(identity, originalIdentity).join(', ')}`);
+      const paths = reversalMismatchPaths(identity, originalIdentity);
+      reject(`change-line mismatch on paths: ${paths.slice(0, 5).map(path => boundedReversalText(path, 160)).join(', ')}${paths.length > 5 ? ` (+${paths.length - 5} more)` : ''}`);
       continue;
     }
     const parentSha = original.parents[0].sha;
@@ -722,7 +735,7 @@ async function originalReversalAuthorization({ repo, review, reviews, supersedin
       ...(rebased ? { rebased: true } : {}),
       completeFileLists: original.filesComplete === true && reviewed.filesComplete === true && parent.filesComplete === true } };
   }
-  return { detail: failures.join('; ') };
+  return { detail: boundedReversalText(failures.join('; ')) };
 }
 
 // get is an injected bounded JSON API reader. Compare caps are errors, not empty diffs.

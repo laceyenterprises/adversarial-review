@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { storedPrimaryChange, primaryChangeReadStatus, sweepPrimaryChangeStore } from '../src/ama/primary-change-store.mjs';
@@ -89,6 +90,25 @@ test('exact identity reuses disk evidence with no API; changed head, base, merge
     await storedPrimaryChange(changed, compute(changed));
   }
   assert.equal(calls, 6);
+});
+
+test('pre-deploy reversal refusals recompute once at an unchanged head and review key', async t => {
+  const args = { ...fixture(t), reviewKey: 'unchanged-reviews' };
+  const dir = join(args.rootDir, 'data', 'primary-change-history');
+  mkdirSync(dir, { recursive: true });
+  const key = [args.repo, args.prNumber, args.baseSha, args.headSha, args.mergeBase, args.reviewKey, null, 'guard-reversal-v1'];
+  const legacyPath = join(dir, `${createHash('sha256').update(JSON.stringify(key)).digest('hex')}.json`);
+  writeFileSync(legacyPath, JSON.stringify({ key, history: { ...evidence(args),
+    rejectedReversalAuthorizations: [{ reason: 'original-reversal-not-proven-before-supersession' }] } }));
+  let calls = 0;
+  const refreshed = await storedPrimaryChange(args, async () => { calls++; return evidence(args); });
+  assert.equal(refreshed.rejectedReversalAuthorizations, undefined);
+  assert.equal(calls, 1);
+  assert.deepEqual(await storedPrimaryChange(args, () => assert.fail('must reuse refreshed history')), refreshed);
+  const currentPath = join(dir, readdirSync(dir).find(name => join(dir, name) !== legacyPath));
+  assert.equal(JSON.parse(readFileSync(currentPath, 'utf8')).key.at(-1), 'hamreversal-v2');
+  const catalog = JSON.parse(readFileSync(new URL('../docs/data-model/catalog.json', import.meta.url), 'utf8'));
+  assert.equal(catalog.entries.find(entry => entry.id === 'primary-change-history').identityVersion, 'hamreversal-v2');
 });
 
 test('timed out caller leaves a single read running, completion persists and next attempt reuses it', async t => {

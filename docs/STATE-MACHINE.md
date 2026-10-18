@@ -935,8 +935,9 @@ Key control points:
   reviewed diffs (REVERSALREBASE-01). A superseded citation additionally requires
   the original HAM reversal, with the same message, file paths, previous paths,
   statuses and ordered removed/added lines and valid original authorization, in
-  the first superseding GitHub review's immutable head. Context and hunk offsets
-  are ignored only when matching that original reversal commit.
+  the first superseding GitHub review's immutable head. Hunk boundaries,
+  context-run boundaries and newline markers must match; context text/counts
+  and hunk offsets are ignored only when matching that original reversal commit.
   Commit dates cannot prove freshness. A refusal names collector and evaluator
   rejection reasons in its
   `missingEvidence` and a HAM head missing only that authorization gets one
